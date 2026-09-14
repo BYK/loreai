@@ -23,6 +23,7 @@ type LintFlags = {
   "deadline-ms": number;
   "candidate-timeout-ms": number;
   "holistic-input-tokens": number;
+  "allow-author-overrides": boolean;
 };
 
 function positiveInteger(value: string): number {
@@ -122,6 +123,11 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
         brief: "Per-candidate judge timeout in milliseconds",
         default: "90000",
       },
+      "allow-author-overrides": {
+        kind: "boolean",
+        brief: "Allow commit trailers to override soft findings (trusted use only)",
+        default: false,
+      },
       "holistic-input-tokens": {
         kind: "parsed",
         parse: positiveInteger,
@@ -149,6 +155,7 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
       deadlineMs: flags["deadline-ms"],
       candidateTimeoutMs: flags["candidate-timeout-ms"],
       holisticInputTokens: flags["holistic-input-tokens"],
+      allowAuthorOverrides: flags["allow-author-overrides"],
       onDiagnostic: (message) =>
         this.process.stderr.write(`[lore] ${message}\n`),
       onJudge: (current, total) =>

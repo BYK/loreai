@@ -6,6 +6,7 @@ const gateMode = gateRaw === "true";
 const cliExit = Number(exitRaw);
 const summaryFile = process.env.GITHUB_STEP_SUMMARY;
 const summaryCellMaxChars = 300;
+const MAX_LINT_REPORT_FINDINGS = 200;
 const MAX_LINT_REPORT_CANDIDATES = 20;
 const MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH = 400;
 const MAX_LINT_REPORT_RESOLVED_REASON_LENGTH = 400;
@@ -33,6 +34,8 @@ const candidateFailureCodes = new Set([
 const phaseFailureCodes = new Set([
   "range-resolution-failed",
   "diff-command-failed",
+  "diff-too-large",
+  "untrusted-context-gate-disabled",
   "invariant-source-read-failed",
   "invariant-source-import-failed",
   "embedding-provider-readiness-failed",
@@ -219,9 +222,12 @@ function validateReport(value) {
       throw new TypeError(`${phase} vector counts disagree`);
     }
   }
+  const coveragePartial =
+    value.coverage?.strategy === "isolated-hunk" ||
+    (value.coverage?.omittedInvariants ?? 0) > 0;
   const derivedStatus = failedSeen
     ? "failed"
-    : degraded
+    : degraded || coveragePartial
       ? "partial"
       : "complete";
   if (value.status !== derivedStatus)
@@ -267,6 +273,7 @@ function validateReport(value) {
   }
   if (
     hunkVectorHealth.expected !== undefined &&
+    counters.invariants > 0 &&
     hunkVectorHealth.expected !== counters.hunks
   ) {
     throw new TypeError("hunk vector health disagrees with counters");
@@ -387,8 +394,13 @@ function validateReport(value) {
     );
   }
 
-  if (!Array.isArray(value.findings))
-    throw new TypeError("findings must be an array");
+  if (
+    !Array.isArray(value.findings) ||
+    value.findings.length > MAX_LINT_REPORT_FINDINGS
+  )
+    throw new TypeError(
+      `findings must be an array of at most ${MAX_LINT_REPORT_FINDINGS} records`,
+    );
   const findingIds = new Set();
   for (const finding of value.findings) {
     if (

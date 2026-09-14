@@ -61,7 +61,7 @@ inputs:
     required: false
     default: "90"
   holistic-input-tokens:
-    description: "Total input-token budget for holistic small-PR review."
+    description: "Total input-token budget for holistic small-PR semantic lint."
     required: false
     default: "16000"
 

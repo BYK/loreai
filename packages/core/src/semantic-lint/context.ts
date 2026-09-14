@@ -109,6 +109,18 @@ export function estimateHolisticLintInputTokens(input: {
   );
 }
 
+export function estimateIsolatedLintInputTokens(input: {
+  invariant: HolisticInvariant;
+  hunk: HolisticHunk;
+  prContext?: HolisticLintInput["prContext"];
+}): number {
+  return estimateHolisticLintInputTokens({
+    invariants: [input.invariant],
+    hunks: [input.hunk],
+    prContext: input.prContext,
+  });
+}
+
 export function buildHolisticLintInput(input: {
   invariants: HolisticInvariant[];
   hunks: HolisticHunk[];

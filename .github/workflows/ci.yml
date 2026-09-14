@@ -109,6 +109,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Execute PR-head semantic lint action without credentials
         uses: ./.github/actions/lint
@@ -120,6 +122,8 @@ jobs:
           deadline-seconds: "1"
           candidate-timeout-seconds: "1"
           holistic-input-tokens: "16000"
+          pr-title: "semantic lint smoke title"
+          pr-description: "semantic lint smoke description"
 
   # ---------------------------------------------------------------------------
   # Lint the install script for bash-4.x-only constructs.

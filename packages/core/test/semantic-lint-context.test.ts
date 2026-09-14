@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildHolisticLintInput,
   estimateHolisticLintInputTokens,
+  estimateIsolatedLintInputTokens,
 } from "../src/semantic-lint/context";
 import { parseHolisticLintResults } from "../src/semantic-lint/check";
 
@@ -55,6 +56,32 @@ describe("bounded holistic semantic lint", () => {
       expect(result.input.prContext?.title).toBe("Move the request guard");
       expect(result.input.hunks).toEqual(hunks);
     }
+  });
+
+  it("estimates isolated calls as bounded per-pair inputs", () => {
+    const estimate = estimateIsolatedLintInputTokens({
+      invariant: invariants[0],
+      hunk: hunks[0],
+      prContext: {
+        title: "Move the request guard",
+        description: "",
+        titleTruncated: false,
+        descriptionTruncated: false,
+      },
+    });
+    expect(estimate).toBeGreaterThan(0);
+    expect(estimate).toBeLessThan(
+      estimateHolisticLintInputTokens({
+        invariants,
+        hunks,
+        prContext: {
+          title: "Move the request guard",
+          description: "The guard is moved with its caller.",
+          titleTruncated: false,
+          descriptionTruncated: false,
+        },
+      }),
+    );
   });
 
   it("does not claim complete context for truncated PR metadata", () => {

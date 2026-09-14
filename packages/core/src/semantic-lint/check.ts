@@ -44,6 +44,7 @@ import {
 import {
   buildHolisticLintInput,
   emptyLintCoverage,
+  estimateIsolatedLintInputTokens,
   MAX_HOLISTIC_INVARIANTS,
   type HolisticInvariant,
   type HolisticLintResult,
@@ -62,6 +63,7 @@ export {
   buildHolisticLintInput,
   emptyLintCoverage,
   estimateHolisticLintInputTokens,
+  estimateIsolatedLintInputTokens,
   MAX_HOLISTIC_INVARIANTS,
 } from "./context";
 export type {
@@ -154,6 +156,8 @@ export const UNPARSEABLE_WARN_RATIO = 0.5;
 
 /** Never send more than this many pairs to the judge in one run. Surviving
  *  pairs are judged most-similar-first; the cap is the cost ceiling per PR. */
+export const MAX_HOLISTIC_EVIDENCE_PER_RESULT = 8;
+export const MAX_LINT_FINDINGS = 200;
 export const MAX_JUDGE_CALLS = 20;
 
 // ---------------------------------------------------------------------------
@@ -592,7 +596,8 @@ export function isIgnoredFile(path: string): boolean {
 
 /**
  * Parse `git diff base..head` into per-file hunks. We diff-only (never whole
- * files) so judge inputs stay tiny. Binary/rename-only entries yield no hunks.
+ * files) so judge inputs stay tiny. Binary entries yield no hunks; rename-only
+ * entries are represented by a synthetic path-change hunk.
  * Ignored files (see {@link isIgnoredFile}) are dropped here.
  */
 export function parseDiff(cwd: string, base: string, head: string): DiffHunk[] {
@@ -646,6 +651,9 @@ export function splitDiff(raw: string): DiffHunk[] {
   // must be judged, not silently dropped.
   let oldFile = "";
   let cur: string[] | null = null;
+  let sectionHadHunk = false;
+  let pathChangeFrom = "";
+  let pathChangeTo = "";
   const flush = () => {
     const f = file || oldFile;
     if (cur && f && cur.length && !isIgnoredFile(f)) {
@@ -665,23 +673,70 @@ export function splitDiff(raw: string): DiffHunk[] {
     }
     cur = null;
   };
+  const flushPathChange = () => {
+    if (
+      sectionHadHunk ||
+      pathChangeFrom.length === 0 ||
+      pathChangeTo.length === 0
+    ) {
+      pathChangeFrom = "";
+      pathChangeTo = "";
+      return;
+    }
+    const f = pathChangeTo;
+    if (!isIgnoredFile(f)) {
+      if (hunks.length >= MAX_DIFF_HUNKS) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
+        );
+      }
+      const text = truncateHunkText(
+        [
+          "@@ -1,1 +1,1 @@ rename-only path change",
+          `- rename from ${pathChangeFrom}`,
+          `+ rename to ${pathChangeTo}`,
+        ].join("\n"),
+      );
+      textBytes += Buffer.byteLength(text);
+      if (textBytes > MAX_DIFF_TEXT_BYTES) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
+        );
+      }
+      hunks.push({ file: f, text });
+    }
+    pathChangeFrom = "";
+    pathChangeTo = "";
+  };
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
       flush();
+      flushPathChange();
       file = "";
       oldFile = "";
+      sectionHadHunk = false;
     } else if (cur === null && line.startsWith("--- a/")) {
       oldFile = line.slice("--- a/".length).trim();
     } else if (cur === null && line.startsWith("+++ b/")) {
       file = line.slice("+++ b/".length).trim();
+    } else if (cur === null && line.startsWith("rename from ")) {
+      pathChangeFrom = line.slice("rename from ".length).trim();
+    } else if (cur === null && line.startsWith("rename to ")) {
+      pathChangeTo = line.slice("rename to ".length).trim();
+    } else if (cur === null && line.startsWith("copy from ")) {
+      pathChangeFrom = line.slice("copy from ".length).trim();
+    } else if (cur === null && line.startsWith("copy to ")) {
+      pathChangeTo = line.slice("copy to ".length).trim();
     } else if (line.startsWith("@@")) {
       flush();
       cur = [line];
+      sectionHadHunk = true;
     } else if (cur) {
       cur.push(line);
     }
   }
   flush();
+  flushPathChange();
   return hunks;
 }
 
@@ -816,7 +871,8 @@ export function parseHolisticLintResults(
         value.reason.trim().length === 0 ||
         value.reason.length > 400 ||
         !isHolisticVerdict(value.verdict) ||
-        !Array.isArray(value.evidence)
+        !Array.isArray(value.evidence) ||
+        value.evidence.length > MAX_HOLISTIC_EVIDENCE_PER_RESULT
       ) {
         return null;
       }
@@ -1582,7 +1638,7 @@ export async function checkInvariants(
           message: boundedMessage(error, "Could not load invariants"),
         },
       },
-      hunkVectors: notRunVectorHealth(),
+      hunkVectors: notRunVectorHealth(hunks.length),
       judge: notRunJudgeHealth(),
     });
   }
@@ -1613,7 +1669,7 @@ export async function checkInvariants(
       {
         diff: diffHealth,
         invariantVectors: invariantVecResult.health,
-        hunkVectors: notRunVectorHealth(),
+        hunkVectors: notRunVectorHealth(hunks.length),
         judge: notRunJudgeHealth(),
       },
       { hunks: hunks.length, invariants: allEntries.length },
@@ -1712,6 +1768,34 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget,
         })
       : null;
+  const isolatedPrContext = input.prContext
+    ? {
+        ...input.prContext,
+        description: "",
+        descriptionTruncated: false,
+      }
+    : undefined;
+  const isolatedInputTokens = selected.reduce((total, candidate) => {
+    const invariant = invariants[candidate.invariantIdx];
+    const hunk = hunks[candidate.hunkIdx];
+    return (
+      total +
+      estimateIsolatedLintInputTokens({
+        invariant: {
+          id: invariant.entry.id,
+          title: invariant.entry.title,
+          content: invariant.entry.content,
+        },
+        hunk: {
+          id: holisticHunkId(candidate.hunkIdx),
+          file: hunk.file,
+          text: hunk.text,
+        },
+        prContext: isolatedPrContext,
+      })
+    );
+  }, 0);
+
   const coverage =
     holisticPlan?.kind === "too-large"
       ? isolatedLintCoverage({
@@ -1720,7 +1804,7 @@ export async function checkInvariants(
             .size,
           availableInvariants: allEntries.length,
           includedInvariants: selectedInvariantIndices.length,
-          inputTokens: holisticPlan.coverage.inputTokens,
+          inputTokens: isolatedInputTokens,
           inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
         })
       : holisticPlan?.kind === "fit"
@@ -1732,7 +1816,7 @@ export async function checkInvariants(
             ).size,
             availableInvariants: allEntries.length,
             includedInvariants: selectedInvariantIndices.length,
-            inputTokens: 0,
+            inputTokens: isolatedInputTokens,
             inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
           });
 
@@ -1815,7 +1899,7 @@ export async function checkInvariants(
           },
           file: hunk.file,
           hunk: hunk.text,
-          prContext: input.prContext,
+          prContext: isolatedPrContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });
       } catch (error) {
@@ -1872,6 +1956,7 @@ export async function checkInvariants(
       const dedupKey = `${inv.entry.id}\x1f${hunks[mi].file}`;
       if (seenFindings.has(dedupKey)) continue;
       seenFindings.add(dedupKey);
+      if (findings.length >= MAX_LINT_FINDINGS) continue;
       findings.push({
         invariantId: inv.entry.id,
         invariantTitle: inv.entry.title,
@@ -1913,7 +1998,7 @@ export async function checkInvariants(
 
   return {
     range: input.range,
-    status: overallStatus(health),
+    status: overallStatus(health, coverage),
     health,
     coverage,
     hunks: hunks.length,
@@ -2172,12 +2257,12 @@ function healthyVectorHealth(
   };
 }
 
-function notRunVectorHealth(): VectorHealth {
+function notRunVectorHealth(expected = 0): VectorHealth {
   return {
     status: "not-run",
-    expected: 0,
+    expected,
     available: 0,
-    missing: 0,
+    missing: expected,
   };
 }
 
@@ -2216,7 +2301,10 @@ function calculateJudgeHealth(
   return { status, selected, resolved, unresolved, notAttempted };
 }
 
-function overallStatus(health: CheckHealth): CheckResult["status"] {
+function overallStatus(
+  health: CheckHealth,
+  coverage?: LintCoverage,
+): CheckResult["status"] {
   const statuses: HealthStatus[] = [
     health.diff.status,
     health.invariantVectors.status,
@@ -2227,6 +2315,12 @@ function overallStatus(health: CheckHealth): CheckResult["status"] {
     return "failed";
   }
   if (statuses.includes("degraded")) return "partial";
+  if (
+    coverage?.strategy === "isolated-hunk" ||
+    (coverage?.omittedInvariants ?? 0) > 0
+  ) {
+    return "partial";
+  }
   return "complete";
 }
 
@@ -2235,14 +2329,15 @@ function emptyCheckResult(
   health: CheckHealth,
   counts: { hunks?: number; invariants?: number } = {},
 ): CheckResult {
+  const coverage = emptyLintCoverage(
+    counts.hunks ?? health.diff.hunks,
+    counts.invariants ?? 0,
+  );
   return {
     range,
-    status: overallStatus(health),
+    status: overallStatus(health, coverage),
     health,
-    coverage: emptyLintCoverage(
-      counts.hunks ?? health.diff.hunks,
-      counts.invariants ?? 0,
-    ),
+    coverage,
     hunks: counts.hunks ?? health.diff.hunks,
     invariants: counts.invariants ?? 0,
     candidates: 0,
@@ -2354,7 +2449,20 @@ async function runHolisticLint(args: {
       const invariantIndex = args.selectedInvariantIndices[i];
       const invariant = invariants[invariantIndex];
       const anchor = anchorByInvariant.get(invariantIndex);
-      if (!anchor) continue;
+      if (!anchor) {
+        candidateOutcomes.push(
+          unavailableHolisticCandidateOutcome(
+            i,
+            invariant,
+            i === 0 ? "unresolved" : "not-attempted",
+            failure,
+            i === 0
+              ? validated.stats
+              : { semanticCalls: 0, transportAttempts: 0 },
+          ),
+        );
+        continue;
+      }
       const base = candidateOutcomeBase(
         i,
         anchor,
@@ -2389,7 +2497,7 @@ async function runHolisticLint(args: {
     };
     return {
       range: checkInput.range,
-      status: overallStatus(health),
+      status: overallStatus(health, plan.coverage),
       health,
       coverage: plan.coverage,
       hunks: hunks.length,
@@ -2418,7 +2526,23 @@ async function runHolisticLint(args: {
     const invariant = invariants[invariantIndex];
     const anchor = anchorByInvariant.get(invariantIndex);
     const result = resultsByInvariant.get(invariant.entry.id);
-    if (!anchor || !result) continue;
+    if (!anchor || !result) {
+      candidateOutcomes.push(
+        unavailableHolisticCandidateOutcome(
+          i,
+          invariant,
+          "not-attempted",
+          {
+            code: "judge-contract-error",
+            message: "Holistic judge omitted a selected candidate",
+            scope: "candidate",
+            retryable: false,
+          },
+          { semanticCalls: 0, transportAttempts: 0 },
+        ),
+      );
+      continue;
+    }
     const base = candidateOutcomeBase(
       i,
       anchor,
@@ -2478,7 +2602,7 @@ async function runHolisticLint(args: {
         file: hunk.file,
         similarity: anchor.similarity,
         refHit: anchor.refHit,
-        reason: result.reason,
+        reason: evidence.reason,
         hunk: hunk.text,
         severity,
       });
@@ -2491,8 +2615,9 @@ async function runHolisticLint(args: {
   const unresolved = candidateOutcomes.filter(
     (candidate) => candidate.state === "unresolved",
   ).length;
-  const notAttempted =
-    args.selectedInvariantIndices.length - candidateOutcomes.length;
+  const notAttempted = candidateOutcomes.filter(
+    (candidate) => candidate.state === "not-attempted",
+  ).length;
   const attempted = resolved + unresolved;
   const health: CheckHealth = {
     diff: { status: "healthy", hunks: hunks.length },
@@ -2507,7 +2632,7 @@ async function runHolisticLint(args: {
   };
   return {
     range: checkInput.range,
-    status: overallStatus(health),
+    status: overallStatus(health, plan.coverage),
     health,
     coverage: plan.coverage,
     hunks: hunks.length,
@@ -2526,6 +2651,27 @@ async function runHolisticLint(args: {
     unparseable: unresolved,
   };
 }
+function unavailableHolisticCandidateOutcome(
+  candidateIndex: number,
+  invariant: InvariantVec,
+  state: "unresolved" | "not-attempted",
+  failure: JudgeFailure,
+  stats: JudgeStats,
+): CandidateOutcome {
+  return {
+    id: `candidate-${String(candidateIndex + 1).padStart(2, "0")}`,
+    file: "<unavailable>",
+    hunkIndex: -1,
+    invariantId: invariant.entry.id,
+    invariantTitle: invariant.entry.title,
+    similarity: 0,
+    refHit: false,
+    state,
+    failure,
+    stats,
+  };
+}
+
 function candidateOutcomeBase(
   candidateIndex: number,
   candidate: Candidate,

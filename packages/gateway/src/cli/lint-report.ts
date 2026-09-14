@@ -150,6 +150,7 @@ const PHASE_ORDER = [
 ] as const;
 
 const VERDICTS = new Set(["violates", "fixes", "satisfies", "unrelated"]);
+export const MAX_LINT_REPORT_FINDINGS = 200;
 export const MAX_LINT_REPORT_CANDIDATES = 20;
 export const MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH = 400;
 export const MAX_LINT_REPORT_RESOLVED_REASON_LENGTH = 400;
@@ -178,6 +179,7 @@ const PHASE_FAILURE_CODES = new Set([
   "range-resolution-failed",
   "diff-command-failed",
   "diff-too-large",
+  "untrusted-context-gate-disabled",
   "invariant-source-read-failed",
   "invariant-source-import-failed",
   "embedding-provider-readiness-failed",
@@ -195,12 +197,13 @@ function findingKey(finding: { invariantId: string; file: string }): string {
 function emptyLintCoverage(
   availableHunks = 0,
   availableInvariants = 0,
+  inputTokenBudget = 16_000,
 ): LintCoverage {
   return {
     strategy: "none",
     contextComplete: false,
     inputTokens: 0,
-    inputTokenBudget: 16_000,
+    inputTokenBudget,
     availableHunks,
     includedHunks: 0,
     omittedHunks: availableHunks,
@@ -217,10 +220,18 @@ function clonePhase(phase: LintPhaseHealth): LintPhaseHealth {
   };
 }
 
-function deriveStatus(report: Pick<SemanticLintReport, "health">): LintStatus {
+function deriveStatus(
+  report: Pick<SemanticLintReport, "health" | "coverage">,
+): LintStatus {
   const statuses = PHASE_ORDER.map((phase) => report.health[phase].status);
   if (statuses.includes("failed")) return "failed";
-  if (statuses.includes("degraded")) return "partial";
+  if (
+    statuses.includes("degraded") ||
+    report.coverage.strategy === "isolated-hunk" ||
+    report.coverage.omittedInvariants > 0
+  ) {
+    return "partial";
+  }
   return "complete";
 }
 
@@ -352,6 +363,7 @@ export function failedSemanticLintReport(input: {
   failedPhase: (typeof PHASE_ORDER)[number];
   failure: LintFailure;
   gateMode: "advisory" | "gate";
+  holisticInputTokenBudget?: number;
 }): SemanticLintReport {
   const health = Object.fromEntries(
     PHASE_ORDER.map((phase) => [phase, notRunHealth()]),
@@ -381,7 +393,11 @@ export function failedSemanticLintReport(input: {
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: input.range ?? null,
-    coverage: emptyLintCoverage(),
+    coverage: emptyLintCoverage(
+      0,
+      0,
+      input.holisticInputTokenBudget ?? 16_000,
+    ),
     health,
     counters: {
       hunks: 0,
@@ -638,7 +654,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       "invariant vector health disagrees with invariant counter",
     );
   }
-  if (hunkVectorHealth.expected !== undefined) {
+  if (
+    hunkVectorHealth.expected !== undefined &&
+    Number(value.counters.invariants) > 0
+  ) {
     assert(
       hunkVectorHealth.expected === value.counters.hunks,
       "hunk vector health disagrees with hunk counter",
@@ -777,7 +796,11 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     "candidate transport attempts do not sum to report total",
   );
 
-  assert(Array.isArray(value.findings), "findings must be an array");
+  assert(
+    Array.isArray(value.findings) &&
+      value.findings.length <= MAX_LINT_REPORT_FINDINGS,
+    `findings must be an array of at most ${MAX_LINT_REPORT_FINDINGS} records`,
+  );
   const findingIds = new Set<string>();
   for (const finding of value.findings) {
     assert(isRecord(finding), "finding must be an object");

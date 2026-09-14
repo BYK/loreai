@@ -266,6 +266,20 @@ describe("splitDiff", () => {
     expect(hunks[0].text).toContain("-if (!token) throw");
   });
 
+  it("preserves rename-only changes as a synthetic path hunk", () => {
+    const raw = [
+      "diff --git a/src/old.ts b/src/new.ts",
+      "similarity index 100%",
+      "rename from src/old.ts",
+      "rename to src/new.ts",
+    ].join("\n");
+    const hunks = splitDiff(raw);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].file).toBe("src/new.ts");
+    expect(hunks[0].text).toContain("rename from src/old.ts");
+    expect(hunks[0].text).toContain("rename to src/new.ts");
+  });
+
   it("drops ignored files (.lore.md, lockfiles, generated) but keeps code", () => {
     const raw = [
       "diff --git a/.lore.md b/.lore.md",

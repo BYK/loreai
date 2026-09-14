@@ -216,6 +216,7 @@ describe("typed lore lint contract", () => {
       "--deadline-ms",
       "--candidate-timeout-ms",
       "--holistic-input-tokens",
+      "--allow-author-overrides",
       "--json",
     ]) {
       expect(help).toContain(flag);

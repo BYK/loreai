@@ -40,6 +40,8 @@ export interface SemanticLintOptions {
   candidateTimeoutMs: number;
   /** Approximate total input-token budget for one holistic small-PR lint. */
   holisticInputTokens?: number;
+  /** Allow commit trailers to override soft findings (trusted local use only). */
+  allowAuthorOverrides?: boolean;
   onDiagnostic?: (message: string) => void;
   onJudge?: (current: number, total: number) => void;
   /** Called after validation and before gateway cleanup. */
@@ -82,6 +84,7 @@ function failedReport(input: {
       message: boundedMessage(input.error, "Semantic lint failed"),
     },
     gateMode: input.options.gate ? "gate" : "advisory",
+    holisticInputTokenBudget: input.options.holisticInputTokens,
   });
 }
 
@@ -157,6 +160,26 @@ export async function runSemanticLint(
       base: range.base,
       head: range.head,
     });
+
+    // PR metadata is author-controlled input. Keep semantic lint advisory when
+    // it is present; gate mode fails closed instead of allowing prompt-injected
+    // context to produce an apparently clean blocking decision.
+    if (options.gate && prContext) {
+      phase = "diff";
+      report = failedReport({
+        options,
+        startedAt,
+        model,
+        effort,
+        range,
+        phase,
+        code: "untrusted-context-gate-disabled",
+        error:
+          "Gate mode is disabled when untrusted pull-request metadata is supplied",
+      });
+      await options.publishReport?.(report);
+      return report;
+    }
 
     phase = "diff";
     throwIfDeadlineExceeded();
@@ -360,15 +383,16 @@ export async function runSemanticLint(
       result.status === "failed" &&
       (deadlineController.signal.aborted || Date.now() >= deadlineAt);
     if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
-    const overrides = preserveFailedAtDeadline
-      ? []
-      : semanticLint.parseOverrides(
-          semanticLint.collectCommitMessages(
-            projectPath,
-            range.base,
-            range.head,
-          ),
-        );
+    const overrides =
+      preserveFailedAtDeadline || !options.allowAuthorOverrides
+        ? []
+        : semanticLint.parseOverrides(
+            semanticLint.collectCommitMessages(
+              projectPath,
+              range.base,
+              range.head,
+            ),
+          );
     if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
     const gate = semanticLint.gateDecision(
       result.findings,
@@ -441,6 +465,7 @@ export async function commandSemanticLint(
     deadlineMs: Number(values["deadline-ms"] ?? 1_200_000),
     candidateTimeoutMs: Number(values["candidate-timeout-ms"] ?? 90_000),
     holisticInputTokens: Number(values["holistic-input-tokens"] ?? 16_000),
+    allowAuthorOverrides: values["allow-author-overrides"] === true,
     onDiagnostic: (message) => console.error(`[lore] ${message}`),
     onJudge: (current, total) =>
       process.stderr.write(`\r[lore]   judging ${current}/${total}...`),

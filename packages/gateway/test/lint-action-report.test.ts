@@ -212,6 +212,57 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(true);
   });
 
+  test("preserves a custom holistic budget in failed reports", () => {
+    const value = failedSemanticLintReport({
+      model: "test/model",
+      effort: "off",
+      elapsedMs: 1,
+      range: { base: "a", head: "b", source: "test" },
+      failedPhase: "diff",
+      failure: {
+        code: "diff-too-large",
+        message: "diff exceeded semantic lint limits",
+      },
+      gateMode: "advisory",
+      holisticInputTokenBudget: 2_000,
+    });
+
+    expect(value.coverage.inputTokenBudget).toBe(2_000);
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
+  test("accepts not-run hunk vectors for an early non-empty diff failure", () => {
+    const value = failedSemanticLintReport({
+      model: "test/model",
+      effort: "off",
+      elapsedMs: 1,
+      range: { base: "a", head: "b", source: "test" },
+      failedPhase: "invariantSource",
+      failure: {
+        code: "invariant-source-read-failed",
+        message: "invariant source unavailable",
+      },
+      gateMode: "advisory",
+    });
+    value.health.diff = { status: "healthy", hunks: 1 };
+    value.health.hunkVectors = {
+      status: "not-run",
+      expected: 1,
+      available: 0,
+      missing: 1,
+    };
+    value.counters.hunks = 1;
+    value.coverage = {
+      ...value.coverage,
+      availableHunks: 1,
+      omittedHunks: 1,
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
   test("accepts the same boundary report as the CLI validator", () => {
     const value = resolvedReport(
       MAX_LINT_REPORT_CANDIDATES,

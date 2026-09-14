@@ -11,8 +11,11 @@ if (!reportPath)
 if (budget !== "16000" || process.env.HOLISTIC_INPUT_TOKENS !== "16000") {
   throw new Error("holistic input budget was not passed through the action");
 }
-if (!process.env.LORE_PR_TITLE) {
-  throw new Error("PR title was not read from the event context");
+if (process.env.LORE_PR_TITLE !== "semantic lint smoke title") {
+  throw new Error("PR title override was not passed through the action");
+}
+if (process.env.LORE_PR_DESCRIPTION !== "semantic lint smoke description") {
+  throw new Error("PR description override was not passed through the action");
 }
 
 writeFileSync(
