@@ -403,4 +403,15 @@ describe("typed lore lint contract", () => {
     );
     expect(renderSemanticLintReport(failed)).toContain("inconclusive");
   });
+
+  test("legacy holistic token parsing defaults empty input safely", async () => {
+    const { parseLegacyHolisticInputTokens } =
+      await import("../src/cli/semantic-lint");
+    expect(parseLegacyHolisticInputTokens("")).toBe(16_000);
+    expect(parseLegacyHolisticInputTokens(undefined)).toBe(16_000);
+    expect(parseLegacyHolisticInputTokens("32000")).toBe(32_000);
+    expect(() => parseLegacyHolisticInputTokens("0")).toThrow(
+      /positive integer/,
+    );
+  });
 });

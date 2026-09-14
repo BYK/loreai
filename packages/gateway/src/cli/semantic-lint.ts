@@ -64,7 +64,7 @@ function boundedMessage(error: unknown, fallback: string): string {
 }
 
 
-function parseLegacyHolisticInputTokens(value: unknown): number {
+export function parseLegacyHolisticInputTokens(value: unknown): number {
   if (value === undefined || value === null || value === "") return 16_000;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
