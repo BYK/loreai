@@ -148,6 +148,7 @@ export async function runSemanticLint(
       return report;
     }
 
+    /** Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts. */
     const prContext = invariantCheck.normalizeSemanticLintContext?.({
       title: options.prTitle ?? process.env.LORE_PR_TITLE,
       description: options.prDescription ?? process.env.LORE_PR_DESCRIPTION,
