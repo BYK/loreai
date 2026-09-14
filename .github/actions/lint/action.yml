@@ -12,6 +12,14 @@ inputs:
     description: "Head ref/SHA. Defaults to the PR head."
     required: false
     default: ""
+  pr-title:
+    description: "Optional untrusted pull-request title for semantic context."
+    required: false
+    default: ""
+  pr-description:
+    description: "Optional untrusted pull-request description for semantic context."
+    required: false
+    default: ""
   model:
     description: "Judge model (provider/id)."
     required: false
@@ -137,6 +145,8 @@ runs:
       env:
         LORE_IC_BASE: ${{ inputs.base }}
         LORE_IC_HEAD: ${{ inputs.head }}
+        LORE_PR_TITLE: ${{ inputs.pr-title }}
+        LORE_PR_DESCRIPTION: ${{ inputs.pr-description }}
         LORE_IC_MODEL: ${{ inputs.model }}
         LORE_CACHE_MODE: ${{ inputs.cache-mode }}
         LORE_IC_EFFORT: ${{ inputs.effort }}

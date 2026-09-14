@@ -26,6 +26,9 @@ import {
 export interface SemanticLintOptions {
   base?: string;
   head?: string;
+  /** Optional PR metadata; action callers pass it through env safely. */
+  prTitle?: string;
+  prDescription?: string;
   model?: string;
   project: string;
   effort?: ReasoningEffort;
@@ -144,6 +147,14 @@ export async function runSemanticLint(
       await options.publishReport?.(report);
       return report;
     }
+
+    const prContext = invariantCheck.normalizeSemanticLintContext?.({
+      title: options.prTitle ?? process.env.LORE_PR_TITLE,
+      description: options.prDescription ?? process.env.LORE_PR_DESCRIPTION,
+      base: range.base,
+      head: range.head,
+    });
+
     phase = "diff";
     throwIfDeadlineExceeded();
     options.onDiagnostic?.(
@@ -183,6 +194,7 @@ export async function runSemanticLint(
         projectPath,
         diff,
         range,
+        prContext,
         model,
         effort,
         sessionID: `invariant-check-${Date.now()}`,
@@ -327,6 +339,7 @@ export async function runSemanticLint(
       projectPath,
       diff,
       range,
+      prContext,
       judge,
       model,
       effort,
@@ -411,6 +424,8 @@ export async function commandInvariantCheck(
   const report = await runSemanticLint({
     base: values.base as string | undefined,
     head: values.head as string | undefined,
+    prTitle: values["pr-title"] as string | undefined,
+    prDescription: values["pr-description"] as string | undefined,
     model: values.model as string | undefined,
     project: resolve((values.project as string | undefined) ?? process.cwd()),
     effort: effort ?? undefined,

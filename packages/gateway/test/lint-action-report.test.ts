@@ -541,6 +541,10 @@ describe("semantic lint action reporter", () => {
     expect(action).toContain('default: "1200"');
     expect(action).toContain('default: "90"');
     expect(action).toContain('default: "restore"');
+    expect(action).toContain("LORE_PR_TITLE: ${{ inputs.pr-title }}");
+    expect(action).toContain(
+      "LORE_PR_DESCRIPTION: ${{ inputs.pr-description }}",
+    );
     expect(action).toContain("actions/cache/restore@v5");
     expect(action).toContain("actions/cache/save@v5");
     expect(action).toContain("lore-invariants-v2-");
@@ -1163,6 +1167,12 @@ describe("semantic lint action reporter", () => {
       "gate: ${{ vars.LORE_SEMANTIC_LINT_GATE == 'true' }}",
     );
     expect(workflow).toContain("pull_request_target:");
+    expect(workflow).toContain(
+      "types: [opened, synchronize, reopened, edited]",
+    );
+    expect(workflow).toContain(
+      "pr-title: ${{ github.event.pull_request.title }}",
+    );
     expect(workflow).toContain(
       "model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}",
     );

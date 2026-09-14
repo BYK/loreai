@@ -9,7 +9,7 @@ on:
   # Run the base repository's trusted workflow definition. The job checks out
   # only the event base SHA; the untrusted head is fetched solely as diff data.
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 
 # Keep only the latest run per PR.
 concurrency:
@@ -70,6 +70,10 @@ jobs:
           # Diff the event's immutable SHAs; the worktree remains at base SHA.
           base: ${{ github.event.pull_request.base.sha }}
           head: ${{ github.event.pull_request.head.sha }}
+          # Author-provided metadata is passed as action inputs and remains
+          # untrusted data inside the linter prompt.
+          pr-title: ${{ github.event.pull_request.title }}
+          pr-description: ${{ github.event.pull_request.body }}
           # Run the built CJS binary under Node (see the build step above).
           lore-command: "node packages/gateway/dist/bin.cjs"
           # Judge model + credential. A paired LORE_WORKER_API_KEY and

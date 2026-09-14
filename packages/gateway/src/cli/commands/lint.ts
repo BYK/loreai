@@ -11,6 +11,8 @@ import {
 type LintFlags = {
   base?: string;
   head?: string;
+  "pr-title"?: string;
+  "pr-description"?: string;
   model?: string;
   project?: string;
   effort?: ReasoningEffort;
@@ -54,6 +56,18 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
         kind: "parsed",
         parse: String,
         brief: "Head commit SHA (default: auto-detect)",
+        optional: true,
+      },
+      "pr-title": {
+        kind: "parsed",
+        parse: String,
+        brief: "Pull-request title (optional; untrusted context)",
+        optional: true,
+      },
+      "pr-description": {
+        kind: "parsed",
+        parse: String,
+        brief: "Pull-request description (optional; untrusted context)",
         optional: true,
       },
       model: {
@@ -117,6 +131,8 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
     const report = await runSemanticLint({
       base: flags.base,
       head: flags.head,
+      prTitle: flags["pr-title"],
+      prDescription: flags["pr-description"],
       model: flags.model,
       project: flags.project ?? this.cwd,
       effort: flags.effort,

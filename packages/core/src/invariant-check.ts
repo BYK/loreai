@@ -318,6 +318,76 @@ export interface ResolvedRange {
 }
 
 /**
+ * Optional provider-neutral pull-request metadata. Values originate outside the
+ * trusted base checkout and are bounded before they reach a model prompt.
+ */
+export interface SemanticLintContext {
+  title: string;
+  description: string;
+  base?: string;
+  head?: string;
+  titleTruncated: boolean;
+  descriptionTruncated: boolean;
+}
+
+export const MAX_PR_TITLE_BYTES = 1_024;
+export const MAX_PR_DESCRIPTION_BYTES = 16 * 1024;
+
+function truncateUntrustedText(
+  value: string,
+  maxBytes: number,
+): { value: string; truncated: boolean } {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= maxBytes) return { value, truncated: false };
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return {
+    value: bytes.subarray(0, end).toString("utf8"),
+    truncated: true,
+  };
+}
+
+/**
+ * Normalize optional PR metadata at the trust boundary. Empty title/body means
+ * there is no PR context; local CLI runs therefore remain unchanged unless the
+ * caller opts in. Base/head are informational only and never used as commands.
+ */
+export function normalizeSemanticLintContext(input:
+  | {
+      title?: string | null;
+      description?: string | null;
+      base?: string | null;
+      head?: string | null;
+    }
+  | null
+  | undefined): SemanticLintContext | undefined {
+  if (!input) return undefined;
+  const title = truncateUntrustedText(
+    typeof input.title === "string" ? input.title : "",
+    MAX_PR_TITLE_BYTES,
+  );
+  const description = truncateUntrustedText(
+    typeof input.description === "string" ? input.description : "",
+    MAX_PR_DESCRIPTION_BYTES,
+  );
+  if (title.value.length === 0 && description.value.length === 0)
+    return undefined;
+
+  const boundedRef = (value: string | null | undefined): string | undefined => {
+    if (typeof value !== "string" || value.length === 0) return undefined;
+    return value.slice(0, 200);
+  };
+  return {
+    title: title.value,
+    description: description.value,
+    ...(boundedRef(input.base) ? { base: boundedRef(input.base) } : {}),
+    ...(boundedRef(input.head) ? { head: boundedRef(input.head) } : {}),
+    titleTruncated: title.truncated,
+    descriptionTruncated: description.truncated,
+  };
+}
+
+/**
  * Resolve the (base, head) commit range to check, mirroring Craft's approach of
  * deriving the range from the environment rather than requiring explicit args.
  *
@@ -869,6 +939,8 @@ export interface InvariantJudgeInput {
   invariant: { id: string; title: string; content: string };
   file: string;
   hunk: string;
+  /** Optional bounded, author-provided PR metadata. */
+  prContext?: SemanticLintContext;
   /** Remaining budget available to this candidate (normally one or two). */
   semanticCallBudget: number;
 }
@@ -1193,6 +1265,7 @@ export function createLLMInvariantJudge(
             invariant: input.invariant,
             file: input.file,
             hunk: input.hunk,
+            prContext: input.prContext,
           }),
         );
       } catch (error) {
@@ -1231,6 +1304,7 @@ export function createLLMInvariantJudge(
             invariant: input.invariant,
             file: input.file,
             hunk: input.hunk,
+            prContext: input.prContext,
             invalidResponse: response.slice(0, 2_000),
           }),
         );
@@ -1266,6 +1340,8 @@ export function createLLMInvariantJudge(
 
 export interface CheckInvariantsInput {
   projectPath: string;
+  /** Optional bounded, author-provided PR metadata. */
+  prContext?: SemanticLintContext;
   /** Preferred health-aware diff input. */
   diff?: DiffResult;
   /** Legacy pre-parsed input. Use `diff` to preserve command failures. */
@@ -1510,6 +1586,7 @@ export async function checkInvariants(
           },
           file: hunk.file,
           hunk: hunk.text,
+          prContext: input.prContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });
       } catch (error) {

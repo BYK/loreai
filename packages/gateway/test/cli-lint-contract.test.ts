@@ -181,6 +181,8 @@ describe("typed lore lint contract", () => {
     for (const flag of [
       "--base",
       "--head",
+      "--pr-title",
+      "--pr-description",
       "--model",
       "--project",
       "--effort",
