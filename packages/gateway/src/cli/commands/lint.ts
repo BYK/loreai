@@ -125,7 +125,7 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
       "holistic-input-tokens": {
         kind: "parsed",
         parse: positiveInteger,
-        brief: "Total input-token budget for holistic small-PR review",
+        brief: "Total input-token budget for holistic small-PR semantic lint",
         default: "16000",
       },
     },
