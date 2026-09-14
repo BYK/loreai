@@ -393,11 +393,7 @@ export function failedSemanticLintReport(input: {
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: input.range ?? null,
-    coverage: emptyLintCoverage(
-      0,
-      0,
-      input.holisticInputTokenBudget ?? 16_000,
-    ),
+    coverage: emptyLintCoverage(0, 0, input.holisticInputTokenBudget ?? 16_000),
     health,
     counters: {
       hunks: 0,
