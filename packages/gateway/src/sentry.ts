@@ -15,6 +15,10 @@ import {
   setRecallContinuationFailureHook,
   type RecallContinuationFailureCategory,
 } from "./recall-continuation-failure";
+import {
+  setPrincipalTransportFailureHook,
+  type PrincipalTransportFailureSample,
+} from "./principal-transport-failure";
 
 // ---------------------------------------------------------------------------
 // Scope enrichment
@@ -721,6 +725,26 @@ export function setupRecallContinuationFailureCapture(): void {
             capturedSpanScope: currentScope,
             capturedSpanIsolationScope: isolationScope,
           },
+        });
+      } catch {
+        // Telemetry never affects the response path.
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Principal Responses transport failures (#1762)
+// ---------------------------------------------------------------------------
+
+/** Emit only fixed, allowlisted principal-stream transport dimensions. */
+export function setupPrincipalTransportFailureCapture(): void {
+  setPrincipalTransportFailureHook(
+    (sample: PrincipalTransportFailureSample) => {
+      if (!Sentry.isInitialized()) return;
+      try {
+        Sentry.metrics.count("lore.responses.principal_transport", 1, {
+          attributes: sample,
         });
       } catch {
         // Telemetry never affects the response path.

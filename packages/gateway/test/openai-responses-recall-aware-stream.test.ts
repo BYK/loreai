@@ -17,6 +17,10 @@ import {
   setRecallContinuationFailureHook,
   type RecallContinuationFailureCategory,
 } from "../src/recall-continuation-failure";
+import {
+  setPrincipalTransportFailureHook,
+  type PrincipalTransportFailureSample,
+} from "../src/principal-transport-failure";
 import type { GatewayResponse } from "../src/translate/types";
 
 const silentLogSink = {
@@ -28,6 +32,7 @@ const silentLogSink = {
 
 afterEach(() => {
   setRecallContinuationFailureHook(undefined);
+  setPrincipalTransportFailureHook(undefined);
   log.registerSink(silentLogSink);
 });
 
@@ -674,6 +679,7 @@ describe("streamResponsesRecallAware", () => {
 
   test("bounds retained output before recall detection", async () => {
     const errors: string[] = [];
+    let retries = 0;
     log.registerSink({
       info: () => {},
       warn: () => {},
@@ -689,6 +695,10 @@ describe("streamResponsesRecallAware", () => {
       {
         maxRetainedStateBytes: 1,
         onComplete: () => {},
+        retryPrincipal: async () => {
+          retries++;
+          return streamFrom([]);
+        },
         onRecall: async () => ({ anchorText: "", resultText: "" }),
         runFollowUp: async () => {
           throw new Error("should not run");
@@ -699,9 +709,34 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain("response.failed");
     expect(out).toContain(PUBLIC_GATEWAY_ERROR);
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(retries).toBe(0);
     expect(errors).toEqual([
       "openai-responses recall-aware stream failed category=principal_resource_limit",
     ]);
+  });
+
+  test("does not retry a pre-output principal resource limit", async () => {
+    let retries = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([created("resp_pre_output_limit", "gpt-5.6-terra")]),
+      {
+        maxStreamBytes: 1,
+        onComplete: () => {},
+        retryPrincipal: async () => {
+          retries++;
+          return streamFrom([]);
+        },
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(retries).toBe(0);
+    expect(out).toContain("event: response.failed");
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
   });
 
   test("rejects an SSE event name that disagrees with the payload type", async () => {
@@ -741,10 +776,78 @@ describe("streamResponsesRecallAware", () => {
     ]);
   });
 
-  test("sanitizes a principal transport failure before recall", async () => {
+  test("retries a principal read failure before emitting any client event", async () => {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const transport: PrincipalTransportFailureSample[] = [];
+    let retries = 0;
+    const completions: Array<{ successful: boolean; text: string }> = [];
+    log.registerSink({
+      info: () => {},
+      warn: (message) => warnings.push(message),
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
+    setPrincipalTransportFailureHook((sample) => transport.push(sample));
+    const privateCause = "private principal socket failure";
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new Error(privateCause));
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      sessionID: "private-session\nforged-log-line",
+      onComplete: (response, successful) =>
+        completions.push({
+          successful,
+          text: response.content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join(""),
+        }),
+      retryPrincipal: async ({ attempt }) => {
+        retries++;
+        expect(attempt).toBe(1);
+        return streamFrom([
+          created("resp_principal_retry", "gpt-5.6-terra"),
+          textItem(0, "recovered"),
+          completed("resp_principal_retry"),
+        ]);
+      },
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const out = await drain(client);
+    expect(retries).toBe(1);
+    expect(out.match(/^event: response\.created$/gm)).toHaveLength(1);
+    expect(out).toContain("recovered");
+    expect(out).not.toContain("response.failed");
+    expect(out).not.toContain("response.incomplete");
+    expect(out).not.toContain(privateCause);
+    expect(warnings.join("\n")).not.toContain("private-session");
+    expect(completions).toEqual([{ successful: true, text: "recovered" }]);
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([
+      "retrying principal Responses stream after read transport failure",
+    ]);
+    expect(transport).toEqual([
+      { kind: "read", stage: "pre_output", outcome: "retry" },
+      { kind: "read", stage: "pre_output", outcome: "retry_succeeded" },
+    ]);
+  });
+
+  test("sanitizes exhausted pre-output principal read retries", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
+    const transport: PrincipalTransportFailureSample[] = [];
     const errors: string[] = [];
     setRecallContinuationFailureHook((category) => failures.push(category));
+    setPrincipalTransportFailureHook((sample) => transport.push(sample));
     log.registerSink({
       info: () => {},
       warn: () => {},
@@ -755,11 +858,6 @@ describe("streamResponsesRecallAware", () => {
     const upstream = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(
-            new TextEncoder().encode(
-              created("resp_principal_transport", "gpt-5.6-terra"),
-            ),
-          );
           controller.error(new Error(privateCause));
         },
       }),
@@ -767,6 +865,14 @@ describe("streamResponsesRecallAware", () => {
     );
     const client = streamResponsesRecallAware(upstream, {
       onComplete: () => {},
+      retryPrincipal: async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new Error("private retry socket failure"));
+            },
+          }),
+        ),
       onRecall: async () => ({ anchorText: "", resultText: "" }),
       runFollowUp: async () => {
         throw new Error("should not run");
@@ -778,10 +884,225 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_GATEWAY_ERROR);
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain(privateCause);
+    expect(out).not.toContain("private retry socket failure");
+    expect(out).toContain('"code":"server_error"');
     expect(failures).toEqual([]);
     expect(errors).toEqual([
       "openai-responses recall-aware stream failed category=principal_transport",
     ]);
+    expect(transport).toEqual([
+      { kind: "read", stage: "pre_output", outcome: "retry" },
+      { kind: "read", stage: "pre_output", outcome: "retry_exhausted" },
+    ]);
+  });
+
+  test("continues after a post-text read failure without replaying the request", async () => {
+    let retries = 0;
+    const transport: PrincipalTransportFailureSample[] = [];
+    const errors: string[] = [];
+    setPrincipalTransportFailureHook((sample) => transport.push(sample));
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
+    const privateCause = "private post-text socket failure";
+    const privateSession = "private-session\nforged-log-entry";
+    let sent = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent) {
+            controller.error(new Error(privateCause));
+            return;
+          }
+          sent = true;
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_post_text", "gpt-5.6-terra") +
+                textItem(0, "partial answer"),
+            ),
+          );
+        },
+      }),
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      sessionID: privateSession,
+      onComplete: () => {},
+      retryPrincipal: async () => {
+        retries++;
+        return streamFrom([]);
+      },
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const out = await drain(client);
+    expect(retries).toBe(0);
+    expect(out.match(/^event: response\.output_text\.delta$/gm)).toHaveLength(
+      1,
+    );
+    expect(out).toContain("partial answer");
+    expect(out.match(/^event: response\.incomplete$/gm)).toHaveLength(1);
+    expect(out).toContain('"reason":"gateway_transport"');
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain("event: response.failed");
+    expect(out).not.toContain(privateCause);
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_transport",
+    ]);
+    expect(errors.join("\n")).not.toContain(privateSession);
+    expect(errors.join("\n")).not.toContain("forged-log-entry");
+    expect(transport).toEqual([
+      { kind: "read", stage: "post_output", outcome: "continue" },
+    ]);
+  });
+
+  test("continues after an emitted ordinary tool without replaying its side effect", async () => {
+    let retries = 0;
+    const transport: PrincipalTransportFailureSample[] = [];
+    setPrincipalTransportFailureHook((sample) => transport.push(sample));
+    let sent = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent) {
+            controller.error(new Error("private post-tool socket failure"));
+            return;
+          }
+          sent = true;
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_post_tool", "gpt-5.6-terra") +
+                sparseVisibleFunctionCall(0, '{"path":"README.md"}'),
+            ),
+          );
+        },
+      }),
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      validation: "codex",
+      onComplete: () => {},
+      retryPrincipal: async () => {
+        retries++;
+        return streamFrom([]);
+      },
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const out = await drain(client);
+    expect(retries).toBe(0);
+    expect(out.match(/^event: response\.output_item\.added$/gm)).toHaveLength(
+      1,
+    );
+    expect(out.match(/^event: response\.incomplete$/gm)).toHaveLength(1);
+    expect(out).toContain('"reason":"gateway_transport"');
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(out).not.toContain("event: response.failed");
+    expect(out).not.toContain("private post-tool socket failure");
+    expect(transport).toEqual([
+      { kind: "read", stage: "post_tool", outcome: "continue" },
+    ]);
+  });
+
+  test("does not retry a pre-output principal inactivity failure", async () => {
+    let retries = 0;
+    const transport: PrincipalTransportFailureSample[] = [];
+    setPrincipalTransportFailureHook((sample) => transport.push(sample));
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        pull() {},
+      }),
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      sseInactivityMs: 5,
+      onComplete: () => {},
+      retryPrincipal: async () => {
+        retries++;
+        return streamFrom([]);
+      },
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const out = await drain(client);
+    expect(retries).toBe(0);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(transport).toEqual([
+      { kind: "inactivity", stage: "pre_output", outcome: "failed" },
+    ]);
+  });
+
+  test("does not retry when the client cancels a stalled principal read", async () => {
+    let retries = 0;
+    let upstreamCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        pull() {},
+        cancel() {
+          upstreamCancelled = true;
+        },
+      }),
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      onComplete: () => {},
+      retryPrincipal: async () => {
+        retries++;
+        return streamFrom([]);
+      },
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    const reader = client.body!.getReader();
+    await reader.cancel(new Error("client disconnected"));
+
+    expect(retries).toBe(0);
+    expect(upstreamCancelled).toBe(true);
+  });
+
+  test("cancels a retry response returned after foreground abort", async () => {
+    const abort = new AbortController();
+    let retryBodyCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new Error("initial read failure"));
+        },
+      }),
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      signal: abort.signal,
+      onComplete: () => {},
+      retryPrincipal: async () => {
+        abort.abort(new DOMException("foreground expired", "TimeoutError"));
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              retryBodyCancelled = true;
+            },
+          }),
+        );
+      },
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    await expect(client.text()).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(retryBodyCancelled).toBe(true);
   });
 
   test("classifies a missing principal response body as unexpected", async () => {

@@ -35,6 +35,7 @@ import {
   setupBustSpiralCapture,
   setupReadPathTimingCapture,
   setupRecallContinuationFailureCapture,
+  setupPrincipalTransportFailureCapture,
   setupVecReadLatencyCapture,
 } from "./sentry";
 import type { GatewayRequest } from "./translate/types";
@@ -827,6 +828,10 @@ export async function startServer(
   // Report only the allowlisted recall-continuation failure category. The
   // hook is assignment-based and never captures request or provider content.
   setupRecallContinuationFailureCapture();
+
+  // Classify principal Responses body failures using fixed transport, stage,
+  // and recovery outcomes only. No provider or request content is captured.
+  setupPrincipalTransportFailureCapture();
 
   // Shared fetch handler for all server instances.
   const fetch = async (
