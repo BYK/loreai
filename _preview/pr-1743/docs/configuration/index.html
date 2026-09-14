@@ -553,7 +553,7 @@
 <tr>
 <td><code dir="auto">recall</code></td>
 <td>object</td>
-<td><code dir="auto">{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0}</code></td>
+<td><code dir="auto">{"charBudget":12000,"relevanceFloor":0.15,"maxResults":15,"absoluteFloor":0,"chainMaxExecutions":24}</code></td>
 <td></td>
 <td>Recall output formatting and result-count limits.</td>
 </tr>
@@ -706,6 +706,13 @@
 <td><code dir="auto">0</code></td>
 <td>min 0</td>
 <td>Absolute RRF score floor; drops weak matches even via the keep-3 backfill. Default: 0 (disabled).</td>
+</tr>
+<tr>
+<td><code dir="auto">chainMaxExecutions</code></td>
+<td>number</td>
+<td><code dir="auto">24</code></td>
+<td>min 12, max 128</td>
+<td>Emergency execution cap for one recall chain. Default: 24; normal resource and stall budgets stop first.</td>
 </tr>
 </tbody>
 </table>

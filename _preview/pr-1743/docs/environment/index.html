@@ -156,6 +156,14 @@
 <td>Check if update checking is disabled via environment variable. When set to <code dir="auto">1</code>, the CLI does not phone home to GitHub for the latest released version and does not print “new version available” notifications. Use this in CI, air-gapped environments, or when you’ve pinned a version and don’t want the upgrade hint. Env: <code dir="auto">LORE_NO_UPDATE_CHECK=1</code>.</td>
 </tr>
 <tr>
+<td><code dir="auto">LORE_PR_DESCRIPTION</code></td>
+<td>Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts.</td>
+</tr>
+<tr>
+<td><code dir="auto">LORE_PR_TITLE</code></td>
+<td>Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts.</td>
+</tr>
+<tr>
 <td><code dir="auto">LORE_PROJECT</code></td>
 <td>Expose project path &amp; git remote as env vars so downstream agents can map them to custom headers if supported in the future. The gateway resolves the project from system-prompt inference and cwd for now.</td>
 </tr>
@@ -297,7 +305,7 @@
 <tbody>
 <tr>
 <td><code dir="auto">LORE_SHUTDOWN_TIMEOUT_MS</code></td>
-<td>Bound for the bounded vector-pool shutdown on graceful shutdown (#1599). The pool teardown must wait for every worker’s SQLite reader to close before the writer can TRUNCATE the WAL — leaving readers up would strand the <code dir="auto">-wal</code> file and force WAL recovery on the next boot. Sized to fit under the global deadline after the embedding drain (60%) so a stuck worker still leaves room for the writer’s checkpoint+close. Mirrors {@link EMBED_DRAIN_DEADLINE_MS}’s safety floor of 500ms so an aggressive <code dir="auto">LORE_SHUTDOWN_TIMEOUT_MS</code> (e.g. 1000ms) doesn’t shrink the pool budget into a guaranteed timeout.</td>
+<td>Environment variable: LORE_SHUTDOWN_TIMEOUT_MS overrides the single process-wide deadline shared by signal-driven and authenticated-control shutdown. Values are milliseconds and are clamped to the minimum safe deadline; invalid values use the default.</td>
 </tr>
 </tbody>
 </table>
@@ -324,7 +332,7 @@
 </tr>
 <tr>
 <td><code dir="auto">LORE_EMBED_POOL_SIZE</code></td>
-<td>Resolve the configured embedding-pool ceiling: <code dir="auto">LORE_EMBED_POOL_SIZE</code> wins (the escape hatch — <code dir="auto">=1</code> forces today’s single worker), then <code dir="auto">search.embeddings.embedPoolSize</code>, else <code dir="auto">undefined</code> (memory-gated default). Read per-construction (not cached) so config reloads / env changes take effect on the next provider. Invalid values are ignored (fall through).</td>
+<td>Number of local ONNX embedding worker threads (each loads its own ~137MB model). Distinct from workerPoolSize (the cheap DB-only vector pool) because an embedding worker’s memory footprint is far larger. Omit to let lore size the pool from available memory (1 on constrained hosts, up to 2 when there’s headroom). Override with LORE_EMBED_POOL_SIZE.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_NO_DB_TRACING</code></td>
