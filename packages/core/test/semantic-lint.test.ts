@@ -437,7 +437,9 @@ describe("isIgnoredFile", () => {
     expect(isIgnoredFile("node_modules/pkg/index.js")).toBe(true);
   });
   it("does NOT ignore real source files", () => {
-    expect(isIgnoredFile("packages/core/src/semantic-lint/check.ts")).toBe(false);
+    expect(isIgnoredFile("packages/core/src/semantic-lint/check.ts")).toBe(
+      false,
+    );
     expect(isIgnoredFile("src/index.ts")).toBe(false);
     expect(isIgnoredFile("Makefile")).toBe(false);
   });

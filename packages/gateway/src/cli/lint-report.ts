@@ -422,9 +422,7 @@ function assertCount(value: unknown, name: string): asserts value is number {
   );
 }
 
-function validateLintCoverage(
-  value: unknown,
-): asserts value is LintCoverage {
+function validateLintCoverage(value: unknown): asserts value is LintCoverage {
   assert(isRecord(value), "coverage must be an object");
   assert(
     value.strategy === "none" ||
@@ -465,7 +463,10 @@ function validateLintCoverage(
     "coverage invariant coverage does not add up",
   );
   if (value.strategy === "holistic") {
-    assert(value.contextComplete, "holistic semantic lint must have complete context");
+    assert(
+      value.contextComplete,
+      "holistic semantic lint must have complete context",
+    );
     assert(
       numbers.includedHunks === numbers.availableHunks &&
         numbers.inputTokens <= numbers.inputTokenBudget,

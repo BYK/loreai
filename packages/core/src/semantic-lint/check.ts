@@ -769,7 +769,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * belong to the complete supplied hunk set. The payload is still untrusted:
  * strings are bounded and never interpreted as instructions.
  */
-function isHolisticVerdict(value: unknown): value is HolisticLintResult["verdict"] {
+function isHolisticVerdict(
+  value: unknown,
+): value is HolisticLintResult["verdict"] {
   return isVerdict(value) || value === "insufficient-context";
 }
 

@@ -5347,8 +5347,7 @@ export function createGatewayInvariantJudge(
               signal.reason.name === "TimeoutError"
                 ? "timeout"
                 : "aborted",
-            message:
-              "Holistic semantic lint cancelled before accepting output",
+            message: "Holistic semantic lint cancelled before accepting output",
             retryable: !options.signal?.aborted,
             model: outcome.model,
             attempts: outcome.attempts,
