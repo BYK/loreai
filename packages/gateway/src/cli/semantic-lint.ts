@@ -63,6 +63,16 @@ function boundedMessage(error: unknown, fallback: string): string {
   return (message.replace(/[\r\n\t]+/g, " ").trim() || fallback).slice(0, 400);
 }
 
+
+function parseLegacyHolisticInputTokens(value: unknown): number {
+  if (value === undefined || value === null || value === "") return 16_000;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new TypeError("holistic-input-tokens must be a positive integer");
+  }
+  return parsed;
+}
+
 function failedReport(input: {
   options: SemanticLintOptions;
   startedAt: number;
@@ -466,7 +476,9 @@ export async function commandSemanticLint(
     primeLoreDb: values["prime-lore-db"] === true,
     deadlineMs: Number(values["deadline-ms"] ?? 1_200_000),
     candidateTimeoutMs: Number(values["candidate-timeout-ms"] ?? 90_000),
-    holisticInputTokens: Number(values["holistic-input-tokens"] ?? 16_000),
+    holisticInputTokens: parseLegacyHolisticInputTokens(
+      values["holistic-input-tokens"],
+    ),
     allowAuthorOverrides: values["allow-author-overrides"] === true,
     onDiagnostic: (message) => console.error(`[lore] ${message}`),
     onJudge: (current, total) =>
