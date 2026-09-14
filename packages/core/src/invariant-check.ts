@@ -352,15 +352,17 @@ function truncateUntrustedText(
  * there is no PR context; local CLI runs therefore remain unchanged unless the
  * caller opts in. Base/head are informational only and never used as commands.
  */
-export function normalizeSemanticLintContext(input:
-  | {
-      title?: string | null;
-      description?: string | null;
-      base?: string | null;
-      head?: string | null;
-    }
-  | null
-  | undefined): SemanticLintContext | undefined {
+export function normalizeSemanticLintContext(
+  input:
+    | {
+        title?: string | null;
+        description?: string | null;
+        base?: string | null;
+        head?: string | null;
+      }
+    | null
+    | undefined,
+): SemanticLintContext | undefined {
   if (!input) return undefined;
   const title = truncateUntrustedText(
     typeof input.title === "string" ? input.title : "",
