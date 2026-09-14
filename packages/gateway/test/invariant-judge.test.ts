@@ -277,7 +277,6 @@ describe("invariant worker recovery", () => {
   }
 });
 
-
 describe("holistic gateway judge", () => {
   const holisticInput = {
     invariants: [

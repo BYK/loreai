@@ -5347,7 +5347,8 @@ export function createGatewayInvariantJudge(
               signal.reason.name === "TimeoutError"
                 ? "timeout"
                 : "aborted",
-            message: "Holistic invariant review cancelled before accepting output",
+            message:
+              "Holistic invariant review cancelled before accepting output",
             retryable: !options.signal?.aborted,
             model: outcome.model,
             attempts: outcome.attempts,
@@ -5358,9 +5359,7 @@ export function createGatewayInvariantJudge(
 
       let outcome: PromptOutcome;
       try {
-        outcome = await call(
-          invariantCheck.invariantHolisticJudgeUser(input),
-        );
+        outcome = await call(invariantCheck.invariantHolisticJudgeUser(input));
       } catch (error) {
         return holisticTransportFailure(error, stats(), options.signal);
       }
@@ -5429,7 +5428,8 @@ function invalidHolisticGatewayReview(
     kind: "unresolved",
     failure: {
       code: "invalid-verdict",
-      message: "Holistic judge response did not match the required review schema",
+      message:
+        "Holistic judge response did not match the required review schema",
       scope: "candidate",
       retryable: true,
     },
@@ -5453,10 +5453,14 @@ function holisticTransportFailure(
     kind: "unresolved",
     failure: {
       code,
-      message: error instanceof Error ? error.message.slice(0, 400) : String(error).slice(0, 400),
-      scope: (code === "abort" || code === "timeout") && overallSignal?.aborted
-        ? "run"
-        : "candidate",
+      message:
+        error instanceof Error
+          ? error.message.slice(0, 400)
+          : String(error).slice(0, 400),
+      scope:
+        (code === "abort" || code === "timeout") && overallSignal?.aborted
+          ? "run"
+          : "candidate",
       retryable: code !== "abort",
     },
     stats,

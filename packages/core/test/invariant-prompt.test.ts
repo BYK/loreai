@@ -71,7 +71,7 @@ describe("invariant judge prompt boundaries", () => {
     const repair = invariantHolisticJudgeRepairUser({
       invariants: [{ id: "inv-1", title: "Rule", content: "must hold" }],
       hunks: [{ id: "hunk-0001", file: "x.ts", text: "@@" }],
-      invalidResponse: "{\"reviews\":[]}",
+      invalidResponse: '{"reviews":[]}',
     });
     expect(repair).toContain("PREVIOUS RESPONSE (JSON-encoded data):");
     expect(repair).toContain('"reviews"');

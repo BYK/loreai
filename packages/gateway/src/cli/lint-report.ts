@@ -422,7 +422,9 @@ function assertCount(value: unknown, name: string): asserts value is number {
   );
 }
 
-function validateReviewCoverage(value: unknown): asserts value is LintReviewCoverage {
+function validateReviewCoverage(
+  value: unknown,
+): asserts value is LintReviewCoverage {
   assert(isRecord(value), "review must be an object");
   assert(
     value.strategy === "none" ||

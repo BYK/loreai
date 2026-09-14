@@ -769,9 +769,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * belong to the complete supplied hunk set. The payload is still untrusted:
  * strings are bounded and never interpreted as instructions.
  */
-function isHolisticVerdict(
-  value: unknown,
-): value is HolisticReview["verdict"] {
+function isHolisticVerdict(value: unknown): value is HolisticReview["verdict"] {
   return isVerdict(value) || value === "insufficient-context";
 }
 
@@ -782,9 +780,7 @@ export function parseHolisticReviews(
 ): HolisticReview[] | null {
   if (!text) return null;
   let payload = text.trim();
-  const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(
-    payload,
-  );
+  const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fenced) payload = fenced[1];
   else if (payload.startsWith("```") || payload.endsWith("```")) {
     return null;
@@ -1705,9 +1701,7 @@ export async function checkInvariants(
     hunk.text.includes("hunk truncated by Lore"),
   );
   const holisticPlan =
-    input.holisticJudge &&
-    holisticInvariants.length > 0 &&
-    !hasTruncatedHunk
+    input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
       ? buildHolisticReviewInput({
           invariants: holisticInvariants,
           hunks: holisticHunks,
@@ -2136,7 +2130,8 @@ function validateHolisticReviewOutcome(
     typeof outcome.failure.message === "string" &&
     outcome.failure.message.trim().length > 0 &&
     outcome.failure.message.length <= 400 &&
-    (outcome.failure.scope === "candidate" || outcome.failure.scope === "run") &&
+    (outcome.failure.scope === "candidate" ||
+      outcome.failure.scope === "run") &&
     (outcome.failure.retryable === undefined ||
       typeof outcome.failure.retryable === "boolean")
   ) {

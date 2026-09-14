@@ -1844,7 +1844,6 @@ describe("checkInvariants typed judge outcomes", () => {
   });
 });
 
-
 describe("holistic review orchestration", () => {
   it("uses one complete whole-diff review and cites only returned evidence", async () => {
     const project = mkdtempSync(join(tmpdir(), "lore-holistic-small-"));

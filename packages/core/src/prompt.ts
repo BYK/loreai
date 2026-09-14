@@ -1378,7 +1378,6 @@ Requirements:
 - no extra keys, prose, or markdown fence`;
 }
 
-
 export const INVARIANT_HOLISTIC_REVIEW_SYSTEM = [
   "You are a semantic linter for a software team. You are given the complete available bounded diff for one pull request, a selected set of documented invariants, and optional pull-request metadata. Review the NET EFFECT of the supplied change against every supplied invariant.",
   "",
@@ -1392,8 +1391,8 @@ export const INVARIANT_HOLISTIC_REVIEW_SYSTEM = [
   '- "violates": the net change directly conflicts with the invariant.',
   '- "fixes": the net change clearly removes a documented conflict or adds its required enforcement.',
   '- "satisfies": the net change is consistent with the invariant.',
-  "- \"unrelated\": the supplied change does not govern the invariant's subject/scope.",
-  "- \"insufficient-context\": the supplied bounded evidence cannot establish a verdict; this is unresolved, not a clean result.",
+  '- "unrelated": the supplied change does not govern the invariant\'s subject/scope.',
+  '- "insufficient-context": the supplied bounded evidence cannot establish a verdict; this is unresolved, not a clean result.',
   "",
   "Precision matters. Use unrelated only when the change is clearly outside scope. If the supplied bounded evidence cannot establish a verdict, use insufficient-context so the run remains unresolved. A violates review requires concrete changed-code evidence.",
   "",
@@ -1404,7 +1403,7 @@ export const INVARIANT_HOLISTIC_REVIEW_SYSTEM = [
   '  "reviews": [',
   "    {",
   '      "invariantId": "one supplied invariant id",',
-  '      "verdict": "violates" | "fixes" | "satisfies" | "unrelated",',
+  '      "verdict": "violates" | "fixes" | "satisfies" | "unrelated" | "insufficient-context",',
   '      "reason": "one concise sentence",',
   '      "evidence": [',
   '        { "hunkId": "one supplied hunk id", "reason": "one concise sentence" }',
@@ -1468,7 +1467,7 @@ export function invariantHolisticJudgeRepairUser(input: {
     JSON.stringify(input.invalidResponse),
     "",
     "Requirements:",
-    '- exactly one review for every supplied invariant',
+    "- exactly one review for every supplied invariant",
     '- use "insufficient-context" when the supplied bounded evidence cannot establish a verdict',
     '- each review has exactly four keys: "evidence", "invariantId", "reason", and "verdict"',
     '- evidence items have exactly two keys: "hunkId" and "reason"',
