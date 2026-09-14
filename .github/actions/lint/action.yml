@@ -13,11 +13,11 @@ inputs:
     required: false
     default: ""
   pr-title:
-    description: "Optional untrusted pull-request title for semantic context."
+    description: "Optional untrusted pull-request title override; defaults to the GitHub PR event."
     required: false
     default: ""
   pr-description:
-    description: "Optional untrusted pull-request description for semantic context."
+    description: "Optional untrusted pull-request description override; defaults to the GitHub PR event."
     required: false
     default: ""
   model:
@@ -145,8 +145,9 @@ runs:
       env:
         LORE_IC_BASE: ${{ inputs.base }}
         LORE_IC_HEAD: ${{ inputs.head }}
-        LORE_PR_TITLE: ${{ inputs.pr-title }}
-        LORE_PR_DESCRIPTION: ${{ inputs.pr-description }}
+        # Explicit inputs override the event payload; normal GitHub PR runs are automatic.
+        LORE_PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}
+        LORE_PR_DESCRIPTION: ${{ inputs.pr-description || github.event.pull_request.body }}
         LORE_IC_MODEL: ${{ inputs.model }}
         LORE_CACHE_MODE: ${{ inputs.cache-mode }}
         LORE_IC_EFFORT: ${{ inputs.effort }}

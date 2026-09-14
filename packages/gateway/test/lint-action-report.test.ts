@@ -541,9 +541,11 @@ describe("semantic lint action reporter", () => {
     expect(action).toContain('default: "1200"');
     expect(action).toContain('default: "90"');
     expect(action).toContain('default: "restore"');
-    expect(action).toContain("LORE_PR_TITLE: ${{ inputs.pr-title }}");
     expect(action).toContain(
-      "LORE_PR_DESCRIPTION: ${{ inputs.pr-description }}",
+      "LORE_PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}",
+    );
+    expect(action).toContain(
+      "LORE_PR_DESCRIPTION: ${{ inputs.pr-description || github.event.pull_request.body }}",
     );
     expect(action).toContain("actions/cache/restore@v5");
     expect(action).toContain("actions/cache/save@v5");
@@ -1170,8 +1172,11 @@ describe("semantic lint action reporter", () => {
     expect(workflow).toContain(
       "types: [opened, synchronize, reopened, edited]",
     );
-    expect(workflow).toContain(
+    expect(workflow).not.toContain(
       "pr-title: ${{ github.event.pull_request.title }}",
+    );
+    expect(workflow).not.toContain(
+      "pr-description: ${{ github.event.pull_request.body }}",
     );
     expect(workflow).toContain(
       "model: ${{ secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL != '' && vars.LORE_INVARIANT_MODEL || 'github-copilot/gpt-5.6-luna' }}",
@@ -1212,6 +1217,7 @@ describe("semantic lint action reporter", () => {
       "utf8",
     );
     expect(guide).toContain("pull_request_target:");
+    expect(guide).toContain("automatically reads the title and description");
     expect(guide).toContain("ref: ${{ github.event.pull_request.base.sha }}");
     expect(guide).toContain(
       "secrets.LORE_WORKER_API_KEY != '' && vars.LORE_INVARIANT_MODEL",
