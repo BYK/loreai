@@ -23,13 +23,13 @@ function completeReport(
   overrides: Partial<SemanticLintReport> = {},
 ): SemanticLintReport {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: "complete",
     model: "github-copilot/gpt-5.6-luna",
     effort: "off",
     elapsedMs: 25,
     range: { base: "base", head: "head", source: "test" },
-    review: {
+    coverage: {
       strategy: "none",
       contextComplete: false,
       inputTokens: 0,
@@ -109,7 +109,7 @@ describe("typed lore lint contract", () => {
       result: {
         status: "complete",
         range: { base: "base", head: "head", source: "test" },
-        review: {
+        coverage: {
           strategy: "holistic",
           contextComplete: true,
           inputTokens: 2_000,
@@ -228,7 +228,7 @@ describe("typed lore lint contract", () => {
       await options.publishReport?.(report);
       return report;
     });
-    vi.doMock("../src/cli/invariant-check", () => ({ runSemanticLint }));
+    vi.doMock("../src/cli/semantic-lint", () => ({ runSemanticLint }));
 
     const directory = await mkdtemp(join(tmpdir(), "lore-lint-contract-"));
     temporaryDirectories.push(directory);
@@ -380,7 +380,7 @@ describe("typed lore lint contract", () => {
     const path = join(directory, "report.json");
     await writeSemanticLintReport(path, failed);
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(failed);
-    expect(failed.schemaVersion).toBe(2);
+    expect(failed.schemaVersion).toBe(3);
     expect(failed.status).toBe("failed");
     expect(semanticLintExitCode(failed)).toBe(3);
   });

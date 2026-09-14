@@ -199,7 +199,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     );
     await client.prompt("sys", "user", {
       sessionID: "sess-off",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
       reasoningEffort: "off",
       temperature: 0,
@@ -221,7 +221,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     );
     await client.prompt("sys", "user", {
       sessionID: "sess-copilot-upstream",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
       upstreamUrl: "http://127.0.0.1:12345",
       upstreamProviderID: "github-copilot",
@@ -242,7 +242,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     );
     await client.prompt("sys", "user", {
       sessionID: "sess-openai-off",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "openai", modelID: "gpt-5.6-luna" },
       protocol: "openai-responses",
       upstreamProviderID: "openai",
@@ -263,7 +263,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
       modelID: "gpt-5.6-luna",
     });
     const outcome = await client.promptDetailed("sys", "user", {
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
     });
 
@@ -306,7 +306,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     );
 
     const outcome = await client.promptDetailed("sys", "user", {
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
       upstreamProviderID: "github-copilot",
     });
@@ -415,7 +415,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     );
     const outcome = await client.promptDetailed("sys", "user", {
       sessionID: "sess-alternate-protocol",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model,
       upstreamProviderID: "github-copilot",
     });
@@ -455,7 +455,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
 
     const outcome = await client.promptDetailed("", "\u0000".repeat(699_029), {
       sessionID: "sess-alternate-protocol-cap",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model,
       maxTokens: 4096,
       upstreamProviderID: "github-copilot",
@@ -497,7 +497,7 @@ describe("worker github-copilot Responses API path (gpt-5.6-*)", () => {
     );
     const outcome = await client.promptDetailed("sys", "user", {
       sessionID: "sess-mixed-protocol-fallback",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "github-copilot", modelID: "gpt-5.6-luna" },
       upstreamProviderID: "github-copilot",
     });

@@ -1,5 +1,5 @@
 /**
- * invariant-check.ts — the "semantic linter" PoC (#TBD).
+ * semantic-lint/check.ts — the "semantic linter" PoC (#TBD).
  *
  * Answers Armin Ronacher's "the tower keeps rising" problem at CI time: agents
  * remove the friction that used to force humans to re-synchronize their shared
@@ -30,46 +30,46 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { db } from "./db";
-import { embeddingByIdSource, readStorageMode } from "./db/vec-store";
-import { anthropicThinkingBudget, type ReasoningEffort } from "./effort";
-import * as embedding from "./embedding";
-import * as ltm from "./ltm";
-import type { KnowledgeEntry } from "./ltm";
+import { db } from "../db";
+import { embeddingByIdSource, readStorageMode } from "../db/vec-store";
+import { anthropicThinkingBudget, type ReasoningEffort } from "../effort";
+import * as embedding from "../embedding";
+import * as ltm from "../ltm";
+import type { KnowledgeEntry } from "../ltm";
 import {
   INVARIANT_JUDGE_SYSTEM,
   invariantJudgeRepairUser,
   invariantJudgeUser,
 } from "./prompt";
 import {
-  buildHolisticReviewInput,
-  emptyReviewCoverage,
+  buildHolisticLintInput,
+  emptyLintCoverage,
   MAX_HOLISTIC_INVARIANTS,
   type HolisticInvariant,
-  type HolisticReview,
-  type HolisticReviewInput,
-  type ReviewCoverage,
-} from "./semantic-review";
-import { extractReferences } from "./references";
-import type { LLMClient } from "./types";
+  type HolisticLintResult,
+  type HolisticLintInput,
+  type LintCoverage,
+} from "./context";
+import { extractReferences } from "../references";
+import type { LLMClient } from "../types";
 
 export {
-  INVARIANT_HOLISTIC_REVIEW_SYSTEM,
-  invariantHolisticJudgeRepairUser,
-  invariantHolisticJudgeUser,
+  INVARIANT_HOLISTIC_LINT_SYSTEM,
+  invariantHolisticLintRepairUser,
+  invariantHolisticLintUser,
 } from "./prompt";
 export {
-  buildHolisticReviewInput,
-  emptyReviewCoverage,
-  estimateHolisticInputTokens,
+  buildHolisticLintInput,
+  emptyLintCoverage,
+  estimateHolisticLintInputTokens,
   MAX_HOLISTIC_INVARIANTS,
-} from "./semantic-review";
+} from "./context";
 export type {
   HolisticInvariant,
-  HolisticReview,
-  HolisticReviewInput,
-  ReviewCoverage,
-} from "./semantic-review";
+  HolisticLintResult,
+  HolisticLintInput,
+  LintCoverage,
+} from "./context";
 
 // ---------------------------------------------------------------------------
 // Constants (mirror contradiction.ts bounds so cost stays capped)
@@ -114,7 +114,7 @@ const MAX_INVARIANTS_SCAN = 300;
 //     of any caller maxTokens, so this value is just the floor and the gateway
 //     bumps it for reasoning-capable models. This is the path `github-copilot/
 //     gpt-5-mini` (the default judge) takes once the CLI awaits fetchModelData
-//     before the first judge call (cli/invariant-check.ts:97).
+//     before the first judge call (cli/semantic-lint/check.ts:97).
 //   - OpenAI / Gemini models WITHOUT reasoning_options (or models absent from
 //     models.dev): the gateway falls back to the caller maxTokens. The 256
 //     below is the budget in that empty-cache fallback — small because the
@@ -470,7 +470,7 @@ export function resolveRange(
     }
   }
 
-  // Fallback: previous commit (a single-commit review). Better than nothing.
+  // Fallback: previous commit (a single-commit lint). Better than nothing.
   const prev = gitOrNull(["rev-parse", `${head}~1`], cwd);
   if (prev) return { base: prev, head, source: "HEAD~1 (fallback)" };
 
@@ -765,19 +765,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Validate one complete holistic judge response. The response must contain
- * exactly one review for every expected invariant, with evidence IDs that
+ * exactly one result for every expected invariant, with evidence IDs that
  * belong to the complete supplied hunk set. The payload is still untrusted:
  * strings are bounded and never interpreted as instructions.
  */
-function isHolisticVerdict(value: unknown): value is HolisticReview["verdict"] {
+function isHolisticVerdict(value: unknown): value is HolisticLintResult["verdict"] {
   return isVerdict(value) || value === "insufficient-context";
 }
 
-export function parseHolisticReviews(
+export function parseHolisticLintResults(
   text: string | null,
   expectedInvariantIds: ReadonlySet<string>,
   expectedHunkIds: ReadonlySet<string>,
-): HolisticReview[] | null {
+): HolisticLintResult[] | null {
   if (!text) return null;
   let payload = text.trim();
   const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
@@ -789,12 +789,12 @@ export function parseHolisticReviews(
   try {
     const parsed: unknown = JSON.parse(payload);
     if (!isRecord(parsed) || Object.keys(parsed).length !== 1) return null;
-    if (!Array.isArray(parsed.reviews)) return null;
-    if (parsed.reviews.length !== expectedInvariantIds.size) return null;
+    if (!Array.isArray(parsed.results)) return null;
+    if (parsed.results.length !== expectedInvariantIds.size) return null;
 
     const seen = new Set<string>();
-    const reviews: HolisticReview[] = [];
-    for (const value of parsed.reviews) {
+    const results: HolisticLintResult[] = [];
+    for (const value of parsed.results) {
       if (!isRecord(value)) return null;
       const keys = Object.keys(value).sort();
       if (
@@ -819,7 +819,7 @@ export function parseHolisticReviews(
         return null;
       }
 
-      const evidence: HolisticReview["evidence"] = [];
+      const evidence: HolisticLintResult["evidence"] = [];
       const seenHunks = new Set<string>();
       for (const evidenceValue of value.evidence) {
         if (!isRecord(evidenceValue)) return null;
@@ -850,7 +850,7 @@ export function parseHolisticReviews(
         return null;
       }
       seen.add(value.invariantId);
-      reviews.push({
+      results.push({
         invariantId: value.invariantId,
         verdict: value.verdict,
         reason: value.reason,
@@ -858,7 +858,7 @@ export function parseHolisticReviews(
       });
     }
 
-    return seen.size === expectedInvariantIds.size ? reviews : null;
+    return seen.size === expectedInvariantIds.size ? results : null;
   } catch {
     return null;
   }
@@ -1088,10 +1088,10 @@ export interface InvariantJudge {
   judge(input: InvariantJudgeInput): Promise<JudgeOutcome>;
 }
 
-export type HolisticReviewOutcome =
+export type HolisticLintOutcome =
   | {
-      kind: "reviews";
-      reviews: HolisticReview[];
+      kind: "results";
+      results: HolisticLintResult[];
       stats: JudgeStats;
     }
   | {
@@ -1100,8 +1100,8 @@ export type HolisticReviewOutcome =
       stats: JudgeStats;
     };
 
-export interface HolisticInvariantJudge {
-  review(input: HolisticReviewInput): Promise<HolisticReviewOutcome>;
+export interface HolisticLintJudge {
+  lint(input: HolisticLintInput): Promise<HolisticLintOutcome>;
 }
 
 interface CandidateOutcomeBase {
@@ -1165,7 +1165,7 @@ export interface CheckResult {
   range: ResolvedRange;
   status: "complete" | "partial" | "failed";
   health: CheckHealth;
-  review: ReviewCoverage;
+  coverage: LintCoverage;
   hunks: number;
   invariants: number;
   candidates: number;
@@ -1386,7 +1386,7 @@ export function createLLMInvariantJudge(
     options.llm.prompt(INVARIANT_JUDGE_SYSTEM, user, {
       model: options.model,
       signal: options.signal,
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       thinking: false,
       reasoningEffort: options.effort,
       urgent: true,
@@ -1441,7 +1441,7 @@ export function createLLMInvariantJudge(
       if (verdict) {
         options.llm.recordWorkerSuccess?.(
           options.sessionID,
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
         return { kind: "verdict", ...verdict, stats: stats() };
       }
@@ -1480,7 +1480,7 @@ export function createLLMInvariantJudge(
       if (repaired) {
         options.llm.recordWorkerSuccess?.(
           options.sessionID,
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
       }
       return repaired
@@ -1502,8 +1502,8 @@ export interface CheckInvariantsInput {
   /** Preferred typed judge boundary. */
   judge?: InvariantJudge;
   /** Optional whole-diff judge used when the bounded input is complete. */
-  holisticJudge?: HolisticInvariantJudge;
-  /** Approximate total input-token budget for one holistic review. */
+  holisticJudge?: HolisticLintJudge;
+  /** Approximate total input-token budget for one holistic lint. */
   holisticInputTokenBudget?: number;
   /** @deprecated Gateway compatibility; use `judge`. */
   llm?: LLMClient;
@@ -1678,7 +1678,7 @@ export async function checkInvariants(
         })
       : null);
 
-  // A small PR gets one bounded whole-diff review only when every available
+  // A small PR gets one bounded whole-diff lint only when every available
   // hunk and selected invariant fits. Larger or incomplete inputs retain the
   // isolated-hunk path below; they are never silently truncated.
   const selectedInvariantIndices = uniqueInvariantIndices(
@@ -1702,7 +1702,7 @@ export async function checkInvariants(
   );
   const holisticPlan =
     input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
-      ? buildHolisticReviewInput({
+      ? buildHolisticLintInput({
           invariants: holisticInvariants,
           hunks: holisticHunks,
           prContext: input.prContext,
@@ -1710,9 +1710,9 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget,
         })
       : null;
-  const review =
+  const coverage =
     holisticPlan?.kind === "too-large"
-      ? isolatedReviewCoverage({
+      ? isolatedLintCoverage({
           availableHunks: hunks.length,
           includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
             .size,
@@ -1723,7 +1723,7 @@ export async function checkInvariants(
         })
       : holisticPlan?.kind === "fit"
         ? holisticPlan.coverage
-        : isolatedReviewCoverage({
+        : isolatedLintCoverage({
             availableHunks: hunks.length,
             includedHunks: new Set(
               selected.map((candidate) => candidate.hunkIdx),
@@ -1735,7 +1735,7 @@ export async function checkInvariants(
           });
 
   if (holisticPlan?.kind === "fit" && input.holisticJudge) {
-    return runHolisticReview({
+    return runHolisticLint({
       input,
       holisticJudge: input.holisticJudge,
       plan: holisticPlan,
@@ -1913,7 +1913,7 @@ export async function checkInvariants(
     range: input.range,
     status: overallStatus(health),
     health,
-    review,
+    coverage,
     hunks: hunks.length,
     invariants: allEntries.length,
     candidates: selected.length,
@@ -2084,11 +2084,11 @@ function judgeContractFailure(): JudgeOutcome {
   };
 }
 
-function validateHolisticReviewOutcome(
+function validateHolisticLintOutcome(
   outcome: unknown,
   expectedInvariantIds: ReadonlySet<string>,
   expectedHunkIds: ReadonlySet<string>,
-): HolisticReviewOutcome {
+): HolisticLintOutcome {
   if (!isRecord(outcome) || !isRecord(outcome.stats)) {
     return holisticContractFailure();
   }
@@ -2113,14 +2113,14 @@ function validateHolisticReviewOutcome(
     semanticCalls,
     transportAttempts,
   };
-  if (outcome.kind === "reviews") {
-    const reviews = parseHolisticReviews(
-      JSON.stringify({ reviews: outcome.reviews }),
+  if (outcome.kind === "results") {
+    const results = parseHolisticLintResults(
+      JSON.stringify({ results: outcome.results }),
       expectedInvariantIds,
       expectedHunkIds,
     );
-    return reviews
-      ? { kind: "reviews", reviews, stats: normalizedStats }
+    return results
+      ? { kind: "results", results, stats: normalizedStats }
       : holisticContractFailure();
   }
   if (
@@ -2145,12 +2145,12 @@ function validateHolisticReviewOutcome(
   return holisticContractFailure();
 }
 
-function holisticContractFailure(): HolisticReviewOutcome {
+function holisticContractFailure(): HolisticLintOutcome {
   return {
     kind: "unresolved",
     failure: {
       code: "judge-contract-error",
-      message: "HolisticInvariantJudge returned an invalid outcome",
+      message: "HolisticLintJudge returned an invalid outcome",
       scope: "run",
       retryable: false,
     },
@@ -2237,7 +2237,7 @@ function emptyCheckResult(
     range,
     status: overallStatus(health),
     health,
-    review: emptyReviewCoverage(
+    coverage: emptyLintCoverage(
       counts.hunks ?? health.diff.hunks,
       counts.invariants ?? 0,
     ),
@@ -2277,14 +2277,14 @@ function uniqueInvariantIndices(
   return out;
 }
 
-function isolatedReviewCoverage(input: {
+function isolatedLintCoverage(input: {
   availableHunks: number;
   includedHunks: number;
   availableInvariants: number;
   includedInvariants: number;
   inputTokens: number;
   inputTokenBudget: number;
-}): ReviewCoverage {
+}): LintCoverage {
   return {
     strategy: "isolated-hunk",
     contextComplete: false,
@@ -2302,10 +2302,10 @@ function isolatedReviewCoverage(input: {
   };
 }
 
-async function runHolisticReview(args: {
+async function runHolisticLint(args: {
   input: CheckInvariantsInput;
-  holisticJudge: HolisticInvariantJudge;
-  plan: { kind: "fit"; input: HolisticReviewInput; coverage: ReviewCoverage };
+  holisticJudge: HolisticLintJudge;
+  plan: { kind: "fit"; input: HolisticLintInput; coverage: LintCoverage };
   hunks: DiffHunk[];
   invariants: InvariantVec[];
   selected: Candidate[];
@@ -2324,7 +2324,7 @@ async function runHolisticReview(args: {
   checkInput.onJudge?.(1, 1);
   let outcome: unknown;
   try {
-    outcome = await args.holisticJudge.review({
+    outcome = await args.holisticJudge.lint({
       ...plan.input,
       semanticCallBudget: Math.min(2, MAX_JUDGE_CALLS),
     });
@@ -2333,14 +2333,14 @@ async function runHolisticReview(args: {
       kind: "unresolved",
       failure: {
         code: "judge-contract-error",
-        message: boundedMessage(error, "HolisticInvariantJudge threw"),
+        message: boundedMessage(error, "HolisticLintJudge threw"),
         scope: "run",
       },
       stats: { semanticCalls: 0, transportAttempts: 0 },
     };
   }
 
-  const validated = validateHolisticReviewOutcome(
+  const validated = validateHolisticLintOutcome(
     outcome,
     new Set(plan.input.invariants.map((invariant) => invariant.id)),
     new Set(plan.input.hunks.map((hunk) => hunk.id)),
@@ -2389,7 +2389,7 @@ async function runHolisticReview(args: {
       range: checkInput.range,
       status: overallStatus(health),
       health,
-      review: plan.coverage,
+      coverage: plan.coverage,
       hunks: hunks.length,
       invariants: args.invariants.length,
       candidates: candidateOutcomes.length,
@@ -2407,16 +2407,16 @@ async function runHolisticReview(args: {
     };
   }
 
-  const reviewsByInvariant = new Map(
-    validated.reviews.map((review) => [review.invariantId, review]),
+  const resultsByInvariant = new Map(
+    validated.results.map((result) => [result.invariantId, result]),
   );
   const candidateOutcomes: CandidateOutcome[] = [];
   for (let i = 0; i < args.selectedInvariantIndices.length; i++) {
     const invariantIndex = args.selectedInvariantIndices[i];
     const invariant = invariants[invariantIndex];
     const anchor = anchorByInvariant.get(invariantIndex);
-    const review = reviewsByInvariant.get(invariant.entry.id);
-    if (!anchor || !review) continue;
+    const result = resultsByInvariant.get(invariant.entry.id);
+    if (!anchor || !result) continue;
     const base = candidateOutcomeBase(
       i,
       anchor,
@@ -2425,13 +2425,13 @@ async function runHolisticReview(args: {
     );
     const stats =
       i === 0 ? validated.stats : { semanticCalls: 0, transportAttempts: 0 };
-    if (review.verdict === "insufficient-context") {
+    if (result.verdict === "insufficient-context") {
       candidateOutcomes.push({
         ...base,
         state: "unresolved",
         failure: {
           code: "insufficient-context",
-          message: review.reason,
+          message: result.reason,
           scope: "candidate",
           retryable: false,
         },
@@ -2442,8 +2442,8 @@ async function runHolisticReview(args: {
     candidateOutcomes.push({
       ...base,
       state: "resolved",
-      verdict: review.verdict,
-      reason: review.reason,
+      verdict: result.verdict,
+      reason: result.reason,
       stats,
     });
   }
@@ -2453,20 +2453,20 @@ async function runHolisticReview(args: {
   const hunkById = new Map(
     plan.input.hunks.map((hunk, index) => [hunk.id, hunks[index]]),
   );
-  for (const review of validated.reviews) {
-    if (review.verdict !== "violates") continue;
+  for (const result of validated.results) {
+    if (result.verdict !== "violates") continue;
     const invariantIndex = args.selectedInvariantIndices.find(
-      (index) => invariants[index].entry.id === review.invariantId,
+      (index) => invariants[index].entry.id === result.invariantId,
     );
     if (invariantIndex === undefined) continue;
     const anchor = anchorByInvariant.get(invariantIndex);
     const invariant = invariants[invariantIndex];
     if (!anchor) continue;
     const severity = enforcementLevel(invariant.entry);
-    for (const evidence of review.evidence) {
+    for (const evidence of result.evidence) {
       const hunk = hunkById.get(evidence.hunkId);
       if (!hunk) continue;
-      const dedupKey = `${review.invariantId}\x1f${hunk.file}`;
+      const dedupKey = `${result.invariantId}\x1f${hunk.file}`;
       if (seen.has(dedupKey)) continue;
       seen.add(dedupKey);
       findings.push({
@@ -2476,7 +2476,7 @@ async function runHolisticReview(args: {
         file: hunk.file,
         similarity: anchor.similarity,
         refHit: anchor.refHit,
-        reason: review.reason,
+        reason: result.reason,
         hunk: hunk.text,
         severity,
       });
@@ -2507,7 +2507,7 @@ async function runHolisticReview(args: {
     range: checkInput.range,
     status: overallStatus(health),
     health,
-    review: plan.coverage,
+    coverage: plan.coverage,
     hunks: hunks.length,
     invariants: args.invariants.length,
     candidates: candidateOutcomes.length,

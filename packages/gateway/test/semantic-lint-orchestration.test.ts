@@ -80,7 +80,7 @@ describe("runSemanticLint cancellation", () => {
         backfillEmbeddings,
       },
       importLoreFile,
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({ kind: "success", hunks: [{}] }),
         checkInvariants,
@@ -118,7 +118,7 @@ describe("runSemanticLint cancellation", () => {
       },
     }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const pending = runSemanticLint({
       project: ".",
       gate: false,
@@ -210,7 +210,7 @@ describe("runSemanticLint cancellation", () => {
       }),
       embedding: { ensureEmbeddingReady },
       importLoreFile,
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({ kind: "success", hunks: [] }),
         checkInvariants,
@@ -230,7 +230,7 @@ describe("runSemanticLint cancellation", () => {
     }));
     vi.doMock("../src/cli/start", () => ({ startGateway }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -308,7 +308,7 @@ describe("runSemanticLint cancellation", () => {
         backfillEmbeddings,
       },
       importLoreFile,
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({ kind: "success", hunks: [] }),
         checkInvariants,
@@ -343,7 +343,7 @@ describe("runSemanticLint cancellation", () => {
       },
     }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -379,7 +379,7 @@ describe("runSemanticLint cancellation", () => {
       }),
       embedding: { ensureEmbeddingReady },
       importLoreFile,
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({ kind: "success", hunks: [{}] }),
       },
@@ -401,7 +401,7 @@ describe("runSemanticLint cancellation", () => {
       }),
     }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -436,7 +436,7 @@ describe("runSemanticLint cancellation", () => {
       }),
       embedding: { ensureEmbeddingReady },
       importLoreFile: vi.fn(),
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({ kind: "success", hunks: [{}] }),
       },
@@ -448,7 +448,7 @@ describe("runSemanticLint cancellation", () => {
     }));
     vi.doMock("../src/cli/start", () => ({ startGateway }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -478,7 +478,7 @@ describe("runSemanticLint cancellation", () => {
       }),
       embedding: { ensureEmbeddingReady: vi.fn(async () => {}) },
       importLoreFile: vi.fn(),
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({
           kind: "failure",
@@ -496,7 +496,7 @@ describe("runSemanticLint cancellation", () => {
     }));
     vi.doMock("../src/cli/start", () => ({ startGateway }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -525,7 +525,7 @@ describe("runSemanticLint cancellation", () => {
       }),
       embedding: { ensureEmbeddingReady: vi.fn(async () => {}) },
       importLoreFile: vi.fn(),
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => {
           now = 10;
           return range;
@@ -541,7 +541,7 @@ describe("runSemanticLint cancellation", () => {
     vi.doMock("../src/cli/start", () => ({ startGateway }));
 
     const published: unknown[] = [];
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -625,7 +625,7 @@ describe("runSemanticLint cancellation", () => {
       }),
       embedding: { ensureEmbeddingReady },
       importLoreFile: vi.fn(),
-      invariantCheck: {
+      semanticLint: {
         resolveRange: () => range,
         parseDiffResult: () => ({ kind: "success", hunks: [{}] }),
         checkInvariants,
@@ -659,7 +659,7 @@ describe("runSemanticLint cancellation", () => {
       }),
     }));
 
-    const { runSemanticLint } = await import("../src/cli/invariant-check");
+    const { runSemanticLint } = await import("../src/cli/semantic-lint");
     const report = await runSemanticLint({
       project: ".",
       gate: false,
@@ -731,7 +731,7 @@ describe("runSemanticLint cancellation", () => {
         }),
         embedding: { ensureEmbeddingReady: vi.fn(async () => {}) },
         importLoreFile: vi.fn(),
-        invariantCheck: {
+        semanticLint: {
           resolveRange: () => range,
           parseDiffResult: () => ({ kind: "success", hunks }),
           checkInvariants,
@@ -768,7 +768,7 @@ describe("runSemanticLint cancellation", () => {
         },
       }));
 
-      const { runSemanticLint } = await import("../src/cli/invariant-check");
+      const { runSemanticLint } = await import("../src/cli/semantic-lint");
       const report = await runSemanticLint({
         project: ".",
         gate: false,

@@ -1,15 +1,15 @@
 /**
- * Shared bounded-review data structures for semantic lint.
+ * Shared bounded semantic-lint data structures for semantic lint.
  *
  * This module deliberately contains no repository I/O or model calls. It only
  * decides whether the complete available diff can be presented to one holistic
  * judge call without lossy truncation.
  */
 
-export type ReviewStrategy = "none" | "isolated-hunk" | "holistic";
+export type LintStrategy = "none" | "isolated-hunk" | "holistic";
 
-export interface ReviewCoverage {
-  strategy: ReviewStrategy;
+export interface LintCoverage {
+  strategy: LintStrategy;
   contextComplete: boolean;
   inputTokens: number;
   inputTokenBudget: number;
@@ -33,7 +33,7 @@ export interface HolisticInvariant {
   content: string;
 }
 
-export interface HolisticReviewInput {
+export interface HolisticLintInput {
   invariants: HolisticInvariant[];
   hunks: HolisticHunk[];
   prContext?: {
@@ -48,12 +48,12 @@ export interface HolisticReviewInput {
   semanticCallBudget: number;
 }
 
-export interface HolisticReviewEvidence {
+export interface HolisticLintEvidence {
   hunkId: string;
   reason: string;
 }
 
-export interface HolisticReview {
+export interface HolisticLintResult {
   invariantId: string;
   verdict:
     | "violates"
@@ -62,7 +62,7 @@ export interface HolisticReview {
     | "unrelated"
     | "insufficient-context";
   reason: string;
-  evidence: HolisticReviewEvidence[];
+  evidence: HolisticLintEvidence[];
 }
 
 export const DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET = 16_000;
@@ -70,11 +70,11 @@ export const MAX_HOLISTIC_INVARIANTS = 20;
 export const HOLISTIC_SYSTEM_TOKEN_RESERVE = 2_000;
 export const APPROX_BYTES_PER_TOKEN = 4;
 
-export function emptyReviewCoverage(
+export function emptyLintCoverage(
   availableHunks = 0,
   availableInvariants = 0,
   inputTokenBudget = DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET,
-): ReviewCoverage {
+): LintCoverage {
   return {
     strategy: "none",
     contextComplete: false,
@@ -89,10 +89,10 @@ export function emptyReviewCoverage(
   };
 }
 
-export function estimateHolisticInputTokens(input: {
+export function estimateHolisticLintInputTokens(input: {
   invariants: HolisticInvariant[];
   hunks: HolisticHunk[];
-  prContext?: HolisticReviewInput["prContext"];
+  prContext?: HolisticLintInput["prContext"];
 }): number {
   const serialized = JSON.stringify(
     {
@@ -109,33 +109,33 @@ export function estimateHolisticInputTokens(input: {
   );
 }
 
-export function buildHolisticReviewInput(input: {
+export function buildHolisticLintInput(input: {
   invariants: HolisticInvariant[];
   hunks: HolisticHunk[];
-  prContext?: HolisticReviewInput["prContext"];
+  prContext?: HolisticLintInput["prContext"];
   /**
-   * Total retrieved invariants before candidate selection. The review input
+   * Total retrieved invariants before candidate selection. The lint input
    * may intentionally contain only the bounded selected subset.
    */
   availableInvariantCount?: number;
   inputTokenBudget?: number;
 }):
-  | { kind: "fit"; input: HolisticReviewInput; coverage: ReviewCoverage }
-  | { kind: "too-large"; coverage: ReviewCoverage } {
+  | { kind: "fit"; input: HolisticLintInput; coverage: LintCoverage }
+  | { kind: "too-large"; coverage: LintCoverage } {
   const inputTokenBudget =
     input.inputTokenBudget ?? DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET;
   const availableInvariantCount = Math.max(
     input.invariants.length,
     input.availableInvariantCount ?? input.invariants.length,
   );
-  const inputTokens = estimateHolisticInputTokens(input);
+  const inputTokens = estimateHolisticLintInputTokens(input);
   const contextTruncated =
     input.prContext?.titleTruncated === true ||
     input.prContext?.descriptionTruncated === true;
   // A bounded title/body is incomplete author context; never label it a
-  // complete holistic PR review.
+  // complete holistic PR lint.
   const fits = inputTokens <= inputTokenBudget && !contextTruncated;
-  const coverage: ReviewCoverage = {
+  const coverage: LintCoverage = {
     strategy: fits ? "holistic" : "isolated-hunk",
     contextComplete: fits,
     inputTokens,

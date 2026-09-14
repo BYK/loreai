@@ -1,5 +1,5 @@
 /**
- * Reasoning-effort → worker request body mapping (invariant-check `--effort`).
+ * Reasoning-effort → worker request body mapping (semantic-lint `--effort`).
  *
  * The effort dial is provider-specific:
  *   - OpenAI Chat Completions → `reasoning_effort` (xhigh clamps to high; off omits)
@@ -72,7 +72,7 @@ describe("reasoning-effort → OpenAI reasoning_effort", () => {
     );
     await client.prompt("system", "user", {
       sessionID: "s",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "openai", modelID: "gpt-5" },
       reasoningEffort: effort,
     });
@@ -115,7 +115,7 @@ describe("reasoning-effort → Anthropic thinking budget", () => {
     );
     await client.prompt("system", "user", {
       sessionID: "s",
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
       reasoningEffort: effort,
       maxTokens,

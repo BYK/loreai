@@ -220,7 +220,7 @@ describe("invariant worker recovery", () => {
       "cancel-repair",
     ])(`${adapter}: %s`, async (mode) => {
       const { createLLMInvariantJudge } =
-        await import("../../core/src/invariant-check");
+        await import("../../core/src/semantic-lint/check");
       const controller = new AbortController();
       const recordWorkerSuccess = vi.fn();
       let calls = 0;
@@ -271,7 +271,7 @@ describe("invariant worker recovery", () => {
       if (usable)
         expect(recordWorkerSuccess).toHaveBeenCalledWith(
           "recover-judge",
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
     });
   }
@@ -297,12 +297,12 @@ describe("holistic gateway judge", () => {
     semanticCallBudget: 2,
   };
 
-  test("parses a complete review set and counts transport attempts", async () => {
+  test("parses a complete lint result set and counts transport attempts", async () => {
     const client = clientWith([
       {
         kind: "success",
         text: JSON.stringify({
-          reviews: [
+          results: [
             {
               invariantId: "inv-1",
               verdict: "satisfies",
@@ -319,12 +319,12 @@ describe("holistic gateway judge", () => {
     const judge = createGatewayInvariantJudge({
       client,
       model: MODEL,
-      sessionID: "holistic-review",
+      sessionID: "holistic-lint",
     });
 
-    const outcome = await judge.review(holisticInput);
+    const outcome = await judge.lint(holisticInput);
     expect(outcome).toMatchObject({
-      kind: "reviews",
+      kind: "results",
       stats: { semanticCalls: 1, transportAttempts: 2 },
     });
   });
@@ -341,7 +341,7 @@ describe("holistic gateway judge", () => {
       {
         kind: "success",
         text: JSON.stringify({
-          reviews: [
+          results: [
             {
               invariantId: "inv-1",
               verdict: "violates",
@@ -360,11 +360,11 @@ describe("holistic gateway judge", () => {
     const judge = createGatewayInvariantJudge({
       client,
       model: MODEL,
-      sessionID: "holistic-repair",
+      sessionID: "holistic-lint-repair",
     });
 
-    const outcome = await judge.review(holisticInput);
-    expect(outcome.kind).toBe("reviews");
+    const outcome = await judge.lint(holisticInput);
+    expect(outcome.kind).toBe("results");
     expect(outcome.stats).toEqual({
       semanticCalls: 2,
       transportAttempts: 2,

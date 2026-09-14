@@ -999,7 +999,7 @@ describe("createGatewayLLMClient.prompt", () => {
 
       await expect(
         client.promptDetailed("system", "user", {
-          workerID: "lore-invariant-check",
+          workerID: "lore-semantic-lint",
           protocol,
           upstreamProviderID: providerID,
         }),
@@ -1063,7 +1063,7 @@ describe("createGatewayLLMClient.prompt", () => {
 
     await expect(
       client.promptDetailed("system", "user", {
-        workerID: "lore-invariant-check",
+        workerID: "lore-semantic-lint",
         protocol: "anthropic",
         upstreamProviderID: "anthropic",
       }),
@@ -1116,7 +1116,7 @@ describe("createGatewayLLMClient.prompt", () => {
 
       await expect(
         client.promptDetailed("system", "user", {
-          workerID: "lore-invariant-check",
+          workerID: "lore-semantic-lint",
           protocol: "openai",
           upstreamProviderID: "openai",
         }),
@@ -1153,7 +1153,7 @@ describe("createGatewayLLMClient.prompt", () => {
 
     await expect(
       client.promptDetailed("system", "user", {
-        workerID: "lore-invariant-check",
+        workerID: "lore-semantic-lint",
         protocol: "gemini",
         upstreamProviderID: "google",
         upstreamUrl: "https://generativelanguage.googleapis.com",
@@ -1232,7 +1232,7 @@ describe("createGatewayLLMClient.prompt", () => {
 
     await expect(
       client.prompt("system", "user", {
-        workerID: "lore-invariant-check",
+        workerID: "lore-semantic-lint",
         protocol: fixture.protocol,
         upstreamProviderID: fixture.providerID,
         ...(fixture.protocol === "gemini"
@@ -4897,8 +4897,8 @@ describe("worker thinking suppression for Anthropic Claude models", () => {
       );
 
       await client.prompt("system", "user", {
-        sessionID: "invariant-check-",
-        workerID: "lore-invariant-check",
+        sessionID: "semantic-lint-",
+        workerID: "lore-semantic-lint",
         model: { providerID: "anthropic", modelID: "claude-haiku-4-5" },
       });
 
@@ -5957,7 +5957,7 @@ describe("worker 400 model-not-supported: fall back to a same-provider backup", 
     );
 
     const outcome = await client.promptDetailed("system", "user", {
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       sessionID: "sess-sdk-bridge",
       upstreamProviderID: "github-copilot",
       upstreamUrl: "http://127.0.0.1:3207",

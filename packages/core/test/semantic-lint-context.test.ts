@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildHolisticReviewInput,
-  estimateHolisticInputTokens,
-} from "../src/semantic-review";
-import { parseHolisticReviews } from "../src/invariant-check";
+  buildHolisticLintInput,
+  estimateHolisticLintInputTokens,
+} from "../src/semantic-lint/context";
+import { parseHolisticLintResults } from "../src/semantic-lint/check";
 
 const invariants = [
   {
@@ -21,7 +21,7 @@ const hunks = [
   },
 ];
 
-describe("bounded holistic semantic review", () => {
+describe("bounded holistic semantic lint", () => {
   it("keeps the complete small input, including PR context, when it fits", () => {
     const input = {
       invariants,
@@ -35,10 +35,10 @@ describe("bounded holistic semantic review", () => {
         descriptionTruncated: false,
       },
     };
-    const result = buildHolisticReviewInput({
+    const result = buildHolisticLintInput({
       ...input,
       availableInvariantCount: 3,
-      inputTokenBudget: estimateHolisticInputTokens(input) + 1,
+      inputTokenBudget: estimateHolisticLintInputTokens(input) + 1,
     });
     expect(result.kind).toBe("fit");
     if (result.kind === "fit") {
@@ -58,7 +58,7 @@ describe("bounded holistic semantic review", () => {
   });
 
   it("does not claim complete context for truncated PR metadata", () => {
-    const result = buildHolisticReviewInput({
+    const result = buildHolisticLintInput({
       invariants,
       hunks,
       prContext: {
@@ -79,7 +79,7 @@ describe("bounded holistic semantic review", () => {
   });
 
   it("falls back without truncating when the complete input is over budget", () => {
-    const result = buildHolisticReviewInput({
+    const result = buildHolisticLintInput({
       invariants,
       hunks: [
         {
@@ -98,11 +98,11 @@ describe("bounded holistic semantic review", () => {
     });
   });
 
-  it("accepts a complete review set and rejects malformed or foreign evidence", () => {
+  it("accepts a complete lint result set and rejects malformed or foreign evidence", () => {
     const expectedInvariantIds = new Set(["inv-1"]);
     const expectedHunkIds = new Set(["hunk-0001"]);
     const valid = JSON.stringify({
-      reviews: [
+      results: [
         {
           invariantId: "inv-1",
           verdict: "violates",
@@ -114,12 +114,12 @@ describe("bounded holistic semantic review", () => {
       ],
     });
     expect(
-      parseHolisticReviews(valid, expectedInvariantIds, expectedHunkIds),
-    ).toEqual(JSON.parse(valid).reviews);
+      parseHolisticLintResults(valid, expectedInvariantIds, expectedHunkIds),
+    ).toEqual(JSON.parse(valid).results);
     expect(
-      parseHolisticReviews(
+      parseHolisticLintResults(
         JSON.stringify({
-          reviews: [
+          results: [
             {
               invariantId: "inv-1",
               verdict: "violates",
@@ -133,9 +133,9 @@ describe("bounded holistic semantic review", () => {
       ),
     ).toBeNull();
     expect(
-      parseHolisticReviews(
+      parseHolisticLintResults(
         JSON.stringify({
-          reviews: [
+          results: [
             {
               invariantId: "inv-1",
               verdict: "violates",
@@ -150,9 +150,9 @@ describe("bounded holistic semantic review", () => {
       ),
     ).toBeNull();
     expect(
-      parseHolisticReviews(
+      parseHolisticLintResults(
         JSON.stringify({
-          reviews: [
+          results: [
             {
               invariantId: "inv-1",
               verdict: "insufficient-context",

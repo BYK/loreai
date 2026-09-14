@@ -31,12 +31,12 @@ import {
   splitDiff,
   type DiffHunk,
   type Finding,
-  type HolisticReviewInput,
+  type HolisticLintInput,
   type InvariantJudge,
   type InvariantVec,
   type JudgeOutcome,
   type ResolvedRange,
-} from "../src/invariant-check";
+} from "../src/semantic-lint/check";
 import type { LLMClient } from "../src/types";
 
 function v(...xs: number[]): Float32Array {
@@ -437,7 +437,7 @@ describe("isIgnoredFile", () => {
     expect(isIgnoredFile("node_modules/pkg/index.js")).toBe(true);
   });
   it("does NOT ignore real source files", () => {
-    expect(isIgnoredFile("packages/core/src/invariant-check.ts")).toBe(false);
+    expect(isIgnoredFile("packages/core/src/semantic-lint/check.ts")).toBe(false);
     expect(isIgnoredFile("src/index.ts")).toBe(false);
     expect(isIgnoredFile("Makefile")).toBe(false);
   });
@@ -1844,8 +1844,8 @@ describe("checkInvariants typed judge outcomes", () => {
   });
 });
 
-describe("holistic review orchestration", () => {
-  it("uses one complete whole-diff review and cites only returned evidence", async () => {
+describe("holistic semantic-lint orchestration", () => {
+  it("uses one complete whole-diff lint and cites only returned evidence", async () => {
     const project = mkdtempSync(join(tmpdir(), "lore-holistic-small-"));
     try {
       await seed(
@@ -1856,11 +1856,11 @@ describe("holistic review orchestration", () => {
       );
       vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
       const isolated = stubJudge(() => {
-        throw new Error("isolated judge should not run for a fitting review");
+        throw new Error("isolated judge should not run for a fitting lint");
       });
-      const holisticReview = vi.fn(async (input: HolisticReviewInput) => ({
-        kind: "reviews" as const,
-        reviews: input.invariants.map((invariant) => ({
+      const holisticLint = vi.fn(async (input: HolisticLintInput) => ({
+        kind: "results" as const,
+        results: input.invariants.map((invariant) => ({
           invariantId: invariant.id,
           verdict: "violates" as const,
           reason: "The complete change bypasses the boundary.",
@@ -1881,14 +1881,14 @@ describe("holistic review orchestration", () => {
         ],
         range: FAKE_RANGE,
         judge: isolated.judge,
-        holisticJudge: { review: holisticReview },
+        holisticJudge: { lint: holisticLint },
         holisticInputTokenBudget: 16_000,
         sessionID: "holistic-small",
       });
 
-      expect(holisticReview).toHaveBeenCalledTimes(1);
+      expect(holisticLint).toHaveBeenCalledTimes(1);
       expect(isolated.judgeCall).not.toHaveBeenCalled();
-      expect(result.review).toMatchObject({
+      expect(result.coverage).toMatchObject({
         strategy: "holistic",
         contextComplete: true,
         includedHunks: 1,
@@ -1919,8 +1919,8 @@ describe("holistic review orchestration", () => {
         reason: "The isolated hunk is compliant.",
         stats: { semanticCalls: 1, transportAttempts: 1 },
       }));
-      const holisticReview = vi.fn(async () => {
-        throw new Error("holistic judge should not run over budget");
+      const holisticLint = vi.fn(async () => {
+        throw new Error("holistic lint judge should not run over budget");
       });
 
       const result = await checkInvariants({
@@ -1933,15 +1933,15 @@ describe("holistic review orchestration", () => {
         ],
         range: FAKE_RANGE,
         judge: isolated.judge,
-        holisticJudge: { review: holisticReview },
+        holisticJudge: { lint: holisticLint },
         holisticInputTokenBudget: 2_000,
         sessionID: "holistic-large",
       });
 
-      expect(holisticReview).not.toHaveBeenCalled();
+      expect(holisticLint).not.toHaveBeenCalled();
       expect(isolated.judgeCall).toHaveBeenCalledTimes(1);
-      expect(result.review.strategy).toBe("isolated-hunk");
-      expect(result.review.contextComplete).toBe(false);
+      expect(result.coverage.strategy).toBe("isolated-hunk");
+      expect(result.coverage.contextComplete).toBe(false);
       expect(result.semanticCalls).toBe(1);
     } finally {
       rmSync(project, { recursive: true, force: true });

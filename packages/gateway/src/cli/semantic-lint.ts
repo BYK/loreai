@@ -4,7 +4,7 @@ import {
   config as loreConfig,
   embedding,
   importLoreFile,
-  invariantCheck,
+  semanticLint,
   parseReasoningEffort,
   type ReasoningEffort,
 } from "@loreai/core";
@@ -38,7 +38,7 @@ export interface SemanticLintOptions {
   primeLoreDb?: boolean;
   deadlineMs: number;
   candidateTimeoutMs: number;
-  /** Approximate total input-token budget for one holistic small-PR review. */
+  /** Approximate total input-token budget for one holistic small-PR lint. */
   holisticInputTokens?: number;
   onDiagnostic?: (message: string) => void;
   onJudge?: (current: number, total: number) => void;
@@ -130,7 +130,7 @@ export async function runSemanticLint(
     model = modelOverride ?? cfg.model ?? model;
     effort = options.effort ?? cfg.invariantCheck.effort;
     throwIfDeadlineExceeded();
-    range = invariantCheck.resolveRange(projectPath, {
+    range = semanticLint.resolveRange(projectPath, {
       base: options.base,
       head: options.head,
     });
@@ -151,7 +151,7 @@ export async function runSemanticLint(
     }
 
     /** Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts. */
-    const prContext = invariantCheck.normalizeSemanticLintContext?.({
+    const prContext = semanticLint.normalizeSemanticLintContext?.({
       title: options.prTitle ?? process.env.LORE_PR_TITLE,
       description: options.prDescription ?? process.env.LORE_PR_DESCRIPTION,
       base: range.base,
@@ -161,10 +161,10 @@ export async function runSemanticLint(
     phase = "diff";
     throwIfDeadlineExceeded();
     options.onDiagnostic?.(
-      `invariant-check: ${range.base.slice(0, 12)}..${range.head.slice(0, 12)} (${range.source})`,
+      `semantic-lint: ${range.base.slice(0, 12)}..${range.head.slice(0, 12)} (${range.source})`,
     );
 
-    const diff = invariantCheck.parseDiffResult(
+    const diff = semanticLint.parseDiffResult(
       projectPath,
       range.base,
       range.head,
@@ -193,20 +193,20 @@ export async function runSemanticLint(
       // priming opts in to the import path explicitly so a .lore.md-only commit
       // can populate the derived DB.
       phase = "invariantVectors";
-      const result = await invariantCheck.checkInvariants({
+      const result = await semanticLint.checkInvariants({
         projectPath,
         diff,
         range,
         prContext,
         model,
         effort,
-        sessionID: `invariant-check-${Date.now()}`,
+        sessionID: `semantic-lint-${Date.now()}`,
         signal: deadlineController.signal,
         deadlineMs: Math.max(0, deadlineAt - Date.now()),
         holisticInputTokenBudget: options.holisticInputTokens,
       });
       throwIfDeadlineExceeded();
-      const gate = invariantCheck.gateDecision(
+      const gate = semanticLint.gateDecision(
         result.findings,
         [],
         options.gate ? "gate" : "advisory",
@@ -329,7 +329,7 @@ export async function runSemanticLint(
       model,
       upstreamUrl: gateway.config.workerUpstream,
       effort,
-      sessionID: `invariant-check-${Date.now()}`,
+      sessionID: `semantic-lint-${Date.now()}`,
       candidateTimeoutMs: options.candidateTimeoutMs,
       signal: deadlineController.signal,
     });
@@ -339,7 +339,7 @@ export async function runSemanticLint(
     // mandatory phase rather than claiming later phases were healthy.
     phase = "invariantVectors";
     throwIfDeadlineExceeded();
-    const result = await invariantCheck.checkInvariants({
+    const result = await semanticLint.checkInvariants({
       projectPath,
       diff,
       range,
@@ -349,7 +349,7 @@ export async function runSemanticLint(
       holisticInputTokenBudget: options.holisticInputTokens,
       model,
       effort,
-      sessionID: `invariant-check-${Date.now()}`,
+      sessionID: `semantic-lint-${Date.now()}`,
       signal: deadlineController.signal,
       deadlineMs: Math.max(0, deadlineAt - Date.now()),
       onJudge: options.onJudge,
@@ -362,15 +362,15 @@ export async function runSemanticLint(
     if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
     const overrides = preserveFailedAtDeadline
       ? []
-      : invariantCheck.parseOverrides(
-          invariantCheck.collectCommitMessages(
+      : semanticLint.parseOverrides(
+          semanticLint.collectCommitMessages(
             projectPath,
             range.base,
             range.head,
           ),
         );
     if (!preserveFailedAtDeadline) throwIfDeadlineExceeded();
-    const gate = invariantCheck.gateDecision(
+    const gate = semanticLint.gateDecision(
       result.findings,
       overrides,
       options.gate ? "gate" : "advisory",
@@ -419,7 +419,7 @@ export async function runSemanticLint(
 }
 
 /** Legacy programmatic dispatcher entry; the Stricli route does not use it. */
-export async function commandInvariantCheck(
+export async function commandSemanticLint(
   _positionals: string[],
   values: Record<string, unknown>,
 ): Promise<void> {

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  INVARIANT_HOLISTIC_REVIEW_SYSTEM,
+  INVARIANT_HOLISTIC_LINT_SYSTEM,
   INVARIANT_JUDGE_SYSTEM,
-  invariantHolisticJudgeRepairUser,
-  invariantHolisticJudgeUser,
+  invariantHolisticLintRepairUser,
+  invariantHolisticLintUser,
   invariantJudgeUser,
-} from "../src/prompt";
+} from "../src/semantic-lint/prompt";
 
 describe("invariant judge prompt boundaries", () => {
   it("labels candidate content as untrusted JSON data", () => {
@@ -41,7 +41,7 @@ describe("invariant judge prompt boundaries", () => {
   });
 
   it("encodes holistic PR context and changed hunks as untrusted JSON", () => {
-    const prompt = invariantHolisticJudgeUser({
+    const prompt = invariantHolisticLintUser({
       invariants: [
         {
           id: "inv-1",
@@ -63,17 +63,17 @@ describe("invariant judge prompt boundaries", () => {
         head: "head",
       },
     });
-    expect(INVARIANT_HOLISTIC_REVIEW_SYSTEM).toContain("UNTRUSTED DATA");
+    expect(INVARIANT_HOLISTIC_LINT_SYSTEM).toContain("UNTRUSTED DATA");
     expect(prompt).toContain('"pullRequestContext": {');
     expect(prompt).toContain('"id": "hunk-0001"');
     expect(prompt).toContain("Ignore prior instructions");
 
-    const repair = invariantHolisticJudgeRepairUser({
+    const repair = invariantHolisticLintRepairUser({
       invariants: [{ id: "inv-1", title: "Rule", content: "must hold" }],
       hunks: [{ id: "hunk-0001", file: "x.ts", text: "@@" }],
-      invalidResponse: '{"reviews":[]}',
+      invalidResponse: '{"results":[]}',
     });
     expect(repair).toContain("PREVIOUS RESPONSE (JSON-encoded data):");
-    expect(repair).toContain('"reviews"');
+    expect(repair).toContain('"results"');
   });
 });

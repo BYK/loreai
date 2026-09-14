@@ -1,6 +1,6 @@
 import { parseReasoningEffort, type ReasoningEffort } from "@loreai/core";
 import { buildOutputCommand } from "../lib/command";
-import { runSemanticLint } from "../invariant-check";
+import { runSemanticLint } from "../semantic-lint";
 import {
   renderSemanticLintReport,
   semanticLintExitCode,

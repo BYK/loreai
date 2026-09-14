@@ -18,13 +18,13 @@ if (!process.env.LORE_PR_TITLE) {
 writeFileSync(
   reportPath,
   JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: "complete",
     model: "test/model",
     effort: "off",
     elapsedMs: 1,
     range: { base: "smoke-base", head: "smoke-head", source: "action-smoke" },
-    review: {
+    coverage: {
       strategy: "none",
       contextComplete: false,
       inputTokens: 0,

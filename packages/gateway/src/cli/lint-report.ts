@@ -24,7 +24,7 @@ export interface LintPhaseHealth {
   notAttempted?: number;
 }
 
-export interface LintReviewCoverage {
+export interface LintCoverage {
   strategy: "none" | "isolated-hunk" | "holistic";
   contextComplete: boolean;
   inputTokens: number;
@@ -72,13 +72,13 @@ export interface SerializedLintGate {
 }
 
 export interface SemanticLintReport {
-  schemaVersion: 2;
+  schemaVersion: 3;
   status: LintStatus;
   model: string;
   effort: "off" | "low" | "medium" | "high" | "xhigh";
   elapsedMs: number;
   range: { base: string; head: string; source: string } | null;
-  review: LintReviewCoverage;
+  coverage: LintCoverage;
   health: {
     range: LintPhaseHealth;
     diff: LintPhaseHealth;
@@ -106,7 +106,7 @@ export interface SemanticLintReport {
 export interface CoreLintResultLike {
   status: LintStatus;
   range: NonNullable<SemanticLintReport["range"]>;
-  review: LintReviewCoverage;
+  coverage: LintCoverage;
   health: {
     diff: LintPhaseHealth;
     invariantVectors: LintPhaseHealth;
@@ -192,10 +192,10 @@ function findingKey(finding: { invariantId: string; file: string }): string {
   return `${finding.invariantId}\x1f${finding.file}`;
 }
 
-function emptyReviewCoverage(
+function emptyLintCoverage(
   availableHunks = 0,
   availableInvariants = 0,
-): LintReviewCoverage {
+): LintCoverage {
   return {
     strategy: "none",
     contextComplete: false,
@@ -285,15 +285,15 @@ export function buildSemanticLintReport(input: {
   }
 
   const report: SemanticLintReport = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: input.result.status,
     model: input.model,
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: { ...input.result.range },
-    review: {
-      ...(input.result.review ??
-        emptyReviewCoverage(input.result.hunks, input.result.invariants)),
+    coverage: {
+      ...(input.result.coverage ??
+        emptyLintCoverage(input.result.hunks, input.result.invariants)),
     },
     health: {
       range: { status: "healthy" },
@@ -375,13 +375,13 @@ export function failedSemanticLintReport(input: {
       : {}),
   };
   return validateSemanticLintReport({
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: "failed",
     model: input.model,
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: input.range ?? null,
-    review: emptyReviewCoverage(),
+    coverage: emptyLintCoverage(),
     health,
     counters: {
       hunks: 0,
@@ -422,19 +422,19 @@ function assertCount(value: unknown, name: string): asserts value is number {
   );
 }
 
-function validateReviewCoverage(
+function validateLintCoverage(
   value: unknown,
-): asserts value is LintReviewCoverage {
-  assert(isRecord(value), "review must be an object");
+): asserts value is LintCoverage {
+  assert(isRecord(value), "coverage must be an object");
   assert(
     value.strategy === "none" ||
       value.strategy === "isolated-hunk" ||
       value.strategy === "holistic",
-    "review.strategy is invalid",
+    "coverage.strategy is invalid",
   );
   assert(
     typeof value.contextComplete === "boolean",
-    "review.contextComplete must be boolean",
+    "coverage.contextComplete must be boolean",
   );
   for (const field of [
     "inputTokens",
@@ -446,35 +446,35 @@ function validateReviewCoverage(
     "includedInvariants",
     "omittedInvariants",
   ]) {
-    assertCount(value[field], `review.${field}`);
+    assertCount(value[field], `coverage.${field}`);
   }
-  const numbers = value as unknown as LintReviewCoverage;
+  const numbers = value as unknown as LintCoverage;
   assert(
     numbers.inputTokenBudget > 0,
-    "review.inputTokenBudget must be positive",
+    "coverage.inputTokenBudget must be positive",
   );
   assert(
     numbers.includedHunks <= numbers.availableHunks &&
       numbers.omittedHunks === numbers.availableHunks - numbers.includedHunks,
-    "review hunk coverage does not add up",
+    "coverage hunk coverage does not add up",
   );
   assert(
     numbers.includedInvariants <= numbers.availableInvariants &&
       numbers.omittedInvariants ===
         numbers.availableInvariants - numbers.includedInvariants,
-    "review invariant coverage does not add up",
+    "coverage invariant coverage does not add up",
   );
   if (value.strategy === "holistic") {
-    assert(value.contextComplete, "holistic review must have complete context");
+    assert(value.contextComplete, "holistic semantic lint must have complete context");
     assert(
       numbers.includedHunks === numbers.availableHunks &&
         numbers.inputTokens <= numbers.inputTokenBudget,
-      "holistic review coverage is incomplete or over budget",
+      "holistic semantic lint coverage is incomplete or over budget",
     );
   } else {
     assert(
       !value.contextComplete,
-      "non-holistic review cannot claim complete context",
+      "non-holistic semantic lint cannot claim complete context",
     );
   }
 }
@@ -502,7 +502,7 @@ function validateFailure(value: unknown, candidate: boolean): void {
 
 export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   assert(isRecord(value), "root must be an object");
-  assert(value.schemaVersion === 2, "schemaVersion must be 2");
+  assert(value.schemaVersion === 3, "schemaVersion must be 3");
   assert(
     value.status === "complete" ||
       value.status === "partial" ||
@@ -597,10 +597,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   );
 
   assert(isRecord(value.counters), "counters is required");
-  validateReviewCoverage(value.review);
+  validateLintCoverage(value.coverage);
   assert(
-    value.review.availableHunks === value.counters.hunks,
-    "review hunk coverage disagrees with hunk counter",
+    value.coverage.availableHunks === value.counters.hunks,
+    "coverage hunk coverage disagrees with hunk counter",
   );
   const counterNames = [
     "hunks",
@@ -968,7 +968,7 @@ export function renderSemanticLintReport(report: SemanticLintReport): string {
     "─".repeat(64),
     `Status: ${report.status.toUpperCase()}   Model: ${report.model}   Effort: ${report.effort}`,
     `Funnel: ${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates`,
-    `Review: ${report.review.strategy} · ${report.review.includedHunks}/${report.review.availableHunks} hunks, ${report.review.includedInvariants}/${report.review.availableInvariants} invariants${report.review.contextComplete ? "" : " · bounded/partial context"}`,
+    `Coverage: ${report.coverage.strategy} · ${report.coverage.includedHunks}/${report.coverage.availableHunks} hunks, ${report.coverage.includedInvariants}/${report.coverage.availableInvariants} invariants${report.coverage.contextComplete ? "" : " · bounded/partial context"}`,
     `Checks: ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted · ${(report.elapsedMs / 1000).toFixed(1)}s`,
     "─".repeat(64),
   ];

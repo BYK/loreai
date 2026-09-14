@@ -83,15 +83,15 @@ function count(value, name) {
   }
 }
 
-function validateReview(review, counters) {
-  if (!review || typeof review !== "object" || Array.isArray(review)) {
-    throw new TypeError("review must be an object");
+function validateCoverage(coverage, counters) {
+  if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) {
+    throw new TypeError("coverage must be an object");
   }
-  if (!["none", "isolated-hunk", "holistic"].includes(review.strategy)) {
-    throw new TypeError("invalid review strategy");
+  if (!["none", "isolated-hunk", "holistic"].includes(coverage.strategy)) {
+    throw new TypeError("invalid coverage strategy");
   }
-  if (typeof review.contextComplete !== "boolean") {
-    throw new TypeError("invalid review contextComplete");
+  if (typeof coverage.contextComplete !== "boolean") {
+    throw new TypeError("invalid coverage contextComplete");
   }
   for (const name of [
     "inputTokens",
@@ -103,35 +103,35 @@ function validateReview(review, counters) {
     "includedInvariants",
     "omittedInvariants",
   ]) {
-    count(review[name], `review.${name}`);
+    count(coverage[name], `coverage.${name}`);
   }
-  if (review.inputTokenBudget <= 0) {
-    throw new TypeError("review input-token budget must be positive");
-  }
-  if (
-    review.availableHunks !== counters.hunks ||
-    review.includedHunks > review.availableHunks ||
-    review.omittedHunks !== review.availableHunks - review.includedHunks
-  ) {
-    throw new TypeError("review hunk coverage disagrees with counters");
+  if (coverage.inputTokenBudget <= 0) {
+    throw new TypeError("coverage input-token budget must be positive");
   }
   if (
-    review.includedInvariants > review.availableInvariants ||
-    review.omittedInvariants !==
-      review.availableInvariants - review.includedInvariants
+    coverage.availableHunks !== counters.hunks ||
+    coverage.includedHunks > coverage.availableHunks ||
+    coverage.omittedHunks !== coverage.availableHunks - coverage.includedHunks
   ) {
-    throw new TypeError("review invariant coverage does not add up");
+    throw new TypeError("coverage hunk coverage disagrees with counters");
   }
-  if (review.strategy === "holistic") {
+  if (
+    coverage.includedInvariants > coverage.availableInvariants ||
+    coverage.omittedInvariants !==
+      coverage.availableInvariants - coverage.includedInvariants
+  ) {
+    throw new TypeError("coverage invariant coverage does not add up");
+  }
+  if (coverage.strategy === "holistic") {
     if (
-      !review.contextComplete ||
-      review.includedHunks !== review.availableHunks ||
-      review.inputTokens > review.inputTokenBudget
+      !coverage.contextComplete ||
+      coverage.includedHunks !== coverage.availableHunks ||
+      coverage.inputTokens > coverage.inputTokenBudget
     ) {
-      throw new TypeError("holistic review coverage is incomplete");
+      throw new TypeError("holistic semantic lint coverage is incomplete");
     }
-  } else if (review.contextComplete) {
-    throw new TypeError("non-holistic review cannot claim complete context");
+  } else if (coverage.contextComplete) {
+    throw new TypeError("non-holistic lint cannot claim complete context");
   }
 }
 
@@ -139,7 +139,7 @@ function validateReport(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("report root must be an object");
   }
-  if (value.schemaVersion !== 2)
+  if (value.schemaVersion !== 3)
     throw new TypeError("unsupported schemaVersion");
   if (!["complete", "partial", "failed"].includes(value.status)) {
     throw new TypeError("invalid status");
@@ -231,7 +231,7 @@ function validateReport(value) {
   }
 
   const counters = value.counters;
-  validateReview(value.review, counters);
+  validateCoverage(value.coverage, counters);
   for (const name of [
     "hunks",
     "invariants",
