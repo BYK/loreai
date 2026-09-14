@@ -225,6 +225,7 @@ describe("semantic lint action reporter", () => {
   test("accepts complete diff context with bounded invariant coverage", () => {
     const value = resolvedReport(1);
     value.counters.hunks = 2;
+    value.health.hunkVectors.expected = 2;
     value.coverage = {
       strategy: "holistic",
       contextComplete: true,
