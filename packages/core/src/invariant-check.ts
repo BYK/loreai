@@ -2097,19 +2097,26 @@ function validateHolisticReviewOutcome(
   if (!isRecord(outcome) || !isRecord(outcome.stats)) {
     return holisticContractFailure();
   }
-  const stats = outcome.stats;
+  const semanticCalls =
+    typeof outcome.stats.semanticCalls === "number"
+      ? outcome.stats.semanticCalls
+      : -1;
+  const transportAttempts =
+    typeof outcome.stats.transportAttempts === "number"
+      ? outcome.stats.transportAttempts
+      : -1;
   if (
-    !Number.isSafeInteger(stats.semanticCalls) ||
-    stats.semanticCalls < 0 ||
-    stats.semanticCalls > Math.min(2, MAX_JUDGE_CALLS) ||
-    !Number.isSafeInteger(stats.transportAttempts) ||
-    stats.transportAttempts < 0
+    !Number.isSafeInteger(semanticCalls) ||
+    semanticCalls < 0 ||
+    semanticCalls > Math.min(2, MAX_JUDGE_CALLS) ||
+    !Number.isSafeInteger(transportAttempts) ||
+    transportAttempts < 0
   ) {
     return holisticContractFailure();
   }
   const normalizedStats: JudgeStats = {
-    semanticCalls: stats.semanticCalls,
-    transportAttempts: stats.transportAttempts,
+    semanticCalls,
+    transportAttempts,
   };
   if (outcome.kind === "reviews") {
     const reviews = parseHolisticReviews(
