@@ -9,7 +9,7 @@ on:
   # Run the base repository's trusted workflow definition. The job checks out
   # only the event base SHA; the untrusted head is fetched solely as diff data.
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 
 # Keep only the latest run per PR.
 concurrency:

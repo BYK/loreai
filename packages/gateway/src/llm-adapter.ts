@@ -5257,6 +5257,7 @@ export function createGatewayInvariantJudge(
           invariant: input.invariant,
           file: input.file,
           hunk: input.hunk,
+          prContext: input.prContext,
         }),
       );
       if (outcome.kind === "failure") {
@@ -5279,6 +5280,7 @@ export function createGatewayInvariantJudge(
           invariant: input.invariant,
           file: input.file,
           hunk: input.hunk,
+          prContext: input.prContext,
           invalidResponse: outcome.text.slice(0, 2_000),
         }),
       );

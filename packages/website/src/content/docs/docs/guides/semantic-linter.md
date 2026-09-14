@@ -32,7 +32,7 @@ name: Semantic linter
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: semantic-linter-${{ github.event.pull_request.number }}
@@ -86,7 +86,7 @@ jobs:
           gate: ${{ vars.LORE_SEMANTIC_LINT_GATE == 'true' }}
 ```
 
-Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
+Open a PR and the check runs, posting any suspected contradictions as annotations plus a job summary. The action automatically reads the title and description from the GitHub event payload and treats them as bounded, explicitly untrusted context, so the judge can use author intent to investigate coordinated changes without treating it as an override. Explicit action inputs remain available as overrides for custom invocations. Title/body edits retrigger the check. Local runs can opt in with `--pr-title` / `--pr-description` or the `LORE_PR_TITLE` / `LORE_PR_DESCRIPTION` environment variables. The reference workflow passes a 20-minute overall deadline and a 90-second per-candidate timeout, leaving five minutes for report publication and gateway shutdown.
 
 PR runs restore a derived invariant database but never write it. Copy the repository's `semantic-linter-cache.yml` too: it primes that cache on trusted `main` changes, including commits that change only `.lore.md`, avoiding forbidden cache-save attempts from `pull_request_target` runs.
 
