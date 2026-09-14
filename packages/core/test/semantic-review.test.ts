@@ -56,6 +56,27 @@ describe("bounded holistic semantic review", () => {
     }
   });
 
+  it("does not claim complete context for truncated PR metadata", () => {
+    const result = buildHolisticReviewInput({
+      invariants,
+      hunks,
+      prContext: {
+        title: "Move the request guard",
+        description: "The bounded author context is incomplete.",
+        titleTruncated: false,
+        descriptionTruncated: true,
+      },
+      inputTokenBudget: 16_000,
+    });
+    expect(result.kind).toBe("too-large");
+    expect(result.coverage).toMatchObject({
+      strategy: "isolated-hunk",
+      contextComplete: false,
+      includedHunks: 0,
+      omittedHunks: 1,
+    });
+  });
+
   it("falls back without truncating when the complete input is over budget", () => {
     const result = buildHolisticReviewInput({
       invariants,

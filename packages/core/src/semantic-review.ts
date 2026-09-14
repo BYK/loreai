@@ -120,7 +120,12 @@ export function buildHolisticReviewInput(input: {
   const inputTokenBudget =
     input.inputTokenBudget ?? DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET;
   const inputTokens = estimateHolisticInputTokens(input);
-  const fits = inputTokens <= inputTokenBudget;
+  const contextTruncated =
+    input.prContext?.titleTruncated === true ||
+    input.prContext?.descriptionTruncated === true;
+  // A bounded title/body is incomplete author context; never label it a
+  // complete holistic PR review.
+  const fits = inputTokens <= inputTokenBudget && !contextTruncated;
   const coverage: ReviewCoverage = {
     strategy: fits ? "holistic" : "isolated-hunk",
     contextComplete: fits,
