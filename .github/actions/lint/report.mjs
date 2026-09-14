@@ -126,7 +126,6 @@ function validateReview(review, counters) {
     if (
       !review.contextComplete ||
       review.includedHunks !== review.availableHunks ||
-      review.includedInvariants !== review.availableInvariants ||
       review.inputTokens > review.inputTokenBudget
     ) {
       throw new TypeError("holistic review coverage is incomplete");

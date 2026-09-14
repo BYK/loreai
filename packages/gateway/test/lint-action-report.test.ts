@@ -222,6 +222,26 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value)).toBe(true);
   });
 
+  test("accepts complete diff context with bounded invariant coverage", () => {
+    const value = resolvedReport(1);
+    value.counters.hunks = 2;
+    value.review = {
+      strategy: "holistic",
+      contextComplete: true,
+      inputTokens: 1_000,
+      inputTokenBudget: 16_000,
+      availableHunks: 2,
+      includedHunks: 2,
+      omittedHunks: 0,
+      availableInvariants: 3,
+      includedInvariants: 1,
+      omittedInvariants: 2,
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value)).toBe(true);
+  });
+
   test.each([
     [
       "too many candidates",

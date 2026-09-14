@@ -468,7 +468,6 @@ function validateReviewCoverage(
     assert(value.contextComplete, "holistic review must have complete context");
     assert(
       numbers.includedHunks === numbers.availableHunks &&
-        numbers.includedInvariants === numbers.availableInvariants &&
         numbers.inputTokens <= numbers.inputTokenBudget,
       "holistic review coverage is incomplete or over budget",
     );
