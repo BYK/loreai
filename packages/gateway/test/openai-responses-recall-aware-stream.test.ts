@@ -899,8 +899,16 @@ describe("streamResponsesRecallAware", () => {
   test("continues after a post-text read failure without replaying the request", async () => {
     let retries = 0;
     const transport: PrincipalTransportFailureSample[] = [];
+    const errors: string[] = [];
     setPrincipalTransportFailureHook((sample) => transport.push(sample));
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: () => {},
+    });
     const privateCause = "private post-text socket failure";
+    const privateSession = "private-session\nforged-log-entry";
     let sent = false;
     const upstream = new Response(
       new ReadableStream<Uint8Array>({
@@ -920,6 +928,7 @@ describe("streamResponsesRecallAware", () => {
       }),
     );
     const client = streamResponsesRecallAware(upstream, {
+      sessionID: privateSession,
       onComplete: () => {},
       retryPrincipal: async () => {
         retries++;
@@ -942,6 +951,11 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_GATEWAY_ERROR);
     expect(out).not.toContain("event: response.failed");
     expect(out).not.toContain(privateCause);
+    expect(errors).toEqual([
+      "openai-responses recall-aware stream failed category=principal_transport",
+    ]);
+    expect(errors.join("\n")).not.toContain(privateSession);
+    expect(errors.join("\n")).not.toContain("forged-log-entry");
     expect(transport).toEqual([
       { kind: "read", stage: "post_output", outcome: "continue" },
     ]);

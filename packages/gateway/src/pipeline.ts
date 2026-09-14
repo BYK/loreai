@@ -11568,9 +11568,7 @@ export function streamResponsesRecallAware(
           const isAbort =
             err instanceof DOMException && err.name === "AbortError";
           if (isAbort) {
-            log.info(
-              `openai-responses recall-aware stream aborted${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
-            );
+            log.info("openai-responses recall-aware stream aborted");
             if (cancelled || signal.aborted) {
               if (opts.signal?.aborted && !cancelled) {
                 safeError(opts.signal.reason);
@@ -11587,7 +11585,7 @@ export function streamResponsesRecallAware(
                   ? (continuationFailureCategory ?? "unexpected")
                   : classifyPrincipalFailure(err);
             log.error(
-              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}`,
             );
           }
           if (!signal.aborted) {
