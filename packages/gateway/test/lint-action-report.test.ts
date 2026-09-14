@@ -34,6 +34,18 @@ function report(): SemanticLintReport {
     effort: "off",
     elapsedMs: 1,
     range: { base: "a", head: "b", source: "test" },
+    review: {
+      strategy: "none",
+      contextComplete: false,
+      inputTokens: 0,
+      inputTokenBudget: 16_000,
+      availableHunks: 0,
+      includedHunks: 0,
+      omittedHunks: 0,
+      availableInvariants: 0,
+      includedInvariants: 0,
+      omittedInvariants: 0,
+    },
     health: {
       range: { status: "healthy" },
       diff: { status: "healthy" },
