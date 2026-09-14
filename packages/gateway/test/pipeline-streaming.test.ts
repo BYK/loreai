@@ -523,15 +523,109 @@ describe("non-stream recall usage aggregation", () => {
     }
   });
 
-  it("accounts typed failed JSON recall follow-up usage in the fallback turn", async () => {
-    clearAllCosts();
-    let call = 0;
-    setUpstreamInterceptor(async () => {
-      call++;
-      if (call === 1) {
+  it.each(["tool", "malformed", "repeated-recall"] as const)(
+    "%s recovery makes exactly one no-recall synthesis request after a failed JSON continuation",
+    async (recoveryOutcome) => {
+      clearAllCosts();
+      let call = 0;
+      const upstreamBodies: Record<string, unknown>[] = [];
+      setUpstreamInterceptor(async (body) => {
+        call++;
+        upstreamBodies.push(body as Record<string, unknown>);
+        if (call === 1) {
+          return new Response(
+            JSON.stringify({
+              id: "resp_failed_json_recall",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_failed_json_recall",
+                  call_id: "call_failed_json_recall",
+                  name: "recall",
+                  arguments: JSON.stringify({
+                    query: "failed json recall usage",
+                  }),
+                  status: "completed",
+                },
+              ],
+              usage: {
+                input_tokens:
+                  recoveryOutcome === "repeated-recall" ? 120_000 : 10,
+                output_tokens: 1,
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (call === 2) {
+          if (recoveryOutcome === "repeated-recall") {
+            return new Response(
+              JSON.stringify({
+                id: "resp_repeated_final_recall",
+                object: "response",
+                created_at: 0,
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [
+                  {
+                    type: "function_call",
+                    id: "fc_private_repeated_recall",
+                    call_id: "call_private_repeated_recall",
+                    name: "recall",
+                    arguments: JSON.stringify({
+                      query: "private repeated recall query",
+                    }),
+                    status: "completed",
+                  },
+                ],
+                usage: { input_tokens: 1_000, output_tokens: 100 },
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              id: "resp_failed_json_recall_followup",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "failed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_private_partial",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: "private failed partial",
+                      annotations: [],
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 1_000, output_tokens: 100 },
+              error: {
+                type: "server_error",
+                message: "private provider failed",
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (recoveryOutcome === "malformed") {
+          return new Response("{not valid recovery json", {
+            headers: { "content-type": "application/json" },
+          });
+        }
         return new Response(
           JSON.stringify({
-            id: "resp_failed_json_recall",
+            id: "resp_recovered_json_recall",
             object: "response",
             created_at: 0,
             model: "gpt-5.6-sol",
@@ -539,64 +633,89 @@ describe("non-stream recall usage aggregation", () => {
             output: [
               {
                 type: "function_call",
-                id: "fc_failed_json_recall",
-                call_id: "call_failed_json_recall",
-                name: "recall",
-                arguments: JSON.stringify({
-                  query: "failed json recall usage",
-                }),
+                id: "fc_recovery_read",
+                call_id: "call_recovery_read",
+                name: "read",
+                arguments: JSON.stringify({ path: "README.md" }),
                 status: "completed",
               },
             ],
-            usage: { input_tokens: 10, output_tokens: 1 },
+            usage: { input_tokens: 20, output_tokens: 2 },
           }),
           { headers: { "content-type": "application/json" } },
         );
-      }
-      return new Response(
-        JSON.stringify({
-          id: "resp_failed_json_recall_followup",
-          object: "response",
-          created_at: 0,
-          model: "gpt-5.6-sol",
-          status: "failed",
-          output: [],
-          usage: { input_tokens: 1_000, output_tokens: 100 },
-          error: { type: "server_error", message: "provider failed" },
-        }),
-        { headers: { "content-type": "application/json" } },
-      );
-    });
-
-    try {
-      const request = makeResponsesRequest({
-        sessionHeaders: { "x-lore-session-id": "failed-json-recall-usage" },
       });
-      request.stream = false;
-      request.rawHeaders["x-lore-no-store"] = "true";
-      const response = await handleRequest(request, loadLocalConfig());
-      expect(response.status).toBe(200);
-      await response.text();
-      const state = [...getActiveSessions().values()].find(
-        (candidate) => candidate.headerSessionId === "failed-json-recall-usage",
-      );
-      expect(state).toBeDefined();
-      // Buffered recall commits usage in the deferred finalizer after EOF.
-      await vi.waitFor(() =>
-        expect(
-          getSessionCosts(state?.sessionID ?? "")?.conversation,
-        ).toMatchObject({
-          inputTokens: 1_010,
-          outputTokens: 101,
-          turns: 1,
-        }),
-      );
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-      clearAllCosts();
-    }
-  });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "failed-json-recall-usage" },
+        });
+        request.stream = false;
+        request.rawHeaders["x-lore-no-store"] = "true";
+        request.extras = {
+          tool_choice: { type: "function", name: "recall" },
+          prompt_cache_key: "private-cache-key",
+        };
+        const response = await handleRequest(request, loadLocalConfig());
+        const body = await response.text();
+        expect(call).toBe(3);
+        expect(body).not.toContain("private failed partial");
+        expect(body).not.toContain("private provider failed");
+        expect(body).not.toContain("private repeated recall query");
+        expect(body).not.toContain("fc_private_repeated_recall");
+        expect(body).not.toContain('"name":"recall"');
+
+        const recoveryBody = upstreamBodies[2];
+        expect(recoveryBody).toBeDefined();
+        expect(recoveryBody).not.toHaveProperty("tool_choice");
+        expect(recoveryBody).not.toHaveProperty("prompt_cache_key");
+        expect(recoveryBody?.tools).toEqual([
+          expect.objectContaining({ name: "read" }),
+        ]);
+        expect(JSON.stringify(recoveryBody?.input)).toContain(
+          '"name":"recall"',
+        );
+        expect(JSON.stringify(recoveryBody?.input)).not.toContain(
+          "private repeated recall query",
+        );
+        expect(JSON.stringify(recoveryBody)).toContain(
+          "accepted recall results",
+        );
+        if (recoveryOutcome === "malformed") {
+          expect(response.status).toBe(502);
+          expect(body).toContain("Recall continuation failed");
+        } else {
+          expect(response.status).toBe(200);
+          expect(body).toContain("call_recovery_read");
+          expect(body).toContain('"name":"read"');
+        }
+        const state = [...getActiveSessions().values()].find(
+          (candidate) =>
+            candidate.headerSessionId === "failed-json-recall-usage",
+        );
+        expect(state).toBeDefined();
+        // Buffered recall commits usage in the deferred finalizer after EOF.
+        await vi.waitFor(() =>
+          expect(
+            getSessionCosts(state?.sessionID ?? "")?.conversation,
+          ).toMatchObject({
+            inputTokens:
+              recoveryOutcome === "tool"
+                ? 1_030
+                : recoveryOutcome === "repeated-recall"
+                  ? 121_020
+                  : 1_010,
+            outputTokens: recoveryOutcome === "malformed" ? 101 : 103,
+            turns: 1,
+          }),
+        );
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearAllCosts();
+      }
+    },
+  );
 });
 
 describe("budget throttle cancellation", () => {

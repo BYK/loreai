@@ -417,6 +417,7 @@ import {
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
+  runRecallRecovery,
   type RecallFollowUpCtx,
   buildRecallAnchor,
   parseRecallAnchor,
@@ -19050,10 +19051,21 @@ async function handleConversationTurn(
     };
     const failRecall = (
       category: RecallContinuationFailureCategory,
+      report = true,
     ): Response => {
-      reportRecallContinuationFailure(category);
+      if (report) reportRecallContinuationFailure(category);
       rollbackRecallPersistence();
-      finishUnsuccessfulStreaming({ ...currentResp, usage: cumulativeUsage });
+      finishUnsuccessfulStreaming({
+        id: currentResp.id,
+        model: currentResp.model,
+        content: [],
+        rawOutputItems: [],
+        stopReason: "stop",
+        usage: cumulativeUsage,
+        ...(currentResp.codexRateLimits
+          ? { codexRateLimits: currentResp.codexRateLimits }
+          : {}),
+      });
       return errorResponse(502, "Recall continuation failed");
     };
     // Whether this request opted into the 1M window (context-1m beta); gates the
@@ -19178,6 +19190,109 @@ async function handleConversationTurn(
         );
       }
 
+      const mergeFailedContinuationUsage = (error: unknown): void => {
+        if (
+          error instanceof ResponsesTerminalError ||
+          error instanceof NonStreamCompletionError
+        ) {
+          Object.assign(
+            cumulativeUsage,
+            mergeRecallUsage(
+              cumulativeUsage,
+              error.response.usage ?? ZERO_USAGE,
+            ),
+          );
+        }
+      };
+      const followUpRequiresStream = currentModifiedReq.codex === true;
+      const recoveryRequestBase = currentModifiedReq;
+      const acceptedRecallResponse = currentResp;
+      const makeJSONRecallCtx = (recovery: boolean): RecallFollowUpCtx => ({
+        forward: (r, signal) =>
+          forwardToUpstream(
+            r,
+            config,
+            undefined,
+            {
+              ...cacheOptions,
+              cacheConversation: false,
+              ...(recovery ? { cacheTools: false } : {}),
+            },
+            signal,
+            requestUpstreamRoute,
+          ),
+        parseJSON: (response, protocol, signal) =>
+          accumulateNonStreamResponse(
+            response,
+            protocol,
+            false,
+            signal,
+            recovery || finalRecallRound,
+          ),
+        parseSSE: (response, signal) =>
+          accumulateResponsesSSEStream(response, {
+            ...foregroundSSEStreamOptions(signal),
+            validation: currentModifiedReq.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
+          }),
+      });
+      const recoverRecallContinuation = async (
+        category: RecallContinuationFailureCategory,
+      ): Promise<Response> => {
+        reportRecallContinuationFailure(category);
+        let recovered: GatewayResponse;
+        try {
+          const recovery = await runRecallRecovery(
+            makeJSONRecallCtx(true),
+            recoveryRequestBase,
+            acceptedRecallResponse,
+            followUpResult,
+            recallBlock,
+            followUpRequiresStream,
+            foregroundAbort.signal,
+          );
+          if (!recovery.ok) return failRecall(category, false);
+          recovered = recovery.continuation;
+        } catch (error) {
+          if (
+            foregroundAbort.signal.aborted ||
+            (error instanceof Error && error.name === "AbortError")
+          ) {
+            throw error;
+          }
+          mergeFailedContinuationUsage(error);
+          return failRecall(category, false);
+        }
+        Object.assign(
+          cumulativeUsage,
+          mergeRecallUsage(cumulativeUsage, recovered.usage ?? ZERO_USAGE),
+        );
+        if (
+          hasRecallToolUse(recovered) ||
+          !isUsableRecallContinuation(recovered)
+        )
+          return failRecall(category, false);
+        if (acceptedRecallResponse.codexRateLimits?.length) {
+          recovered.codexRateLimits = [
+            ...acceptedRecallResponse.codexRateLimits,
+            ...(recovered.codexRateLimits ?? []),
+          ];
+        }
+        recovered.usage = cumulativeUsage;
+        currentResp = recovered;
+        finishBufferedResponse(recovered);
+        return nonStreamHttpResponse(
+          shouldInjectWarning
+            ? injectContextWarning(recovered, warningText)
+            : recovered,
+          req.protocol,
+          req.stream,
+          { "x-lore-recall-invoked": "true" },
+          longContext,
+        );
+      };
+
       // Recall-only — send follow-up request for seamless UX.
       // Build + forward + assert-content-type + parse in one coupled call so
       // the follow-up's stream flag can never diverge from how the continuation
@@ -19191,39 +19306,10 @@ async function handleConversationTurn(
       // into a non-streaming continuation, so the recall loop below is
       // unchanged. Every other backend keeps the stream:false JSON follow-up
       // (the standard Responses API and Chat Completions both accept it).
-      const followUpRequiresStream = currentModifiedReq.codex === true;
       log.info(
         `recall (non-stream, depth=${recallDepth}, codex=${followUpRequiresStream}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
       );
-      const jsonRecallCtx: RecallFollowUpCtx = {
-        forward: (r, signal) =>
-          forwardToUpstream(
-            r,
-            config,
-            undefined,
-            {
-              ...cacheOptions,
-              cacheConversation: false,
-            },
-            signal,
-            requestUpstreamRoute,
-          ),
-        parseJSON: (response, protocol, signal) =>
-          accumulateNonStreamResponse(
-            response,
-            protocol,
-            false,
-            signal,
-            finalRecallRound,
-          ),
-        parseSSE: (response, signal) =>
-          accumulateResponsesSSEStream(response, {
-            ...foregroundSSEStreamOptions(signal),
-            validation: currentModifiedReq.codex ? "codex" : "public",
-            stopAtTerminal: true,
-            requireCompletedTerminal: true,
-          }),
-      };
+      const jsonRecallCtx = makeJSONRecallCtx(false);
       let jsonFollowUp: Awaited<ReturnType<typeof runRecallFollowUpJSON>>;
       try {
         jsonFollowUp = followUpRequiresStream
@@ -19252,35 +19338,11 @@ async function handleConversationTurn(
         ) {
           throw fetchErr;
         }
-        if (
-          fetchErr instanceof ResponsesTerminalError ||
-          fetchErr instanceof NonStreamCompletionError
-        ) {
-          Object.assign(
-            cumulativeUsage,
-            mergeRecallUsage(
-              cumulativeUsage,
-              fetchErr.response.usage ?? ZERO_USAGE,
-            ),
-          );
-        }
+        mergeFailedContinuationUsage(fetchErr);
         log.error(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
-        if (finalRecallRound) return failRecall("follow_up_failed");
-        bufferedRecallDiagnostics.finish("failed");
-        // Fall back to response with marker (no continuation)
-        markerResp.usage = cumulativeUsage;
-        finishBufferedResponse(markerResp);
-        return nonStreamHttpResponse(
-          shouldInjectWarning
-            ? injectContextWarning(markerResp, warningText)
-            : markerResp,
-          req.protocol,
-          req.stream,
-          { "x-lore-recall-invoked": "true" },
-          longContext,
-        );
+        return recoverRecallContinuation("follow_up_failed");
       }
 
       if (!jsonFollowUp.ok) {
@@ -19298,20 +19360,7 @@ async function handleConversationTurn(
           model: currentModifiedReq.model,
           sessionID: sessionState.sessionID,
         });
-        if (finalRecallRound) return failRecall("follow_up_failed");
-        bufferedRecallDiagnostics.finish("failed");
-        // Fall back to response with marker (no continuation)
-        markerResp.usage = cumulativeUsage;
-        finishBufferedResponse(markerResp);
-        return nonStreamHttpResponse(
-          shouldInjectWarning
-            ? injectContextWarning(markerResp, warningText)
-            : markerResp,
-          req.protocol,
-          req.stream,
-          { "x-lore-recall-invoked": "true" },
-          longContext,
-        );
+        return recoverRecallContinuation("follow_up_failed");
       }
 
       const { continuation: continuationResp, followUp } = jsonFollowUp;
@@ -19337,10 +19386,15 @@ async function handleConversationTurn(
       }
       currentResp = continuationResp;
       if (
+        !hasRecallToolUse(currentResp) &&
+        !isUsableRecallContinuation(currentResp)
+      )
+        return recoverRecallContinuation("follow_up_failed");
+      if (
         (finalRecallRound || continuationStopReason) &&
         hasRecallToolUse(currentResp)
       ) {
-        return failRecall("depth_exhausted");
+        return recoverRecallContinuation("depth_exhausted");
       }
       // Loop continues — hasRecallToolUse checked at top
     }

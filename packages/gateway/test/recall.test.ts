@@ -28,9 +28,11 @@ import {
   hasOtherToolUse,
   clientHasRecallTool,
   buildRecallFollowUpRequest,
+  buildRecallRecoveryRequest,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
+  runRecallRecovery,
   type RecallFollowUpCtx,
   buildRecallMarker,
   buildRecallAnchor,
@@ -845,6 +847,92 @@ describe("buildRecallFollowUpRequest", () => {
       expect(req.tools.map((tool) => tool.name)).toEqual(["Read", "recall"]);
       expect(req.metadata.tool_choice).toBe(choice);
       expect(req.extras?.tool_choice).toBe(choice);
+    },
+  );
+
+  test.each([
+    ["anthropic", { tool_choice: { type: "tool", name: "recall" } }],
+    ["openai", { tool_choice: { type: "function", name: "recall" } }],
+    ["openai-responses", { tool_choice: { type: "function", name: "recall" } }],
+    ["vertex", { tool_choice: { type: "tool", name: "recall" } }],
+    ["gemini", { toolConfig: { functionCallingConfig: { mode: "ANY" } } }],
+  ] as const)(
+    "builds an isolated %s recovery request without recall or forced controls",
+    (protocol, metadata) => {
+      const recall = makeRecallToolUse("recover this task");
+      const request = makeRequest(
+        [{ role: "user", content: [{ type: "text", text: "finish" }] }],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      request.protocol = protocol;
+      request.metadata = {
+        ...metadata,
+        cachedContent: "cachedContents/private",
+      };
+      request.extras = {
+        tool_choice: { type: "function", name: "recall" },
+        prompt_cache_key: "private-cache-key",
+      };
+      const original = structuredClone(request);
+
+      const recovery = buildRecallRecoveryRequest(
+        request,
+        makeResponse(
+          [
+            {
+              type: "thinking",
+              thinking: "preserve this reasoning",
+              signature: "signed",
+            },
+            recall,
+          ],
+          "tool_use",
+        ),
+        "accepted recall result",
+        recall,
+        true,
+      );
+
+      expect(recovery).not.toBe(request);
+      expect(recovery.tools.map((tool) => tool.name)).toEqual(["Read"]);
+      expect(recovery.metadata).not.toHaveProperty("tool_choice");
+      expect(recovery.metadata).not.toHaveProperty("toolConfig");
+      expect(recovery.metadata).not.toHaveProperty("cachedContent");
+      expect(recovery.extras).not.toHaveProperty("tool_choice");
+      expect(recovery.extras).not.toHaveProperty("prompt_cache_key");
+      expect(recovery.stream).toBe(true);
+      expect(recovery.messages.at(-2)?.content).toContainEqual(
+        expect.objectContaining({
+          type: "thinking",
+          thinking: "preserve this reasoning",
+          signature: "signed",
+        }),
+      );
+      expect(recovery.messages.at(-2)?.content).toContainEqual(
+        expect.objectContaining({
+          type: "tool_use",
+          id: recall.id,
+          name: "recall",
+        }),
+      );
+      expect(recovery.messages.at(-1)?.content).toContainEqual(
+        expect.objectContaining({
+          type: "tool_result",
+          toolUseId: recall.id,
+          toolName: "recall",
+          content: expect.arrayContaining([
+            { type: "text", text: "accepted recall result" },
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining("Continue the user's task"),
+            }),
+          ]),
+        }),
+      );
+      expect(request).toEqual(original);
     },
   );
 
@@ -1865,6 +1953,77 @@ describe("runRecallFollowUpStreamAccumulated", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(bodyCancelled).toBe(true);
   });
+});
+
+describe("runRecallRecovery", () => {
+  const recallBlock = makeRecallToolUse("recovery query");
+  const resp = makeResponse([recallBlock], "tool_use");
+
+  test.each([false, true])(
+    "couples stream:%s to one no-recall forward and its matching parser",
+    async (stream) => {
+      let forwards = 0;
+      let jsonParses = 0;
+      let sseParses = 0;
+      let captured: GatewayRequest | undefined;
+      let capturedSignal: AbortSignal | undefined;
+      const controller = new AbortController();
+      const continuation = makeResponse(
+        [{ type: "text", text: "recovered answer" }],
+        "end_turn",
+      );
+      const request = makeRequest(
+        [],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      request.codex = stream;
+      const ctx: RecallFollowUpCtx = {
+        forward: async (forwarded, signal) => {
+          forwards++;
+          captured = forwarded;
+          capturedSignal = signal;
+          return {
+            response: new Response(stream ? "data: ok\n\n" : "{}", {
+              headers: {
+                "content-type": stream
+                  ? "text/event-stream"
+                  : "application/json",
+              },
+            }),
+            effectiveProtocol: "openai-responses",
+          };
+        },
+        parseJSON: async () => {
+          jsonParses++;
+          return continuation;
+        },
+        parseSSE: async () => {
+          sseParses++;
+          return continuation;
+        },
+      };
+
+      const result = await runRecallRecovery(
+        ctx,
+        request,
+        resp,
+        "accepted result",
+        recallBlock,
+        stream,
+        controller.signal,
+      );
+
+      expect(result.ok).toBe(true);
+      expect(forwards).toBe(1);
+      expect([jsonParses, sseParses]).toEqual(stream ? [0, 1] : [1, 0]);
+      expect(captured?.stream).toBe(stream);
+      expect(captured?.tools.map((tool) => tool.name)).toEqual(["Read"]);
+      expect(capturedSignal).toBe(controller.signal);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

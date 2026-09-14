@@ -1325,6 +1325,61 @@ export function buildRecallFollowUpRequest(
   };
 }
 
+const RECALL_RECOVERY_INSTRUCTION =
+  "Continue the user's task using the accepted recall results and the context already available. Give your best supported answer or use an available non-recall tool. Do not request recall and do not mention recovery or provider failures.";
+
+/** Build the single request-local synthesis attempt after recall continuation failure. */
+export function buildRecallRecoveryRequest(
+  originalReq: GatewayRequest,
+  resp: GatewayResponse,
+  recallResult: string,
+  recallToolUseBlock: GatewayToolUseBlock,
+  stream: boolean,
+): GatewayRequest {
+  const followUp = buildRecallFollowUpRequest(
+    originalReq,
+    resp,
+    recallResult,
+    recallToolUseBlock,
+    stream,
+  );
+  const messages = [...followUp.messages];
+  const resultMessage = messages.at(-1);
+  if (!resultMessage) throw new Error("recall recovery result message missing");
+  messages[messages.length - 1] = {
+    ...resultMessage,
+    content: resultMessage.content.map((block) =>
+      block.type === "tool_result" && block.toolUseId === recallToolUseBlock.id
+        ? {
+            ...block,
+            content: [
+              ...block.content,
+              { type: "text", text: RECALL_RECOVERY_INSTRUCTION },
+            ],
+          }
+        : block,
+    ),
+  };
+
+  const metadata = { ...followUp.metadata };
+  delete metadata.tool_choice;
+  delete metadata.toolConfig;
+  delete metadata.cachedContent;
+  const extras = followUp.extras ? { ...followUp.extras } : undefined;
+  if (extras) {
+    delete extras.tool_choice;
+    delete extras.prompt_cache_key;
+  }
+
+  return {
+    ...followUp,
+    messages,
+    tools: followUp.tools.filter((tool) => tool.name !== RECALL_TOOL_NAME),
+    metadata,
+    ...(extras ? { extras } : { extras: undefined }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Content-type guards — fail loud on a stream-flag / consumer mismatch
 // ---------------------------------------------------------------------------
@@ -1587,6 +1642,14 @@ export async function runRecallFollowUpJSON(
     /* stream */ false,
     finalRecallRound,
   );
+  return runRecallJSONRequest(ctx, followUp, signal);
+}
+
+async function runRecallJSONRequest(
+  ctx: RecallFollowUpCtx,
+  followUp: GatewayRequest,
+  signal?: AbortSignal,
+): Promise<RecallFollowUpJSON | RecallFollowUpError> {
   const { response, effectiveProtocol } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
     signal,
@@ -1643,12 +1706,6 @@ export async function runRecallFollowUpStreamAccumulated(
   signal?: AbortSignal,
   finalRecallRound = false,
 ): Promise<RecallFollowUpJSON | RecallFollowUpError> {
-  const parseSSE = ctx.parseSSE;
-  if (!parseSSE) {
-    throw new Error(
-      "runRecallFollowUpStreamAccumulated requires ctx.parseSSE to accumulate the streamed continuation",
-    );
-  }
   const followUp = buildRecallFollowUpRequest(
     originalReq,
     resp,
@@ -1657,6 +1714,20 @@ export async function runRecallFollowUpStreamAccumulated(
     /* stream */ true,
     finalRecallRound,
   );
+  return runRecallStreamAccumulatedRequest(ctx, followUp, signal);
+}
+
+async function runRecallStreamAccumulatedRequest(
+  ctx: RecallFollowUpCtx,
+  followUp: GatewayRequest,
+  signal?: AbortSignal,
+): Promise<RecallFollowUpJSON | RecallFollowUpError> {
+  const parseSSE = ctx.parseSSE;
+  if (!parseSSE) {
+    throw new Error(
+      "runRecallFollowUpStreamAccumulated requires ctx.parseSSE to accumulate the streamed continuation",
+    );
+  }
   const { response } = await promiseAgainstAbort(
     () => ctx.forward(followUp, signal),
     signal,
@@ -1685,6 +1756,28 @@ export async function runRecallFollowUpStreamAccumulated(
     signal,
   );
   return { ok: true, continuation, followUp };
+}
+
+/** Execute the one no-recall synthesis request after an accepted recall fails. */
+export function runRecallRecovery(
+  ctx: RecallFollowUpCtx,
+  originalReq: GatewayRequest,
+  resp: GatewayResponse,
+  recallResult: string,
+  recallToolUseBlock: GatewayToolUseBlock,
+  stream: boolean,
+  signal?: AbortSignal,
+): Promise<RecallFollowUpJSON | RecallFollowUpError> {
+  const recovery = buildRecallRecoveryRequest(
+    originalReq,
+    resp,
+    recallResult,
+    recallToolUseBlock,
+    stream,
+  );
+  return stream
+    ? runRecallStreamAccumulatedRequest(ctx, recovery, signal)
+    : runRecallJSONRequest(ctx, recovery, signal);
 }
 
 // ---------------------------------------------------------------------------
