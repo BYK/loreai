@@ -160,6 +160,14 @@
 <td>Expose project path &amp; git remote as env vars so downstream agents can map them to custom headers if supported in the future. The gateway resolves the project from system-prompt inference and cwd for now.</td>
 </tr>
 <tr>
+<td><code dir="auto">LORE_PR_DESCRIPTION</code></td>
+<td>Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts.</td>
+</tr>
+<tr>
+<td><code dir="auto">LORE_PR_TITLE</code></td>
+<td>Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts.</td>
+</tr>
+<tr>
 <td><code dir="auto">LORE_REMOTE_GATEWAY</code></td>
 <td>Remote/central gateway mode. When true, the gateway is serving agents running on OTHER machines, so its own <code dir="auto">process.cwd()</code> has no relationship to any client’s project. In this mode the gateway MUST NOT attribute path-less requests to its own cwd (doing so merges unrelated projects). Instead, requests that cannot resolve a confident project path are routed to a per-session synthetic “unattributed” bucket (<code dir="auto">/__lore_unattributed__/&lt;sessionID&gt;</code>) that can later self-heal or be consolidated. Env: LORE_REMOTE_GATEWAY. Note: hosted mode (<code dir="auto">LORE_HOSTED_MODE</code>) implies remote-gateway behavior — a hosted gateway never shares a filesystem with its clients. Auto-detection: when neither <code dir="auto">LORE_REMOTE_GATEWAY</code> nor <code dir="auto">LORE_HOSTED_MODE</code> is set, the gateway auto-enables remote-gateway mode if its bind address(es) include any non-loopback host. This catches the common case of running a long-lived gateway on a server (Tailscale, LAN IP, <code dir="auto">0.0.0.0</code>, etc.) without requiring an explicit env var.</td>
 </tr>
