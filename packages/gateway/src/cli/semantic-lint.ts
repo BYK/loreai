@@ -356,6 +356,8 @@ export async function runSemanticLint(
       candidateTimeoutMs: options.candidateTimeoutMs,
       signal: deadlineController.signal,
     });
+    // Keep the holistic capability explicit at the orchestration boundary.
+    const holisticJudge: semanticLint.HolisticLintJudge = judge;
 
     // Core returns typed health for expected vector/judge failures. If it throws,
     // the exact internal phase is unknown, so fail at the first uncompleted
@@ -368,7 +370,7 @@ export async function runSemanticLint(
       range,
       prContext,
       judge,
-      holisticJudge: judge,
+      holisticJudge,
       holisticInputTokenBudget: options.holisticInputTokens,
       model,
       effort,
