@@ -362,6 +362,7 @@ import {
   reportRecallContinuationFailure,
   type RecallContinuationFailureCategory,
 } from "./recall-continuation-failure";
+import { reportPrincipalTransportFailure } from "./principal-transport-failure";
 import {
   recordConversationCost,
   updateShadowContext,
@@ -6353,6 +6354,8 @@ function resolveRequestUpstreamRoute(
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
 type UpstreamResult = {
   response: Response;
+  /** Repeat the exact prepared request bytes, headers, route, and interceptor. */
+  retry: (signal?: AbortSignal) => Promise<Response>;
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
   /** The wire protocol used for the upstream request (may differ from ingress). */
@@ -6676,37 +6679,37 @@ async function forwardToUpstream(
 
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
-  if (effectiveInterceptor) {
-    const response = await responseAgainstAbort(
-      () =>
-        effectiveInterceptor(body, req.model, req.stream, () =>
-          responseAgainstAbort(
-            () =>
-              upstreamFetch(url, {
-                method: "POST",
-                headers,
-                body: upstreamBody,
-                signal,
-              }),
-            signal,
-          ),
-        ),
-      signal,
-    );
-    return { response, serializedBody, effectiveProtocol };
-  }
+  const dispatch = (dispatchSignal?: AbortSignal): Promise<Response> =>
+    effectiveInterceptor
+      ? responseAgainstAbort(
+          () =>
+            effectiveInterceptor(body, req.model, req.stream, () =>
+              responseAgainstAbort(
+                () =>
+                  upstreamFetch(url, {
+                    method: "POST",
+                    headers,
+                    body: upstreamBody,
+                    signal: dispatchSignal,
+                  }),
+                dispatchSignal,
+              ),
+            ),
+          dispatchSignal,
+        )
+      : responseAgainstAbort(
+          () =>
+            upstreamFetch(url, {
+              method: "POST",
+              headers,
+              body: upstreamBody,
+              signal: dispatchSignal,
+            }),
+          dispatchSignal,
+        );
 
-  const response = await responseAgainstAbort(
-    () =>
-      upstreamFetch(url, {
-        method: "POST",
-        headers,
-        body: upstreamBody,
-        signal,
-      }),
-    signal,
-  );
-  return { response, serializedBody, effectiveProtocol };
+  const response = await dispatch(signal);
+  return { response, retry: dispatch, serializedBody, effectiveProtocol };
 }
 
 // ---------------------------------------------------------------------------
@@ -7813,6 +7816,17 @@ export function streamResponsesRecallAware(
     /** Absolute request deadline inherited from the foreground abort scope. */
     recallDeadlineAt?: number;
     /**
+     * Reissue the byte-stable principal request after a pre-output body-read
+     * failure. The caller must retain the original transformed request, route,
+     * credentials, and abort deadline.
+     */
+    retryPrincipal?: (input: {
+      attempt: number;
+      signal: AbortSignal;
+    }) => Promise<Response>;
+    /** Test-only override for the stream inactivity deadline. */
+    sseInactivityMs?: number;
+    /**
      * Called when a `recall` function_call is fully parsed. Runs the recall
      * (LTM search + optional LLM result) and returns the pieces needed to
      * deliver the marker + continuation to the client:
@@ -7860,7 +7874,7 @@ export function streamResponsesRecallAware(
   },
 ): Response {
   const recallDiagnostics = createRecallDiagnostics(!opts.noStore);
-  const state = makeResponsesAccState();
+  let state = makeResponsesAccState();
   const syntheticIdentities = new Set<string>();
   const referenceIdentities = new Set<string>();
   const outputIdentities = new Set<string>();
@@ -8040,7 +8054,8 @@ export function streamResponsesRecallAware(
   let hiddenRecallBytes = 0;
   const maxSSEFrames = opts.maxSSEFrames ?? 100_000;
   const frameCounter = { count: 0 };
-  const sseInactivityMs = FOREGROUND_SSE_INACTIVITY_MS;
+  const sseInactivityMs = opts.sseInactivityMs ?? FOREGROUND_SSE_INACTIVITY_MS;
+  const maxPrincipalTransportRetries = 1;
   const maxRecallContinuationTransportRetries = 1;
 
   type RecallArguments = {
@@ -8304,6 +8319,7 @@ export function streamResponsesRecallAware(
     ? AbortSignal.any([opts.signal, abortController.signal])
     : abortController.signal;
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let currentPrincipalResponse = upstreamResponse;
 
   const outputIndexForEvent = (
     event: string,
@@ -9913,7 +9929,8 @@ export function streamResponsesRecallAware(
     if (keepaliveTimer) clearTimeout(keepaliveTimer);
     keepaliveTimer = null;
     if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
-    else void upstreamResponse.body?.cancel(signal.reason).catch(() => {});
+    else
+      void currentPrincipalResponse.body?.cancel(signal.reason).catch(() => {});
   };
   signal.addEventListener("abort", onStreamAbort, { once: true });
   if (signal.aborted) onStreamAbort();
@@ -9932,6 +9949,8 @@ export function streamResponsesRecallAware(
           }
           signal.throwIfAborted();
         };
+        let principalEventEmitted = false;
+        let ordinaryToolEmitted = false;
         const safeEnqueue = async (
           chunk: Uint8Array,
           afterEnqueue?: () => void,
@@ -9948,6 +9967,16 @@ export function streamResponsesRecallAware(
           afterEnqueue?.();
           return true;
         };
+        const enqueuePrincipal = async (
+          chunk: Uint8Array,
+          emitsOrdinaryTool = false,
+          afterEnqueue?: () => void,
+        ): Promise<boolean> =>
+          safeEnqueue(chunk, () => {
+            principalEventEmitted = true;
+            if (emitsOrdinaryTool) ordinaryToolEmitted = true;
+            afterEnqueue?.();
+          });
         const safeClose = (): void => {
           cleanupAbort();
           if (cancelled) return;
@@ -9985,6 +10014,9 @@ export function streamResponsesRecallAware(
         };
         let principalReader: ReadableStreamDefaultReader<Uint8Array> | null =
           null;
+        let principalTransportRetries = 0;
+        let principalRetrySucceededReported = false;
+        let principalReadFinished = false;
         let continuationAttempted = false;
         let continuationFailureCategory:
           | RecallContinuationFailureCategory
@@ -10010,6 +10042,12 @@ export function streamResponsesRecallAware(
           }
           return principalFailureCategory;
         };
+        const principalTransportStage = () =>
+          ordinaryToolEmitted
+            ? ("post_tool" as const)
+            : principalEventEmitted
+              ? ("post_output" as const)
+              : ("pre_output" as const);
         const reportContinuationFailure = (
           category: RecallContinuationFailureCategory,
         ): void => {
@@ -10023,11 +10061,14 @@ export function streamResponsesRecallAware(
         const unresolvedToolIndices = new Set<number>();
         const referenceIndices = new Map<number, ReferenceLifecycle>();
 
-        try {
-          if (!upstreamResponse.body) {
+        const retainedStateBaseline = retainedStateBytes;
+        const hiddenRecallBaseline = hiddenRecallBytes;
+        const runPrincipalAttempt = async (): Promise<void> => {
+          principalReadFinished = false;
+          if (!currentPrincipalResponse.body) {
             throw new Error("Upstream response has no body");
           }
-          const reader = upstreamResponse.body.getReader();
+          const reader = currentPrincipalResponse.body.getReader();
           principalReader = reader;
           activeReader = reader;
 
@@ -10100,7 +10141,7 @@ export function streamResponsesRecallAware(
                   }
                   deferredEvents.push({ chunk });
                 } else {
-                  await safeEnqueue(chunk);
+                  await enqueuePrincipal(chunk, otherToolSeen);
                 }
               }
               continue;
@@ -10217,7 +10258,7 @@ export function streamResponsesRecallAware(
               unresolvedToolIndices.size === 0
             ) {
               for (const deferred of deferredEvents) {
-                if (!(await safeEnqueue(deferred.chunk))) break;
+                if (!(await enqueuePrincipal(deferred.chunk, true))) break;
               }
               deferredEvents.length = 0;
               deferredBytes = 0;
@@ -10292,6 +10333,7 @@ export function streamResponsesRecallAware(
               event === "response.incomplete" ||
               event === "response.failed"
             ) {
+              principalReadFinished = true;
               const terminalParsed = stripHiddenReferenceOutput(parsed);
               const terminalResponse = terminalParsed.response as
                 | Record<string, unknown>
@@ -10355,6 +10397,17 @@ export function streamResponsesRecallAware(
                 state,
                 pendingRecalls.map((recall) => recall.outputIndex),
               );
+              if (
+                principalTransportRetries > 0 &&
+                !principalRetrySucceededReported
+              ) {
+                principalRetrySucceededReported = true;
+                reportPrincipalTransportFailure({
+                  kind: "read",
+                  stage: "pre_output",
+                  outcome: "retry_succeeded",
+                });
+              }
               if (pendingRecalls.length === 0) {
                 if (unresolvedToolIndices.size > 0) {
                   throw new Error(
@@ -10367,14 +10420,15 @@ export function streamResponsesRecallAware(
                   );
                 }
                 for (const deferred of deferredEvents) {
-                  if (!(await safeEnqueue(deferred.chunk))) break;
+                  if (!(await enqueuePrincipal(deferred.chunk, otherToolSeen)))
+                    break;
                 }
                 deferredEvents.length = 0;
                 deferredBytes = 0;
                 // No recall — forward the terminal event verbatim.
                 const finalResponse = finalizeResponsesAcc(state);
                 if (
-                  !(await safeEnqueue(
+                  !(await enqueuePrincipal(
                     encoder.encode(
                       formatResponsesEvent(
                         event,
@@ -10383,6 +10437,7 @@ export function streamResponsesRecallAware(
                           : JSON.stringify(terminalParsed),
                       ),
                     ),
+                    otherToolSeen,
                     () => {
                       terminalDelivered = true;
                       finish(
@@ -11389,7 +11444,7 @@ export function streamResponsesRecallAware(
                 );
               }
               deferredEvents.push({ chunk });
-            } else if (!(await safeEnqueue(chunk))) {
+            } else if (!(await enqueuePrincipal(chunk, otherToolSeen))) {
               break;
             }
           }
@@ -11398,6 +11453,96 @@ export function streamResponsesRecallAware(
           throw new Error(
             "upstream Responses stream ended without a terminal event",
           );
+        };
+
+        try {
+          for (;;) {
+            try {
+              await runPrincipalAttempt();
+              break;
+            } catch (error) {
+              const isPrincipalTransportFailure =
+                error instanceof SSEStreamTransportError &&
+                !principalReadFinished &&
+                !continuationAttempted;
+              const shouldRetryPrincipal =
+                isPrincipalTransportFailure &&
+                error.kind === "read" &&
+                !principalEventEmitted &&
+                !ordinaryToolEmitted &&
+                !signal.aborted &&
+                opts.retryPrincipal !== undefined &&
+                principalTransportRetries < maxPrincipalTransportRetries;
+              if (isPrincipalTransportFailure) {
+                reportPrincipalTransportFailure({
+                  kind: error.kind,
+                  stage: principalTransportStage(),
+                  outcome: shouldRetryPrincipal
+                    ? "retry"
+                    : principalEventEmitted
+                      ? "continue"
+                      : principalTransportRetries > 0
+                        ? "retry_exhausted"
+                        : "failed",
+                });
+              }
+              if (!shouldRetryPrincipal) throw error;
+
+              principalTransportRetries++;
+              if (principalReader) {
+                cancelAndReleaseReader(principalReader, signal.reason);
+              }
+              principalReader = null;
+              activeReader = null;
+              clearKeepalive();
+              log.warn(
+                "retrying principal Responses stream after read transport failure",
+              );
+
+              const retryPrincipal = opts.retryPrincipal;
+              if (!retryPrincipal) throw error;
+
+              let retryResponse: Response | undefined;
+              try {
+                retryResponse = await retryPrincipal({
+                  attempt: principalTransportRetries,
+                  signal,
+                });
+                signal.throwIfAborted();
+                if (!retryResponse.ok || !retryResponse.body) {
+                  void retryResponse.body?.cancel().catch(() => {});
+                  throw new Error("principal retry did not return a stream");
+                }
+              } catch {
+                if (signal.aborted) {
+                  void retryResponse?.body
+                    ?.cancel(signal.reason)
+                    .catch(() => {});
+                  throw signal.reason;
+                }
+                reportPrincipalTransportFailure({
+                  kind: error.kind,
+                  stage: "pre_output",
+                  outcome: "retry_exhausted",
+                });
+                throw error;
+              }
+
+              currentPrincipalResponse = retryResponse;
+              state = makeResponsesAccState();
+              syntheticIdentities.clear();
+              referenceIdentities.clear();
+              outputIdentities.clear();
+              recallIndices.clear();
+              unresolvedToolIndices.clear();
+              referenceIndices.clear();
+              recallDetected = false;
+              principalFailureCategory = "principal_unexpected";
+              retainedStateBytes = retainedStateBaseline;
+              hiddenRecallBytes = hiddenRecallBaseline;
+              continue;
+            }
+          }
         } catch (err) {
           rollbackTransaction();
           if (principalReader) {
@@ -11454,10 +11599,15 @@ export function streamResponsesRecallAware(
               );
             }
           }
+          const principalTransportFailure =
+            err instanceof SSEStreamTransportError && !continuationAttempted;
+          const continueAfterPrincipalTransport =
+            principalTransportFailure && principalEventEmitted;
           const recallFailure =
-            recallDetected ||
-            continuationAttempted ||
-            err instanceof RecallContinuationFailure;
+            !principalTransportFailure &&
+            (recallDetected ||
+              continuationAttempted ||
+              err instanceof RecallContinuationFailure);
           const failedResponse = finalizeResponsesAcc(state);
           try {
             assertUsageMergeable(
@@ -11512,19 +11662,33 @@ export function streamResponsesRecallAware(
           await safeEnqueue(
             encoder.encode(
               formatResponsesEvent(
-                "response.failed",
+                continueAfterPrincipalTransport
+                  ? "response.incomplete"
+                  : "response.failed",
                 JSON.stringify({
-                  type: "response.failed",
+                  type: continueAfterPrincipalTransport
+                    ? "response.incomplete"
+                    : "response.failed",
                   response: {
                     id: state.id || "resp_error",
                     object: "response",
                     created_at: Math.floor(Date.now() / 1000),
                     model: state.model,
-                    status: "failed",
+                    status: continueAfterPrincipalTransport
+                      ? "incomplete"
+                      : "failed",
                     output: buildOutputItems(hiddenOutputIndices),
                     usage: null,
+                    ...(continueAfterPrincipalTransport
+                      ? {
+                          incomplete_details: {
+                            reason: PRINCIPAL_TRANSPORT_INCOMPLETE_REASON,
+                          },
+                        }
+                      : {}),
                     error: {
                       type: "server_error",
+                      code: "server_error",
                       message: recallFailure
                         ? "Lore could not continue the response after recall"
                         : "Gateway request failed",
@@ -11566,7 +11730,10 @@ export function streamResponsesRecallAware(
       );
       if (keepaliveTimer) clearTimeout(keepaliveTimer);
       if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
-      else void upstreamResponse.body?.cancel(signal.reason).catch(() => {});
+      else
+        void currentPrincipalResponse.body
+          ?.cancel(signal.reason)
+          .catch(() => {});
     },
   });
 
@@ -11591,6 +11758,9 @@ export function streamResponsesRecallAware(
 const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
 const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
+// A gateway-owned reason stays distinct from provider token-limit reasons and
+// maps to OpenCode's retryable `unknown` finish, preserving its agent loop.
+const PRINCIPAL_TRANSPORT_INCOMPLETE_REASON = "gateway_transport";
 const FOREGROUND_ERROR_BODY_TIMEOUT_MS = 10_000;
 const MAX_RELAY_RETRY_AFTER_MS = 300_000;
 let foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
@@ -18467,6 +18637,10 @@ async function handleConversationTurn(
               noStore: suppressTemporalStorage,
               signal: foregroundAbort.signal,
               recallDeadlineAt: foregroundAbort.deadlineAt,
+              retryPrincipal: async ({ signal }) => {
+                const retried = await upstreamResult.retry(signal);
+                return wrapBodyWithCleanup(retried, () => {}, signal);
+              },
               onRecall: async ({
                 query,
                 scope,

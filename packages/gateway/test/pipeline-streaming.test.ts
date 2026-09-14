@@ -302,6 +302,52 @@ function makeResponsesRequest(input: {
   };
 }
 
+describe("principal Responses transport recovery", () => {
+  it("retries the exact transformed request once before client-visible output", async () => {
+    const forwardedBodies: string[] = [];
+    let calls = 0;
+    setUpstreamInterceptor(async (body) => {
+      calls++;
+      forwardedBodies.push(JSON.stringify(body));
+      if (calls === 1) {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(new Error("private upstream read failure"));
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        validResponsesSSE("resp_principal_retry", "recovered exactly once"),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "principal-retry-session" },
+      });
+      request.rawHeaders["x-lore-no-store"] = "true";
+      const response = await handleRequest(request, loadLocalConfig());
+      const output = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(output.match(/^event: response\.created$/gm)).toHaveLength(1);
+      expect(output.match(/recovered exactly once/g)).toHaveLength(4);
+      expect(output).not.toContain("response.failed");
+      expect(output).not.toContain("private upstream read failure");
+      expect(calls).toBe(2);
+      expect(forwardedBodies[0]).toContain('"name":"recall"');
+      expect(forwardedBodies[1]).toBe(forwardedBodies[0]);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+});
+
 describe("non-stream recall usage aggregation", () => {
   it("rejects per-field and cross-component safe-integer overflow", () => {
     expect(() =>
