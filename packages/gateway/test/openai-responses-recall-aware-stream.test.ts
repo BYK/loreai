@@ -60,6 +60,48 @@ async function drain(resp: Response): Promise<string> {
   return out;
 }
 
+function responseEvents(output: string): Array<{
+  event: string;
+  data: Record<string, unknown>;
+}> {
+  return [...output.matchAll(/^event: (.+)\ndata: (.+)$/gm)].flatMap(
+    ([, event, data]) => {
+      try {
+        const parsed = JSON.parse(data) as unknown;
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? [{ event, data: parsed as Record<string, unknown> }]
+          : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+}
+
+function expectVisibleOutputIndicesToMatchTerminal(output: string): void {
+  const events = responseEvents(output);
+  const terminal = events.find(({ event }) => event === "response.completed");
+  const terminalOutput = terminal?.data.response as
+    | { output?: Array<{ id?: unknown }> }
+    | undefined;
+  expect(terminalOutput?.output).toBeDefined();
+
+  for (const { data } of events) {
+    if (!Number.isSafeInteger(data.output_index)) continue;
+    const item = data.item as Record<string, unknown> | undefined;
+    const itemID =
+      typeof data.item_id === "string"
+        ? data.item_id
+        : typeof item?.id === "string"
+          ? item.id
+          : undefined;
+    if (!itemID) continue;
+    expect(terminalOutput?.output?.[data.output_index as number]?.id).toBe(
+      itemID,
+    );
+  }
+}
+
 const created = (id: string, model: string) =>
   sseEvent("response.created", { response: { id, model } });
 
@@ -4408,6 +4450,8 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("rejects continuation index arithmetic beyond safe integers", async () => {
+    let recalls = 0;
+    let followUps = 0;
     const followUp = streamFrom([
       created("resp_index_overflow_followup", "gpt-5.6-terra"),
       textItem(0, "first", "msg_index_overflow_first"),
@@ -4423,17 +4467,25 @@ describe("streamResponsesRecallAware", () => {
       ]),
       {
         onComplete: () => {},
-        onRecall: async () => ({
-          anchorText: "recalled",
-          resultText: "result",
-        }),
-        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+        onRecall: async () => {
+          recalls++;
+          return {
+            anchorText: "recalled",
+            resultText: "result",
+          };
+        },
+        runFollowUp: async () => {
+          followUps++;
+          return { reader: followUp.body!.getReader() };
+        },
       },
     );
 
     const output = await drain(client);
     expect(output).toContain(PUBLIC_RECALL_ERROR);
     expect(output).not.toContain('"output_index":9007199254740992');
+    expect(recalls).toBe(0);
+    expect(followUps).toBe(0);
   });
 
   test("rejects usage overflow while merging a continuation", async () => {
@@ -5241,7 +5293,7 @@ describe("streamResponsesRecallAware", () => {
     const followUpStream = streamFrom([
       created("resp_followup", "gpt-5.6-terra"),
       sseEvent("response.in_progress", {}),
-      textItem(0, "Here is the answer from the continuation."),
+      textItem(7, "Here is the answer from the continuation."),
       completed("resp_followup", { input_tokens: 5, output_tokens: 9 }),
     ]);
 
@@ -5295,19 +5347,20 @@ describe("streamResponsesRecallAware", () => {
       (match) => Number(match[1]),
     );
     expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index));
+    expectVisibleOutputIndicesToMatchTerminal(out);
   });
 
   test("places continuation after deferred principal output without index collisions", async () => {
     const followUp = streamFrom([
       created("resp_followup", "gpt-5.6-terra"),
-      textItem(0, "continuation"),
+      textItem(9, "continuation", "msg_sparse_continuation"),
       completed("resp_followup"),
     ]);
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_collision", "gpt-5.6-terra"),
         recallCall(0, { query: "architecture" }),
-        textItem(1, "principal"),
+        textItem(7, "principal", "msg_sparse_principal"),
         completed("resp_collision"),
       ]),
       {
@@ -5324,10 +5377,153 @@ describe("streamResponsesRecallAware", () => {
     const terminal = JSON.parse(
       /event: response\.completed\ndata: (.+)/.exec(out)?.[1] ?? "{}",
     ) as { response?: { output?: Array<{ content?: unknown }> } };
-    expect(out).toContain('"output_index":1');
-    expect(out).toContain('"output_index":2');
     expect(JSON.stringify(terminal.response?.output)).toContain("principal");
     expect(JSON.stringify(terminal.response?.output)).toContain("continuation");
+    expectVisibleOutputIndicesToMatchTerminal(out);
+  });
+
+  test("fails closed when a late recall would reindex sparse visible output", async () => {
+    let recalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_sparse_late_recall", "gpt-5.6-terra"),
+        textItem(7, "already visible", "msg_sparse_visible"),
+        recallCall(9, { query: "private query" }, "fc_late_recall"),
+        completed("resp_sparse_late_recall"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "private anchor", resultText: "private result" };
+        },
+        runFollowUp: async () => {
+          throw new Error("must not run follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const events = responseEvents(output);
+    expect(output).toContain("already visible");
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private query");
+    expect(output).not.toContain("private result");
+    expect(recalls).toBe(0);
+    expect(
+      events.filter(({ event }) => event === "response.failed"),
+    ).toHaveLength(1);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ event: "response.completed" }),
+    );
+    expect(
+      events.find(({ event }) => event === "response.failed")?.data.response,
+    ).toMatchObject({ status: "failed", output: [] });
+  });
+
+  test("fails closed when a lower-index recall follows visible output", async () => {
+    let recalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_dense_late_recall", "gpt-5.6-terra"),
+        textItem(1, "already visible", "msg_dense_visible"),
+        recallCall(0, { query: "private query" }, "fc_dense_late_recall"),
+        completed("resp_dense_late_recall"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "private anchor", resultText: "private result" };
+        },
+        runFollowUp: async () => {
+          throw new Error("must not run follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const events = responseEvents(output);
+    expect(output).toContain("already visible");
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private query");
+    expect(output).not.toContain("private result");
+    expect(recalls).toBe(0);
+    expect(
+      events.filter(({ event }) => event === "response.failed"),
+    ).toHaveLength(1);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ event: "response.completed" }),
+    );
+    expect(
+      events.find(({ event }) => event === "response.failed")?.data.response,
+    ).toMatchObject({ status: "failed", output: [] });
+  });
+
+  test("fails closed when deferred sparse output precedes a late recall", async () => {
+    let recalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_deferred_sparse_late_recall", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_deferred_visible",
+            call_id: "",
+            name: "",
+            arguments: "",
+          },
+        }),
+        sseEvent("response.function_call_arguments.delta", {
+          output_index: 0,
+          item_id: "fc_deferred_visible",
+          delta: "{}",
+        }),
+        textItem(7, "deferred visible", "msg_deferred_sparse_visible"),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_deferred_visible",
+            call_id: "call_deferred_visible",
+            name: "read",
+            arguments: "{}",
+            status: "completed",
+          },
+        }),
+        recallCall(9, { query: "private query" }, "fc_late_deferred_recall"),
+        completed("resp_deferred_sparse_late_recall"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "private anchor", resultText: "private result" };
+        },
+        runFollowUp: async () => {
+          throw new Error("must not run follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    const events = responseEvents(output);
+    expect(output).toContain("deferred visible");
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain("private query");
+    expect(output).not.toContain("private result");
+    expect(recalls).toBe(0);
+    expect(
+      events.filter(({ event }) => event === "response.failed"),
+    ).toHaveLength(1);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ event: "response.completed" }),
+    );
+    expect(
+      events.find(({ event }) => event === "response.failed")?.data.response,
+    ).toMatchObject({ status: "failed", output: [] });
   });
 
   test("rejects continuation identities that collide with principal output", async () => {
@@ -5782,7 +5978,7 @@ describe("streamResponsesRecallAware", () => {
     const anchorText = "a".repeat(4 * 1024);
     const followUp = streamFrom([
       created("resp_sparse_transactional_once", "gpt-5.6-terra"),
-      sparseVisibleFunctionCall(0, sparseArguments),
+      sparseVisibleFunctionCall(7, sparseArguments),
       completed("resp_sparse_transactional_once"),
     ]);
     const client = streamResponsesRecallAware(
@@ -5816,11 +6012,11 @@ describe("streamResponsesRecallAware", () => {
     expect(deltaFrame).toBeDefined();
     const deltaData = deltaFrame?.slice(deltaFrame.indexOf("data: ") + 6);
     expect(JSON.parse(deltaData ?? "")).toMatchObject({
-      output_index: 1,
-      item_id: "fc_sparse_0",
+      item_id: "fc_sparse_7",
       delta: sparseArguments,
     });
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expectVisibleOutputIndicesToMatchTerminal(out);
   });
 
   test("stops reading upstream while the client applies backpressure", async () => {
@@ -5952,23 +6148,23 @@ describe("streamResponsesRecallAware", () => {
     const followUp = streamFrom([
       created("resp_followup", "gpt-5.6-terra"),
       sseEvent("response.output_item.added", {
-        output_index: 0,
+        output_index: 7,
         item: { type: "message", id: "msg_refusal", role: "assistant" },
       }),
       sseEvent("response.refusal.delta", {
-        output_index: 0,
+        output_index: 7,
         item_id: "msg_refusal",
         content_index: 0,
         delta: "no",
       }),
       sseEvent("response.refusal.done", {
-        output_index: 0,
+        output_index: 7,
         item_id: "msg_refusal",
         content_index: 0,
         refusal: "no",
       }),
       sseEvent("response.output_item.done", {
-        output_index: 0,
+        output_index: 7,
         item: {
           type: "message",
           id: "msg_refusal",
@@ -5997,7 +6193,6 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(out).toContain("event: response.refusal.delta");
-    expect(out).toContain('"output_index":1');
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
     const terminal = JSON.parse(
       /event: response\.completed\ndata: (.+)/.exec(out)?.[1] ?? "{}",
@@ -6008,6 +6203,7 @@ describe("streamResponsesRecallAware", () => {
         content: [{ type: "refusal", refusal: "no" }],
       }),
     );
+    expectVisibleOutputIndicesToMatchTerminal(out);
   });
 
   test("preserves refusal supplied only by output_item.done", async () => {

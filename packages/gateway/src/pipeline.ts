@@ -9842,7 +9842,14 @@ export function streamResponsesRecallAware(
   function buildOutputItems(
     hiddenIndices: ReadonlySet<number> = new Set(),
   ): Array<Record<string, unknown>> {
-    const finalOutput: Array<Record<string, unknown>> = [];
+    return buildOutputItemsWithIndices(hiddenIndices).map(({ item }) => item);
+  }
+
+  function buildOutputItemsWithIndices(
+    hiddenIndices: ReadonlySet<number> = new Set(),
+  ): Array<{ index: number; item: Record<string, unknown> }> {
+    const finalOutput: Array<{ index: number; item: Record<string, unknown> }> =
+      [];
     const sortedIndices = [
       ...new Set([...state.rawItems.keys(), ...state.items.keys()]),
     ].sort((a, b) => a - b);
@@ -9852,7 +9859,7 @@ export function streamResponsesRecallAware(
       if (!item) {
         const rawItem = state.rawItems.get(index);
         if (rawItem && rawItem.type !== "item_reference") {
-          finalOutput.push(rawItem);
+          finalOutput.push({ index, item: rawItem });
         }
         continue;
       }
@@ -9860,47 +9867,114 @@ export function streamResponsesRecallAware(
         if (item.content) {
           const raw = state.rawItems.get(index);
           finalOutput.push({
-            ...(raw ?? {
-              type: "message",
-              id: item.id,
-              role: "assistant",
-              status: "completed",
-            }),
-            content: Array.isArray(raw?.content) ? raw.content : item.content,
+            index,
+            item: {
+              ...(raw ?? {
+                type: "message",
+                id: item.id,
+                role: "assistant",
+                status: "completed",
+              }),
+              content: Array.isArray(raw?.content) ? raw.content : item.content,
+            },
           });
           continue;
         }
         if (item.refusal !== undefined) {
           finalOutput.push({
-            type: "message",
-            id: item.id,
-            role: "assistant",
-            status: "completed",
-            content: [{ type: "refusal", refusal: item.refusal }],
+            index,
+            item: {
+              type: "message",
+              id: item.id,
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "refusal", refusal: item.refusal }],
+            },
           });
           continue;
         }
         finalOutput.push({
-          type: "message",
-          id: item.id,
-          role: "assistant",
-          status: "completed",
-          content: [{ type: "output_text", text: item.text, annotations: [] }],
+          index,
+          item: {
+            type: "message",
+            id: item.id,
+            role: "assistant",
+            status: "completed",
+            content: [
+              { type: "output_text", text: item.text, annotations: [] },
+            ],
+          },
         });
       } else {
         const raw = state.rawItems.get(index);
         finalOutput.push({
-          ...raw,
-          type: "function_call",
-          id: item.id,
-          call_id: item.callId,
-          name: item.name,
-          arguments: item.args,
-          status: typeof raw?.status === "string" ? raw.status : "completed",
+          index,
+          item: {
+            ...raw,
+            type: "function_call",
+            id: item.id,
+            call_id: item.callId,
+            name: item.name,
+            arguments: item.args,
+            status: typeof raw?.status === "string" ? raw.status : "completed",
+          },
         });
       }
     }
     return finalOutput;
+  }
+
+  function visibleOutputIndexMap(
+    hiddenIndices: ReadonlySet<number> = new Set(),
+  ): ReadonlyMap<number, number> {
+    return new Map(
+      buildOutputItemsWithIndices(hiddenIndices).map(
+        ({ index }, visibleIndex) => [index, visibleIndex],
+      ),
+    );
+  }
+
+  function remapVisibleOutputIndices(
+    chunk: Uint8Array,
+    visibleIndices: ReadonlyMap<number, number>,
+  ): Uint8Array {
+    const text = new TextDecoder().decode(chunk);
+    if (!text.startsWith("event: ")) return chunk;
+    let output = "";
+    for (const frame of text.split("\n\n")) {
+      if (!frame) continue;
+      const lines = frame.split("\n");
+      const eventLine = lines.find((line) => line.startsWith("event: "));
+      const dataLines = lines.filter((line) => line.startsWith("data: "));
+      if (!eventLine || dataLines.length === 0) {
+        output += `${frame}\n\n`;
+        continue;
+      }
+      const event = eventLine.slice("event: ".length);
+      const data = dataLines
+        .map((line) => line.slice("data: ".length))
+        .join("\n");
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(data) as Record<string, unknown>;
+      } catch {
+        output += `${frame}\n\n`;
+        continue;
+      }
+      if (!Number.isSafeInteger(parsed.output_index)) {
+        output += `${frame}\n\n`;
+        continue;
+      }
+      const visibleIndex = visibleIndices.get(parsed.output_index as number);
+      if (visibleIndex === undefined) {
+        throw new Error("hidden Responses output item reached the client");
+      }
+      output += formatResponsesEvent(
+        event,
+        JSON.stringify({ ...parsed, output_index: visibleIndex }),
+      );
+    }
+    return encoder.encode(output);
   }
 
   let resumeDemand: (() => void) | undefined;
@@ -9991,6 +10065,7 @@ export function streamResponsesRecallAware(
           | undefined;
         let continuationFailureReported = false;
         let recallDetected = false;
+        let projectionInvalid = false;
         type PrincipalFailureCategory =
           | "principal_transport"
           | "principal_resource_limit"
@@ -10020,8 +10095,15 @@ export function streamResponsesRecallAware(
         // Recall items are gateway-internal and must stay hidden on every exit,
         // including failures raised before marker replacement.
         const recallIndices = new Set<number>();
+        const forwardedVisibleOutputIndices = new Set<number>();
         const unresolvedToolIndices = new Set<number>();
         const referenceIndices = new Map<number, ReferenceLifecycle>();
+        const wouldReindexForwardedOutput = (): boolean => {
+          const visibleIndices = visibleOutputIndexMap(recallIndices);
+          return [...forwardedVisibleOutputIndices].some(
+            (sourceIndex) => visibleIndices.get(sourceIndex) !== sourceIndex,
+          );
+        };
 
         try {
           if (!upstreamResponse.body) {
@@ -10042,6 +10124,7 @@ export function streamResponsesRecallAware(
           const deferredEvents: Array<{
             chunk: Uint8Array;
             candidateIndex?: number;
+            sourceIndex?: number;
           }> = [];
           let deferredBytes = 0;
           const discardDeferredCandidate = (outputIndex: number): void => {
@@ -10124,6 +10207,7 @@ export function streamResponsesRecallAware(
             );
             validateResponseLifecycle(state, event, parsed);
             seedImplicitCodexItem(state, normalizationState, event, parsed);
+            let newlyPrivateRecallIndex = false;
 
             if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
               continue;
@@ -10141,7 +10225,10 @@ export function streamResponsesRecallAware(
                   return;
                 }
                 recallDetected = true;
-                recallIndices.add(index);
+                if (!recallIndices.has(index)) {
+                  recallIndices.add(index);
+                  newlyPrivateRecallIndex = true;
+                }
               },
             );
             if (outputIndex !== undefined) {
@@ -10176,7 +10263,10 @@ export function streamResponsesRecallAware(
                 item?.type === "function_call" && item?.name === "recall";
               if (isRecallCall) {
                 recallDetected = true;
-                recallIndices.add(outputIndex);
+                if (!recallIndices.has(outputIndex)) {
+                  recallIndices.add(outputIndex);
+                  newlyPrivateRecallIndex = true;
+                }
                 resolvingRecallTool = true;
               } else if (item?.type === "function_call") {
                 if (
@@ -10199,7 +10289,15 @@ export function streamResponsesRecallAware(
             ) {
               preserveStreamedReasoning(state, outputIndex);
             }
-
+            if (newlyPrivateRecallIndex && recallIndices.size > 1) {
+              throw new RecallContinuationFailure("parallel_recall");
+            }
+            if (newlyPrivateRecallIndex && wouldReindexForwardedOutput()) {
+              projectionInvalid = true;
+              throw new Error(
+                "Responses recall changes a client-visible output_index",
+              );
+            }
             let resolvedVisibleTool = false;
             if (outputIndex !== undefined && resolvingRecallTool) {
               discardDeferredCandidate(outputIndex);
@@ -10217,7 +10315,14 @@ export function streamResponsesRecallAware(
               unresolvedToolIndices.size === 0
             ) {
               for (const deferred of deferredEvents) {
-                if (!(await safeEnqueue(deferred.chunk))) break;
+                if (
+                  !(await safeEnqueue(deferred.chunk, () => {
+                    if (deferred.sourceIndex !== undefined) {
+                      forwardedVisibleOutputIndices.add(deferred.sourceIndex);
+                    }
+                  }))
+                )
+                  break;
               }
               deferredEvents.length = 0;
               deferredBytes = 0;
@@ -10269,6 +10374,7 @@ export function streamResponsesRecallAware(
                 deferredEvents.push({
                   chunk: hiddenChunk,
                   candidateIndex: outputIndex,
+                  sourceIndex: outputIndex,
                 });
               }
               if (event === "response.output_item.done") {
@@ -10324,7 +10430,17 @@ export function streamResponsesRecallAware(
                       return;
                     }
                     recallDetected = true;
+                    const newlyPrivate = !recallIndices.has(outputIndex);
                     recallIndices.add(outputIndex);
+                    if (newlyPrivate && recallIndices.size > 1) {
+                      throw new RecallContinuationFailure("parallel_recall");
+                    }
+                    if (newlyPrivate && wouldReindexForwardedOutput()) {
+                      projectionInvalid = true;
+                      throw new Error(
+                        "Responses recall changes a client-visible output_index",
+                      );
+                    }
                     unresolvedToolIndices.delete(outputIndex);
                     discardDeferredCandidate(outputIndex);
                     promoteDeferredCandidate(outputIndex);
@@ -10411,6 +10527,20 @@ export function streamResponsesRecallAware(
               // Recall was detected. Drive the recall loop.
               if (pendingRecalls.length > 1) {
                 throw new RecallContinuationFailure("parallel_recall");
+              }
+              if (!otherToolSeen) {
+                try {
+                  shiftedOutputIndex(
+                    Math.max(
+                      -1,
+                      ...state.rawItems.keys(),
+                      ...state.items.keys(),
+                    ),
+                    1,
+                  );
+                } catch {
+                  throw new RecallContinuationFailure("resource_limit");
+                }
               }
               const anchorTexts: string[] = [];
               transactionBaseline = {
@@ -11311,12 +11441,17 @@ export function streamResponsesRecallAware(
                 }),
                 rawOutputItems: buildOutputItems(),
               };
+              const visibleIndices = visibleOutputIndexMap();
               if (continuationAttempted) {
                 continuationFailureCategory = "delivery";
               }
               clearKeepalive();
               for (const chunk of transactionalEvents) {
-                if (!(await safeEnqueue(chunk))) {
+                if (
+                  !(await safeEnqueue(
+                    remapVisibleOutputIndices(chunk, visibleIndices),
+                  ))
+                ) {
                   throw new Error(
                     "client disconnected while delivering recall continuation",
                   );
@@ -11388,8 +11523,19 @@ export function streamResponsesRecallAware(
                   "recall stream exceeded deferred event limit",
                 );
               }
-              deferredEvents.push({ chunk });
-            } else if (!(await safeEnqueue(chunk))) {
+              deferredEvents.push({
+                chunk,
+                ...(outputIndex !== undefined
+                  ? { sourceIndex: outputIndex }
+                  : {}),
+              });
+            } else if (
+              !(await safeEnqueue(chunk, () => {
+                if (outputIndex !== undefined) {
+                  forwardedVisibleOutputIndices.add(outputIndex);
+                }
+              }))
+            ) {
               break;
             }
           }
@@ -11455,9 +11601,10 @@ export function streamResponsesRecallAware(
             }
           }
           const recallFailure =
-            recallDetected ||
-            continuationAttempted ||
-            err instanceof RecallContinuationFailure;
+            !projectionInvalid &&
+            (recallDetected ||
+              continuationAttempted ||
+              err instanceof RecallContinuationFailure);
           const failedResponse = finalizeResponsesAcc(state);
           try {
             assertUsageMergeable(
@@ -11521,7 +11668,9 @@ export function streamResponsesRecallAware(
                     created_at: Math.floor(Date.now() / 1000),
                     model: state.model,
                     status: "failed",
-                    output: buildOutputItems(hiddenOutputIndices),
+                    output: projectionInvalid
+                      ? []
+                      : buildOutputItems(hiddenOutputIndices),
                     usage: null,
                     error: {
                       type: "server_error",
