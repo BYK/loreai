@@ -51,6 +51,7 @@ import {
   type HolisticLintInput,
   type LintCoverage,
 } from "./context";
+import { buildConnectedContext, renderConnectedContext } from "./connected-context";
 import { extractReferences } from "../references";
 import type { LLMClient } from "../types";
 
@@ -1716,9 +1717,13 @@ export async function checkInvariants(
   }
   const hunkVecs = hunkVecResult.vecs;
 
-  // Diversify: cluster near-identical hunks so the budget covers DISTINCT
-  // changes. Only each cluster's representative is judged; members inherit.
-  const clusters = clusterHunks(hunkVecs);
+  // Every hunk remains an independent seed. Similarity is not proof that
+  // another file has the same behavior, so verdicts are never propagated.
+  const clusters = hunks.map((_, index) => ({
+    repIdx: index,
+    memberIdxs: [index],
+  }));
+  const connectedBySeed = buildConnectedContext(hunks);
 
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
@@ -1834,10 +1839,6 @@ export async function checkInvariants(
     });
   }
 
-  // Map a representative hunk index → its cluster members, for verdict fan-out.
-  const membersByRep = new Map<number, number[]>();
-  for (const c of clusters) membersByRep.set(c.repIdx, c.memberIdxs);
-
   // Stage 2: judge the selected pairs (capped, coverage-ordered).
   const findings: Finding[] = [];
   // Dedup key = `${invariantId}\x1f${file}`: one drift per (invariant, file),
@@ -1898,7 +1899,11 @@ export async function checkInvariants(
             content: inv.entry.content,
           },
           file: hunk.file,
-          hunk: hunk.text,
+          hunk: renderConnectedContext(
+            hunk,
+            connectedBySeed.get(c.hunkIdx) ?? [],
+            hunks,
+          ),
           prContext: isolatedPrContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });
@@ -1944,13 +1949,9 @@ export async function checkInvariants(
     // which is what produced the dominant false-positive class (a fix being read
     // as a violation).
     if (outcome.verdict !== "violates") continue;
-    // Fan out the verdict to every hunk in the representative's cluster: a
-    // repeated change (e.g. one rename across N files) is flagged in all N.
-    // Dedup per (invariant, file): the same invariant flagged against several
-    // hunks of ONE file is ONE drift, not N findings (the #1234 error-reporting
-    // case produced 4 near-identical findings). Cluster fan-out across DIFFERENT
-    // files is preserved — those are genuinely distinct locations.
-    const memberIdxs = membersByRep.get(c.hunkIdx) ?? [c.hunkIdx];
+    // A verdict belongs only to the seed hunk that was actually judged.
+    // Companion context is evidence for investigation, never a second verdict.
+    const memberIdxs = [c.hunkIdx];
     const severity = enforcementLevel(inv.entry);
     for (const mi of memberIdxs) {
       const dedupKey = `${inv.entry.id}\x1f${hunks[mi].file}`;
