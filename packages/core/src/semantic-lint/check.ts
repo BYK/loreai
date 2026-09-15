@@ -53,7 +53,7 @@ import {
 } from "./context";
 import {
   buildConnectedContext,
-  renderConnectedContext,
+  renderConnectedContextDetails,
 } from "./connected-context";
 import { extractReferences } from "../references";
 import type { LLMClient } from "../types";
@@ -505,6 +505,8 @@ function resolveDefaultBranch(cwd: string): string | null {
 
 export interface DiffHunk {
   file: string;
+  /** Original path for a rename; omitted when the path is unchanged. */
+  oldFile?: string;
   /** The unified-diff hunk text (the `@@ ... @@` header + its body). */
   text: string;
 }
@@ -673,7 +675,11 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, text });
+      hunks.push({
+        file: f,
+        text,
+        ...(oldFile && oldFile !== f ? { oldFile } : {}),
+      });
     }
     cur = null;
   };
@@ -707,7 +713,7 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, text });
+      hunks.push({ file: f, oldFile: pathChangeFrom, text });
     }
     pathChangeFrom = "";
     pathChangeTo = "";
@@ -1727,6 +1733,12 @@ export async function checkInvariants(
     memberIdxs: [index],
   }));
   const connectedBySeed = buildConnectedContext(hunks);
+  const renderIsolatedHunk = (hunkIndex: number) =>
+    renderConnectedContextDetails(
+      hunks[hunkIndex],
+      connectedBySeed.get(hunkIndex) ?? [],
+      hunks,
+    );
 
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
@@ -1763,8 +1775,8 @@ export async function checkInvariants(
       content: invariants[index].entry.content,
     }),
   );
-  const hasTruncatedHunk = hunks.some((hunk) =>
-    hunk.text.includes("hunk truncated by Lore"),
+  const hasTruncatedHunk = hunks.some(
+    (hunk) => renderConnectedContextDetails(hunk, [], hunks).truncated,
   );
   const holisticPlan =
     input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
@@ -1797,11 +1809,7 @@ export async function checkInvariants(
         hunk: {
           id: holisticHunkId(candidate.hunkIdx),
           file: hunk.file,
-          text: renderConnectedContext(
-            hunk,
-            connectedBySeed.get(candidate.hunkIdx) ?? [],
-            hunks,
-          ),
+          text: renderIsolatedHunk(candidate.hunkIdx).text,
         },
         prContext: isolatedPrContext,
       })
@@ -1885,6 +1893,25 @@ export async function checkInvariants(
       continue;
     }
 
+    const renderedContext = renderIsolatedHunk(c.hunkIdx);
+    if (renderedContext.truncated) {
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure: {
+          code: "insufficient-context",
+          message:
+            renderedContext.omittedCompanions > 0
+              ? `Connected context omitted ${renderedContext.omittedCompanions} companion hunk(s)`
+              : "Hunk context was truncated by the semantic-lint input bound",
+          scope: "candidate",
+          retryable: false,
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      });
+      continue;
+    }
+
     input.onJudge?.(candidateIndex + 1, selected.length);
     let outcome: JudgeOutcome;
     if (!judge) {
@@ -1906,11 +1933,7 @@ export async function checkInvariants(
             content: inv.entry.content,
           },
           file: hunk.file,
-          hunk: renderConnectedContext(
-            hunk,
-            connectedBySeed.get(c.hunkIdx) ?? [],
-            hunks,
-          ),
+          hunk: renderedContext.text,
           prContext: isolatedPrContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });

@@ -276,6 +276,7 @@ describe("splitDiff", () => {
     const hunks = splitDiff(raw);
     expect(hunks).toHaveLength(1);
     expect(hunks[0].file).toBe("src/new.ts");
+    expect(hunks[0].oldFile).toBe("src/old.ts");
     expect(hunks[0].text).toContain("rename from src/old.ts");
     expect(hunks[0].text).toContain("rename to src/new.ts");
   });
@@ -360,16 +361,24 @@ describe("parseDiffResult", () => {
           reason: "bounded",
           stats: { semanticCalls: 1, transportAttempts: 1 },
         }));
-        await checkInvariants({
+        const check = await checkInvariants({
           projectPath: repo,
           diff: result,
           range: { base, head, source: "test" },
           judge,
           sessionID: "large-real-git-hunk",
         });
-        expect(judgeCall).toHaveBeenCalledWith(
-          expect.objectContaining({ hunk: result.hunks[0].text }),
-        );
+        expect(judgeCall).not.toHaveBeenCalled();
+        expect(check).toMatchObject({
+          status: "failed",
+          unresolved: 1,
+          candidateOutcomes: [
+            expect.objectContaining({
+              state: "unresolved",
+              failure: { code: "insufficient-context" },
+            }),
+          ],
+        });
       }
     } finally {
       rmSync(repo, { recursive: true, force: true });

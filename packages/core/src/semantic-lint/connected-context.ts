@@ -17,9 +17,19 @@ const MAX_SAME_FILE_CANDIDATES = 16;
 const MAX_DIRECT_CANDIDATES = 32;
 const TOKEN_RE = /\b[A-Za-z_$][\w$]{2,}\b/g;
 const IMPORT_RE =
-  /^\s*(?:import(?:[^;\r\n]*?\sfrom\s+|\s*)|export[^;\r\n]*?\sfrom\s+|(?:const|let|var)[^;\r\n]*?=\s*require\()\s*['"]([^'"]+)['"]/gm;
+  /(?:^|[;\n])\s*(?:import(?:[^;]*?\sfrom\s+|\s*)|export[^;]*?\sfrom\s+|(?:const|let|var)[^;]*?=\s*require\()\s*['"]([^'"]+)['"]/gm;
 const STRING_RE = /(["'\x60])(?:\\.|(?!\1)[^\r\n])*\1/g;
 const TEST_RE = /(?:^|[./_-])(test|spec|tests?)(?:[./_-]|$)/i;
+const TEST_PAIR_ROOTS = new Set([
+  "app",
+  "lib",
+  "src",
+  "spec",
+  "specs",
+  "test",
+  "tests",
+  "__tests__",
+]);
 const CONTEXT_TRUNCATION_MARKER = "\n... [seed hunk truncated by Lore] ...\n";
 
 const IGNORED_TOKENS = new Set([
@@ -96,10 +106,20 @@ const IGNORED_TOKENS = new Set([
   "value",
   "yield",
   "assert",
+  "array",
+  "client",
   "describe",
   "expect",
   "it",
+  "logger",
+  "manager",
+  "number",
   "mock",
+  "object",
+  "promise",
+  "record",
+  "server",
+  "service",
   "setup",
   "status",
   "test",
@@ -108,6 +128,7 @@ const IGNORED_TOKENS = new Set([
 
 interface HunkMetadata {
   file: string;
+  oldFile?: string;
   module: string;
   tokens: Set<string>;
   imports: Set<string>;
@@ -121,35 +142,98 @@ interface HunkIndex {
   byModule: Map<string, number[]>;
   byToken: Map<string, number[]>;
   byImportTarget: Map<string, number[]>;
-  byStem: Map<string, number[]>;
+  byTestStem: Map<string, number[]>;
+  bySourceStem: Map<string, number[]>;
+  sameFileNeighbors: Map<number, number[]>;
 }
 
-function changedLines(hunk: DiffHunk): string {
+function diffLines(hunk: DiffHunk, prefix: "+" | "-" | "result"): string {
   return hunk.text
     .split("\n")
-    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .filter((line) => {
+      if (prefix === "+")
+        return line.startsWith("+") && !line.startsWith("+++");
+      if (prefix === "-")
+        return line.startsWith("-") && !line.startsWith("---");
+      return (
+        line.startsWith(" ") ||
+        (line.startsWith("+") && !line.startsWith("+++"))
+      );
+    })
     .map((line) => line.slice(1))
     .join("\n");
 }
 
-function codeText(hunk: DiffHunk): string {
-  return changedLines(hunk)
-    .replace(STRING_RE, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "");
+function currentLines(hunk: DiffHunk): string {
+  return diffLines(hunk, "result");
+}
+
+function oldLines(hunk: DiffHunk): string {
+  return diffLines(hunk, "-") + "\n" + diffLines(hunk, "result");
+}
+
+function stripComments(value: string): string {
+  let output = "";
+  let quote: string | null = null;
+  let blockComment = false;
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    const next = value[i + 1];
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        i++;
+      } else if (char === "\n") {
+        output += "\n";
+      }
+      continue;
+    }
+    if (quote) {
+      output += char;
+      if (char === "\\" && next !== undefined) {
+        output += next;
+        i++;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "\x60") {
+      quote = char;
+      output += char;
+    } else if (char === "/" && next === "/") {
+      while (i < value.length && value[i] !== "\n") i++;
+      if (value[i] === "\n") output += "\n";
+    } else if (char === "/" && next === "*") {
+      blockComment = true;
+      i++;
+    } else {
+      output += char;
+    }
+  }
+  return output;
+}
+
+function codeText(value: string): string {
+  return stripComments(value).replace(STRING_RE, " ");
 }
 
 function tokens(hunk: DiffHunk): Set<string> {
   const result = new Set<string>();
-  for (const token of codeText(hunk).match(TOKEN_RE) ?? []) {
-    if (!IGNORED_TOKENS.has(token)) result.add(token);
+  const current = codeText(currentLines(hunk));
+  const source = current.trim().length > 0 ? current : codeText(oldLines(hunk));
+  for (const token of source.match(TOKEN_RE) ?? []) {
+    if (!IGNORED_TOKENS.has(token.toLowerCase())) result.add(token);
   }
   return result;
 }
 
 function imports(hunk: DiffHunk): Set<string> {
   const result = new Set<string>();
-  for (const match of changedLines(hunk).matchAll(IMPORT_RE)) {
+  const current = stripComments(currentLines(hunk));
+  const source =
+    current.trim().length > 0 ? current : stripComments(oldLines(hunk));
+  for (const match of source.matchAll(IMPORT_RE)) {
     if (match[1]) result.add(match[1]);
   }
   return result;
@@ -188,6 +272,10 @@ function moduleLookupKeys(module: string): string[] {
   return keys;
 }
 
+function isTestPath(file: string): boolean {
+  return TEST_RE.test(file);
+}
+
 function stem(file: string): string {
   return basename(file)
     .replace(/\.(tsx?|jsx?|mjs|cjs|py|rs|go|java)$/i, "")
@@ -203,6 +291,9 @@ function lineStart(hunk: DiffHunk): number | null {
 function metadata(hunk: DiffHunk): HunkMetadata {
   return {
     file: hunk.file,
+    ...(hunk.oldFile && hunk.oldFile !== hunk.file
+      ? { oldFile: hunk.oldFile }
+      : {}),
     module: modulePath(hunk.file),
     tokens: tokens(hunk),
     imports: imports(hunk),
@@ -225,10 +316,14 @@ function addIndex(
   }
 }
 
-function importTarget(importer: HunkMetadata, specifier: string): string {
+function importTargetFromPath(importer: string, specifier: string): string {
   if (!specifier.startsWith(".")) return modulePath(specifier);
-  const directory = importer.file.split("/").slice(0, -1).join("/");
+  const directory = importer.split("/").slice(0, -1).join("/");
   return modulePath(normalizePath(directory + "/" + specifier));
+}
+
+function filePaths(hunk: HunkMetadata): string[] {
+  return hunk.oldFile ? [hunk.file, hunk.oldFile] : [hunk.file];
 }
 
 function buildIndex(hunks: DiffHunk[]): HunkIndex {
@@ -239,22 +334,81 @@ function buildIndex(hunks: DiffHunk[]): HunkIndex {
     byModule: new Map(),
     byToken: new Map(),
     byImportTarget: new Map(),
-    byStem: new Map(),
+    byTestStem: new Map(),
+    bySourceStem: new Map(),
+    sameFileNeighbors: new Map(),
   };
 
   for (let i = 0; i < metadataList.length; i++) {
     const item = metadataList[i];
-    addIndex(index.byFile, item.file, i);
-    for (const key of moduleLookupKeys(item.module)) {
-      addIndex(index.byModule, key, i);
+    for (const file of filePaths(item)) {
+      addIndex(index.byFile, file, i);
+      for (const key of moduleLookupKeys(modulePath(file))) {
+        addIndex(index.byModule, key, i);
+      }
+      const stemIndex = isTestPath(file)
+        ? index.byTestStem
+        : index.bySourceStem;
+      addIndex(stemIndex, stem(file), i);
     }
     for (const token of item.tokens) {
       addIndex(index.byToken, token, i);
     }
     for (const specifier of item.imports) {
-      addIndex(index.byImportTarget, importTarget(item, specifier), i);
+      for (const file of filePaths(item)) {
+        addIndex(
+          index.byImportTarget,
+          importTargetFromPath(file, specifier),
+          i,
+        );
+      }
     }
-    addIndex(index.byStem, stem(item.file), i);
+  }
+
+  for (const fileIndices of index.byFile.values()) {
+    const ordered = [...fileIndices].sort((a, b) => {
+      const aLine = index.metadata[a].lineStart;
+      const bLine = index.metadata[b].lineStart;
+      if (aLine === null || bLine === null) return a - b;
+      return aLine - bLine || a - b;
+    });
+    const positions = new Map(
+      ordered.map((value, position) => [value, position]),
+    );
+    for (const seedIndex of ordered) {
+      const position = positions.get(seedIndex) ?? 0;
+      const nearby = ordered.slice(
+        Math.max(0, position - MAX_SAME_FILE_CANDIDATES),
+        Math.min(ordered.length, position + MAX_SAME_FILE_CANDIDATES + 1),
+      );
+      nearby.sort((a, b) => {
+        const seedLine = index.metadata[seedIndex].lineStart;
+        const aLine = index.metadata[a].lineStart;
+        const bLine = index.metadata[b].lineStart;
+        if (seedLine === null || aLine === null || bLine === null) {
+          return a - b;
+        }
+        return Math.abs(aLine - seedLine) - Math.abs(bLine - seedLine) || a - b;
+      });
+      const merged = [
+        ...(index.sameFileNeighbors.get(seedIndex) ?? []),
+        ...nearby.filter((candidate) => candidate !== seedIndex),
+      ];
+      const unique = [...new Set(merged)];
+      unique.sort((a, b) => {
+        const seedLine = index.metadata[seedIndex].lineStart;
+        const aLine = index.metadata[a].lineStart;
+        const bLine = index.metadata[b].lineStart;
+        if (seedLine === null || aLine === null || bLine === null) {
+          return a - b;
+        }
+        return Math.abs(aLine - seedLine) - Math.abs(bLine - seedLine) || a - b;
+      });
+      index.sameFileNeighbors.set(
+        seedIndex,
+        unique.slice(0, MAX_SAME_FILE_CANDIDATES),
+      );
+    }
   }
   return index;
 }
@@ -278,22 +432,28 @@ function candidateIndexes(seedIndex: number, index: HunkIndex): number[] {
   const direct = new Set<number>();
 
   for (const specifier of seed.imports) {
-    for (const key of moduleLookupKeys(importTarget(seed, specifier))) {
+    for (const importer of filePaths(seed)) {
+      for (const key of moduleLookupKeys(
+        importTargetFromPath(importer, specifier),
+      )) {
+        appendCandidates(
+          direct,
+          index.byModule.get(key),
+          seedIndex,
+          MAX_DIRECT_CANDIDATES,
+        );
+      }
+    }
+  }
+  for (const importer of filePaths(seed)) {
+    for (const key of moduleLookupKeys(modulePath(importer))) {
       appendCandidates(
         direct,
-        index.byModule.get(key),
+        index.byImportTarget.get(key),
         seedIndex,
         MAX_DIRECT_CANDIDATES,
       );
     }
-  }
-  for (const key of moduleLookupKeys(seed.module)) {
-    appendCandidates(
-      direct,
-      index.byImportTarget.get(key),
-      seedIndex,
-      MAX_DIRECT_CANDIDATES,
-    );
   }
   appendCandidates(
     candidates,
@@ -303,26 +463,15 @@ function candidateIndexes(seedIndex: number, index: HunkIndex): number[] {
   );
   appendCandidates(
     candidates,
-    index.byStem.get(stem(seed.file)),
+    index.sameFileNeighbors.get(seedIndex),
     seedIndex,
     MAX_CONTEXT_CANDIDATES_PER_SEED,
   );
-
-  const sameFile = [...(index.byFile.get(seed.file) ?? [])].filter(
-    (candidate) => candidate !== seedIndex,
-  );
-  sameFile.sort((a, b) => {
-    const aLine = index.metadata[a].lineStart;
-    const bLine = index.metadata[b].lineStart;
-    const seedLine = seed.lineStart;
-    if (seedLine === null || aLine === null || bLine === null) {
-      return a - b;
-    }
-    return Math.abs(aLine - seedLine) - Math.abs(bLine - seedLine) || a - b;
-  });
   appendCandidates(
     candidates,
-    sameFile.slice(0, MAX_SAME_FILE_CANDIDATES),
+    seed.isTest
+      ? index.bySourceStem.get(stem(seed.file))
+      : index.byTestStem.get(stem(seed.file)),
     seedIndex,
     MAX_CONTEXT_CANDIDATES_PER_SEED,
   );
@@ -365,17 +514,54 @@ function importMatches(
   }
   const normalizedSpecifier = normalizePath(specifier);
   const normalizedCandidate = modulePath(candidate);
+  return normalizedCandidate === normalizedSpecifier;
+}
+
+function testPairPathCompatible(source: string, test: string): boolean {
+  const sourceParts = source.split("/").slice(0, -1);
+  const testParts = test.split("/").slice(0, -1);
+  if (sourceParts.join("/") === testParts.join("/")) return true;
+  let common = 0;
+  while (
+    common < sourceParts.length &&
+    common < testParts.length &&
+    sourceParts[common] === testParts[common]
+  ) {
+    common++;
+  }
+  if (common >= 2) return true;
   return (
-    normalizedCandidate === normalizedSpecifier ||
-    normalizedCandidate.endsWith("/" + normalizedSpecifier)
+    common === 0 &&
+    TEST_PAIR_ROOTS.has(sourceParts[0] ?? "") &&
+    TEST_PAIR_ROOTS.has(testParts[0] ?? "")
   );
+}
+
+function isTestPair(seed: HunkMetadata, candidate: HunkMetadata): boolean {
+  for (const seedFile of filePaths(seed)) {
+    for (const candidateFile of filePaths(candidate)) {
+      const seedIsTest = isTestPath(seedFile);
+      const candidateIsTest = isTestPath(candidateFile);
+      if (
+        seedIsTest !== candidateIsTest &&
+        stem(seedFile) === stem(candidateFile) &&
+        testPairPathCompatible(
+          seedIsTest ? candidateFile : seedFile,
+          seedIsTest ? seedFile : candidateFile,
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function related(
   seed: HunkMetadata,
   candidate: HunkMetadata,
 ): { reason: ConnectedCompanion["reason"]; score: number } | null {
-  if (seed.file === candidate.file) {
+  if (filePaths(seed).some((file) => filePaths(candidate).includes(file))) {
     const distance =
       seed.lineStart === null || candidate.lineStart === null
         ? 1000
@@ -383,23 +569,28 @@ function related(
     return { reason: "same-file", score: 100_000 - distance };
   }
   if (
-    [...seed.imports].some((value) =>
-      importMatches(seed.file, value, candidate.file),
+    filePaths(seed).some((importer) =>
+      [...seed.imports].some((value) =>
+        filePaths(candidate).some((candidateFile) =>
+          importMatches(importer, value, candidateFile),
+        ),
+      ),
     )
   ) {
     return { reason: "import-relationship", score: 80_000 };
   }
   if (
-    [...candidate.imports].some((value) =>
-      importMatches(candidate.file, value, seed.file),
+    filePaths(candidate).some((importer) =>
+      [...candidate.imports].some((value) =>
+        filePaths(seed).some((seedFile) =>
+          importMatches(importer, value, seedFile),
+        ),
+      ),
     )
   ) {
     return { reason: "import-relationship", score: 80_000 };
   }
-  if (
-    stem(seed.file) === stem(candidate.file) &&
-    seed.isTest !== candidate.isTest
-  ) {
+  if (isTestPair(seed, candidate)) {
     return { reason: "test-pair", score: 70_000 };
   }
   const shared = [...seed.tokens].filter((token) =>
@@ -461,15 +652,26 @@ function truncateUtf8(value: string, maxBytes: number): string {
   );
 }
 
-export function renderConnectedContext(
+export interface RenderedConnectedContext {
+  text: string;
+  truncated: boolean;
+  omittedCompanions: number;
+}
+
+export function renderConnectedContextDetails(
   seed: DiffHunk,
   companions: ConnectedCompanion[],
   hunks: DiffHunk[],
-): string {
+): RenderedConnectedContext {
+  const seedBytes = Buffer.byteLength(seed.text, "utf8");
   let output = truncateUtf8(seed.text, MAX_CONTEXT_BYTES);
+  let omittedCompanions = 0;
   for (const companion of companions) {
     const hunk = hunks[companion.hunkIndex];
-    if (!hunk) continue;
+    if (!hunk) {
+      omittedCompanions++;
+      continue;
+    }
     const block =
       "\n\n[connected context: " +
       companion.reason +
@@ -477,8 +679,26 @@ export function renderConnectedContext(
       hunk.file +
       "]\n" +
       hunk.text;
-    if (Buffer.byteLength(output + block, "utf8") > MAX_CONTEXT_BYTES) break;
+    if (Buffer.byteLength(output + block, "utf8") > MAX_CONTEXT_BYTES) {
+      omittedCompanions++;
+      continue;
+    }
     output += block;
   }
-  return output;
+  return {
+    text: output,
+    truncated:
+      seedBytes > MAX_CONTEXT_BYTES ||
+      seed.text.includes("hunk truncated by Lore") ||
+      omittedCompanions > 0,
+    omittedCompanions,
+  };
+}
+
+export function renderConnectedContext(
+  seed: DiffHunk,
+  companions: ConnectedCompanion[],
+  hunks: DiffHunk[],
+): string {
+  return renderConnectedContextDetails(seed, companions, hunks).text;
 }

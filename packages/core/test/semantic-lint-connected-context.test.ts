@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   buildConnectedContext,
   renderConnectedContext,
+  renderConnectedContextDetails,
 } from "../src/semantic-lint/connected-context";
 import type { DiffHunk } from "../src/semantic-lint/check";
 
-const hunk = (file: string, text: string): DiffHunk => ({ file, text });
+const hunk = (
+  file: string,
+  text: string,
+  extras: Pick<DiffHunk, "oldFile"> = {},
+): DiffHunk => ({ file, text, ...extras });
 
 describe("connected semantic-lint context", () => {
   it("selects bounded deterministic companions without transitive fan-out", () => {
@@ -74,6 +79,14 @@ describe("connected semantic-lint context", () => {
     expect(buildConnectedContext(hunks).get(0)).toEqual([]);
   });
 
+  it("does not treat a package name as a source-root suffix", () => {
+    const hunks = [
+      hunk("src/main.ts", '@@\n+import lodash from "lodash";'),
+      hunk("src/lodash.ts", "@@\n+export const helper = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
   it("ignores imports that only appear in removed lines or comments", () => {
     const hunks = [
       hunk("src/main.ts", '@@\n-import { helper } from "./utils";'),
@@ -98,6 +111,46 @@ describe("connected semantic-lint context", () => {
     expect(buildConnectedContext(hunks).get(0)).toEqual([]);
   });
 
+  it("filters common PascalCase identifiers from shared-symbol matching", () => {
+    const hunks = [
+      hunk("src/a.ts", "@@\n+const request = Request;\n+return Response;"),
+      hunk("src/b.ts", "@@\n+const request = Request;\n+return Response;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
+  it("parses multiline imports and ignores comment lookalikes", () => {
+    const hunks = [
+      hunk(
+        "src/main.ts",
+        '@@\n+/* import "./fake"; */\n+import {\n+  helper,\n+} from "./utils";',
+      ),
+      hunk("src/utils.ts", "@@\n+export const helper = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "import-relationship",
+    });
+  });
+
+  it("includes unchanged import context but excludes removed imports", () => {
+    const hunks = [
+      hunk(
+        "src/main.ts",
+        '@@\n import { helper } from "./utils";\n+helper();\n-import { removed } from "./wrong";',
+      ),
+      hunk("src/utils.ts", "@@\n+export const helper = true;"),
+      hunk("src/wrong.ts", "@@\n+export const removed = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "import-relationship",
+    });
+    expect(buildConnectedContext(hunks).get(0)).not.toContainEqual(
+      expect.objectContaining({ hunkIndex: 2 }),
+    );
+  });
+
   it("prefers the nearest same-file hunk", () => {
     const hunks = [
       hunk("src/core.ts", "@@ -100,1 +100,1 @@\n+first"),
@@ -115,6 +168,64 @@ describe("connected semantic-lint context", () => {
     );
     expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(12 * 1024);
     expect(rendered).toContain("seed hunk truncated");
+  });
+
+  it("skips an oversized companion and still considers later companions", () => {
+    const hunks = [
+      hunk("src/seed.ts", "x".repeat(100)),
+      hunk("src/too-large.ts", "y".repeat(40_000)),
+      hunk("src/small.ts", "small companion"),
+    ];
+    const details = renderConnectedContextDetails(
+      hunks[0],
+      [
+        { hunkIndex: 1, reason: "shared-symbol", score: 2 },
+        { hunkIndex: 2, reason: "shared-symbol", score: 1 },
+      ],
+      hunks,
+    );
+    expect(details.text).toContain("small companion");
+    expect(details.omittedCompanions).toBe(1);
+    expect(details.truncated).toBe(true);
+  });
+
+  it("finds a test pair after unrelated same-stem source files", () => {
+    const distractors = Array.from({ length: 80 }, (_, index) =>
+      hunk(`packages/pkg-${index}/foo.ts`, "@@\n+const distractor = true;"),
+    );
+    const hunks = [
+      hunk("src/foo.ts", "@@\n+const source = true;"),
+      ...distractors,
+      hunk("tests/foo.test.ts", "@@\n+expect(source).toBe(true);"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 81,
+      reason: "test-pair",
+    });
+  });
+
+  it("rejects same-named test files from unrelated packages", () => {
+    const hunks = [
+      hunk("packages/alpha/src/foo.ts", "@@\n+const source = true;"),
+      hunk(
+        "packages/beta/tests/foo.test.ts",
+        "@@\n+expect(source).toBe(true);",
+      ),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
+  it("matches a renamed file through its old path", () => {
+    const hunks = [
+      hunk("src/main.ts", '@@\n+import x from "./old";'),
+      hunk("src/new.ts", "@@\n+export const x = true;", {
+        oldFile: "src/old.ts",
+      }),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "import-relationship",
+    });
   });
 
   it("bounds relation work for a maximum-sized diff", () => {
