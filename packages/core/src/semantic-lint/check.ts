@@ -1808,6 +1808,13 @@ export async function checkInvariants(
     ),
     contextIncomplete: !connectedContext.contexts.has(hunkIndex),
   });
+  const coverageCandidates = selected.filter(
+    (candidate) => !renderIsolatedHunk(candidate.hunkIdx).truncated,
+  );
+  const coverageInvariantIndices = uniqueInvariantIndices(
+    coverageCandidates,
+    MAX_HOLISTIC_INVARIANTS,
+  );
   const isolatedPrContext = input.prContext
     ? {
         ...input.prContext,
@@ -1815,7 +1822,7 @@ export async function checkInvariants(
         descriptionTruncated: false,
       }
     : undefined;
-  const isolatedInputTokens = selected.reduce((total, candidate) => {
+  const isolatedInputTokens = coverageCandidates.reduce((total, candidate) => {
     const invariant = invariants[candidate.invariantIdx];
     const hunk = hunks[candidate.hunkIdx];
     return (
@@ -1840,19 +1847,21 @@ export async function checkInvariants(
     holisticPlan?.kind === "too-large"
       ? isolatedLintCoverage({
           availableHunks: hunks.length,
-          includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
-            .size,
+          includedHunks: new Set(
+            coverageCandidates.map((candidate) => candidate.hunkIdx),
+          ).size,
           availableInvariants: allEntries.length,
-          includedInvariants: selectedInvariantIndices.length,
+          includedInvariants: coverageInvariantIndices.length,
           inputTokens: isolatedInputTokens,
           inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
         })
       : isolatedLintCoverage({
           availableHunks: hunks.length,
-          includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
-            .size,
+          includedHunks: new Set(
+            coverageCandidates.map((candidate) => candidate.hunkIdx),
+          ).size,
           availableInvariants: allEntries.length,
-          includedInvariants: selectedInvariantIndices.length,
+          includedInvariants: coverageInvariantIndices.length,
           inputTokens: isolatedInputTokens,
           inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
         });
