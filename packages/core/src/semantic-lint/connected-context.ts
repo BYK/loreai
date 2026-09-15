@@ -73,10 +73,14 @@ function importMatches(
   specifier: string,
   candidate: string,
 ): boolean {
+  if (specifier.startsWith(".")) {
+    return relativeImportMatches(importer, specifier, candidate);
+  }
+  const normalizedSpecifier = normalizePath(specifier);
+  const normalizedCandidate = modulePath(candidate);
   return (
-    relativeImportMatches(importer, specifier, candidate) ||
-    candidate.includes(specifier) ||
-    specifier.endsWith("/" + basename(candidate))
+    normalizedCandidate === normalizedSpecifier ||
+    normalizedCandidate.endsWith("/" + normalizedSpecifier)
   );
 }
 

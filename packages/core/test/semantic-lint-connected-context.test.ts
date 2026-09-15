@@ -54,4 +54,12 @@ describe("connected semantic-lint context", () => {
       reason: "test-pair",
     });
   });
+
+  it("does not treat package-name substrings as import relationships", () => {
+    const hunks = [
+      hunk("src/main.ts", 'import lodash from "lodash";'),
+      hunk("src/lodash-utils.ts", "export const helper = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
 });
