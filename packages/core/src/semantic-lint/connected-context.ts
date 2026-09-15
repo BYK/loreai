@@ -172,6 +172,10 @@ function oldLines(hunk: DiffHunk): string {
   return diffLines(hunk, "-") + "\n" + diffLines(hunk, "result");
 }
 
+function hasAddedLines(hunk: DiffHunk): boolean {
+  return diffLines(hunk, "+").trim().length > 0;
+}
+
 function stripComments(value: string): string {
   let output = "";
   let quote: string | null = null;
@@ -220,8 +224,10 @@ function codeText(value: string): string {
 
 function tokens(hunk: DiffHunk): Set<string> {
   const result = new Set<string>();
-  const current = codeText(currentLines(hunk));
-  const source = current.trim().length > 0 ? current : codeText(oldLines(hunk));
+  const current = currentLines(hunk);
+  const source = hasAddedLines(hunk)
+    ? codeText(current)
+    : codeText(oldLines(hunk));
   for (const token of source.match(TOKEN_RE) ?? []) {
     if (!IGNORED_TOKENS.has(token.toLowerCase())) result.add(token);
   }
@@ -230,9 +236,10 @@ function tokens(hunk: DiffHunk): Set<string> {
 
 function imports(hunk: DiffHunk): Set<string> {
   const result = new Set<string>();
-  const current = stripComments(currentLines(hunk));
-  const source =
-    current.trim().length > 0 ? current : stripComments(oldLines(hunk));
+  const current = currentLines(hunk);
+  const source = hasAddedLines(hunk)
+    ? stripComments(current)
+    : stripComments(oldLines(hunk));
   for (const match of source.matchAll(IMPORT_RE)) {
     if (match[1]) result.add(match[1]);
   }
@@ -607,15 +614,18 @@ function related(
 
 export function buildConnectedContext(
   hunks: DiffHunk[],
+  signal?: AbortSignal,
 ): Map<number, ConnectedCompanion[]> {
   const index = buildIndex(hunks);
   const result = new Map<number, ConnectedCompanion[]>();
   let relationChecks = 0;
 
   for (let seedIndex = 0; seedIndex < hunks.length; seedIndex++) {
+    signal?.throwIfAborted();
     if (relationChecks >= MAX_CONTEXT_RELATION_CHECKS) break;
     const companions: ConnectedCompanion[] = [];
     for (const candidateIndex of candidateIndexes(seedIndex, index)) {
+      signal?.throwIfAborted();
       if (relationChecks >= MAX_CONTEXT_RELATION_CHECKS) break;
       relationChecks++;
       const relation = related(

@@ -1732,7 +1732,7 @@ export async function checkInvariants(
     repIdx: index,
     memberIdxs: [index],
   }));
-  const connectedBySeed = buildConnectedContext(hunks);
+  const connectedBySeed = buildConnectedContext(hunks, input.signal);
   const renderIsolatedHunk = (hunkIndex: number) =>
     renderConnectedContextDetails(
       hunks[hunkIndex],

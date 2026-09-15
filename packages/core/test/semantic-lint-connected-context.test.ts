@@ -151,6 +151,20 @@ describe("connected semantic-lint context", () => {
     );
   });
 
+  it("uses removed code as evidence for a deletion-only hunk", () => {
+    const hunks = [
+      hunk(
+        "src/main.ts",
+        '@@ -1,2 +1,1 @@\n context\n-import x from "./utils";',
+      ),
+      hunk("src/utils.ts", "@@\n+export const x = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "import-relationship",
+    });
+  });
+
   it("prefers the nearest same-file hunk", () => {
     const hunks = [
       hunk("src/core.ts", "@@ -100,1 +100,1 @@\n+first"),
@@ -226,6 +240,17 @@ describe("connected semantic-lint context", () => {
       hunkIndex: 1,
       reason: "import-relationship",
     });
+  });
+
+  it("honors an already-aborted context signal", () => {
+    const controller = new AbortController();
+    controller.abort();
+    expect(() =>
+      buildConnectedContext(
+        [hunk("src/a.ts", "@@\n+const value = true;")],
+        controller.signal,
+      ),
+    ).toThrow();
   });
 
   it("bounds relation work for a maximum-sized diff", () => {
