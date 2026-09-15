@@ -30,7 +30,9 @@ function basename(file: string): string {
 }
 
 function stem(file: string): string {
-  return basename(file).replace(/\.(tsx?|jsx?|mjs|cjs|py|rs|go|java)$/i, "");
+  return basename(file)
+    .replace(/\.(tsx?|jsx?|mjs|cjs|py|rs|go|java)$/i, "")
+    .replace(/\.(test|spec)$/i, "");
 }
 
 function related(
