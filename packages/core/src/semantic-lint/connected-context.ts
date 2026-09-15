@@ -121,6 +121,7 @@ interface HunkIndex {
   byModule: Map<string, number[]>;
   byToken: Map<string, number[]>;
   byImportTarget: Map<string, number[]>;
+  byStem: Map<string, number[]>;
 }
 
 function changedLines(hunk: DiffHunk): string {
@@ -238,6 +239,7 @@ function buildIndex(hunks: DiffHunk[]): HunkIndex {
     byModule: new Map(),
     byToken: new Map(),
     byImportTarget: new Map(),
+    byStem: new Map(),
   };
 
   for (let i = 0; i < metadataList.length; i++) {
@@ -252,6 +254,7 @@ function buildIndex(hunks: DiffHunk[]): HunkIndex {
     for (const specifier of item.imports) {
       addIndex(index.byImportTarget, importTarget(item, specifier), i);
     }
+    addIndex(index.byStem, stem(item.file), i);
   }
   return index;
 }
@@ -295,6 +298,12 @@ function candidateIndexes(seedIndex: number, index: HunkIndex): number[] {
   appendCandidates(
     candidates,
     [...direct],
+    seedIndex,
+    MAX_CONTEXT_CANDIDATES_PER_SEED,
+  );
+  appendCandidates(
+    candidates,
+    index.byStem.get(stem(seed.file)),
     seedIndex,
     MAX_CONTEXT_CANDIDATES_PER_SEED,
   );
