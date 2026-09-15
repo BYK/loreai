@@ -35,8 +35,8 @@ describe("connected semantic-lint context", () => {
 
   it("resolves extensionless relative imports", () => {
     const hunks = [
-      hunk("src/main.ts", 'import { helper } from "./utils";'),
-      hunk("src/utils.ts", "export const helper = true;"),
+      hunk("src/main.ts", '@@\n+import { helper } from "./utils";'),
+      hunk("src/utils.ts", "@@\n+export const helper = true;"),
     ];
     expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
       hunkIndex: 1,
@@ -55,11 +55,74 @@ describe("connected semantic-lint context", () => {
     });
   });
 
+  it("pairs Python suffix-style tests with their source module", () => {
+    const hunks = [
+      hunk("src/foo.py", "def foo(): return True"),
+      hunk("tests/foo_test.py", "def test_foo(): assert foo()"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "test-pair",
+    });
+  });
+
   it("does not treat package-name substrings as import relationships", () => {
     const hunks = [
-      hunk("src/main.ts", 'import lodash from "lodash";'),
-      hunk("src/lodash-utils.ts", "export const helper = true;"),
+      hunk("src/main.ts", '@@\n+import lodash from "lodash";'),
+      hunk("src/lodash-utils.ts", "@@\n+export const helper = true;"),
     ];
     expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
+  it("ignores imports that only appear in removed lines or comments", () => {
+    const hunks = [
+      hunk("src/main.ts", '@@\n-import { helper } from "./utils";'),
+      hunk("src/utils.ts", "@@\n+export const helper = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
+  it("does not connect files using only common syntax tokens", () => {
+    const hunks = [
+      hunk("src/a.ts", "@@\n+const value = true;\n+return value;"),
+      hunk("src/b.ts", "@@\n+const other = true;\n+return other;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
+  it("does not connect files using only common identifiers", () => {
+    const hunks = [
+      hunk("src/a.ts", "@@\n+const data = value;\n+return result;"),
+      hunk("src/b.ts", "@@\n+const data = value;\n+return result;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
+  it("prefers the nearest same-file hunk", () => {
+    const hunks = [
+      hunk("src/core.ts", "@@ -100,1 +100,1 @@\n+first"),
+      hunk("src/core.ts", "@@ -110,1 +110,1 @@\n+near"),
+      hunk("src/core.ts", "@@ -1000,1 +1000,1 @@\n+far"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]?.hunkIndex).toBe(1);
+  });
+
+  it("keeps oversized seed context within the byte bound", () => {
+    const rendered = renderConnectedContext(
+      hunk("src/large.ts", "x".repeat(40_000)),
+      [],
+      [],
+    );
+    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(12 * 1024);
+    expect(rendered).toContain("seed hunk truncated");
+  });
+
+  it("bounds relation work for a maximum-sized diff", () => {
+    const hunks = Array.from({ length: 1_000 }, (_, index) =>
+      hunk(`src/file-${index}.ts`, `@@\n+const value${index} = true;`),
+    );
+
+    const context = buildConnectedContext(hunks);
+    expect(context.size).toBe(1_000);
   });
 });
