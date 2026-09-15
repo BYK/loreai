@@ -51,6 +51,10 @@ import {
   type HolisticLintInput,
   type LintCoverage,
 } from "./context";
+import {
+  buildConnectedContextDetails,
+  renderConnectedContextDetails,
+} from "./connected-context";
 import { extractReferences } from "../references";
 import type { LLMClient } from "../types";
 
@@ -501,6 +505,10 @@ function resolveDefaultBranch(cwd: string): string | null {
 
 export interface DiffHunk {
   file: string;
+  /** Original path for a rename; omitted when the path is unchanged. */
+  oldFile?: string;
+  /** True when the changed file has no new-side path (a full file deletion). */
+  deleted?: boolean;
   /** The unified-diff hunk text (the `@@ ... @@` header + its body). */
   text: string;
 }
@@ -669,7 +677,12 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, text });
+      hunks.push({
+        file: f,
+        text,
+        ...(oldFile && oldFile !== f ? { oldFile } : {}),
+        ...(file.length === 0 && oldFile ? { deleted: true } : {}),
+      });
     }
     cur = null;
   };
@@ -703,7 +716,7 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, text });
+      hunks.push({ file: f, oldFile: pathChangeFrom, text });
     }
     pathChangeFrom = "";
     pathChangeTo = "";
@@ -1716,9 +1729,12 @@ export async function checkInvariants(
   }
   const hunkVecs = hunkVecResult.vecs;
 
-  // Diversify: cluster near-identical hunks so the budget covers DISTINCT
-  // changes. Only each cluster's representative is judged; members inherit.
-  const clusters = clusterHunks(hunkVecs);
+  // Every hunk remains an independent seed. Similarity is not proof that
+  // another file has the same behavior, so verdicts are never propagated.
+  const clusters = hunks.map((_, index) => ({
+    repIdx: index,
+    memberIdxs: [index],
+  }));
 
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
@@ -1768,57 +1784,6 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget,
         })
       : null;
-  const isolatedPrContext = input.prContext
-    ? {
-        ...input.prContext,
-        description: "",
-        descriptionTruncated: false,
-      }
-    : undefined;
-  const isolatedInputTokens = selected.reduce((total, candidate) => {
-    const invariant = invariants[candidate.invariantIdx];
-    const hunk = hunks[candidate.hunkIdx];
-    return (
-      total +
-      estimateIsolatedLintInputTokens({
-        invariant: {
-          id: invariant.entry.id,
-          title: invariant.entry.title,
-          content: invariant.entry.content,
-        },
-        hunk: {
-          id: holisticHunkId(candidate.hunkIdx),
-          file: hunk.file,
-          text: hunk.text,
-        },
-        prContext: isolatedPrContext,
-      })
-    );
-  }, 0);
-
-  const coverage =
-    holisticPlan?.kind === "too-large"
-      ? isolatedLintCoverage({
-          availableHunks: hunks.length,
-          includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
-            .size,
-          availableInvariants: allEntries.length,
-          includedInvariants: selectedInvariantIndices.length,
-          inputTokens: isolatedInputTokens,
-          inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
-        })
-      : holisticPlan?.kind === "fit"
-        ? holisticPlan.coverage
-        : isolatedLintCoverage({
-            availableHunks: hunks.length,
-            includedHunks: new Set(
-              selected.map((candidate) => candidate.hunkIdx),
-            ).size,
-            availableInvariants: allEntries.length,
-            includedInvariants: selectedInvariantIndices.length,
-            inputTokens: isolatedInputTokens,
-            inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
-          });
 
   if (holisticPlan?.kind === "fit" && input.holisticJudge) {
     return runHolisticLint({
@@ -1834,9 +1799,72 @@ export async function checkInvariants(
     });
   }
 
-  // Map a representative hunk index → its cluster members, for verdict fan-out.
-  const membersByRep = new Map<number, number[]>();
-  for (const c of clusters) membersByRep.set(c.repIdx, c.memberIdxs);
+  const connectedContext = buildConnectedContextDetails(hunks, input.signal);
+  const renderIsolatedHunk = (hunkIndex: number) => ({
+    ...renderConnectedContextDetails(
+      hunks[hunkIndex],
+      connectedContext.contexts.get(hunkIndex) ?? [],
+      hunks,
+    ),
+    contextIncomplete: !connectedContext.contexts.has(hunkIndex),
+  });
+  const coverageCandidates = selected.filter(
+    (candidate) => !renderIsolatedHunk(candidate.hunkIdx).truncated,
+  );
+  const coverageInvariantIndices = uniqueInvariantIndices(
+    coverageCandidates,
+    MAX_HOLISTIC_INVARIANTS,
+  );
+  const isolatedPrContext = input.prContext
+    ? {
+        ...input.prContext,
+        description: "",
+        descriptionTruncated: false,
+      }
+    : undefined;
+  const isolatedInputTokens = coverageCandidates.reduce((total, candidate) => {
+    const invariant = invariants[candidate.invariantIdx];
+    const hunk = hunks[candidate.hunkIdx];
+    return (
+      total +
+      estimateIsolatedLintInputTokens({
+        invariant: {
+          id: invariant.entry.id,
+          title: invariant.entry.title,
+          content: invariant.entry.content,
+        },
+        hunk: {
+          id: holisticHunkId(candidate.hunkIdx),
+          file: hunk.file,
+          text: renderIsolatedHunk(candidate.hunkIdx).text,
+        },
+        prContext: isolatedPrContext,
+      })
+    );
+  }, 0);
+
+  const coverage =
+    holisticPlan?.kind === "too-large"
+      ? isolatedLintCoverage({
+          availableHunks: hunks.length,
+          includedHunks: new Set(
+            coverageCandidates.map((candidate) => candidate.hunkIdx),
+          ).size,
+          availableInvariants: allEntries.length,
+          includedInvariants: coverageInvariantIndices.length,
+          inputTokens: isolatedInputTokens,
+          inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
+        })
+      : isolatedLintCoverage({
+          availableHunks: hunks.length,
+          includedHunks: new Set(
+            coverageCandidates.map((candidate) => candidate.hunkIdx),
+          ).size,
+          availableInvariants: allEntries.length,
+          includedInvariants: coverageInvariantIndices.length,
+          inputTokens: isolatedInputTokens,
+          inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
+        });
 
   // Stage 2: judge the selected pairs (capped, coverage-ordered).
   const findings: Finding[] = [];
@@ -1877,6 +1905,23 @@ export async function checkInvariants(
       continue;
     }
 
+    const renderedContext = renderIsolatedHunk(c.hunkIdx);
+    if (renderedContext.truncated) {
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure: {
+          code: "insufficient-context",
+          message:
+            "Hunk context was truncated by the semantic-lint input bound",
+          scope: "candidate",
+          retryable: false,
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      });
+      continue;
+    }
+
     input.onJudge?.(candidateIndex + 1, selected.length);
     let outcome: JudgeOutcome;
     if (!judge) {
@@ -1898,7 +1943,7 @@ export async function checkInvariants(
             content: inv.entry.content,
           },
           file: hunk.file,
-          hunk: hunk.text,
+          hunk: renderedContext.text,
           prContext: isolatedPrContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });
@@ -1944,13 +1989,9 @@ export async function checkInvariants(
     // which is what produced the dominant false-positive class (a fix being read
     // as a violation).
     if (outcome.verdict !== "violates") continue;
-    // Fan out the verdict to every hunk in the representative's cluster: a
-    // repeated change (e.g. one rename across N files) is flagged in all N.
-    // Dedup per (invariant, file): the same invariant flagged against several
-    // hunks of ONE file is ONE drift, not N findings (the #1234 error-reporting
-    // case produced 4 near-identical findings). Cluster fan-out across DIFFERENT
-    // files is preserved — those are genuinely distinct locations.
-    const memberIdxs = membersByRep.get(c.hunkIdx) ?? [c.hunkIdx];
+    // A verdict belongs only to the seed hunk that was actually judged.
+    // Companion context is evidence for investigation, never a second verdict.
+    const memberIdxs = [c.hunkIdx];
     const severity = enforcementLevel(inv.entry);
     for (const mi of memberIdxs) {
       const dedupKey = `${inv.entry.id}\x1f${hunks[mi].file}`;
