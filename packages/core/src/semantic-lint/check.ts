@@ -1797,7 +1797,11 @@ export async function checkInvariants(
         hunk: {
           id: holisticHunkId(candidate.hunkIdx),
           file: hunk.file,
-          text: hunk.text,
+          text: renderConnectedContext(
+            hunk,
+            connectedBySeed.get(candidate.hunkIdx) ?? [],
+            hunks,
+          ),
         },
         prContext: isolatedPrContext,
       })
