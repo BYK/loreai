@@ -9,7 +9,7 @@ import type { DiffHunk } from "../src/semantic-lint/check";
 const hunk = (
   file: string,
   text: string,
-  extras: Pick<DiffHunk, "oldFile"> = {},
+  extras: Pick<DiffHunk, "deleted" | "oldFile"> = {},
 ): DiffHunk => ({ file, text, ...extras });
 
 describe("connected semantic-lint context", () => {
@@ -164,6 +164,7 @@ describe("connected semantic-lint context", () => {
       hunk(
         "src/main.ts",
         '@@ -1,2 +1,1 @@\n context\n-import x from "./utils";',
+        { deleted: true },
       ),
       hunk("src/utils.ts", "@@\n+export const x = true;"),
     ];

@@ -175,6 +175,10 @@ function hasAddedLines(hunk: DiffHunk): boolean {
   return diffLines(hunk, "+").trim().length > 0;
 }
 
+function usesOldSide(hunk: DiffHunk): boolean {
+  return hunk.deleted === true || hunk.oldFile !== undefined;
+}
+
 interface StringLiteral {
   start: number;
   end: number;
@@ -322,9 +326,10 @@ function extractImports(value: string): Set<string> {
 function tokens(hunk: DiffHunk): Set<string> {
   const result = new Set<string>();
   const current = currentLines(hunk);
-  const source = hasAddedLines(hunk)
-    ? codeText(current)
-    : codeText(oldLines(hunk));
+  const source =
+    !usesOldSide(hunk) || hasAddedLines(hunk)
+      ? codeText(current)
+      : codeText(oldLines(hunk));
   for (const token of source.match(TOKEN_RE) ?? []) {
     if (!IGNORED_TOKENS.has(token.toLowerCase())) result.add(token);
   }
@@ -333,7 +338,8 @@ function tokens(hunk: DiffHunk): Set<string> {
 
 function imports(hunk: DiffHunk): Set<string> {
   const current = currentLines(hunk);
-  const source = hasAddedLines(hunk) ? current : oldLines(hunk);
+  const source =
+    !usesOldSide(hunk) || hasAddedLines(hunk) ? current : oldLines(hunk);
   return extractImports(source);
 }
 
@@ -797,9 +803,10 @@ export function renderConnectedContextDetails(
   }
   return {
     text: output,
-    truncated:
-      seedBytes > MAX_CONTEXT_BYTES ||
-      seed.text.includes("hunk truncated by Lore"),
+    // A complete hunk may exceed the connected-context rendering bound and is
+    // still usable for isolated judging. Only parser-level truncation means
+    // that the diff evidence itself is incomplete and must fail closed.
+    truncated: seed.text.includes("hunk truncated by Lore"),
     omittedCompanions,
   };
 }

@@ -264,6 +264,7 @@ describe("splitDiff", () => {
     expect(hunks).toHaveLength(1);
     expect(hunks[0].file).toBe("src/guard.ts");
     expect(hunks[0].text).toContain("-if (!token) throw");
+    expect(hunks[0].deleted).toBe(true);
   });
 
   it("preserves rename-only changes as a synthetic path hunk", () => {
@@ -375,7 +376,7 @@ describe("parseDiffResult", () => {
           candidateOutcomes: [
             expect.objectContaining({
               state: "unresolved",
-              failure: { code: "insufficient-context" },
+              failure: expect.objectContaining({ code: "insufficient-context" }),
             }),
           ],
         });

@@ -507,6 +507,8 @@ export interface DiffHunk {
   file: string;
   /** Original path for a rename; omitted when the path is unchanged. */
   oldFile?: string;
+  /** True when the changed file has no new-side path (a full file deletion). */
+  deleted?: boolean;
   /** The unified-diff hunk text (the `@@ ... @@` header + its body). */
   text: string;
 }
@@ -679,6 +681,7 @@ export function splitDiff(raw: string): DiffHunk[] {
         file: f,
         text,
         ...(oldFile && oldFile !== f ? { oldFile } : {}),
+        ...(file.length === 0 && oldFile ? { deleted: true } : {}),
       });
     }
     cur = null;
