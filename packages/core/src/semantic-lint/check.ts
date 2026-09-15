@@ -1775,8 +1775,8 @@ export async function checkInvariants(
       content: invariants[index].entry.content,
     }),
   );
-  const hasTruncatedHunk = hunks.some(
-    (hunk) => renderConnectedContextDetails(hunk, [], hunks).truncated,
+  const hasTruncatedHunk = hunks.some((hunk) =>
+    hunk.text.includes("hunk truncated by Lore"),
   );
   const holisticPlan =
     input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk

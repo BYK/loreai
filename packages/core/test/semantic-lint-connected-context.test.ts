@@ -199,8 +199,9 @@ describe("connected semantic-lint context", () => {
       hunks,
     );
     expect(details.text).toContain("small companion");
+    expect(details.text).toContain("omitted by size bound");
     expect(details.omittedCompanions).toBe(1);
-    expect(details.truncated).toBe(true);
+    expect(details.truncated).toBe(false);
   });
 
   it("finds a test pair after unrelated same-stem source files", () => {

@@ -31,6 +31,8 @@ const TEST_PAIR_ROOTS = new Set([
   "__tests__",
 ]);
 const CONTEXT_TRUNCATION_MARKER = "\n... [seed hunk truncated by Lore] ...\n";
+const CONTEXT_OMISSION_MARKER =
+  "\n[connected context: companion hunks omitted by size bound]\n";
 
 const IGNORED_TOKENS = new Set([
   "any",
@@ -695,12 +697,18 @@ export function renderConnectedContextDetails(
     }
     output += block;
   }
+  if (omittedCompanions > 0) {
+    const marker =
+      CONTEXT_OMISSION_MARKER.slice(0, -1) + ` (${omittedCompanions})\n`;
+    if (Buffer.byteLength(output + marker, "utf8") <= MAX_CONTEXT_BYTES) {
+      output += marker;
+    }
+  }
   return {
     text: output,
     truncated:
       seedBytes > MAX_CONTEXT_BYTES ||
-      seed.text.includes("hunk truncated by Lore") ||
-      omittedCompanions > 0,
+      seed.text.includes("hunk truncated by Lore"),
     omittedCompanions,
   };
 }
