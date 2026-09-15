@@ -565,14 +565,16 @@ function candidateIndexes(seedIndex: number, index: HunkIndex): number[] {
     seedIndex,
     MAX_CONTEXT_CANDIDATES_PER_SEED,
   );
-  appendCandidates(
-    candidates,
-    seed.isTest
-      ? index.bySourceStem.get(stem(seed.file))
-      : index.byTestStem.get(stem(seed.file)),
-    seedIndex,
-    MAX_CONTEXT_CANDIDATES_PER_SEED,
-  );
+  for (const seedFile of filePaths(seed)) {
+    appendCandidates(
+      candidates,
+      isTestPath(seedFile)
+        ? index.bySourceStem.get(stem(seedFile))
+        : index.byTestStem.get(stem(seedFile)),
+      seedIndex,
+      MAX_CONTEXT_CANDIDATES_PER_SEED,
+    );
+  }
 
   for (const token of seed.tokens) {
     const matches = index.byToken.get(token);

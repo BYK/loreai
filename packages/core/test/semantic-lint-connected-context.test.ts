@@ -251,6 +251,19 @@ describe("connected semantic-lint context", () => {
     });
   });
 
+  it("finds a test pair through a renamed source stem", () => {
+    const hunks = [
+      hunk("src/new-foo.ts", "@@\n+const source = true;", {
+        oldFile: "src/foo.ts",
+      }),
+      hunk("tests/foo.test.ts", "@@\n+expect(source).toBe(true);"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "test-pair",
+    });
+  });
+
   it("honors an already-aborted context signal", () => {
     const controller = new AbortController();
     controller.abort();
