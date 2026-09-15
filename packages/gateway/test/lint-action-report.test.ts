@@ -28,12 +28,24 @@ afterEach(() => {
 
 function report(): SemanticLintReport {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     status: "complete",
     model: "test/model",
     effort: "off",
     elapsedMs: 1,
     range: { base: "a", head: "b", source: "test" },
+    coverage: {
+      strategy: "none",
+      contextComplete: false,
+      inputTokens: 0,
+      inputTokenBudget: 16_000,
+      availableHunks: 0,
+      includedHunks: 0,
+      omittedHunks: 0,
+      availableInvariants: 0,
+      includedInvariants: 0,
+      omittedInvariants: 0,
+    },
     health: {
       range: { status: "healthy" },
       diff: { status: "healthy" },
@@ -200,11 +212,89 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(true);
   });
 
+  test("preserves a custom holistic budget in failed reports", () => {
+    const value = failedSemanticLintReport({
+      model: "test/model",
+      effort: "off",
+      elapsedMs: 1,
+      range: { base: "a", head: "b", source: "test" },
+      failedPhase: "diff",
+      failure: {
+        code: "diff-too-large",
+        message: "diff exceeded semantic lint limits",
+      },
+      gateMode: "advisory",
+      holisticInputTokenBudget: 2_000,
+    });
+
+    expect(value.coverage.inputTokenBudget).toBe(2_000);
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
+  test("accepts not-run hunk vectors for an early non-empty diff failure", () => {
+    const value = failedSemanticLintReport({
+      model: "test/model",
+      effort: "off",
+      elapsedMs: 1,
+      range: { base: "a", head: "b", source: "test" },
+      failedPhase: "invariantSource",
+      failure: {
+        code: "invariant-source-read-failed",
+        message: "invariant source unavailable",
+      },
+      gateMode: "advisory",
+    });
+    value.health.diff = { status: "healthy" };
+    value.health.hunkVectors = {
+      status: "not-run",
+      expected: 1,
+      available: 0,
+      missing: 1,
+    };
+    value.counters.hunks = 1;
+    value.coverage = {
+      ...value.coverage,
+      availableHunks: 1,
+      omittedHunks: 1,
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
   test("accepts the same boundary report as the CLI validator", () => {
     const value = resolvedReport(
       MAX_LINT_REPORT_CANDIDATES,
       "x".repeat(MAX_LINT_REPORT_RESOLVED_REASON_LENGTH),
     );
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value)).toBe(true);
+  });
+
+  test("accepts partial diff context with bounded invariant coverage", () => {
+    const value = resolvedReport(1);
+    value.status = "partial";
+    value.counters.hunks = 2;
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 2,
+      available: 2,
+      missing: 0,
+    };
+    value.coverage = {
+      strategy: "holistic",
+      contextComplete: true,
+      inputTokens: 1_000,
+      inputTokenBudget: 16_000,
+      availableHunks: 2,
+      includedHunks: 2,
+      omittedHunks: 0,
+      availableInvariants: 3,
+      includedInvariants: 1,
+      omittedInvariants: 2,
+    };
 
     expect(validateSemanticLintReport(value)).toBe(value);
     expect(actionAccepts(value)).toBe(true);
@@ -316,7 +406,7 @@ describe("semantic lint action reporter", () => {
   });
 
   test("makes malformed reports visible but nonblocking in advisory mode", () => {
-    const malformed = { ...report(), schemaVersion: 2 };
+    const malformed = { ...report(), schemaVersion: 1 };
     const result = runReporter(malformed, false, 3);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("health failure");
@@ -540,6 +630,8 @@ describe("semantic lint action reporter", () => {
     const action = readFileSync(join(actionDirectory, "action.yml"), "utf8");
     expect(action).toContain('default: "1200"');
     expect(action).toContain('default: "90"');
+    expect(action).toContain('default: "16000"');
+    expect(action).toContain("--holistic-input-tokens");
     expect(action).toContain('default: "restore"');
     expect(action).toContain(
       "LORE_PR_TITLE: ${{ inputs.pr-title || github.event.pull_request.title }}",

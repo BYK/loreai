@@ -24,6 +24,19 @@ export interface LintPhaseHealth {
   notAttempted?: number;
 }
 
+export interface LintCoverage {
+  strategy: "none" | "isolated-hunk" | "holistic";
+  contextComplete: boolean;
+  inputTokens: number;
+  inputTokenBudget: number;
+  availableHunks: number;
+  includedHunks: number;
+  omittedHunks: number;
+  availableInvariants: number;
+  includedInvariants: number;
+  omittedInvariants: number;
+}
+
 export interface LintCandidateOutcome {
   id: string;
   file: string;
@@ -59,12 +72,13 @@ export interface SerializedLintGate {
 }
 
 export interface SemanticLintReport {
-  schemaVersion: 1;
+  schemaVersion: 3;
   status: LintStatus;
   model: string;
   effort: "off" | "low" | "medium" | "high" | "xhigh";
   elapsedMs: number;
   range: { base: string; head: string; source: string } | null;
+  coverage: LintCoverage;
   health: {
     range: LintPhaseHealth;
     diff: LintPhaseHealth;
@@ -92,6 +106,7 @@ export interface SemanticLintReport {
 export interface CoreLintResultLike {
   status: LintStatus;
   range: NonNullable<SemanticLintReport["range"]>;
+  coverage: LintCoverage;
   health: {
     diff: LintPhaseHealth;
     invariantVectors: LintPhaseHealth;
@@ -135,6 +150,7 @@ const PHASE_ORDER = [
 ] as const;
 
 const VERDICTS = new Set(["violates", "fixes", "satisfies", "unrelated"]);
+export const MAX_LINT_REPORT_FINDINGS = 200;
 export const MAX_LINT_REPORT_CANDIDATES = 20;
 export const MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH = 400;
 export const MAX_LINT_REPORT_RESOLVED_REASON_LENGTH = 400;
@@ -157,11 +173,13 @@ const CANDIDATE_FAILURE_CODES = new Set([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "insufficient-context",
 ]);
 const PHASE_FAILURE_CODES = new Set([
   "range-resolution-failed",
   "diff-command-failed",
   "diff-too-large",
+  "untrusted-context-gate-disabled",
   "invariant-source-read-failed",
   "invariant-source-import-failed",
   "embedding-provider-readiness-failed",
@@ -176,6 +194,25 @@ function findingKey(finding: { invariantId: string; file: string }): string {
   return `${finding.invariantId}\x1f${finding.file}`;
 }
 
+function emptyLintCoverage(
+  availableHunks = 0,
+  availableInvariants = 0,
+  inputTokenBudget = 16_000,
+): LintCoverage {
+  return {
+    strategy: "none",
+    contextComplete: false,
+    inputTokens: 0,
+    inputTokenBudget,
+    availableHunks,
+    includedHunks: 0,
+    omittedHunks: availableHunks,
+    availableInvariants,
+    includedInvariants: 0,
+    omittedInvariants: availableInvariants,
+  };
+}
+
 function clonePhase(phase: LintPhaseHealth): LintPhaseHealth {
   return {
     ...phase,
@@ -183,10 +220,18 @@ function clonePhase(phase: LintPhaseHealth): LintPhaseHealth {
   };
 }
 
-function deriveStatus(report: Pick<SemanticLintReport, "health">): LintStatus {
+function deriveStatus(
+  report: Pick<SemanticLintReport, "health" | "coverage">,
+): LintStatus {
   const statuses = PHASE_ORDER.map((phase) => report.health[phase].status);
   if (statuses.includes("failed")) return "failed";
-  if (statuses.includes("degraded")) return "partial";
+  if (
+    statuses.includes("degraded") ||
+    report.coverage.strategy === "isolated-hunk" ||
+    report.coverage.omittedInvariants > 0
+  ) {
+    return "partial";
+  }
   return "complete";
 }
 
@@ -251,12 +296,16 @@ export function buildSemanticLintReport(input: {
   }
 
   const report: SemanticLintReport = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     status: input.result.status,
     model: input.model,
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: { ...input.result.range },
+    coverage: {
+      ...(input.result.coverage ??
+        emptyLintCoverage(input.result.hunks, input.result.invariants)),
+    },
     health: {
       range: { status: "healthy" },
       diff: clonePhase(input.result.health.diff),
@@ -314,6 +363,7 @@ export function failedSemanticLintReport(input: {
   failedPhase: (typeof PHASE_ORDER)[number];
   failure: LintFailure;
   gateMode: "advisory" | "gate";
+  holisticInputTokenBudget?: number;
 }): SemanticLintReport {
   const health = Object.fromEntries(
     PHASE_ORDER.map((phase) => [phase, notRunHealth()]),
@@ -337,12 +387,13 @@ export function failedSemanticLintReport(input: {
       : {}),
   };
   return validateSemanticLintReport({
-    schemaVersion: 1,
+    schemaVersion: 3,
     status: "failed",
     model: input.model,
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: input.range ?? null,
+    coverage: emptyLintCoverage(0, 0, input.holisticInputTokenBudget ?? 16_000),
     health,
     counters: {
       hunks: 0,
@@ -383,6 +434,64 @@ function assertCount(value: unknown, name: string): asserts value is number {
   );
 }
 
+function validateLintCoverage(value: unknown): asserts value is LintCoverage {
+  assert(isRecord(value), "coverage must be an object");
+  assert(
+    value.strategy === "none" ||
+      value.strategy === "isolated-hunk" ||
+      value.strategy === "holistic",
+    "coverage.strategy is invalid",
+  );
+  assert(
+    typeof value.contextComplete === "boolean",
+    "coverage.contextComplete must be boolean",
+  );
+  for (const field of [
+    "inputTokens",
+    "inputTokenBudget",
+    "availableHunks",
+    "includedHunks",
+    "omittedHunks",
+    "availableInvariants",
+    "includedInvariants",
+    "omittedInvariants",
+  ]) {
+    assertCount(value[field], `coverage.${field}`);
+  }
+  const numbers = value as unknown as LintCoverage;
+  assert(
+    numbers.inputTokenBudget > 0,
+    "coverage.inputTokenBudget must be positive",
+  );
+  assert(
+    numbers.includedHunks <= numbers.availableHunks &&
+      numbers.omittedHunks === numbers.availableHunks - numbers.includedHunks,
+    "coverage hunk coverage does not add up",
+  );
+  assert(
+    numbers.includedInvariants <= numbers.availableInvariants &&
+      numbers.omittedInvariants ===
+        numbers.availableInvariants - numbers.includedInvariants,
+    "coverage invariant coverage does not add up",
+  );
+  if (value.strategy === "holistic") {
+    assert(
+      value.contextComplete,
+      "holistic semantic lint must have complete context",
+    );
+    assert(
+      numbers.includedHunks === numbers.availableHunks &&
+        numbers.inputTokens <= numbers.inputTokenBudget,
+      "holistic semantic lint coverage is incomplete or over budget",
+    );
+  } else {
+    assert(
+      !value.contextComplete,
+      "non-holistic semantic lint cannot claim complete context",
+    );
+  }
+}
+
 function validateFailure(value: unknown, candidate: boolean): void {
   assert(isRecord(value), "failure must be an object");
   assert(typeof value.code === "string", "failure.code must be a string");
@@ -406,7 +515,7 @@ function validateFailure(value: unknown, candidate: boolean): void {
 
 export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   assert(isRecord(value), "root must be an object");
-  assert(value.schemaVersion === 1, "schemaVersion must be 1");
+  assert(value.schemaVersion === 3, "schemaVersion must be 3");
   assert(
     value.status === "complete" ||
       value.status === "partial" ||
@@ -501,6 +610,11 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   );
 
   assert(isRecord(value.counters), "counters is required");
+  validateLintCoverage(value.coverage);
+  assert(
+    value.coverage.availableHunks === value.counters.hunks,
+    "coverage hunk coverage disagrees with hunk counter",
+  );
   const counterNames = [
     "hunks",
     "invariants",
@@ -536,7 +650,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       "invariant vector health disagrees with invariant counter",
     );
   }
-  if (hunkVectorHealth.expected !== undefined) {
+  if (
+    hunkVectorHealth.expected !== undefined &&
+    Number(value.counters.invariants) > 0
+  ) {
     assert(
       hunkVectorHealth.expected === value.counters.hunks,
       "hunk vector health disagrees with hunk counter",
@@ -675,7 +792,11 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     "candidate transport attempts do not sum to report total",
   );
 
-  assert(Array.isArray(value.findings), "findings must be an array");
+  assert(
+    Array.isArray(value.findings) &&
+      value.findings.length <= MAX_LINT_REPORT_FINDINGS,
+    `findings must be an array of at most ${MAX_LINT_REPORT_FINDINGS} records`,
+  );
   const findingIds = new Set<string>();
   for (const finding of value.findings) {
     assert(isRecord(finding), "finding must be an object");
@@ -867,6 +988,7 @@ export function renderSemanticLintReport(report: SemanticLintReport): string {
     "─".repeat(64),
     `Status: ${report.status.toUpperCase()}   Model: ${report.model}   Effort: ${report.effort}`,
     `Funnel: ${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates`,
+    `Coverage: ${report.coverage.strategy} · ${report.coverage.includedHunks}/${report.coverage.availableHunks} hunks, ${report.coverage.includedInvariants}/${report.coverage.availableInvariants} invariants${report.coverage.contextComplete ? "" : " · bounded/partial context"}`,
     `Checks: ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted · ${(report.elapsedMs / 1000).toFixed(1)}s`,
     "─".repeat(64),
   ];

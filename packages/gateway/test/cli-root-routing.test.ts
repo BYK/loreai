@@ -95,8 +95,8 @@ vi.mock("../src/cli/setup", () => ({ commandSetup: spies.setup }));
 vi.mock("../src/cli/inventory", () => ({ commandDoctor: spies.doctor }));
 vi.mock("../src/cli/data", () => ({ commandData: spies.data }));
 vi.mock("../src/cli/recall-cmd", () => ({ commandRecall: spies.recall }));
-vi.mock("../src/cli/invariant-check", () => ({
-  commandInvariantCheck: spies.lint,
+vi.mock("../src/cli/semantic-lint", () => ({
+  commandSemanticLint: spies.lint,
 }));
 vi.mock("../src/cli/history-cmd", () => ({
   commandLog: spies.log,

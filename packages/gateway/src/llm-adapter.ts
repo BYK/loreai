@@ -23,7 +23,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { LLMClient } from "@loreai/core";
 import { log } from "@loreai/core";
 import { anthropicThinkingBudget, openAIReasoningEffort } from "@loreai/core";
-import { invariantCheck } from "@loreai/core";
+import { semanticLint } from "@loreai/core";
 import type { ReasoningEffort } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
@@ -1840,7 +1840,7 @@ function buildAnthropicWorkerRequest(
   // Caveat: budget+headroom for `xhigh` is ~41K; a model whose output ceiling is
   // below that would 400. Not guarded here (we lack the per-model ceiling on the
   // worker path), but the effort budgets stay well under the common 64K ceiling
-  // and the invariant-check judge — the only effort caller — degrades a judge 400
+  // and the semantic-lint judge — the only effort caller — degrades a judge 400
   // to a safe "no finding" (advisory: never fails the build).
   const thinkingBudget = anthropicThinkingBudget(reasoningEffort);
   const thinkingEnabled = thinkingBudget != null;
@@ -5194,9 +5194,9 @@ export interface GatewayInvariantJudgeOptions {
 /** Bridge detailed gateway transport outcomes into core's semantic judge. */
 export function createGatewayInvariantJudge(
   options: GatewayInvariantJudgeOptions,
-): invariantCheck.InvariantJudge {
+): semanticLint.InvariantJudge & semanticLint.HolisticLintJudge {
   return {
-    async judge(input): Promise<invariantCheck.JudgeOutcome> {
+    async judge(input): Promise<semanticLint.JudgeOutcome> {
       let semanticCalls = 0;
       let transportAttempts = 0;
       const timeoutSignal =
@@ -5207,14 +5207,14 @@ export function createGatewayInvariantJudge(
         options.signal && timeoutSignal
           ? AbortSignal.any([options.signal, timeoutSignal])
           : (options.signal ?? timeoutSignal);
-      const stats = (): invariantCheck.JudgeStats => ({
+      const stats = (): semanticLint.JudgeStats => ({
         semanticCalls,
         transportAttempts,
       });
       const call = async (user: string): Promise<PromptOutcome> => {
         semanticCalls++;
         const outcome = await options.client.promptDetailed(
-          invariantCheck.INVARIANT_JUDGE_SYSTEM,
+          semanticLint.INVARIANT_JUDGE_SYSTEM,
           user,
           {
             model: options.model,
@@ -5224,12 +5224,12 @@ export function createGatewayInvariantJudge(
                   upstreamProviderID: options.model.providerID,
                 }
               : {}),
-            workerID: "lore-invariant-check",
+            workerID: "lore-semantic-lint",
             thinking: false,
             reasoningEffort: options.effort,
             urgent: true,
             sessionID: options.sessionID,
-            maxTokens: invariantCheck.judgeMaxTokens(options.effort),
+            maxTokens: semanticLint.judgeMaxTokens(options.effort),
             temperature: 0,
             signal,
           },
@@ -5253,7 +5253,7 @@ export function createGatewayInvariantJudge(
       };
 
       let outcome = await call(
-        invariantCheck.invariantJudgeUser({
+        semanticLint.invariantJudgeUser({
           invariant: input.invariant,
           file: input.file,
           hunk: input.hunk,
@@ -5263,11 +5263,11 @@ export function createGatewayInvariantJudge(
       if (outcome.kind === "failure") {
         return promptFailureToJudgeOutcome(outcome, stats(), options.signal);
       }
-      let verdict = invariantCheck.parseInvariantVerdict(outcome.text);
+      let verdict = semanticLint.parseInvariantVerdict(outcome.text);
       if (verdict) {
         options.client.recordWorkerSuccess?.(
           options.sessionID,
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
         return { kind: "verdict", ...verdict, stats: stats() };
       }
@@ -5276,7 +5276,7 @@ export function createGatewayInvariantJudge(
       }
 
       outcome = await call(
-        invariantCheck.invariantJudgeRepairUser({
+        semanticLint.invariantJudgeRepairUser({
           invariant: input.invariant,
           file: input.file,
           hunk: input.hunk,
@@ -5287,23 +5287,209 @@ export function createGatewayInvariantJudge(
       if (outcome.kind === "failure") {
         return promptFailureToJudgeOutcome(outcome, stats(), options.signal);
       }
-      verdict = invariantCheck.parseInvariantVerdict(outcome.text);
+      verdict = semanticLint.parseInvariantVerdict(outcome.text);
       if (verdict) {
         options.client.recordWorkerSuccess?.(
           options.sessionID,
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
       }
       return verdict
         ? { kind: "verdict", ...verdict, stats: stats() }
         : invalidGatewayVerdict(stats());
     },
+    async lint(
+      input: semanticLint.HolisticLintInput,
+    ): Promise<semanticLint.HolisticLintOutcome> {
+      let semanticCalls = 0;
+      let transportAttempts = 0;
+      const timeoutSignal =
+        options.candidateTimeoutMs == null
+          ? undefined
+          : AbortSignal.timeout(options.candidateTimeoutMs);
+      const signal =
+        options.signal && timeoutSignal
+          ? AbortSignal.any([options.signal, timeoutSignal])
+          : (options.signal ?? timeoutSignal);
+      const stats = (): semanticLint.JudgeStats => ({
+        semanticCalls,
+        transportAttempts,
+      });
+      const call = async (user: string): Promise<PromptOutcome> => {
+        semanticCalls++;
+        const outcome = await options.client.promptDetailed(
+          semanticLint.INVARIANT_HOLISTIC_LINT_SYSTEM,
+          user,
+          {
+            model: options.model,
+            ...(options.upstreamUrl
+              ? {
+                  upstreamUrl: options.upstreamUrl,
+                  upstreamProviderID: options.model.providerID,
+                }
+              : {}),
+            workerID: "lore-semantic-lint",
+            thinking: false,
+            reasoningEffort: options.effort,
+            urgent: true,
+            sessionID: options.sessionID,
+            maxTokens: semanticLint.judgeMaxTokens(options.effort),
+            temperature: 0,
+            signal,
+          },
+        );
+        transportAttempts += outcome.attempts;
+        if (signal?.aborted) {
+          return {
+            kind: "failure",
+            code:
+              signal.reason instanceof DOMException &&
+              signal.reason.name === "TimeoutError"
+                ? "timeout"
+                : "aborted",
+            message: "Holistic semantic lint cancelled before accepting output",
+            retryable: !options.signal?.aborted,
+            model: outcome.model,
+            attempts: outcome.attempts,
+          };
+        }
+        return outcome;
+      };
+
+      let outcome: PromptOutcome;
+      try {
+        outcome = await call(semanticLint.invariantHolisticLintUser(input));
+      } catch (error) {
+        return holisticLintTransportFailure(error, stats(), options.signal);
+      }
+      if (outcome.kind === "failure") {
+        return promptFailureToHolisticLintOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+
+      let results = semanticLint.parseHolisticLintResults(
+        outcome.text,
+        new Set(input.invariants.map((invariant) => invariant.id)),
+        new Set(input.hunks.map((hunk) => hunk.id)),
+      );
+      if (results) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-semantic-lint",
+        );
+        return { kind: "results", results, stats: stats() };
+      }
+      if (input.semanticCallBudget < 2) {
+        return invalidHolisticLintOutcome(stats());
+      }
+
+      try {
+        outcome = await call(
+          semanticLint.invariantHolisticLintRepairUser({
+            ...input,
+            invalidResponse: outcome.text.slice(0, 4_000),
+          }),
+        );
+      } catch (error) {
+        return holisticLintTransportFailure(error, stats(), options.signal);
+      }
+      if (outcome.kind === "failure") {
+        return promptFailureToHolisticLintOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+      results = semanticLint.parseHolisticLintResults(
+        outcome.text,
+        new Set(input.invariants.map((invariant) => invariant.id)),
+        new Set(input.hunks.map((hunk) => hunk.id)),
+      );
+      if (results) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-semantic-lint",
+        );
+        return { kind: "results", results, stats: stats() };
+      }
+      return invalidHolisticLintOutcome(stats());
+    },
+  };
+}
+
+function invalidHolisticLintOutcome(
+  stats: semanticLint.JudgeStats,
+): semanticLint.HolisticLintOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "invalid-verdict",
+      message:
+        "Holistic lint response did not match the required result schema",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
+  };
+}
+
+function holisticLintTransportFailure(
+  error: unknown,
+  stats: semanticLint.JudgeStats,
+  overallSignal?: AbortSignal,
+): semanticLint.HolisticLintOutcome {
+  const name = error instanceof Error ? error.name : "";
+  const code: semanticLint.JudgeFailureCode =
+    name === "AbortError"
+      ? "abort"
+      : name === "TimeoutError"
+        ? "timeout"
+        : "transport-error";
+  return {
+    kind: "unresolved",
+    failure: {
+      code,
+      message:
+        error instanceof Error
+          ? error.message.slice(0, 400)
+          : String(error).slice(0, 400),
+      scope:
+        (code === "abort" || code === "timeout") && overallSignal?.aborted
+          ? "run"
+          : "candidate",
+      retryable: code !== "abort",
+    },
+    stats,
+  };
+}
+
+function promptFailureToHolisticLintOutcome(
+  outcome: Extract<PromptOutcome, { kind: "failure" }>,
+  stats: semanticLint.JudgeStats,
+  overallSignal?: AbortSignal,
+): semanticLint.HolisticLintOutcome {
+  const translated = promptFailureToJudgeOutcome(outcome, stats, overallSignal);
+  if (translated.kind === "unresolved") {
+    return translated;
+  }
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "transport-error",
+      message: "Holistic semantic lint transport failed",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
   };
 }
 
 function invalidGatewayVerdict(
-  stats: invariantCheck.JudgeStats,
-): invariantCheck.JudgeOutcome {
+  stats: semanticLint.JudgeStats,
+): semanticLint.JudgeOutcome {
   return {
     kind: "unresolved",
     failure: {
@@ -5318,11 +5504,11 @@ function invalidGatewayVerdict(
 
 function promptFailureToJudgeOutcome(
   outcome: Extract<PromptOutcome, { kind: "failure" }>,
-  stats: invariantCheck.JudgeStats,
+  stats: semanticLint.JudgeStats,
   overallSignal?: AbortSignal,
-): invariantCheck.JudgeOutcome {
+): semanticLint.JudgeOutcome {
   const code = judgeFailureCode(outcome.code);
-  const runScoped = new Set<invariantCheck.JudgeFailureCode>([
+  const runScoped = new Set<semanticLint.JudgeFailureCode>([
     "no-auth",
     "auth-rejected",
     "route-unavailable",
@@ -5349,7 +5535,7 @@ function promptFailureToJudgeOutcome(
 
 function judgeFailureCode(
   code: PromptFailureCode,
-): invariantCheck.JudgeFailureCode {
+): semanticLint.JudgeFailureCode {
   switch (code) {
     case "network-error":
       return "network";

@@ -6,6 +6,7 @@ const gateMode = gateRaw === "true";
 const cliExit = Number(exitRaw);
 const summaryFile = process.env.GITHUB_STEP_SUMMARY;
 const summaryCellMaxChars = 300;
+const MAX_LINT_REPORT_FINDINGS = 200;
 const MAX_LINT_REPORT_CANDIDATES = 20;
 const MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH = 400;
 const MAX_LINT_REPORT_RESOLVED_REASON_LENGTH = 400;
@@ -28,10 +29,13 @@ const candidateFailureCodes = new Set([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "insufficient-context",
 ]);
 const phaseFailureCodes = new Set([
   "range-resolution-failed",
   "diff-command-failed",
+  "diff-too-large",
+  "untrusted-context-gate-disabled",
   "invariant-source-read-failed",
   "invariant-source-import-failed",
   "embedding-provider-readiness-failed",
@@ -82,11 +86,63 @@ function count(value, name) {
   }
 }
 
+function validateCoverage(coverage, counters) {
+  if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) {
+    throw new TypeError("coverage must be an object");
+  }
+  if (!["none", "isolated-hunk", "holistic"].includes(coverage.strategy)) {
+    throw new TypeError("invalid coverage strategy");
+  }
+  if (typeof coverage.contextComplete !== "boolean") {
+    throw new TypeError("invalid coverage contextComplete");
+  }
+  for (const name of [
+    "inputTokens",
+    "inputTokenBudget",
+    "availableHunks",
+    "includedHunks",
+    "omittedHunks",
+    "availableInvariants",
+    "includedInvariants",
+    "omittedInvariants",
+  ]) {
+    count(coverage[name], `coverage.${name}`);
+  }
+  if (coverage.inputTokenBudget <= 0) {
+    throw new TypeError("coverage input-token budget must be positive");
+  }
+  if (
+    coverage.availableHunks !== counters.hunks ||
+    coverage.includedHunks > coverage.availableHunks ||
+    coverage.omittedHunks !== coverage.availableHunks - coverage.includedHunks
+  ) {
+    throw new TypeError("coverage hunk coverage disagrees with counters");
+  }
+  if (
+    coverage.includedInvariants > coverage.availableInvariants ||
+    coverage.omittedInvariants !==
+      coverage.availableInvariants - coverage.includedInvariants
+  ) {
+    throw new TypeError("coverage invariant coverage does not add up");
+  }
+  if (coverage.strategy === "holistic") {
+    if (
+      !coverage.contextComplete ||
+      coverage.includedHunks !== coverage.availableHunks ||
+      coverage.inputTokens > coverage.inputTokenBudget
+    ) {
+      throw new TypeError("holistic semantic lint coverage is incomplete");
+    }
+  } else if (coverage.contextComplete) {
+    throw new TypeError("non-holistic lint cannot claim complete context");
+  }
+}
+
 function validateReport(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("report root must be an object");
   }
-  if (value.schemaVersion !== 1)
+  if (value.schemaVersion !== 3)
     throw new TypeError("unsupported schemaVersion");
   if (!["complete", "partial", "failed"].includes(value.status)) {
     throw new TypeError("invalid status");
@@ -166,9 +222,12 @@ function validateReport(value) {
       throw new TypeError(`${phase} vector counts disagree`);
     }
   }
+  const coveragePartial =
+    value.coverage?.strategy === "isolated-hunk" ||
+    (value.coverage?.omittedInvariants ?? 0) > 0;
   const derivedStatus = failedSeen
     ? "failed"
-    : degraded
+    : degraded || coveragePartial
       ? "partial"
       : "complete";
   if (value.status !== derivedStatus)
@@ -178,6 +237,7 @@ function validateReport(value) {
   }
 
   const counters = value.counters;
+  validateCoverage(value.coverage, counters);
   for (const name of [
     "hunks",
     "invariants",
@@ -213,6 +273,7 @@ function validateReport(value) {
   }
   if (
     hunkVectorHealth.expected !== undefined &&
+    counters.invariants > 0 &&
     hunkVectorHealth.expected !== counters.hunks
   ) {
     throw new TypeError("hunk vector health disagrees with counters");
@@ -333,8 +394,13 @@ function validateReport(value) {
     );
   }
 
-  if (!Array.isArray(value.findings))
-    throw new TypeError("findings must be an array");
+  if (
+    !Array.isArray(value.findings) ||
+    value.findings.length > MAX_LINT_REPORT_FINDINGS
+  )
+    throw new TypeError(
+      `findings must be an array of at most ${MAX_LINT_REPORT_FINDINGS} records`,
+    );
   const findingIds = new Set();
   for (const finding of value.findings) {
     if (

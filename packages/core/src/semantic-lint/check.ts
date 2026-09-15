@@ -1,5 +1,5 @@
 /**
- * invariant-check.ts — the "semantic linter" PoC (#TBD).
+ * semantic-lint/check.ts — the "semantic linter" PoC (#TBD).
  *
  * Answers Armin Ronacher's "the tower keeps rising" problem at CI time: agents
  * remove the friction that used to force humans to re-synchronize their shared
@@ -30,19 +30,48 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { db } from "./db";
-import { embeddingByIdSource, readStorageMode } from "./db/vec-store";
-import { anthropicThinkingBudget, type ReasoningEffort } from "./effort";
-import * as embedding from "./embedding";
-import * as ltm from "./ltm";
-import type { KnowledgeEntry } from "./ltm";
+import { db } from "../db";
+import { embeddingByIdSource, readStorageMode } from "../db/vec-store";
+import { anthropicThinkingBudget, type ReasoningEffort } from "../effort";
+import * as embedding from "../embedding";
+import * as ltm from "../ltm";
+import type { KnowledgeEntry } from "../ltm";
 import {
   INVARIANT_JUDGE_SYSTEM,
   invariantJudgeRepairUser,
   invariantJudgeUser,
 } from "./prompt";
-import { extractReferences } from "./references";
-import type { LLMClient } from "./types";
+import {
+  buildHolisticLintInput,
+  emptyLintCoverage,
+  estimateIsolatedLintInputTokens,
+  MAX_HOLISTIC_INVARIANTS,
+  type HolisticInvariant,
+  type HolisticLintResult,
+  type HolisticLintInput,
+  type LintCoverage,
+} from "./context";
+import { extractReferences } from "../references";
+import type { LLMClient } from "../types";
+
+export {
+  INVARIANT_HOLISTIC_LINT_SYSTEM,
+  invariantHolisticLintRepairUser,
+  invariantHolisticLintUser,
+} from "./prompt";
+export {
+  buildHolisticLintInput,
+  emptyLintCoverage,
+  estimateHolisticLintInputTokens,
+  estimateIsolatedLintInputTokens,
+  MAX_HOLISTIC_INVARIANTS,
+} from "./context";
+export type {
+  HolisticInvariant,
+  HolisticLintResult,
+  HolisticLintInput,
+  LintCoverage,
+} from "./context";
 
 // ---------------------------------------------------------------------------
 // Constants (mirror contradiction.ts bounds so cost stays capped)
@@ -87,7 +116,7 @@ const MAX_INVARIANTS_SCAN = 300;
 //     of any caller maxTokens, so this value is just the floor and the gateway
 //     bumps it for reasoning-capable models. This is the path `github-copilot/
 //     gpt-5-mini` (the default judge) takes once the CLI awaits fetchModelData
-//     before the first judge call (cli/invariant-check.ts:97).
+//     before the first judge call (cli/semantic-lint/check.ts:97).
 //   - OpenAI / Gemini models WITHOUT reasoning_options (or models absent from
 //     models.dev): the gateway falls back to the caller maxTokens. The 256
 //     below is the budget in that empty-cache fallback — small because the
@@ -127,6 +156,8 @@ export const UNPARSEABLE_WARN_RATIO = 0.5;
 
 /** Never send more than this many pairs to the judge in one run. Surviving
  *  pairs are judged most-similar-first; the cap is the cost ceiling per PR. */
+export const MAX_HOLISTIC_EVIDENCE_PER_RESULT = 8;
+export const MAX_LINT_FINDINGS = 200;
 export const MAX_JUDGE_CALLS = 20;
 
 // ---------------------------------------------------------------------------
@@ -443,7 +474,7 @@ export function resolveRange(
     }
   }
 
-  // Fallback: previous commit (a single-commit review). Better than nothing.
+  // Fallback: previous commit (a single-commit lint). Better than nothing.
   const prev = gitOrNull(["rev-parse", `${head}~1`], cwd);
   if (prev) return { base: prev, head, source: "HEAD~1 (fallback)" };
 
@@ -565,7 +596,8 @@ export function isIgnoredFile(path: string): boolean {
 
 /**
  * Parse `git diff base..head` into per-file hunks. We diff-only (never whole
- * files) so judge inputs stay tiny. Binary/rename-only entries yield no hunks.
+ * files) so judge inputs stay tiny. Binary entries yield no hunks; rename-only
+ * entries are represented by a synthetic path-change hunk.
  * Ignored files (see {@link isIgnoredFile}) are dropped here.
  */
 export function parseDiff(cwd: string, base: string, head: string): DiffHunk[] {
@@ -619,6 +651,9 @@ export function splitDiff(raw: string): DiffHunk[] {
   // must be judged, not silently dropped.
   let oldFile = "";
   let cur: string[] | null = null;
+  let sectionHadHunk = false;
+  let pathChangeFrom = "";
+  let pathChangeTo = "";
   const flush = () => {
     const f = file || oldFile;
     if (cur && f && cur.length && !isIgnoredFile(f)) {
@@ -638,23 +673,70 @@ export function splitDiff(raw: string): DiffHunk[] {
     }
     cur = null;
   };
+  const flushPathChange = () => {
+    if (
+      sectionHadHunk ||
+      pathChangeFrom.length === 0 ||
+      pathChangeTo.length === 0
+    ) {
+      pathChangeFrom = "";
+      pathChangeTo = "";
+      return;
+    }
+    const f = pathChangeTo;
+    if (!isIgnoredFile(f)) {
+      if (hunks.length >= MAX_DIFF_HUNKS) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
+        );
+      }
+      const text = truncateHunkText(
+        [
+          "@@ -1,1 +1,1 @@ rename-only path change",
+          `- rename from ${pathChangeFrom}`,
+          `+ rename to ${pathChangeTo}`,
+        ].join("\n"),
+      );
+      textBytes += Buffer.byteLength(text);
+      if (textBytes > MAX_DIFF_TEXT_BYTES) {
+        throw new DiffLimitError(
+          `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
+        );
+      }
+      hunks.push({ file: f, text });
+    }
+    pathChangeFrom = "";
+    pathChangeTo = "";
+  };
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
       flush();
+      flushPathChange();
       file = "";
       oldFile = "";
+      sectionHadHunk = false;
     } else if (cur === null && line.startsWith("--- a/")) {
       oldFile = line.slice("--- a/".length).trim();
     } else if (cur === null && line.startsWith("+++ b/")) {
       file = line.slice("+++ b/".length).trim();
+    } else if (cur === null && line.startsWith("rename from ")) {
+      pathChangeFrom = line.slice("rename from ".length).trim();
+    } else if (cur === null && line.startsWith("rename to ")) {
+      pathChangeTo = line.slice("rename to ".length).trim();
+    } else if (cur === null && line.startsWith("copy from ")) {
+      pathChangeFrom = line.slice("copy from ".length).trim();
+    } else if (cur === null && line.startsWith("copy to ")) {
+      pathChangeTo = line.slice("copy to ".length).trim();
     } else if (line.startsWith("@@")) {
       flush();
       cur = [line];
+      sectionHadHunk = true;
     } else if (cur) {
       cur.push(line);
     }
   }
   flush();
+  flushPathChange();
   return hunks;
 }
 
@@ -727,6 +809,114 @@ export function parseInvariantVerdict(
       return null;
     }
     return { verdict: record.verdict, reason: record.reason };
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate one complete holistic judge response. The response must contain
+ * exactly one result for every expected invariant, with evidence IDs that
+ * belong to the complete supplied hunk set. The payload is still untrusted:
+ * strings are bounded and never interpreted as instructions.
+ */
+function isHolisticVerdict(
+  value: unknown,
+): value is HolisticLintResult["verdict"] {
+  return isVerdict(value) || value === "insufficient-context";
+}
+
+export function parseHolisticLintResults(
+  text: string | null,
+  expectedInvariantIds: ReadonlySet<string>,
+  expectedHunkIds: ReadonlySet<string>,
+): HolisticLintResult[] | null {
+  if (!text) return null;
+  let payload = text.trim();
+  const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
+  if (fenced) payload = fenced[1];
+  else if (payload.startsWith("```") || payload.endsWith("```")) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (!isRecord(parsed) || Object.keys(parsed).length !== 1) return null;
+    if (!Array.isArray(parsed.results)) return null;
+    if (parsed.results.length !== expectedInvariantIds.size) return null;
+
+    const seen = new Set<string>();
+    const results: HolisticLintResult[] = [];
+    for (const value of parsed.results) {
+      if (!isRecord(value)) return null;
+      const keys = Object.keys(value).sort();
+      if (
+        keys.length !== 4 ||
+        keys[0] !== "evidence" ||
+        keys[1] !== "invariantId" ||
+        keys[2] !== "reason" ||
+        keys[3] !== "verdict"
+      ) {
+        return null;
+      }
+      if (
+        typeof value.invariantId !== "string" ||
+        !expectedInvariantIds.has(value.invariantId) ||
+        seen.has(value.invariantId) ||
+        typeof value.reason !== "string" ||
+        value.reason.trim().length === 0 ||
+        value.reason.length > 400 ||
+        !isHolisticVerdict(value.verdict) ||
+        !Array.isArray(value.evidence) ||
+        value.evidence.length > MAX_HOLISTIC_EVIDENCE_PER_RESULT
+      ) {
+        return null;
+      }
+
+      const evidence: HolisticLintResult["evidence"] = [];
+      const seenHunks = new Set<string>();
+      for (const evidenceValue of value.evidence) {
+        if (!isRecord(evidenceValue)) return null;
+        const evidenceKeys = Object.keys(evidenceValue).sort();
+        if (
+          evidenceKeys.length !== 2 ||
+          evidenceKeys[0] !== "hunkId" ||
+          evidenceKeys[1] !== "reason" ||
+          typeof evidenceValue.hunkId !== "string" ||
+          !expectedHunkIds.has(evidenceValue.hunkId) ||
+          seenHunks.has(evidenceValue.hunkId) ||
+          typeof evidenceValue.reason !== "string" ||
+          evidenceValue.reason.trim().length === 0 ||
+          evidenceValue.reason.length > 400
+        ) {
+          return null;
+        }
+        seenHunks.add(evidenceValue.hunkId);
+        evidence.push({
+          hunkId: evidenceValue.hunkId,
+          reason: evidenceValue.reason,
+        });
+      }
+      if (
+        (value.verdict === "violates" || value.verdict === "fixes") &&
+        evidence.length === 0
+      ) {
+        return null;
+      }
+      seen.add(value.invariantId);
+      results.push({
+        invariantId: value.invariantId,
+        verdict: value.verdict,
+        reason: value.reason,
+        evidence,
+      });
+    }
+
+    return seen.size === expectedInvariantIds.size ? results : null;
   } catch {
     return null;
   }
@@ -915,7 +1105,8 @@ export type JudgeFailureCode =
   | "transport-error"
   | "invalid-verdict"
   | "judge-contract-error"
-  | "semantic-budget-exhausted";
+  | "semantic-budget-exhausted"
+  | "insufficient-context";
 
 export interface JudgeFailure {
   code: JudgeFailureCode;
@@ -953,6 +1144,22 @@ export interface InvariantJudgeInput {
  */
 export interface InvariantJudge {
   judge(input: InvariantJudgeInput): Promise<JudgeOutcome>;
+}
+
+export type HolisticLintOutcome =
+  | {
+      kind: "results";
+      results: HolisticLintResult[];
+      stats: JudgeStats;
+    }
+  | {
+      kind: "unresolved";
+      failure: JudgeFailure;
+      stats: JudgeStats;
+    };
+
+export interface HolisticLintJudge {
+  lint(input: HolisticLintInput): Promise<HolisticLintOutcome>;
 }
 
 interface CandidateOutcomeBase {
@@ -1016,6 +1223,7 @@ export interface CheckResult {
   range: ResolvedRange;
   status: "complete" | "partial" | "failed";
   health: CheckHealth;
+  coverage: LintCoverage;
   hunks: number;
   invariants: number;
   candidates: number;
@@ -1236,7 +1444,7 @@ export function createLLMInvariantJudge(
     options.llm.prompt(INVARIANT_JUDGE_SYSTEM, user, {
       model: options.model,
       signal: options.signal,
-      workerID: "lore-invariant-check",
+      workerID: "lore-semantic-lint",
       thinking: false,
       reasoningEffort: options.effort,
       urgent: true,
@@ -1291,7 +1499,7 @@ export function createLLMInvariantJudge(
       if (verdict) {
         options.llm.recordWorkerSuccess?.(
           options.sessionID,
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
         return { kind: "verdict", ...verdict, stats: stats() };
       }
@@ -1330,7 +1538,7 @@ export function createLLMInvariantJudge(
       if (repaired) {
         options.llm.recordWorkerSuccess?.(
           options.sessionID,
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
       }
       return repaired
@@ -1351,6 +1559,10 @@ export interface CheckInvariantsInput {
   range: ResolvedRange;
   /** Preferred typed judge boundary. */
   judge?: InvariantJudge;
+  /** Optional whole-diff judge used when the bounded input is complete. */
+  holisticJudge?: HolisticLintJudge;
+  /** Approximate total input-token budget for one holistic lint. */
+  holisticInputTokenBudget?: number;
   /** @deprecated Gateway compatibility; use `judge`. */
   llm?: LLMClient;
   model?: { providerID: string; modelID: string };
@@ -1426,7 +1638,7 @@ export async function checkInvariants(
           message: boundedMessage(error, "Could not load invariants"),
         },
       },
-      hunkVectors: notRunVectorHealth(),
+      hunkVectors: notRunVectorHealth(hunks.length),
       judge: notRunJudgeHealth(),
     });
   }
@@ -1457,7 +1669,7 @@ export async function checkInvariants(
       {
         diff: diffHealth,
         invariantVectors: invariantVecResult.health,
-        hunkVectors: notRunVectorHealth(),
+        hunkVectors: notRunVectorHealth(hunks.length),
         judge: notRunJudgeHealth(),
       },
       { hunks: hunks.length, invariants: allEntries.length },
@@ -1512,6 +1724,116 @@ export async function checkInvariants(
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
   const selected = selectCandidates(clusters, hunkVecs, invariants, hunks);
 
+  const judge =
+    input.judge ??
+    (input.llm
+      ? createLLMInvariantJudge({
+          llm: input.llm,
+          model: input.model,
+          effort: input.effort,
+          sessionID: input.sessionID,
+          signal: input.signal,
+        })
+      : null);
+
+  // A small PR gets one bounded whole-diff lint only when every available
+  // hunk and selected invariant fits. Larger or incomplete inputs retain the
+  // isolated-hunk path below; they are never silently truncated.
+  const selectedInvariantIndices = uniqueInvariantIndices(
+    selected,
+    MAX_HOLISTIC_INVARIANTS,
+  );
+  const holisticHunks = hunks.map((hunk, index) => ({
+    id: holisticHunkId(index),
+    file: hunk.file,
+    text: hunk.text,
+  }));
+  const holisticInvariants: HolisticInvariant[] = selectedInvariantIndices.map(
+    (index) => ({
+      id: invariants[index].entry.id,
+      title: invariants[index].entry.title,
+      content: invariants[index].entry.content,
+    }),
+  );
+  const hasTruncatedHunk = hunks.some((hunk) =>
+    hunk.text.includes("hunk truncated by Lore"),
+  );
+  const holisticPlan =
+    input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
+      ? buildHolisticLintInput({
+          invariants: holisticInvariants,
+          hunks: holisticHunks,
+          prContext: input.prContext,
+          availableInvariantCount: allEntries.length,
+          inputTokenBudget: input.holisticInputTokenBudget,
+        })
+      : null;
+  const isolatedPrContext = input.prContext
+    ? {
+        ...input.prContext,
+        description: "",
+        descriptionTruncated: false,
+      }
+    : undefined;
+  const isolatedInputTokens = selected.reduce((total, candidate) => {
+    const invariant = invariants[candidate.invariantIdx];
+    const hunk = hunks[candidate.hunkIdx];
+    return (
+      total +
+      estimateIsolatedLintInputTokens({
+        invariant: {
+          id: invariant.entry.id,
+          title: invariant.entry.title,
+          content: invariant.entry.content,
+        },
+        hunk: {
+          id: holisticHunkId(candidate.hunkIdx),
+          file: hunk.file,
+          text: hunk.text,
+        },
+        prContext: isolatedPrContext,
+      })
+    );
+  }, 0);
+
+  const coverage =
+    holisticPlan?.kind === "too-large"
+      ? isolatedLintCoverage({
+          availableHunks: hunks.length,
+          includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
+            .size,
+          availableInvariants: allEntries.length,
+          includedInvariants: selectedInvariantIndices.length,
+          inputTokens: isolatedInputTokens,
+          inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
+        })
+      : holisticPlan?.kind === "fit"
+        ? holisticPlan.coverage
+        : isolatedLintCoverage({
+            availableHunks: hunks.length,
+            includedHunks: new Set(
+              selected.map((candidate) => candidate.hunkIdx),
+            ).size,
+            availableInvariants: allEntries.length,
+            includedInvariants: selectedInvariantIndices.length,
+            inputTokens: isolatedInputTokens,
+            inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
+          });
+
+  if (holisticPlan?.kind === "fit" && input.holisticJudge) {
+    return runHolisticLint({
+      input,
+      holisticJudge: input.holisticJudge,
+      plan: holisticPlan,
+      hunks,
+      invariants,
+      selected,
+      selectedInvariantIndices,
+      invariantVectorHealth: invariantVecResult.health,
+      hunkVectorHealth: hunkVecResult.health,
+    });
+  }
+
   // Map a representative hunk index → its cluster members, for verdict fan-out.
   const membersByRep = new Map<number, number[]>();
   for (const c of clusters) membersByRep.set(c.repIdx, c.memberIdxs);
@@ -1525,17 +1847,6 @@ export async function checkInvariants(
   let semanticCalls = 0;
   let transportAttempts = 0;
   let stopFailure: JudgeFailure | null = null;
-  const judge =
-    input.judge ??
-    (input.llm
-      ? createLLMInvariantJudge({
-          llm: input.llm,
-          model: input.model,
-          effort: input.effort,
-          sessionID: input.sessionID,
-          signal: input.signal,
-        })
-      : null);
 
   for (
     let candidateIndex = 0;
@@ -1588,7 +1899,7 @@ export async function checkInvariants(
           },
           file: hunk.file,
           hunk: hunk.text,
-          prContext: input.prContext,
+          prContext: isolatedPrContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });
       } catch (error) {
@@ -1645,6 +1956,7 @@ export async function checkInvariants(
       const dedupKey = `${inv.entry.id}\x1f${hunks[mi].file}`;
       if (seenFindings.has(dedupKey)) continue;
       seenFindings.add(dedupKey);
+      if (findings.length >= MAX_LINT_FINDINGS) continue;
       findings.push({
         invariantId: inv.entry.id,
         invariantTitle: inv.entry.title,
@@ -1686,8 +1998,9 @@ export async function checkInvariants(
 
   return {
     range: input.range,
-    status: overallStatus(health),
+    status: overallStatus(health, coverage),
     health,
+    coverage,
     hunks: hunks.length,
     invariants: allEntries.length,
     candidates: selected.length,
@@ -1735,6 +2048,7 @@ const JUDGE_FAILURE_CODES = new Set<JudgeFailureCode>([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "insufficient-context",
 ]);
 
 function isVerdict(value: unknown): value is Verdict {
@@ -1857,6 +2171,80 @@ function judgeContractFailure(): JudgeOutcome {
   };
 }
 
+function validateHolisticLintOutcome(
+  outcome: unknown,
+  expectedInvariantIds: ReadonlySet<string>,
+  expectedHunkIds: ReadonlySet<string>,
+): HolisticLintOutcome {
+  if (!isRecord(outcome) || !isRecord(outcome.stats)) {
+    return holisticContractFailure();
+  }
+  const semanticCalls =
+    typeof outcome.stats.semanticCalls === "number"
+      ? outcome.stats.semanticCalls
+      : -1;
+  const transportAttempts =
+    typeof outcome.stats.transportAttempts === "number"
+      ? outcome.stats.transportAttempts
+      : -1;
+  if (
+    !Number.isSafeInteger(semanticCalls) ||
+    semanticCalls < 0 ||
+    semanticCalls > Math.min(2, MAX_JUDGE_CALLS) ||
+    !Number.isSafeInteger(transportAttempts) ||
+    transportAttempts < 0
+  ) {
+    return holisticContractFailure();
+  }
+  const normalizedStats: JudgeStats = {
+    semanticCalls,
+    transportAttempts,
+  };
+  if (outcome.kind === "results") {
+    const results = parseHolisticLintResults(
+      JSON.stringify({ results: outcome.results }),
+      expectedInvariantIds,
+      expectedHunkIds,
+    );
+    return results
+      ? { kind: "results", results, stats: normalizedStats }
+      : holisticContractFailure();
+  }
+  if (
+    outcome.kind === "unresolved" &&
+    isRecord(outcome.failure) &&
+    typeof outcome.failure.code === "string" &&
+    JUDGE_FAILURE_CODES.has(outcome.failure.code as JudgeFailureCode) &&
+    typeof outcome.failure.message === "string" &&
+    outcome.failure.message.trim().length > 0 &&
+    outcome.failure.message.length <= 400 &&
+    (outcome.failure.scope === "candidate" ||
+      outcome.failure.scope === "run") &&
+    (outcome.failure.retryable === undefined ||
+      typeof outcome.failure.retryable === "boolean")
+  ) {
+    return {
+      kind: "unresolved",
+      failure: outcome.failure as unknown as JudgeFailure,
+      stats: normalizedStats,
+    };
+  }
+  return holisticContractFailure();
+}
+
+function holisticContractFailure(): HolisticLintOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "judge-contract-error",
+      message: "HolisticLintJudge returned an invalid outcome",
+      scope: "run",
+      retryable: false,
+    },
+    stats: { semanticCalls: 0, transportAttempts: 0 },
+  };
+}
+
 function healthyVectorHealth(
   expected: number,
   available: number,
@@ -1869,12 +2257,12 @@ function healthyVectorHealth(
   };
 }
 
-function notRunVectorHealth(): VectorHealth {
+function notRunVectorHealth(expected = 0): VectorHealth {
   return {
     status: "not-run",
-    expected: 0,
+    expected,
     available: 0,
-    missing: 0,
+    missing: expected,
   };
 }
 
@@ -1913,7 +2301,10 @@ function calculateJudgeHealth(
   return { status, selected, resolved, unresolved, notAttempted };
 }
 
-function overallStatus(health: CheckHealth): CheckResult["status"] {
+function overallStatus(
+  health: CheckHealth,
+  coverage?: LintCoverage,
+): CheckResult["status"] {
   const statuses: HealthStatus[] = [
     health.diff.status,
     health.invariantVectors.status,
@@ -1924,6 +2315,12 @@ function overallStatus(health: CheckHealth): CheckResult["status"] {
     return "failed";
   }
   if (statuses.includes("degraded")) return "partial";
+  if (
+    coverage?.strategy === "isolated-hunk" ||
+    (coverage?.omittedInvariants ?? 0) > 0
+  ) {
+    return "partial";
+  }
   return "complete";
 }
 
@@ -1932,10 +2329,15 @@ function emptyCheckResult(
   health: CheckHealth,
   counts: { hunks?: number; invariants?: number } = {},
 ): CheckResult {
+  const coverage = emptyLintCoverage(
+    counts.hunks ?? health.diff.hunks,
+    counts.invariants ?? 0,
+  );
   return {
     range,
-    status: overallStatus(health),
+    status: overallStatus(health, coverage),
     health,
+    coverage,
     hunks: counts.hunks ?? health.diff.hunks,
     invariants: counts.invariants ?? 0,
     candidates: 0,
@@ -1950,6 +2352,323 @@ function emptyCheckResult(
     judged: 0,
     judgeCalls: 0,
     unparseable: 0,
+  };
+}
+
+function holisticHunkId(index: number): string {
+  return `hunk-${String(index + 1).padStart(4, "0")}`;
+}
+
+function uniqueInvariantIndices(
+  selected: Candidate[],
+  limit: number,
+): number[] {
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const candidate of selected) {
+    if (seen.has(candidate.invariantIdx)) continue;
+    seen.add(candidate.invariantIdx);
+    out.push(candidate.invariantIdx);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function isolatedLintCoverage(input: {
+  availableHunks: number;
+  includedHunks: number;
+  availableInvariants: number;
+  includedInvariants: number;
+  inputTokens: number;
+  inputTokenBudget: number;
+}): LintCoverage {
+  return {
+    strategy: "isolated-hunk",
+    contextComplete: false,
+    inputTokens: input.inputTokens,
+    inputTokenBudget: input.inputTokenBudget,
+    availableHunks: input.availableHunks,
+    includedHunks: input.includedHunks,
+    omittedHunks: Math.max(0, input.availableHunks - input.includedHunks),
+    availableInvariants: input.availableInvariants,
+    includedInvariants: input.includedInvariants,
+    omittedInvariants: Math.max(
+      0,
+      input.availableInvariants - input.includedInvariants,
+    ),
+  };
+}
+
+async function runHolisticLint(args: {
+  input: CheckInvariantsInput;
+  holisticJudge: HolisticLintJudge;
+  plan: { kind: "fit"; input: HolisticLintInput; coverage: LintCoverage };
+  hunks: DiffHunk[];
+  invariants: InvariantVec[];
+  selected: Candidate[];
+  selectedInvariantIndices: number[];
+  invariantVectorHealth: VectorHealth;
+  hunkVectorHealth: VectorHealth;
+}): Promise<CheckResult> {
+  const { input: checkInput, plan, hunks, invariants, selected } = args;
+  const anchorByInvariant = new Map<number, Candidate>();
+  for (const candidate of selected) {
+    if (!anchorByInvariant.has(candidate.invariantIdx)) {
+      anchorByInvariant.set(candidate.invariantIdx, candidate);
+    }
+  }
+
+  checkInput.onJudge?.(1, 1);
+  let outcome: unknown;
+  try {
+    outcome = await args.holisticJudge.lint({
+      ...plan.input,
+      semanticCallBudget: Math.min(2, MAX_JUDGE_CALLS),
+    });
+  } catch (error) {
+    outcome = {
+      kind: "unresolved",
+      failure: {
+        code: "judge-contract-error",
+        message: boundedMessage(error, "HolisticLintJudge threw"),
+        scope: "run",
+      },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    };
+  }
+
+  const validated = validateHolisticLintOutcome(
+    outcome,
+    new Set(plan.input.invariants.map((invariant) => invariant.id)),
+    new Set(plan.input.hunks.map((hunk) => hunk.id)),
+  );
+  if (validated.kind === "unresolved") {
+    const failure = validated.failure;
+    const candidateOutcomes: CandidateOutcome[] = [];
+    for (let i = 0; i < args.selectedInvariantIndices.length; i++) {
+      const invariantIndex = args.selectedInvariantIndices[i];
+      const invariant = invariants[invariantIndex];
+      const anchor = anchorByInvariant.get(invariantIndex);
+      if (!anchor) {
+        candidateOutcomes.push(
+          unavailableHolisticCandidateOutcome(
+            i,
+            invariant,
+            i === 0 ? "unresolved" : "not-attempted",
+            failure,
+            i === 0
+              ? validated.stats
+              : { semanticCalls: 0, transportAttempts: 0 },
+          ),
+        );
+        continue;
+      }
+      const base = candidateOutcomeBase(
+        i,
+        anchor,
+        invariant,
+        hunks[anchor.hunkIdx],
+      );
+      candidateOutcomes.push({
+        ...base,
+        state: i === 0 ? "unresolved" : "not-attempted",
+        failure,
+        stats:
+          i === 0
+            ? validated.stats
+            : { semanticCalls: 0, transportAttempts: 0 },
+      });
+    }
+    const unresolved = candidateOutcomes.filter(
+      (candidate) => candidate.state === "unresolved",
+    ).length;
+    const notAttempted = candidateOutcomes.length - unresolved;
+    const judgeHealth = calculateJudgeHealth(
+      candidateOutcomes.length,
+      0,
+      unresolved,
+      notAttempted,
+    );
+    const health: CheckHealth = {
+      diff: { status: "healthy", hunks: hunks.length },
+      invariantVectors: args.invariantVectorHealth,
+      hunkVectors: args.hunkVectorHealth,
+      judge: judgeHealth,
+    };
+    return {
+      range: checkInput.range,
+      status: overallStatus(health, plan.coverage),
+      health,
+      coverage: plan.coverage,
+      hunks: hunks.length,
+      invariants: args.invariants.length,
+      candidates: candidateOutcomes.length,
+      attempted: unresolved,
+      resolved: 0,
+      unresolved,
+      notAttempted,
+      semanticCalls: validated.stats.semanticCalls,
+      transportAttempts: validated.stats.transportAttempts,
+      candidateOutcomes,
+      findings: [],
+      judged: unresolved,
+      judgeCalls: validated.stats.semanticCalls,
+      unparseable: unresolved,
+    };
+  }
+
+  const resultsByInvariant = new Map(
+    validated.results.map((result) => [result.invariantId, result]),
+  );
+  const candidateOutcomes: CandidateOutcome[] = [];
+  for (let i = 0; i < args.selectedInvariantIndices.length; i++) {
+    const invariantIndex = args.selectedInvariantIndices[i];
+    const invariant = invariants[invariantIndex];
+    const anchor = anchorByInvariant.get(invariantIndex);
+    const result = resultsByInvariant.get(invariant.entry.id);
+    if (!anchor || !result) {
+      candidateOutcomes.push(
+        unavailableHolisticCandidateOutcome(
+          i,
+          invariant,
+          "not-attempted",
+          {
+            code: "judge-contract-error",
+            message: "Holistic judge omitted a selected candidate",
+            scope: "candidate",
+            retryable: false,
+          },
+          { semanticCalls: 0, transportAttempts: 0 },
+        ),
+      );
+      continue;
+    }
+    const base = candidateOutcomeBase(
+      i,
+      anchor,
+      invariant,
+      hunks[anchor.hunkIdx],
+    );
+    const stats =
+      i === 0 ? validated.stats : { semanticCalls: 0, transportAttempts: 0 };
+    if (result.verdict === "insufficient-context") {
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure: {
+          code: "insufficient-context",
+          message: result.reason,
+          scope: "candidate",
+          retryable: false,
+        },
+        stats,
+      });
+      continue;
+    }
+    candidateOutcomes.push({
+      ...base,
+      state: "resolved",
+      verdict: result.verdict,
+      reason: result.reason,
+      stats,
+    });
+  }
+
+  const findings: Finding[] = [];
+  const seen = new Set<string>();
+  const hunkById = new Map(
+    plan.input.hunks.map((hunk, index) => [hunk.id, hunks[index]]),
+  );
+  for (const result of validated.results) {
+    if (result.verdict !== "violates") continue;
+    const invariantIndex = args.selectedInvariantIndices.find(
+      (index) => invariants[index].entry.id === result.invariantId,
+    );
+    if (invariantIndex === undefined) continue;
+    const anchor = anchorByInvariant.get(invariantIndex);
+    const invariant = invariants[invariantIndex];
+    if (!anchor) continue;
+    const severity = enforcementLevel(invariant.entry);
+    for (const evidence of result.evidence) {
+      const hunk = hunkById.get(evidence.hunkId);
+      if (!hunk) continue;
+      const dedupKey = `${result.invariantId}\x1f${hunk.file}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
+      findings.push({
+        invariantId: invariant.entry.id,
+        invariantTitle: invariant.entry.title,
+        invariantContent: invariant.entry.content,
+        file: hunk.file,
+        similarity: anchor.similarity,
+        refHit: anchor.refHit,
+        reason: evidence.reason,
+        hunk: hunk.text,
+        severity,
+      });
+    }
+  }
+
+  const resolved = candidateOutcomes.filter(
+    (candidate) => candidate.state === "resolved",
+  ).length;
+  const unresolved = candidateOutcomes.filter(
+    (candidate) => candidate.state === "unresolved",
+  ).length;
+  const notAttempted = candidateOutcomes.filter(
+    (candidate) => candidate.state === "not-attempted",
+  ).length;
+  const attempted = resolved + unresolved;
+  const health: CheckHealth = {
+    diff: { status: "healthy", hunks: hunks.length },
+    invariantVectors: args.invariantVectorHealth,
+    hunkVectors: args.hunkVectorHealth,
+    judge: calculateJudgeHealth(
+      args.selectedInvariantIndices.length,
+      resolved,
+      unresolved,
+      notAttempted,
+    ),
+  };
+  return {
+    range: checkInput.range,
+    status: overallStatus(health, plan.coverage),
+    health,
+    coverage: plan.coverage,
+    hunks: hunks.length,
+    invariants: args.invariants.length,
+    candidates: candidateOutcomes.length,
+    attempted,
+    resolved,
+    unresolved,
+    notAttempted,
+    semanticCalls: validated.stats.semanticCalls,
+    transportAttempts: validated.stats.transportAttempts,
+    candidateOutcomes,
+    findings,
+    judged: attempted,
+    judgeCalls: validated.stats.semanticCalls,
+    unparseable: unresolved,
+  };
+}
+function unavailableHolisticCandidateOutcome(
+  candidateIndex: number,
+  invariant: InvariantVec,
+  state: "unresolved" | "not-attempted",
+  failure: JudgeFailure,
+  stats: JudgeStats,
+): CandidateOutcome {
+  return {
+    id: `candidate-${String(candidateIndex + 1).padStart(2, "0")}`,
+    file: "<unavailable>",
+    hunkIndex: -1,
+    invariantId: invariant.entry.id,
+    invariantTitle: invariant.entry.title,
+    similarity: 0,
+    refHit: false,
+    state,
+    failure,
+    stats,
   };
 }
 

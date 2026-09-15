@@ -31,11 +31,12 @@ import {
   splitDiff,
   type DiffHunk,
   type Finding,
+  type HolisticLintInput,
   type InvariantJudge,
   type InvariantVec,
   type JudgeOutcome,
   type ResolvedRange,
-} from "../src/invariant-check";
+} from "../src/semantic-lint/check";
 import type { LLMClient } from "../src/types";
 
 function v(...xs: number[]): Float32Array {
@@ -265,6 +266,20 @@ describe("splitDiff", () => {
     expect(hunks[0].text).toContain("-if (!token) throw");
   });
 
+  it("preserves rename-only changes as a synthetic path hunk", () => {
+    const raw = [
+      "diff --git a/src/old.ts b/src/new.ts",
+      "similarity index 100%",
+      "rename from src/old.ts",
+      "rename to src/new.ts",
+    ].join("\n");
+    const hunks = splitDiff(raw);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].file).toBe("src/new.ts");
+    expect(hunks[0].text).toContain("rename from src/old.ts");
+    expect(hunks[0].text).toContain("rename to src/new.ts");
+  });
+
   it("drops ignored files (.lore.md, lockfiles, generated) but keeps code", () => {
     const raw = [
       "diff --git a/.lore.md b/.lore.md",
@@ -436,7 +451,9 @@ describe("isIgnoredFile", () => {
     expect(isIgnoredFile("node_modules/pkg/index.js")).toBe(true);
   });
   it("does NOT ignore real source files", () => {
-    expect(isIgnoredFile("packages/core/src/invariant-check.ts")).toBe(false);
+    expect(isIgnoredFile("packages/core/src/semantic-lint/check.ts")).toBe(
+      false,
+    );
     expect(isIgnoredFile("src/index.ts")).toBe(false);
     expect(isIgnoredFile("Makefile")).toBe(false);
   });
@@ -1665,7 +1682,7 @@ describe("checkInvariants typed judge outcomes", () => {
     expect(result.health.judge.status).toBe("not-run");
   });
 
-  it("reports a healthy run only when every selected candidate resolves", async () => {
+  it("reports partial coverage when isolated candidate judging resolves", async () => {
     const project = "/tmp/ic-test-typed-healthy";
     const hunks = await seedCandidateSet(project, 3);
     const { judge, judgeCall } = stubJudge(() => ({
@@ -1685,7 +1702,7 @@ describe("checkInvariants typed judge outcomes", () => {
 
     expect(judgeCall).toHaveBeenCalledTimes(3);
     expect(result).toMatchObject({
-      status: "complete",
+      status: "partial",
       candidates: 3,
       attempted: 3,
       resolved: 3,
@@ -1840,5 +1857,110 @@ describe("checkInvariants typed judge outcomes", () => {
         0,
       ),
     ).toBe(result.transportAttempts);
+  });
+});
+
+describe("holistic semantic-lint orchestration", () => {
+  it("uses one complete whole-diff lint and cites only returned evidence", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-small-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => {
+        throw new Error("isolated judge should not run for a fitting lint");
+      });
+      const holisticLint = vi.fn(async (input: HolisticLintInput) => ({
+        kind: "results" as const,
+        results: input.invariants.map((invariant) => ({
+          invariantId: invariant.id,
+          verdict: "violates" as const,
+          reason: "The complete change bypasses the boundary.",
+          evidence: [
+            { hunkId: input.hunks[0].id, reason: "The changed call is here." },
+          ],
+        })),
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@ -1 +1 @@\n-old\n+new",
+          },
+        ],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { lint: holisticLint },
+        holisticInputTokenBudget: 16_000,
+        sessionID: "holistic-small",
+      });
+
+      expect(holisticLint).toHaveBeenCalledTimes(1);
+      expect(isolated.judgeCall).not.toHaveBeenCalled();
+      expect(result.coverage).toMatchObject({
+        strategy: "holistic",
+        contextComplete: true,
+        includedHunks: 1,
+        omittedHunks: 0,
+      });
+      expect(result.semanticCalls).toBe(1);
+      expect(result.candidates).toBe(1);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0].hunk).toContain("+new");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to isolated hunks when the complete diff exceeds the budget", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-large-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "satisfies",
+        reason: "The isolated hunk is compliant.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const holisticLint = vi.fn(async () => {
+        throw new Error("holistic lint judge should not run over budget");
+      });
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@\\n+" + "x".repeat(20_000),
+          },
+        ],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { lint: holisticLint },
+        holisticInputTokenBudget: 2_000,
+        sessionID: "holistic-large",
+      });
+
+      expect(holisticLint).not.toHaveBeenCalled();
+      expect(isolated.judgeCall).toHaveBeenCalledTimes(1);
+      expect(result.coverage.strategy).toBe("isolated-hunk");
+      expect(result.coverage.contextComplete).toBe(false);
+      expect(result.semanticCalls).toBe(1);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
   });
 });

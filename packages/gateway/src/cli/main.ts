@@ -512,8 +512,8 @@ export async function _cli(): Promise<void> {
       }
 
       case "lint": {
-        const { commandInvariantCheck } = await import("./invariant-check");
-        await commandInvariantCheck(rest, values);
+        const { commandSemanticLint } = await import("./semantic-lint");
+        await commandSemanticLint(rest, values);
         break;
       }
 

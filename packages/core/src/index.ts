@@ -35,7 +35,9 @@ export * as syncData from "./sync-data";
 export * as data from "./data";
 export * as distillation from "./distillation";
 export * as contradiction from "./contradiction";
-export * as invariantCheck from "./invariant-check";
+export * as semanticLint from "./semantic-lint";
+/** @deprecated Use semanticLint; retained for host compatibility. */
+export * as invariantCheck from "./semantic-lint";
 export {
   anthropicThinkingBudget,
   openAIReasoningEffort,

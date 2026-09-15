@@ -220,7 +220,7 @@ describe("invariant worker recovery", () => {
       "cancel-repair",
     ])(`${adapter}: %s`, async (mode) => {
       const { createLLMInvariantJudge } =
-        await import("../../core/src/invariant-check");
+        await import("../../core/src/semantic-lint/check");
       const controller = new AbortController();
       const recordWorkerSuccess = vi.fn();
       let calls = 0;
@@ -271,8 +271,103 @@ describe("invariant worker recovery", () => {
       if (usable)
         expect(recordWorkerSuccess).toHaveBeenCalledWith(
           "recover-judge",
-          "lore-invariant-check",
+          "lore-semantic-lint",
         );
     });
   }
+});
+
+describe("holistic gateway judge", () => {
+  const holisticInput = {
+    invariants: [
+      {
+        id: "inv-1",
+        title: "Boundary",
+        content: "The shared boundary must remain enforced.",
+      },
+    ],
+    hunks: [
+      {
+        id: "hunk-0001",
+        file: "src/a.ts",
+        text: "@@ -1 +1 @@\n-old\n+new",
+      },
+    ],
+    inputTokenBudget: 16_000,
+    semanticCallBudget: 2,
+  };
+
+  test("parses a complete lint result set and counts transport attempts", async () => {
+    const client = clientWith([
+      {
+        kind: "success",
+        text: JSON.stringify({
+          results: [
+            {
+              invariantId: "inv-1",
+              verdict: "satisfies",
+              reason: "The changed call remains inside the boundary.",
+              evidence: [],
+            },
+          ],
+        }),
+        model: "github-copilot/gpt-5.6-luna",
+        protocol: "openai-responses",
+        attempts: 2,
+      },
+    ]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "holistic-lint",
+    });
+
+    const outcome = await judge.lint(holisticInput);
+    expect(outcome).toMatchObject({
+      kind: "results",
+      stats: { semanticCalls: 1, transportAttempts: 2 },
+    });
+  });
+
+  test("repairs an invalid holistic response within the semantic budget", async () => {
+    const client = clientWith([
+      {
+        kind: "success",
+        text: "not json",
+        model: "github-copilot/gpt-5.6-luna",
+        protocol: "openai-responses",
+        attempts: 1,
+      },
+      {
+        kind: "success",
+        text: JSON.stringify({
+          results: [
+            {
+              invariantId: "inv-1",
+              verdict: "violates",
+              reason: "The new call bypasses the boundary.",
+              evidence: [
+                { hunkId: "hunk-0001", reason: "The changed call is here." },
+              ],
+            },
+          ],
+        }),
+        model: "github-copilot/gpt-5.6-luna",
+        protocol: "openai-responses",
+        attempts: 1,
+      },
+    ]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "holistic-lint-repair",
+    });
+
+    const outcome = await judge.lint(holisticInput);
+    expect(outcome.kind).toBe("results");
+    expect(outcome.stats).toEqual({
+      semanticCalls: 2,
+      transportAttempts: 2,
+    });
+  });
 });

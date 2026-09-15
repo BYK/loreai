@@ -60,6 +60,10 @@ inputs:
     description: "Per-candidate judge timeout, in seconds."
     required: false
     default: "90"
+  holistic-input-tokens:
+    description: "Total input-token budget for holistic small-PR semantic lint."
+    required: false
+    default: "16000"
 
 runs:
   using: "composite"
@@ -158,6 +162,7 @@ runs:
         LORE_IC_GATE: ${{ inputs.gate }}
         LORE_DEADLINE_SECONDS: ${{ inputs.deadline-seconds }}
         LORE_CANDIDATE_TIMEOUT_SECONDS: ${{ inputs.candidate-timeout-seconds }}
+        HOLISTIC_INPUT_TOKENS: ${{ inputs.holistic-input-tokens }}
         LORE_REPORT_FILE: ${{ runner.temp }}/lore-semantic-lint-report.json
         LORE_DEBUG: "1"
       run: |
@@ -188,6 +193,7 @@ runs:
         args=(lint --report-file "$LORE_REPORT_FILE")
         args+=(--deadline-ms "$((LORE_DEADLINE_SECONDS * 1000))")
         args+=(--candidate-timeout-ms "$((LORE_CANDIDATE_TIMEOUT_SECONDS * 1000))")
+        args+=(--holistic-input-tokens "$HOLISTIC_INPUT_TOKENS")
         [ -n "$base" ] && args+=(--base "$base")
         [ -n "$head" ] && args+=(--head "$head")
         [ -n "$LORE_IC_MODEL" ] && args+=(--model "$LORE_IC_MODEL")

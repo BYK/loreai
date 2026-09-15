@@ -12,6 +12,7 @@ const temporaryDirectories: string[] = [];
 afterEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  vi.doUnmock("../src/cli/semantic-lint");
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -23,12 +24,24 @@ function completeReport(
   overrides: Partial<SemanticLintReport> = {},
 ): SemanticLintReport {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     status: "complete",
     model: "github-copilot/gpt-5.6-luna",
     effort: "off",
     elapsedMs: 25,
     range: { base: "base", head: "head", source: "test" },
+    coverage: {
+      strategy: "none",
+      contextComplete: false,
+      inputTokens: 0,
+      inputTokenBudget: 16_000,
+      availableHunks: 0,
+      includedHunks: 0,
+      omittedHunks: 0,
+      availableInvariants: 0,
+      includedInvariants: 0,
+      omittedInvariants: 0,
+    },
     health: {
       range: { status: "healthy" },
       diff: { status: "healthy" },
@@ -97,6 +110,18 @@ describe("typed lore lint contract", () => {
       result: {
         status: "complete",
         range: { base: "base", head: "head", source: "test" },
+        coverage: {
+          strategy: "holistic",
+          contextComplete: true,
+          inputTokens: 2_000,
+          inputTokenBudget: 16_000,
+          availableHunks: 1,
+          includedHunks: 1,
+          omittedHunks: 0,
+          availableInvariants: 1,
+          includedInvariants: 1,
+          omittedInvariants: 0,
+        },
         health: {
           diff: { status: "healthy" },
           invariantVectors: {
@@ -191,6 +216,8 @@ describe("typed lore lint contract", () => {
       "--report-file",
       "--deadline-ms",
       "--candidate-timeout-ms",
+      "--holistic-input-tokens",
+      "--allow-author-overrides",
       "--json",
     ]) {
       expect(help).toContain(flag);
@@ -203,7 +230,7 @@ describe("typed lore lint contract", () => {
       await options.publishReport?.(report);
       return report;
     });
-    vi.doMock("../src/cli/invariant-check", () => ({ runSemanticLint }));
+    vi.doMock("../src/cli/semantic-lint", () => ({ runSemanticLint }));
 
     const directory = await mkdtemp(join(tmpdir(), "lore-lint-contract-"));
     temporaryDirectories.push(directory);
@@ -355,7 +382,7 @@ describe("typed lore lint contract", () => {
     const path = join(directory, "report.json");
     await writeSemanticLintReport(path, failed);
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(failed);
-    expect(failed.schemaVersion).toBe(1);
+    expect(failed.schemaVersion).toBe(3);
     expect(failed.status).toBe("failed");
     expect(semanticLintExitCode(failed)).toBe(3);
   });
@@ -376,5 +403,16 @@ describe("typed lore lint contract", () => {
       "No suspected invariant violations",
     );
     expect(renderSemanticLintReport(failed)).toContain("inconclusive");
+  });
+
+  test("legacy holistic token parsing defaults empty input safely", async () => {
+    const { parseLegacyHolisticInputTokens } =
+      await import("../src/cli/semantic-lint");
+    expect(parseLegacyHolisticInputTokens("")).toBe(16_000);
+    expect(parseLegacyHolisticInputTokens(undefined)).toBe(16_000);
+    expect(parseLegacyHolisticInputTokens("32000")).toBe(32_000);
+    expect(() => parseLegacyHolisticInputTokens("0")).toThrow(
+      /positive integer/,
+    );
   });
 });
