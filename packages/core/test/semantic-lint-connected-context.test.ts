@@ -32,4 +32,26 @@ describe("connected semantic-lint context", () => {
     );
     expect(rendered).toContain("expect(sharedSymbol)");
   });
+
+  it("resolves extensionless relative imports", () => {
+    const hunks = [
+      hunk("src/main.ts", 'import { helper } from "./utils";'),
+      hunk("src/utils.ts", "export const helper = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "import-relationship",
+    });
+  });
+
+  it("pairs Python test_ prefixes with their source module", () => {
+    const hunks = [
+      hunk("src/foo.py", "def foo(): return True"),
+      hunk("tests/test_foo.py", "def test_foo(): assert foo()"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)?.[0]).toMatchObject({
+      hunkIndex: 1,
+      reason: "test-pair",
+    });
+  });
 });

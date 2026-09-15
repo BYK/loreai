@@ -32,7 +32,52 @@ function basename(file: string): string {
 function stem(file: string): string {
   return basename(file)
     .replace(/\.(tsx?|jsx?|mjs|cjs|py|rs|go|java)$/i, "")
-    .replace(/\.(test|spec)$/i, "");
+    .replace(/\.(test|spec)$/i, "")
+    .replace(/^test_/i, "");
+}
+
+function modulePath(file: string): string {
+  return normalizePath(file)
+    .replace(/\.(tsx?|jsx?|mjs|cjs|py|rs|go|java)$/i, "")
+    .replace(/\/index$/i, "");
+}
+
+function normalizePath(file: string): string {
+  const parts: string[] = [];
+  for (const part of file.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+    } else {
+      parts.push(part);
+    }
+  }
+  return parts.join("/");
+}
+
+function relativeImportMatches(
+  importer: string,
+  specifier: string,
+  candidate: string,
+): boolean {
+  if (!specifier.startsWith(".")) return false;
+  const importerDirectory = importer.split("/").slice(0, -1).join("/");
+  return (
+    modulePath(normalizePath(importerDirectory + "/" + specifier)) ===
+    modulePath(candidate)
+  );
+}
+
+function importMatches(
+  importer: string,
+  specifier: string,
+  candidate: string,
+): boolean {
+  return (
+    relativeImportMatches(importer, specifier, candidate) ||
+    candidate.includes(specifier) ||
+    specifier.endsWith("/" + basename(candidate))
+  );
 }
 
 function related(
@@ -46,17 +91,14 @@ function related(
   const seedImports = imports(seed);
   const candidateImports = imports(candidate);
   if (
-    [...seedImports].some(
-      (value) =>
-        candidate.file.includes(value) ||
-        value.endsWith("/" + basename(candidate.file)),
+    [...seedImports].some((value) =>
+      importMatches(seed.file, value, candidate.file),
     )
   )
     return { reason: "import-relationship", score: 80 };
   if (
-    [...candidateImports].some(
-      (value) =>
-        seed.file.includes(value) || value.endsWith("/" + basename(seed.file)),
+    [...candidateImports].some((value) =>
+      importMatches(candidate.file, value, seed.file),
     )
   )
     return { reason: "import-relationship", score: 80 };
