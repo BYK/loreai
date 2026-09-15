@@ -1903,10 +1903,9 @@ export async function checkInvariants(
         state: "unresolved",
         failure: {
           code: "insufficient-context",
-          message:
-            renderedContext.omittedCompanions > 0
-              ? `Connected context omitted ${renderedContext.omittedCompanions} companion hunk(s)`
-              : "Hunk context was truncated by the semantic-lint input bound",
+          message: renderedContext.truncated
+            ? "Hunk context was truncated by the semantic-lint input bound"
+            : `Connected context omitted ${renderedContext.omittedCompanions} companion hunk(s)`,
           scope: "candidate",
           retryable: false,
         },
