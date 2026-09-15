@@ -51,6 +51,10 @@ import {
   type HolisticLintInput,
   type LintCoverage,
 } from "./context";
+import {
+  buildConnectedContext,
+  renderConnectedContextDetails,
+} from "./connected-context";
 import { extractReferences } from "../references";
 import type { LLMClient } from "../types";
 
@@ -501,6 +505,10 @@ function resolveDefaultBranch(cwd: string): string | null {
 
 export interface DiffHunk {
   file: string;
+  /** Original path for a rename; omitted when the path is unchanged. */
+  oldFile?: string;
+  /** True when the changed file has no new-side path (a full file deletion). */
+  deleted?: boolean;
   /** The unified-diff hunk text (the `@@ ... @@` header + its body). */
   text: string;
 }
@@ -669,7 +677,12 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, text });
+      hunks.push({
+        file: f,
+        text,
+        ...(oldFile && oldFile !== f ? { oldFile } : {}),
+        ...(file.length === 0 && oldFile ? { deleted: true } : {}),
+      });
     }
     cur = null;
   };
@@ -703,7 +716,7 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, text });
+      hunks.push({ file: f, oldFile: pathChangeFrom, text });
     }
     pathChangeFrom = "";
     pathChangeTo = "";
@@ -1716,9 +1729,19 @@ export async function checkInvariants(
   }
   const hunkVecs = hunkVecResult.vecs;
 
-  // Diversify: cluster near-identical hunks so the budget covers DISTINCT
-  // changes. Only each cluster's representative is judged; members inherit.
-  const clusters = clusterHunks(hunkVecs);
+  // Every hunk remains an independent seed. Similarity is not proof that
+  // another file has the same behavior, so verdicts are never propagated.
+  const clusters = hunks.map((_, index) => ({
+    repIdx: index,
+    memberIdxs: [index],
+  }));
+  const connectedBySeed = buildConnectedContext(hunks, input.signal);
+  const renderIsolatedHunk = (hunkIndex: number) =>
+    renderConnectedContextDetails(
+      hunks[hunkIndex],
+      connectedBySeed.get(hunkIndex) ?? [],
+      hunks,
+    );
 
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
@@ -1789,7 +1812,7 @@ export async function checkInvariants(
         hunk: {
           id: holisticHunkId(candidate.hunkIdx),
           file: hunk.file,
-          text: hunk.text,
+          text: renderIsolatedHunk(candidate.hunkIdx).text,
         },
         prContext: isolatedPrContext,
       })
@@ -1834,10 +1857,6 @@ export async function checkInvariants(
     });
   }
 
-  // Map a representative hunk index → its cluster members, for verdict fan-out.
-  const membersByRep = new Map<number, number[]>();
-  for (const c of clusters) membersByRep.set(c.repIdx, c.memberIdxs);
-
   // Stage 2: judge the selected pairs (capped, coverage-ordered).
   const findings: Finding[] = [];
   // Dedup key = `${invariantId}\x1f${file}`: one drift per (invariant, file),
@@ -1877,6 +1896,24 @@ export async function checkInvariants(
       continue;
     }
 
+    const renderedContext = renderIsolatedHunk(c.hunkIdx);
+    if (renderedContext.truncated) {
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure: {
+          code: "insufficient-context",
+          message: renderedContext.truncated
+            ? "Hunk context was truncated by the semantic-lint input bound"
+            : `Connected context omitted ${renderedContext.omittedCompanions} companion hunk(s)`,
+          scope: "candidate",
+          retryable: false,
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      });
+      continue;
+    }
+
     input.onJudge?.(candidateIndex + 1, selected.length);
     let outcome: JudgeOutcome;
     if (!judge) {
@@ -1898,7 +1935,7 @@ export async function checkInvariants(
             content: inv.entry.content,
           },
           file: hunk.file,
-          hunk: hunk.text,
+          hunk: renderedContext.text,
           prContext: isolatedPrContext,
           semanticCallBudget: Math.min(2, remainingSemanticCalls),
         });
@@ -1944,13 +1981,9 @@ export async function checkInvariants(
     // which is what produced the dominant false-positive class (a fix being read
     // as a violation).
     if (outcome.verdict !== "violates") continue;
-    // Fan out the verdict to every hunk in the representative's cluster: a
-    // repeated change (e.g. one rename across N files) is flagged in all N.
-    // Dedup per (invariant, file): the same invariant flagged against several
-    // hunks of ONE file is ONE drift, not N findings (the #1234 error-reporting
-    // case produced 4 near-identical findings). Cluster fan-out across DIFFERENT
-    // files is preserved — those are genuinely distinct locations.
-    const memberIdxs = membersByRep.get(c.hunkIdx) ?? [c.hunkIdx];
+    // A verdict belongs only to the seed hunk that was actually judged.
+    // Companion context is evidence for investigation, never a second verdict.
+    const memberIdxs = [c.hunkIdx];
     const severity = enforcementLevel(inv.entry);
     for (const mi of memberIdxs) {
       const dedupKey = `${inv.entry.id}\x1f${hunks[mi].file}`;
