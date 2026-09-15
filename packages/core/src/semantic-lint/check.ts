@@ -1900,15 +1900,14 @@ export async function checkInvariants(
     }
 
     const renderedContext = renderIsolatedHunk(c.hunkIdx);
-    if (renderedContext.truncated || renderedContext.contextIncomplete) {
+    if (renderedContext.truncated) {
       candidateOutcomes.push({
         ...base,
         state: "unresolved",
         failure: {
           code: "insufficient-context",
-          message: renderedContext.truncated
-            ? "Hunk context was truncated by the semantic-lint input bound"
-            : "Connected context generation hit its relation-check bound",
+          message:
+            "Hunk context was truncated by the semantic-lint input bound",
           scope: "candidate",
           retryable: false,
         },
