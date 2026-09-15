@@ -146,6 +146,11 @@ interface HunkIndex {
   sameFileNeighbors: Map<number, number[]>;
 }
 
+export interface ConnectedContextDetails {
+  contexts: Map<number, ConnectedCompanion[]>;
+  complete: boolean;
+}
+
 function diffLines(hunk: DiffHunk, prefix: "+" | "-" | "result"): string {
   return hunk.text
     .split("\n")
@@ -711,10 +716,10 @@ function related(
   return null;
 }
 
-export function buildConnectedContext(
+export function buildConnectedContextDetails(
   hunks: DiffHunk[],
   signal?: AbortSignal,
-): Map<number, ConnectedCompanion[]> {
+): ConnectedContextDetails {
   const index = buildIndex(hunks);
   const result = new Map<number, ConnectedCompanion[]>();
   let relationChecks = 0;
@@ -738,7 +743,17 @@ export function buildConnectedContext(
     companions.sort((a, b) => b.score - a.score || a.hunkIndex - b.hunkIndex);
     result.set(seedIndex, companions.slice(0, MAX_COMPANIONS));
   }
-  return result;
+  return {
+    contexts: result,
+    complete: result.size === hunks.length,
+  };
+}
+
+export function buildConnectedContext(
+  hunks: DiffHunk[],
+  signal?: AbortSignal,
+): Map<number, ConnectedCompanion[]> {
+  return buildConnectedContextDetails(hunks, signal).contexts;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {

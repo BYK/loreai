@@ -52,7 +52,7 @@ import {
   type LintCoverage,
 } from "./context";
 import {
-  buildConnectedContext,
+  buildConnectedContextDetails,
   renderConnectedContextDetails,
 } from "./connected-context";
 import { extractReferences } from "../references";
@@ -1735,13 +1735,6 @@ export async function checkInvariants(
     repIdx: index,
     memberIdxs: [index],
   }));
-  const connectedBySeed = buildConnectedContext(hunks, input.signal);
-  const renderIsolatedHunk = (hunkIndex: number) =>
-    renderConnectedContextDetails(
-      hunks[hunkIndex],
-      connectedBySeed.get(hunkIndex) ?? [],
-      hunks,
-    );
 
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
@@ -1791,6 +1784,30 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget,
         })
       : null;
+
+  if (holisticPlan?.kind === "fit" && input.holisticJudge) {
+    return runHolisticLint({
+      input,
+      holisticJudge: input.holisticJudge,
+      plan: holisticPlan,
+      hunks,
+      invariants,
+      selected,
+      selectedInvariantIndices,
+      invariantVectorHealth: invariantVecResult.health,
+      hunkVectorHealth: hunkVecResult.health,
+    });
+  }
+
+  const connectedContext = buildConnectedContextDetails(hunks, input.signal);
+  const renderIsolatedHunk = (hunkIndex: number) => ({
+    ...renderConnectedContextDetails(
+      hunks[hunkIndex],
+      connectedContext.contexts.get(hunkIndex) ?? [],
+      hunks,
+    ),
+    contextIncomplete: !connectedContext.contexts.has(hunkIndex),
+  });
   const isolatedPrContext = input.prContext
     ? {
         ...input.prContext,
@@ -1843,20 +1860,6 @@ export async function checkInvariants(
             inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
           });
 
-  if (holisticPlan?.kind === "fit" && input.holisticJudge) {
-    return runHolisticLint({
-      input,
-      holisticJudge: input.holisticJudge,
-      plan: holisticPlan,
-      hunks,
-      invariants,
-      selected,
-      selectedInvariantIndices,
-      invariantVectorHealth: invariantVecResult.health,
-      hunkVectorHealth: hunkVecResult.health,
-    });
-  }
-
   // Stage 2: judge the selected pairs (capped, coverage-ordered).
   const findings: Finding[] = [];
   // Dedup key = `${invariantId}\x1f${file}`: one drift per (invariant, file),
@@ -1897,7 +1900,7 @@ export async function checkInvariants(
     }
 
     const renderedContext = renderIsolatedHunk(c.hunkIdx);
-    if (renderedContext.truncated) {
+    if (renderedContext.truncated || renderedContext.contextIncomplete) {
       candidateOutcomes.push({
         ...base,
         state: "unresolved",
@@ -1905,7 +1908,7 @@ export async function checkInvariants(
           code: "insufficient-context",
           message: renderedContext.truncated
             ? "Hunk context was truncated by the semantic-lint input bound"
-            : `Connected context omitted ${renderedContext.omittedCompanions} companion hunk(s)`,
+            : "Connected context generation hit its relation-check bound",
           scope: "candidate",
           retryable: false,
         },
