@@ -133,6 +133,14 @@ describe("connected semantic-lint context", () => {
     });
   });
 
+  it("ignores import-looking text inside template literals", () => {
+    const hunks = [
+      hunk("src/main.ts", '@@\n+const text = `\nimport x from "./fake";\n`;'),
+      hunk("src/fake.ts", "@@\n+export const x = true;"),
+    ];
+    expect(buildConnectedContext(hunks).get(0)).toEqual([]);
+  });
+
   it("includes unchanged import context but excludes removed imports", () => {
     const hunks = [
       hunk(

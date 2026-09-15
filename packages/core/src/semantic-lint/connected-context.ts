@@ -16,9 +16,6 @@ const MAX_TOKEN_FANOUT = 64;
 const MAX_SAME_FILE_CANDIDATES = 16;
 const MAX_DIRECT_CANDIDATES = 32;
 const TOKEN_RE = /\b[A-Za-z_$][\w$]{2,}\b/g;
-const IMPORT_RE =
-  /(?:^|[;\n])\s*(?:import(?:[^;]*?\sfrom\s+|\s*)|export[^;]*?\sfrom\s+|(?:const|let|var)[^;]*?=\s*require\()\s*['"]([^'"]+)['"]/gm;
-const STRING_RE = /(["'\x60])(?:\\.|(?!\1)[^\r\n])*\1/g;
 const TEST_RE = /(?:^|[./_-])(test|spec|tests?)(?:[./_-]|$)/i;
 const TEST_PAIR_ROOTS = new Set([
   "app",
@@ -178,50 +175,148 @@ function hasAddedLines(hunk: DiffHunk): boolean {
   return diffLines(hunk, "+").trim().length > 0;
 }
 
-function stripComments(value: string): string {
+interface StringLiteral {
+  start: number;
+  end: number;
+  value: string;
+}
+
+interface LexedSource {
+  masked: string;
+  strings: StringLiteral[];
+}
+
+function lexSource(value: string): LexedSource {
   let output = "";
-  let quote: string | null = null;
+  const strings: StringLiteral[] = [];
+  let quote: "'" | '"' | "`" | null = null;
   let blockComment = false;
+  let stringStart = -1;
+  let stringValue = "";
   for (let i = 0; i < value.length; i++) {
     const char = value[i];
     const next = value[i + 1];
     if (blockComment) {
       if (char === "*" && next === "/") {
         blockComment = false;
+        output += "  ";
         i++;
       } else if (char === "\n") {
         output += "\n";
+      } else {
+        output += " ";
       }
       continue;
     }
     if (quote) {
-      output += char;
+      if (char === "\n") output += "\n";
+      else output += " ";
       if (char === "\\" && next !== undefined) {
-        output += next;
+        if (next === "\n") output += "\n";
+        else output += " ";
+        if (quote !== "`") stringValue += next;
         i++;
       } else if (char === quote) {
+        if (quote !== "`") {
+          strings.push({
+            start: stringStart,
+            end: i + 1,
+            value: stringValue,
+          });
+        }
         quote = null;
+        stringStart = -1;
+        stringValue = "";
+      } else if (quote !== "`") {
+        stringValue += char;
       }
       continue;
     }
     if (char === '"' || char === "'" || char === "\x60") {
       quote = char;
-      output += char;
+      stringStart = i;
+      stringValue = "";
+      output += " ";
     } else if (char === "/" && next === "/") {
-      while (i < value.length && value[i] !== "\n") i++;
+      output += "  ";
+      i++;
+      while (i < value.length && value[i] !== "\n") {
+        output += " ";
+        i++;
+      }
       if (value[i] === "\n") output += "\n";
     } else if (char === "/" && next === "*") {
       blockComment = true;
+      output += "  ";
       i++;
     } else {
       output += char;
     }
   }
-  return output;
+  return { masked: output, strings };
 }
 
 function codeText(value: string): string {
-  return stripComments(value).replace(STRING_RE, " ");
+  return lexSource(value).masked;
+}
+
+function firstStringAfter(
+  strings: StringLiteral[],
+  start: number,
+  end: number,
+): StringLiteral | undefined {
+  return strings.find(
+    (literal) => literal.start >= start && literal.end <= end,
+  );
+}
+
+function extractImports(value: string): Set<string> {
+  const { masked, strings } = lexSource(value);
+  const result = new Set<string>();
+  const scanLimit = (start: number): number => {
+    const semicolon = masked.indexOf(";", start);
+    return semicolon >= 0
+      ? Math.min(semicolon, start + 4_096)
+      : Math.min(masked.length, start + 4_096);
+  };
+
+  for (const match of masked.matchAll(/(?:^|[;\n])\s*import\b/gm)) {
+    const keyword = match.index + match[0].lastIndexOf("import");
+    const end = scanLimit(keyword + "import".length);
+    const from = /\bfrom\b/.exec(masked.slice(keyword + "import".length, end));
+    const literal = firstStringAfter(
+      strings,
+      from
+        ? keyword + "import".length + from.index + from[0].length
+        : keyword + "import".length,
+      end + 1,
+    );
+    if (literal) result.add(literal.value);
+  }
+
+  for (const match of masked.matchAll(/(?:^|[;\n])\s*export\b/gm)) {
+    const keyword = match.index + match[0].lastIndexOf("export");
+    const end = scanLimit(keyword + "export".length);
+    const from = /\bfrom\b/.exec(masked.slice(keyword + "export".length, end));
+    if (!from) continue;
+    const literal = firstStringAfter(
+      strings,
+      keyword + "export".length + from.index + from[0].length,
+      end + 1,
+    );
+    if (literal) result.add(literal.value);
+  }
+
+  for (const match of masked.matchAll(/\brequire\s*\(/g)) {
+    const end = scanLimit(match.index + match[0].length);
+    const literal = firstStringAfter(
+      strings,
+      match.index + match[0].length,
+      end + 1,
+    );
+    if (literal) result.add(literal.value);
+  }
+  return result;
 }
 
 function tokens(hunk: DiffHunk): Set<string> {
@@ -237,15 +332,9 @@ function tokens(hunk: DiffHunk): Set<string> {
 }
 
 function imports(hunk: DiffHunk): Set<string> {
-  const result = new Set<string>();
   const current = currentLines(hunk);
-  const source = hasAddedLines(hunk)
-    ? stripComments(current)
-    : stripComments(oldLines(hunk));
-  for (const match of source.matchAll(IMPORT_RE)) {
-    if (match[1]) result.add(match[1]);
-  }
-  return result;
+  const source = hasAddedLines(hunk) ? current : oldLines(hunk);
+  return extractImports(source);
 }
 
 function basename(file: string): string {
