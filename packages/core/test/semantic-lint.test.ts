@@ -376,7 +376,9 @@ describe("parseDiffResult", () => {
           candidateOutcomes: [
             expect.objectContaining({
               state: "unresolved",
-              failure: expect.objectContaining({ code: "insufficient-context" }),
+              failure: expect.objectContaining({
+                code: "insufficient-context",
+              }),
             }),
           ],
         });
