@@ -45,17 +45,20 @@ function related(
   const shared = [...seedTokens].filter((token) => candidateTokens.has(token));
   const seedImports = imports(seed);
   const candidateImports = imports(candidate);
-  if ([...seedImports].some(
-    (value) =>
-      candidate.file.includes(value) ||
-      value.endsWith("/" + basename(candidate.file)),
-  ))
+  if (
+    [...seedImports].some(
+      (value) =>
+        candidate.file.includes(value) ||
+        value.endsWith("/" + basename(candidate.file)),
+    )
+  )
     return { reason: "import-relationship", score: 80 };
-  if ([...candidateImports].some(
-    (value) =>
-      seed.file.includes(value) ||
-      value.endsWith("/" + basename(seed.file)),
-  ))
+  if (
+    [...candidateImports].some(
+      (value) =>
+        seed.file.includes(value) || value.endsWith("/" + basename(seed.file)),
+    )
+  )
     return { reason: "import-relationship", score: 80 };
   if (
     stem(seed.file) === stem(candidate.file) &&
@@ -78,7 +81,11 @@ export function buildConnectedContext(
   const result = new Map<number, ConnectedCompanion[]>();
   for (let seedIndex = 0; seedIndex < hunks.length; seedIndex++) {
     const companions: ConnectedCompanion[] = [];
-    for (let candidateIndex = 0; candidateIndex < hunks.length; candidateIndex++) {
+    for (
+      let candidateIndex = 0;
+      candidateIndex < hunks.length;
+      candidateIndex++
+    ) {
       if (seedIndex === candidateIndex) continue;
       const match = related(hunks[seedIndex], hunks[candidateIndex]);
       if (match) companions.push({ hunkIndex: candidateIndex, ...match });
@@ -98,7 +105,13 @@ export function renderConnectedContext(
   for (const companion of companions) {
     const hunk = hunks[companion.hunkIndex];
     if (!hunk) continue;
-    const block = '\n\n[connected context: ' + companion.reason + '; file=' + hunk.file + ']\n' + hunk.text;
+    const block =
+      "\n\n[connected context: " +
+      companion.reason +
+      "; file=" +
+      hunk.file +
+      "]\n" +
+      hunk.text;
     if (Buffer.byteLength(output + block, "utf8") > MAX_CONTEXT_BYTES) break;
     output += block;
   }

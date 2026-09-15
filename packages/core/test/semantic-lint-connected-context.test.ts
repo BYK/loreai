@@ -27,7 +27,9 @@ describe("connected semantic-lint context", () => {
     ];
     const companions = buildConnectedContext(hunks).get(0) ?? [];
     const rendered = renderConnectedContext(hunks[0], companions, hunks);
-    expect(rendered).toContain("[connected context: test-pair; file=src/core.test.ts]");
+    expect(rendered).toContain(
+      "[connected context: test-pair; file=src/core.test.ts]",
+    );
     expect(rendered).toContain("expect(sharedSymbol)");
   });
 });
