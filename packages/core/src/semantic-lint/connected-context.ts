@@ -772,7 +772,6 @@ export function renderConnectedContextDetails(
   companions: ConnectedCompanion[],
   hunks: DiffHunk[],
 ): RenderedConnectedContext {
-  const seedBytes = Buffer.byteLength(seed.text, "utf8");
   let output = truncateUtf8(seed.text, MAX_CONTEXT_BYTES);
   let omittedCompanions = 0;
   for (const companion of companions) {
