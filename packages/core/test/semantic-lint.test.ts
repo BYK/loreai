@@ -1199,7 +1199,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.candidates).toBe(1);
   });
 
-  it("fans a violation out to all near-duplicate hunks with ONE judge call", async () => {
+  it("judges near-duplicate hunks independently without verdict fan-out", async () => {
     const project = "/tmp/ic-test-proj-5";
     await seed(
       project,
@@ -1207,8 +1207,8 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       "node:sqlite must never be imported outside driver.node.ts",
       v(1, 0, 0),
     );
-    // Two near-identical hunks (same import added in two files) + embed maps
-    // both to the same vector as the invariant → one cluster, high cosine.
+    // Two near-identical hunks (same import added in two files). Similarity
+    // may rank them alike, but it does not justify sharing a verdict.
     vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([
       v(1, 0, 0),
       v(1, 0, 0),
@@ -1229,10 +1229,10 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       llm,
       sessionID: "s5",
     });
-    // Exactly ONE judge call (only the cluster representative)...
-    expect(prompt).toHaveBeenCalledTimes(1);
-    expect(result.judgeCalls).toBe(1);
-    // ...but BOTH files are flagged (verdict fanned out to cluster members).
+    // Both seeds are judged independently; one result is never fanned out to
+    // the other file.
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(result.judgeCalls).toBe(2);
     expect(result.findings).toHaveLength(2);
     expect(result.findings.map((f) => f.file).sort()).toEqual([
       "src/a.ts",
