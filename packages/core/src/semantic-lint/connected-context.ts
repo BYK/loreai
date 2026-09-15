@@ -19,7 +19,9 @@ function tokens(hunk: DiffHunk): Set<string> {
 
 function imports(hunk: DiffHunk): Set<string> {
   const result = new Set<string>();
-  for (const match of hunk.text.matchAll(IMPORT_RE)) result.add(match[1]);
+  for (const match of hunk.text.matchAll(IMPORT_RE)) {
+    if (match[1]) result.add(match[1]);
+  }
   return result;
 }
 
@@ -31,24 +33,45 @@ function stem(file: string): string {
   return basename(file).replace(/\.(tsx?|jsx?|mjs|cjs|py|rs|go|java)$/i, "");
 }
 
-function related(seed: DiffHunk, candidate: DiffHunk): { reason: ConnectedCompanion["reason"]; score: number } | null {
+function related(
+  seed: DiffHunk,
+  candidate: DiffHunk,
+): { reason: ConnectedCompanion["reason"]; score: number } | null {
   if (seed.file === candidate.file) return { reason: "same-file", score: 100 };
   const seedTokens = tokens(seed);
   const candidateTokens = tokens(candidate);
   const shared = [...seedTokens].filter((token) => candidateTokens.has(token));
   const seedImports = imports(seed);
   const candidateImports = imports(candidate);
-  if ([...seedImports].some((value) => candidate.file.includes(value) || value.endsWith('/' + basename(candidate.file))))
+  if ([...seedImports].some(
+    (value) =>
+      candidate.file.includes(value) ||
+      value.endsWith("/" + basename(candidate.file)),
+  ))
     return { reason: "import-relationship", score: 80 };
-  if ([...candidateImports].some((value) => seed.file.includes(value) || value.endsWith('/' + basename(seed.file))))
+  if ([...candidateImports].some(
+    (value) =>
+      seed.file.includes(value) ||
+      value.endsWith("/" + basename(seed.file)),
+  ))
     return { reason: "import-relationship", score: 80 };
-  if (shared.length >= 2) return { reason: "shared-symbol", score: 40 + Math.min(shared.length, 10) };
-  if (stem(seed.file) === stem(candidate.file) && TEST_RE.test(seed.file) !== TEST_RE.test(candidate.file))
+  if (shared.length >= 2) {
+    return {
+      reason: "shared-symbol",
+      score: 40 + Math.min(shared.length, 10),
+    };
+  }
+  if (
+    stem(seed.file) === stem(candidate.file) &&
+    TEST_RE.test(seed.file) !== TEST_RE.test(candidate.file)
+  )
     return { reason: "test-pair", score: 70 };
   return null;
 }
 
-export function buildConnectedContext(hunks: DiffHunk[]): Map<number, ConnectedCompanion[]> {
+export function buildConnectedContext(
+  hunks: DiffHunk[],
+): Map<number, ConnectedCompanion[]> {
   const result = new Map<number, ConnectedCompanion[]>();
   for (let seedIndex = 0; seedIndex < hunks.length; seedIndex++) {
     const companions: ConnectedCompanion[] = [];
@@ -63,7 +86,11 @@ export function buildConnectedContext(hunks: DiffHunk[]): Map<number, ConnectedC
   return result;
 }
 
-export function renderConnectedContext(seed: DiffHunk, companions: ConnectedCompanion[], hunks: DiffHunk[]): string {
+export function renderConnectedContext(
+  seed: DiffHunk,
+  companions: ConnectedCompanion[],
+  hunks: DiffHunk[],
+): string {
   let output = seed.text;
   for (const companion of companions) {
     const hunk = hunks[companion.hunkIndex];

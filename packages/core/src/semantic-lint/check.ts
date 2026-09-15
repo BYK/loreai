@@ -51,7 +51,10 @@ import {
   type HolisticLintInput,
   type LintCoverage,
 } from "./context";
-import { buildConnectedContext, renderConnectedContext } from "./connected-context";
+import {
+  buildConnectedContext,
+  renderConnectedContext,
+} from "./connected-context";
 import { extractReferences } from "../references";
 import type { LLMClient } from "../types";
 
