@@ -1847,18 +1847,15 @@ export async function checkInvariants(
           inputTokens: isolatedInputTokens,
           inputTokenBudget: holisticPlan.coverage.inputTokenBudget,
         })
-      : holisticPlan?.kind === "fit"
-        ? holisticPlan.coverage
-        : isolatedLintCoverage({
-            availableHunks: hunks.length,
-            includedHunks: new Set(
-              selected.map((candidate) => candidate.hunkIdx),
-            ).size,
-            availableInvariants: allEntries.length,
-            includedInvariants: selectedInvariantIndices.length,
-            inputTokens: isolatedInputTokens,
-            inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
-          });
+      : isolatedLintCoverage({
+          availableHunks: hunks.length,
+          includedHunks: new Set(selected.map((candidate) => candidate.hunkIdx))
+            .size,
+          availableInvariants: allEntries.length,
+          includedInvariants: selectedInvariantIndices.length,
+          inputTokens: isolatedInputTokens,
+          inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
+        });
 
   // Stage 2: judge the selected pairs (capped, coverage-ordered).
   const findings: Finding[] = [];
