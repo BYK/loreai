@@ -10,7 +10,7 @@ export interface ConnectedCompanion {
 const MAX_COMPANIONS = 3;
 const MAX_CONTEXT_BYTES = 12 * 1024;
 const TOKEN_RE = /\b[A-Za-z_$][\w$]{2,}\b/g;
-const IMPORT_RE = /(?:from|import|require\s*\()\s*[\'\"]([^\'\"]+)[\'\"]/g;
+const IMPORT_RE = /(?:from|import|require\s*\()\s*['"]([^'"]+)['"]/g;
 const TEST_RE = /(?:^|[./_-])(test|spec|tests?)(?:[./_-]|$)/i;
 
 function tokens(hunk: DiffHunk): Set<string> {
@@ -57,17 +57,18 @@ function related(
       value.endsWith("/" + basename(seed.file)),
   ))
     return { reason: "import-relationship", score: 80 };
+  if (
+    stem(seed.file) === stem(candidate.file) &&
+    TEST_RE.test(seed.file) !== TEST_RE.test(candidate.file)
+  ) {
+    return { reason: "test-pair", score: 70 };
+  }
   if (shared.length >= 2) {
     return {
       reason: "shared-symbol",
       score: 40 + Math.min(shared.length, 10),
     };
   }
-  if (
-    stem(seed.file) === stem(candidate.file) &&
-    TEST_RE.test(seed.file) !== TEST_RE.test(candidate.file)
-  )
-    return { reason: "test-pair", score: 70 };
   return null;
 }
 
