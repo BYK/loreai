@@ -119,7 +119,7 @@ describe("connected semantic-lint context", () => {
 
   it("bounds relation work for a maximum-sized diff", () => {
     const hunks = Array.from({ length: 1_000 }, (_, index) =>
-      hunk(`src/file-${index}.ts`, `@@\n+const value${index} = true;`),
+      hunk(`src/dir-${index}/foo.ts`, `@@\n+const value${index} = true;`),
     );
 
     const context = buildConnectedContext(hunks);
