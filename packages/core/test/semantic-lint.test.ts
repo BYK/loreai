@@ -26,6 +26,7 @@ import {
   overrideMatchesFinding,
   parseDiffResult,
   parseInvariantVerdict,
+  parseCounterevidenceVerdict,
   parseOverrides,
   selectCandidates,
   splitDiff,
@@ -1001,6 +1002,21 @@ describe("parseInvariantVerdict", () => {
     expect(
       parseInvariantVerdict('```json\n{"verdict":"satisfies","reason":"ok"}'),
     ).toBeNull();
+  });
+});
+
+describe("parseCounterevidenceVerdict", () => {
+  it("parses a valid fenced JSON verdict", () => {
+    expect(
+      parseCounterevidenceVerdict(
+        '```json\n{"verdict":"confirmed","reason":"still bypasses","evidence":[{"hunkId":"hunk-0001","reason":"call remains direct"}]}\n```',
+        new Set(["hunk-0001"]),
+      ),
+    ).toEqual({
+      verdict: "confirmed",
+      reason: "still bypasses",
+      evidence: [{ hunkId: "hunk-0001", reason: "call remains direct" }],
+    });
   });
 });
 
