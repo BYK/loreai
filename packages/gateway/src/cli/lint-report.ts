@@ -627,8 +627,9 @@ function validateVerificationSummary(
     );
   } else {
     assert(
-      summary.inputTokenBudget > 0,
-      "verification input budget is invalid",
+      summary.inputTokenBudget > 0 &&
+        summary.inputTokens <= summary.inputTokenBudget,
+      "verification input accounting exceeds its budget",
     );
   }
 }
@@ -978,6 +979,17 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
         candidate.stats.semanticCalls === 0 &&
           candidate.stats.transportAttempts === 0,
         "not-attempted candidate stats must be zero",
+      );
+    }
+    if (
+      candidate.state === "resolved" &&
+      candidate.verdict === "violates"
+    ) {
+      assert(
+        candidate.verification !== undefined ||
+          (value.coverage.strategy === "holistic" &&
+            value.verification.strategy === "none"),
+        "violations require counterevidence outside holistic lint",
       );
     }
     if (candidate.verification !== undefined) {
