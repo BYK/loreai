@@ -1853,7 +1853,7 @@ export async function checkInvariants(
         })
       : null;
 
-  const counterevidenceEnabled = holisticPlan?.kind !== "fit";
+  const counterevidenceEnabled = holisticPlan?.kind === "too-large";
 
   if (holisticPlan?.kind === "fit" && input.holisticJudge) {
     return runHolisticLint({

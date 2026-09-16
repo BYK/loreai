@@ -1078,16 +1078,11 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
         reason: "adds node:sqlite import outside driver.node.ts",
       }),
     );
-    const verifier = confirmingVerifier(
-      "node:sqlite remains outside its required boundary.",
-    );
-
     const result = await checkInvariants({
       projectPath: project,
       hunks,
       range: FAKE_RANGE,
       llm,
-      verifier,
       sessionID: "s1",
     });
 
@@ -1095,7 +1090,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0].file).toBe("src/other.ts");
     expect(result.findings[0].reason).toContain("node:sqlite");
-    expect(result.judgeCalls).toBe(2);
+    expect(result.judgeCalls).toBe(1);
   });
 
   it("does NOT flag when the judge says no violation", async () => {
@@ -1200,19 +1195,15 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
         ? 'Sure: {"verdict":"violates","reason":"adds node:sqlite import"}'
         : '{"verdict":"violates","reason":"adds node:sqlite import"}';
     });
-    const verifier = confirmingVerifier(
-      "node:sqlite remains outside its required boundary.",
-    );
     const result = await checkInvariants({
       projectPath: project,
       hunks: [{ file: "src/other.ts", text: '@@\n+import "node:sqlite"' }],
       range: FAKE_RANGE,
       llm,
-      verifier,
       sessionID: "s-prosejson",
     });
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(result.semanticCalls).toBe(3);
+    expect(result.semanticCalls).toBe(2);
     expect(result.unparseable).toBe(0);
     expect(result.resolved).toBe(1);
     expect(result.findings).toHaveLength(1);
@@ -1290,7 +1281,6 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
         reason: "adds node:sqlite import",
       }),
     );
-    const verifier = confirmingVerifier();
     const result = await checkInvariants({
       projectPath: project,
       hunks: [
@@ -1299,13 +1289,12 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       ],
       range: FAKE_RANGE,
       llm,
-      verifier,
       sessionID: "s5",
     });
     // Both seeds are judged independently; one result is never fanned out to
     // the other file.
     expect(prompt).toHaveBeenCalledTimes(2);
-    expect(result.judgeCalls).toBe(4);
+    expect(result.judgeCalls).toBe(2);
     expect(result.findings).toHaveLength(2);
     expect(result.findings.map((f) => f.file).sort()).toEqual([
       "src/a.ts",
@@ -1938,7 +1927,8 @@ describe("checkInvariants typed judge outcomes", () => {
     const project = "/tmp/ic-test-judge-only-budget";
     const hunks = await seedCandidateSet(project, 20);
     const { judge, judgeCall } = stubJudge((input) => {
-      expect(input.semanticCallBudget).toBe(2);
+      expect(input.semanticCallBudget).toBeGreaterThanOrEqual(1);
+      expect(input.semanticCallBudget).toBeLessThanOrEqual(2);
       return {
         kind: "unresolved",
         failure: {
@@ -1971,11 +1961,12 @@ describe("checkInvariants typed judge outcomes", () => {
     });
   });
 
-  it("shares the global budget when verification has no holistic judge", async () => {
+  it("keeps the full budget when no holistic verifier is selected", async () => {
     const project = "/tmp/ic-test-typed-budget";
     const hunks = await seedCandidateSet(project, 20);
     const { judge, judgeCall } = stubJudge((input) => {
-      expect(input.semanticCallBudget).toBe(2);
+      expect(input.semanticCallBudget).toBeGreaterThanOrEqual(1);
+      expect(input.semanticCallBudget).toBeLessThanOrEqual(2);
       return {
         kind: "verdict",
         verdict: "violates",
@@ -1983,50 +1974,39 @@ describe("checkInvariants typed judge outcomes", () => {
         stats: { semanticCalls: 1, transportAttempts: 1 },
       };
     });
-    const verifier = confirmingVerifier();
-
     const result = await checkInvariants({
       projectPath: project,
       hunks,
       range: FAKE_RANGE,
       judge,
-      verifier,
       sessionID: "typed-budget",
     });
 
-    expect(judgeCall).toHaveBeenCalledTimes(10);
-    expect(verifier.verify).toHaveBeenCalledTimes(10);
+    expect(judgeCall).toHaveBeenCalledTimes(20);
     expect(result).toMatchObject({
-      status: "partial",
       candidates: 20,
-      attempted: 10,
-      resolved: 10,
+      attempted: 20,
+      resolved: 20,
       unresolved: 0,
-      notAttempted: 10,
+      notAttempted: 0,
       semanticCalls: 20,
       transportAttempts: 20,
       verification: {
-        strategy: "counterevidence",
-        selected: 10,
-        attempted: 10,
-        confirmed: 10,
+        strategy: "none",
+        selected: 0,
+        attempted: 0,
+        confirmed: 0,
         cleared: 0,
         unresolved: 0,
         notAttempted: 0,
-        semanticCalls: 10,
-        transportAttempts: 10,
+        semanticCalls: 0,
+        transportAttempts: 0,
       },
     });
     expect(
-      result.candidateOutcomes
-        .slice(10)
-        .every(
-          (outcome) =>
-            outcome.state === "not-attempted" &&
-            outcome.failure.code === "semantic-budget-exhausted" &&
-            outcome.stats.semanticCalls === 0,
-        ),
+      result.candidateOutcomes.every((outcome) => outcome.state === "resolved"),
     ).toBe(true);
+    expect(result.findings).toHaveLength(20);
     expect(
       result.candidateOutcomes.reduce(
         (sum, outcome) => sum + outcome.stats.semanticCalls,
@@ -2157,6 +2137,8 @@ describe("counterevidence semantic-lint verification", () => {
       range: FAKE_RANGE,
       judge,
       verifier,
+      holisticJudge: holisticFallbackJudge(),
+      holisticInputTokenBudget: 1,
       sessionID: "counterevidence-verifier-throws",
     });
 

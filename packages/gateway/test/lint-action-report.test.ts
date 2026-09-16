@@ -517,7 +517,7 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(false);
   });
 
-  test("rejects an isolated violation without counterevidence", () => {
+  test("accepts an ordinary isolated violation without selected counterevidence", () => {
     const value = resolvedReport();
     value.status = "partial";
     value.coverage = {
@@ -538,10 +538,32 @@ describe("semantic lint action reporter", () => {
       available: 1,
       missing: 0,
     };
+    value.health.invariantVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
     value.candidates[0].verdict = "violates";
+    value.candidates[0].reason = "The changed call bypasses the boundary.";
+    value.findings = [
+      {
+        id: "finding-01",
+        invariantId: "inv-1",
+        invariantTitle: "Rule",
+        invariantContent: "The boundary must remain enforced.",
+        file: "src/file-1.ts",
+        similarity: 1,
+        refHit: false,
+        reason: "The changed call bypasses the boundary.",
+        hunk: "@@ -1,1 +1,1 @@",
+        severity: "advisory",
+      },
+    ];
+    value.gate.advisoryFindingIds = ["finding-01"];
 
-    expect(() => validateSemanticLintReport(value)).toThrow();
-    expect(actionAccepts(value, 3)).toBe(false);
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
   });
 
   test("accepts a report with confirmed counterevidence", () => {

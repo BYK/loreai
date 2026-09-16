@@ -545,8 +545,7 @@ function validateReport(value) {
       candidate.verdict === "violates" &&
       !(
         candidate.verification !== undefined ||
-        (value.coverage.strategy === "holistic" &&
-          value.verification.strategy === "none")
+        value.verification.strategy !== "counterevidence"
       )
     ) {
       throw new TypeError(
@@ -746,7 +745,7 @@ function validateReport(value) {
   for (const finding of value.findings) {
     const key = `${finding.invariantId}\x1f${finding.file}`;
     const matchingCandidates = candidatesByKey.get(key) ?? [];
-    if (value.coverage.strategy !== "holistic") {
+    if (value.verification.strategy === "counterevidence") {
       if (
         !matchingCandidates.some(
           (candidate) =>
@@ -758,6 +757,19 @@ function validateReport(value) {
       ) {
         throw new TypeError(
           "isolated findings require confirmed matching candidates",
+        );
+      }
+    } else if (value.coverage.strategy !== "holistic") {
+      if (
+        !matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === finding.severity,
+        )
+      ) {
+        throw new TypeError(
+          "isolated findings require matching violated candidates",
         );
       }
     } else {

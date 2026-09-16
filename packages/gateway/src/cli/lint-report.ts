@@ -1002,8 +1002,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     if (candidate.state === "resolved" && candidate.verdict === "violates") {
       assert(
         candidate.verification !== undefined ||
-          (value.coverage.strategy === "holistic" &&
-            value.verification.strategy === "none"),
+          value.verification.strategy !== "counterevidence",
         "violations require counterevidence outside holistic lint",
       );
     }
@@ -1254,7 +1253,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     const record = finding as unknown as Record<string, unknown>;
     const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
     const matchingCandidates = candidatesByKey.get(key) ?? [];
-    if (value.coverage.strategy !== "holistic") {
+    if (value.verification.strategy === "counterevidence") {
       assert(
         matchingCandidates.some(
           (candidate) =>
@@ -1265,6 +1264,16 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
             candidate.severity === record.severity,
         ),
         "isolated findings require confirmed matching candidates",
+      );
+    } else if (value.coverage.strategy !== "holistic") {
+      assert(
+        matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === record.severity,
+        ),
+        "isolated findings require matching violated candidates",
       );
     } else {
       const invariantCandidates =
