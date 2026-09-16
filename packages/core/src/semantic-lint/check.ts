@@ -2505,7 +2505,9 @@ function buildCounterevidenceInput(args: {
     text: args.seed.text,
   };
   const connected: CounterevidenceHunk[] = [];
-  let omittedCompanions = args.renderedContext.omittedCompanions;
+  let omittedCompanions =
+    args.renderedContext.omittedCompanions +
+    (args.connectedContext.omittedBySeed.get(args.candidate.hunkIdx) ?? 0);
   for (const companion of
     args.connectedContext.contexts.get(args.candidate.hunkIdx) ?? []) {
     const hunk = args.hunks[companion.hunkIndex];
@@ -2539,6 +2541,7 @@ function buildCounterevidenceInput(args: {
     seed: seedEntry,
     connectedContext: connected,
     contextComplete:
+      args.connectedContext.complete &&
       args.connectedContext.contexts.has(args.candidate.hunkIdx) &&
       !args.renderedContext.truncated &&
       omittedCompanions === 0,
