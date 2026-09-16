@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildConnectedContext,
+  buildConnectedContextDetails,
   renderConnectedContext,
   renderConnectedContextDetails,
 } from "../src/semantic-lint/connected-context";
@@ -23,6 +24,21 @@ describe("connected semantic-lint context", () => {
     expect(context.get(0)?.map((entry) => entry.hunkIndex)).toEqual([1]);
     expect(context.get(0)?.[0]?.reason).toBe("same-file");
     expect(context.get(2)).toEqual([]);
+  });
+
+  it("marks companion-cap omissions as incomplete context", () => {
+    const hunks = Array.from({ length: 10 }, (_, index) =>
+      hunk(
+        "src/core.ts",
+        `@@ -${index + 1},1 +${index + 1},1 @@
++sharedSymbol${index} = true;`,
+      ),
+    );
+    const details = buildConnectedContextDetails(hunks);
+
+    expect(details.complete).toBe(false);
+    expect(details.contexts.get(0)).toHaveLength(3);
+    expect(details.omittedBySeed.get(0)).toBeGreaterThan(0);
   });
 
   it("renders companion evidence with an explicit relationship label", () => {
