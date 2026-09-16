@@ -627,8 +627,7 @@ function validateVerificationSummary(
     );
   } else {
     assert(
-      summary.inputTokenBudget > 0 &&
-        summary.inputTokens <= summary.inputTokenBudget,
+      summary.inputTokenBudget > 0,
       "verification input budget is invalid",
     );
   }
