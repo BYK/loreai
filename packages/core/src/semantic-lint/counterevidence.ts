@@ -1,8 +1,4 @@
-import type {
-  JudgeFailure,
-  JudgeStats,
-  SemanticLintContext,
-} from "./check";
+import type { JudgeFailure, JudgeStats, SemanticLintContext } from "./check";
 
 export type CounterevidenceVerdict =
   | "confirmed"
@@ -12,7 +8,12 @@ export type CounterevidenceVerdict =
 export interface CounterevidenceHunk {
   id: string;
   file: string;
-  relationship: "seed" | "same-file" | "shared-symbol" | "import-relationship" | "test-pair";
+  relationship:
+    | "seed"
+    | "same-file"
+    | "shared-symbol"
+    | "import-relationship"
+    | "test-pair";
   text: string;
 }
 
@@ -159,9 +160,7 @@ export function parseCounterevidenceVerdict(
 ): CounterevidenceResult | null {
   if (!text) return null;
   let payload = text.trim();
-  const fenced = /^```json[ \\t]*\\r?\\n([\\s\\S]*)\\r?\\n```$/.exec(
-    payload,
-  );
+  const fenced = /^```json[ \\t]*\\r?\\n([\\s\\S]*)\\r?\\n```$/.exec(payload);
   if (fenced) payload = fenced[1];
   else if (payload.startsWith("```") || payload.endsWith("```")) {
     return null;

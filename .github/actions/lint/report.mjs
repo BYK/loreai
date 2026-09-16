@@ -246,7 +246,9 @@ function validateCandidateVerification(verification, candidate) {
     }
   } else {
     if (candidate.state !== "unresolved") {
-      throw new TypeError("unresolved verification requires an unresolved candidate");
+      throw new TypeError(
+        "unresolved verification requires an unresolved candidate",
+      );
     }
     if (
       verification.reason !== undefined ||
@@ -254,7 +256,8 @@ function validateCandidateVerification(verification, candidate) {
       !candidateFailureCodes.has(verification.failure?.code) ||
       typeof verification.failure?.message !== "string" ||
       verification.failure.message.trim().length === 0 ||
-      verification.failure.message.length > MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH ||
+      verification.failure.message.length >
+        MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH ||
       !["candidate", "run"].includes(verification.failure.scope)
     ) {
       throw new TypeError("unresolved verification requires a scoped failure");
@@ -279,7 +282,9 @@ function validateReport(value) {
     throw new TypeError("invalid status");
   }
   if (!value.health || !value.counters || !value.gate || !value.verification) {
-    throw new TypeError("health, counters, gate, and verification are required");
+    throw new TypeError(
+      "health, counters, gate, and verification are required",
+    );
   }
   if (typeof value.model !== "string" || !value.model)
     throw new TypeError("model is required");

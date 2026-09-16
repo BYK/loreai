@@ -411,7 +411,6 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(false);
   });
 
-
   test("rejects an isolated violation without counterevidence", () => {
     const value = resolvedReport();
     value.status = "partial";
@@ -472,6 +471,18 @@ describe("semantic lint action reporter", () => {
       resolved: 1,
       unresolved: 0,
       notAttempted: 0,
+    };
+    value.health.invariantVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
     };
     value.counters = {
       ...value.counters,

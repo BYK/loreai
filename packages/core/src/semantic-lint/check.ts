@@ -201,8 +201,7 @@ export const MAX_JUDGE_CALLS = 20;
 /** Reserved for counterevidence verification and its schema repair. */
 export const MAX_VERIFIER_CALLS = 8;
 /** First-pass calls are capped so verification cannot be starved. */
-export const MAX_FIRST_PASS_JUDGE_CALLS =
-  MAX_JUDGE_CALLS - MAX_VERIFIER_CALLS;
+export const MAX_FIRST_PASS_JUDGE_CALLS = MAX_JUDGE_CALLS - MAX_VERIFIER_CALLS;
 
 // ---------------------------------------------------------------------------
 // Enforceable-invariant filter
@@ -1837,6 +1836,8 @@ export async function checkInvariants(
         })
       : null;
 
+  const counterevidenceEnabled = holisticPlan?.kind === "too-large";
+
   if (holisticPlan?.kind === "fit" && input.holisticJudge) {
     return runHolisticLint({
       input,
@@ -1953,8 +1954,7 @@ export async function checkInvariants(
       continue;
     }
 
-    const remainingFirstPassCalls =
-      firstPassCallBudget - firstPassCalls;
+    const remainingFirstPassCalls = firstPassCallBudget - firstPassCalls;
     if (remainingFirstPassCalls === 0) {
       candidateOutcomes.push({
         ...base,
@@ -2042,6 +2042,32 @@ export async function checkInvariants(
         verdict: outcome.verdict,
         reason: outcome.reason,
         stats: outcome.stats,
+      });
+      continue;
+    }
+
+    if (!counterevidenceEnabled) {
+      candidateOutcomes.push({
+        ...base,
+        state: "resolved",
+        verdict: outcome.verdict,
+        reason: outcome.reason,
+        stats: outcome.stats,
+      });
+      const dedupKey = inv.entry.id + "\x1f" + hunk.file;
+      if (seenFindings.has(dedupKey)) continue;
+      seenFindings.add(dedupKey);
+      if (findings.length >= MAX_LINT_FINDINGS) continue;
+      findings.push({
+        invariantId: inv.entry.id,
+        invariantTitle: inv.entry.title,
+        invariantContent: inv.entry.content,
+        file: hunk.file,
+        similarity: c.similarity,
+        refHit: c.refHit,
+        reason: outcome.reason,
+        hunk: hunk.text,
+        severity: enforcementLevel(inv.entry),
       });
       continue;
     }
@@ -2218,7 +2244,8 @@ export async function checkInvariants(
         failure,
         stats: {
           semanticCalls:
-            firstPassStats.semanticCalls + verificationOutcome.stats.semanticCalls,
+            firstPassStats.semanticCalls +
+            verificationOutcome.stats.semanticCalls,
           transportAttempts:
             firstPassStats.transportAttempts +
             verificationOutcome.stats.transportAttempts,
@@ -2413,8 +2440,7 @@ function semanticBudgetFailure(
 ): JudgeFailure {
   return {
     code: "semantic-budget-exhausted",
-    message:
-      `First-pass semantic-call budget of ${firstPassCallBudget} was exhausted`,
+    message: `First-pass semantic-call budget of ${firstPassCallBudget} was exhausted`,
     scope: "run",
     retryable: false,
   };
@@ -2507,8 +2533,9 @@ function buildCounterevidenceInput(args: {
   let omittedCompanions =
     args.renderedContext.omittedCompanions +
     (args.connectedContext.omittedBySeed.get(args.candidate.hunkIdx) ?? 0);
-  for (const companion of
-    args.connectedContext.contexts.get(args.candidate.hunkIdx) ?? []) {
+  for (const companion of args.connectedContext.contexts.get(
+    args.candidate.hunkIdx,
+  ) ?? []) {
     const hunk = args.hunks[companion.hunkIndex];
     if (!hunk || hunk.text.includes("hunk truncated by Lore")) {
       omittedCompanions++;
@@ -2551,8 +2578,6 @@ function buildCounterevidenceInput(args: {
   };
 }
 
-
-
 function validateCounterevidenceOutcome(
   outcome: unknown,
   expectedHunkIds: ReadonlySet<string>,
@@ -2569,8 +2594,7 @@ function validateCounterevidenceOutcome(
   if (
     !Number.isSafeInteger(stats.semanticCalls) ||
     (stats.semanticCalls as number) < 0 ||
-    (stats.semanticCalls as number) >
-      Math.min(2, remainingSemanticCalls) ||
+    (stats.semanticCalls as number) > Math.min(2, remainingSemanticCalls) ||
     !Number.isSafeInteger(stats.transportAttempts) ||
     (stats.transportAttempts as number) < 0
   ) {
@@ -2606,7 +2630,8 @@ function validateCounterevidenceOutcome(
       failure.message.trim().length > 0 &&
       failure.message.length <= 400 &&
       (failure.scope === "candidate" || failure.scope === "run") &&
-      (failure.retryable === undefined || typeof failure.retryable === "boolean")
+      (failure.retryable === undefined ||
+        typeof failure.retryable === "boolean")
     ) {
       return {
         kind: "unresolved",

@@ -492,7 +492,10 @@ describe("counterevidence gateway verifier", () => {
             verdict: "resolved",
             reason: "A companion change adds the required wrapper.",
             evidence: [
-              { hunkId: "hunk-0001", reason: "The wrapper is in the connected change." },
+              {
+                hunkId: "hunk-0001",
+                reason: "The wrapper is in the connected change.",
+              },
             ],
           }),
           model: "github-copilot/gpt-5.6-luna",

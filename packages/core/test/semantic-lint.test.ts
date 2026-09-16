@@ -1868,7 +1868,9 @@ describe("checkInvariants typed judge outcomes", () => {
     });
     const verifier = {
       verify: vi.fn(async () => {
-        throw new Error("verifier should not be called for unresolved first-pass candidates");
+        throw new Error(
+          "verifier should not be called for unresolved first-pass candidates",
+        );
       }),
     };
 
@@ -1917,7 +1919,6 @@ describe("checkInvariants typed judge outcomes", () => {
   });
 });
 
-
 describe("counterevidence semantic-lint verification", () => {
   function oversizedHunk() {
     return {
@@ -1935,7 +1936,9 @@ describe("counterevidence semantic-lint verification", () => {
   }
 
   it("confirms a tentative violation with bounded counterevidence", async () => {
-    const project = mkdtempSync(join(tmpdir(), "lore-counterevidence-confirmed-"));
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-confirmed-"),
+    );
     try {
       await seed(
         project,
@@ -1952,11 +1955,15 @@ describe("counterevidence semantic-lint verification", () => {
       }));
       const verifier = {
         verify: vi.fn(
-          async (input: CounterevidenceInput): Promise<CounterevidenceOutcome> => ({
+          async (
+            input: CounterevidenceInput,
+          ): Promise<CounterevidenceOutcome> => ({
             kind: "verdict",
             verdict: "confirmed",
             reason: "The connected context still bypasses the shared boundary.",
-            evidence: [{ hunkId: input.seed.id, reason: "The call remains unwrapped." }],
+            evidence: [
+              { hunkId: input.seed.id, reason: "The call remains unwrapped." },
+            ],
             stats: { semanticCalls: 1, transportAttempts: 1 },
           }),
         ),
@@ -2007,7 +2014,9 @@ describe("counterevidence semantic-lint verification", () => {
   });
 
   it("clears a tentative violation when connected context resolves it", async () => {
-    const project = mkdtempSync(join(tmpdir(), "lore-counterevidence-cleared-"));
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-cleared-"),
+    );
     try {
       await seed(
         project,
@@ -2024,11 +2033,19 @@ describe("counterevidence semantic-lint verification", () => {
       }));
       const verifier = {
         verify: vi.fn(
-          async (input: CounterevidenceInput): Promise<CounterevidenceOutcome> => ({
+          async (
+            input: CounterevidenceInput,
+          ): Promise<CounterevidenceOutcome> => ({
             kind: "verdict",
             verdict: "resolved",
-            reason: "A companion change routes the call through the shared boundary.",
-            evidence: [{ hunkId: input.seed.id, reason: "The companion context adds the wrapper." }],
+            reason:
+              "A companion change routes the call through the shared boundary.",
+            evidence: [
+              {
+                hunkId: input.seed.id,
+                reason: "The companion context adds the wrapper.",
+              },
+            ],
             stats: { semanticCalls: 1, transportAttempts: 1 },
           }),
         ),
@@ -2072,7 +2089,9 @@ describe("counterevidence semantic-lint verification", () => {
   });
 
   it("does not count a preflight-rejected verifier input as consumed", async () => {
-    const project = mkdtempSync(join(tmpdir(), "lore-counterevidence-over-budget-"));
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-over-budget-"),
+    );
     try {
       await seed(
         project,
@@ -2139,7 +2158,9 @@ describe("counterevidence semantic-lint verification", () => {
   });
 
   it("fails closed when no counterevidence verifier is available", async () => {
-    const project = mkdtempSync(join(tmpdir(), "lore-counterevidence-missing-"));
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-missing-"),
+    );
     try {
       await seed(
         project,
@@ -2168,7 +2189,7 @@ describe("counterevidence semantic-lint verification", () => {
       expect(result.findings).toHaveLength(0);
       expect(result).toMatchObject({
         status: "failed",
-        attempted: 0,
+        attempted: 1,
         resolved: 0,
         unresolved: 1,
         semanticCalls: 1,

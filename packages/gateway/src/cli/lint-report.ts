@@ -392,9 +392,11 @@ export function buildSemanticLintReport(input: {
               ...candidate.verification,
               ...(candidate.verification.evidence
                 ? {
-                    evidence: candidate.verification.evidence.map((evidence) => ({
-                      ...evidence,
-                    })),
+                    evidence: candidate.verification.evidence.map(
+                      (evidence) => ({
+                        ...evidence,
+                      }),
+                    ),
                   }
                 : {}),
               ...(candidate.verification.failure
@@ -706,8 +708,7 @@ function validateCandidateVerification(
     validateFailure(value.failure, true);
     if (value.state === "not-attempted") {
       assert(
-        value.stats.semanticCalls === 0 &&
-          value.stats.transportAttempts === 0,
+        value.stats.semanticCalls === 0 && value.stats.transportAttempts === 0,
         "not-attempted verification stats must be zero",
       );
     }
@@ -981,10 +982,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
         "not-attempted candidate stats must be zero",
       );
     }
-    if (
-      candidate.state === "resolved" &&
-      candidate.verdict === "violates"
-    ) {
+    if (candidate.state === "resolved" && candidate.verdict === "violates") {
       assert(
         candidate.verification !== undefined ||
           (value.coverage.strategy === "holistic" &&
