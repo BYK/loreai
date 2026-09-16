@@ -2071,6 +2071,73 @@ describe("counterevidence semantic-lint verification", () => {
     }
   });
 
+  it("does not count a preflight-rejected verifier input as consumed", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-counterevidence-over-budget-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(async () => ({
+          kind: "verdict" as const,
+          verdict: "confirmed" as const,
+          reason: "This should not be reached.",
+          evidence: [{ hunkId: "hunk-0", reason: "unreachable" }],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        })),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@\n+" + "dispatchRequest(".padEnd(80_000, "x"),
+          },
+        ],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        sessionID: "counterevidence-over-budget",
+      });
+
+      expect(verifier.verify).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        status: "failed",
+        findings: [],
+        verification: {
+          strategy: "counterevidence",
+          selected: 1,
+          attempted: 0,
+          notAttempted: 1,
+          inputTokens: 0,
+        },
+      });
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "unresolved",
+        verification: {
+          state: "not-attempted",
+          inputTokens: 0,
+          failure: { code: "insufficient-context", scope: "candidate" },
+        },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed when no counterevidence verifier is available", async () => {
     const project = mkdtempSync(join(tmpdir(), "lore-counterevidence-missing-"));
     try {
