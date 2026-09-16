@@ -201,6 +201,109 @@ function unresolvedReport(): SemanticLintReport {
   return value;
 }
 
+function confirmedCounterevidenceReport(
+  options: {
+    contextComplete?: boolean;
+    semanticCalls?: number;
+  } = {},
+): SemanticLintReport {
+  const value = resolvedReport();
+  const contextComplete = options.contextComplete ?? true;
+  const verificationSemanticCalls = options.semanticCalls ?? 1;
+  value.status = "partial";
+  value.coverage = {
+    ...value.coverage,
+    strategy: "isolated-hunk",
+    availableHunks: 1,
+    includedHunks: 1,
+    omittedHunks: 0,
+    availableInvariants: 1,
+    includedInvariants: 1,
+    omittedInvariants: 0,
+  };
+  value.verification = {
+    strategy: "counterevidence",
+    contextComplete,
+    selected: 1,
+    attempted: 1,
+    confirmed: 1,
+    cleared: 0,
+    unresolved: 0,
+    notAttempted: 0,
+    semanticCalls: verificationSemanticCalls,
+    transportAttempts: verificationSemanticCalls,
+    inputTokens: 3_000,
+    inputTokenBudget: 16_000,
+  };
+  value.health.invariantVectors = {
+    status: "healthy",
+    expected: 1,
+    available: 1,
+    missing: 0,
+  };
+  value.health.hunkVectors = {
+    status: "healthy",
+    expected: 1,
+    available: 1,
+    missing: 0,
+  };
+  value.counters = {
+    ...value.counters,
+    hunks: 1,
+    candidates: 1,
+    attempted: 1,
+    resolved: 1,
+    semanticCalls: 1 + verificationSemanticCalls,
+    transportAttempts: 1 + verificationSemanticCalls,
+  };
+  value.candidates = [
+    {
+      ...value.candidates[0],
+      verdict: "violates",
+      reason: "The connected change still bypasses the boundary.",
+      stats: {
+        semanticCalls: 1 + verificationSemanticCalls,
+        transportAttempts: 1 + verificationSemanticCalls,
+      },
+      verification: {
+        state: "confirmed",
+        reason: "The connected change still bypasses the boundary.",
+        evidence: [
+          { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+        ],
+        stats: {
+          semanticCalls: verificationSemanticCalls,
+          transportAttempts: verificationSemanticCalls,
+        },
+        inputTokens: 3_000,
+        contextComplete,
+      },
+    },
+  ];
+  value.findings = [
+    {
+      id: "finding-01",
+      invariantId: "inv-1",
+      invariantTitle: "Rule",
+      invariantContent: "The boundary must remain enforced.",
+      file: "src/file-1.ts",
+      similarity: 1,
+      refHit: false,
+      reason: "The connected change still bypasses the boundary.",
+      hunk: "@@ -1,1 +1,1 @@",
+      severity: "advisory",
+    },
+  ];
+  value.gate = {
+    mode: "advisory",
+    blockingFindingIds: [],
+    overridden: [],
+    advisoryFindingIds: ["finding-01"],
+    wouldBlockFindingIds: [],
+  };
+  return value;
+}
+
 function actionAccepts(value: unknown, cliExit = 0): boolean {
   return !runReporter(value, false, cliExit).stdout.includes(
     "unreadable or invalid report",
@@ -453,7 +556,7 @@ describe("semantic lint action reporter", () => {
     };
     value.verification = {
       strategy: "counterevidence",
-      contextComplete: false,
+      contextComplete: true,
       selected: 1,
       attempted: 1,
       confirmed: 1,
@@ -512,7 +615,7 @@ describe("semantic lint action reporter", () => {
           ],
           stats: { semanticCalls: 1, transportAttempts: 1 },
           inputTokens: 3_000,
-          contextComplete: false,
+          contextComplete: true,
         },
       },
     ];
@@ -543,6 +646,15 @@ describe("semantic lint action reporter", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).not.toContain("unreadable or invalid report");
     expect(result.summary).toContain("confirmed");
+  });
+
+  test.each([
+    ["incomplete context", { contextComplete: false, semanticCalls: 1 }],
+    ["zero semantic calls", { contextComplete: true, semanticCalls: 0 }],
+  ])("rejects confirmed counterevidence with %s", (_, options) => {
+    const value = confirmedCounterevidenceReport(options);
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
   });
 
   test("reports a valid complete advisory run without blocking", () => {

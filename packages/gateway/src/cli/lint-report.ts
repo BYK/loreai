@@ -664,6 +664,14 @@ function validateCandidateVerification(
   );
   if (value.state === "confirmed" || value.state === "cleared") {
     assert(
+      value.contextComplete,
+      "confirmed or cleared verification requires complete context",
+    );
+    assert(
+      value.stats.semanticCalls > 0,
+      "confirmed or cleared verification requires a semantic call",
+    );
+    assert(
       candidate.state === "resolved" && candidate.verdict === "violates",
       "confirmed or cleared verification requires a violated candidate",
     );

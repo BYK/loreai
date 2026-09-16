@@ -815,9 +815,12 @@ export function buildConnectedContext(
   return buildConnectedContextDetails(hunks, signal).contexts;
 }
 
-function truncateUtf8(value: string, maxBytes: number): string {
+function truncateUtf8(
+  value: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
   const bytes = Buffer.from(value);
-  if (bytes.length <= maxBytes) return value;
+  if (bytes.length <= maxBytes) return { text: value, truncated: false };
   const markerBytes = Buffer.byteLength(CONTEXT_TRUNCATION_MARKER);
   const available = maxBytes - markerBytes;
   const headBudget = Math.ceil(available / 2);
@@ -828,11 +831,13 @@ function truncateUtf8(value: string, maxBytes: number): string {
   while (tailStart < bytes.length && (bytes[tailStart] & 0xc0) === 0x80) {
     tailStart++;
   }
-  return (
-    bytes.subarray(0, headEnd).toString("utf8") +
-    CONTEXT_TRUNCATION_MARKER +
-    bytes.subarray(tailStart).toString("utf8")
-  );
+  return {
+    text:
+      bytes.subarray(0, headEnd).toString("utf8") +
+      CONTEXT_TRUNCATION_MARKER +
+      bytes.subarray(tailStart).toString("utf8"),
+    truncated: true,
+  };
 }
 
 export interface RenderedConnectedContext {
@@ -846,7 +851,8 @@ export function renderConnectedContextDetails(
   companions: ConnectedCompanion[],
   hunks: DiffHunk[],
 ): RenderedConnectedContext {
-  let output = truncateUtf8(seed.text, MAX_CONTEXT_BYTES);
+  const seedContext = truncateUtf8(seed.text, MAX_CONTEXT_BYTES);
+  let output = seedContext.text;
   let omittedCompanions = 0;
   for (const companion of companions) {
     const hunk = hunks[companion.hunkIndex];
@@ -876,10 +882,9 @@ export function renderConnectedContextDetails(
   }
   return {
     text: output,
-    // A complete hunk may exceed the connected-context rendering bound and is
-    // still usable for isolated judging. Only parser-level truncation means
-    // that the diff evidence itself is incomplete and must fail closed.
-    truncated: seed.text.includes("hunk truncated by Lore"),
+    // Rendering or parser truncation means that the diff evidence is
+    // incomplete and must fail closed.
+    truncated: seedContext.truncated || seed.truncated === true,
     omittedCompanions,
   };
 }

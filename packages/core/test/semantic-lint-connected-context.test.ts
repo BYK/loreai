@@ -200,13 +200,16 @@ describe("connected semantic-lint context", () => {
   });
 
   it("keeps oversized seed context within the byte bound", () => {
-    const rendered = renderConnectedContext(
+    const details = renderConnectedContextDetails(
       hunk("src/large.ts", "x".repeat(40_000)),
       [],
       [],
     );
-    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(12 * 1024);
-    expect(rendered).toContain("seed hunk truncated");
+    expect(Buffer.byteLength(details.text, "utf8")).toBeLessThanOrEqual(
+      12 * 1024,
+    );
+    expect(details.text).toContain("seed hunk truncated");
+    expect(details.truncated).toBe(true);
   });
 
   it("skips an oversized companion and still considers later companions", () => {

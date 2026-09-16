@@ -5213,6 +5213,9 @@ export function createGatewayInvariantJudge(
         semanticCalls,
         transportAttempts,
       });
+      if (input.semanticCallBudget < 1) {
+        return invalidGatewayVerdict(stats());
+      }
       const call = async (user: string): Promise<PromptOutcome> => {
         semanticCalls++;
         const outcome = await options.client.promptDetailed(

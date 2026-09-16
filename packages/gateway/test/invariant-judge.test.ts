@@ -54,6 +54,23 @@ describe("createGatewayInvariantJudge", () => {
     });
   });
 
+  test("does not call the model with zero judge budget", async () => {
+    const client = clientWith([]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "lint-zero-budget",
+    });
+
+    await expect(
+      judge.judge({ ...INPUT, semanticCallBudget: 0 }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
   test("repairs one invalid verdict and sums transport attempts", async () => {
     const client = clientWith([
       {

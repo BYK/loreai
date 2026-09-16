@@ -211,6 +211,16 @@ function validateCandidateVerification(verification, candidate) {
     "candidate verification transportAttempts",
   );
   if (verification.state === "confirmed" || verification.state === "cleared") {
+    if (!verification.contextComplete) {
+      throw new TypeError(
+        "confirmed or cleared verification requires complete context",
+      );
+    }
+    if (verification.stats.semanticCalls < 1) {
+      throw new TypeError(
+        "confirmed or cleared verification requires a semantic call",
+      );
+    }
     if (candidate.state !== "resolved" || candidate.verdict !== "violates") {
       throw new TypeError("verification requires a violated candidate");
     }

@@ -548,6 +548,8 @@ export interface DiffHunk {
   oldFile?: string;
   /** True when the changed file has no new-side path (a full file deletion). */
   deleted?: boolean;
+  /** True when the parser truncated this hunk to the semantic-lint bound. */
+  truncated?: boolean;
   /** The unified-diff hunk text (the `@@ ... @@` header + its body). */
   text: string;
 }
@@ -576,9 +578,9 @@ class DiffLimitError extends Error {
   override name = "DiffLimitError";
 }
 
-function truncateHunkText(text: string): string {
+function truncateHunkText(text: string): { text: string; truncated: boolean } {
   const bytes = Buffer.from(text);
-  if (bytes.length <= MAX_HUNK_TEXT_BYTES) return text;
+  if (bytes.length <= MAX_HUNK_TEXT_BYTES) return { text, truncated: false };
 
   const markerBytes = Buffer.byteLength(HUNK_TRUNCATION_MARKER);
   const available = MAX_HUNK_TEXT_BYTES - markerBytes;
@@ -590,7 +592,10 @@ function truncateHunkText(text: string): string {
   while (tailStart < bytes.length && (bytes[tailStart] & 0xc0) === 0x80)
     tailStart++;
 
-  return `${bytes.subarray(0, headEnd).toString("utf8")}${HUNK_TRUNCATION_MARKER}${bytes.subarray(tailStart).toString("utf8")}`;
+  return {
+    text: `${bytes.subarray(0, headEnd).toString("utf8")}${HUNK_TRUNCATION_MARKER}${bytes.subarray(tailStart).toString("utf8")}`,
+    truncated: true,
+  };
 }
 
 /**
@@ -709,7 +714,8 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
         );
       }
-      const text = truncateHunkText(cur.join("\n"));
+      const truncated = truncateHunkText(cur.join("\n"));
+      const text = truncated.text;
       textBytes += Buffer.byteLength(text);
       if (textBytes > MAX_DIFF_TEXT_BYTES) {
         throw new DiffLimitError(
@@ -721,6 +727,7 @@ export function splitDiff(raw: string): DiffHunk[] {
         text,
         ...(oldFile && oldFile !== f ? { oldFile } : {}),
         ...(file.length === 0 && oldFile ? { deleted: true } : {}),
+        ...(truncated.truncated ? { truncated: true } : {}),
       });
     }
     cur = null;
@@ -742,20 +749,26 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
         );
       }
-      const text = truncateHunkText(
+      const truncated = truncateHunkText(
         [
           "@@ -1,1 +1,1 @@ rename-only path change",
           `- rename from ${pathChangeFrom}`,
           `+ rename to ${pathChangeTo}`,
         ].join("\n"),
       );
+      const text = truncated.text;
       textBytes += Buffer.byteLength(text);
       if (textBytes > MAX_DIFF_TEXT_BYTES) {
         throw new DiffLimitError(
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, oldFile: pathChangeFrom, text });
+      hunks.push({
+        file: f,
+        oldFile: pathChangeFrom,
+        text,
+        ...(truncated.truncated ? { truncated: true } : {}),
+      });
     }
     pathChangeFrom = "";
     pathChangeTo = "";
@@ -1822,9 +1835,7 @@ export async function checkInvariants(
       content: invariants[index].entry.content,
     }),
   );
-  const hasTruncatedHunk = hunks.some((hunk) =>
-    hunk.text.includes("hunk truncated by Lore"),
-  );
+  const hasTruncatedHunk = hunks.some((hunk) => hunk.truncated === true);
   const holisticPlan =
     input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
       ? buildHolisticLintInput({
@@ -1836,7 +1847,7 @@ export async function checkInvariants(
         })
       : null;
 
-  const counterevidenceEnabled = holisticPlan?.kind === "too-large";
+  const counterevidenceEnabled = holisticPlan?.kind !== "fit";
 
   if (holisticPlan?.kind === "fit" && input.holisticJudge) {
     return runHolisticLint({
@@ -1919,9 +1930,11 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
         });
 
-  // Stage 2: judge selected pairs, then verify tentative violations.
-  // The first pass and counterevidence pass share MAX_JUDGE_CALLS; reserving
-  // MAX_VERIFIER_CALLS prevents the first pass from consuming that budget.
+  // Stage 2: judge selected pairs, then verify tentative violations. The
+  // first pass and counterevidence pass share MAX_JUDGE_CALLS. A large
+  // holistic fallback reserves verifier capacity up front; when no holistic
+  // plan exists, the loop spends the shared budget dynamically so clean runs
+  // can use all calls without allowing interleaved verification to overrun it.
   const findings: Finding[] = [];
   const seenFindings = new Set<string>();
   const candidateOutcomes: CandidateOutcome[] = [];
@@ -1931,9 +1944,10 @@ export async function checkInvariants(
   let transportAttempts = 0;
   let stopFailure: JudgeFailure | null = null;
   let verificationStopFailure: JudgeFailure | null = null;
-  const firstPassCallBudget = input.verifier
-    ? MAX_FIRST_PASS_JUDGE_CALLS
-    : MAX_JUDGE_CALLS;
+  const firstPassCallBudget =
+    holisticPlan?.kind === "too-large" && input.verifier
+      ? MAX_FIRST_PASS_JUDGE_CALLS
+      : MAX_JUDGE_CALLS;
 
   for (
     let candidateIndex = 0;
@@ -1954,8 +1968,11 @@ export async function checkInvariants(
       continue;
     }
 
-    const remainingFirstPassCalls = firstPassCallBudget - firstPassCalls;
-    if (remainingFirstPassCalls === 0) {
+    const remainingFirstPassCalls = Math.min(
+      firstPassCallBudget - firstPassCalls,
+      MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
+    );
+    if (remainingFirstPassCalls <= 0) {
       candidateOutcomes.push({
         ...base,
         state: "not-attempted",
@@ -2155,9 +2172,11 @@ export async function checkInvariants(
       unresolvedVerification(failure, "not-attempted");
       continue;
     }
-    const remainingVerifierCalls =
-      MAX_VERIFIER_CALLS - verification.semanticCalls;
-    if (remainingVerifierCalls === 0) {
+    const remainingVerifierCalls = Math.min(
+      MAX_VERIFIER_CALLS,
+      MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
+    );
+    if (remainingVerifierCalls <= 0) {
       unresolvedVerification(
         {
           code: "verification-budget-exhausted",
@@ -2467,6 +2486,7 @@ function validateJudgeOutcome(
   if (!statsValid) return judgeContractFailure();
 
   if (record.kind === "verdict") {
+    if ((stats.semanticCalls as number) < 1) return judgeContractFailure();
     if (
       isVerdict(record.verdict) &&
       typeof record.reason === "string" &&
@@ -2537,7 +2557,7 @@ function buildCounterevidenceInput(args: {
     args.candidate.hunkIdx,
   ) ?? []) {
     const hunk = args.hunks[companion.hunkIndex];
-    if (!hunk || hunk.text.includes("hunk truncated by Lore")) {
+    if (!hunk || hunk.truncated === true) {
       omittedCompanions++;
       continue;
     }
@@ -2567,8 +2587,8 @@ function buildCounterevidenceInput(args: {
     seed: seedEntry,
     connectedContext: connected,
     contextComplete:
-      args.connectedContext.complete &&
       args.connectedContext.contexts.has(args.candidate.hunkIdx) &&
+      !args.connectedContext.omittedBySeed.has(args.candidate.hunkIdx) &&
       !args.renderedContext.truncated &&
       omittedCompanions === 0,
     omittedCompanions,
@@ -2605,6 +2625,8 @@ function validateCounterevidenceOutcome(
     transportAttempts: stats.transportAttempts as number,
   };
   if (record.kind === "verdict") {
+    if ((stats.semanticCalls as number) < 1)
+      return counterevidenceContractFailure();
     const parsed = parseCounterevidenceVerdict(
       JSON.stringify({
         evidence: record.evidence,
@@ -2686,6 +2708,7 @@ function validateHolisticLintOutcome(
     transportAttempts,
   };
   if (outcome.kind === "results") {
+    if (semanticCalls < 1) return holisticContractFailure();
     const results = parseHolisticLintResults(
       JSON.stringify({ results: outcome.results }),
       expectedInvariantIds,
