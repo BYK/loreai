@@ -412,6 +412,33 @@ describe("semantic lint action reporter", () => {
   });
 
 
+  test("rejects an isolated violation without counterevidence", () => {
+    const value = resolvedReport();
+    value.status = "partial";
+    value.coverage = {
+      ...value.coverage,
+      strategy: "isolated-hunk",
+      availableHunks: 1,
+      includedHunks: 1,
+      omittedHunks: 0,
+      availableInvariants: 1,
+      includedInvariants: 1,
+      omittedInvariants: 0,
+    };
+    value.counters.hunks = 1;
+    value.counters.invariants = 1;
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
+    value.candidates[0].verdict = "violates";
+
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
   test("accepts a report with confirmed counterevidence", () => {
     const value = report();
     value.status = "partial";
