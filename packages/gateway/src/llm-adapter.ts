@@ -5194,7 +5194,9 @@ export interface GatewayInvariantJudgeOptions {
 /** Bridge detailed gateway transport outcomes into core's semantic judge. */
 export function createGatewayInvariantJudge(
   options: GatewayInvariantJudgeOptions,
-): semanticLint.InvariantJudge & semanticLint.HolisticLintJudge {
+): semanticLint.InvariantJudge &
+  semanticLint.HolisticLintJudge &
+  semanticLint.CounterevidenceVerifier {
   return {
     async judge(input): Promise<semanticLint.JudgeOutcome> {
       let semanticCalls = 0;
@@ -5297,6 +5299,127 @@ export function createGatewayInvariantJudge(
       return verdict
         ? { kind: "verdict", ...verdict, stats: stats() }
         : invalidGatewayVerdict(stats());
+    },
+    async verify(
+      input: semanticLint.CounterevidenceInput,
+    ): Promise<semanticLint.CounterevidenceOutcome> {
+      let semanticCalls = 0;
+      let transportAttempts = 0;
+      const timeoutSignal =
+        options.candidateTimeoutMs == null
+          ? undefined
+          : AbortSignal.timeout(options.candidateTimeoutMs);
+      const signal =
+        options.signal && timeoutSignal
+          ? AbortSignal.any([options.signal, timeoutSignal])
+          : (options.signal ?? timeoutSignal);
+      const stats = (): semanticLint.JudgeStats => ({
+        semanticCalls,
+        transportAttempts,
+      });
+      const call = async (user: string): Promise<PromptOutcome> => {
+        semanticCalls++;
+        const outcome = await options.client.promptDetailed(
+          semanticLint.INVARIANT_COUNTEREVIDENCE_SYSTEM,
+          user,
+          {
+            model: options.model,
+            ...(options.upstreamUrl
+              ? {
+                  upstreamUrl: options.upstreamUrl,
+                  upstreamProviderID: options.model.providerID,
+                }
+              : {}),
+            workerID: "lore-semantic-lint",
+            thinking: false,
+            reasoningEffort: options.effort,
+            urgent: true,
+            sessionID: options.sessionID,
+            maxTokens: semanticLint.judgeMaxTokens(options.effort),
+            temperature: 0,
+            signal,
+          },
+        );
+        transportAttempts += outcome.attempts;
+        if (signal?.aborted) {
+          return {
+            kind: "failure",
+            code:
+              signal.reason instanceof DOMException &&
+              signal.reason.name === "TimeoutError"
+                ? "timeout"
+                : "aborted",
+            message:
+              "Counterevidence verifier cancelled before accepting output",
+            retryable: !options.signal?.aborted,
+            model: outcome.model,
+            attempts: outcome.attempts,
+          };
+        }
+        return outcome;
+      };
+
+      let outcome = await call(
+        semanticLint.invariantCounterevidenceUser(input),
+      );
+      if (outcome.kind === "failure") {
+        return promptFailureToCounterevidenceOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+      const expectedHunkIds = new Set([
+        input.seed.id,
+        ...input.connectedContext.map((entry) => entry.id),
+      ]);
+      let result = semanticLint.parseCounterevidenceVerdict(
+        outcome.text,
+        expectedHunkIds,
+      );
+      if (result) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-semantic-lint",
+        );
+        return { kind: "verdict", ...result, stats: stats() };
+      }
+      if (input.semanticCallBudget < 2) {
+        return invalidCounterevidenceOutcome(stats());
+      }
+
+      outcome = await call(
+        semanticLint.invariantCounterevidenceRepairUser({
+          invariant: input.invariant,
+          seed: input.seed,
+          connectedContext: input.connectedContext,
+          contextComplete: input.contextComplete,
+          omittedCompanions: input.omittedCompanions,
+          firstPassReason: input.firstPassReason,
+          prContext: input.prContext,
+          invalidResponse: outcome.text.slice(0, 4_000),
+        }),
+      );
+      if (outcome.kind === "failure") {
+        return promptFailureToCounterevidenceOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+      result = semanticLint.parseCounterevidenceVerdict(
+        outcome.text,
+        expectedHunkIds,
+      );
+      if (result) {
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-semantic-lint",
+        );
+      }
+      return result
+        ? { kind: "verdict", ...result, stats: stats() }
+        : invalidCounterevidenceOutcome(stats());
     },
     async lint(
       input: semanticLint.HolisticLintInput,
@@ -5495,6 +5618,41 @@ function invalidGatewayVerdict(
     failure: {
       code: "invalid-verdict",
       message: "Judge response did not match the required verdict schema",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
+  };
+}
+
+function invalidCounterevidenceOutcome(
+  stats: semanticLint.JudgeStats,
+): semanticLint.CounterevidenceOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "invalid-verdict",
+      message:
+        "Counterevidence response did not match the required verdict schema",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
+  };
+}
+
+function promptFailureToCounterevidenceOutcome(
+  outcome: Extract<PromptOutcome, { kind: "failure" }>,
+  stats: semanticLint.JudgeStats,
+  overallSignal?: AbortSignal,
+): semanticLint.CounterevidenceOutcome {
+  const translated = promptFailureToJudgeOutcome(outcome, stats, overallSignal);
+  if (translated.kind === "unresolved") return translated;
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "transport-error",
+      message: "Counterevidence verifier transport failed",
       scope: "candidate",
       retryable: true,
     },
