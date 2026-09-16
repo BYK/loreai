@@ -148,6 +148,11 @@ interface HunkIndex {
 
 export interface ConnectedContextDetails {
   contexts: Map<number, ConnectedCompanion[]>;
+  /**
+   * Number of related hunks which were not inspected or retained for each
+   * seed. A non-zero value makes counterevidence context incomplete.
+   */
+  omittedBySeed: Map<number, number>;
   complete: boolean;
 }
 
@@ -527,79 +532,107 @@ function appendCandidates(
   candidates: number[] | undefined,
   seedIndex: number,
   limit: number,
-): void {
-  if (!candidates) return;
+): boolean {
+  if (!candidates) return false;
+  let truncated = false;
   for (const candidate of candidates) {
-    if (candidate !== seedIndex) target.add(candidate);
-    if (target.size >= limit) return;
+    if (candidate === seedIndex) continue;
+    if (target.size >= limit) {
+      truncated = true;
+      break;
+    }
+    target.add(candidate);
   }
+  return truncated;
 }
 
-function candidateIndexes(seedIndex: number, index: HunkIndex): number[] {
+interface CandidateIndexes {
+  indexes: number[];
+  truncated: boolean;
+}
+
+function candidateIndexes(
+  seedIndex: number,
+  index: HunkIndex,
+): CandidateIndexes {
   const seed = index.metadata[seedIndex];
   const candidates = new Set<number>();
   const direct = new Set<number>();
+  let truncated = false;
 
   for (const specifier of seed.imports) {
     for (const importer of filePaths(seed)) {
       for (const key of moduleLookupKeys(
         importTargetFromPath(importer, specifier),
       )) {
-        appendCandidates(
-          direct,
-          index.byModule.get(key),
-          seedIndex,
-          MAX_DIRECT_CANDIDATES,
-        );
+        truncated =
+          appendCandidates(
+            direct,
+            index.byModule.get(key),
+            seedIndex,
+            MAX_DIRECT_CANDIDATES,
+          ) || truncated;
       }
     }
   }
   for (const importer of filePaths(seed)) {
     for (const key of moduleLookupKeys(modulePath(importer))) {
-      appendCandidates(
-        direct,
-        index.byImportTarget.get(key),
-        seedIndex,
-        MAX_DIRECT_CANDIDATES,
-      );
+      truncated =
+        appendCandidates(
+          direct,
+          index.byImportTarget.get(key),
+          seedIndex,
+          MAX_DIRECT_CANDIDATES,
+        ) || truncated;
     }
   }
-  appendCandidates(
-    candidates,
-    [...direct],
-    seedIndex,
-    MAX_CONTEXT_CANDIDATES_PER_SEED,
-  );
-  appendCandidates(
-    candidates,
-    index.sameFileNeighbors.get(seedIndex),
-    seedIndex,
-    MAX_CONTEXT_CANDIDATES_PER_SEED,
-  );
-  for (const seedFile of filePaths(seed)) {
+  truncated =
     appendCandidates(
       candidates,
-      isTestPath(seedFile)
-        ? index.bySourceStem.get(stem(seedFile))
-        : index.byTestStem.get(stem(seedFile)),
+      [...direct],
       seedIndex,
       MAX_CONTEXT_CANDIDATES_PER_SEED,
-    );
+    ) || truncated;
+  truncated =
+    appendCandidates(
+      candidates,
+      index.sameFileNeighbors.get(seedIndex),
+      seedIndex,
+      MAX_CONTEXT_CANDIDATES_PER_SEED,
+    ) || truncated;
+  for (const seedFile of filePaths(seed)) {
+    truncated =
+      appendCandidates(
+        candidates,
+        isTestPath(seedFile)
+          ? index.bySourceStem.get(stem(seedFile))
+          : index.byTestStem.get(stem(seedFile)),
+        seedIndex,
+        MAX_CONTEXT_CANDIDATES_PER_SEED,
+      ) || truncated;
   }
 
   for (const token of seed.tokens) {
     const matches = index.byToken.get(token);
-    if (!matches || matches.length > MAX_TOKEN_FANOUT) continue;
-    appendCandidates(
-      candidates,
-      matches,
-      seedIndex,
-      MAX_CONTEXT_CANDIDATES_PER_SEED,
-    );
-    if (candidates.size >= MAX_CONTEXT_CANDIDATES_PER_SEED) break;
+    if (!matches) continue;
+    if (matches.length > MAX_TOKEN_FANOUT) {
+      truncated = true;
+      continue;
+    }
+    truncated =
+      appendCandidates(
+        candidates,
+        matches,
+        seedIndex,
+        MAX_CONTEXT_CANDIDATES_PER_SEED,
+      ) || truncated;
+    if (candidates.size >= MAX_CONTEXT_CANDIDATES_PER_SEED) {
+      truncated = true;
+      break;
+    }
   }
 
-  return [...candidates];
+  return { indexes: [...candidates], truncated };
 }
 
 function relativeImportMatches(
@@ -722,15 +755,28 @@ export function buildConnectedContextDetails(
 ): ConnectedContextDetails {
   const index = buildIndex(hunks);
   const result = new Map<number, ConnectedCompanion[]>();
+  const omittedBySeed = new Map<number, number>();
   let relationChecks = 0;
+  let complete = true;
 
   for (let seedIndex = 0; seedIndex < hunks.length; seedIndex++) {
     signal?.throwIfAborted();
-    if (relationChecks >= MAX_CONTEXT_RELATION_CHECKS) break;
+    if (relationChecks >= MAX_CONTEXT_RELATION_CHECKS) {
+      complete = false;
+      omittedBySeed.set(seedIndex, 1);
+      break;
+    }
+    const candidateSet = candidateIndexes(seedIndex, index);
+    let omitted = candidateSet.truncated ? 1 : 0;
+    if (candidateSet.truncated) complete = false;
     const companions: ConnectedCompanion[] = [];
-    for (const candidateIndex of candidateIndexes(seedIndex, index)) {
+    for (const candidateIndex of candidateSet.indexes) {
       signal?.throwIfAborted();
-      if (relationChecks >= MAX_CONTEXT_RELATION_CHECKS) break;
+      if (relationChecks >= MAX_CONTEXT_RELATION_CHECKS) {
+        complete = false;
+        omitted++;
+        break;
+      }
       relationChecks++;
       const relation = related(
         index.metadata[seedIndex],
@@ -741,11 +787,24 @@ export function buildConnectedContextDetails(
       }
     }
     companions.sort((a, b) => b.score - a.score || a.hunkIndex - b.hunkIndex);
+    omitted += Math.max(0, companions.length - MAX_COMPANIONS);
+    if (omitted > 0) {
+      complete = false;
+      omittedBySeed.set(seedIndex, omitted);
+    }
     result.set(seedIndex, companions.slice(0, MAX_COMPANIONS));
+  }
+
+  if (result.size !== hunks.length) {
+    complete = false;
+    for (let seedIndex = 0; seedIndex < hunks.length; seedIndex++) {
+      if (!result.has(seedIndex)) omittedBySeed.set(seedIndex, 1);
+    }
   }
   return {
     contexts: result,
-    complete: result.size === hunks.length,
+    omittedBySeed,
+    complete,
   };
 }
 
