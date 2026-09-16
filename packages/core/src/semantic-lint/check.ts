@@ -2292,7 +2292,7 @@ export async function checkInvariants(
     });
     if (verificationState !== "confirmed") continue;
 
-    const dedupKey = inv.entry.id + "\\x1f" + hunk.file;
+    const dedupKey = inv.entry.id + "\x1f" + hunk.file;
     if (seenFindings.has(dedupKey)) continue;
     seenFindings.add(dedupKey);
     if (findings.length >= MAX_LINT_FINDINGS) continue;
