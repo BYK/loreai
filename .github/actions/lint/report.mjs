@@ -181,8 +181,11 @@ function validateVerification(summary) {
     ) {
       throw new TypeError("empty verification summary contains work");
     }
-  } else if (summary.inputTokenBudget <= 0) {
-    throw new TypeError("verification input budget is invalid");
+  } else if (
+    summary.inputTokenBudget <= 0 ||
+    summary.inputTokens > summary.inputTokenBudget
+  ) {
+    throw new TypeError("verification input accounting exceeds its budget");
   }
 }
 
@@ -518,6 +521,19 @@ function validateReport(value) {
       ) {
         throw new TypeError("not-attempted candidate stats must be zero");
       }
+    }
+    if (
+      candidate.state === "resolved" &&
+      candidate.verdict === "violates" &&
+      !(
+        candidate.verification !== undefined ||
+        (value.coverage.strategy === "holistic" &&
+          value.verification.strategy === "none")
+      )
+    ) {
+      throw new TypeError(
+        "violations require counterevidence outside holistic lint",
+      );
     }
     if (candidate.verification !== undefined) {
       const verification = candidate.verification;
