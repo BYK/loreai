@@ -5160,7 +5160,7 @@ export function createGatewayLLMClient(
               { model: context.model, protocol: context.protocol },
             );
           } else {
-            throw error;
+            throw attachPromptAttempts(error, context.attempts);
           }
         }
         return (
@@ -5633,7 +5633,7 @@ function holisticLintTransportFailure(
           : "candidate",
       retryable: code !== "abort",
     },
-    stats,
+    stats: addThrownTransportAttempts(error, stats),
   };
 }
 
@@ -5679,7 +5679,11 @@ function gatewayJudgeTransportFailure(
   overallSignal?: AbortSignal,
 ): semanticLint.JudgeOutcome {
   const failure = gatewayThrownTransportFailure(error, overallSignal);
-  return { kind: "unresolved", failure, stats };
+  return {
+    kind: "unresolved",
+    failure,
+    stats: addThrownTransportAttempts(error, stats),
+  };
 }
 
 function invalidCounterevidenceOutcome(
@@ -5704,7 +5708,55 @@ function gatewayCounterevidenceTransportFailure(
   overallSignal?: AbortSignal,
 ): semanticLint.CounterevidenceOutcome {
   const failure = gatewayThrownTransportFailure(error, overallSignal);
-  return { kind: "unresolved", failure, stats };
+  return {
+    kind: "unresolved",
+    failure,
+    stats: addThrownTransportAttempts(error, stats),
+  };
+}
+
+function addThrownTransportAttempts(
+  error: unknown,
+  stats: semanticLint.JudgeStats,
+): semanticLint.JudgeStats {
+  return {
+    ...stats,
+    transportAttempts: stats.transportAttempts + promptAttemptsFromError(error),
+  };
+}
+
+function promptAttemptsFromError(error: unknown): number {
+  if (!error || typeof error !== "object") return 0;
+  const attempts = (error as { attempts?: unknown }).attempts;
+  return typeof attempts === "number" &&
+    Number.isSafeInteger(attempts) &&
+    attempts > 0
+    ? attempts
+    : 0;
+}
+
+function attachPromptAttempts(error: unknown, attempts: number): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const target = error instanceof Error ? error : new Error(message);
+  try {
+    Object.defineProperty(target, "attempts", {
+      configurable: true,
+      enumerable: false,
+      value: attempts,
+      writable: false,
+    });
+    return target;
+  } catch {
+    const wrapped = new Error(message);
+    Object.defineProperty(wrapped, "attempts", {
+      configurable: true,
+      enumerable: false,
+      value: attempts,
+      writable: false,
+    });
+    wrapped.name = target.name;
+    return wrapped;
+  }
 }
 
 function gatewayThrownTransportFailure(

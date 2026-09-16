@@ -72,10 +72,13 @@ describe("createGatewayInvariantJudge", () => {
   });
 
   test("converts thrown judge transport failures into accounted outcomes", async () => {
+    const error = Object.assign(new Error("transport disconnected"), {
+      attempts: 3,
+    });
     const client: GatewayLLMClient = {
       prompt: vi.fn(async () => null),
       promptDetailed: vi.fn(async () => {
-        throw new Error("transport disconnected");
+        throw error;
       }),
     };
     const judge = createGatewayInvariantJudge({
@@ -87,7 +90,7 @@ describe("createGatewayInvariantJudge", () => {
     await expect(judge.judge(INPUT)).resolves.toMatchObject({
       kind: "unresolved",
       failure: { code: "transport-error", scope: "candidate" },
-      stats: { semanticCalls: 1, transportAttempts: 0 },
+      stats: { semanticCalls: 1, transportAttempts: 3 },
     });
   });
 
@@ -499,10 +502,13 @@ describe("counterevidence gateway verifier", () => {
   });
 
   test("converts thrown verifier transport failures into accounted outcomes", async () => {
+    const error = Object.assign(new Error("verifier transport disconnected"), {
+      attempts: 2,
+    });
     const client: GatewayLLMClient = {
       prompt: vi.fn(async () => null),
       promptDetailed: vi.fn(async () => {
-        throw new Error("verifier transport disconnected");
+        throw error;
       }),
     };
     const judge = createGatewayInvariantJudge({
@@ -514,7 +520,7 @@ describe("counterevidence gateway verifier", () => {
     await expect(judge.verify(counterevidenceInput)).resolves.toMatchObject({
       kind: "unresolved",
       failure: { code: "transport-error", scope: "candidate" },
-      stats: { semanticCalls: 1, transportAttempts: 0 },
+      stats: { semanticCalls: 1, transportAttempts: 2 },
     });
   });
 

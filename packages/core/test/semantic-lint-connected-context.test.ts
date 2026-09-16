@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendCandidates,
   buildConnectedContext,
   buildConnectedContextDetails,
   renderConnectedContext,
@@ -14,6 +15,13 @@ const hunk = (
 ): DiffHunk => ({ file, text, ...extras });
 
 describe("connected semantic-lint context", () => {
+  it("does not mark duplicate candidates as truncated at capacity", () => {
+    const target = new Set([1, 2]);
+
+    expect(appendCandidates(target, [1, 2], 0, 2)).toBe(false);
+    expect(target).toEqual(new Set([1, 2]));
+  });
+
   it("selects bounded deterministic companions without transitive fan-out", () => {
     const hunks = [
       hunk("src/core.ts", "@@\n const sharedSymbol = true;"),

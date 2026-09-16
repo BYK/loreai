@@ -1230,6 +1230,14 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       : undefined;
     if (!verification) continue;
     const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const sameKeyCandidates = candidatesByKey.get(key) ?? [];
+    const hasConfirmedCandidate = sameKeyCandidates.some(
+      (candidate) =>
+        candidate.state === "resolved" &&
+        candidate.verdict === "violates" &&
+        isRecord(candidate.verification) &&
+        candidate.verification.state === "confirmed",
+    );
     const matchingFindings = findingsByKey.get(key) ?? [];
     if (verification.state === "confirmed") {
       assert(
@@ -1244,7 +1252,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       );
     } else {
       assert(
-        matchingFindings.length === 0,
+        matchingFindings.length === 0 || hasConfirmedCandidate,
         "only confirmed verification may back a finding",
       );
     }

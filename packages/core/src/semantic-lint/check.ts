@@ -1676,24 +1676,32 @@ export async function checkInvariants(
     hunks: input.hunks ?? [],
   };
   if (diff.kind === "failure") {
-    return emptyCheckResult(input.range, {
-      diff: { status: "failed", hunks: 0, failure: diff.failure },
-      invariantVectors: notRunVectorHealth(),
-      hunkVectors: notRunVectorHealth(),
-      judge: notRunJudgeHealth(),
-    });
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: { status: "failed", hunks: 0, failure: diff.failure },
+        invariantVectors: notRunVectorHealth(),
+        hunkVectors: notRunVectorHealth(),
+        judge: notRunJudgeHealth(),
+      },
+      { inputTokenBudget: input.holisticInputTokenBudget },
+    );
   }
 
   const hunks = diff.hunks;
   const files = changedFiles(hunks);
   const diffHealth: DiffHealth = { status: "healthy", hunks: hunks.length };
   if (hunks.length === 0) {
-    return emptyCheckResult(input.range, {
-      diff: diffHealth,
-      invariantVectors: healthyVectorHealth(0, 0),
-      hunkVectors: healthyVectorHealth(0, 0),
-      judge: healthyJudgeHealth(0),
-    });
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: healthyVectorHealth(0, 0),
+        hunkVectors: healthyVectorHealth(0, 0),
+        judge: healthyJudgeHealth(0),
+      },
+      { inputTokenBudget: input.holisticInputTokenBudget },
+    );
   }
 
   // Load invariants (confidence DESC), gate on confidence + enforceability,
@@ -1707,21 +1715,25 @@ export async function checkInvariants(
       .filter((e) => isEnforceableInvariant(e))
       .slice(0, MAX_INVARIANTS_SCAN);
   } catch (error) {
-    return emptyCheckResult(input.range, {
-      diff: diffHealth,
-      invariantVectors: {
-        status: "failed",
-        expected: 0,
-        available: 0,
-        missing: 0,
-        failure: {
-          code: "invariant-source-read-failed",
-          message: boundedMessage(error, "Could not load invariants"),
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: {
+          status: "failed",
+          expected: 0,
+          available: 0,
+          missing: 0,
+          failure: {
+            code: "invariant-source-read-failed",
+            message: boundedMessage(error, "Could not load invariants"),
+          },
         },
+        hunkVectors: notRunVectorHealth(hunks.length),
+        judge: notRunJudgeHealth(),
       },
-      hunkVectors: notRunVectorHealth(hunks.length),
-      judge: notRunJudgeHealth(),
-    });
+      { inputTokenBudget: input.holisticInputTokenBudget },
+    );
   }
   input.signal?.throwIfAborted();
   if (allEntries.length === 0) {
@@ -1733,7 +1745,7 @@ export async function checkInvariants(
         hunkVectors: healthyVectorHealth(0, 0),
         judge: healthyJudgeHealth(0),
       },
-      { hunks: hunks.length },
+      { hunks: hunks.length, inputTokenBudget: input.holisticInputTokenBudget },
     );
   }
 
@@ -1753,7 +1765,11 @@ export async function checkInvariants(
         hunkVectors: notRunVectorHealth(hunks.length),
         judge: notRunJudgeHealth(),
       },
-      { hunks: hunks.length, invariants: allEntries.length },
+      {
+        hunks: hunks.length,
+        invariants: allEntries.length,
+        inputTokenBudget: input.holisticInputTokenBudget,
+      },
     );
   }
   const vecById = invariantVecResult.vecs;
@@ -1792,7 +1808,11 @@ export async function checkInvariants(
         hunkVectors: hunkVecResult.health,
         judge: notRunJudgeHealth(),
       },
-      { hunks: hunks.length, invariants: allEntries.length },
+      {
+        hunks: hunks.length,
+        invariants: allEntries.length,
+        inputTokenBudget: input.holisticInputTokenBudget,
+      },
     );
   }
   const hunkVecs = hunkVecResult.vecs;
@@ -2174,6 +2194,7 @@ export async function checkInvariants(
         scope: "run",
         retryable: false,
       };
+      stopFailure = failure;
       verificationStopFailure = failure;
       unresolvedVerification(failure, "not-attempted");
       continue;
@@ -2183,16 +2204,15 @@ export async function checkInvariants(
       MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
     );
     if (remainingVerifierCalls <= 0) {
-      unresolvedVerification(
-        {
-          code: "verification-budget-exhausted",
-          message:
-            "Reserved counterevidence semantic-call budget was exhausted",
-          scope: "run",
-          retryable: false,
-        },
-        "not-attempted",
-      );
+      const failure: JudgeFailure = {
+        code: "verification-budget-exhausted",
+        message: "Reserved counterevidence semantic-call budget was exhausted",
+        scope: "run",
+        retryable: false,
+      };
+      stopFailure = failure;
+      verificationStopFailure = failure;
+      unresolvedVerification(failure, "not-attempted");
       continue;
     }
     if (estimatedInputTokens > COUNTEREVIDENCE_INPUT_TOKEN_BUDGET) {
@@ -2250,6 +2270,7 @@ export async function checkInvariants(
 
     if (verificationOutcome.kind === "unresolved") {
       if (verificationOutcome.failure.scope === "run") {
+        stopFailure = verificationOutcome.failure;
         verificationStopFailure = verificationOutcome.failure;
       }
       unresolvedVerification(
@@ -2847,11 +2868,16 @@ function overallStatus(
 function emptyCheckResult(
   range: ResolvedRange,
   health: CheckHealth,
-  counts: { hunks?: number; invariants?: number } = {},
+  counts: {
+    hunks?: number;
+    invariants?: number;
+    inputTokenBudget?: number;
+  } = {},
 ): CheckResult {
   const coverage = emptyLintCoverage(
     counts.hunks ?? health.diff.hunks,
     counts.invariants ?? 0,
+    counts.inputTokenBudget,
   );
   return {
     range,

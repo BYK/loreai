@@ -1233,6 +1233,18 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.candidates).toBe(0);
   });
 
+  it("preserves the configured input budget on an empty result", async () => {
+    const result = await checkInvariants({
+      projectPath: "/tmp/ic-test-empty-budget",
+      hunks: [],
+      range: FAKE_RANGE,
+      holisticInputTokenBudget: 4_096,
+      sessionID: "empty-budget",
+    });
+
+    expect(result.coverage.inputTokenBudget).toBe(4_096);
+  });
+
   it("admits a candidate via a ref hit even when cosine is low", async () => {
     const project = "/tmp/ic-test-proj-4";
     // Invariant cites a file:line; the diff touches that exact file. Cosine is
@@ -2150,6 +2162,52 @@ describe("counterevidence semantic-lint verification", () => {
     });
     expect(result.semanticCalls).toBe(1);
     expect(result.findings).toHaveLength(0);
+  });
+
+  it("stops first-pass judging after a run-scoped verifier failure", async () => {
+    const project = "/tmp/lore-counterevidence-verifier-run-failure";
+    const hunks = await seedCandidateSet(project, 2);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict" as const,
+      verdict: "violates" as const,
+      reason: "The isolated change appears to bypass the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = {
+      verify: vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "transport-error" as const,
+          message: "verifier transport unavailable",
+          scope: "run" as const,
+          retryable: true,
+        },
+        stats: { semanticCalls: 1, transportAttempts: 2 },
+      })),
+    };
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      holisticJudge: holisticFallbackJudge(),
+      holisticInputTokenBudget: 1,
+      sessionID: "counterevidence-verifier-run-failure",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(verifier.verify).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      semanticCalls: 2,
+      transportAttempts: 3,
+      findings: [],
+    });
+    expect(result.candidateOutcomes[1]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "transport-error", scope: "run" },
+    });
   });
 
   it("fails closed when connected-context rendering truncates a parsed hunk", async () => {

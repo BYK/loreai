@@ -726,6 +726,13 @@ function validateReport(value) {
   for (const candidate of value.candidates) {
     if (candidate.verification === undefined) continue;
     const key = `${candidate.invariantId}\x1f${candidate.file}`;
+    const sameKeyCandidates = candidatesByKey.get(key) ?? [];
+    const hasConfirmedCandidate = sameKeyCandidates.some(
+      (sameKeyCandidate) =>
+        sameKeyCandidate.state === "resolved" &&
+        sameKeyCandidate.verdict === "violates" &&
+        sameKeyCandidate.verification?.state === "confirmed",
+    );
     const matchingFindings = findingsByKey.get(key) ?? [];
     if (candidate.verification.state === "confirmed") {
       if (matchingFindings.length === 0)
@@ -739,7 +746,8 @@ function validateReport(value) {
           "finding severity disagrees with trusted candidate severity",
         );
     } else if (matchingFindings.length > 0) {
-      throw new TypeError("only confirmed verification may back a finding");
+      if (!hasConfirmedCandidate)
+        throw new TypeError("only confirmed verification may back a finding");
     }
   }
   for (const finding of value.findings) {

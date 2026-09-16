@@ -527,7 +527,7 @@ function buildIndex(hunks: DiffHunk[]): HunkIndex {
   return index;
 }
 
-function appendCandidates(
+export function appendCandidates(
   target: Set<number>,
   candidates: number[] | undefined,
   seedIndex: number,
@@ -537,6 +537,7 @@ function appendCandidates(
   let truncated = false;
   for (const candidate of candidates) {
     if (candidate === seedIndex) continue;
+    if (target.has(candidate)) continue;
     if (target.size >= limit) {
       truncated = true;
       break;

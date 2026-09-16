@@ -720,6 +720,38 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(false);
   });
 
+  test("accepts mixed same-key verification when one candidate is confirmed", () => {
+    const value = confirmedCounterevidenceReport();
+    const confirmed = value.candidates[0].verification;
+    if (!confirmed) throw new Error("test fixture lacks verification");
+    value.candidates.push({
+      ...value.candidates[0],
+      id: "candidate-2",
+      verification: {
+        ...confirmed,
+        state: "cleared",
+        reason: "Connected context routes the second hunk safely.",
+      },
+    });
+    value.health.judge.selected = 2;
+    value.health.judge.resolved = 2;
+    value.counters.candidates = 2;
+    value.counters.attempted = 2;
+    value.counters.resolved = 2;
+    value.counters.semanticCalls = 4;
+    value.counters.transportAttempts = 4;
+    value.verification.selected = 2;
+    value.verification.attempted = 2;
+    value.verification.confirmed = 1;
+    value.verification.cleared = 1;
+    value.verification.semanticCalls = 2;
+    value.verification.transportAttempts = 2;
+    value.verification.inputTokens = 6_000;
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
   test("reports a valid complete advisory run without blocking", () => {
     const result = runReporter(report(), false, 0);
     expect(result.status).toBe(0);
