@@ -1788,7 +1788,7 @@ export async function checkInvariants(
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
   const selected = selectCandidates(clusters, hunkVecs, invariants, hunks, {
-    cap: MAX_FIRST_PASS_JUDGE_CALLS,
+    cap: MAX_JUDGE_CALLS,
   });
 
   const judge =
