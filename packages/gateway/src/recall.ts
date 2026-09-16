@@ -1115,9 +1115,11 @@ export async function executeRecall(
       input: { query, scope, id, ids, detailOffset, detailLimit },
       coverage: recall.coverage,
     };
-  } catch (e) {
+  } catch {
     if (signal?.aborted) throw signal.reason;
-    log.error("gateway recall execution failed:", e);
+    const diagnostic = new Error("gateway recall execution failed");
+    diagnostic.name = "RecallExecutionError";
+    log.error(diagnostic);
     return {
       result: "Recall search failed. The memory system encountered an error.",
       input: { query, scope, id, ids, detailOffset, detailLimit },

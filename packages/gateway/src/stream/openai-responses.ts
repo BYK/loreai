@@ -35,6 +35,7 @@ import {
   safeTokenSum,
   validateResponsesUsage,
 } from "../usage-validation";
+import { appendCodexRateLimitEvent } from "../codex-rate-limits";
 
 // ---------------------------------------------------------------------------
 // Stream accumulator — shared per-event core
@@ -250,6 +251,35 @@ export function isValidResponsesOutputItemStatus(
   if (status === undefined) return true;
   if (typeof type !== "string" || typeof status !== "string") return false;
   return OUTPUT_ITEM_STATUSES_BY_TYPE[type]?.[phase]?.has(status) ?? false;
+}
+
+export function assertSuccessfulResponsesCompletion(
+  response: Record<string, unknown>,
+): void {
+  const usage = validateResponsesUsage(
+    response.usage,
+    "malformed Responses usage",
+  );
+  if (
+    response.status !== "completed" ||
+    !isNonEmptyString(response.id) ||
+    !isNonEmptyString(response.model) ||
+    !Array.isArray(response.output) ||
+    !usage ||
+    typeof usage.input_tokens !== "number" ||
+    typeof usage.output_tokens !== "number" ||
+    response.error != null
+  ) {
+    throw new Error("upstream Responses request did not complete");
+  }
+  for (const rawItem of response.output) {
+    if (!isRecord(rawItem)) {
+      throw new Error("upstream Responses request did not complete");
+    }
+    if (rawItem.status !== undefined && rawItem.status !== "completed") {
+      throw new Error("upstream Responses request did not complete");
+    }
+  }
 }
 
 function recordExtends(
@@ -584,24 +614,10 @@ export function applyResponsesEvent(
   state: ResponsesAccState,
   event: string,
   parsed: Record<string, unknown>,
-): void {
+): Record<string, unknown> | undefined {
   switch (event) {
     case "codex.rate_limits": {
-      // Only the provider's quota event crosses buffered reconstruction. Never
-      // retain arbitrary events or diagnostic fields. The stream's existing
-      // byte/frame limits bound this response-local list.
-      const quota: Record<string, unknown> = { type: "codex.rate_limits" };
-      for (const name of [
-        "plan_type",
-        "rate_limits",
-        "credits",
-        "metered_limit_name",
-        "limit_name",
-      ]) {
-        if (Object.hasOwn(parsed, name)) quota[name] = parsed[name];
-      }
-      (state.codexRateLimits ??= []).push(quota);
-      break;
+      return appendCodexRateLimitEvent((state.codexRateLimits ??= []), parsed);
     }
     case "response.created":
     case "response.in_progress": {
@@ -1132,6 +1148,7 @@ function validatePublicResponsesEvent(
       if (item?.type !== "tool_use") malformed();
       break;
   }
+  return undefined;
 }
 
 /** `public` enforces OpenAI's lifecycle; `codex` validates ChatGPT's sparse variant. */
@@ -1890,6 +1907,8 @@ export async function accumulateResponsesSSEStream(
     /** Buffered callers that run successful-turn side effects must reject
      * incomplete terminals rather than treating a parsed body as completion. */
     requireCompletedTerminal?: boolean;
+    /** Recovery synthesis requires complete identity, usage, and item state. */
+    requireSuccessfulCompletion?: boolean;
     /** Internal state injection used by validated true passthrough. */
     state?: ResponsesAccState;
     onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void;
@@ -2004,6 +2023,16 @@ export async function accumulateResponsesSSEStream(
         doneItems.has(parsed.output_index as number)
       ) {
         throw new Error("malformed Responses stream event");
+      }
+      if (
+        opts.requireSuccessfulCompletion &&
+        (event === "response.completed" || event === "response.done")
+      ) {
+        const terminal = parsed.response;
+        if (!isRecord(terminal)) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        assertSuccessfulResponsesCompletion(terminal);
       }
       if (
         opts.validation &&
@@ -2158,7 +2187,7 @@ export async function accumulateResponsesSSEStream(
       ) {
         throw new Error("malformed Responses stream event");
       }
-      applyResponsesEvent(state, event, parsed);
+      const acceptedCodexRateLimit = applyResponsesEvent(state, event, parsed);
       if (event === "response.output_text.done") {
         state.textDoneItems.add(parsed.output_index as number);
       } else if (event === "response.refusal.done") {
@@ -2350,7 +2379,16 @@ export async function accumulateResponsesSSEStream(
         if (opts.stopAtTerminal) break;
         continue;
       }
-      if (event !== "message") await opts.onValidatedEvent?.(event, data);
+      if (event !== "message") {
+        if (event !== "codex.rate_limits" || acceptedCodexRateLimit) {
+          await opts.onValidatedEvent?.(
+            event,
+            acceptedCodexRateLimit
+              ? JSON.stringify(acceptedCodexRateLimit)
+              : data,
+          );
+        }
+      }
     }
   } finally {
     cancelAndReleaseReader(reader);

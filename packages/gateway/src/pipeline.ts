@@ -228,9 +228,14 @@ import {
   responsesDoneItemMatchesAdded,
   responsesTerminalItemMatches,
   normalizeCodexResponsesEvent,
+  assertSuccessfulResponsesCompletion,
   ResponsesTerminalError,
   type ResponsesAccState,
 } from "./stream/openai-responses";
+import {
+  appendCodexRateLimitEvent,
+  sanitizeCodexRateLimitEvents,
+} from "./codex-rate-limits";
 import {
   accumulateOpenAISSEStream,
   OpenAIStreamValidationError,
@@ -249,6 +254,8 @@ import {
   safeTokenSum,
   validateOpenAIUsage,
   validateResponsesUsage,
+  validateAnthropicUsage,
+  validateGeminiUsageMetadata,
 } from "./usage-validation";
 import {
   accumulateSSEResponse,
@@ -8457,6 +8464,7 @@ export function streamResponsesRecallAware(
   let state = makeResponsesAccState();
   const maxSSEFrames = opts.maxSSEFrames ?? DEFAULT_MAX_SSE_FRAMES;
   const maxSparseIndex = Math.min(maxSSEFrames, DEFAULT_MAX_SSE_FRAMES);
+  const publicCodexRateLimits: Array<Record<string, unknown>> = [];
   const syntheticIdentities = new Set<string>();
   const referenceIdentities = new Set<string>();
   const outputIdentities = new Set<string>();
@@ -11076,7 +11084,20 @@ export function streamResponsesRecallAware(
             }
 
             // Always accumulate into the internal state for postResponse.
-            applyResponsesEvent(state, event, parsed);
+            const acceptedCodexRateLimit = applyResponsesEvent(
+              state,
+              event,
+              parsed,
+            );
+            const publicCodexRateLimit = acceptedCodexRateLimit
+              ? appendCodexRateLimitEvent(
+                  publicCodexRateLimits,
+                  acceptedCodexRateLimit,
+                )
+              : undefined;
+            const publicData = publicCodexRateLimit
+              ? JSON.stringify(publicCodexRateLimit)
+              : data;
             if (
               event === "response.output_item.done" &&
               outputIndex !== undefined
@@ -11685,7 +11706,20 @@ export function streamResponsesRecallAware(
                               }
                             }
                           }
-                          applyResponsesEvent(contState, ce, cparsed);
+                          const acceptedCodexRateLimit = applyResponsesEvent(
+                            contState,
+                            ce,
+                            cparsed,
+                          );
+                          const publicCodexRateLimit = acceptedCodexRateLimit
+                            ? appendCodexRateLimitEvent(
+                                publicCodexRateLimits,
+                                acceptedCodexRateLimit,
+                              )
+                            : undefined;
+                          const publicContinuationData = publicCodexRateLimit
+                            ? JSON.stringify(publicCodexRateLimit)
+                            : cd;
                           if (
                             ce === "response.output_item.done" &&
                             ci !== undefined
@@ -11893,9 +11927,12 @@ export function streamResponsesRecallAware(
                             ) {
                               holdContinuation(shifted);
                             } else queueTransactional(shifted);
-                          } else if (ce !== "message") {
+                          } else if (
+                            ce !== "message" &&
+                            (ce !== "codex.rate_limits" || publicCodexRateLimit)
+                          ) {
                             const chunk = encoder.encode(
-                              formatResponsesEvent(ce, cd),
+                              formatResponsesEvent(ce, publicContinuationData),
                             );
                             if (
                               contRecallIndices.size > 0 ||
@@ -12262,6 +12299,9 @@ export function streamResponsesRecallAware(
             // Non-terminal, non-recall event: project reviewed reasoning
             // schemas and forward all other validated events unchanged.
             const projected = projectReasoningEvent(event, parsed);
+            if (event === "codex.rate_limits" && !publicCodexRateLimit) {
+              continue;
+            }
             const chunk = encoder.encode(
               formatResponsesEvent(
                 event,
@@ -12792,6 +12832,7 @@ export async function accumulateNonStreamResponse(
           validation: codex ? "codex" : "public",
           stopAtTerminal: true,
           requireCompletedTerminal: true,
+          requireSuccessfulCompletion: requireValidCompletion,
         });
       case "gemini":
         return accumulateGeminiSSEStream(sse, {
@@ -12923,7 +12964,9 @@ function assertValidNonStreamCompletion(
     if (
       (status !== "completed" && status !== "incomplete") ||
       typeof json.id !== "string" ||
+      !json.id ||
       typeof json.model !== "string" ||
+      !json.model ||
       !Array.isArray(json.output) ||
       !json.usage ||
       typeof json.usage !== "object" ||
@@ -12931,6 +12974,7 @@ function assertValidNonStreamCompletion(
     ) {
       throw new Error("upstream Responses request did not complete");
     }
+    if (status === "completed") assertSuccessfulResponsesCompletion(json);
     const seenIdentities = new Set<string>();
     for (const rawItem of json.output) {
       if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
@@ -12979,7 +13023,6 @@ function assertValidNonStreamCompletion(
       } else if (item.type === "function_call") {
         const validItemStatus =
           item.status === "completed" ||
-          item.status === "failed" ||
           (status === "incomplete" && item.status === "incomplete");
         if (
           typeof item.call_id !== "string" ||
@@ -13078,12 +13121,37 @@ function assertValidNonStreamCompletion(
       !Array.isArray(promptFeedback)
         ? (promptFeedback as Record<string, unknown>).blockReason
         : undefined;
+    const candidate =
+      first && typeof first === "object" && !Array.isArray(first)
+        ? (first as Record<string, unknown>)
+        : undefined;
+    const content =
+      candidate?.content &&
+      typeof candidate.content === "object" &&
+      !Array.isArray(candidate.content)
+        ? (candidate.content as Record<string, unknown>)
+        : undefined;
+    const finishReason = candidate?.finishReason;
+    const usage = validateGeminiUsageMetadata(
+      json.usageMetadata,
+      "malformed Gemini usage metadata",
+    );
     if (
-      (!first ||
-        typeof first !== "object" ||
-        Array.isArray(first) ||
-        typeof (first as Record<string, unknown>).finishReason !== "string") &&
-      typeof blockReason !== "string"
+      typeof json.responseId !== "string" ||
+      !json.responseId ||
+      typeof json.modelVersion !== "string" ||
+      !json.modelVersion ||
+      !usage ||
+      typeof usage.promptTokenCount !== "number" ||
+      typeof usage.candidatesTokenCount !== "number" ||
+      !Array.isArray(candidates) ||
+      candidates.length !== 1 ||
+      !candidate ||
+      !content ||
+      content.role !== "model" ||
+      !Array.isArray(content.parts) ||
+      (finishReason !== "STOP" && finishReason !== "MAX_TOKENS") ||
+      typeof blockReason === "string"
     ) {
       throw new Error("upstream Gemini request did not complete");
     }
@@ -13094,12 +13162,33 @@ function assertValidNonStreamCompletion(
     json.type !== "message" ||
     json.role !== "assistant" ||
     typeof json.id !== "string" ||
+    !json.id ||
     typeof json.model !== "string" ||
+    !json.model ||
     !Array.isArray(json.content) ||
     typeof json.stop_reason !== "string" ||
     !json.usage ||
     typeof json.usage !== "object" ||
     Array.isArray(json.usage)
+  ) {
+    throw new Error("upstream Anthropic request did not complete");
+  }
+  validateAnthropicUsage(json.usage, {
+    message: "malformed Anthropic usage",
+    required: true,
+    requireInput: true,
+    requireOutput: true,
+  });
+  if (
+    ![
+      "end_turn",
+      "tool_use",
+      "max_tokens",
+      "stop_sequence",
+      "pause_turn",
+      "refusal",
+      "model_context_window_exceeded",
+    ].includes(json.stop_reason)
   ) {
     throw new Error("upstream Anthropic request did not complete");
   }
@@ -19074,7 +19163,9 @@ async function handleConversationTurn(
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
-    const cumulativeCodexRateLimits = [...(resp.codexRateLimits ?? [])];
+    const cumulativeCodexRateLimits = sanitizeCodexRateLimitEvents(
+      resp.codexRateLimits ?? [],
+    );
     const recallBudget = new RecallChainBudget({
       maxExecutions: loreConfig().search.recall.chainMaxExecutions,
       deadlineAt: foregroundAbort.deadlineAt,
@@ -19263,7 +19354,9 @@ async function handleConversationTurn(
             ),
           );
           if (error.response.codexRateLimits?.length) {
-            cumulativeCodexRateLimits.push(...error.response.codexRateLimits);
+            for (const quota of error.response.codexRateLimits) {
+              appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
+            }
           }
         }
       };
@@ -19298,6 +19391,7 @@ async function handleConversationTurn(
             validation: currentModifiedReq.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
+            requireSuccessfulCompletion: recovery,
           }),
       });
       const recoverRecallContinuation = async (
@@ -19322,7 +19416,9 @@ async function handleConversationTurn(
             mergeRecallUsage(cumulativeUsage, recovered.usage ?? ZERO_USAGE),
           );
           if (recovered.codexRateLimits?.length) {
-            cumulativeCodexRateLimits.push(...recovered.codexRateLimits);
+            for (const quota of recovered.codexRateLimits) {
+              appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
+            }
           }
         } catch (error) {
           if (
@@ -19331,7 +19427,11 @@ async function handleConversationTurn(
           ) {
             throw error;
           }
-          mergeFailedContinuationMetadata(error);
+          try {
+            mergeFailedContinuationMetadata(error);
+          } catch {
+            return failRecall(category, false);
+          }
           return failRecall(category, false);
         }
         if (
@@ -19440,7 +19540,9 @@ async function handleConversationTurn(
         mergeRecallUsage(cumulativeUsage, contUsage),
       );
       if (continuationResp.codexRateLimits?.length) {
-        cumulativeCodexRateLimits.push(...continuationResp.codexRateLimits);
+        for (const quota of continuationResp.codexRateLimits) {
+          appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
+        }
       }
 
       // Update for next iteration

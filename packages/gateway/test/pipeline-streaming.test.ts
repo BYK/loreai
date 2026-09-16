@@ -524,7 +524,15 @@ describe("non-stream recall usage aggregation", () => {
     }
   });
 
-  it.each(["tool", "malformed", "repeated-recall", "overflow"] as const)(
+  it.each([
+    "tool",
+    "malformed",
+    "repeated-recall",
+    "overflow",
+    "failed-overflow",
+    "recall-plus-text",
+    "reasoning-only",
+  ] as const)(
     "%s recovery makes exactly one no-recall synthesis request after a failed JSON continuation",
     async (recoveryOutcome) => {
       clearAllCosts();
@@ -624,27 +632,99 @@ describe("non-stream recall usage aggregation", () => {
             headers: { "content-type": "application/json" },
           });
         }
+        if (recoveryOutcome === "recall-plus-text") {
+          return new Response(
+            JSON.stringify({
+              id: "resp_recovery_recall_plus_text",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_private_recovery_text",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    { type: "output_text", text: "usable private text" },
+                  ],
+                },
+                {
+                  type: "function_call",
+                  id: "fc_private_recovery_recall",
+                  call_id: "call_private_recovery_recall",
+                  name: "recall",
+                  arguments: JSON.stringify({
+                    query: "private recovery query",
+                  }),
+                  status: "completed",
+                },
+              ],
+              usage: { input_tokens: 20, output_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (recoveryOutcome === "reasoning-only") {
+          return new Response(
+            JSON.stringify({
+              id: "resp_recovery_reasoning_only",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "reasoning",
+                  id: "rs_private_recovery",
+                  summary: [
+                    {
+                      type: "summary_text",
+                      text: "private recovery reasoning",
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 20, output_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
         return new Response(
           JSON.stringify({
             id: "resp_recovered_json_recall",
             object: "response",
             created_at: 0,
             model: "gpt-5.6-sol",
-            status: "completed",
-            output: [
-              {
-                type: "function_call",
-                id: "fc_recovery_read",
-                call_id: "call_recovery_read",
-                name: "read",
-                arguments: JSON.stringify({ path: "README.md" }),
-                status: "completed",
-              },
-            ],
+            status:
+              recoveryOutcome === "failed-overflow" ? "failed" : "completed",
+            output:
+              recoveryOutcome === "failed-overflow"
+                ? []
+                : [
+                    {
+                      type: "function_call",
+                      id: "fc_recovery_read",
+                      call_id: "call_recovery_read",
+                      name: "read",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                      status: "completed",
+                    },
+                  ],
             usage:
-              recoveryOutcome === "overflow"
+              recoveryOutcome === "overflow" ||
+              recoveryOutcome === "failed-overflow"
                 ? { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 }
                 : { input_tokens: 20, output_tokens: 2 },
+            ...(recoveryOutcome === "failed-overflow"
+              ? {
+                  error: {
+                    type: "server_error",
+                    message: "private failed recovery diagnostic",
+                  },
+                }
+              : {}),
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -665,6 +745,10 @@ describe("non-stream recall usage aggregation", () => {
         expect(call).toBe(3);
         expect(body).not.toContain("private failed partial");
         expect(body).not.toContain("private provider failed");
+        expect(body).not.toContain("private failed recovery diagnostic");
+        expect(body).not.toContain("usable private text");
+        expect(body).not.toContain("private recovery query");
+        expect(body).not.toContain("private recovery reasoning");
         expect(body).not.toContain("private repeated recall query");
         expect(body).not.toContain("fc_private_repeated_recall");
         expect(body).not.toContain('"name":"recall"');
@@ -685,7 +769,13 @@ describe("non-stream recall usage aggregation", () => {
         expect(JSON.stringify(recoveryBody)).toContain(
           "accepted recall results",
         );
-        if (recoveryOutcome === "malformed" || recoveryOutcome === "overflow") {
+        if (
+          recoveryOutcome === "malformed" ||
+          recoveryOutcome === "overflow" ||
+          recoveryOutcome === "failed-overflow" ||
+          recoveryOutcome === "recall-plus-text" ||
+          recoveryOutcome === "reasoning-only"
+        ) {
           expect(response.status).toBe(502);
           expect(body).toContain("Recall continuation failed");
         } else {
@@ -704,13 +794,17 @@ describe("non-stream recall usage aggregation", () => {
             getSessionCosts(state?.sessionID ?? "")?.conversation,
           ).toMatchObject({
             inputTokens:
-              recoveryOutcome === "tool"
+              recoveryOutcome === "tool" ||
+              recoveryOutcome === "recall-plus-text" ||
+              recoveryOutcome === "reasoning-only"
                 ? 1_030
                 : recoveryOutcome === "repeated-recall"
                   ? 121_020
                   : 1_010,
             outputTokens:
-              recoveryOutcome === "malformed" || recoveryOutcome === "overflow"
+              recoveryOutcome === "malformed" ||
+              recoveryOutcome === "overflow" ||
+              recoveryOutcome === "failed-overflow"
                 ? 101
                 : 103,
             turns: 1,

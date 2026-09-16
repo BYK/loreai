@@ -272,6 +272,47 @@ describe("executeRecall malformed input", () => {
       "Recall search failed. The memory system encountered an error.",
     );
   });
+
+  test("logs malformed recall input through a fixed error envelope", async () => {
+    const errors: string[] = [];
+    const captured: Error[] = [];
+    const sentinel = "private recall query\nprovider diagnostic";
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: (error) => {
+        if (error instanceof Error) captured.push(error);
+      },
+    });
+
+    try {
+      await executeRecall(
+        {
+          type: "tool_use",
+          id: "recall-private-log",
+          name: RECALL_TOOL_NAME,
+          input: { [sentinel]: true },
+        },
+        process.cwd(),
+        "private-log-input",
+      );
+      expect(errors).toEqual(["gateway recall execution failed"]);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.name).toBe("RecallExecutionError");
+      expect(captured[0]?.message).toBe("gateway recall execution failed");
+      expect(`${captured[0]?.message}\n${captured[0]?.stack}`).not.toContain(
+        sentinel,
+      );
+    } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
+  });
 });
 
 describe("LORE_COMMIT_REMINDER", () => {

@@ -293,6 +293,74 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
+  test("bounds Codex quota metadata across the principal and continuation", async () => {
+    const quota = (index: number) =>
+      sseEvent("codex.rate_limits", {
+        metered_limit_name: `bucket_${index}`,
+        rate_limits: {
+          primary: {
+            used_percent: index,
+            window_minutes: 300,
+            reset_at: 2000000000 + index,
+          },
+        },
+      });
+    const principalQuotas = Array.from({ length: 40 }, (_, index) => [
+      quota(index),
+      quota(index),
+    ]).flat();
+    const continuationQuotas = Array.from({ length: 40 }, (_, index) => [
+      quota(index + 40),
+      quota(index + 40),
+    ]).flat();
+    let recalls = 0;
+    let followUps = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_quota_chain", "gpt-5.6-terra"),
+        ...principalQuotas,
+        recallCall(0, { query: "quota chain" }),
+        completed("resp_quota_chain", { input_tokens: 10, output_tokens: 3 }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "anchor", resultText: "result" };
+        },
+        runFollowUp: async () => {
+          followUps++;
+          return {
+            reader: streamFrom([
+              created("resp_quota_continuation", "gpt-5.6-terra"),
+              ...continuationQuotas,
+              textItem(0, "Completed answer"),
+              completed("resp_quota_continuation", {
+                input_tokens: 5,
+                output_tokens: 2,
+              }),
+            ]).body!.getReader(),
+          };
+        },
+      },
+    );
+    const out = await drain(client);
+    const events = out
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("event: codex.rate_limits\n"))
+      .map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+
+    expect(recalls).toBe(1);
+    expect(followUps).toBe(1);
+    expect(events).toHaveLength(64);
+    expect(events.map((event) => event.metered_limit_name)).toEqual(
+      Array.from({ length: 64 }, (_, index) => `bucket_${index}`),
+    );
+    expect(out).toContain("Completed answer");
+    expect(out).not.toContain("response.failed");
+  });
+
   test("finalizes when the client cancels immediately after a no-recall terminal", async () => {
     let upstreamCancelled = false;
     const upstream = new Response(
