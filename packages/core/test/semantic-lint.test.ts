@@ -1814,7 +1814,7 @@ describe("checkInvariants typed judge outcomes", () => {
     });
   });
 
-  it("caps repairs at 20 semantic calls and accounts for displaced candidates", async () => {
+  it("reserves verifier calls while accounting for displaced candidates", async () => {
     const project = "/tmp/ic-test-typed-budget";
     const hunks = await seedCandidateSet(project, 20);
     const { judge, judgeCall } = stubJudge((input) => {
@@ -1838,20 +1838,20 @@ describe("checkInvariants typed judge outcomes", () => {
       sessionID: "typed-budget",
     });
 
-    expect(judgeCall).toHaveBeenCalledTimes(10);
+    expect(judgeCall).toHaveBeenCalledTimes(6);
     expect(result).toMatchObject({
       status: "failed",
       candidates: 20,
-      attempted: 10,
+      attempted: 6,
       resolved: 0,
-      unresolved: 10,
-      notAttempted: 10,
-      semanticCalls: 20,
-      transportAttempts: 20,
+      unresolved: 6,
+      notAttempted: 14,
+      semanticCalls: 12,
+      transportAttempts: 12,
     });
     expect(
       result.candidateOutcomes
-        .slice(10)
+        .slice(6)
         .every(
           (outcome) =>
             outcome.state === "not-attempted" &&
