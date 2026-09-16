@@ -342,7 +342,7 @@ export function buildSemanticLintReport(input: {
   }
 
   const report: SemanticLintReport = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: input.result.status,
     model: input.model,
     effort: input.effort,
