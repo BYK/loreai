@@ -1021,7 +1021,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     transportAttempts === value.counters.transportAttempts,
     "candidate transport attempts do not sum to report total",
   );
-  const verification = value.verification as LintVerification;
+  const verification = value.verification;
   assert(
     verification.selected === verificationSelected &&
       verification.attempted === verificationAttempted &&
