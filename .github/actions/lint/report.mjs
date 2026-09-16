@@ -29,6 +29,7 @@ const candidateFailureCodes = new Set([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "verification-budget-exhausted",
   "insufficient-context",
 ]);
 const phaseFailureCodes = new Set([
@@ -138,17 +139,147 @@ function validateCoverage(coverage, counters) {
   }
 }
 
+function validateVerification(summary) {
+  if (
+    !summary ||
+    typeof summary !== "object" ||
+    Array.isArray(summary) ||
+    !["none", "counterevidence"].includes(summary.strategy) ||
+    typeof summary.contextComplete !== "boolean"
+  ) {
+    throw new TypeError("invalid verification summary");
+  }
+  for (const name of [
+    "selected",
+    "attempted",
+    "confirmed",
+    "cleared",
+    "unresolved",
+    "notAttempted",
+    "semanticCalls",
+    "transportAttempts",
+    "inputTokens",
+    "inputTokenBudget",
+  ]) {
+    count(summary[name], `verification.${name}`);
+  }
+  if (summary.selected !== summary.attempted + summary.notAttempted) {
+    throw new TypeError("verification selected count does not add up");
+  }
+  if (
+    summary.attempted !==
+    summary.confirmed + summary.cleared + summary.unresolved
+  ) {
+    throw new TypeError("verification attempted count does not add up");
+  }
+  if (summary.strategy === "none") {
+    if (
+      summary.contextComplete ||
+      summary.selected !== 0 ||
+      summary.inputTokens !== 0 ||
+      summary.inputTokenBudget !== 0
+    ) {
+      throw new TypeError("empty verification summary contains work");
+    }
+  } else if (
+    summary.inputTokenBudget <= 0 ||
+    summary.inputTokens > summary.inputTokenBudget
+  ) {
+    throw new TypeError("verification input budget is invalid");
+  }
+}
+
+function validateCandidateVerification(verification, candidate) {
+  if (
+    !verification ||
+    typeof verification !== "object" ||
+    Array.isArray(verification) ||
+    !["confirmed", "cleared", "unresolved", "not-attempted"].includes(
+      verification.state,
+    ) ||
+    typeof verification.contextComplete !== "boolean"
+  ) {
+    throw new TypeError("invalid candidate verification");
+  }
+  count(verification.inputTokens, "candidate verification inputTokens");
+  count(
+    verification.stats?.semanticCalls,
+    "candidate verification semanticCalls",
+  );
+  count(
+    verification.stats?.transportAttempts,
+    "candidate verification transportAttempts",
+  );
+  if (verification.state === "confirmed" || verification.state === "cleared") {
+    if (candidate.state !== "resolved" || candidate.verdict !== "violates") {
+      throw new TypeError("verification requires a violated candidate");
+    }
+    if (
+      typeof verification.reason !== "string" ||
+      verification.reason.trim().length === 0 ||
+      verification.reason.length > MAX_LINT_REPORT_RESOLVED_REASON_LENGTH
+    ) {
+      throw new TypeError("candidate verification reason is invalid");
+    }
+    if (
+      !Array.isArray(verification.evidence) ||
+      verification.evidence.length === 0 ||
+      verification.evidence.length > 4
+    ) {
+      throw new TypeError("candidate verification evidence is invalid");
+    }
+    for (const evidence of verification.evidence) {
+      if (
+        !evidence ||
+        typeof evidence !== "object" ||
+        typeof evidence.hunkId !== "string" ||
+        evidence.hunkId.length === 0 ||
+        typeof evidence.reason !== "string" ||
+        evidence.reason.trim().length === 0 ||
+        evidence.reason.length > MAX_LINT_REPORT_RESOLVED_REASON_LENGTH
+      ) {
+        throw new TypeError("candidate verification evidence is invalid");
+      }
+    }
+    if (verification.failure !== undefined) {
+      throw new TypeError("confirmed or cleared verification cannot fail");
+    }
+  } else {
+    if (candidate.state !== "unresolved") {
+      throw new TypeError("unresolved verification requires an unresolved candidate");
+    }
+    if (
+      verification.reason !== undefined ||
+      verification.evidence !== undefined ||
+      !candidateFailureCodes.has(verification.failure?.code) ||
+      typeof verification.failure?.message !== "string" ||
+      verification.failure.message.trim().length === 0 ||
+      verification.failure.message.length > MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH ||
+      !["candidate", "run"].includes(verification.failure.scope)
+    ) {
+      throw new TypeError("unresolved verification requires a scoped failure");
+    }
+    if (
+      verification.state === "not-attempted" &&
+      (verification.stats.semanticCalls !== 0 ||
+        verification.stats.transportAttempts !== 0)
+    ) {
+      throw new TypeError("not-attempted verification stats must be zero");
+    }
+  }
+}
+
 function validateReport(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("report root must be an object");
   }
-  if (value.schemaVersion !== 3)
+  if (value.schemaVersion !== 4)
     throw new TypeError("unsupported schemaVersion");
   if (!["complete", "partial", "failed"].includes(value.status)) {
     throw new TypeError("invalid status");
   }
-  if (!value.health || !value.counters || !value.gate) {
-    throw new TypeError("health, counters, and gate are required");
+  if (!value.health || !value.counters || !value.gate || !value.verification) {
+    throw new TypeError("health, counters, gate, and verification are required");
   }
   if (typeof value.model !== "string" || !value.model)
     throw new TypeError("model is required");
@@ -238,6 +369,7 @@ function validateReport(value) {
 
   const counters = value.counters;
   validateCoverage(value.coverage, counters);
+  validateVerification(value.verification);
   for (const name of [
     "hunks",
     "invariants",
@@ -317,6 +449,15 @@ function validateReport(value) {
   const states = { resolved: 0, unresolved: 0, "not-attempted": 0 };
   let semanticCalls = 0;
   let transportAttempts = 0;
+  let verificationSelected = 0;
+  let verificationAttempted = 0;
+  let verificationConfirmed = 0;
+  let verificationCleared = 0;
+  let verificationUnresolved = 0;
+  let verificationNotAttempted = 0;
+  let verificationSemanticCalls = 0;
+  let verificationTransportAttempts = 0;
+  let verificationInputTokens = 0;
   for (const candidate of value.candidates) {
     if (
       typeof candidate?.id !== "string" ||
@@ -381,6 +522,26 @@ function validateReport(value) {
         throw new TypeError("not-attempted candidate stats must be zero");
       }
     }
+    if (candidate.verification !== undefined) {
+      const verification = candidate.verification;
+      validateCandidateVerification(verification, candidate);
+      verificationSelected++;
+      verificationSemanticCalls += verification.stats.semanticCalls;
+      verificationTransportAttempts += verification.stats.transportAttempts;
+      verificationInputTokens += verification.inputTokens;
+      if (verification.state === "confirmed") {
+        verificationAttempted++;
+        verificationConfirmed++;
+      } else if (verification.state === "cleared") {
+        verificationAttempted++;
+        verificationCleared++;
+      } else if (verification.state === "unresolved") {
+        verificationAttempted++;
+        verificationUnresolved++;
+      } else {
+        verificationNotAttempted++;
+      }
+    }
   }
   if (
     states.resolved !== counters.resolved ||
@@ -391,6 +552,21 @@ function validateReport(value) {
   ) {
     throw new TypeError(
       "candidate state or attempt totals disagree with counters",
+    );
+  }
+  if (
+    value.verification.selected !== verificationSelected ||
+    value.verification.attempted !== verificationAttempted ||
+    value.verification.confirmed !== verificationConfirmed ||
+    value.verification.cleared !== verificationCleared ||
+    value.verification.unresolved !== verificationUnresolved ||
+    value.verification.notAttempted !== verificationNotAttempted ||
+    value.verification.semanticCalls !== verificationSemanticCalls ||
+    value.verification.transportAttempts !== verificationTransportAttempts ||
+    value.verification.inputTokens !== verificationInputTokens
+  ) {
+    throw new TypeError(
+      "candidate verification totals disagree with verification summary",
     );
   }
 
