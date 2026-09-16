@@ -790,17 +790,21 @@ if (report) {
     .map(([code, count]) => `${code}: ${count}`)
     .join(", ");
   const funnel = `${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates · ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted`;
+  const verificationSummary =
+    report.verification.strategy === "counterevidence"
+      ? `counterevidence: ${report.verification.confirmed} confirmed, ${report.verification.cleared} cleared, ${report.verification.unresolved} unresolved, ${report.verification.notAttempted} not attempted`
+      : "counterevidence: not run";
   if (report.status === "complete" && report.findings.length === 0) {
     annotation(
       "notice",
       "Lore semantic lint",
-      `✓ no suspected invariant violations among selected candidates (${funnel})`,
+      `✓ no suspected invariant violations among selected candidates (${funnel} · ${verificationSummary})`,
     );
   } else if (report.status !== "complete") {
     annotation(
       "warning",
       "Lore semantic lint inconclusive",
-      `${report.status}: ${funnel}${failureSummary ? ` · causes: ${failureSummary}` : ""}`,
+      `${report.status}: ${funnel} · ${verificationSummary}${failureSummary ? ` · causes: ${failureSummary}` : ""}`,
     );
   }
   if (summaryFile) {
@@ -824,7 +828,7 @@ if (report) {
             : `⚠ **${report.findings.length} advisory finding(s)**.`;
     appendFileSync(
       summaryFile,
-      `## 🧭 Lore semantic linter\n\n${headline}\n\n${funnel}\n` +
+      `## 🧭 Lore semantic linter\n\n${headline}\n\n${funnel}\n\n${verificationSummary}\n` +
         (failureSummary ? `\n**Unresolved causes:** ${failureSummary}\n` : "") +
         (rows
           ? `\n| severity | state | invariant | file | why |\n|---|---|---|---|---|\n${rows}\n`
