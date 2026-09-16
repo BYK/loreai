@@ -1814,8 +1814,8 @@ describe("checkInvariants typed judge outcomes", () => {
     });
   });
 
-  it("reserves verifier calls while accounting for displaced candidates", async () => {
-    const project = "/tmp/ic-test-typed-budget";
+  it("keeps the full candidate budget for judge-only callers", async () => {
+    const project = "/tmp/ic-test-judge-only-budget";
     const hunks = await seedCandidateSet(project, 20);
     const { judge, judgeCall } = stubJudge((input) => {
       expect(input.semanticCallBudget).toBe(2);
@@ -1835,6 +1835,49 @@ describe("checkInvariants typed judge outcomes", () => {
       hunks,
       range: FAKE_RANGE,
       judge,
+      sessionID: "judge-only-budget",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(10);
+    expect(result).toMatchObject({
+      status: "failed",
+      candidates: 20,
+      attempted: 10,
+      resolved: 0,
+      unresolved: 10,
+      notAttempted: 10,
+      semanticCalls: 20,
+      transportAttempts: 20,
+    });
+  });
+
+  it("reserves verifier calls while accounting for displaced candidates", async () => {
+    const project = "/tmp/ic-test-typed-budget";
+    const hunks = await seedCandidateSet(project, 20);
+    const { judge, judgeCall } = stubJudge((input) => {
+      expect(input.semanticCallBudget).toBe(2);
+      return {
+        kind: "unresolved",
+        failure: {
+          code: "invalid-verdict",
+          message: "Initial and repair responses were invalid",
+          scope: "candidate",
+        },
+        stats: { semanticCalls: 2, transportAttempts: 2 },
+      };
+    });
+    const verifier = {
+      verify: vi.fn(async () => {
+        throw new Error("verifier should not be called for unresolved first-pass candidates");
+      }),
+    };
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
       sessionID: "typed-budget",
     });
 
