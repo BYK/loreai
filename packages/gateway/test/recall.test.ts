@@ -9,6 +9,7 @@
  *  - Response stripping
  */
 import { describe, test, expect, vi } from "vitest";
+import { log } from "@loreai/core";
 import {
   LORE_COMMIT_REMINDER,
   accumulateOpenAINonStreamJSON,
@@ -1704,12 +1705,24 @@ describe("runRecallFollowUpJSON", () => {
   });
 
   test("throws on content-type mismatch (SSE instead of JSON)", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new TextEncoder().encode("data: test\n\n"));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
     const ctx: RecallFollowUpCtx = {
       forward: async () => ({
-        response: new Response("data: test\n\n", {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        }),
+        response,
         effectiveProtocol: "anthropic",
       }),
       parseJSON: () => {
@@ -1726,6 +1739,7 @@ describe("runRecallFollowUpJSON", () => {
         recallBlock,
       ),
     ).rejects.toThrow("recall follow-up expected JSON but got SSE");
+    await vi.waitFor(() => expect(cancelled).toBe(true));
   });
 
   test("abort settles when JSON follow-up setup ignores its signal", async () => {
@@ -1953,6 +1967,81 @@ describe("runRecallFollowUpStreamAccumulated", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(bodyCancelled).toBe(true);
   });
+});
+
+describe("recall follow-up error-body privacy", () => {
+  const recallBlock = makeRecallToolUse("test query");
+  const resp = makeResponse([recallBlock], "tool_use");
+  const hostile = "private recall query\nprovider diagnostic";
+
+  test.each(["streaming", "json", "accumulated-sse"] as const)(
+    "%s logs only a fixed category when a non-OK body reader throws",
+    async (mode) => {
+      const warnings: string[] = [];
+      log.registerSink({
+        info: () => {},
+        warn: (message) => warnings.push(message),
+        error: () => {},
+        captureException: () => {},
+      });
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            throw new Error(hostile);
+          },
+        }),
+        { status: 503 },
+      );
+      const ctx: RecallFollowUpCtx = {
+        forward: async () => ({ response, effectiveProtocol: "anthropic" }),
+        parseJSON: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+        parseSSE: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+      };
+
+      try {
+        const result =
+          mode === "streaming"
+            ? await runRecallFollowUpStreaming(
+                ctx,
+                makeRequest(),
+                resp,
+                "recall results",
+                recallBlock,
+              )
+            : mode === "json"
+              ? await runRecallFollowUpJSON(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                )
+              : await runRecallFollowUpStreamAccumulated(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                );
+        expect(result).toMatchObject({ ok: false, status: 503, detail: "" });
+        expect(warnings).toEqual([
+          "recall follow-up error body could not be read",
+        ]);
+        expect(JSON.stringify(warnings)).not.toContain(hostile);
+      } finally {
+        log.registerSink({
+          info: () => {},
+          warn: () => {},
+          error: () => {},
+          captureException: () => {},
+        });
+      }
+    },
+  );
 });
 
 describe("runRecallRecovery", () => {

@@ -1508,6 +1508,11 @@ async function readResponseTextLimited(
 function assertJSONResponse(response: Response): void {
   const ct = response.headers.get("content-type") ?? "";
   if (ct.includes("text/event-stream")) {
+    try {
+      void response.body?.cancel().catch(() => {});
+    } catch {
+      // Mismatch cleanup is best-effort and must never delay the caller.
+    }
     throw new Error(
       `recall follow-up expected JSON but got SSE — stream flag/consumer mismatch`,
     );
@@ -1604,9 +1609,9 @@ export async function runRecallFollowUpStreaming(
     let detail = "";
     try {
       detail = await readResponseTextLimited(response, 500, signal);
-    } catch (err) {
+    } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read:", err);
+      log.warn("recall follow-up error body could not be read");
     }
     return { ok: false, status: response.status, detail };
   }
@@ -1665,9 +1670,9 @@ async function runRecallJSONRequest(
     let detail = "";
     try {
       detail = await readResponseTextLimited(response, 500, signal);
-    } catch (error) {
+    } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read:", error);
+      log.warn("recall follow-up error body could not be read");
     }
     return { ok: false, status: response.status, detail };
   }
@@ -1743,9 +1748,9 @@ async function runRecallStreamAccumulatedRequest(
     let detail = "";
     try {
       detail = await readResponseTextLimited(response, 500, signal);
-    } catch (error) {
+    } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read:", error);
+      log.warn("recall follow-up error body could not be read");
     }
     return { ok: false, status: response.status, detail };
   }

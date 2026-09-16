@@ -880,6 +880,9 @@ let provisionalFinalizerPauseForTest:
 let pipelineResetSettleTimeoutMs = 5000;
 let pipelineResetInProgress = false;
 let pipelineResetPromise: Promise<void> | undefined;
+let pipelineResponseReadFailureForTest:
+  | { afterChunks: number; error: unknown }
+  | undefined;
 
 interface ActivePipelineRequest {
   admissionKey: string;
@@ -1033,6 +1036,12 @@ export function setRecallPersistenceCommitObserverForTest(
   observer: (() => void) | undefined,
 ): void {
   recallPersistenceCommitObserver = observer;
+}
+
+export function setPipelineResponseReadFailureForTest(
+  failure: { afterChunks: number; error: unknown } | undefined,
+): void {
+  pipelineResponseReadFailureForTest = failure;
 }
 
 export function setPipelineResetPauseForTest(
@@ -1195,6 +1204,7 @@ async function resetPipelineStateInner(opts?: {
   beforeUpstreamCaptureForTest = undefined;
   postResponseStartObserver = undefined;
   recallPersistenceCommitObserver = undefined;
+  pipelineResponseReadFailureForTest = undefined;
   provisionalFinalizerPauseForTest = undefined;
   foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
   if (stopFileWatcher) {
@@ -7075,8 +7085,12 @@ async function forwardToUpstream(
     // x-api-key). The 1h extended-cache-ttl is an Anthropic beta of uncertain
     // Vertex support, so downgrade to 5m — the same safe default used for other
     // non-native Anthropic hosts (mantle / MiniMax / Fireworks).
-    const effectiveCache = cache
-      ? { ...cache, systemTTL: "5m" as const, conversationTTL: "5m" as const }
+    const effectiveCache: AnthropicCacheOptions | undefined = cache
+      ? {
+          ...cache,
+          systemTTL: cache.systemTTL === false ? false : ("5m" as const),
+          conversationTTL: "5m" as const,
+        }
       : cache;
     const result = buildAnthropicRequest(req, effectiveCache);
 
@@ -7134,11 +7148,11 @@ async function forwardToUpstream(
     // supported) so third-party providers still benefit from prompt caching.
     const isNativeAnthropic =
       effectiveUpstreamBase === "https://api.anthropic.com";
-    const effectiveCache =
+    const effectiveCache: AnthropicCacheOptions | undefined =
       cache && !isNativeAnthropic
         ? {
             ...cache,
-            systemTTL: "5m" as const,
+            systemTTL: cache.systemTTL === false ? false : ("5m" as const),
             conversationTTL: "5m" as const,
           }
         : cache;
@@ -12870,12 +12884,34 @@ function assertValidNonStreamCompletion(
   if (protocol === "openai") {
     const choices = json.choices;
     const first = Array.isArray(choices) ? choices[0] : undefined;
+    const finishReason =
+      first && typeof first === "object" && !Array.isArray(first)
+        ? (first as Record<string, unknown>).finish_reason
+        : undefined;
+    const message =
+      first && typeof first === "object" && !Array.isArray(first)
+        ? (first as Record<string, unknown>).message
+        : undefined;
     if (
+      typeof json.id !== "string" ||
+      !json.id ||
+      typeof json.model !== "string" ||
+      !json.model ||
+      !json.usage ||
+      typeof json.usage !== "object" ||
+      Array.isArray(json.usage) ||
+      !Array.isArray(choices) ||
+      choices.length !== 1 ||
       !first ||
       typeof first !== "object" ||
       Array.isArray(first) ||
-      !(first as Record<string, unknown>).message ||
-      typeof (first as Record<string, unknown>).finish_reason !== "string"
+      !message ||
+      typeof message !== "object" ||
+      Array.isArray(message) ||
+      (message as Record<string, unknown>).role !== "assistant" ||
+      (finishReason !== "stop" &&
+        finishReason !== "tool_calls" &&
+        finishReason !== "length")
     ) {
       throw new Error("upstream OpenAI request did not complete");
     }
@@ -15192,6 +15228,7 @@ export async function handleCompactEndpoint(
           ),
         undefined,
         undefined,
+        undefined,
         directRequestCredentialFingerprint(req, config),
       );
       return wrapBodyWithCleanup(
@@ -15472,6 +15509,7 @@ export async function handleResponsesCompactEndpoint(
             claimSession,
             rawHeaders,
           ),
+        undefined,
         undefined,
         undefined,
         directRequestCredentialFingerprint(req, config),
@@ -15823,6 +15861,8 @@ export function wrapBodyWithCleanup(
   cleanup: () => void,
   signal?: AbortSignal,
   onCancel?: (reason?: unknown) => void,
+  onComplete?: () => void,
+  readFailure?: () => { afterChunks: number; error: unknown } | undefined,
 ): Response {
   if (!response.body) {
     cleanup();
@@ -15830,6 +15870,7 @@ export function wrapBodyWithCleanup(
   }
   const reader = response.body.getReader();
   let finished = false;
+  let deliveredChunks = 0;
   let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
   const onAbort = (): void => {
     if (finished) return;
@@ -15855,10 +15896,18 @@ export function wrapBodyWithCleanup(
       },
       async pull(controller) {
         try {
+          const injectedFailure = readFailure?.();
+          if (
+            injectedFailure &&
+            deliveredChunks >= injectedFailure.afterChunks
+          ) {
+            throw injectedFailure.error;
+          }
           const { done, value } = signal
             ? await readStreamChunk(reader, { signal })
             : await reader.read();
           if (done) {
+            onComplete?.();
             finish();
             try {
               reader.releaseLock();
@@ -15867,6 +15916,7 @@ export function wrapBodyWithCleanup(
             }
             controller.close();
           } else if (value) {
+            deliveredChunks++;
             controller.enqueue(value);
           }
         } catch (error) {
@@ -15942,6 +15992,7 @@ async function runActivePipelineRequest(
   ) => Promise<Response>,
   onResponseBodySettled?: () => void,
   onResponseBodyCancelled?: () => void,
+  onResponseBodyCompleted?: () => void,
   admissionKey = "",
 ): Promise<Response> {
   if (
@@ -16028,10 +16079,17 @@ async function runActivePipelineRequest(
       if (callerSignal?.aborted) markResponseCancelled();
       settleResponse();
     }
-    return wrapBodyWithCleanup(response, settleResponse, undefined, () => {
-      markResponseCancelled();
-      settleResponse();
-    });
+    return wrapBodyWithCleanup(
+      response,
+      settleResponse,
+      undefined,
+      () => {
+        markResponseCancelled();
+        settleResponse();
+      },
+      onResponseBodyCompleted,
+      () => pipelineResponseReadFailureForTest,
+    );
   } catch (error) {
     onResponseBodySettled?.();
     void finish();
@@ -16929,6 +16987,7 @@ async function handleConversationTurn(
   requestGeneration: number,
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
+  downstreamCompleted: () => boolean,
   claimSession: (sessionID: string) => Promise<void>,
   onSessionIdentified?: (sessionID: string) => void,
 ): Promise<Response> {
@@ -19015,6 +19074,7 @@ async function handleConversationTurn(
     let currentModifiedReq = modifiedReq;
     const responsesVisibleContent: GatewayContentBlock[] = [];
     const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
+    const cumulativeCodexRateLimits = [...(resp.codexRateLimits ?? [])];
     const recallBudget = new RecallChainBudget({
       maxExecutions: loreConfig().search.recall.chainMaxExecutions,
       deadlineAt: foregroundAbort.deadlineAt,
@@ -19062,8 +19122,8 @@ async function handleConversationTurn(
         rawOutputItems: [],
         stopReason: "stop",
         usage: cumulativeUsage,
-        ...(currentResp.codexRateLimits
-          ? { codexRateLimits: currentResp.codexRateLimits }
+        ...(cumulativeCodexRateLimits.length > 0
+          ? { codexRateLimits: cumulativeCodexRateLimits }
           : {}),
       });
       return errorResponse(502, "Recall continuation failed");
@@ -19190,7 +19250,7 @@ async function handleConversationTurn(
         );
       }
 
-      const mergeFailedContinuationUsage = (error: unknown): void => {
+      const mergeFailedContinuationMetadata = (error: unknown): void => {
         if (
           error instanceof ResponsesTerminalError ||
           error instanceof NonStreamCompletionError
@@ -19202,6 +19262,9 @@ async function handleConversationTurn(
               error.response.usage ?? ZERO_USAGE,
             ),
           );
+          if (error.response.codexRateLimits?.length) {
+            cumulativeCodexRateLimits.push(...error.response.codexRateLimits);
+          }
         }
       };
       const followUpRequiresStream = currentModifiedReq.codex === true;
@@ -19216,7 +19279,7 @@ async function handleConversationTurn(
             {
               ...cacheOptions,
               cacheConversation: false,
-              ...(recovery ? { cacheTools: false } : {}),
+              ...(recovery ? { cacheTools: false, systemTTL: false } : {}),
             },
             signal,
             requestUpstreamRoute,
@@ -19254,6 +19317,13 @@ async function handleConversationTurn(
           );
           if (!recovery.ok) return failRecall(category, false);
           recovered = recovery.continuation;
+          Object.assign(
+            cumulativeUsage,
+            mergeRecallUsage(cumulativeUsage, recovered.usage ?? ZERO_USAGE),
+          );
+          if (recovered.codexRateLimits?.length) {
+            cumulativeCodexRateLimits.push(...recovered.codexRateLimits);
+          }
         } catch (error) {
           if (
             foregroundAbort.signal.aborted ||
@@ -19261,23 +19331,16 @@ async function handleConversationTurn(
           ) {
             throw error;
           }
-          mergeFailedContinuationUsage(error);
+          mergeFailedContinuationMetadata(error);
           return failRecall(category, false);
         }
-        Object.assign(
-          cumulativeUsage,
-          mergeRecallUsage(cumulativeUsage, recovered.usage ?? ZERO_USAGE),
-        );
         if (
           hasRecallToolUse(recovered) ||
           !isUsableRecallContinuation(recovered)
         )
           return failRecall(category, false);
-        if (acceptedRecallResponse.codexRateLimits?.length) {
-          recovered.codexRateLimits = [
-            ...acceptedRecallResponse.codexRateLimits,
-            ...(recovered.codexRateLimits ?? []),
-          ];
+        if (cumulativeCodexRateLimits.length > 0) {
+          recovered.codexRateLimits = cumulativeCodexRateLimits;
         }
         recovered.usage = cumulativeUsage;
         currentResp = recovered;
@@ -19338,7 +19401,11 @@ async function handleConversationTurn(
         ) {
           throw fetchErr;
         }
-        mergeFailedContinuationUsage(fetchErr);
+        try {
+          mergeFailedContinuationMetadata(fetchErr);
+        } catch {
+          return failRecall("follow_up_failed");
+        }
         log.error(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
         );
@@ -19372,17 +19439,17 @@ async function handleConversationTurn(
         cumulativeUsage,
         mergeRecallUsage(cumulativeUsage, contUsage),
       );
+      if (continuationResp.codexRateLimits?.length) {
+        cumulativeCodexRateLimits.push(...continuationResp.codexRateLimits);
+      }
 
       // Update for next iteration
       currentModifiedReq = followUp;
       // Recall can consume another quota window or omit quota metadata entirely.
       // Keep this turn's ordered updates so the rebuilt stream reports every
       // bucket, with newer updates following older ones.
-      if (currentResp.codexRateLimits?.length) {
-        continuationResp.codexRateLimits = [
-          ...currentResp.codexRateLimits,
-          ...(continuationResp.codexRateLimits ?? []),
-        ];
+      if (cumulativeCodexRateLimits.length > 0) {
+        continuationResp.codexRateLimits = cumulativeCodexRateLimits;
       }
       currentResp = continuationResp;
       if (
@@ -19403,6 +19470,9 @@ async function handleConversationTurn(
     if (recallBudget.stopReason() && !isUsableRecallContinuation(currentResp))
       return failRecall("follow_up_failed");
     currentResp.usage = cumulativeUsage;
+    if (cumulativeCodexRateLimits.length > 0) {
+      currentResp.codexRateLimits = cumulativeCodexRateLimits;
+    }
     if (recallBudget.stopReason())
       log.info("recall final continuation: completed");
     finishBufferedResponse(currentResp);
@@ -19470,7 +19540,7 @@ async function handleConversationTurn(
           dropStreamingFinalizer();
           return;
         }
-        if (downstreamWasCancelled()) {
+        if (downstreamWasCancelled() || !downstreamCompleted()) {
           rollbackRecallPersistence();
           accountUnsuccessfulResponse(
             resp,
@@ -20818,6 +20888,7 @@ async function handleRequestForTenant(
   streamingPostResponsesAccepting = true;
   let resolveDownstreamSettled: (() => void) | undefined;
   let downstreamCancelled = false;
+  let downstreamCompleted = false;
   const downstreamSettled = new Promise<void>((resolve) => {
     resolveDownstreamSettled = resolve;
   });
@@ -20830,12 +20901,16 @@ async function handleRequestForTenant(
         requestGeneration,
         downstreamSettled,
         () => downstreamCancelled,
+        () => downstreamCompleted,
         trackOperation,
         claimSession,
       ),
     () => resolveDownstreamSettled?.(),
     () => {
       downstreamCancelled = true;
+    },
+    () => {
+      downstreamCompleted = true;
     },
     requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
   );
@@ -20847,6 +20922,7 @@ async function handleRequestInner(
   requestGeneration: number,
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
+  downstreamCompleted: () => boolean,
   trackOperation: (operation: Promise<unknown>) => void,
   claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
@@ -20985,6 +21061,7 @@ async function handleRequestInner(
       requestGeneration,
       downstreamSettled,
       downstreamWasCancelled,
+      downstreamCompleted,
       claimSession,
     );
   } catch (err) {

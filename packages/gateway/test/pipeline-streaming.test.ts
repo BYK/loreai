@@ -58,6 +58,7 @@ import {
   resetPipelineState,
   scheduleStreamingPostResponseForTest,
   setPipelinePreUpstreamPauseForTest,
+  setPipelineResponseReadFailureForTest,
   setMaxActivePipelineRequestsForTest,
   setMaxDetachedPipelineRequestsForTest,
   setPipelineResetSettleTimeoutForTest,
@@ -523,7 +524,7 @@ describe("non-stream recall usage aggregation", () => {
     }
   });
 
-  it.each(["tool", "malformed", "repeated-recall"] as const)(
+  it.each(["tool", "malformed", "repeated-recall", "overflow"] as const)(
     "%s recovery makes exactly one no-recall synthesis request after a failed JSON continuation",
     async (recoveryOutcome) => {
       clearAllCosts();
@@ -640,7 +641,10 @@ describe("non-stream recall usage aggregation", () => {
                 status: "completed",
               },
             ],
-            usage: { input_tokens: 20, output_tokens: 2 },
+            usage:
+              recoveryOutcome === "overflow"
+                ? { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 }
+                : { input_tokens: 20, output_tokens: 2 },
           }),
           { headers: { "content-type": "application/json" } },
         );
@@ -681,7 +685,7 @@ describe("non-stream recall usage aggregation", () => {
         expect(JSON.stringify(recoveryBody)).toContain(
           "accepted recall results",
         );
-        if (recoveryOutcome === "malformed") {
+        if (recoveryOutcome === "malformed" || recoveryOutcome === "overflow") {
           expect(response.status).toBe(502);
           expect(body).toContain("Recall continuation failed");
         } else {
@@ -705,7 +709,10 @@ describe("non-stream recall usage aggregation", () => {
                 : recoveryOutcome === "repeated-recall"
                   ? 121_020
                   : 1_010,
-            outputTokens: recoveryOutcome === "malformed" ? 101 : 103,
+            outputTokens:
+              recoveryOutcome === "malformed" || recoveryOutcome === "overflow"
+                ? 101
+                : 103,
             turns: 1,
           }),
         );
@@ -3864,6 +3871,96 @@ describe("Pipeline — streaming responses", () => {
       expect(ltm.transferCount(knowledgeId)).toBeGreaterThan(0);
     } finally {
       ltm.remove(knowledgeId);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rolls back recall persistence when downstream reading errors before EOF", async () => {
+    const alias = "deadline-before-recall-eof-alias";
+    const knowledgeId = ltm.create({
+      projectPath: "/test/responses-recall-atomicity/deadline-origin",
+      category: "gotcha",
+      title: "Deadline recall persistence terms",
+      content: "one two three four five six seven eight nine deadline terms",
+      scope: "project",
+      crossProject: true,
+    });
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? recallResponsesSSE(
+              "resp_deadline_recall_persistence",
+              "one two three four five six seven eight nine deadline terms",
+            )
+          : validResponsesSSE(
+              "resp_deadline_recall_persistence_final",
+              "final answer",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias },
+        }),
+        loadLocalConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      const trackingBeforeError = loadSessionTracking(state?.sessionID ?? "");
+      const temporalBeforeError = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+
+      setPipelineResponseReadFailureForTest({
+        afterChunks: 0,
+        error: new DOMException("downstream read failed", "NetworkError"),
+      });
+      await expect(reader?.read()).rejects.toMatchObject({
+        name: "NetworkError",
+      });
+      await vi.waitFor(() =>
+        expect(streamingPostResponsePendingForTest()).toBe(0),
+      );
+
+      const trackingAfterError = loadSessionTracking(state?.sessionID ?? "");
+      const temporalAfterError = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+      expect(upstreamCall).toBe(2);
+      expect(state?.recallStore.size).toBe(0);
+      expect(trackingAfterError?.recallStore).toBe(
+        trackingBeforeError?.recallStore ?? null,
+      );
+      expect(trackingAfterError?.messageCount).toBe(
+        trackingBeforeError?.messageCount,
+      );
+      expect(temporalAfterError.count).toBe(temporalBeforeError.count);
+      expect(ltm.transferCount(knowledgeId)).toBe(0);
+    } finally {
+      ltm.remove(knowledgeId);
+      setPipelineResponseReadFailureForTest(undefined);
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
