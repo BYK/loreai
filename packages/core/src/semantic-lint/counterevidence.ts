@@ -104,7 +104,7 @@ export function emptyCounterevidenceSummary(): CounterevidenceSummary {
     semanticCalls: 0,
     transportAttempts: 0,
     inputTokens: 0,
-    inputTokenBudget: COUNTEREVIDENCE_INPUT_TOKEN_BUDGET,
+    inputTokenBudget: 0,
   };
 }
 
