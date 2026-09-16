@@ -5213,6 +5213,9 @@ export function createGatewayInvariantJudge(
         semanticCalls,
         transportAttempts,
       });
+      if (input.semanticCallBudget < 1) {
+        return invalidCounterevidenceOutcome(stats());
+      }
       const call = async (user: string): Promise<PromptOutcome> => {
         semanticCalls++;
         const outcome = await options.client.promptDetailed(
@@ -5397,7 +5400,10 @@ export function createGatewayInvariantJudge(
           omittedCompanions: input.omittedCompanions,
           firstPassReason: input.firstPassReason,
           prContext: input.prContext,
-          invalidResponse: outcome.text.slice(0, 4_000),
+          invalidResponse: outcome.text.slice(
+            0,
+            semanticLint.MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS,
+          ),
         }),
       );
       if (outcome.kind === "failure") {
