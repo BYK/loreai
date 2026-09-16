@@ -411,6 +411,102 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(false);
   });
 
+
+  test("accepts a report with confirmed counterevidence", () => {
+    const value = report();
+    value.status = "partial";
+    value.coverage = {
+      ...value.coverage,
+      strategy: "isolated-hunk",
+      availableHunks: 1,
+      includedHunks: 1,
+      omittedHunks: 0,
+      availableInvariants: 1,
+      includedInvariants: 1,
+      omittedInvariants: 0,
+    };
+    value.verification = {
+      strategy: "counterevidence",
+      contextComplete: false,
+      selected: 1,
+      attempted: 1,
+      confirmed: 1,
+      cleared: 0,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 1,
+      transportAttempts: 1,
+      inputTokens: 3_000,
+      inputTokenBudget: 16_000,
+    };
+    value.health.judge = {
+      status: "healthy",
+      selected: 1,
+      resolved: 1,
+      unresolved: 0,
+      notAttempted: 0,
+    };
+    value.counters = {
+      ...value.counters,
+      hunks: 1,
+      invariants: 1,
+      candidates: 1,
+      attempted: 1,
+      resolved: 1,
+      semanticCalls: 2,
+      transportAttempts: 2,
+    };
+    value.candidates = [
+      {
+        id: "candidate-1",
+        file: "src/file.ts",
+        invariantId: "inv-1",
+        invariantTitle: "Rule",
+        state: "resolved",
+        verdict: "violates",
+        reason: "The violation survived connected-context verification.",
+        stats: { semanticCalls: 2, transportAttempts: 2 },
+        verification: {
+          state: "confirmed",
+          reason: "The connected change still bypasses the boundary.",
+          evidence: [
+            { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+          ],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+          inputTokens: 3_000,
+          contextComplete: false,
+        },
+      },
+    ];
+    value.findings = [
+      {
+        id: "finding-01",
+        invariantId: "inv-1",
+        invariantTitle: "Rule",
+        invariantContent: "The boundary must remain enforced.",
+        file: "src/file.ts",
+        similarity: 1,
+        refHit: false,
+        reason: "The connected change still bypasses the boundary.",
+        hunk: "@@ -1,1 +1,1 @@",
+        severity: "advisory",
+      },
+    ];
+    value.gate = {
+      mode: "advisory",
+      blockingFindingIds: [],
+      overridden: [],
+      advisoryFindingIds: ["finding-01"],
+      wouldBlockFindingIds: [],
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    const result = runReporter(value, false, 3);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("unreadable or invalid report");
+    expect(result.summary).toContain("confirmed");
+  });
+
   test("reports a valid complete advisory run without blocking", () => {
     const result = runReporter(report(), false, 0);
     expect(result.status).toBe(0);
