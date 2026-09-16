@@ -151,11 +151,11 @@ export function parseCounterevidenceVerdict(
 ): CounterevidenceResult | null {
   if (!text) return null;
   let payload = text.trim();
-  const fenced = /^\`\`\`json[ \\t]*\\r?\\n([\\s\\S]*)\\r?\\n\`\`\`$/.exec(
+  const fenced = /^```json[ \\t]*\\r?\\n([\\s\\S]*)\\r?\\n```$/.exec(
     payload,
   );
   if (fenced) payload = fenced[1];
-  else if (payload.startsWith("\`\`\`") || payload.endsWith("\`\`\`")) {
+  else if (payload.startsWith("```") || payload.endsWith("```")) {
     return null;
   }
 
