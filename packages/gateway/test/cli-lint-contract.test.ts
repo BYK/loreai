@@ -24,7 +24,7 @@ function completeReport(
   overrides: Partial<SemanticLintReport> = {},
 ): SemanticLintReport {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: "complete",
     model: "github-copilot/gpt-5.6-luna",
     effort: "off",
@@ -41,6 +41,20 @@ function completeReport(
       availableInvariants: 0,
       includedInvariants: 0,
       omittedInvariants: 0,
+    },
+    verification: {
+      strategy: "none",
+      contextComplete: false,
+      selected: 0,
+      attempted: 0,
+      confirmed: 0,
+      cleared: 0,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 0,
+      transportAttempts: 0,
+      inputTokens: 0,
+      inputTokenBudget: 0,
     },
     health: {
       range: { status: "healthy" },
@@ -382,7 +396,7 @@ describe("typed lore lint contract", () => {
     const path = join(directory, "report.json");
     await writeSemanticLintReport(path, failed);
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(failed);
-    expect(failed.schemaVersion).toBe(3);
+    expect(failed.schemaVersion).toBe(4);
     expect(failed.status).toBe("failed");
     expect(semanticLintExitCode(failed)).toBe(3);
   });
