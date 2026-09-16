@@ -1233,6 +1233,7 @@ export function renderSemanticLintReport(report: SemanticLintReport): string {
     `Status: ${report.status.toUpperCase()}   Model: ${report.model}   Effort: ${report.effort}`,
     `Funnel: ${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates`,
     `Coverage: ${report.coverage.strategy} · ${report.coverage.includedHunks}/${report.coverage.availableHunks} hunks, ${report.coverage.includedInvariants}/${report.coverage.availableInvariants} invariants${report.coverage.contextComplete ? "" : " · bounded/partial context"}`,
+    `Counterevidence: ${report.verification.strategy === "counterevidence" ? `${report.verification.confirmed} confirmed, ${report.verification.cleared} cleared, ${report.verification.unresolved} unresolved, ${report.verification.notAttempted} not attempted` : "not run"}`,
     `Checks: ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted · ${(report.elapsedMs / 1000).toFixed(1)}s`,
     "─".repeat(64),
   ];
