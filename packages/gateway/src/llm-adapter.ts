@@ -5381,6 +5381,12 @@ export function createGatewayInvariantJudge(
         expectedHunkIds,
       );
       if (result) {
+        if (
+          !input.contextComplete &&
+          result.verdict !== "insufficient-context"
+        ) {
+          return insufficientCounterevidenceOutcome(stats());
+        }
         options.client.recordWorkerSuccess?.(
           options.sessionID,
           "lore-semantic-lint",
@@ -5418,6 +5424,12 @@ export function createGatewayInvariantJudge(
         expectedHunkIds,
       );
       if (result) {
+        if (
+          !input.contextComplete &&
+          result.verdict !== "insufficient-context"
+        ) {
+          return insufficientCounterevidenceOutcome(stats());
+        }
         options.client.recordWorkerSuccess?.(
           options.sessionID,
           "lore-semantic-lint",
@@ -5642,6 +5654,22 @@ function invalidCounterevidenceOutcome(
         "Counterevidence response did not match the required verdict schema",
       scope: "candidate",
       retryable: true,
+    },
+    stats,
+  };
+}
+
+function insufficientCounterevidenceOutcome(
+  stats: semanticLint.JudgeStats,
+): semanticLint.CounterevidenceOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "insufficient-context",
+      message:
+        "Counterevidence context was incomplete; confirmed or resolved verdicts are not accepted",
+      scope: "candidate",
+      retryable: false,
     },
     stats,
   };
