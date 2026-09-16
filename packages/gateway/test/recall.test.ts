@@ -3748,6 +3748,29 @@ describe("final recall continuation output", () => {
       ),
     ).toBe(expected);
   });
+
+  test.each([
+    ["end_turn", true],
+    ["tool_use", true],
+    ["stop_sequence", true],
+    ["refusal", true],
+    ["max_tokens", false],
+    ["pause_turn", false],
+    ["model_context_window_exceeded", false],
+    ["failed", false],
+    ["cancelled", false],
+    ["incomplete", false],
+  ] as const)(
+    "requires an allowlisted successful stop reason: %s",
+    (stopReason, expected) => {
+      expect(
+        isUsableRecallContinuation({
+          ...makeResponse([{ type: "text", text: "usable answer" }]),
+          stopReason,
+        }),
+      ).toBe(expected);
+    },
+  );
 });
 
 test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(

@@ -10437,6 +10437,13 @@ export function streamResponsesRecallAware(
       const data = dataLines
         .map((line) => line.slice("data: ".length))
         .join("\n");
+      // Codex quota metadata is a gateway extension, not a Responses lifecycle
+      // event. It has already been rebuilt from the reviewed allowlist, so keep
+      // it byte-stable and outside the Responses sequence-number namespace.
+      if (event === "codex.rate_limits") {
+        output += `${frame}\n\n`;
+        continue;
+      }
       try {
         const parsed = JSON.parse(data) as Record<string, unknown>;
         output += formatResponsesEvent(
@@ -10980,6 +10987,9 @@ export function streamResponsesRecallAware(
               if (event.startsWith("response.")) {
                 throw new Error(`malformed JSON in Responses event ${event}`);
               }
+              // Quota metadata crosses the public boundary only after it has
+              // been parsed and rebuilt from the reviewed allowlist.
+              if (event === "codex.rate_limits") continue;
               // Non-JSON keepalive/comment event — forward as-is.
               if (event !== "message") {
                 const chunk = encoder.encode(formatResponsesEvent(event, data));
@@ -11602,6 +11612,9 @@ export function streamResponsesRecallAware(
                                 `malformed JSON in Responses event ${ce}`,
                               );
                             }
+                            // Quota metadata crosses the public boundary only
+                            // after reviewed-schema normalization.
+                            if (ce === "codex.rate_limits") continue;
                             if (ce !== "message") {
                               const chunk = encoder.encode(
                                 formatResponsesEvent(ce, cd),
@@ -12933,14 +12946,18 @@ function assertValidNonStreamCompletion(
       first && typeof first === "object" && !Array.isArray(first)
         ? (first as Record<string, unknown>).message
         : undefined;
+    const usage = validateOpenAIUsage(
+      json.usage,
+      "malformed OpenAI response usage",
+    );
     if (
       typeof json.id !== "string" ||
       !json.id ||
       typeof json.model !== "string" ||
       !json.model ||
-      !json.usage ||
-      typeof json.usage !== "object" ||
-      Array.isArray(json.usage) ||
+      !usage ||
+      typeof usage.prompt_tokens !== "number" ||
+      typeof usage.completion_tokens !== "number" ||
       !Array.isArray(choices) ||
       choices.length !== 1 ||
       !first ||
@@ -12950,9 +12967,7 @@ function assertValidNonStreamCompletion(
       typeof message !== "object" ||
       Array.isArray(message) ||
       (message as Record<string, unknown>).role !== "assistant" ||
-      (finishReason !== "stop" &&
-        finishReason !== "tool_calls" &&
-        finishReason !== "length")
+      (finishReason !== "stop" && finishReason !== "tool_calls")
     ) {
       throw new Error("upstream OpenAI request did not complete");
     }
@@ -13150,7 +13165,7 @@ function assertValidNonStreamCompletion(
       !content ||
       content.role !== "model" ||
       !Array.isArray(content.parts) ||
-      (finishReason !== "STOP" && finishReason !== "MAX_TOKENS") ||
+      finishReason !== "STOP" ||
       typeof blockReason === "string"
     ) {
       throw new Error("upstream Gemini request did not complete");
@@ -13180,15 +13195,9 @@ function assertValidNonStreamCompletion(
     requireOutput: true,
   });
   if (
-    ![
-      "end_turn",
-      "tool_use",
-      "max_tokens",
-      "stop_sequence",
-      "pause_turn",
-      "refusal",
-      "model_context_window_exceeded",
-    ].includes(json.stop_reason)
+    !["end_turn", "tool_use", "stop_sequence", "refusal"].includes(
+      json.stop_reason,
+    )
   ) {
     throw new Error("upstream Anthropic request did not complete");
   }

@@ -6,9 +6,10 @@ import {
   streamResponsesPassthrough,
 } from "../src/stream/openai-responses";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
-
-const MAX_CODEX_RATE_LIMIT_EVENTS = 64;
-const MAX_CODEX_RATE_LIMIT_BYTES = 16 * 1024;
+import {
+  MAX_CODEX_RATE_LIMIT_BYTES,
+  MAX_CODEX_RATE_LIMIT_EVENTS,
+} from "../src/codex-rate-limits";
 
 const limits = {
   type: "codex.rate_limits",
@@ -60,6 +61,37 @@ function quotaEvents(body: string): unknown[] {
     .split("\n\n")
     .filter((frame) => frame.startsWith("event: codex.rate_limits\n"))
     .map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+}
+
+function maximalQuota(index: number): Record<string, unknown> {
+  const category = (prefix: string) =>
+    `${prefix}_${String(index).padStart(3, "0")}_${"x".repeat(64)}`.slice(
+      0,
+      64,
+    );
+  return {
+    type: "codex.rate_limits",
+    plan_type: category("plan"),
+    metered_limit_name: category("metered"),
+    limit_name: category("limit"),
+    rate_limits: {
+      primary: {
+        used_percent: index % 101,
+        window_minutes: 5_256_000,
+        reset_at: 253_402_300_799,
+      },
+      secondary: {
+        used_percent: (index + 1) % 101,
+        window_minutes: 5_256_000,
+        reset_at: 253_402_300_799 - index,
+      },
+    },
+    credits: {
+      has_credits: index % 2 === 0,
+      unlimited: index % 3 === 0,
+      balance: "999999999999999999999999.999999999999",
+    },
+  };
 }
 
 describe("Codex subscription metadata", () => {
@@ -250,18 +282,14 @@ describe("Codex subscription metadata", () => {
   test("bounds quota metadata by canonical request-wide bytes", async () => {
     const events = Array.from(
       { length: MAX_CODEX_RATE_LIMIT_EVENTS },
-      (_, index) => ({
-        type: "codex.rate_limits",
-        metered_limit_name: `bucket_${index}_${"x".repeat(48)}`,
-        rate_limits: {
-          primary: {
-            used_percent: index % 101,
-            window_minutes: 300,
-            reset_at: 2000000000 + index,
-          },
-        },
-      }),
+      (_, index) => maximalQuota(index),
     );
+    const inputBytes = events.reduce(
+      (total, event) =>
+        total + new TextEncoder().encode(JSON.stringify(event)).byteLength,
+      0,
+    );
+    expect(inputBytes).toBeGreaterThan(MAX_CODEX_RATE_LIMIT_BYTES);
     const accumulated = await accumulateResponsesSSEStream(upstream(events), {
       validation: "codex",
       stopAtTerminal: true,
@@ -276,6 +304,7 @@ describe("Codex subscription metadata", () => {
     );
 
     expect(encodedBytes).toBeLessThanOrEqual(MAX_CODEX_RATE_LIMIT_BYTES);
+    expect(projected.length).toBeLessThan(MAX_CODEX_RATE_LIMIT_EVENTS);
     expect(projected).toEqual(events.slice(0, projected.length));
   });
 

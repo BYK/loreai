@@ -22,6 +22,10 @@ import {
   type PrincipalTransportFailureSample,
 } from "../src/principal-transport-failure";
 import type { GatewayResponse } from "../src/translate/types";
+import {
+  MAX_CODEX_RATE_LIMIT_BYTES,
+  MAX_CODEX_RATE_LIMIT_EVENTS,
+} from "../src/codex-rate-limits";
 
 const silentLogSink = {
   info: () => {},
@@ -197,6 +201,39 @@ const doneWithStatus = (id: string, status: string) =>
 const PUBLIC_RECALL_ERROR = "Lore could not continue the response after recall";
 const PUBLIC_GATEWAY_ERROR = "Gateway request failed";
 
+const malformedQuotaEvent = (sentinel: string) =>
+  `event: codex.rate_limits\ndata: ${sentinel}\n\n`;
+
+function maximalQuotaEvent(index: number): string {
+  const category = (prefix: string) =>
+    `${prefix}_${String(index).padStart(3, "0")}_${"x".repeat(64)}`.slice(
+      0,
+      64,
+    );
+  return sseEvent("codex.rate_limits", {
+    plan_type: category("plan"),
+    metered_limit_name: category("metered"),
+    limit_name: category("limit"),
+    rate_limits: {
+      primary: {
+        used_percent: index % 101,
+        window_minutes: 5_256_000,
+        reset_at: 253_402_300_799,
+      },
+      secondary: {
+        used_percent: (index + 1) % 101,
+        window_minutes: 5_256_000,
+        reset_at: 253_402_300_799 - index,
+      },
+    },
+    credits: {
+      has_credits: index % 2 === 0,
+      unlimited: index % 3 === 0,
+      balance: "999999999999999999999999.999999999999",
+    },
+  });
+}
+
 const textItem = (
   outputIndex: number,
   text: string,
@@ -293,26 +330,85 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
-  test("bounds Codex quota metadata across the principal and continuation", async () => {
-    const quota = (index: number) =>
-      sseEvent("codex.rate_limits", {
-        metered_limit_name: `bucket_${index}`,
-        rate_limits: {
-          primary: {
-            used_percent: index,
-            window_minutes: 300,
-            reset_at: 2000000000 + index,
-          },
+  test("suppresses malformed non-JSON principal Codex quota events", async () => {
+    const sentinel = "private-principal-quota-sentinel";
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_malformed_principal_quota", "gpt-5.6-terra"),
+        malformedQuotaEvent(sentinel),
+        textItem(0, "safe answer"),
+        completed("resp_malformed_principal_quota", {
+          input_tokens: 1,
+          output_tokens: 1,
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not be called");
         },
-      });
-    const principalQuotas = Array.from({ length: 40 }, (_, index) => [
-      quota(index),
-      quota(index),
-    ]).flat();
-    const continuationQuotas = Array.from({ length: 40 }, (_, index) => [
-      quota(index + 40),
-      quota(index + 40),
-    ]).flat();
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("safe answer");
+    expect(out).not.toContain(sentinel);
+    expect(out).not.toContain("event: codex.rate_limits");
+  });
+
+  test("suppresses malformed non-JSON continuation Codex quota events", async () => {
+    const sentinel = "private-continuation-quota-sentinel";
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_malformed_continuation_quota", "gpt-5.6-terra"),
+        recallCall(0, { query: "quota continuation" }),
+        completed("resp_malformed_continuation_quota", {
+          input_tokens: 1,
+          output_tokens: 1,
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "anchor", resultText: "result" }),
+        runFollowUp: async () => ({
+          reader: streamFrom([
+            created("resp_malformed_quota_followup", "gpt-5.6-terra"),
+            malformedQuotaEvent(sentinel),
+            textItem(0, "safe continuation"),
+            completed("resp_malformed_quota_followup", {
+              input_tokens: 1,
+              output_tokens: 1,
+            }),
+          ]).body!.getReader(),
+        }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("safe continuation");
+    expect(out).not.toContain(sentinel);
+    expect(out).not.toContain("event: codex.rate_limits");
+  });
+
+  test("bounds Codex quota metadata by bytes across the principal and continuation", async () => {
+    const quotas = Array.from(
+      { length: MAX_CODEX_RATE_LIMIT_EVENTS },
+      (_, index) => maximalQuotaEvent(index),
+    );
+    const canonical = quotas.map((event) =>
+      JSON.parse(event.split("\ndata: ")[1]),
+    );
+    const allBytes = canonical.reduce(
+      (total, event) =>
+        total + new TextEncoder().encode(JSON.stringify(event)).byteLength,
+      0,
+    );
+    expect(allBytes).toBeGreaterThan(MAX_CODEX_RATE_LIMIT_BYTES);
+    const principalQuotas = quotas.slice(0, 20);
+    const continuationQuotas = quotas.slice(20);
     let recalls = 0;
     let followUps = 0;
     const client = streamResponsesRecallAware(
@@ -353,10 +449,14 @@ describe("streamResponsesRecallAware", () => {
 
     expect(recalls).toBe(1);
     expect(followUps).toBe(1);
-    expect(events).toHaveLength(64);
-    expect(events.map((event) => event.metered_limit_name)).toEqual(
-      Array.from({ length: 64 }, (_, index) => `bucket_${index}`),
+    const emittedBytes = events.reduce(
+      (total, event) =>
+        total + new TextEncoder().encode(JSON.stringify(event)).byteLength,
+      0,
     );
+    expect(emittedBytes).toBeLessThanOrEqual(MAX_CODEX_RATE_LIMIT_BYTES);
+    expect(events.length).toBeLessThan(MAX_CODEX_RATE_LIMIT_EVENTS);
+    expect(events).toEqual(canonical.slice(0, events.length));
     expect(out).toContain("Completed answer");
     expect(out).not.toContain("response.failed");
   });
