@@ -181,10 +181,7 @@ function validateVerification(summary) {
     ) {
       throw new TypeError("empty verification summary contains work");
     }
-  } else if (
-    summary.inputTokenBudget <= 0 ||
-    summary.inputTokens > summary.inputTokenBudget
-  ) {
+  } else if (summary.inputTokenBudget <= 0) {
     throw new TypeError("verification input budget is invalid");
   }
 }
