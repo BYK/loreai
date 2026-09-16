@@ -58,7 +58,6 @@ import {
 } from "./connected-context";
 import {
   COUNTEREVIDENCE_INPUT_TOKEN_BUDGET,
-  MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS,
   emptyCounterevidenceSummary,
   estimateCounterevidenceInputTokens,
   parseCounterevidenceVerdict,
