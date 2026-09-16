@@ -2399,6 +2399,230 @@ describe("streamResponsesRecallAware", () => {
     },
   );
 
+  test("rejects a terminal-only principal reasoning summary before recall execution", async () => {
+    const privateSummary = "private terminal-only principal summary";
+    const args = JSON.stringify({ query: "must not execute" });
+    let recalls = 0;
+    let followUps = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_only_principal_summary", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_terminal_only_principal" },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_terminal_only_principal",
+            status: "completed",
+          },
+        }),
+        recallCall(1, { query: "must not execute" }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_terminal_only_principal_summary",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "reasoning",
+                id: "rs_terminal_only_principal",
+                status: "completed",
+                summary: [{ type: "summary_text", text: privateSummary }],
+              },
+              {
+                type: "function_call",
+                id: "fc_1",
+                call_id: "call_1",
+                name: "recall",
+                arguments: args,
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "private anchor", resultText: "private result" };
+        },
+        runFollowUp: async () => {
+          followUps++;
+          throw new Error("must not run follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalls).toBe(0);
+    expect(followUps).toBe(0);
+    expect(output).toContain("response.failed");
+    expect(output).not.toContain(privateSummary);
+    expect(output).not.toContain("must not execute");
+  });
+
+  test("rejects a terminal-only continuation reasoning summary before nested recall execution", async () => {
+    const privateSummary = "private terminal-only continuation summary";
+    const nestedArgs = JSON.stringify({ query: "must not execute nested" });
+    let recalls = 0;
+    let followUps = 0;
+    const followUp = streamFrom([
+      created("resp_terminal_only_continuation_summary", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        output_index: 0,
+        item: { type: "reasoning", id: "rs_terminal_only_continuation" },
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "reasoning",
+          id: "rs_terminal_only_continuation",
+          status: "completed",
+        },
+      }),
+      recallCall(1, { query: "must not execute nested" }),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_terminal_only_continuation_summary",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [
+            {
+              type: "reasoning",
+              id: "rs_terminal_only_continuation",
+              status: "completed",
+              summary: [{ type: "summary_text", text: privateSummary }],
+            },
+            {
+              type: "function_call",
+              id: "fc_1",
+              call_id: "call_1",
+              name: "recall",
+              arguments: nestedArgs,
+              status: "completed",
+            },
+          ],
+        },
+      }),
+    ]);
+    if (!followUp.body) throw new Error("follow-up stream has no body");
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_terminal_only_summary_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "first recall" }),
+        completed("resp_terminal_only_summary_principal"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          recalls++;
+          return { anchorText: "private anchor", resultText: "private result" };
+        },
+        runFollowUp: async () => {
+          followUps++;
+          return { reader: followUp.body!.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalls).toBe(1);
+    expect(followUps).toBe(1);
+    expect(output).toContain("response.failed");
+    expect(output).not.toContain(privateSummary);
+    expect(output).not.toContain("must not execute nested");
+  });
+
+  test("reconciles high-cardinality Codex output with linear map iteration", async () => {
+    const itemCount = 512;
+    const events = [created("resp_high_cardinality", "gpt-5.6-terra")];
+    const terminalOutput: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < itemCount; index++) {
+      const itemId = `msg_high_cardinality_${index}`;
+      const text = `answer ${index}`;
+      events.push(textItem(index, text, itemId));
+      terminalOutput.push({
+        type: "message",
+        id: itemId,
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text }],
+      });
+    }
+    events.push(
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_high_cardinality",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: terminalOutput,
+        },
+      }),
+    );
+
+    const originalIterator = Map.prototype[Symbol.iterator];
+    const originalFindIndex = Array.prototype.findIndex;
+    let yieldedEntries = 0;
+    let terminalMatchVisits = 0;
+    const iteratorSpy = vi
+      .spyOn(Map.prototype, Symbol.iterator)
+      .mockImplementation(function (this: Map<unknown, unknown>) {
+        const iterator = originalIterator.call(this);
+        const next = iterator.next.bind(iterator);
+        iterator.next = () => {
+          const result = next();
+          if (!result.done) yieldedEntries++;
+          return result;
+        };
+        return iterator;
+      });
+    const findIndexSpy = vi
+      .spyOn(Array.prototype, "findIndex")
+      .mockImplementation(function (
+        this: unknown[],
+        predicate: (value: unknown, index: number, array: unknown[]) => unknown,
+        thisArg?: unknown,
+      ): number {
+        return originalFindIndex.call(this, (value, index, array) => {
+          if (
+            Array.isArray(value) &&
+            value.length === 2 &&
+            typeof value[0] === "number"
+          ) {
+            terminalMatchVisits++;
+          }
+          return predicate.call(thisArg, value, index, array);
+        });
+      } as typeof Array.prototype.findIndex);
+    try {
+      const client = streamResponsesRecallAware(streamFrom(events), {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => {
+          throw new Error("should not run");
+        },
+        runFollowUp: async () => {
+          throw new Error("should not run");
+        },
+      });
+
+      const output = await drain(client);
+      expect(output).not.toContain("response.failed");
+      expect(output).toContain("answer 511");
+      expect(yieldedEntries).toBeLessThan(itemCount * 40);
+      expect(terminalMatchVisits).toBeLessThan(itemCount * 4);
+    } finally {
+      findIndexSpy.mockRestore();
+      iteratorSpy.mockRestore();
+    }
+  });
+
   test("rejects an oversized output_item.added reasoning summary before seeding lifecycle state", async () => {
     const summary = reasoningSummaryParts(
       Array.from(

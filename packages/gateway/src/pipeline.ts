@@ -8475,24 +8475,6 @@ export function streamResponsesRecallAware(
         throw new Error("duplicate Responses item identity");
       }
       for (const identity of identities) outputIdentities.add(identity);
-      for (const [existingIndex, existing] of state.rawItems) {
-        const newIdentities = [item.id, item.call_id].filter(
-          (value): value is string =>
-            typeof value === "string" && value.length > 0,
-        );
-        const existingIdentities = new Set(
-          [existing.id, existing.call_id].filter(
-            (value): value is string =>
-              typeof value === "string" && value.length > 0,
-          ),
-        );
-        if (
-          existingIndex !== outputIndex &&
-          newIdentities.some((identity) => existingIdentities.has(identity))
-        ) {
-          throw new Error("duplicate Responses item identity");
-        }
-      }
       const initialArguments =
         item.type === "function_call" && typeof item.arguments === "string"
           ? item.arguments
@@ -8595,14 +8577,6 @@ export function streamResponsesRecallAware(
             syntheticIdentities.has(finalCallId))
         ) {
           throw new Error("duplicate Responses item identity");
-        }
-        for (const [existingIndex, existing] of state.rawItems) {
-          if (
-            existingIndex !== outputIndex &&
-            (existing.id === finalCallId || existing.call_id === finalCallId)
-          ) {
-            throw new Error("duplicate Responses item identity");
-          }
         }
         finalFunctionIdentity = { callId: finalCallId, name: finalName };
       }
@@ -9306,6 +9280,51 @@ export function streamResponsesRecallAware(
     }
     if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
   };
+  const assertReasoningPartsMatchLifecycle = (
+    rawParts: unknown,
+    states: ReadonlyMap<number, TextPartLifecycle>,
+    kind: "summary_text" | "reasoning_text",
+    description: string,
+    outputIndex: number,
+  ): void => {
+    if (rawParts === undefined) return;
+    if (!Array.isArray(rawParts)) {
+      throw new Error(`Responses ${description} must be an array`);
+    }
+    for (const [partIndex, rawPart] of rawParts.entries()) {
+      if (rawPart === undefined) continue;
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const state = states.get(partIndex);
+      if (!state) {
+        throw new Error(
+          `Responses ${description} introduced untracked part for index ${outputIndex}:${partIndex}`,
+        );
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (
+        part.type !== kind ||
+        Object.keys(part).some((key) => key !== "type" && key !== "text")
+      ) {
+        throw new Error(`invalid Responses ${description} item`);
+      }
+      const value = partValue(kind, part, description);
+      if (
+        (state.deltaSeen && !state.valueDone) ||
+        (state.partAdded && !state.partDone)
+      ) {
+        throw new Error(
+          `Responses ${description} ended before completion for index ${outputIndex}:${partIndex}`,
+        );
+      }
+      if (state.authoritativeValueSeen && state.authoritativeValue !== value) {
+        throw new Error(
+          `Responses ${description} changed content for index ${outputIndex}:${partIndex}`,
+        );
+      }
+    }
+  };
   const completedReasoningSummary = (
     lifecycle: OutputLifecycle,
     outputIndex: number,
@@ -9345,12 +9364,34 @@ export function streamResponsesRecallAware(
     outputIndex: number,
   ): void => {
     const collections: Array<
-      [unknown, ReadonlyMap<number, TextPartLifecycle>, string]
+      [
+        unknown,
+        ReadonlyMap<number, TextPartLifecycle>,
+        "summary_text" | "reasoning_text",
+        string,
+      ]
     > = [
-      [actual.summary, lifecycle.reasoning, "reasoning summary"],
-      [actual.content, lifecycle.content, "reasoning content"],
+      [
+        actual.summary,
+        lifecycle.reasoning,
+        "summary_text",
+        "reasoning summary",
+      ],
+      [
+        actual.content,
+        lifecycle.content,
+        "reasoning_text",
+        "reasoning content",
+      ],
     ];
-    for (const [rawParts, states, description] of collections) {
+    for (const [rawParts, states, kind, description] of collections) {
+      assertReasoningPartsMatchLifecycle(
+        rawParts,
+        states,
+        kind,
+        description,
+        outputIndex,
+      );
       if (rawParts === undefined) continue;
       if (!Array.isArray(rawParts)) {
         throw new Error(`Responses terminal ${description} must be an array`);
@@ -9419,6 +9460,13 @@ export function streamResponsesRecallAware(
       return item as Record<string, unknown>;
     });
     const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    const expectedByID = new Map(
+      expected.flatMap(([, item], index) =>
+        typeof item.id === "string" && item.id
+          ? ([[item.id, index]] as const)
+          : [],
+      ),
+    );
     if (
       opts.validation === "public" &&
       actualOutput.length !== expected.length
@@ -9436,29 +9484,31 @@ export function streamResponsesRecallAware(
       ) {
         throw new Error("Responses terminal output contains invalid reference");
       }
-      const matchIndex = expected.findIndex(
-        ([outputIndex, streamed], index) => {
-          if (
-            index < expectedIndex ||
-            actual.id !== streamed.id ||
-            (!isReference && actual.type !== streamed.type)
-          ) {
-            return false;
-          }
-          if (isReference || actual.call_id === streamed.call_id) return true;
-          return (
+      const matchIndex =
+        typeof actual.id === "string" ? expectedByID.get(actual.id) : undefined;
+      if (matchIndex === undefined || matchIndex < expectedIndex) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const match = expected[matchIndex];
+      if (!match) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const [matchedOutputIndex, matchedStreamed] = match;
+      if (
+        (!isReference && actual.type !== matchedStreamed.type) ||
+        (!isReference &&
+          actual.call_id !== matchedStreamed.call_id &&
+          !(
             opts.validation === "codex" &&
-            !lifecyclesFor(acc).get(outputIndex)?.outputDone
-          );
-        },
-      );
-      if (matchIndex < 0) {
+            !lifecyclesFor(acc).get(matchedOutputIndex)?.outputDone
+          ))
+      ) {
         throw new Error("Responses terminal output changed streamed item");
       }
       if (opts.validation === "public" && matchIndex !== expectedIndex) {
         throw new Error("Responses terminal output changed streamed item");
       }
-      const [outputIndex, streamed] = expected[matchIndex];
+      const [outputIndex, streamed] = match;
       const lifecycle = lifecyclesFor(acc).get(outputIndex);
       // Codex may repeat a completed reasoning item with an empty summary in
       // the terminal snapshot. Preserve only the summaries already validated
