@@ -1929,6 +1929,9 @@ export async function checkInvariants(
   let transportAttempts = 0;
   let stopFailure: JudgeFailure | null = null;
   let verificationStopFailure: JudgeFailure | null = null;
+  const firstPassCallBudget = input.verifier
+    ? MAX_FIRST_PASS_JUDGE_CALLS
+    : MAX_JUDGE_CALLS;
 
   for (
     let candidateIndex = 0;
@@ -1950,12 +1953,12 @@ export async function checkInvariants(
     }
 
     const remainingFirstPassCalls =
-      MAX_FIRST_PASS_JUDGE_CALLS - firstPassCalls;
+      firstPassCallBudget - firstPassCalls;
     if (remainingFirstPassCalls === 0) {
       candidateOutcomes.push({
         ...base,
         state: "not-attempted",
-        failure: semanticBudgetFailure(),
+        failure: semanticBudgetFailure(firstPassCallBudget),
       });
       continue;
     }
@@ -2055,8 +2058,11 @@ export async function checkInvariants(
       firstPassReason: outcome.reason,
       prContext: input.prContext,
     });
-    const inputTokens = estimateCounterevidenceInputTokens(counterevidenceInput);
-    verification.inputTokens += inputTokens;
+    const estimatedInputTokens =
+      estimateCounterevidenceInputTokens(counterevidenceInput);
+    // Only accepted verifier calls consume input-token accounting. A
+    // preflight-rejected or not-attempted candidate reports zero consumed input.
+    let inputTokens = 0;
     verification.contextComplete =
       verification.selected === 1
         ? counterevidenceInput.contextComplete
@@ -2097,6 +2103,19 @@ export async function checkInvariants(
       unresolvedVerification(verificationStopFailure, "not-attempted");
       continue;
     }
+    if (!counterevidenceInput.contextComplete) {
+      unresolvedVerification(
+        {
+          code: "insufficient-context",
+          message:
+            "Connected context was truncated or incompletely retrieved; verification was not attempted",
+          scope: "candidate",
+          retryable: false,
+        },
+        "not-attempted",
+      );
+      continue;
+    }
     if (!input.verifier) {
       const failure: JudgeFailure = {
         code: "judge-contract-error",
@@ -2124,7 +2143,7 @@ export async function checkInvariants(
       );
       continue;
     }
-    if (inputTokens > COUNTEREVIDENCE_INPUT_TOKEN_BUDGET) {
+    if (estimatedInputTokens > COUNTEREVIDENCE_INPUT_TOKEN_BUDGET) {
       unresolvedVerification(
         {
           code: "insufficient-context",
@@ -2137,6 +2156,8 @@ export async function checkInvariants(
       continue;
     }
 
+    inputTokens = estimatedInputTokens;
+    verification.inputTokens += inputTokens;
     let verificationOutcome: CounterevidenceOutcome;
     try {
       verificationOutcome = await input.verifier.verify({
@@ -2386,11 +2407,13 @@ function invalidVerdictOutcome(stats: JudgeStats): JudgeOutcome {
   };
 }
 
-function semanticBudgetFailure(): JudgeFailure {
+function semanticBudgetFailure(
+  firstPassCallBudget = MAX_FIRST_PASS_JUDGE_CALLS,
+): JudgeFailure {
   return {
     code: "semantic-budget-exhausted",
     message:
-      `First-pass semantic-call budget of ${MAX_FIRST_PASS_JUDGE_CALLS} was exhausted; verification was reserved`,
+      `First-pass semantic-call budget of ${firstPassCallBudget} was exhausted`,
     scope: "run",
     retryable: false,
   };
