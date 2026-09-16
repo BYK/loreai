@@ -21,7 +21,7 @@ if (process.env.LORE_PR_DESCRIPTION !== "semantic lint smoke description") {
 writeFileSync(
   reportPath,
   JSON.stringify({
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: "complete",
     model: "test/model",
     effort: "off",
@@ -38,6 +38,20 @@ writeFileSync(
       availableInvariants: 0,
       includedInvariants: 0,
       omittedInvariants: 0,
+    },
+    verification: {
+      strategy: "none",
+      contextComplete: false,
+      selected: 0,
+      attempted: 0,
+      confirmed: 0,
+      cleared: 0,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 0,
+      transportAttempts: 0,
+      inputTokens: 0,
+      inputTokenBudget: 0,
     },
     health: {
       range: { status: "healthy" },
