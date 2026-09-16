@@ -87,9 +87,14 @@ export interface CounterevidenceSummary {
 
 export const MAX_COUNTEREVIDENCE_EVIDENCE = 4;
 export const MAX_COUNTEREVIDENCE_REASON_LENGTH = 400;
+/** Maximum untrusted invalid output echoed into a repair prompt. */
+export const MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS = 1_000;
 export const COUNTEREVIDENCE_INPUT_TOKEN_BUDGET = 16_000;
 const APPROX_BYTES_PER_TOKEN = 4;
 const SYSTEM_TOKEN_RESERVE = 2_000;
+const REPAIR_RESPONSE_TOKEN_RESERVE = Math.ceil(
+  MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS / APPROX_BYTES_PER_TOKEN,
+);
 
 export function emptyCounterevidenceSummary(): CounterevidenceSummary {
   return {
@@ -137,7 +142,8 @@ export function estimateCounterevidenceInputTokens(
   );
   return (
     Math.ceil(Buffer.byteLength(serialized, "utf8") / APPROX_BYTES_PER_TOKEN) +
-    SYSTEM_TOKEN_RESERVE
+    SYSTEM_TOKEN_RESERVE +
+    REPAIR_RESPONSE_TOKEN_RESERVE
   );
 }
 
