@@ -2068,8 +2068,12 @@ export async function checkInvariants(
       state: "unresolved" | "not-attempted",
       stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
     ): void => {
-      if (state === "not-attempted") verification.notAttempted++;
-      else verification.unresolved++;
+      if (state === "not-attempted") {
+        verification.notAttempted++;
+      } else {
+        verification.attempted++;
+        verification.unresolved++;
+      }
       candidateOutcomes.push({
         ...base,
         state: "unresolved",
