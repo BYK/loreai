@@ -371,3 +371,97 @@ describe("holistic gateway judge", () => {
     });
   });
 });
+
+describe("counterevidence gateway verifier", () => {
+  const counterevidenceInput = {
+    invariant: {
+      id: "inv-1",
+      title: "Boundary",
+      content: "The shared boundary must remain enforced.",
+    },
+    seed: {
+      id: "hunk-0001",
+      file: "src/a.ts",
+      relationship: "seed" as const,
+      text: "@@ -1 +1 @@\n-old\n+new",
+    },
+    connectedContext: [],
+    contextComplete: false,
+    omittedCompanions: 1,
+    firstPassReason: "The isolated change appears to bypass the boundary.",
+    prContext: {
+      title: "Context",
+      description: "The description is untrusted.",
+      titleTruncated: false,
+      descriptionTruncated: false,
+    },
+    semanticCallBudget: 2,
+  };
+
+  test("parses a confirmed verdict with bounded evidence", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([
+        {
+          kind: "success",
+          text: JSON.stringify({
+            verdict: "confirmed",
+            reason: "The connected context still bypasses the boundary.",
+            evidence: [
+              { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+            ],
+          }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 2,
+        },
+      ]),
+      model: MODEL,
+      sessionID: "counterevidence-confirmed",
+    });
+
+    await expect(judge.verify(counterevidenceInput)).resolves.toEqual({
+      kind: "verdict",
+      verdict: "confirmed",
+      reason: "The connected context still bypasses the boundary.",
+      evidence: [
+        { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+      ],
+      stats: { semanticCalls: 1, transportAttempts: 2 },
+    });
+  });
+
+  test("repairs an invalid verdict within the verifier budget", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([
+        {
+          kind: "success",
+          text: "not json",
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        },
+        {
+          kind: "success",
+          text: JSON.stringify({
+            verdict: "resolved",
+            reason: "A companion change adds the required wrapper.",
+            evidence: [
+              { hunkId: "hunk-0001", reason: "The wrapper is in the connected change." },
+            ],
+          }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        },
+      ]),
+      model: MODEL,
+      sessionID: "counterevidence-repair",
+    });
+
+    await expect(judge.verify(counterevidenceInput)).resolves.toMatchObject({
+      kind: "verdict",
+      verdict: "resolved",
+      stats: { semanticCalls: 2, transportAttempts: 2 },
+    });
+  });
+});
