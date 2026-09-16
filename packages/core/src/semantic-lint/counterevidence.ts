@@ -90,6 +90,8 @@ export const MAX_COUNTEREVIDENCE_EVIDENCE = 4;
 export const MAX_COUNTEREVIDENCE_REASON_LENGTH = 400;
 /** Maximum untrusted invalid output echoed into a repair prompt. */
 export const MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS = 1_000;
+/** Hard bound before trimming or parsing an untrusted verifier response. */
+export const MAX_COUNTEREVIDENCE_RESPONSE_BYTES = 64 * 1024;
 export const COUNTEREVIDENCE_INPUT_TOKEN_BUDGET = 16_000;
 const APPROX_BYTES_PER_TOKEN = 4;
 const SYSTEM_TOKEN_RESERVE = 2_000;
@@ -158,7 +160,13 @@ export function parseCounterevidenceVerdict(
   text: string | null,
   expectedHunkIds: ReadonlySet<string>,
 ): CounterevidenceResult | null {
-  if (!text) return null;
+  if (
+    typeof text !== "string" ||
+    text.length === 0 ||
+    Buffer.byteLength(text, "utf8") > MAX_COUNTEREVIDENCE_RESPONSE_BYTES
+  ) {
+    return null;
+  }
   let payload = text.trim();
   const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fenced) payload = fenced[1];

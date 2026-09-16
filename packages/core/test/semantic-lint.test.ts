@@ -21,6 +21,7 @@ import {
   MAX_DIFF_TEXT_BYTES,
   MAX_GIT_OUTPUT_BYTES,
   MAX_HUNK_TEXT_BYTES,
+  MAX_COUNTEREVIDENCE_RESPONSE_BYTES,
   MAX_PR_DESCRIPTION_BYTES,
   MAX_PR_TITLE_BYTES,
   normalizeSemanticLintContext,
@@ -1050,6 +1051,19 @@ describe("parseCounterevidenceVerdict", () => {
       reason: "still bypasses",
       evidence: [{ hunkId: "hunk-0001", reason: "call remains direct" }],
     });
+  });
+
+  it("rejects non-string and oversized responses before parsing", () => {
+    const expectedHunks = new Set(["hunk-0001"]);
+    expect(
+      parseCounterevidenceVerdict(42 as unknown as string, expectedHunks),
+    ).toBeNull();
+    expect(
+      parseCounterevidenceVerdict(
+        "x".repeat(MAX_COUNTEREVIDENCE_RESPONSE_BYTES + 1),
+        expectedHunks,
+      ),
+    ).toBeNull();
   });
 });
 
@@ -2139,7 +2153,9 @@ describe("counterevidence semantic-lint verification", () => {
     }));
     const verifier = {
       verify: vi.fn(async () => {
-        throw new Error("verifier transport failed after dispatch");
+        const error = new Error("verifier transport failed after dispatch");
+        Object.defineProperty(error, "attempts", { value: 2 });
+        throw error;
       }),
     };
 
@@ -2161,6 +2177,7 @@ describe("counterevidence semantic-lint verification", () => {
       failure: { code: "judge-contract-error", scope: "run" },
     });
     expect(result.semanticCalls).toBe(1);
+    expect(result.transportAttempts).toBe(3);
     expect(result.findings).toHaveLength(0);
   });
 
@@ -2266,6 +2283,66 @@ describe("counterevidence semantic-lint verification", () => {
             stats: { semanticCalls: 0, transportAttempts: 0 },
           },
         ],
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when PR metadata is truncated", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-pr-context-bound-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(async () => ({
+          kind: "verdict" as const,
+          verdict: "confirmed" as const,
+          reason: "This must not be accepted from incomplete PR metadata.",
+          evidence: [{ hunkId: "hunk-0001", reason: "unreachable" }],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        })),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [oversizedHunk()],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        prContext: {
+          title: "bounded metadata",
+          description: "truncated metadata",
+          titleTruncated: false,
+          descriptionTruncated: true,
+        },
+        sessionID: "counterevidence-pr-context-bound",
+      });
+
+      expect(verifier.verify).not.toHaveBeenCalled();
+      expect(result.findings).toHaveLength(0);
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "unresolved",
+        failure: { code: "insufficient-context" },
+        verification: {
+          state: "not-attempted",
+          contextComplete: false,
+        },
       });
     } finally {
       rmSync(project, { recursive: true, force: true });

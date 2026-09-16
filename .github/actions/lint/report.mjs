@@ -10,6 +10,9 @@ const MAX_LINT_REPORT_FINDINGS = 200;
 const MAX_LINT_REPORT_CANDIDATES = 20;
 const MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH = 400;
 const MAX_LINT_REPORT_RESOLVED_REASON_LENGTH = 400;
+const MAX_REPORT_JUDGE_CALLS = 20;
+const MAX_REPORT_VERIFIER_CALLS = 8;
+const MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS = 16_000;
 const candidateFailureCodes = new Set([
   "no-auth",
   "auth-rejected",
@@ -85,6 +88,10 @@ function count(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new TypeError(`${name} must be a non-negative integer`);
   }
+}
+
+function tupleKey(...values) {
+  return JSON.stringify(values);
 }
 
 function validateCoverage(coverage, counters) {
@@ -176,6 +183,8 @@ function validateVerification(summary) {
     if (
       summary.contextComplete ||
       summary.selected !== 0 ||
+      summary.semanticCalls !== 0 ||
+      summary.transportAttempts !== 0 ||
       summary.inputTokens !== 0 ||
       summary.inputTokenBudget !== 0
     ) {
@@ -183,6 +192,9 @@ function validateVerification(summary) {
     }
   } else if (
     summary.inputTokenBudget <= 0 ||
+    summary.inputTokenBudget !==
+      summary.selected * MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS ||
+    summary.semanticCalls > MAX_REPORT_VERIFIER_CALLS ||
     summary.inputTokens > summary.inputTokenBudget
   ) {
     throw new TypeError("verification input accounting exceeds its budget");
@@ -210,6 +222,23 @@ function validateCandidateVerification(verification, candidate) {
     verification.stats?.transportAttempts,
     "candidate verification transportAttempts",
   );
+  if (verification.inputTokens > MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS) {
+    throw new TypeError(
+      "candidate verification inputTokens exceeds its budget",
+    );
+  }
+  if (verification.stats.semanticCalls > 2) {
+    throw new TypeError(
+      "candidate verification semantic calls exceed its per-candidate budget",
+    );
+  }
+  if (
+    !candidate.stats ||
+    candidate.stats.semanticCalls < verification.stats.semanticCalls ||
+    candidate.stats.transportAttempts < verification.stats.transportAttempts
+  ) {
+    throw new TypeError("candidate stats must include verification stats");
+  }
   if (verification.state === "confirmed" || verification.state === "cleared") {
     if (!verification.contextComplete) {
       throw new TypeError(
@@ -271,6 +300,12 @@ function validateCandidateVerification(verification, candidate) {
       !["candidate", "run"].includes(verification.failure.scope)
     ) {
       throw new TypeError("unresolved verification requires a scoped failure");
+    }
+    if (
+      verification.failure.retryable !== undefined &&
+      typeof verification.failure.retryable !== "boolean"
+    ) {
+      throw new TypeError("candidate failure retryable must be a boolean");
     }
     if (
       verification.state === "not-attempted" &&
@@ -346,6 +381,12 @@ function validateReport(value) {
       ) {
         throw new TypeError(`invalid ${phase} failure`);
       }
+      if (
+        health.failure.retryable !== undefined &&
+        typeof health.failure.retryable !== "boolean"
+      ) {
+        throw new TypeError(`${phase} failure retryable must be a boolean`);
+      }
     } else if (status === "failed" && phase !== "judge") {
       throw new TypeError(`${phase} failure details are required`);
     }
@@ -397,6 +438,11 @@ function validateReport(value) {
     "transportAttempts",
   ]) {
     count(counters[name], `counters.${name}`);
+  }
+  if (counters.semanticCalls > MAX_REPORT_JUDGE_CALLS) {
+    throw new TypeError(
+      "counters.semanticCalls exceeds the shared semantic-call budget",
+    );
   }
   if (counters.candidates !== counters.attempted + counters.notAttempted) {
     throw new TypeError("candidates != attempted + notAttempted");
@@ -528,6 +574,12 @@ function validateReport(value) {
         !["candidate", "run"].includes(candidate.failure.scope)
       ) {
         throw new TypeError("unresolved candidate requires a scoped failure");
+      }
+      if (
+        candidate.failure.retryable !== undefined &&
+        typeof candidate.failure.retryable !== "boolean"
+      ) {
+        throw new TypeError("candidate failure retryable must be a boolean");
       }
       if (candidate.verdict !== undefined || candidate.reason !== undefined) {
         throw new TypeError("unresolved candidate cannot have a verdict");
@@ -708,7 +760,7 @@ function validateReport(value) {
   const candidatesByKey = new Map();
   const candidatesByInvariant = new Map();
   for (const candidate of value.candidates) {
-    const key = `${candidate.invariantId}\x1f${candidate.file}`;
+    const key = tupleKey(candidate.invariantId, candidate.file);
     const byKey = candidatesByKey.get(key) ?? [];
     byKey.push(candidate);
     candidatesByKey.set(key, byKey);
@@ -718,14 +770,14 @@ function validateReport(value) {
   }
   const findingsByKey = new Map();
   for (const finding of value.findings) {
-    const key = `${finding.invariantId}\x1f${finding.file}`;
+    const key = tupleKey(finding.invariantId, finding.file);
     const byKey = findingsByKey.get(key) ?? [];
     byKey.push(finding);
     findingsByKey.set(key, byKey);
   }
   for (const candidate of value.candidates) {
     if (candidate.verification === undefined) continue;
-    const key = `${candidate.invariantId}\x1f${candidate.file}`;
+    const key = tupleKey(candidate.invariantId, candidate.file);
     const sameKeyCandidates = candidatesByKey.get(key) ?? [];
     const hasConfirmedCandidate = sameKeyCandidates.some(
       (sameKeyCandidate) =>
@@ -751,7 +803,7 @@ function validateReport(value) {
     }
   }
   for (const finding of value.findings) {
-    const key = `${finding.invariantId}\x1f${finding.file}`;
+    const key = tupleKey(finding.invariantId, finding.file);
     const matchingCandidates = candidatesByKey.get(key) ?? [];
     if (value.verification.strategy === "counterevidence") {
       if (

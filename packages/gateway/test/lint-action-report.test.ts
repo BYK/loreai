@@ -675,6 +675,54 @@ describe("semantic lint action reporter", () => {
   });
 
   test.each([
+    [
+      "more than the shared semantic-call budget",
+      (value: SemanticLintReport) => {
+        value.candidates[0].stats.semanticCalls = 21;
+        value.counters.semanticCalls = 21;
+      },
+    ],
+    [
+      "candidate verifier input above its budget",
+      (value: SemanticLintReport) => {
+        const verification = value.candidates[0].verification;
+        if (!verification) throw new Error("test fixture lacks verification");
+        verification.inputTokens = 16_001;
+        value.verification.inputTokens = 16_001;
+      },
+    ],
+    [
+      "candidate totals that omit verifier calls",
+      (value: SemanticLintReport) => {
+        value.candidates[0].stats = {
+          semanticCalls: 0,
+          transportAttempts: 0,
+        };
+        value.counters.semanticCalls = 0;
+        value.counters.transportAttempts = 0;
+      },
+    ],
+  ])("rejects reports with invalid budget accounting: %s", (_, mutate) => {
+    const value = confirmedCounterevidenceReport();
+    mutate(value);
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test("CLI and action reject a malformed retryable failure", () => {
+    const value = unresolvedReport() as unknown as {
+      candidates: Array<{
+        failure?: Record<string, unknown>;
+      }>;
+    };
+    const failure = value.candidates[0].failure;
+    if (!failure) throw new Error("test fixture lacks failure");
+    failure.retryable = "sometimes";
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test.each([
     ["incomplete context", { contextComplete: false, semanticCalls: 1 }],
     ["zero semantic calls", { contextComplete: true, semanticCalls: 0 }],
   ])("rejects confirmed counterevidence with %s", (_, options) => {
@@ -747,6 +795,7 @@ describe("semantic lint action reporter", () => {
     value.verification.semanticCalls = 2;
     value.verification.transportAttempts = 2;
     value.verification.inputTokens = 6_000;
+    value.verification.inputTokenBudget = 32_000;
 
     expect(validateSemanticLintReport(value)).toBe(value);
     expect(actionAccepts(value, 3)).toBe(true);

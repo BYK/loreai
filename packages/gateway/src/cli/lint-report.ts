@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { semanticLint } from "@loreai/core";
+
+const MAX_REPORT_JUDGE_CALLS = semanticLint.MAX_JUDGE_CALLS;
+const MAX_REPORT_VERIFIER_CALLS = semanticLint.MAX_VERIFIER_CALLS;
+const MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS =
+  semanticLint.COUNTEREVIDENCE_INPUT_TOKEN_BUDGET;
 
 export type LintStatus = "complete" | "partial" | "failed";
 export type LintPhaseStatus = "healthy" | "degraded" | "failed" | "not-run";
@@ -222,7 +228,7 @@ const PHASE_FAILURE_CODES = new Set([
 ]);
 
 function findingKey(finding: { invariantId: string; file: string }): string {
-  return `${finding.invariantId}\x1f${finding.file}`;
+  return JSON.stringify([finding.invariantId, finding.file]);
 }
 
 function emptyLintVerification(): LintVerification {
@@ -584,6 +590,12 @@ function validateFailure(value: unknown, candidate: boolean): void {
       "candidate failure scope is invalid",
     );
   }
+  if (value.retryable !== undefined) {
+    assert(
+      typeof value.retryable === "boolean",
+      "failure.retryable must be a boolean when present",
+    );
+  }
 }
 
 function validateVerificationSummary(
@@ -626,6 +638,8 @@ function validateVerificationSummary(
     assert(
       !summary.contextComplete &&
         summary.selected === 0 &&
+        summary.semanticCalls === 0 &&
+        summary.transportAttempts === 0 &&
         summary.inputTokens === 0 &&
         summary.inputTokenBudget === 0,
       "empty verification summary contains work",
@@ -633,6 +647,9 @@ function validateVerificationSummary(
   } else {
     assert(
       summary.inputTokenBudget > 0 &&
+        summary.inputTokenBudget ===
+          summary.selected * MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS &&
+        summary.semanticCalls <= MAX_REPORT_VERIFIER_CALLS &&
         summary.inputTokens <= summary.inputTokenBudget,
       "verification input accounting exceeds its budget",
     );
@@ -664,6 +681,22 @@ function validateCandidateVerification(
   assertCount(
     value.stats.transportAttempts,
     "candidate.verification.stats.transportAttempts",
+  );
+  assert(
+    value.inputTokens <= MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS,
+    "candidate.verification.inputTokens exceeds its budget",
+  );
+  assert(
+    value.stats.semanticCalls <= 2,
+    "candidate.verification semantic calls exceed its per-candidate budget",
+  );
+  assert(
+    isRecord(candidate.stats) &&
+      typeof candidate.stats.semanticCalls === "number" &&
+      candidate.stats.semanticCalls >= value.stats.semanticCalls &&
+      typeof candidate.stats.transportAttempts === "number" &&
+      candidate.stats.transportAttempts >= value.stats.transportAttempts,
+    "candidate stats must include verification stats",
   );
   if (value.state === "confirmed" || value.state === "cleared") {
     assert(
@@ -842,6 +875,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   ] as const;
   for (const name of counterNames)
     assertCount(value.counters[name], `counters.${name}`);
+  assert(
+    Number(value.counters.semanticCalls) <= MAX_REPORT_JUDGE_CALLS,
+    "counters.semanticCalls exceeds the shared semantic-call budget",
+  );
   assert(
     value.counters.candidates ===
       Number(value.counters.attempted) + Number(value.counters.notAttempted),
@@ -1206,7 +1243,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   >();
   for (const candidate of value.candidates) {
     const record = candidate as unknown as Record<string, unknown>;
-    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
     const byKey = candidatesByKey.get(key) ?? [];
     byKey.push(record);
     candidatesByKey.set(key, byKey);
@@ -1218,7 +1258,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   const findingsByKey = new Map<string, Array<Record<string, unknown>>>();
   for (const finding of value.findings) {
     const record = finding as unknown as Record<string, unknown>;
-    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
     const byKey = findingsByKey.get(key) ?? [];
     byKey.push(record);
     findingsByKey.set(key, byKey);
@@ -1229,7 +1272,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       ? record.verification
       : undefined;
     if (!verification) continue;
-    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
     const sameKeyCandidates = candidatesByKey.get(key) ?? [];
     const hasConfirmedCandidate = sameKeyCandidates.some(
       (candidate) =>
@@ -1259,7 +1305,10 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   }
   for (const finding of value.findings) {
     const record = finding as unknown as Record<string, unknown>;
-    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
     const matchingCandidates = candidatesByKey.get(key) ?? [];
     if (value.verification.strategy === "counterevidence") {
       assert(

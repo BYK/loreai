@@ -95,6 +95,7 @@ export type {
 export {
   COUNTEREVIDENCE_INPUT_TOKEN_BUDGET,
   MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS,
+  MAX_COUNTEREVIDENCE_RESPONSE_BYTES,
   emptyCounterevidenceSummary,
   estimateCounterevidenceInputTokens,
   parseCounterevidenceVerdict,
@@ -883,6 +884,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function tupleKey(...values: string[]): string {
+  return JSON.stringify(values);
+}
+
 /**
  * Validate one complete holistic judge response. The response must contain
  * exactly one result for every expected invariant, with evidence IDs that
@@ -1490,7 +1495,7 @@ export function parseOverrides(messages: string[]): Override[] {
       const target = m[1].trim();
       const reason = m[2].trim();
       if (!target || !reason) continue;
-      const dedup = `${target.toLowerCase()}\x1f${reason.toLowerCase()}`;
+      const dedup = tupleKey(target.toLowerCase(), reason.toLowerCase());
       if (seen.has(dedup)) continue; // idempotent: same trailer in 2 commits = 1
       seen.add(dedup);
       out.push({ target, reason });
@@ -2097,7 +2102,7 @@ export async function checkInvariants(
         reason: outcome.reason,
         stats: outcome.stats,
       });
-      const dedupKey = inv.entry.id + "\x1f" + hunk.file;
+      const dedupKey = tupleKey(inv.entry.id, hunk.file);
       if (seenFindings.has(dedupKey)) continue;
       seenFindings.add(dedupKey);
       if (findings.length >= MAX_LINT_FINDINGS) continue;
@@ -2246,7 +2251,10 @@ export async function checkInvariants(
       verificationOutcome = {
         kind: "unresolved",
         failure,
-        stats: { semanticCalls: 0, transportAttempts: 0 },
+        stats: {
+          semanticCalls: 0,
+          transportAttempts: transportAttemptsFromError(error),
+        },
       };
       // A custom verifier may have dispatched a call before throwing, but its
       // contract gives us no reliable stats. Stop the run so the first-pass
@@ -2344,7 +2352,7 @@ export async function checkInvariants(
     });
     if (verificationState !== "confirmed") continue;
 
-    const dedupKey = inv.entry.id + "\x1f" + hunk.file;
+    const dedupKey = tupleKey(inv.entry.id, hunk.file);
     if (seenFindings.has(dedupKey)) continue;
     seenFindings.add(dedupKey);
     if (findings.length >= MAX_LINT_FINDINGS) continue;
@@ -2451,6 +2459,16 @@ function boundedMessage(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error);
   const sanitized = message.replace(/[\r\n\t]+/g, " ").trim();
   return (sanitized || fallback).slice(0, 400);
+}
+
+function transportAttemptsFromError(error: unknown): number {
+  if (!isRecord(error)) return 0;
+  const attempts = error.attempts;
+  return typeof attempts === "number" &&
+    Number.isSafeInteger(attempts) &&
+    attempts >= 0
+    ? attempts
+    : 0;
 }
 
 function judgeErrorOutcome(error: unknown, stats: JudgeStats): JudgeOutcome {
@@ -2623,6 +2641,8 @@ function buildCounterevidenceInput(args: {
       args.connectedContext.contexts.has(args.candidate.hunkIdx) &&
       !args.connectedContext.omittedBySeed.has(args.candidate.hunkIdx) &&
       !args.renderedContext.truncated &&
+      args.prContext?.titleTruncated !== true &&
+      args.prContext?.descriptionTruncated !== true &&
       omittedCompanions === 0,
     omittedCompanions,
     firstPassReason: args.firstPassReason,
@@ -3140,7 +3160,7 @@ async function runHolisticLint(args: {
     for (const evidence of result.evidence) {
       const hunk = hunkById.get(evidence.hunkId);
       if (!hunk) continue;
-      const dedupKey = `${result.invariantId}\x1f${hunk.file}`;
+      const dedupKey = tupleKey(result.invariantId, hunk.file);
       if (seen.has(dedupKey)) continue;
       seen.add(dedupKey);
       findings.push({
