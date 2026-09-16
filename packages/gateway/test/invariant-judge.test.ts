@@ -386,8 +386,8 @@ describe("counterevidence gateway verifier", () => {
       text: "@@ -1 +1 @@\n-old\n+new",
     },
     connectedContext: [],
-    contextComplete: false,
-    omittedCompanions: 1,
+    contextComplete: true,
+    omittedCompanions: 0,
     firstPassReason: "The isolated change appears to bypass the boundary.",
     prContext: {
       title: "Context",
@@ -397,6 +397,52 @@ describe("counterevidence gateway verifier", () => {
     },
     semanticCallBudget: 2,
   };
+
+  test("rejects a verifier call when context is incomplete", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([
+        {
+          kind: "success",
+          text: JSON.stringify({
+            verdict: "confirmed",
+            reason: "The isolated call still bypasses the boundary.",
+            evidence: [
+              { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+            ],
+          }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        },
+      ]),
+      model: MODEL,
+      sessionID: "counterevidence-incomplete",
+    });
+
+    await expect(
+      judge.verify({ ...counterevidenceInput, contextComplete: false }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "insufficient-context" },
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    });
+  });
+
+  test("does not call the model with zero verifier budget", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([]),
+      model: MODEL,
+      sessionID: "counterevidence-zero-budget",
+    });
+
+    await expect(
+      judge.verify({ ...counterevidenceInput, semanticCallBudget: 0 }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
 
   test("parses a confirmed verdict with bounded evidence", async () => {
     const judge = createGatewayInvariantJudge({
