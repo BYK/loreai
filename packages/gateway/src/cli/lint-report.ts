@@ -52,6 +52,8 @@ export interface LintCandidateOutcome {
   file: string;
   invariantId: string;
   invariantTitle: string;
+  /** Copied from the invariant metadata before report serialization. */
+  severity: "advisory" | "soft" | "strict";
   state: "resolved" | "unresolved" | "not-attempted";
   verdict?: "violates" | "fixes" | "satisfies" | "unrelated";
   reason?: string;
@@ -379,6 +381,7 @@ export function buildSemanticLintReport(input: {
       file: candidate.file,
       invariantId: candidate.invariantId,
       invariantTitle: candidate.invariantTitle,
+      severity: candidate.severity,
       state: candidate.state,
       ...(candidate.verdict !== undefined
         ? { verdict: candidate.verdict }
@@ -947,6 +950,12 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       "candidate.invariantTitle is required",
     );
     assert(
+      candidate.severity === "advisory" ||
+        candidate.severity === "soft" ||
+        candidate.severity === "strict",
+      "candidate.severity is invalid",
+    );
+    assert(
       candidate.state === "resolved" ||
         candidate.state === "unresolved" ||
         candidate.state === "not-attempted",
@@ -1189,6 +1198,87 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       ),
       "gate advisory findings disagree with finding severities",
     );
+  }
+
+  const candidatesByKey = new Map<string, Array<Record<string, unknown>>>();
+  const candidatesByInvariant = new Map<
+    string,
+    Array<Record<string, unknown>>
+  >();
+  for (const candidate of value.candidates) {
+    const record = candidate as unknown as Record<string, unknown>;
+    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const byKey = candidatesByKey.get(key) ?? [];
+    byKey.push(record);
+    candidatesByKey.set(key, byKey);
+    const byInvariant =
+      candidatesByInvariant.get(String(record.invariantId)) ?? [];
+    byInvariant.push(record);
+    candidatesByInvariant.set(String(record.invariantId), byInvariant);
+  }
+  const findingsByKey = new Map<string, Array<Record<string, unknown>>>();
+  for (const finding of value.findings) {
+    const record = finding as unknown as Record<string, unknown>;
+    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const byKey = findingsByKey.get(key) ?? [];
+    byKey.push(record);
+    findingsByKey.set(key, byKey);
+  }
+  for (const candidate of value.candidates) {
+    const record = candidate as unknown as Record<string, unknown>;
+    const verification = isRecord(record.verification)
+      ? record.verification
+      : undefined;
+    if (!verification) continue;
+    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const matchingFindings = findingsByKey.get(key) ?? [];
+    if (verification.state === "confirmed") {
+      assert(
+        matchingFindings.length > 0,
+        "confirmed violations require a matching finding",
+      );
+      assert(
+        matchingFindings.every(
+          (finding) => finding.severity === record.severity,
+        ),
+        "finding severity disagrees with trusted candidate severity",
+      );
+    } else {
+      assert(
+        matchingFindings.length === 0,
+        "only confirmed verification may back a finding",
+      );
+    }
+  }
+  for (const finding of value.findings) {
+    const record = finding as unknown as Record<string, unknown>;
+    const key = `${String(record.invariantId)}\x1f${String(record.file)}`;
+    const matchingCandidates = candidatesByKey.get(key) ?? [];
+    if (value.coverage.strategy !== "holistic") {
+      assert(
+        matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            isRecord(candidate.verification) &&
+            candidate.verification.state === "confirmed" &&
+            candidate.severity === record.severity,
+        ),
+        "isolated findings require confirmed matching candidates",
+      );
+    } else {
+      const invariantCandidates =
+        candidatesByInvariant.get(String(record.invariantId)) ?? [];
+      assert(
+        invariantCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === record.severity,
+        ),
+        "holistic findings require matching violated candidates",
+      );
+    }
   }
 
   const report = value as unknown as SemanticLintReport;

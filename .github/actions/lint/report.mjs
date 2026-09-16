@@ -492,6 +492,9 @@ function validateReport(value) {
     ) {
       throw new TypeError("candidate identity fields are required");
     }
+    if (!["advisory", "soft", "strict"].includes(candidate.severity)) {
+      throw new TypeError("invalid candidate severity");
+    }
     states[candidate.state]++;
     count(candidate.stats?.semanticCalls, "candidate semanticCalls");
     count(candidate.stats?.transportAttempts, "candidate transportAttempts");
@@ -702,6 +705,77 @@ function validateReport(value) {
       throw new TypeError("gate blocking findings disagree with severities");
     if (!sameIds(value.gate.advisoryFindingIds, expectedAdvisory))
       throw new TypeError("gate advisory findings disagree with severities");
+  }
+  const candidatesByKey = new Map();
+  const candidatesByInvariant = new Map();
+  for (const candidate of value.candidates) {
+    const key = `${candidate.invariantId}\x1f${candidate.file}`;
+    const byKey = candidatesByKey.get(key) ?? [];
+    byKey.push(candidate);
+    candidatesByKey.set(key, byKey);
+    const byInvariant = candidatesByInvariant.get(candidate.invariantId) ?? [];
+    byInvariant.push(candidate);
+    candidatesByInvariant.set(candidate.invariantId, byInvariant);
+  }
+  const findingsByKey = new Map();
+  for (const finding of value.findings) {
+    const key = `${finding.invariantId}\x1f${finding.file}`;
+    const byKey = findingsByKey.get(key) ?? [];
+    byKey.push(finding);
+    findingsByKey.set(key, byKey);
+  }
+  for (const candidate of value.candidates) {
+    if (candidate.verification === undefined) continue;
+    const key = `${candidate.invariantId}\x1f${candidate.file}`;
+    const matchingFindings = findingsByKey.get(key) ?? [];
+    if (candidate.verification.state === "confirmed") {
+      if (matchingFindings.length === 0)
+        throw new TypeError("confirmed violations require a matching finding");
+      if (
+        matchingFindings.some(
+          (finding) => finding.severity !== candidate.severity,
+        )
+      )
+        throw new TypeError(
+          "finding severity disagrees with trusted candidate severity",
+        );
+    } else if (matchingFindings.length > 0) {
+      throw new TypeError("only confirmed verification may back a finding");
+    }
+  }
+  for (const finding of value.findings) {
+    const key = `${finding.invariantId}\x1f${finding.file}`;
+    const matchingCandidates = candidatesByKey.get(key) ?? [];
+    if (value.coverage.strategy !== "holistic") {
+      if (
+        !matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.verification?.state === "confirmed" &&
+            candidate.severity === finding.severity,
+        )
+      ) {
+        throw new TypeError(
+          "isolated findings require confirmed matching candidates",
+        );
+      }
+    } else {
+      const invariantCandidates =
+        candidatesByInvariant.get(finding.invariantId) ?? [];
+      if (
+        !invariantCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === finding.severity,
+        )
+      ) {
+        throw new TypeError(
+          "holistic findings require matching violated candidates",
+        );
+      }
+    }
   }
   if (
     value.status === "complete" &&

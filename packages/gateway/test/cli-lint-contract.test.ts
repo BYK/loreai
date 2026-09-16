@@ -112,6 +112,7 @@ describe("typed lore lint contract", () => {
       file: "src/file.ts",
       invariantId: "inv-01",
       invariantTitle: "Keep reports strict",
+      severity: "advisory",
       state: "resolved",
       verdict: "satisfies",
       reason: "The report projects only public fields.",

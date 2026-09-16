@@ -1234,6 +1234,8 @@ interface CandidateOutcomeBase {
   hunkIndex: number;
   invariantId: string;
   invariantTitle: string;
+  /** Trusted enforcement level copied from the selected invariant metadata. */
+  severity: EnforcementLevel;
   similarity: number;
   refHit: boolean;
   stats: JudgeStats;
@@ -1540,6 +1542,10 @@ export function createLLMInvariantJudge(
         return response;
       };
       const stats = (): JudgeStats => ({ semanticCalls, transportAttempts });
+
+      if (input.semanticCallBudget < 1) {
+        return invalidVerdictOutcome(stats());
+      }
 
       let response: string | null;
       try {
@@ -2211,16 +2217,22 @@ export async function checkInvariants(
         semanticCallBudget: Math.min(2, remainingVerifierCalls),
       });
     } catch (error) {
+      const failure: JudgeFailure = {
+        code: "judge-contract-error",
+        message: boundedMessage(error, "CounterevidenceVerifier threw"),
+        scope: "run",
+        retryable: false,
+      };
       verificationOutcome = {
         kind: "unresolved",
-        failure: {
-          code: "judge-contract-error",
-          message: boundedMessage(error, "CounterevidenceVerifier threw"),
-          scope: "run",
-          retryable: false,
-        },
+        failure,
         stats: { semanticCalls: 0, transportAttempts: 0 },
       };
+      // A custom verifier may have dispatched a call before throwing, but its
+      // contract gives us no reliable stats. Stop the run so the first-pass
+      // judge cannot spend calls beyond the shared ceiling or cost budget.
+      stopFailure = failure;
+      verificationStopFailure = failure;
     }
     verificationOutcome = validateCounterevidenceOutcome(
       verificationOutcome,
@@ -3175,6 +3187,7 @@ function unavailableHolisticCandidateOutcome(
     hunkIndex: -1,
     invariantId: invariant.entry.id,
     invariantTitle: invariant.entry.title,
+    severity: enforcementLevel(invariant.entry),
     similarity: 0,
     refHit: false,
     state,
@@ -3195,6 +3208,7 @@ function candidateOutcomeBase(
     hunkIndex: candidate.hunkIdx,
     invariantId: invariant.entry.id,
     invariantTitle: invariant.entry.title,
+    severity: enforcementLevel(invariant.entry),
     similarity: candidate.similarity,
     refHit: candidate.refHit,
     stats: { semanticCalls: 0, transportAttempts: 0 },

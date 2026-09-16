@@ -71,6 +71,26 @@ describe("createGatewayInvariantJudge", () => {
     });
   });
 
+  test("converts thrown judge transport failures into accounted outcomes", async () => {
+    const client: GatewayLLMClient = {
+      prompt: vi.fn(async () => null),
+      promptDetailed: vi.fn(async () => {
+        throw new Error("transport disconnected");
+      }),
+    };
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "lint-thrown-transport",
+    });
+
+    await expect(judge.judge(INPUT)).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "transport-error", scope: "candidate" },
+      stats: { semanticCalls: 1, transportAttempts: 0 },
+    });
+  });
+
   test("repairs one invalid verdict and sums transport attempts", async () => {
     const client = clientWith([
       {
@@ -314,6 +334,23 @@ describe("holistic gateway judge", () => {
     semanticCallBudget: 2,
   };
 
+  test("does not call the model with zero holistic budget", async () => {
+    const client = clientWith([]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "holistic-zero-budget",
+    });
+
+    await expect(
+      judge.lint({ ...holisticInput, semanticCallBudget: 0 }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
   test("parses a complete lint result set and counts transport attempts", async () => {
     const client = clientWith([
       {
@@ -458,6 +495,26 @@ describe("counterevidence gateway verifier", () => {
       kind: "unresolved",
       failure: { code: "invalid-verdict" },
       stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
+  test("converts thrown verifier transport failures into accounted outcomes", async () => {
+    const client: GatewayLLMClient = {
+      prompt: vi.fn(async () => null),
+      promptDetailed: vi.fn(async () => {
+        throw new Error("verifier transport disconnected");
+      }),
+    };
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "counterevidence-thrown-transport",
+    });
+
+    await expect(judge.verify(counterevidenceInput)).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "transport-error", scope: "candidate" },
+      stats: { semanticCalls: 1, transportAttempts: 0 },
     });
   });
 

@@ -11,6 +11,7 @@ import {
   changedFiles,
   checkInvariants,
   clusterHunks,
+  createLLMInvariantJudge,
   enforcementLevel,
   gateDecision,
   isEnforceableInvariant,
@@ -1827,6 +1828,30 @@ describe("checkInvariants typed judge outcomes", () => {
     });
   });
 
+  it("does not dispatch the compatibility judge with zero budget", async () => {
+    const prompt = vi.fn(async () =>
+      JSON.stringify({ verdict: "satisfies", reason: "covered" }),
+    );
+    const judge = createLLMInvariantJudge({
+      llm: { prompt },
+      sessionID: "compat-zero-budget",
+    });
+
+    await expect(
+      judge.judge({
+        invariant: { id: "inv-1", title: "Rule", content: "must hold" },
+        file: "src/a.ts",
+        hunk: "@@ -1 +1 @@\n-old\n+new",
+        semanticCallBudget: 0,
+      }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   it("fails health when all selected candidates are unresolved", async () => {
     const project = "/tmp/ic-test-typed-unresolved";
     const hunks = await seedCandidateSet(project, 3);
@@ -2109,6 +2134,40 @@ describe("counterevidence semantic-lint verification", () => {
     } finally {
       rmSync(project, { recursive: true, force: true });
     }
+  });
+
+  it("stops the run when a verifier throws before reporting call usage", async () => {
+    const project = "/tmp/lore-counterevidence-verifier-throws";
+    const hunks = await seedCandidateSet(project, 2);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict" as const,
+      verdict: "violates" as const,
+      reason: "The isolated change appears to bypass the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = {
+      verify: vi.fn(async () => {
+        throw new Error("verifier transport failed after dispatch");
+      }),
+    };
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      sessionID: "counterevidence-verifier-throws",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(verifier.verify).toHaveBeenCalledOnce();
+    expect(result.candidateOutcomes[1]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "judge-contract-error", scope: "run" },
+    });
+    expect(result.semanticCalls).toBe(1);
+    expect(result.findings).toHaveLength(0);
   });
 
   it("fails closed when connected-context rendering truncates a parsed hunk", async () => {

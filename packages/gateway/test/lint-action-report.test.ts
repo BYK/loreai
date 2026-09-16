@@ -158,6 +158,7 @@ function resolvedReport(
     file: `src/file-${index + 1}.ts`,
     invariantId: `inv-${index + 1}`,
     invariantTitle: "Rule",
+    severity: "advisory",
     state: "resolved",
     verdict: "satisfies",
     reason,
@@ -189,6 +190,7 @@ function unresolvedReport(): SemanticLintReport {
       file: "src/file.ts",
       invariantId: "inv-1",
       invariantTitle: "Rule",
+      severity: "advisory",
       state: "unresolved",
       failure: {
         code: "timeout",
@@ -250,6 +252,7 @@ function confirmedCounterevidenceReport(
   value.counters = {
     ...value.counters,
     hunks: 1,
+    invariants: 1,
     candidates: 1,
     attempted: 1,
     resolved: 1,
@@ -603,6 +606,7 @@ describe("semantic lint action reporter", () => {
         file: "src/file.ts",
         invariantId: "inv-1",
         invariantTitle: "Rule",
+        severity: "advisory",
         state: "resolved",
         verdict: "violates",
         reason: "The violation survived connected-context verification.",
@@ -657,6 +661,43 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(false);
   });
 
+  test.each([
+    [
+      "a confirmed candidate without a finding",
+      (value: SemanticLintReport) => {
+        value.findings = [];
+        value.gate = {
+          mode: "advisory",
+          blockingFindingIds: [],
+          overridden: [],
+          advisoryFindingIds: [],
+          wouldBlockFindingIds: [],
+        };
+      },
+    ],
+    [
+      "a cleared candidate with a finding",
+      (value: SemanticLintReport) => {
+        const candidate = value.candidates[0].verification;
+        if (!candidate) throw new Error("test fixture lacks verification");
+        candidate.state = "cleared";
+        value.verification.confirmed = 0;
+        value.verification.cleared = 1;
+      },
+    ],
+    [
+      "a finding with downgraded severity",
+      (value: SemanticLintReport) => {
+        value.findings[0].severity = "soft";
+      },
+    ],
+  ])("rejects report integrity failure: %s", (_, mutate) => {
+    const value = confirmedCounterevidenceReport();
+    mutate(value);
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
   test("reports a valid complete advisory run without blocking", () => {
     const result = runReporter(report(), false, 0);
     expect(result.status).toBe(0);
@@ -682,7 +723,9 @@ describe("semantic lint action reporter", () => {
   });
 
   test("fails gate mode on blocking finding exit 2", () => {
-    const value = report();
+    const value = confirmedCounterevidenceReport();
+    value.candidates[0].file = "src/file.ts";
+    value.candidates[0].severity = "strict";
     value.gate = {
       mode: "gate",
       blockingFindingIds: ["finding-01"],
@@ -693,7 +736,7 @@ describe("semantic lint action reporter", () => {
     value.findings = [
       {
         id: "finding-01",
-        invariantId: "inv",
+        invariantId: "inv-1",
         invariantTitle: "Never bypass validation",
         invariantContent: "Validation must never be bypassed.",
         file: "src/file.ts",
@@ -704,6 +747,7 @@ describe("semantic lint action reporter", () => {
         severity: "strict",
       },
     ];
+    expect(validateSemanticLintReport(value)).toBe(value);
     const result = runReporter(value, true, 2);
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("exit 2: complete with blocking findings");
@@ -723,7 +767,8 @@ describe("semantic lint action reporter", () => {
       hunk: "@@ -1,1 +1,1 @@",
       severity: "strict" as const,
     };
-    const advisory = report();
+    const advisory = confirmedCounterevidenceReport();
+    advisory.candidates[0].severity = "strict";
     advisory.findings = [finding];
     advisory.gate = {
       mode: "advisory",
@@ -740,7 +785,8 @@ describe("semantic lint action reporter", () => {
       "No suspected invariant violations",
     );
 
-    const gate = report();
+    const gate = confirmedCounterevidenceReport();
+    gate.candidates[0].severity = "strict";
     gate.findings = [finding];
     gate.gate = {
       mode: "gate",
@@ -798,6 +844,7 @@ describe("semantic lint action reporter", () => {
             file: "src/file.ts",
             invariantId: "inv",
             invariantTitle: "Rule",
+            severity: "advisory",
             state: "unresolved",
             failure: {
               code: "timeout",
@@ -820,24 +867,15 @@ describe("semantic lint action reporter", () => {
   });
 
   test("neutralizes and caps report-controlled Markdown summary fields", () => {
-    const value = report();
-    value.findings = [
-      {
-        id: "finding-01",
-        invariantId: "inv",
-        invariantTitle: "<img src=x onerror=alert(1)> [title](https://bad)",
-        invariantContent: "Rule",
-        file: "[file](https://bad/file)",
-        similarity: 1,
-        refHit: true,
-        reason: `![image](https://bad/image) ${"x".repeat(1_000)}`,
-        hunk: "@@ -1,1 +1,1 @@",
-        severity: "advisory",
-      },
-    ];
+    const value = confirmedCounterevidenceReport();
+    value.candidates[0].file = "[file](https://bad/file)";
+    value.findings[0].invariantTitle =
+      "<img src=x onerror=alert(1)> [title](https://bad)";
+    value.findings[0].file = value.candidates[0].file;
+    value.findings[0].reason = `![image](https://bad/image) ${"x".repeat(1_000)}`;
     value.gate.advisoryFindingIds = ["finding-01"];
 
-    const result = runReporter(value, false, 0);
+    const result = runReporter(value, false, 3);
     expect(result.status).toBe(0);
     expect(result.summary).toContain("&lt;img src=x onerror=alert\\(1\\)&gt;");
     expect(result.summary).not.toContain("<img");
@@ -870,6 +908,7 @@ describe("semantic lint action reporter", () => {
         file: "src/file.ts",
         invariantId: "inv",
         invariantTitle: "Rule",
+        severity: "advisory",
         state: "unresolved",
         failure: {
           code: "no-auth",
