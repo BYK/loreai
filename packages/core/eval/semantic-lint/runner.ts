@@ -339,7 +339,7 @@ function runStrategy(
           invariant: caseData.invariant,
           hunk: { id: "hunk-0001", file: seed.file, text: seed.text },
         }),
-        config.budgets.holisticInputTokenBudget,
+        config.budgets.counterevidenceInputTokenBudget,
         "seed-context-truncated",
       );
     }
@@ -356,7 +356,7 @@ function runStrategy(
       final.outcome,
       coverage,
       trace.inputTokens,
-      config.budgets.holisticInputTokenBudget,
+      config.budgets.counterevidenceInputTokenBudget,
     );
   }
 

@@ -152,6 +152,30 @@ describe("semantic-lint labeled replay evaluation", () => {
     );
   });
 
+  test("keeps isolated and holistic token budgets independently configurable", () => {
+    const report = runSemanticLintReplay({
+      repetitions: 1,
+      budgets: {
+        holisticInputTokenBudget: 1,
+        counterevidenceInputTokenBudget: 10_000,
+      },
+    });
+    expect(
+      report.observations.find(
+        (item) =>
+          item.caseId === "labeled-safe-embedding-extraction" &&
+          item.strategy === "isolated-baseline",
+      )?.inputTokenBudget,
+    ).toBe(10_000);
+    expect(
+      report.observations.find(
+        (item) =>
+          item.caseId === "labeled-safe-embedding-extraction" &&
+          item.strategy === "holistic-fit",
+      )?.inputTokenBudget,
+    ).toBe(1);
+  });
+
   test("reduces context false positives without hiding guard-removal mutants", () => {
     const report = runSemanticLintReplay({ repetitions: 3 });
     expect(report.guardrails.status).toBe("pass");
