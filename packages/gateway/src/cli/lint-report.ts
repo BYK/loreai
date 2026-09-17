@@ -3,10 +3,15 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { semanticLint } from "@loreai/core";
 
-const MAX_REPORT_JUDGE_CALLS = semanticLint.MAX_JUDGE_CALLS;
-const MAX_REPORT_VERIFIER_CALLS = semanticLint.MAX_VERIFIER_CALLS;
+// Keep report validation compatible with hosts that provide a partial semantic
+// lint namespace (for example older embedded callers and focused test doubles).
+// Production core exports these same limits; the fallbacks only prevent an
+// absent optional export from turning every failure report into invalid NaN
+// accounting.
+const MAX_REPORT_JUDGE_CALLS = semanticLint.MAX_JUDGE_CALLS ?? 20;
+const MAX_REPORT_VERIFIER_CALLS = semanticLint.MAX_VERIFIER_CALLS ?? 8;
 const MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS =
-  semanticLint.COUNTEREVIDENCE_INPUT_TOKEN_BUDGET;
+  semanticLint.COUNTEREVIDENCE_INPUT_TOKEN_BUDGET ?? 16_000;
 
 export type LintStatus = "complete" | "partial" | "failed";
 export type LintPhaseStatus = "healthy" | "degraded" | "failed" | "not-run";
