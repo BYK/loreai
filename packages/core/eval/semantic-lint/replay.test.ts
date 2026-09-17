@@ -7,10 +7,13 @@ import {
   costFor,
   renderSemanticLintReplayMarkdown,
   runSemanticLintReplay,
+  runStrategy,
   validateTraceAccounting,
+  validateVerifierTrace,
 } from "./runner";
 import type {
   RecordedJudgeTrace,
+  RecordedVerifierTrace,
   ReplayObservation,
   TruthLabel,
 } from "./types";
@@ -252,11 +255,31 @@ describe("semantic-lint labeled replay evaluation", () => {
     ).toThrow("inputTokens must be a non-negative integer");
   });
 
+  test("rejects verifier traces with unknown outcomes", () => {
+    const trace: RecordedVerifierTrace = {
+      response: "{}",
+      outcome: "unexpected" as RecordedVerifierTrace["outcome"],
+      reason: "invalid outcome",
+      semanticCalls: 1,
+      transportAttempts: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      latencyMs: 1,
+    };
+    expect(() => validateVerifierTrace(trace, "test", new Set())).toThrow(
+      "outcome must be confirmed, cleared, or unresolved",
+    );
+  });
+
   test("reduces context false positives without hiding guard-removal mutants", () => {
     const report = runSemanticLintReplay({ repetitions: 3 });
     expect(report.guardrails.status).toBe("pass");
     expect(report.guardrails.contextFalsePositiveReduction).toBeGreaterThan(0);
     expect(report.guardrails.controlledMutantRecall).toBe(1);
+    expect(report.guardrails.falsePositiveRateDelta).toBeLessThanOrEqual(0);
+    expect(report.guardrails.precisionDelta).toBeGreaterThanOrEqual(0);
 
     const adaptive = report.metrics.find(
       (item) => item.strategy === "adaptive-connected" && item.split === "all",
@@ -295,6 +318,31 @@ describe("semantic-lint labeled replay evaluation", () => {
     });
   });
 
+  test("abstains on parser-truncated holistic hunk content", () => {
+    const source = SEMANTIC_LINT_REPLAY_FIXTURES.find(
+      (item) => item.id === "labeled-safe-embedding-extraction",
+    );
+    if (!source) throw new Error("fixture missing");
+    const truncated = {
+      ...source,
+      hunks: source.hunks.map((item, index) =>
+        index === 0 ? { ...item, truncated: true } : item,
+      ),
+    };
+    const observation = runStrategy(
+      truncated,
+      "holistic-fit",
+      1,
+      DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
+    );
+    expect(observation).toMatchObject({
+      outcome: "abstained",
+      status: "not-attempted",
+      abstentionReason: "hunk-content-truncated",
+      semanticCalls: 0,
+    });
+  });
+
   test("marks isolated context incomplete when companion hunks are omitted", () => {
     const report = runSemanticLintReplay({ repetitions: 1 });
     const isolated = report.observations.find(
@@ -305,7 +353,7 @@ describe("semantic-lint labeled replay evaluation", () => {
     expect(isolated).toMatchObject({
       contextComplete: false,
       includedHunks: 1,
-      omittedHunks: 2,
+      omittedHunks: 1,
     });
   });
 

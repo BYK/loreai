@@ -26,6 +26,12 @@ export interface ReplayRevision {
   source: string;
   base: string;
   head: string;
+  kind: "exact-diff" | "synthetic";
+  /** Selected hunks copied from the locked revision diff and checked locally. */
+  evidence?: Array<{
+    file: string;
+    text: string;
+  }>;
 }
 
 export interface ReplayFixtureDigests {
@@ -153,6 +159,7 @@ export interface ConfusionMetrics {
   falseNegatives: number;
   abstainedTrueViolations: number;
   precision: number | null;
+  falsePositiveRate: number | null;
   recall: number | null;
   decidedRecall: number | null;
   contextFalsePositives: number;
@@ -191,6 +198,8 @@ export interface StrategyMetrics extends ConfusionMetrics, DistributionMetrics {
 export interface SemanticLintReplayGuardrails {
   status: "pass" | "insufficient-sample" | "fail";
   contextFalsePositiveReduction: number;
+  falsePositiveRateDelta: number | null;
+  precisionDelta: number | null;
   recallDelta: number | null;
   decidedRecallDelta: number | null;
   controlledMutantRecall: number | null;

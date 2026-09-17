@@ -172,12 +172,21 @@ function validateHolisticTrace(
   }
 }
 
-function validateVerifierTrace(
+export function validateVerifierTrace(
   trace: RecordedVerifierTrace,
   label: string,
   expectedHunkIds: ReadonlySet<string>,
 ): void {
   validateTraceAccounting(trace, label);
+  if (
+    trace.outcome !== "confirmed" &&
+    trace.outcome !== "cleared" &&
+    trace.outcome !== "unresolved"
+  ) {
+    throw new TypeError(
+      `${label}.outcome must be confirmed, cleared, or unresolved`,
+    );
+  }
   const verdict =
     trace.outcome === "confirmed"
       ? "confirmed"
@@ -317,7 +326,7 @@ function finalOutcome(verdict: RecordedJudgeTrace["verdict"]): {
     : { outcome: "clear", status: "resolved" };
 }
 
-function runStrategy(
+export function runStrategy(
   caseData: SemanticLintReplayCase,
   strategy: SemanticLintStrategy,
   repetition: number,
@@ -387,6 +396,28 @@ function runStrategy(
     });
     const trace = caseData.recorded.holistic;
     validateHolisticTrace(trace, caseData, `${caseData.id}.holistic`);
+    if (caseData.hunks.some((item) => item.truncated === true)) {
+      return observationFromTraces(
+        caseData,
+        strategy,
+        repetition,
+        config,
+        [],
+        undefined,
+        "The holistic diff contains parser-truncated hunk content.",
+        "not-attempted",
+        "abstained",
+        {
+          contextComplete: false,
+          availableHunks: caseData.hunks.length,
+          includedHunks: 0,
+          omittedHunks: caseData.hunks.length,
+        },
+        plan.coverage.inputTokens,
+        plan.coverage.inputTokenBudget,
+        "hunk-content-truncated",
+      );
+    }
     if (plan.kind !== "fit") {
       return observationFromTraces(
         caseData,
@@ -672,6 +703,7 @@ export function confusionMetrics(
   ).length;
   const decidedTrue = truePositives + falseNegatives;
   const allTrue = decidedTrue + abstainedTrueViolations;
+  const negativeSamples = primary.filter((item) => !trueViolation(item)).length;
   return {
     truePositives,
     falsePositives,
@@ -681,6 +713,8 @@ export function confusionMetrics(
       truePositives + falsePositives === 0
         ? null
         : truePositives / (truePositives + falsePositives),
+    falsePositiveRate:
+      negativeSamples === 0 ? null : falsePositives / negativeSamples,
     recall: allTrue === 0 ? null : truePositives / allTrue,
     decidedRecall: decidedTrue === 0 ? null : truePositives / decidedTrue,
     contextFalsePositives: primary.filter(
@@ -762,6 +796,14 @@ function guardrails(
     cases.filter((item) => item.split === "held-out").length >= 2;
   const contextFalsePositiveReduction =
     contextFalsePositiveReductionForReplay(observations);
+  const falsePositiveRateDelta =
+    isolated?.falsePositiveRate === null || adaptive?.falsePositiveRate === null
+      ? null
+      : (adaptive?.falsePositiveRate ?? 0) - (isolated?.falsePositiveRate ?? 0);
+  const precisionDelta =
+    isolated?.precision === null || adaptive?.precision === null
+      ? null
+      : (adaptive?.precision ?? 0) - (isolated?.precision ?? 0);
   const recallDelta =
     isolated?.recall === null || adaptive?.recall === null
       ? null
@@ -791,6 +833,14 @@ function guardrails(
       "adaptive-connected did not reduce context-related false positives",
     );
   }
+  if (falsePositiveRateDelta !== null && falsePositiveRateDelta > 0) {
+    notes.push(
+      "adaptive-connected false-positive rate is above isolated-baseline",
+    );
+  }
+  if (precisionDelta !== null && precisionDelta < 0) {
+    notes.push("adaptive-connected precision is below isolated-baseline");
+  }
   if (controlledMutantRecall !== 1) {
     notes.push(
       "adaptive-connected did not preserve every controlled mutant finding",
@@ -813,6 +863,8 @@ function guardrails(
   return {
     status,
     contextFalsePositiveReduction,
+    falsePositiveRateDelta,
+    precisionDelta,
     recallDelta,
     decidedRecallDelta,
     controlledMutantRecall,
@@ -854,6 +906,28 @@ function validateReplayCorpus(cases: readonly SemanticLintReplayCase[]): void {
     ) {
       throw new Error(
         `semantic-lint replay integrity mismatch: ${caseData.id}`,
+      );
+    }
+    if (caseData.revision.kind === "exact-diff") {
+      if (!caseData.revision.evidence?.length) {
+        throw new Error(
+          `exact-diff replay case has no revision evidence: ${caseData.id}`,
+        );
+      }
+      for (const item of caseData.hunks) {
+        const evidence = caseData.revision.evidence.find(
+          (candidate) =>
+            candidate.file === item.file && candidate.text.includes(item.text),
+        );
+        if (!evidence) {
+          throw new Error(
+            `replay hunk is not present in locked revision evidence: ${caseData.id}`,
+          );
+        }
+      }
+    } else if (caseData.revision.evidence !== undefined) {
+      throw new Error(
+        `synthetic replay case cannot carry revision evidence: ${caseData.id}`,
       );
     }
     if (caseData.split === "labeled") {
@@ -994,7 +1068,7 @@ export function renderSemanticLintReplayMarkdown(
   }
   lines.push(
     "",
-    `Guardrails: **${report.guardrails.status}** — context-related FP clears ${report.guardrails.contextFalsePositiveReduction}; recall delta ${formatPct(report.guardrails.recallDelta)}; decided-recall delta ${formatPct(report.guardrails.decidedRecallDelta)}; controlled-mutant recall ${formatPct(report.guardrails.controlledMutantRecall)}.`,
+    `Guardrails: **${report.guardrails.status}** — context-related FP clears ${report.guardrails.contextFalsePositiveReduction}; FP-rate delta ${formatPct(report.guardrails.falsePositiveRateDelta)}; precision delta ${formatPct(report.guardrails.precisionDelta)}; recall delta ${formatPct(report.guardrails.recallDelta)}; decided-recall delta ${formatPct(report.guardrails.decidedRecallDelta)}; controlled-mutant recall ${formatPct(report.guardrails.controlledMutantRecall)}.`,
   );
   for (const note of report.guardrails.notes) lines.push(`- ${note}`);
   lines.push(
