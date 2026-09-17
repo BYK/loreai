@@ -1,9 +1,11 @@
 import { describe, expect, test } from "vitest";
 import {
   SEMANTIC_LINT_REPLAY_FIXTURES,
+  confusionMetrics,
   renderSemanticLintReplayMarkdown,
   runSemanticLintReplay,
 } from "./runner";
+import type { ReplayObservation, TruthLabel } from "./types";
 
 describe("semantic-lint labeled replay evaluation", () => {
   test("locks fixed revisions, labels, and controlled mutants", () => {
@@ -84,6 +86,52 @@ describe("semantic-lint labeled replay evaluation", () => {
       expect(metric.totalOutputTokens).toBeGreaterThanOrEqual(0);
       expect(metric.totalEstimatedCostUsd).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  test("counts abstained true violations in recall, not decided recall", () => {
+    const observation = (
+      label: TruthLabel,
+      outcome: ReplayObservation["outcome"],
+    ): ReplayObservation => ({
+      caseId: `${label}-${outcome}`,
+      name: "metric fixture",
+      split: "labeled",
+      label,
+      repetition: 1,
+      strategy: "isolated-baseline",
+      outcome,
+      reason: "metric fixture",
+      status: outcome === "abstained" ? "unresolved" : "resolved",
+      contextComplete: false,
+      availableHunks: 1,
+      includedHunks: 0,
+      omittedHunks: 1,
+      semanticCalls: 0,
+      transportAttempts: 0,
+      verifierCalls: 0,
+      inputTokens: 0,
+      plannedInputTokens: 0,
+      inputTokenBudget: 1,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    });
+    const metrics = confusionMetrics([
+      observation("true-violation", "finding"),
+      observation("true-violation", "clear"),
+      observation("true-violation", "abstained"),
+      observation("context-fp", "finding"),
+    ]);
+
+    expect(metrics).toMatchObject({
+      truePositives: 1,
+      falseNegatives: 1,
+      abstainedTrueViolations: 1,
+      decidedRecall: 0.5,
+      recall: 1 / 3,
+    });
   });
 
   test("reduces context false positives without hiding guard-removal mutants", () => {

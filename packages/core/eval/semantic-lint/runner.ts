@@ -613,7 +613,9 @@ function distribution(observations: ReplayObservation[]): DistributionMetrics {
   };
 }
 
-function confusion(observations: ReplayObservation[]): ConfusionMetrics {
+export function confusionMetrics(
+  observations: ReplayObservation[],
+): ConfusionMetrics {
   const finding = (item: ReplayObservation) => item.outcome === "finding";
   const trueViolation = (item: ReplayObservation) =>
     item.label === "true-violation";
@@ -628,19 +630,21 @@ function confusion(observations: ReplayObservation[]): ConfusionMetrics {
   const falseNegatives = primary.filter(
     (item) => trueViolation(item) && item.outcome === "clear",
   ).length;
+  const abstainedTrueViolations = primary.filter(
+    (item) => trueViolation(item) && item.outcome === "abstained",
+  ).length;
   const decidedTrue = truePositives + falseNegatives;
+  const allTrue = decidedTrue + abstainedTrueViolations;
   return {
     truePositives,
     falsePositives,
     falseNegatives,
+    abstainedTrueViolations,
     precision:
       truePositives + falsePositives === 0
         ? null
         : truePositives / (truePositives + falsePositives),
-    recall:
-      truePositives + falseNegatives === 0
-        ? null
-        : truePositives / (truePositives + falseNegatives),
+    recall: allTrue === 0 ? null : truePositives / allTrue,
     decidedRecall: decidedTrue === 0 ? null : truePositives / decidedTrue,
     contextFalsePositives: primary.filter(
       (item) => item.label === "context-fp" && finding(item),
@@ -668,7 +672,7 @@ function metricsFor(
     split,
     sampleCases: uniqueCases.size,
     repetitions: repetitions.size,
-    ...confusion(filtered),
+    ...confusionMetrics(filtered),
     ...distribution(filtered),
   };
 }

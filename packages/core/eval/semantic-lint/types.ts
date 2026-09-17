@@ -149,6 +149,7 @@ export interface ConfusionMetrics {
   truePositives: number;
   falsePositives: number;
   falseNegatives: number;
+  abstainedTrueViolations: number;
   precision: number | null;
   recall: number | null;
   decidedRecall: number | null;
