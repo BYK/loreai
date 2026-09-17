@@ -13,7 +13,9 @@ Commands:
   run [command] [args...]  Start gateway and launch an AI agent (default)
                            Extra arguments are forwarded to the launched agent
   start               Start the gateway server (without launching an agent)
-                       Hosted mode is ON by default; use --local to disable.
+                       Hosted and remote-gateway modes are ON by default.
+                       Use --local when this gateway shares its filesystem
+                       with the agents it serves.
                        Remote-gateway mode is also ON by default for long-running
                        setups — path-less sessions route to per-session buckets
                        so unrelated projects never merge onto the gateway cwd.
@@ -56,9 +58,11 @@ Options:
                       (default: 127.0.0.1, env: LORE_LISTEN_HOST)
   -r, --remote <url>  Use a remote gateway instead of starting a local one
                       (env: LORE_REMOTE_URL)
-  -l, --local         Disable hosted mode AND remote-gateway mode for
-                      \`lore start\` (keep FS ops active; bucket cwd fallback)
-                      (env: LORE_HOSTED_MODE=0)
+  -l, --local         Run \`lore start\` as a filesystem-backed local gateway:
+                      disables hosted and remote-gateway modes, enables FS ops,
+                      and uses the gateway cwd as the path-less fallback
+                      (env equivalent: LORE_HOSTED_MODE=0, LORE_REMOTE_GATEWAY=0)
+                      Use only on loopback or a fully trusted isolated network.
       --allow-remote-management
                        Allow non-loopback access to /ui and /api
                        (env: LORE_ALLOW_REMOTE_MANAGEMENT=1)
@@ -149,7 +153,7 @@ Examples:
   lore start                    # Start gateway (hosted mode, FS ops disabled)
   lore start --bg               # Start gateway in the background, then exit
   lore stop                     # Stop a background gateway
-  lore start --local            # Start gateway with FS ops enabled (local use)
+  lore start --local            # Start a filesystem-backed local gateway
   lore start -p 8080            # Start gateway on a custom port
   lore start -H 127.0.0.1 -H 100.69.65.125  # Bind to multiple interfaces
   lore start -H 127.0.0.1,100.69.65.125     # Same, comma-separated
@@ -206,8 +210,11 @@ Environment variables:
   LORE_HOSTED_MODE              Hosted mode — disables FS ops on client-controlled paths
                                 ON by default for \`lore start\`; set to 0 to disable
   LORE_REMOTE_GATEWAY           Remote-gateway mode — bucket path-less sessions per-session
-                                ON by default for \`lore start\`; also auto-enabled when bind
-                                address is non-loopback (e.g. Tailscale, LAN, 0.0.0.0)
+                                ON by default for \`lore start\`; set to 0 to disable only this
+                                bucketing policy. For a filesystem-backed local gateway, use
+                                --local (or set both LORE_HOSTED_MODE=0 and this variable to 0).
+                                Local mode is for loopback or fully trusted isolated networks.
+                                auto-enabled for non-loopback binds (e.g. Tailscale, LAN, 0.0.0.0)
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
   SUPABASE_URL                  Override the Folk Lore Supabase project URL

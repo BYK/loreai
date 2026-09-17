@@ -115,6 +115,9 @@ describe("Phase 1 — Stricli app contract", () => {
     expect(out).toContain("Commands:");
     expect(out).toContain("run");
     expect(out).toContain("setup");
+    expect(out).toContain("filesystem-backed local gateway");
+    expect(out).toContain("loopback or a fully trusted isolated network");
+    expect(out).not.toContain("local dev");
   });
 
   test("`lore help --json` returns structured Phase-1 stub", async () => {

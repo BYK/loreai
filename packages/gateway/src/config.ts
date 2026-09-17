@@ -136,6 +136,13 @@ export interface GatewayConfig {
    * address(es) include any non-loopback host. This catches the common
    * case of running a long-lived gateway on a server (Tailscale, LAN IP,
    * `0.0.0.0`, etc.) without requiring an explicit env var.
+   *
+   * `lore start` also defaults to remote-gateway mode. Use
+   * `lore start --local` when the gateway shares its filesystem with
+   * the agents it serves. For equivalent service configuration, set both
+   * `LORE_HOSTED_MODE=0` and `LORE_REMOTE_GATEWAY=0`. Local mode disables
+   * gateway access authentication, so use it only on loopback or a fully
+   * trusted isolated network; use remote/hosted mode for untrusted clients.
    */
   remoteGateway: boolean;
   /**

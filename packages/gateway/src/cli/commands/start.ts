@@ -74,7 +74,8 @@ export const startCommand = buildCommand<StartFlags, []>({
       },
       local: {
         kind: "boolean",
-        brief: "Disable hosted mode even for lore start (alias: -l)",
+        brief:
+          "Run as a filesystem-backed local gateway on trusted networks (disables hosted and remote modes; alias: -l)",
         optional: true,
       },
       allowRemoteManagement: {
