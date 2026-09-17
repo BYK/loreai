@@ -7,8 +7,13 @@ import {
   costFor,
   renderSemanticLintReplayMarkdown,
   runSemanticLintReplay,
+  validateTraceAccounting,
 } from "./runner";
-import type { ReplayObservation, TruthLabel } from "./types";
+import type {
+  RecordedJudgeTrace,
+  ReplayObservation,
+  TruthLabel,
+} from "./types";
 
 describe("semantic-lint labeled replay evaluation", () => {
   test("locks fixed revisions, labels, and controlled mutants", () => {
@@ -221,6 +226,30 @@ describe("semantic-lint labeled replay evaluation", () => {
         observation("case-c", "adaptive-connected", "clear"),
       ]),
     ).toBe(1);
+  });
+
+  test("rejects impossible call and token accounting", () => {
+    const trace: RecordedJudgeTrace = {
+      response: '{"reason":"ok","verdict":"satisfies"}',
+      verdict: "satisfies",
+      reason: "ok",
+      semanticCalls: 2,
+      transportAttempts: 1,
+      inputTokens: 1_000,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      latencyMs: 10,
+    };
+    expect(() => validateTraceAccounting(trace, "test")).toThrow(
+      "transportAttempts cannot be below semanticCalls",
+    );
+    expect(() =>
+      validateTraceAccounting(
+        { ...trace, transportAttempts: 2, inputTokens: 1.5 },
+        "test",
+      ),
+    ).toThrow("inputTokens must be a non-negative integer");
   });
 
   test("reduces context false positives without hiding guard-removal mutants", () => {

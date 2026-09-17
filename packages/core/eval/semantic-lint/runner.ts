@@ -91,10 +91,16 @@ function finiteNonNegative(value: number, label: string): number {
   return value;
 }
 
-function validateTraceAccounting(
+export function validateTraceAccounting(
   trace: RecordedJudgeTrace | RecordedVerifierTrace,
   label: string,
 ): void {
+  const tokenKeys = new Set([
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+  ]);
   for (const [key, value] of Object.entries(trace)) {
     if (
       key === "response" ||
@@ -104,12 +110,20 @@ function validateTraceAccounting(
     )
       continue;
     finiteNonNegative(value, `${label}.${key}`);
+    if (tokenKeys.has(key) && !Number.isSafeInteger(value)) {
+      throw new TypeError(`${label}.${key} must be a non-negative integer`);
+    }
   }
   if (!Number.isSafeInteger(trace.semanticCalls)) {
     throw new TypeError(`${label}.semanticCalls must be an integer`);
   }
   if (!Number.isSafeInteger(trace.transportAttempts)) {
     throw new TypeError(`${label}.transportAttempts must be an integer`);
+  }
+  if (trace.transportAttempts < trace.semanticCalls) {
+    throw new TypeError(
+      `${label}.transportAttempts cannot be below semanticCalls`,
+    );
   }
   if (trace.response.trim().length === 0) {
     throw new TypeError(`${label}.response must be non-empty`);
