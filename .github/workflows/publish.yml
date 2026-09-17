@@ -25,6 +25,7 @@ jobs:
         id: inputs
         env:
           ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           # Title format: "publish: owner/repo@VERSION"
           VERSION=$(echo "$ISSUE_TITLE" | grep -oP '@\K[^\s]+$')
@@ -33,6 +34,26 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Craft itself never reads the issue: the "### Targets" checklist is
+          # honoured by translating it into explicit `--target` flags. Checked
+          # boxes mean "already done, skip"; when everything is checked we pass
+          # the special target `none`, which runs only the post-publish steps
+          # (tag, merge the release branch back, delete it).
+          TARGETS_SECTION=$(echo "$ISSUE_BODY" | sed -n '/### Targets/,/Checked targets will be skipped/p')
+          PENDING=$(echo "$TARGETS_SECTION" | grep -oP '^\s*-\s*\[ \]\s+\K\S+' || true)
+          ALL=$(echo "$TARGETS_SECTION" | grep -oP '^\s*-\s*\[[ xX]\]\s+\K\S+' || true)
+          TARGET_ARGS=""
+          if [[ -n "$ALL" && "$PENDING" != "$ALL" ]]; then
+            if [[ -z "$PENDING" ]]; then
+              TARGET_ARGS="--target none"
+            else
+              while read -r target; do
+                TARGET_ARGS+=" --target $target"
+              done <<< "$PENDING"
+            fi
+          fi
+          echo "target_args=$TARGET_ARGS" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
         with:
@@ -111,7 +132,7 @@ jobs:
           fi
 
       - name: Publish
-        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input
+        run: craft publish "${{ steps.inputs.outputs.version }}" --no-input ${{ steps.inputs.outputs.target_args }}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
