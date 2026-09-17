@@ -41,6 +41,7 @@ export interface ReplayInvariant {
 }
 
 export interface RecordedJudgeTrace {
+  response: string;
   verdict: RecordedVerdict;
   reason: string;
   semanticCalls: number;
@@ -53,6 +54,7 @@ export interface RecordedJudgeTrace {
 }
 
 export interface RecordedVerifierTrace {
+  response: string;
   outcome: "confirmed" | "cleared" | "unresolved";
   reason: string;
   semanticCalls: number;
@@ -154,6 +156,7 @@ export interface ConfusionMetrics {
   recall: number | null;
   decidedRecall: number | null;
   contextFalsePositives: number;
+  contextFalsePositiveClears: number;
   controlledMutantTruePositives: number;
   controlledMutantSamples: number;
 }
@@ -188,6 +191,7 @@ export interface StrategyMetrics extends ConfusionMetrics, DistributionMetrics {
 export interface SemanticLintReplayGuardrails {
   status: "pass" | "insufficient-sample" | "fail";
   contextFalsePositiveReduction: number;
+  recallDelta: number | null;
   decidedRecallDelta: number | null;
   controlledMutantRecall: number | null;
   abstentionRateDelta: number | null;

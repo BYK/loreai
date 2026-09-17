@@ -12,10 +12,13 @@ Each case records:
 - controlled mutants that remove an authentication guard.
 
 This is a locked-trace metric replay, not a live model evaluation: it does not
-fetch or execute the revisions. A reviewed SHA-256 manifest binds every case's
-revision metadata, invariant, hunk set, labels, and recorded traces before any
-metrics are produced. The two real PR cases use full commit SHAs; synthetic
-cases are labeled as such.
+fetch or execute the revisions. A reviewed SHA-256 drift manifest binds every
+case's revision metadata, invariant, hunk set, labels, and recorded traces
+before any metrics are produced, and the stored judge/verifier responses are
+validated by the production response parsers. The manifest is change
+detection, not a security boundary: branch protection and maintainer review
+remain the authority for changing labels or traces. The two real PR cases use
+full commit SHAs; synthetic cases are labeled as such.
 
 The runner compares three arms:
 
@@ -37,8 +40,12 @@ and p50/p95 latency. Abstentions are not silently counted as clean: the report
 keeps them separate from decided false negatives and checks that all controlled
 mutant violations remain visible. Primary precision/recall exclude controlled
 mutants; their recall is reported separately. Held-out cases use distinct
-invariants and hunk sets, and held-out mutants must be independently authored
-rather than naming an in-corpus labeled parent.
+invariants and hunk-content fingerprints, and held-out mutants must be
+independently authored rather than naming an in-corpus labeled parent. The
+guardrails compare total recall as well as decided recall, reject increased
+adaptive abstention, and count only resolved clears as false-positive
+reductions. Cost accounting treats uncached, cache-read, and cache-write token
+buckets as disjoint.
 
 The traces are locked fixture observations, not a claim that one model run is a
 population estimate. New cases must update the reviewed digest manifest and

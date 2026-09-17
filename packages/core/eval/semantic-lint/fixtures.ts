@@ -11,6 +11,7 @@ function judge(
   overrides: Partial<RecordedJudgeTrace> = {},
 ): RecordedJudgeTrace {
   return {
+    response: JSON.stringify({ verdict, reason }),
     verdict,
     reason,
     semanticCalls: 1,
@@ -29,7 +30,21 @@ function verifier(
   reason: string,
   overrides: Partial<RecordedVerifierTrace> = {},
 ): RecordedVerifierTrace {
+  const parsedVerdict =
+    outcome === "confirmed"
+      ? "confirmed"
+      : outcome === "cleared"
+        ? "resolved"
+        : "insufficient-context";
   return {
+    response: JSON.stringify({
+      evidence:
+        parsedVerdict === "insufficient-context"
+          ? []
+          : [{ hunkId: "hunk-0001", reason }],
+      reason,
+      verdict: parsedVerdict,
+    }),
     outcome,
     reason,
     semanticCalls: 1,
@@ -40,6 +55,31 @@ function verifier(
     cacheWriteTokens: 0,
     latencyMs: 64,
     ...overrides,
+  };
+}
+
+function holisticJudge(
+  invariantId: string,
+  verdict: RecordedJudgeTrace["verdict"],
+  reason: string,
+  overrides: Partial<RecordedJudgeTrace> = {},
+): RecordedJudgeTrace {
+  const trace = judge(verdict, reason, overrides);
+  return {
+    ...trace,
+    response: JSON.stringify({
+      results: [
+        {
+          evidence:
+            verdict === "violates" || verdict === "fixes"
+              ? [{ hunkId: "hunk-0001", reason }]
+              : [],
+          invariantId,
+          reason,
+          verdict,
+        },
+      ],
+    }),
   };
 }
 
@@ -69,8 +109,8 @@ const relocatedGateInvariant = invariant(
 
 const lifecycleInvariant = invariant(
   "inv-embedded-gateway-lifecycle",
-  "Owned embedded gateways must shut down on process termination",
-  "An embedded gateway owned by the host process must install a SIGTERM shutdown handler and must not rely on per-workspace disposal.",
+  "Owned embedded gateways must preserve lifecycle ownership",
+  "An embedded gateway owned by the host process must remain registered with the existing lifecycle owner and preserve per-workspace disposal; replacing that contract with a process-level SIGTERM hook is an intentional baseline-rule change.",
   "strict",
 );
 
@@ -220,7 +260,8 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
         "The old gateway gate is absent from the changed pipeline hunk.",
         { inputTokens: 1_960, outputTokens: 104, latencyMs: 52 },
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-temporal-recall-gate",
         "satisfies",
         "The complete diff shows the gate moved to the core backfill boundary.",
         { inputTokens: 5_420, outputTokens: 144, latencyMs: 78 },
@@ -248,7 +289,8 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
         "The per-workspace lifecycle owner was removed.",
         { inputTokens: 1_740, outputTokens: 102, latencyMs: 51 },
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-embedded-gateway-lifecycle",
         "violates",
         "The new process-level SIGTERM handler does not preserve the old disposal contract.",
         { inputTokens: 4_880, outputTokens: 151, latencyMs: 73 },
@@ -293,7 +335,8 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
         "violates",
         "The replacement dispatch bypasses authentication.",
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-replacement-guard",
         "violates",
         "No connected hunk restores the removed replacement guard.",
         { inputTokens: 4_220, outputTokens: 128, latencyMs: 65 },
@@ -325,8 +368,10 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
       isolated: judge(
         "satisfies",
         "The extracted runtime still uses the provider boundary.",
+        { cacheReadTokens: 240, cacheWriteTokens: 120 },
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-embedding-facade",
         "satisfies",
         "The complete refactor preserves the public embedding facade.",
         { inputTokens: 3_820, outputTokens: 132, latencyMs: 59 },
@@ -367,7 +412,8 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
         "violates",
         "The seed hunk does not show the guard assertion.",
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-replacement-guard",
         "satisfies",
         "The changed test confirms the replacement guard remains active.",
         { inputTokens: 3_460, outputTokens: 126, latencyMs: 57 },
@@ -403,7 +449,8 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
         "violates",
         "The worker is started without the process termination hook in the seed.",
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-process-worker-termination-hook",
         "satisfies",
         "The companion termination module preserves the worker shutdown hook.",
         { inputTokens: 3_980, outputTokens: 137, latencyMs: 63 },
@@ -446,7 +493,8 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
         "violates",
         "The session replacement executes without authorization.",
       ),
-      holistic: judge(
+      holistic: holisticJudge(
+        "inv-session-replacement-authorization",
         "violates",
         "The authorization guard is absent from the complete diff.",
         {
@@ -488,11 +536,16 @@ const FIXTURE_DEFINITIONS: readonly ReplayFixtureDefinition[] = [
           latencyMs: 83,
         },
       ),
-      holistic: judge("satisfies", "The complete storage diff is clean.", {
-        inputTokens: 21_000,
-        outputTokens: 120,
-        latencyMs: 110,
-      }),
+      holistic: holisticJudge(
+        "inv-storage-facade",
+        "satisfies",
+        "The complete storage diff is clean.",
+        {
+          inputTokens: 21_000,
+          outputTokens: 120,
+          latencyMs: 110,
+        },
+      ),
       adaptive: {
         firstPass: judge(
           "satisfies",
@@ -513,49 +566,49 @@ export const SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS = {
     inputSha256:
       "ce49a5c6961e0a22bca46fbd8a5c016626d03d14a0ada4abca0150c012c7ffbf",
     traceSha256:
-      "1faff28a1decb978f1f46dcbf396fdec6d2feb4c3467d98deec98b84b3ca6523",
+      "791c85004e3de9c8f86149ebf2eebb65bbd7032546d39f0e9a150a291d1653e3",
   },
   "labeled-pr-1768-intentional-lifecycle-change": {
     inputSha256:
-      "e704a669146872061138cc0d9bdbf7a1748a59505680eb36e15045be039b12c7",
+      "bf8de149196f5761feb4d8182a5b6e3d1654dfffb95997735b5a9695343b72d9",
     traceSha256:
-      "f47550a84c0d3613bf85cd106e08e57b441afa439f326ca9ce0a8d1a8d80e94f",
+      "4dab2ee1649e61cc5617f83d7df0316b8b37bc5cde03b30e6b8afc75647563fc",
   },
   "labeled-mutant-remove-replacement-guard": {
     inputSha256:
       "bf780fef6dee42a2decf18c488471cce641bb21a78273d07b9d98a046cdb0b1b",
     traceSha256:
-      "9824a2f00d3952c81bc7a9c0c6ace43fd1acccceb801ae8647c5b8f8c0c2b851",
+      "58812407334374356d06e1831282bdbf4ae8ea373b0d6624b595a79d4cd68348",
   },
   "labeled-safe-embedding-extraction": {
     inputSha256:
       "170f00d80965ec7aa6c2211792b3c3b27258e7a807f1a26c7983d0e17a8b1bb7",
     traceSha256:
-      "8a190d216e3dcdd7114392b4d8d196fdcb46677fbb3f682d794ddb1fa4c3fd6f",
+      "571bfedafaba4741a86de996fa7d4359b236ea26efec689911bc2b0eccd85402",
   },
   "labeled-connected-test-pair-clears-fp": {
     inputSha256:
       "ac6bb45655ddcf907bee9c0c30096438afbf2695285f83cde814c42f28e56ed0",
     traceSha256:
-      "7ee8562931633db4f8ae8dd7e2eb672085d346c0184d4fe1045cd55ef124fd83",
+      "2ad9cbae3832cbe8cd8f9485a643eb6e7003268224651c0cdf75e97212e2e856",
   },
   "heldout-relocated-sigterm-helper": {
     inputSha256:
       "ef62aecb04ad7a46d9f022c5272666248f55fb679d53c669fbfa1c7701b99adc",
     traceSha256:
-      "fbc89102c9f0824246cbe4383985b960cbcf892134f4939909cafeb8fc0cbf13",
+      "52f035e3d65018ebbc8f68b7c220c7450ad2dfd749473c3277363fd402a9d12e",
   },
   "heldout-remove-replacement-guard": {
     inputSha256:
       "e979dd44d803b3b2da73b5da3d87d52b0f2d77e5224946d6d8245d887a400688",
     traceSha256:
-      "59ddcb1d23fa9134f758dff8360f2c709839d0a6ec635b4aa607ffb8f9e7e816",
+      "2176aa6b52cc16f8988fe09e4e195bb9b0df01b6fb784460b61dce662db27992",
   },
   "heldout-large-clean-refactor": {
     inputSha256:
       "a4275ae1fb663a2491e5fad243d7a252cda4afd2462dca95e1199c77c700f65d",
     traceSha256:
-      "5047113b9f03b59464969aeaa965165f10d64b92b7e7d696215949fe90a98352",
+      "992fddbd0d0189709c3c2edfb3a097118b277ba30001a47bb0225c35b74efa11",
   },
 } as const;
 

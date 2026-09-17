@@ -31,7 +31,11 @@ import {
   SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS,
   getSemanticLintReplayFixtures,
 } from "./fixtures";
-import { computeReplayFixtureDigests } from "./integrity";
+import {
+  computeReplayFixtureDigests,
+  replayHunkDigests,
+  replayInvariantContentDigest,
+} from "./integrity";
 
 export const DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG: SemanticLintReplayConfig = {
   model: "test/semantic-lint-replay",
@@ -87,9 +91,18 @@ function finiteNonNegative(value: number, label: string): number {
   return value;
 }
 
-function validateJudgeTrace(trace: RecordedJudgeTrace, label: string): void {
+function validateTraceAccounting(
+  trace: RecordedJudgeTrace | RecordedVerifierTrace,
+  label: string,
+): void {
   for (const [key, value] of Object.entries(trace)) {
-    if (key === "verdict" || key === "reason") continue;
+    if (
+      key === "response" ||
+      key === "verdict" ||
+      key === "outcome" ||
+      key === "reason"
+    )
+      continue;
     finiteNonNegative(value, `${label}.${key}`);
   }
   if (!Number.isSafeInteger(trace.semanticCalls)) {
@@ -98,9 +111,14 @@ function validateJudgeTrace(trace: RecordedJudgeTrace, label: string): void {
   if (!Number.isSafeInteger(trace.transportAttempts)) {
     throw new TypeError(`${label}.transportAttempts must be an integer`);
   }
-  const parsed = parseInvariantVerdict(
-    JSON.stringify({ verdict: trace.verdict, reason: trace.reason }),
-  );
+  if (trace.response.trim().length === 0) {
+    throw new TypeError(`${label}.response must be non-empty`);
+  }
+}
+
+function validateJudgeTrace(trace: RecordedJudgeTrace, label: string): void {
+  validateTraceAccounting(trace, label);
+  const parsed = parseInvariantVerdict(trace.response);
   if (
     !parsed ||
     parsed.verdict !== trace.verdict ||
@@ -117,31 +135,23 @@ function validateHolisticTrace(
   caseData: SemanticLintReplayCase,
   label: string,
 ): void {
-  validateJudgeTrace(trace, label);
+  validateTraceAccounting(trace, label);
   const hunkIds = new Set(
     caseData.hunks.map(
       (_, index) => `hunk-${String(index + 1).padStart(4, "0")}`,
     ),
   );
-  const evidence =
-    trace.verdict === "violates" || trace.verdict === "fixes"
-      ? [{ hunkId: "hunk-0001", reason: trace.reason }]
-      : [];
   const parsed = parseHolisticLintResults(
-    JSON.stringify({
-      results: [
-        {
-          invariantId: caseData.invariant.id,
-          verdict: trace.verdict,
-          reason: trace.reason,
-          evidence,
-        },
-      ],
-    }),
+    trace.response,
     new Set([caseData.invariant.id]),
     hunkIds,
   );
-  if (!parsed || parsed[0]?.verdict !== trace.verdict) {
+  if (
+    !parsed ||
+    parsed[0]?.invariantId !== caseData.invariant.id ||
+    parsed[0]?.verdict !== trace.verdict ||
+    parsed[0]?.reason !== trace.reason
+  ) {
     throw new TypeError(
       `${label} does not satisfy the production holistic parser`,
     );
@@ -153,30 +163,14 @@ function validateVerifierTrace(
   label: string,
   expectedHunkIds: ReadonlySet<string>,
 ): void {
-  for (const [key, value] of Object.entries(trace)) {
-    if (key === "outcome" || key === "reason") continue;
-    finiteNonNegative(value, `${label}.${key}`);
-  }
-  if (!Number.isSafeInteger(trace.semanticCalls)) {
-    throw new TypeError(`${label}.semanticCalls must be an integer`);
-  }
-  if (!Number.isSafeInteger(trace.transportAttempts)) {
-    throw new TypeError(`${label}.transportAttempts must be an integer`);
-  }
+  validateTraceAccounting(trace, label);
   const verdict =
     trace.outcome === "confirmed"
       ? "confirmed"
       : trace.outcome === "cleared"
         ? "resolved"
         : "insufficient-context";
-  const evidence =
-    verdict === "insufficient-context"
-      ? []
-      : [{ hunkId: [...expectedHunkIds][0], reason: trace.reason }];
-  const parsed = parseCounterevidenceVerdict(
-    JSON.stringify({ verdict, reason: trace.reason, evidence }),
-    expectedHunkIds,
-  );
+  const parsed = parseCounterevidenceVerdict(trace.response, expectedHunkIds);
   if (!parsed || parsed.verdict !== verdict || parsed.reason !== trace.reason) {
     throw new TypeError(
       `${label} does not satisfy the production counterevidence parser`,
@@ -184,7 +178,7 @@ function validateVerifierTrace(
   }
 }
 
-function costFor(
+export function costFor(
   trace: {
     inputTokens: number;
     outputTokens: number;
@@ -193,9 +187,8 @@ function costFor(
   },
   config: SemanticLintReplayConfig,
 ): number {
-  const billableInput = Math.max(0, trace.inputTokens - trace.cacheReadTokens);
   return (
-    (billableInput * config.inputCostPerMillion +
+    (trace.inputTokens * config.inputCostPerMillion +
       trace.outputTokens * config.outputCostPerMillion +
       trace.cacheReadTokens * config.cacheReadCostPerMillion +
       trace.cacheWriteTokens * config.cacheWriteCostPerMillion) /
@@ -649,6 +642,9 @@ export function confusionMetrics(
     contextFalsePositives: primary.filter(
       (item) => item.label === "context-fp" && finding(item),
     ).length,
+    contextFalsePositiveClears: primary.filter(
+      (item) => item.label === "context-fp" && item.outcome === "clear",
+    ).length,
     controlledMutantTruePositives: mutants.filter(
       (item) => item.label === "true-violation" && finding(item),
     ).length,
@@ -689,9 +685,14 @@ function guardrails(
   const sampleSizeMet =
     cases.filter((item) => item.split === "labeled").length >= 3 &&
     cases.filter((item) => item.split === "held-out").length >= 2;
-  const contextFalsePositiveReduction =
-    (isolated?.contextFalsePositives ?? 0) -
-    (adaptive?.contextFalsePositives ?? 0);
+  const contextFalsePositiveReduction = Math.min(
+    isolated?.contextFalsePositives ?? 0,
+    adaptive?.contextFalsePositiveClears ?? 0,
+  );
+  const recallDelta =
+    isolated?.recall === null || adaptive?.recall === null
+      ? null
+      : (adaptive?.recall ?? 0) - (isolated?.recall ?? 0);
   const decidedRecallDelta =
     isolated?.decidedRecall === null || adaptive?.decidedRecall === null
       ? null
@@ -725,6 +726,12 @@ function guardrails(
   if (decidedRecallDelta !== null && decidedRecallDelta < 0) {
     notes.push("adaptive-connected decided recall is below isolated-baseline");
   }
+  if (recallDelta !== null && recallDelta < 0) {
+    notes.push("adaptive-connected recall is below isolated-baseline");
+  }
+  if (abstentionRateDelta !== null && abstentionRateDelta > 0) {
+    notes.push("adaptive-connected abstention rate is above isolated-baseline");
+  }
   const status = !sampleSizeMet
     ? "insufficient-sample"
     : notes.length > 0
@@ -733,6 +740,7 @@ function guardrails(
   return {
     status,
     contextFalsePositiveReduction,
+    recallDelta,
     decidedRecallDelta,
     controlledMutantRecall,
     abstentionRateDelta,
@@ -749,7 +757,8 @@ function validateReplayCorpus(cases: readonly SemanticLintReplayCase[]): void {
   );
   const caseIds = new Set<string>();
   const labeledInputDigests = new Set<string>();
-  const labeledInvariantIds = new Set<string>();
+  const labeledInvariantContentDigests = new Set<string>();
+  const labeledHunkDigests = new Set<string>();
 
   for (const caseData of cases) {
     if (caseIds.has(caseData.id)) {
@@ -776,7 +785,12 @@ function validateReplayCorpus(cases: readonly SemanticLintReplayCase[]): void {
     }
     if (caseData.split === "labeled") {
       labeledInputDigests.add(actual.inputSha256);
-      labeledInvariantIds.add(caseData.invariant.id);
+      labeledInvariantContentDigests.add(
+        replayInvariantContentDigest(caseData),
+      );
+      for (const digest of replayHunkDigests(caseData)) {
+        labeledHunkDigests.add(digest);
+      }
     }
   }
 
@@ -789,8 +803,21 @@ function validateReplayCorpus(cases: readonly SemanticLintReplayCase[]): void {
     if (labeledInputDigests.has(actual.inputSha256)) {
       throw new Error(`held-out case reuses labeled input: ${caseData.id}`);
     }
-    if (labeledInvariantIds.has(caseData.invariant.id)) {
-      throw new Error(`held-out case reuses labeled invariant: ${caseData.id}`);
+    if (
+      labeledInvariantContentDigests.has(replayInvariantContentDigest(caseData))
+    ) {
+      throw new Error(
+        `held-out case reuses labeled invariant content: ${caseData.id}`,
+      );
+    }
+    if (
+      replayHunkDigests(caseData).some((digest) =>
+        labeledHunkDigests.has(digest),
+      )
+    ) {
+      throw new Error(
+        `held-out case reuses labeled hunk content: ${caseData.id}`,
+      );
     }
     if (caseData.mutation) {
       if (caseData.mutation.ancestry !== "independent") {
@@ -884,17 +911,17 @@ export function renderSemanticLintReplayMarkdown(
     "",
     `Configuration: model \`${report.configuration.model}\`, effort \`${report.configuration.effort}\`, prompt \`${report.configuration.promptVersion}\`, cache \`${report.configuration.cacheCondition}\`.`,
     "",
-    "| Strategy | n | Precision | Decided recall | Abstentions | Coverage | Calls | Input tok | Output tok | Cost | p50/p95 ms |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Strategy | n | Precision | Recall | Decided recall | Abstentions | Coverage | Calls | Input tok | Output tok | Cost | p50/p95 ms |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const item of all) {
     lines.push(
-      `| ${item.strategy} | ${item.total} | ${formatPct(item.precision)} | ${formatPct(item.decidedRecall)} | ${item.abstentions} | ${formatPct(item.coverageRatio)} | ${item.totalSemanticCalls} / ${item.totalTransportAttempts} | ${item.totalInputTokens} | ${item.totalOutputTokens} | $${item.totalEstimatedCostUsd.toFixed(4)} | ${item.p50.toFixed(0)} / ${item.p95.toFixed(0)} |`,
+      `| ${item.strategy} | ${item.total} | ${formatPct(item.precision)} | ${formatPct(item.recall)} | ${formatPct(item.decidedRecall)} | ${item.abstentions} | ${formatPct(item.coverageRatio)} | ${item.totalSemanticCalls} / ${item.totalTransportAttempts} | ${item.totalInputTokens} | ${item.totalOutputTokens} | $${item.totalEstimatedCostUsd.toFixed(4)} | ${item.p50.toFixed(0)} / ${item.p95.toFixed(0)} |`,
     );
   }
   lines.push(
     "",
-    `Guardrails: **${report.guardrails.status}** — context-related FP reduction ${report.guardrails.contextFalsePositiveReduction}; decided-recall delta ${formatPct(report.guardrails.decidedRecallDelta)}; controlled-mutant recall ${formatPct(report.guardrails.controlledMutantRecall)}.`,
+    `Guardrails: **${report.guardrails.status}** — context-related FP clears ${report.guardrails.contextFalsePositiveReduction}; recall delta ${formatPct(report.guardrails.recallDelta)}; decided-recall delta ${formatPct(report.guardrails.decidedRecallDelta)}; controlled-mutant recall ${formatPct(report.guardrails.controlledMutantRecall)}.`,
   );
   for (const note of report.guardrails.notes) lines.push(`- ${note}`);
   lines.push(

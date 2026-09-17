@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
+  DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
   SEMANTIC_LINT_REPLAY_FIXTURES,
   confusionMetrics,
+  costFor,
   renderSemanticLintReplayMarkdown,
   runSemanticLintReplay,
 } from "./runner";
@@ -132,6 +134,22 @@ describe("semantic-lint labeled replay evaluation", () => {
       decidedRecall: 0.5,
       recall: 1 / 3,
     });
+  });
+
+  test("prices disjoint uncached, cache-read, and cache-write tokens", () => {
+    expect(
+      costFor(
+        {
+          inputTokens: 1_000,
+          outputTokens: 100,
+          cacheReadTokens: 500,
+          cacheWriteTokens: 200,
+        },
+        DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
+      ),
+    ).toBeCloseTo(
+      (1_000 * 0.25 + 100 * 1.25 + 500 * 0.025 + 200 * 0.3125) / 1_000_000,
+    );
   });
 
   test("reduces context false positives without hiding guard-removal mutants", () => {

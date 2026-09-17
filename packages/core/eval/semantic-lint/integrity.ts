@@ -39,6 +39,17 @@ export function replayTracePayload(caseData: SemanticLintReplayCase): unknown {
   return caseData.recorded;
 }
 
+export function replayInvariantContentDigest(
+  caseData: SemanticLintReplayCase,
+): string {
+  const { id: _id, ...content } = caseData.invariant;
+  return sha256Canonical(content);
+}
+
+export function replayHunkDigests(caseData: SemanticLintReplayCase): string[] {
+  return caseData.hunks.map((hunk) => sha256Canonical(hunk));
+}
+
 export function computeReplayFixtureDigests(
   caseData: SemanticLintReplayCase,
 ): ReplayFixtureDigests {
