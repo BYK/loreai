@@ -282,6 +282,17 @@ describe("semantic-lint labeled replay evaluation", () => {
     expect(large?.plannedInputTokens).toBeGreaterThan(
       large?.inputTokenBudget ?? 0,
     );
+    const adaptiveLarge = report.observations.find(
+      (item) =>
+        item.caseId === "heldout-large-clean-refactor" &&
+        item.strategy === "adaptive-connected",
+    );
+    expect(adaptiveLarge).toMatchObject({
+      outcome: "abstained",
+      status: "not-attempted",
+      abstentionReason: "connected-context-truncated",
+      semanticCalls: 0,
+    });
   });
 
   test("marks isolated context incomplete when companion hunks are omitted", () => {

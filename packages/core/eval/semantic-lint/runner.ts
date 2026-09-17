@@ -443,15 +443,43 @@ function runStrategy(
     rendered.omittedCompanions === 0 &&
     !connected.omittedBySeed.has(caseData.seedHunkIndex) &&
     !caseData.hunks.some((item) => item.truncated === true);
+  const connectedContextTruncated =
+    rendered.truncated ||
+    caseData.hunks.some((item) => item.truncated === true);
   const firstPass = caseData.recorded.adaptive.firstPass;
   validateJudgeTrace(firstPass, `${caseData.id}.adaptive.firstPass`);
   const adaptive = caseData.recorded.adaptive;
   const included = contextComplete
     ? 1 + companions.length
-    : rendered.truncated
+    : connectedContextTruncated
       ? 0
       : 1;
   const coverage = coverageFor(caseData, included, contextComplete);
+
+  if (connectedContextTruncated) {
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      [],
+      undefined,
+      "The connected seed context exceeded the bounded input limit.",
+      "not-attempted",
+      "abstained",
+      coverage,
+      estimateIsolatedLintInputTokens({
+        invariant: caseData.invariant,
+        hunk: {
+          id: "hunk-0001",
+          file: seed.file,
+          text: seed.text,
+        },
+      }),
+      config.budgets.counterevidenceInputTokenBudget,
+      "connected-context-truncated",
+    );
+  }
 
   if (firstPass.verdict !== "violates") {
     const final = finalOutcome(firstPass.verdict);
