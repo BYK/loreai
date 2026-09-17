@@ -9,6 +9,7 @@ import {
   runSemanticLintReplay,
   runStrategy,
   validateTraceAccounting,
+  validateTraceInputBudget,
   validateVerifierTrace,
 } from "./runner";
 import type {
@@ -255,6 +256,25 @@ describe("semantic-lint labeled replay evaluation", () => {
     ).toThrow("inputTokens must be a non-negative integer");
   });
 
+  test("validates each semantic trace against its own input budget", () => {
+    const trace: RecordedJudgeTrace = {
+      response: '{"reason":"ok","verdict":"satisfies"}',
+      verdict: "satisfies",
+      reason: "ok",
+      semanticCalls: 1,
+      transportAttempts: 1,
+      inputTokens: 10,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      latencyMs: 1,
+    };
+    expect(() => validateTraceInputBudget(trace, 10, "test")).not.toThrow();
+    expect(() => validateTraceInputBudget(trace, 9, "test")).toThrow(
+      "inputTokens exceeded input-token budget",
+    );
+  });
+
   test("rejects verifier traces with unknown outcomes", () => {
     const trace: RecordedVerifierTrace = {
       response: "{}",
@@ -355,6 +375,29 @@ describe("semantic-lint labeled replay evaluation", () => {
       includedHunks: 1,
       omittedHunks: 1,
     });
+  });
+
+  test("counts rendered companions even when connected context is incomplete", () => {
+    const source = SEMANTIC_LINT_REPLAY_FIXTURES.find(
+      (item) => item.id === "labeled-safe-embedding-extraction",
+    );
+    if (!source) throw new Error("fixture missing");
+    const seed = source.hunks[0];
+    if (!seed) throw new Error("seed hunk missing");
+    const hunks = Array.from({ length: 5 }, (_, index) => ({
+      ...seed,
+      file: "packages/core/src/semantic-lint/replay.ts",
+      text: `@@ -${index + 1},1 +${index + 1},1 @@\n+const sharedSymbol = ${index};`,
+    }));
+    const observation = runStrategy(
+      { ...source, hunks, seedHunkIndex: 0 },
+      "adaptive-connected",
+      1,
+      DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
+    );
+    expect(observation.contextComplete).toBe(false);
+    expect(observation.includedHunks).toBeGreaterThan(1);
+    expect(observation.includedHunks).toBeLessThanOrEqual(4);
   });
 
   test("renders an auditable Markdown summary", () => {

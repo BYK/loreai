@@ -130,6 +130,22 @@ export function validateTraceAccounting(
   }
 }
 
+/**
+ * Validate one semantic call against its own input budget. Adaptive replay can
+ * record a first-pass call and a verifier call, each with a separate budget;
+ * their aggregate is intentionally reported for cost accounting only.
+ */
+export function validateTraceInputBudget(
+  trace: RecordedJudgeTrace | RecordedVerifierTrace,
+  budget: number,
+  label: string,
+): void {
+  finiteNonNegative(budget, `${label} budget`);
+  if (trace.inputTokens > budget) {
+    throw new Error(`${label}.inputTokens exceeded input-token budget`);
+  }
+}
+
 function validateJudgeTrace(trace: RecordedJudgeTrace, label: string): void {
   validateTraceAccounting(trace, label);
   const parsed = parseInvariantVerdict(trace.response);
@@ -338,7 +354,6 @@ export function runStrategy(
   if (strategy === "isolated-baseline") {
     const rendered = renderConnectedContextDetails(seed, [], caseData.hunks);
     const trace = caseData.recorded.isolated;
-    validateJudgeTrace(trace, `${caseData.id}.isolated`);
     const coverage = coverageFor(
       caseData,
       rendered.truncated ? 0 : 1,
@@ -366,6 +381,12 @@ export function runStrategy(
         "seed-context-truncated",
       );
     }
+    validateJudgeTrace(trace, `${caseData.id}.isolated`);
+    validateTraceInputBudget(
+      trace,
+      config.budgets.counterevidenceInputTokenBudget,
+      `${caseData.id}.isolated`,
+    );
     const final = finalOutcome(trace.verdict);
     return observationFromTraces(
       caseData,
@@ -395,7 +416,6 @@ export function runStrategy(
       inputTokenBudget: config.budgets.holisticInputTokenBudget,
     });
     const trace = caseData.recorded.holistic;
-    validateHolisticTrace(trace, caseData, `${caseData.id}.holistic`);
     if (caseData.hunks.some((item) => item.truncated === true)) {
       return observationFromTraces(
         caseData,
@@ -440,6 +460,12 @@ export function runStrategy(
         "holistic-budget-exhausted",
       );
     }
+    validateHolisticTrace(trace, caseData, `${caseData.id}.holistic`);
+    validateTraceInputBudget(
+      trace,
+      config.budgets.holisticInputTokenBudget,
+      `${caseData.id}.holistic`,
+    );
     const final = finalOutcome(trace.verdict);
     return observationFromTraces(
       caseData,
@@ -478,13 +504,12 @@ export function runStrategy(
     rendered.truncated ||
     caseData.hunks.some((item) => item.truncated === true);
   const firstPass = caseData.recorded.adaptive.firstPass;
-  validateJudgeTrace(firstPass, `${caseData.id}.adaptive.firstPass`);
   const adaptive = caseData.recorded.adaptive;
-  const included = contextComplete
-    ? 1 + companions.length
-    : connectedContextTruncated
-      ? 0
-      : 1;
+  const renderedCompanions = Math.max(
+    0,
+    companions.length - rendered.omittedCompanions,
+  );
+  const included = connectedContextTruncated ? 0 : 1 + renderedCompanions;
   const coverage = coverageFor(caseData, included, contextComplete);
 
   if (connectedContextTruncated) {
@@ -511,6 +536,13 @@ export function runStrategy(
       "connected-context-truncated",
     );
   }
+
+  validateJudgeTrace(firstPass, `${caseData.id}.adaptive.firstPass`);
+  validateTraceInputBudget(
+    firstPass,
+    config.budgets.counterevidenceInputTokenBudget,
+    `${caseData.id}.adaptive.firstPass`,
+  );
 
   if (firstPass.verdict !== "violates") {
     const final = finalOutcome(firstPass.verdict);
@@ -574,6 +606,11 @@ export function runStrategy(
         (index) => `hunk-${String(index + 1).padStart(4, "0")}`,
       ),
     ),
+  );
+  validateTraceInputBudget(
+    verifierTrace,
+    config.budgets.counterevidenceInputTokenBudget,
+    `${caseData.id}.adaptive.verifier`,
   );
   const traces = [firstPass, verifierTrace];
   if (verifierTrace.outcome === "unresolved") {
@@ -1004,11 +1041,6 @@ export function runSemanticLintReplay(
         if (observation.verifierCalls > config.budgets.maxVerifierCalls) {
           throw new Error(
             `${caseData.id}/${strategy} exceeded verifier-call budget`,
-          );
-        }
-        if (observation.inputTokens > observation.inputTokenBudget) {
-          throw new Error(
-            `${caseData.id}/${strategy} exceeded input-token budget`,
           );
         }
         observations.push(observation);

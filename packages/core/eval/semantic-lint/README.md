@@ -48,7 +48,9 @@ guardrails compare total recall as well as decided recall, reject increased
 adaptive abstention or aggregate false-positive rate, require non-decreasing
 precision, and count only resolved clears as false-positive reductions. Cost
 accounting treats uncached, cache-read, and cache-write token buckets as
-disjoint.
+disjoint. `inputTokenBudget` is a per-semantic-call limit; adaptive first-pass
+and verifier tokens are both reported in the observation total and priced
+together, but each trace is validated against its own call budget.
 
 The traces are locked fixture observations, not a claim that one model run is a
 population estimate. New cases must update the reviewed digest manifest and
