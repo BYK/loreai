@@ -119,6 +119,64 @@ describe.skipIf(process.platform === "win32")(
     );
 
     test(
+      "warns when a filesystem-capable local gateway binds beyond loopback",
+      async () => {
+        if (!existsSync(BUNDLE)) {
+          throw new Error(
+            `Bundle not found at ${BUNDLE} — run the gateway bundle first.`,
+          );
+        }
+
+        const dir = await mkdtemp(join(tmpdir(), "lore-local-mode-warning-"));
+        tempDirs.add(dir);
+        const child = spawn(
+          process.execPath,
+          [BUNDLE, "start", "--local", "--host", "0.0.0.0", "--port", "0"],
+          {
+            env: testEnvironment(dir),
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        children.add(child);
+
+        let gatewayStarted = false;
+        let stderr = "";
+        let signalSent = false;
+        const stopAfterWarning = () => {
+          if (
+            !signalSent &&
+            gatewayStarted &&
+            stderr.includes("SECURITY WARNING: local mode")
+          ) {
+            signalSent = true;
+            child.kill("SIGTERM");
+          }
+        };
+        child.stdout?.on("data", (chunk: Buffer) => {
+          if (chunk.toString("utf8").includes("Gateway listening")) {
+            gatewayStarted = true;
+            stopAfterWarning();
+          }
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString("utf8");
+          stopAfterWarning();
+        });
+
+        const outcome = await waitForExit(child);
+        children.delete(child);
+
+        expect(signalSent).toBe(true);
+        expect(stderr).toContain("SECURITY WARNING: local mode");
+        expect(stderr).toContain(
+          "does not require gateway access authentication",
+        );
+        expect(outcome).toEqual({ code: 143, signal: null });
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    test(
       "authenticated shutdown closes a stalled partial HTTP connection",
       async () => {
         if (!existsSync(BUNDLE)) throw new Error("Gateway bundle is required");
