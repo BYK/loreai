@@ -14,9 +14,10 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
-    "@astrojs/mdx": "^7.0.3",
+    "@astrojs/markdown-remark": "^7.3.1",
+    "@astrojs/mdx": "^8.0.1",
     "@astrojs/rss": "^4.0.19",
-    "@astrojs/starlight": "^0.41.3",
+    "@astrojs/starlight": "^0.41.11",
     "astro": "^7.3.2",
     "sharp": "^0.35.4",
     "svgo": "^3.3.2",
