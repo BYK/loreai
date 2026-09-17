@@ -2894,6 +2894,110 @@ describe("counterevidence semantic-lint verification", () => {
 });
 
 describe("holistic semantic-lint orchestration", () => {
+  it("sanitizes invalid holistic transport-attempt stats", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-invalid-stats-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => {
+        throw new Error("isolated judge should not run for a fitting lint");
+      });
+      const holisticLint = vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "judge-contract-error" as const,
+          message: "The holistic judge returned invalid usage.",
+          scope: "run" as const,
+        },
+        stats: {
+          semanticCalls: Number.NaN,
+          transportAttempts: Number.POSITIVE_INFINITY,
+        },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [{ file: "src/transport.ts", text: "@@ -1 +1 @@\n+new" }],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { lint: holisticLint },
+        holisticInputTokenBudget: 16_000,
+        sessionID: "holistic-invalid-stats",
+      });
+
+      expect(result).toMatchObject({
+        status: "failed",
+        semanticCalls: 2,
+        transportAttempts: 2,
+        candidateOutcomes: [
+          {
+            state: "unresolved",
+            failure: { code: "judge-contract-error", scope: "run" },
+            stats: { semanticCalls: 2, transportAttempts: 2 },
+          },
+        ],
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a zero-call run-scoped holistic failure", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-run-failure-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => {
+        throw new Error("isolated judge should not run for a fitting lint");
+      });
+      const holisticLint = vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "no-auth" as const,
+          message: "No credential is available for the holistic judge.",
+          scope: "run" as const,
+          retryable: false,
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [{ file: "src/transport.ts", text: "@@ -1 +1 @@\n+new" }],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { lint: holisticLint },
+        holisticInputTokenBudget: 16_000,
+        sessionID: "holistic-run-failure",
+      });
+
+      expect(result).toMatchObject({
+        status: "failed",
+        semanticCalls: 0,
+        transportAttempts: 0,
+        candidateOutcomes: [
+          {
+            state: "unresolved",
+            failure: { code: "no-auth", scope: "run" },
+            stats: { semanticCalls: 0, transportAttempts: 0 },
+          },
+        ],
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("uses one complete whole-diff lint and cites only returned evidence", async () => {
     const project = mkdtempSync(join(tmpdir(), "lore-holistic-small-"));
     try {

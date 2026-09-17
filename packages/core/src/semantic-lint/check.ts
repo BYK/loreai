@@ -2515,16 +2515,22 @@ function semanticCallsFromError(error: unknown, maxCalls: number): number {
 
 function conservativeContractStats(
   remainingSemanticCalls: number,
-  observedTransportAttempts = 0,
+  observedTransportAttempts: unknown = 0,
 ): JudgeStats {
   // Every typed judge boundary receives at most two calls (initial response
   // plus one schema repair). Charge that entire invocation budget when the
   // callback cannot provide trustworthy usage, then make the failure run
   // scoped so no later candidate can spend more calls.
   const semanticCalls = Math.min(2, Math.max(0, remainingSemanticCalls));
+  const transportAttempts =
+    typeof observedTransportAttempts === "number" &&
+    Number.isSafeInteger(observedTransportAttempts) &&
+    observedTransportAttempts >= 0
+      ? observedTransportAttempts
+      : 0;
   return {
     semanticCalls,
-    transportAttempts: Math.max(semanticCalls, observedTransportAttempts),
+    transportAttempts: Math.max(semanticCalls, transportAttempts),
   };
 }
 
@@ -2942,7 +2948,7 @@ function validateHolisticLintOutcome(
     (outcome.failure.retryable === undefined ||
       typeof outcome.failure.retryable === "boolean")
   ) {
-    if (semanticCalls === 0) {
+    if (semanticCalls === 0 && outcome.failure.scope === "candidate") {
       return holisticContractFailure(
         conservativeContractStats(remainingSemanticCalls, transportAttempts),
       );
