@@ -1438,7 +1438,7 @@ export async function commandStart(opts: StartOptions): Promise<never> {
       );
       if (config.remoteGatewayCommandDefault) {
         console.log(
-          `[lore]   pass \`--local\` or set LORE_REMOTE_GATEWAY=0 to disable for local dev`,
+          `[lore]   pass \`--local\` when this gateway shares its filesystem with its agents`,
         );
       }
     } else {
