@@ -2,10 +2,11 @@
 /**
  * Run the deterministic semantic-lint replay corpus.
  *
- * This is deliberately separate from the live memory eval: it replays locked
- * judge/verifier traces for fixed revisions, so a CI run has no model spend and
- * produces comparable precision/recall, abstention, coverage, cost, and
- * latency measurements.
+ * This is deliberately separate from the live memory eval: it replays
+ * integrity-checked judge/verifier traces for fixed revisions, so a CI run has
+ * no model spend and produces comparable precision/recall, abstention,
+ * coverage, cost, and latency measurements without fetching or executing the
+ * revisions.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";

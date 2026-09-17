@@ -28,6 +28,11 @@ export interface ReplayRevision {
   head: string;
 }
 
+export interface ReplayFixtureDigests {
+  inputSha256: string;
+  traceSha256: string;
+}
+
 export interface ReplayInvariant {
   id: string;
   title: string;
@@ -78,8 +83,11 @@ export interface SemanticLintReplayCase {
   mutation?: {
     id: string;
     parentCaseId: string;
+    ancestry: "derived" | "independent";
     description: string;
   };
+  /** Checked against a separately reviewed manifest before replay. */
+  integrity: ReplayFixtureDigests;
   recorded: {
     isolated: RecordedJudgeTrace;
     holistic: RecordedJudgeTrace;

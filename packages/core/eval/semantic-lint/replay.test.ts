@@ -26,7 +26,38 @@ describe("semantic-lint labeled replay evaluation", () => {
       expect(item.revision.head).not.toHaveLength(0);
       expect(item.invariant.id).not.toHaveLength(0);
       expect(item.hunks.length).toBeGreaterThan(0);
+      expect(item.integrity.inputSha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(item.integrity.traceSha256).toMatch(/^[0-9a-f]{64}$/);
     }
+
+    const labeledInvariantIds = new Set(
+      SEMANTIC_LINT_REPLAY_FIXTURES.filter(
+        (item) => item.split === "labeled",
+      ).map((item) => item.invariant.id),
+    );
+    expect(
+      SEMANTIC_LINT_REPLAY_FIXTURES.filter(
+        (item) =>
+          item.split === "held-out" &&
+          labeledInvariantIds.has(item.invariant.id),
+      ),
+    ).toHaveLength(0);
+
+    const tampered = SEMANTIC_LINT_REPLAY_FIXTURES.map((item, index) =>
+      index === 0
+        ? {
+            ...item,
+            hunks: item.hunks.map((hunk, hunkIndex) =>
+              hunkIndex === 0
+                ? { ...hunk, text: `${hunk.text}\n+tampered` }
+                : hunk,
+            ),
+          }
+        : item,
+    );
+    expect(() => runSemanticLintReplay({ repetitions: 1 }, tampered)).toThrow(
+      "integrity mismatch",
+    );
   });
 
   test("compares all three strategies with repeated-run metrics", () => {

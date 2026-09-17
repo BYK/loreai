@@ -9,7 +9,13 @@ Each case records:
 - one human-reviewed invariant and a bounded diff-hunk replay;
 - a truth label: context false positive, true violation, or clean change;
 - recorded first-pass and verifier traces with calls, retries, tokens, and latency;
-- controlled mutants that remove the replacement authentication guard.
+- controlled mutants that remove an authentication guard.
+
+This is a locked-trace metric replay, not a live model evaluation: it does not
+fetch or execute the revisions. A reviewed SHA-256 manifest binds every case's
+revision metadata, invariant, hunk set, labels, and recorded traces before any
+metrics are produced. The two real PR cases use full commit SHAs; synthetic
+cases are labeled as such.
 
 The runner compares three arms:
 
@@ -29,9 +35,12 @@ decided recall, false negatives, abstention/unresolved counts, context coverage,
 semantic/transport/verifier calls, input/output/cache tokens, estimated cost,
 and p50/p95 latency. Abstentions are not silently counted as clean: the report
 keeps them separate from decided false negatives and checks that all controlled
-mutant violations remain visible.
+mutant violations remain visible. Primary precision/recall exclude controlled
+mutants; their recall is reported separately. Held-out cases use distinct
+invariants and hunk sets, and held-out mutants must be independently authored
+rather than naming an in-corpus labeled parent.
 
 The traces are locked fixture observations, not a claim that one model run is a
-population estimate. New labeled or held-out revisions should be added with a
-truth label and a recorded trace, then the minimum-sample and guardrail tests
-should remain green.
+population estimate. New cases must update the reviewed digest manifest and
+remain disjoint across the labeled/held-out split; the minimum-sample and
+guardrail tests should remain green.

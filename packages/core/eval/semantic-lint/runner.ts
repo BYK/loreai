@@ -23,8 +23,10 @@ import {
 } from "./types";
 import {
   SEMANTIC_LINT_REPLAY_FIXTURES,
+  SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS,
   getSemanticLintReplayFixtures,
 } from "./fixtures";
+import { computeReplayFixtureDigests } from "./integrity";
 
 export const DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG: SemanticLintReplayConfig = {
   model: "test/semantic-lint-replay",
@@ -534,14 +536,15 @@ function confusion(observations: ReplayObservation[]): ConfusionMetrics {
   const finding = (item: ReplayObservation) => item.outcome === "finding";
   const trueViolation = (item: ReplayObservation) =>
     item.label === "true-violation";
+  const primary = observations.filter((item) => item.mutationId === undefined);
   const mutants = observations.filter((item) => item.mutationId !== undefined);
-  const truePositives = observations.filter(
+  const truePositives = primary.filter(
     (item) => trueViolation(item) && finding(item),
   ).length;
-  const falsePositives = observations.filter(
+  const falsePositives = primary.filter(
     (item) => !trueViolation(item) && finding(item),
   ).length;
-  const falseNegatives = observations.filter(
+  const falseNegatives = primary.filter(
     (item) => trueViolation(item) && item.outcome === "clear",
   ).length;
   const decidedTrue = truePositives + falseNegatives;
@@ -558,7 +561,7 @@ function confusion(observations: ReplayObservation[]): ConfusionMetrics {
         ? null
         : truePositives / (truePositives + falseNegatives),
     decidedRecall: decidedTrue === 0 ? null : truePositives / decidedTrue,
-    contextFalsePositives: observations.filter(
+    contextFalsePositives: primary.filter(
       (item) => item.label === "context-fp" && finding(item),
     ).length,
     controlledMutantTruePositives: mutants.filter(
@@ -655,6 +658,68 @@ function guardrails(
   };
 }
 
+function validateReplayCorpus(cases: readonly SemanticLintReplayCase[]): void {
+  const expectedIds = new Set(
+    Object.keys(SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS),
+  );
+  const caseIds = new Set<string>();
+  const labeledInputDigests = new Set<string>();
+  const labeledInvariantIds = new Set<string>();
+
+  for (const caseData of cases) {
+    if (caseIds.has(caseData.id)) {
+      throw new Error(`duplicate semantic-lint replay case: ${caseData.id}`);
+    }
+    caseIds.add(caseData.id);
+    const expected =
+      SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS[
+        caseData.id as keyof typeof SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS
+      ];
+    if (!expected) {
+      throw new Error(`unmanifested semantic-lint replay case: ${caseData.id}`);
+    }
+    const actual = computeReplayFixtureDigests(caseData);
+    if (
+      caseData.integrity.inputSha256 !== expected.inputSha256 ||
+      caseData.integrity.traceSha256 !== expected.traceSha256 ||
+      actual.inputSha256 !== expected.inputSha256 ||
+      actual.traceSha256 !== expected.traceSha256
+    ) {
+      throw new Error(
+        `semantic-lint replay integrity mismatch: ${caseData.id}`,
+      );
+    }
+    if (caseData.split === "labeled") {
+      labeledInputDigests.add(actual.inputSha256);
+      labeledInvariantIds.add(caseData.invariant.id);
+    }
+  }
+
+  if (caseIds.size !== expectedIds.size) {
+    throw new Error("semantic-lint replay manifest and corpus differ");
+  }
+  for (const caseData of cases) {
+    if (caseData.split !== "held-out") continue;
+    const actual = computeReplayFixtureDigests(caseData);
+    if (labeledInputDigests.has(actual.inputSha256)) {
+      throw new Error(`held-out case reuses labeled input: ${caseData.id}`);
+    }
+    if (labeledInvariantIds.has(caseData.invariant.id)) {
+      throw new Error(`held-out case reuses labeled invariant: ${caseData.id}`);
+    }
+    if (caseData.mutation) {
+      if (caseData.mutation.ancestry !== "independent") {
+        throw new Error(`held-out mutant is not independent: ${caseData.id}`);
+      }
+      if (caseIds.has(caseData.mutation.parentCaseId)) {
+        throw new Error(
+          `held-out mutant names an in-corpus parent: ${caseData.id}`,
+        );
+      }
+    }
+  }
+}
+
 export function runSemanticLintReplay(
   options: SemanticLintReplayOptions = {},
   cases: readonly SemanticLintReplayCase[] = getSemanticLintReplayFixtures(),
@@ -662,6 +727,7 @@ export function runSemanticLintReplay(
   const config = mergedConfig(options);
   if (cases.length === 0)
     throw new Error("semantic-lint replay corpus is empty");
+  validateReplayCorpus(cases);
   const observations: ReplayObservation[] = [];
   for (let repetition = 1; repetition <= config.repetitions; repetition++) {
     for (const caseData of cases) {
@@ -748,7 +814,7 @@ export function renderSemanticLintReplayMarkdown(
   for (const note of report.guardrails.notes) lines.push(`- ${note}`);
   lines.push(
     "",
-    "The fixture runner replays locked judge/verifier traces from fixed revisions. It reports abstention separately from false negatives so improved context handling cannot hide unresolved true violations.",
+    "The fixture runner replays integrity-checked judge/verifier traces; it does not fetch or execute the fixed revisions. Primary precision/recall exclude controlled mutants, and abstention remains separate from false negatives.",
     "",
   );
   return lines.join("\n");
