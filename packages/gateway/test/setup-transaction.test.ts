@@ -426,6 +426,15 @@ describe("setup transaction publication", () => {
     expect(readFileSync(file, "utf8")).toBe('{"replacement":true}\n');
   });
 
+  it("returns an identity usable for immediate trusted removal", () => {
+    const file = join(home, "written.json");
+
+    const identity = atomicWriteTrustedFile(file, '{"lore":true}\n');
+
+    expect(() => removeTrustedFile(file, identity)).not.toThrow();
+    expect(existsSync(file)).toBe(false);
+  });
+
   it.each([1, 2, 3])(
     "restores config and sidecar exactly after commit %i fails",
     async (commit) => {
