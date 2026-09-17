@@ -171,9 +171,12 @@ runs:
         rm -f "$LORE_REPORT_FILE"
         echo "report_file=$LORE_REPORT_FILE" >> "$GITHUB_OUTPUT"
 
-        if [[ ! "$LORE_DEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
-           [[ ! "$LORE_CANDIDATE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-          echo "::warning title=Lore semantic lint::deadline inputs must be positive integers"
+        max_timeout_seconds=86400
+        if [[ ! "$LORE_DEADLINE_SECONDS" =~ ^[1-9][0-9]{0,4}$ ]] || \
+           [[ ! "$LORE_CANDIDATE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]{0,4}$ ]] || \
+           (( 10#$LORE_DEADLINE_SECONDS > max_timeout_seconds )) || \
+           (( 10#$LORE_CANDIDATE_TIMEOUT_SECONDS > max_timeout_seconds )); then
+          echo "::warning title=Lore semantic lint::deadline inputs must be positive integers no greater than 86400 seconds"
           echo "exit_code=1" >> "$GITHUB_OUTPUT"
           exit 0
         fi

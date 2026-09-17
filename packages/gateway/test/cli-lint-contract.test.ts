@@ -105,6 +105,19 @@ function completeReport(
 }
 
 describe("typed lore lint contract", () => {
+  test("bounds lint timer flags before they reach Node timers", async () => {
+    const { MAX_SEMANTIC_LINT_TIMEOUT_MS, parseSemanticLintTimeout } =
+      await import("../src/cli/commands/lint");
+
+    expect(parseSemanticLintTimeout("1")).toBe(1);
+    expect(parseSemanticLintTimeout(String(MAX_SEMANTIC_LINT_TIMEOUT_MS))).toBe(
+      MAX_SEMANTIC_LINT_TIMEOUT_MS,
+    );
+    expect(() =>
+      parseSemanticLintTimeout(String(MAX_SEMANTIC_LINT_TIMEOUT_MS + 1)),
+    ).toThrow(/at most/);
+  });
+
   test("report construction does not leak internal candidate fields", async () => {
     const { buildSemanticLintReport } = await import("../src/cli/lint-report");
     const internalCandidate = {

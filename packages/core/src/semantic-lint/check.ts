@@ -2513,6 +2513,21 @@ function semanticCallsFromError(error: unknown, maxCalls: number): number {
   return Math.min(1, maxCalls);
 }
 
+function conservativeContractStats(
+  remainingSemanticCalls: number,
+  observedTransportAttempts = 0,
+): JudgeStats {
+  // Every typed judge boundary receives at most two calls (initial response
+  // plus one schema repair). Charge that entire invocation budget when the
+  // callback cannot provide trustworthy usage, then make the failure run
+  // scoped so no later candidate can spend more calls.
+  const semanticCalls = Math.min(2, Math.max(0, remainingSemanticCalls));
+  return {
+    semanticCalls,
+    transportAttempts: Math.max(semanticCalls, observedTransportAttempts),
+  };
+}
+
 function judgeErrorOutcome(error: unknown, stats: JudgeStats): JudgeOutcome {
   const name = error instanceof Error ? error.name : "";
   const code: JudgeFailureCode =
@@ -2563,11 +2578,15 @@ function validateJudgeOutcome(
   remainingSemanticCalls: number,
 ): JudgeOutcome {
   if (!outcome || typeof outcome !== "object") {
-    return judgeContractFailure();
+    return judgeContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const record = outcome as Record<string, unknown>;
   if (!record.stats || typeof record.stats !== "object") {
-    return judgeContractFailure();
+    return judgeContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const stats = record.stats as Record<string, unknown>;
   const statsValid =
@@ -2576,7 +2595,18 @@ function validateJudgeOutcome(
     (stats.semanticCalls as number) <= Math.min(2, remainingSemanticCalls) &&
     Number.isSafeInteger(stats.transportAttempts) &&
     (stats.transportAttempts as number) >= 0;
-  if (!statsValid) return judgeContractFailure();
+  if (!statsValid) {
+    return judgeContractFailure(
+      conservativeContractStats(
+        remainingSemanticCalls,
+        typeof stats.transportAttempts === "number" &&
+          Number.isSafeInteger(stats.transportAttempts) &&
+          stats.transportAttempts >= 0
+          ? stats.transportAttempts
+          : 0,
+      ),
+    );
+  }
   const normalizedStats: JudgeStats = {
     semanticCalls: stats.semanticCalls as number,
     transportAttempts: stats.transportAttempts as number,
@@ -2584,7 +2614,12 @@ function validateJudgeOutcome(
 
   if (record.kind === "verdict") {
     if ((stats.semanticCalls as number) < 1)
-      return judgeContractFailure(normalizedStats);
+      return judgeContractFailure(
+        conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+      );
     if (
       isVerdict(record.verdict) &&
       typeof record.reason === "string" &&
@@ -2598,7 +2633,14 @@ function validateJudgeOutcome(
 
   if (record.kind === "unresolved") {
     if (!record.failure || typeof record.failure !== "object") {
-      return judgeContractFailure(normalizedStats);
+      return judgeContractFailure(
+        normalizedStats.semanticCalls > 0
+          ? normalizedStats
+          : conservativeContractStats(
+              remainingSemanticCalls,
+              normalizedStats.transportAttempts,
+            ),
+      );
     }
     const failure = record.failure as Record<string, unknown>;
     if (
@@ -2611,10 +2653,28 @@ function validateJudgeOutcome(
       (failure.retryable === undefined ||
         typeof failure.retryable === "boolean")
     ) {
+      if (
+        failure.scope === "candidate" &&
+        normalizedStats.semanticCalls === 0
+      ) {
+        return judgeContractFailure(
+          conservativeContractStats(
+            remainingSemanticCalls,
+            normalizedStats.transportAttempts,
+          ),
+        );
+      }
       return outcome as JudgeOutcome;
     }
   }
-  return judgeContractFailure(normalizedStats);
+  return judgeContractFailure(
+    normalizedStats.semanticCalls > 0
+      ? normalizedStats
+      : conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+  );
 }
 
 function judgeContractFailure(
@@ -2633,7 +2693,7 @@ function judgeContractFailure(
   };
 }
 
-function buildCounterevidenceInput(args: {
+export function buildCounterevidenceInput(args: {
   candidate: Candidate;
   invariant: InvariantVec;
   seed: DiffHunk;
@@ -2651,8 +2711,7 @@ function buildCounterevidenceInput(args: {
   };
   const connected: CounterevidenceHunk[] = [];
   let omittedCompanions =
-    args.renderedContext.omittedCompanions +
-    (args.connectedContext.omittedBySeed.get(args.candidate.hunkIdx) ?? 0);
+    args.connectedContext.omittedBySeed.get(args.candidate.hunkIdx) ?? 0;
   for (const companion of args.connectedContext.contexts.get(
     args.candidate.hunkIdx,
   ) ?? []) {
@@ -2707,11 +2766,15 @@ function validateCounterevidenceOutcome(
   remainingSemanticCalls: number,
 ): CounterevidenceOutcome {
   if (!outcome || typeof outcome !== "object") {
-    return counterevidenceContractFailure();
+    return counterevidenceContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const record = outcome as Record<string, unknown>;
   if (!record.stats || typeof record.stats !== "object") {
-    return counterevidenceContractFailure();
+    return counterevidenceContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const stats = record.stats as Record<string, unknown>;
   if (
@@ -2721,7 +2784,16 @@ function validateCounterevidenceOutcome(
     !Number.isSafeInteger(stats.transportAttempts) ||
     (stats.transportAttempts as number) < 0
   ) {
-    return counterevidenceContractFailure();
+    return counterevidenceContractFailure(
+      conservativeContractStats(
+        remainingSemanticCalls,
+        typeof stats.transportAttempts === "number" &&
+          Number.isSafeInteger(stats.transportAttempts) &&
+          stats.transportAttempts >= 0
+          ? stats.transportAttempts
+          : 0,
+      ),
+    );
   }
   const normalizedStats: JudgeStats = {
     semanticCalls: stats.semanticCalls as number,
@@ -2729,7 +2801,12 @@ function validateCounterevidenceOutcome(
   };
   if (record.kind === "verdict") {
     if ((stats.semanticCalls as number) < 1)
-      return counterevidenceContractFailure(normalizedStats);
+      return counterevidenceContractFailure(
+        conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+      );
     const serialized = safeJsonStringify({
       evidence: record.evidence,
       reason: record.reason,
@@ -2758,6 +2835,17 @@ function validateCounterevidenceOutcome(
       (failure.retryable === undefined ||
         typeof failure.retryable === "boolean")
     ) {
+      if (
+        failure.scope === "candidate" &&
+        normalizedStats.semanticCalls === 0
+      ) {
+        return counterevidenceContractFailure(
+          conservativeContractStats(
+            remainingSemanticCalls,
+            normalizedStats.transportAttempts,
+          ),
+        );
+      }
       return {
         kind: "unresolved",
         failure: failure as unknown as JudgeFailure,
@@ -2765,7 +2853,14 @@ function validateCounterevidenceOutcome(
       };
     }
   }
-  return counterevidenceContractFailure(normalizedStats);
+  return counterevidenceContractFailure(
+    normalizedStats.semanticCalls > 0
+      ? normalizedStats
+      : conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+  );
 }
 
 function counterevidenceContractFailure(
@@ -2787,9 +2882,12 @@ function validateHolisticLintOutcome(
   outcome: unknown,
   expectedInvariantIds: ReadonlySet<string>,
   expectedHunkIds: ReadonlySet<string>,
+  remainingSemanticCalls = MAX_JUDGE_CALLS,
 ): HolisticLintOutcome {
   if (!isRecord(outcome) || !isRecord(outcome.stats)) {
-    return holisticContractFailure();
+    return holisticContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const semanticCalls =
     typeof outcome.stats.semanticCalls === "number"
@@ -2806,14 +2904,20 @@ function validateHolisticLintOutcome(
     !Number.isSafeInteger(transportAttempts) ||
     transportAttempts < 0
   ) {
-    return holisticContractFailure();
+    return holisticContractFailure(
+      conservativeContractStats(remainingSemanticCalls, transportAttempts),
+    );
   }
   const normalizedStats: JudgeStats = {
     semanticCalls,
     transportAttempts,
   };
   if (outcome.kind === "results") {
-    if (semanticCalls < 1) return holisticContractFailure(normalizedStats);
+    if (semanticCalls < 1) {
+      return holisticContractFailure(
+        conservativeContractStats(remainingSemanticCalls, transportAttempts),
+      );
+    }
     const serialized = safeJsonStringify({ results: outcome.results });
     if (serialized === null) return holisticContractFailure(normalizedStats);
     const results = parseHolisticLintResults(
@@ -2838,13 +2942,25 @@ function validateHolisticLintOutcome(
     (outcome.failure.retryable === undefined ||
       typeof outcome.failure.retryable === "boolean")
   ) {
+    if (semanticCalls === 0) {
+      return holisticContractFailure(
+        conservativeContractStats(remainingSemanticCalls, transportAttempts),
+      );
+    }
     return {
       kind: "unresolved",
       failure: outcome.failure as unknown as JudgeFailure,
       stats: normalizedStats,
     };
   }
-  return holisticContractFailure(normalizedStats);
+  return holisticContractFailure(
+    normalizedStats.semanticCalls > 0
+      ? normalizedStats
+      : conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+  );
 }
 
 function holisticContractFailure(
