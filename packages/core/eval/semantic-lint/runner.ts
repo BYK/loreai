@@ -1,0 +1,760 @@
+import {
+  buildHolisticLintInput,
+  estimateIsolatedLintInputTokens,
+} from "../../src/semantic-lint/context";
+import {
+  buildConnectedContextDetails,
+  renderConnectedContextDetails,
+} from "../../src/semantic-lint/connected-context";
+import {
+  SEMANTIC_LINT_EVAL_SCHEMA_VERSION,
+  type ConfusionMetrics,
+  type DistributionMetrics,
+  type RecordedJudgeTrace,
+  type RecordedVerifierTrace,
+  type ReplayObservation,
+  type SemanticLintReplayBudgets,
+  type SemanticLintReplayCase,
+  type SemanticLintReplayConfig,
+  type SemanticLintReplayGuardrails,
+  type SemanticLintReplayReport,
+  type SemanticLintStrategy,
+  type StrategyMetrics,
+} from "./types";
+import {
+  SEMANTIC_LINT_REPLAY_FIXTURES,
+  getSemanticLintReplayFixtures,
+} from "./fixtures";
+
+export const DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG: SemanticLintReplayConfig = {
+  model: "test/semantic-lint-replay",
+  effort: "off",
+  promptVersion: "semantic-lint-eval-v1",
+  cacheCondition: "warm",
+  repetitions: 3,
+  inputCostPerMillion: 0.25,
+  outputCostPerMillion: 1.25,
+  cacheReadCostPerMillion: 0.025,
+  cacheWriteCostPerMillion: 0.3125,
+  budgets: {
+    holisticInputTokenBudget: 16_000,
+    maxSemanticCalls: 20,
+    maxVerifierCalls: 8,
+    counterevidenceInputTokenBudget: 16_000,
+  },
+};
+
+export interface SemanticLintReplayOptions extends Partial<
+  Omit<SemanticLintReplayConfig, "budgets">
+> {
+  budgets?: Partial<SemanticLintReplayBudgets>;
+}
+
+function mergedConfig(
+  options: SemanticLintReplayOptions = {},
+): SemanticLintReplayConfig {
+  const repetitions =
+    options.repetitions ?? DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG.repetitions;
+  if (
+    !Number.isSafeInteger(repetitions) ||
+    repetitions < 1 ||
+    repetitions > 100
+  ) {
+    throw new RangeError("repetitions must be an integer from 1 through 100");
+  }
+  return {
+    ...DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
+    ...options,
+    repetitions,
+    budgets: {
+      ...DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG.budgets,
+      ...options.budgets,
+    },
+  };
+}
+
+function finiteNonNegative(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${label} must be a finite non-negative number`);
+  }
+  return value;
+}
+
+function validateJudgeTrace(trace: RecordedJudgeTrace, label: string): void {
+  for (const [key, value] of Object.entries(trace)) {
+    if (key === "verdict" || key === "reason") continue;
+    finiteNonNegative(value, `${label}.${key}`);
+  }
+  if (!Number.isSafeInteger(trace.semanticCalls)) {
+    throw new TypeError(`${label}.semanticCalls must be an integer`);
+  }
+  if (!Number.isSafeInteger(trace.transportAttempts)) {
+    throw new TypeError(`${label}.transportAttempts must be an integer`);
+  }
+}
+
+function validateVerifierTrace(
+  trace: RecordedVerifierTrace,
+  label: string,
+): void {
+  for (const [key, value] of Object.entries(trace)) {
+    if (key === "outcome" || key === "reason") continue;
+    finiteNonNegative(value, `${label}.${key}`);
+  }
+  if (!Number.isSafeInteger(trace.semanticCalls)) {
+    throw new TypeError(`${label}.semanticCalls must be an integer`);
+  }
+  if (!Number.isSafeInteger(trace.transportAttempts)) {
+    throw new TypeError(`${label}.transportAttempts must be an integer`);
+  }
+}
+
+function costFor(
+  trace: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+  },
+  config: SemanticLintReplayConfig,
+): number {
+  const billableInput = Math.max(0, trace.inputTokens - trace.cacheReadTokens);
+  return (
+    (billableInput * config.inputCostPerMillion +
+      trace.outputTokens * config.outputCostPerMillion +
+      trace.cacheReadTokens * config.cacheReadCostPerMillion +
+      trace.cacheWriteTokens * config.cacheWriteCostPerMillion) /
+    1_000_000
+  );
+}
+
+function traceValues(
+  traces: Array<RecordedJudgeTrace | RecordedVerifierTrace>,
+  cost: (trace: RecordedJudgeTrace | RecordedVerifierTrace) => number,
+): {
+  semanticCalls: number;
+  transportAttempts: number;
+  verifierCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  latencyMs: number;
+  estimatedCostUsd: number;
+} {
+  return traces.reduce(
+    (total, trace) => ({
+      semanticCalls: total.semanticCalls + trace.semanticCalls,
+      transportAttempts: total.transportAttempts + trace.transportAttempts,
+      verifierCalls:
+        total.verifierCalls + ("outcome" in trace ? trace.semanticCalls : 0),
+      inputTokens: total.inputTokens + trace.inputTokens,
+      outputTokens: total.outputTokens + trace.outputTokens,
+      cacheReadTokens: total.cacheReadTokens + trace.cacheReadTokens,
+      cacheWriteTokens: total.cacheWriteTokens + trace.cacheWriteTokens,
+      latencyMs: total.latencyMs + trace.latencyMs,
+      estimatedCostUsd: total.estimatedCostUsd + cost(trace),
+    }),
+    {
+      semanticCalls: 0,
+      transportAttempts: 0,
+      verifierCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      latencyMs: 0,
+      estimatedCostUsd: 0,
+    },
+  );
+}
+
+function coverageFor(
+  caseData: SemanticLintReplayCase,
+  includedHunks: number,
+  complete: boolean,
+) {
+  return {
+    contextComplete: complete,
+    availableHunks: caseData.hunks.length,
+    includedHunks: Math.min(caseData.hunks.length, Math.max(0, includedHunks)),
+    omittedHunks: Math.max(0, caseData.hunks.length - includedHunks),
+  };
+}
+
+function observationFromTraces(
+  caseData: SemanticLintReplayCase,
+  strategy: SemanticLintStrategy,
+  repetition: number,
+  config: SemanticLintReplayConfig,
+  traces: Array<RecordedJudgeTrace | RecordedVerifierTrace>,
+  verdict: RecordedJudgeTrace["verdict"] | undefined,
+  reason: string,
+  status: ReplayObservation["status"],
+  outcome: ReplayObservation["outcome"],
+  coverage: ReturnType<typeof coverageFor>,
+  plannedInputTokens: number,
+  inputTokenBudget: number,
+  abstentionReason?: string,
+): ReplayObservation {
+  const values = traceValues(traces, (trace) => costFor(trace, config));
+  return {
+    caseId: caseData.id,
+    name: caseData.name,
+    split: caseData.split,
+    label: caseData.label,
+    ...(caseData.mutation ? { mutationId: caseData.mutation.id } : {}),
+    repetition,
+    strategy,
+    outcome,
+    ...(verdict ? { verdict } : {}),
+    reason,
+    status,
+    ...(abstentionReason ? { abstentionReason } : {}),
+    ...coverage,
+    semanticCalls: values.semanticCalls,
+    transportAttempts: values.transportAttempts,
+    verifierCalls: values.verifierCalls,
+    inputTokens: values.inputTokens,
+    plannedInputTokens,
+    inputTokenBudget,
+    outputTokens: values.outputTokens,
+    cacheReadTokens: values.cacheReadTokens,
+    cacheWriteTokens: values.cacheWriteTokens,
+    estimatedCostUsd: values.estimatedCostUsd,
+    latencyMs: values.latencyMs,
+  };
+}
+
+function finalOutcome(verdict: RecordedJudgeTrace["verdict"]): {
+  outcome: ReplayObservation["outcome"];
+  status: ReplayObservation["status"];
+} {
+  return verdict === "violates"
+    ? { outcome: "finding", status: "resolved" }
+    : { outcome: "clear", status: "resolved" };
+}
+
+function runStrategy(
+  caseData: SemanticLintReplayCase,
+  strategy: SemanticLintStrategy,
+  repetition: number,
+  config: SemanticLintReplayConfig,
+): ReplayObservation {
+  const seed = caseData.hunks[caseData.seedHunkIndex];
+  if (!seed) throw new Error(`${caseData.id} has no seed hunk`);
+
+  if (strategy === "isolated-baseline") {
+    const rendered = renderConnectedContextDetails(seed, [], caseData.hunks);
+    const trace = caseData.recorded.isolated;
+    validateJudgeTrace(trace, `${caseData.id}.isolated`);
+    const coverage = coverageFor(
+      caseData,
+      rendered.truncated ? 0 : 1,
+      !rendered.truncated,
+    );
+    if (rendered.truncated) {
+      return observationFromTraces(
+        caseData,
+        strategy,
+        repetition,
+        config,
+        [],
+        undefined,
+        "The isolated seed exceeded the bounded rendered-context limit.",
+        "not-attempted",
+        "abstained",
+        coverage,
+        estimateIsolatedLintInputTokens({
+          invariant: caseData.invariant,
+          hunk: { id: "hunk-0001", file: seed.file, text: seed.text },
+        }),
+        config.budgets.holisticInputTokenBudget,
+        "seed-context-truncated",
+      );
+    }
+    const final = finalOutcome(trace.verdict);
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      [trace],
+      trace.verdict,
+      trace.reason,
+      final.status,
+      final.outcome,
+      coverage,
+      trace.inputTokens,
+      config.budgets.holisticInputTokenBudget,
+    );
+  }
+
+  if (strategy === "holistic-fit") {
+    const plan = buildHolisticLintInput({
+      invariants: [caseData.invariant],
+      hunks: caseData.hunks.map((item, index) => ({
+        id: `hunk-${String(index + 1).padStart(4, "0")}`,
+        file: item.file,
+        text: item.text,
+      })),
+      availableInvariantCount: 1,
+      inputTokenBudget: config.budgets.holisticInputTokenBudget,
+    });
+    const trace = caseData.recorded.holistic;
+    validateJudgeTrace(trace, `${caseData.id}.holistic`);
+    if (plan.kind !== "fit") {
+      return observationFromTraces(
+        caseData,
+        strategy,
+        repetition,
+        config,
+        [],
+        undefined,
+        "The complete diff did not fit the holistic input-token budget.",
+        "not-attempted",
+        "abstained",
+        {
+          contextComplete: false,
+          availableHunks: plan.coverage.availableHunks,
+          includedHunks: plan.coverage.includedHunks,
+          omittedHunks: plan.coverage.omittedHunks,
+        },
+        plan.coverage.inputTokens,
+        plan.coverage.inputTokenBudget,
+        "holistic-budget-exhausted",
+      );
+    }
+    const final = finalOutcome(trace.verdict);
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      [trace],
+      trace.verdict,
+      trace.reason,
+      final.status,
+      final.outcome,
+      {
+        contextComplete: plan.coverage.contextComplete,
+        availableHunks: plan.coverage.availableHunks,
+        includedHunks: plan.coverage.includedHunks,
+        omittedHunks: plan.coverage.omittedHunks,
+      },
+      plan.coverage.inputTokens,
+      plan.coverage.inputTokenBudget,
+    );
+  }
+
+  const connected = buildConnectedContextDetails(caseData.hunks);
+  const companions = connected.contexts.get(caseData.seedHunkIndex) ?? [];
+  const rendered = renderConnectedContextDetails(
+    seed,
+    companions,
+    caseData.hunks,
+  );
+  const contextComplete =
+    !rendered.truncated &&
+    rendered.omittedCompanions === 0 &&
+    !connected.omittedBySeed.has(caseData.seedHunkIndex) &&
+    !caseData.hunks.some((item) => item.truncated === true);
+  const firstPass = caseData.recorded.adaptive.firstPass;
+  validateJudgeTrace(firstPass, `${caseData.id}.adaptive.firstPass`);
+  const adaptive = caseData.recorded.adaptive;
+  const included = contextComplete
+    ? 1 + companions.length
+    : rendered.truncated
+      ? 0
+      : 1;
+  const coverage = coverageFor(caseData, included, contextComplete);
+
+  if (firstPass.verdict !== "violates") {
+    const final = finalOutcome(firstPass.verdict);
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      [firstPass],
+      firstPass.verdict,
+      firstPass.reason,
+      final.status,
+      final.outcome,
+      coverage,
+      firstPass.inputTokens,
+      config.budgets.counterevidenceInputTokenBudget,
+    );
+  }
+
+  if (!contextComplete) {
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      [firstPass],
+      firstPass.verdict,
+      firstPass.reason,
+      "not-attempted",
+      "abstained",
+      coverage,
+      firstPass.inputTokens,
+      config.budgets.counterevidenceInputTokenBudget,
+      "connected-context-incomplete",
+    );
+  }
+
+  const verifierTrace = adaptive.verifier;
+  if (!verifierTrace) {
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      [firstPass],
+      firstPass.verdict,
+      "No verifier trace was recorded for a tentative violation.",
+      "unresolved",
+      "abstained",
+      coverage,
+      firstPass.inputTokens,
+      config.budgets.counterevidenceInputTokenBudget,
+      "verifier-not-attempted",
+    );
+  }
+  validateVerifierTrace(verifierTrace, `${caseData.id}.adaptive.verifier`);
+  const traces = [firstPass, verifierTrace];
+  if (verifierTrace.outcome === "unresolved") {
+    return observationFromTraces(
+      caseData,
+      strategy,
+      repetition,
+      config,
+      traces,
+      firstPass.verdict,
+      verifierTrace.reason,
+      "unresolved",
+      "abstained",
+      coverage,
+      firstPass.inputTokens + verifierTrace.inputTokens,
+      config.budgets.counterevidenceInputTokenBudget,
+      "verifier-unresolved",
+    );
+  }
+  const final =
+    verifierTrace.outcome === "confirmed" ? "violates" : "satisfies";
+  return observationFromTraces(
+    caseData,
+    strategy,
+    repetition,
+    config,
+    traces,
+    final,
+    verifierTrace.reason,
+    "resolved",
+    final === "violates" ? "finding" : "clear",
+    coverage,
+    firstPass.inputTokens + verifierTrace.inputTokens,
+    config.budgets.counterevidenceInputTokenBudget,
+  );
+}
+
+function percentile(values: number[], fraction: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(sorted.length * fraction) - 1),
+  );
+  return sorted[index] ?? 0;
+}
+
+function distribution(observations: ReplayObservation[]): DistributionMetrics {
+  const total = observations.length;
+  const latency = observations.map((item) => item.latencyMs);
+  const availableHunks = observations.reduce(
+    (sum, item) => sum + item.availableHunks,
+    0,
+  );
+  const includedHunks = observations.reduce(
+    (sum, item) => sum + item.includedHunks,
+    0,
+  );
+  return {
+    total,
+    mean:
+      total === 0 ? 0 : latency.reduce((sum, value) => sum + value, 0) / total,
+    p50: percentile(latency, 0.5),
+    p95: percentile(latency, 0.95),
+    totalInputTokens: observations.reduce(
+      (sum, item) => sum + item.inputTokens,
+      0,
+    ),
+    totalOutputTokens: observations.reduce(
+      (sum, item) => sum + item.outputTokens,
+      0,
+    ),
+    totalCacheReadTokens: observations.reduce(
+      (sum, item) => sum + item.cacheReadTokens,
+      0,
+    ),
+    totalCacheWriteTokens: observations.reduce(
+      (sum, item) => sum + item.cacheWriteTokens,
+      0,
+    ),
+    totalEstimatedCostUsd: observations.reduce(
+      (sum, item) => sum + item.estimatedCostUsd,
+      0,
+    ),
+    totalSemanticCalls: observations.reduce(
+      (sum, item) => sum + item.semanticCalls,
+      0,
+    ),
+    totalTransportAttempts: observations.reduce(
+      (sum, item) => sum + item.transportAttempts,
+      0,
+    ),
+    totalVerifierCalls: observations.reduce(
+      (sum, item) => sum + item.verifierCalls,
+      0,
+    ),
+    abstentions: observations.filter((item) => item.outcome === "abstained")
+      .length,
+    unresolved: observations.filter((item) => item.status === "unresolved")
+      .length,
+    notAttempted: observations.filter((item) => item.status === "not-attempted")
+      .length,
+    completeContext: observations.filter((item) => item.contextComplete).length,
+    coverageRatio: availableHunks === 0 ? 0 : includedHunks / availableHunks,
+  };
+}
+
+function confusion(observations: ReplayObservation[]): ConfusionMetrics {
+  const finding = (item: ReplayObservation) => item.outcome === "finding";
+  const trueViolation = (item: ReplayObservation) =>
+    item.label === "true-violation";
+  const mutants = observations.filter((item) => item.mutationId !== undefined);
+  const truePositives = observations.filter(
+    (item) => trueViolation(item) && finding(item),
+  ).length;
+  const falsePositives = observations.filter(
+    (item) => !trueViolation(item) && finding(item),
+  ).length;
+  const falseNegatives = observations.filter(
+    (item) => trueViolation(item) && item.outcome === "clear",
+  ).length;
+  const decidedTrue = truePositives + falseNegatives;
+  return {
+    truePositives,
+    falsePositives,
+    falseNegatives,
+    precision:
+      truePositives + falsePositives === 0
+        ? null
+        : truePositives / (truePositives + falsePositives),
+    recall:
+      truePositives + falseNegatives === 0
+        ? null
+        : truePositives / (truePositives + falseNegatives),
+    decidedRecall: decidedTrue === 0 ? null : truePositives / decidedTrue,
+    contextFalsePositives: observations.filter(
+      (item) => item.label === "context-fp" && finding(item),
+    ).length,
+    controlledMutantTruePositives: mutants.filter(
+      (item) => item.label === "true-violation" && finding(item),
+    ).length,
+    controlledMutantSamples: mutants.length,
+  };
+}
+
+function metricsFor(
+  observations: ReplayObservation[],
+  strategy: SemanticLintStrategy,
+  split: "all" | "labeled" | "held-out",
+): StrategyMetrics {
+  const filtered = observations.filter(
+    (item) =>
+      item.strategy === strategy && (split === "all" || item.split === split),
+  );
+  const uniqueCases = new Set(filtered.map((item) => item.caseId));
+  const repetitions = new Set(filtered.map((item) => item.repetition));
+  return {
+    strategy,
+    split,
+    sampleCases: uniqueCases.size,
+    repetitions: repetitions.size,
+    ...confusion(filtered),
+    ...distribution(filtered),
+  };
+}
+
+function guardrails(
+  metrics: StrategyMetrics[],
+  cases: readonly SemanticLintReplayCase[],
+  config: SemanticLintReplayConfig,
+): SemanticLintReplayGuardrails {
+  const all = (strategy: SemanticLintStrategy) =>
+    metrics.find((item) => item.strategy === strategy && item.split === "all");
+  const isolated = all("isolated-baseline");
+  const adaptive = all("adaptive-connected");
+  const sampleSizeMet =
+    cases.filter((item) => item.split === "labeled").length >= 3 &&
+    cases.filter((item) => item.split === "held-out").length >= 2;
+  const contextFalsePositiveReduction =
+    (isolated?.contextFalsePositives ?? 0) -
+    (adaptive?.contextFalsePositives ?? 0);
+  const decidedRecallDelta =
+    isolated?.decidedRecall === null || adaptive?.decidedRecall === null
+      ? null
+      : (adaptive?.decidedRecall ?? 0) - (isolated?.decidedRecall ?? 0);
+  const controlledMutantRecall =
+    adaptive && adaptive.controlledMutantSamples > 0
+      ? adaptive.controlledMutantTruePositives /
+        adaptive.controlledMutantSamples
+      : null;
+  const abstentionRate = (item: StrategyMetrics | undefined) =>
+    !item || item.total === 0 ? null : item.abstentions / item.total;
+  const isolatedAbstention = abstentionRate(isolated);
+  const adaptiveAbstention = abstentionRate(adaptive);
+  const abstentionRateDelta =
+    isolatedAbstention === null || adaptiveAbstention === null
+      ? null
+      : adaptiveAbstention - isolatedAbstention;
+  const notes: string[] = [];
+  if (!sampleSizeMet)
+    notes.push("minimum labeled/held-out sample sizes are not met");
+  if (contextFalsePositiveReduction <= 0) {
+    notes.push(
+      "adaptive-connected did not reduce context-related false positives",
+    );
+  }
+  if (controlledMutantRecall !== 1) {
+    notes.push(
+      "adaptive-connected did not preserve every controlled mutant finding",
+    );
+  }
+  if (decidedRecallDelta !== null && decidedRecallDelta < 0) {
+    notes.push("adaptive-connected decided recall is below isolated-baseline");
+  }
+  const status = !sampleSizeMet
+    ? "insufficient-sample"
+    : notes.length > 0
+      ? "fail"
+      : "pass";
+  return {
+    status,
+    contextFalsePositiveReduction,
+    decidedRecallDelta,
+    controlledMutantRecall,
+    abstentionRateDelta,
+    notes:
+      notes.length > 0
+        ? notes
+        : [`repeated ${config.repetitions} time(s) with locked fixture traces`],
+  };
+}
+
+export function runSemanticLintReplay(
+  options: SemanticLintReplayOptions = {},
+  cases: readonly SemanticLintReplayCase[] = getSemanticLintReplayFixtures(),
+): SemanticLintReplayReport {
+  const config = mergedConfig(options);
+  if (cases.length === 0)
+    throw new Error("semantic-lint replay corpus is empty");
+  const observations: ReplayObservation[] = [];
+  for (let repetition = 1; repetition <= config.repetitions; repetition++) {
+    for (const caseData of cases) {
+      for (const strategy of [
+        "isolated-baseline",
+        "holistic-fit",
+        "adaptive-connected",
+      ] as const) {
+        const observation = runStrategy(caseData, strategy, repetition, config);
+        if (observation.semanticCalls > config.budgets.maxSemanticCalls) {
+          throw new Error(
+            `${caseData.id}/${strategy} exceeded semantic-call budget`,
+          );
+        }
+        if (observation.verifierCalls > config.budgets.maxVerifierCalls) {
+          throw new Error(
+            `${caseData.id}/${strategy} exceeded verifier-call budget`,
+          );
+        }
+        if (
+          observation.inputTokens >
+          config.budgets.counterevidenceInputTokenBudget
+        ) {
+          throw new Error(
+            `${caseData.id}/${strategy} exceeded input-token budget`,
+          );
+        }
+        observations.push(observation);
+      }
+    }
+  }
+  const metrics = (
+    ["isolated-baseline", "holistic-fit", "adaptive-connected"] as const
+  ).flatMap((strategy) => [
+    metricsFor(observations, strategy, "all"),
+    metricsFor(observations, strategy, "labeled"),
+    metricsFor(observations, strategy, "held-out"),
+  ]);
+  return {
+    schemaVersion: SEMANTIC_LINT_EVAL_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    corpus: {
+      labeledCases: cases.filter((item) => item.split === "labeled").length,
+      heldOutCases: cases.filter((item) => item.split === "held-out").length,
+      controlledMutantCases: cases.filter((item) => item.mutation !== undefined)
+        .length,
+      totalCases: cases.length,
+      repetitions: config.repetitions,
+      observations: observations.length,
+    },
+    configuration: config,
+    metrics,
+    guardrails: guardrails(metrics, cases, config),
+    observations,
+  };
+}
+
+function formatPct(value: number | null): string {
+  return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
+}
+
+export function renderSemanticLintReplayMarkdown(
+  report: SemanticLintReplayReport,
+): string {
+  const all = report.metrics.filter((item) => item.split === "all");
+  const lines = [
+    "# Semantic-lint replay evaluation",
+    "",
+    `Schema ${report.schemaVersion}; generated ${report.generatedAt}.`,
+    "",
+    `Corpus: ${report.corpus.labeledCases} labeled, ${report.corpus.heldOutCases} held-out, ${report.corpus.controlledMutantCases} controlled mutants; ${report.corpus.repetitions} repetition(s).`,
+    "",
+    `Configuration: model \`${report.configuration.model}\`, effort \`${report.configuration.effort}\`, prompt \`${report.configuration.promptVersion}\`, cache \`${report.configuration.cacheCondition}\`.`,
+    "",
+    "| Strategy | n | Precision | Decided recall | Abstentions | Coverage | Calls | Input tok | Output tok | Cost | p50/p95 ms |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+  ];
+  for (const item of all) {
+    lines.push(
+      `| ${item.strategy} | ${item.total} | ${formatPct(item.precision)} | ${formatPct(item.decidedRecall)} | ${item.abstentions} | ${formatPct(item.coverageRatio)} | ${item.totalSemanticCalls} / ${item.totalTransportAttempts} | ${item.totalInputTokens} | ${item.totalOutputTokens} | $${item.totalEstimatedCostUsd.toFixed(4)} | ${item.p50.toFixed(0)} / ${item.p95.toFixed(0)} |`,
+    );
+  }
+  lines.push(
+    "",
+    `Guardrails: **${report.guardrails.status}** — context-related FP reduction ${report.guardrails.contextFalsePositiveReduction}; decided-recall delta ${formatPct(report.guardrails.decidedRecallDelta)}; controlled-mutant recall ${formatPct(report.guardrails.controlledMutantRecall)}.`,
+  );
+  for (const note of report.guardrails.notes) lines.push(`- ${note}`);
+  lines.push(
+    "",
+    "The fixture runner replays locked judge/verifier traces from fixed revisions. It reports abstention separately from false negatives so improved context handling cannot hide unresolved true violations.",
+    "",
+  );
+  return lines.join("\n");
+}
+
+export { SEMANTIC_LINT_REPLAY_FIXTURES };
