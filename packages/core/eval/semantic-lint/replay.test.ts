@@ -3,6 +3,7 @@ import {
   DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
   SEMANTIC_LINT_REPLAY_FIXTURES,
   confusionMetrics,
+  contextFalsePositiveReductionForReplay,
   costFor,
   renderSemanticLintReplayMarkdown,
   runSemanticLintReplay,
@@ -173,6 +174,52 @@ describe("semantic-lint labeled replay evaluation", () => {
           item.caseId === "labeled-safe-embedding-extraction" &&
           item.strategy === "holistic-fit",
       )?.inputTokenBudget,
+    ).toBe(1);
+  });
+
+  test("pairs context false-positive reductions by case and repetition", () => {
+    const observation = (
+      caseId: string,
+      strategy: ReplayObservation["strategy"],
+      outcome: ReplayObservation["outcome"],
+    ): ReplayObservation => ({
+      caseId,
+      name: "pairing fixture",
+      split: "labeled",
+      label: "context-fp",
+      repetition: 1,
+      strategy,
+      outcome,
+      reason: "pairing fixture",
+      status: outcome === "abstained" ? "unresolved" : "resolved",
+      contextComplete: false,
+      availableHunks: 1,
+      includedHunks: 0,
+      omittedHunks: 1,
+      semanticCalls: 0,
+      transportAttempts: 0,
+      verifierCalls: 0,
+      inputTokens: 0,
+      plannedInputTokens: 0,
+      inputTokenBudget: 1,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estimatedCostUsd: 0,
+      latencyMs: 0,
+    });
+
+    expect(
+      contextFalsePositiveReductionForReplay([
+        observation("case-a", "isolated-baseline", "finding"),
+        observation("case-b", "adaptive-connected", "clear"),
+      ]),
+    ).toBe(0);
+    expect(
+      contextFalsePositiveReductionForReplay([
+        observation("case-c", "isolated-baseline", "finding"),
+        observation("case-c", "adaptive-connected", "clear"),
+      ]),
     ).toBe(1);
   });
 

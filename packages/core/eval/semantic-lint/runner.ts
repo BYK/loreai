@@ -497,8 +497,8 @@ function runStrategy(
     verifierTrace,
     `${caseData.id}.adaptive.verifier`,
     new Set(
-      caseData.hunks.map(
-        (_, index) => `hunk-${String(index + 1).padStart(4, "0")}`,
+      [caseData.seedHunkIndex, ...companions.map((item) => item.hunkIndex)].map(
+        (index) => `hunk-${String(index + 1).padStart(4, "0")}`,
       ),
     ),
   );
@@ -675,8 +675,39 @@ function metricsFor(
   };
 }
 
+export function contextFalsePositiveReductionForReplay(
+  observations: readonly ReplayObservation[],
+): number {
+  const pairs = new Map<
+    string,
+    { isolated?: ReplayObservation; adaptive?: ReplayObservation }
+  >();
+  for (const observation of observations) {
+    if (
+      observation.mutationId !== undefined ||
+      observation.label !== "context-fp" ||
+      (observation.strategy !== "isolated-baseline" &&
+        observation.strategy !== "adaptive-connected")
+    ) {
+      continue;
+    }
+    const key = `${observation.caseId}\u0000${observation.split}\u0000${observation.repetition}`;
+    const pair = pairs.get(key) ?? {};
+    pair[
+      observation.strategy === "isolated-baseline" ? "isolated" : "adaptive"
+    ] = observation;
+    pairs.set(key, pair);
+  }
+  return [...pairs.values()].filter(
+    (pair) =>
+      pair.isolated?.outcome === "finding" &&
+      pair.adaptive?.outcome === "clear",
+  ).length;
+}
+
 function guardrails(
   metrics: StrategyMetrics[],
+  observations: readonly ReplayObservation[],
   cases: readonly SemanticLintReplayCase[],
   config: SemanticLintReplayConfig,
 ): SemanticLintReplayGuardrails {
@@ -687,10 +718,8 @@ function guardrails(
   const sampleSizeMet =
     cases.filter((item) => item.split === "labeled").length >= 3 &&
     cases.filter((item) => item.split === "held-out").length >= 2;
-  const contextFalsePositiveReduction = Math.min(
-    isolated?.contextFalsePositives ?? 0,
-    adaptive?.contextFalsePositiveClears ?? 0,
-  );
+  const contextFalsePositiveReduction =
+    contextFalsePositiveReductionForReplay(observations);
   const recallDelta =
     isolated?.recall === null || adaptive?.recall === null
       ? null
@@ -891,7 +920,7 @@ export function runSemanticLintReplay(
     },
     configuration: config,
     metrics,
-    guardrails: guardrails(metrics, cases, config),
+    guardrails: guardrails(metrics, observations, cases, config),
     observations,
   };
 }

@@ -164,17 +164,29 @@ const relocatedGateHunks: DiffHunk[] = [
   ),
 ];
 
+const relocatedVerifier = verifier(
+  "cleared",
+  "The companion core hunk reinstates the same admission rule at the shared boundary.",
+  { inputTokens: 2_720, outputTokens: 132, latencyMs: 71 },
+);
+relocatedVerifier.response = JSON.stringify({
+  evidence: [
+    {
+      hunkId: "hunk-0002",
+      reason: relocatedVerifier.reason,
+    },
+  ],
+  reason: relocatedVerifier.reason,
+  verdict: "resolved",
+});
+
 const relocatedGateAdaptive = {
   firstPass: judge(
     "violates",
     "The gateway-side gate was removed from the changed pipeline hunk.",
     { inputTokens: 1_620, outputTokens: 88, latencyMs: 44 },
   ),
-  verifier: verifier(
-    "cleared",
-    "The companion core hunk reinstates the same admission rule at the shared boundary.",
-    { inputTokens: 2_720, outputTokens: 132, latencyMs: 71 },
-  ),
+  verifier: relocatedVerifier,
 };
 
 const lifecycleHunks: DiffHunk[] = [
@@ -566,7 +578,7 @@ export const SEMANTIC_LINT_REPLAY_FIXTURE_DIGESTS = {
     inputSha256:
       "ce49a5c6961e0a22bca46fbd8a5c016626d03d14a0ada4abca0150c012c7ffbf",
     traceSha256:
-      "791c85004e3de9c8f86149ebf2eebb65bbd7032546d39f0e9a150a291d1653e3",
+      "ae0e2ffc78bf347861d87950180759a45904a6456072b546df65ad625555ba10",
   },
   "labeled-pr-1768-intentional-lifecycle-change": {
     inputSha256:
