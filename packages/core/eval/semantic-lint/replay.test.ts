@@ -184,6 +184,20 @@ describe("semantic-lint labeled replay evaluation", () => {
     );
   });
 
+  test("marks isolated context incomplete when companion hunks are omitted", () => {
+    const report = runSemanticLintReplay({ repetitions: 1 });
+    const isolated = report.observations.find(
+      (item) =>
+        item.caseId === "labeled-pr-1766-relocated-temporal-gate" &&
+        item.strategy === "isolated-baseline",
+    );
+    expect(isolated).toMatchObject({
+      contextComplete: false,
+      includedHunks: 1,
+      omittedHunks: 2,
+    });
+  });
+
   test("renders an auditable Markdown summary", () => {
     const markdown = renderSemanticLintReplayMarkdown(
       runSemanticLintReplay({ repetitions: 1 }),

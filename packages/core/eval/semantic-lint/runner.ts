@@ -319,7 +319,9 @@ function runStrategy(
     const coverage = coverageFor(
       caseData,
       rendered.truncated ? 0 : 1,
-      !rendered.truncated,
+      caseData.hunks.length === 1 &&
+        seed.truncated !== true &&
+        !rendered.truncated,
     );
     if (rendered.truncated) {
       return observationFromTraces(
