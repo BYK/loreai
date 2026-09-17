@@ -62,6 +62,7 @@ Options:
                       disables hosted and remote-gateway modes, enables FS ops,
                       and uses the gateway cwd as the path-less fallback
                       (env equivalent: LORE_HOSTED_MODE=0, LORE_REMOTE_GATEWAY=0)
+                      Use only on loopback or a fully trusted isolated network.
       --allow-remote-management
                        Allow non-loopback access to /ui and /api
                        (env: LORE_ALLOW_REMOTE_MANAGEMENT=1)
@@ -212,6 +213,7 @@ Environment variables:
                                 ON by default for \`lore start\`; set to 0 to disable only this
                                 bucketing policy. For a filesystem-backed local gateway, use
                                 --local (or set both LORE_HOSTED_MODE=0 and this variable to 0).
+                                Local mode is for loopback or fully trusted isolated networks.
                                 auto-enabled for non-loopback binds (e.g. Tailscale, LAN, 0.0.0.0)
   LORE_DEBUG                    Enable debug logging (1 or true)
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)

@@ -9,6 +9,7 @@ import { closeSync } from "node:fs";
 import { join } from "node:path";
 import {
   assertGatewayAccessConfigured,
+  hasNonLoopbackHost,
   loadConfig,
   DEFAULT_PORTS,
   type GatewayConfig,
@@ -1444,6 +1445,15 @@ export async function commandStart(opts: StartOptions): Promise<never> {
     } else {
       console.log(
         `[lore] remote gateway mode OFF (cwd fallback active) — set LORE_REMOTE_GATEWAY=1 for long-running/remote setups`,
+      );
+    }
+    if (
+      !config.hostedMode &&
+      !config.remoteGateway &&
+      hasNonLoopbackHost(config.hosts)
+    ) {
+      console.warn(
+        "[lore] SECURITY WARNING: local mode on a non-loopback bind is filesystem-capable and does not require gateway access authentication. Bind to loopback or use hosted/remote mode for untrusted clients.",
       );
     }
     console.log("");
