@@ -275,6 +275,42 @@ describe("semantic-lint labeled replay evaluation", () => {
     );
   });
 
+  test("allows adaptive two-pass totals above a per-call budget", () => {
+    const source = SEMANTIC_LINT_REPLAY_FIXTURES.find(
+      (item) => item.id === "labeled-pr-1768-intentional-lifecycle-change",
+    );
+    if (!source) throw new Error("fixture missing");
+    const verifier = source.recorded.adaptive.verifier;
+    if (!verifier) throw new Error("verifier fixture missing");
+    const config = {
+      ...DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG,
+      budgets: {
+        ...DEFAULT_SEMANTIC_LINT_REPLAY_CONFIG.budgets,
+        counterevidenceInputTokenBudget: 3_000,
+      },
+    };
+    const observation = runStrategy(
+      {
+        ...source,
+        recorded: {
+          ...source.recorded,
+          adaptive: {
+            firstPass: {
+              ...source.recorded.adaptive.firstPass,
+              inputTokens: 3_000,
+            },
+            verifier: { ...verifier, inputTokens: 3_000 },
+          },
+        },
+      },
+      "adaptive-connected",
+      1,
+      config,
+    );
+    expect(observation.inputTokens).toBe(6_000);
+    expect(observation.inputTokenBudget).toBe(3_000);
+  });
+
   test("rejects verifier traces with unknown outcomes", () => {
     const trace: RecordedVerifierTrace = {
       response: "{}",
