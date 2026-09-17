@@ -143,6 +143,19 @@ function validateCoverage(coverage, counters) {
     }
   } else if (coverage.contextComplete) {
     throw new TypeError("non-holistic lint cannot claim complete context");
+  } else if (
+    coverage.strategy === "none" &&
+    (coverage.inputTokens !== 0 ||
+      coverage.includedHunks !== 0 ||
+      coverage.includedInvariants !== 0)
+  ) {
+    throw new TypeError("none coverage cannot claim included work");
+  }
+  if (
+    coverage.strategy === "holistic" &&
+    coverage.includedInvariants > counters.candidates
+  ) {
+    throw new TypeError("holistic coverage lacks candidate work");
   }
 }
 
@@ -239,6 +252,11 @@ function validateCandidateVerification(verification, candidate) {
   ) {
     throw new TypeError("candidate stats must include verification stats");
   }
+  if (candidate.stats.semanticCalls - verification.stats.semanticCalls > 2) {
+    throw new TypeError(
+      "candidate first-pass semantic calls exceed their per-candidate budget",
+    );
+  }
   if (verification.state === "confirmed" || verification.state === "cleared") {
     if (!verification.contextComplete) {
       throw new TypeError(
@@ -248,6 +266,11 @@ function validateCandidateVerification(verification, candidate) {
     if (verification.stats.semanticCalls < 1) {
       throw new TypeError(
         "confirmed or cleared verification requires a semantic call",
+      );
+    }
+    if (verification.inputTokens < 1) {
+      throw new TypeError(
+        "confirmed or cleared verification requires input-token accounting",
       );
     }
     if (candidate.state !== "resolved" || candidate.verdict !== "violates") {
@@ -310,9 +333,10 @@ function validateCandidateVerification(verification, candidate) {
     if (
       verification.state === "not-attempted" &&
       (verification.stats.semanticCalls !== 0 ||
-        verification.stats.transportAttempts !== 0)
+        verification.stats.transportAttempts !== 0 ||
+        verification.inputTokens !== 0)
     ) {
-      throw new TypeError("not-attempted verification stats must be zero");
+      throw new TypeError("not-attempted verification accounting must be zero");
     }
   }
 }
@@ -519,6 +543,7 @@ function validateReport(value) {
   let verificationSemanticCalls = 0;
   let verificationTransportAttempts = 0;
   let verificationInputTokens = 0;
+  const verificationContexts = [];
   for (const candidate of value.candidates) {
     if (
       typeof candidate?.id !== "string" ||
@@ -546,7 +571,11 @@ function validateReport(value) {
     count(candidate.stats?.transportAttempts, "candidate transportAttempts");
     if (
       candidate.stats.semanticCalls >
-      (candidate.verification === undefined ? 2 : 4)
+      (candidate.verification?.state === "confirmed" ||
+      candidate.verification?.state === "cleared" ||
+      candidate.verification?.state === "unresolved"
+        ? 4
+        : 2)
     ) {
       throw new TypeError(
         "candidate semantic calls exceed the per-candidate budget",
@@ -615,6 +644,7 @@ function validateReport(value) {
     if (candidate.verification !== undefined) {
       const verification = candidate.verification;
       validateCandidateVerification(verification, candidate);
+      verificationContexts.push(verification.contextComplete);
       verificationSelected++;
       verificationSemanticCalls += verification.stats.semanticCalls;
       verificationTransportAttempts += verification.stats.transportAttempts;
@@ -658,6 +688,19 @@ function validateReport(value) {
     throw new TypeError(
       "candidate verification totals disagree with verification summary",
     );
+  }
+  if (value.verification.strategy === "counterevidence") {
+    if (value.coverage.strategy !== "isolated-hunk") {
+      throw new TypeError("counterevidence requires isolated-hunk coverage");
+    }
+    if (
+      value.verification.contextComplete !==
+      (verificationContexts.length > 0 && verificationContexts.every(Boolean))
+    ) {
+      throw new TypeError(
+        "verification context completeness disagrees with candidates",
+      );
+    }
   }
 
   if (

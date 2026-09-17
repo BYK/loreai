@@ -203,6 +203,8 @@ export const MAX_JUDGE_CALLS = 20;
 export const MAX_VERIFIER_CALLS = 8;
 /** First-pass calls are capped so verification cannot be starved. */
 export const MAX_FIRST_PASS_JUDGE_CALLS = MAX_JUDGE_CALLS - MAX_VERIFIER_CALLS;
+/** Reject untrusted judge payloads before trim/JSON.parse can allocate on them. */
+export const MAX_JUDGE_RESPONSE_BYTES = 1 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Enforceable-invariant filter
@@ -851,6 +853,7 @@ export function parseInvariantVerdict(
   text: string | null,
 ): InvariantVerdict | null {
   if (!text) return null;
+  if (Buffer.byteLength(text, "utf8") > MAX_JUDGE_RESPONSE_BYTES) return null;
   let payload = text.trim();
   const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fenced) payload = fenced[1];
@@ -888,6 +891,15 @@ function tupleKey(...values: string[]): string {
   return JSON.stringify(values);
 }
 
+function safeJsonStringify(value: unknown): string | null {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Validate one complete holistic judge response. The response must contain
  * exactly one result for every expected invariant, with evidence IDs that
@@ -906,6 +918,7 @@ export function parseHolisticLintResults(
   expectedHunkIds: ReadonlySet<string>,
 ): HolisticLintResult[] | null {
   if (!text) return null;
+  if (Buffer.byteLength(text, "utf8") > MAX_JUDGE_RESPONSE_BYTES) return null;
   let payload = text.trim();
   const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fenced) payload = fenced[1];
@@ -1868,7 +1881,7 @@ export async function checkInvariants(
   );
   const hasTruncatedHunk = hunks.some((hunk) => hunk.truncated === true);
   const holisticPlan =
-    input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
+    holisticInvariants.length > 0 && !hasTruncatedHunk
       ? buildHolisticLintInput({
           invariants: holisticInvariants,
           hunks: holisticHunks,
@@ -1975,7 +1988,7 @@ export async function checkInvariants(
   let transportAttempts = 0;
   let stopFailure: JudgeFailure | null = null;
   let verificationStopFailure: JudgeFailure | null = null;
-  const firstPassCallBudget =
+  const reservedFirstPassCallBudget =
     holisticPlan?.kind === "too-large" && input.verifier
       ? MAX_FIRST_PASS_JUDGE_CALLS
       : MAX_JUDGE_CALLS;
@@ -1999,6 +2012,14 @@ export async function checkInvariants(
       continue;
     }
 
+    // Keep the verifier reserve while tentative violations exist. If the
+    // initial reserve is consumed entirely by clean candidates, spend the
+    // otherwise-unused capacity so a clean large PR is not left unexplored.
+    const firstPassCallBudget =
+      reservedFirstPassCallBudget === MAX_FIRST_PASS_JUDGE_CALLS &&
+      verification.selected === 0
+        ? MAX_JUDGE_CALLS
+        : reservedFirstPassCallBudget;
     const remainingFirstPassCalls = Math.min(
       firstPassCallBudget - firstPassCalls,
       MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
@@ -2062,7 +2083,13 @@ export async function checkInvariants(
             message: boundedMessage(error, "InvariantJudge threw"),
             scope: "run",
           },
-          stats: { semanticCalls: 0, transportAttempts: 0 },
+          stats: {
+            semanticCalls: semanticCallsFromError(
+              error,
+              Math.min(2, remainingFirstPassCalls),
+            ),
+            transportAttempts: transportAttemptsFromError(error),
+          },
         };
       }
     }
@@ -2252,7 +2279,10 @@ export async function checkInvariants(
         kind: "unresolved",
         failure,
         stats: {
-          semanticCalls: 0,
+          semanticCalls: semanticCallsFromError(
+            error,
+            Math.min(2, remainingVerifierCalls),
+          ),
           transportAttempts: transportAttemptsFromError(error),
         },
       };
@@ -2471,6 +2501,18 @@ function transportAttemptsFromError(error: unknown): number {
     : 0;
 }
 
+function semanticCallsFromError(error: unknown, maxCalls: number): number {
+  if (isRecord(error)) {
+    const calls = error.semanticCalls;
+    if (typeof calls === "number" && Number.isSafeInteger(calls) && calls >= 0)
+      return Math.min(calls, maxCalls);
+  }
+  // A throwing adapter may have dispatched before it could return stats. Count
+  // one conservative call so telemetry and the shared ceiling cannot undercount
+  // an invocation whose usage is otherwise unknowable.
+  return Math.min(1, maxCalls);
+}
+
 function judgeErrorOutcome(error: unknown, stats: JudgeStats): JudgeOutcome {
   const name = error instanceof Error ? error.name : "";
   const code: JudgeFailureCode =
@@ -2535,9 +2577,14 @@ function validateJudgeOutcome(
     Number.isSafeInteger(stats.transportAttempts) &&
     (stats.transportAttempts as number) >= 0;
   if (!statsValid) return judgeContractFailure();
+  const normalizedStats: JudgeStats = {
+    semanticCalls: stats.semanticCalls as number,
+    transportAttempts: stats.transportAttempts as number,
+  };
 
   if (record.kind === "verdict") {
-    if ((stats.semanticCalls as number) < 1) return judgeContractFailure();
+    if ((stats.semanticCalls as number) < 1)
+      return judgeContractFailure(normalizedStats);
     if (
       isVerdict(record.verdict) &&
       typeof record.reason === "string" &&
@@ -2546,12 +2593,12 @@ function validateJudgeOutcome(
     ) {
       return outcome as JudgeOutcome;
     }
-    return judgeContractFailure();
+    return judgeContractFailure(normalizedStats);
   }
 
   if (record.kind === "unresolved") {
     if (!record.failure || typeof record.failure !== "object") {
-      return judgeContractFailure();
+      return judgeContractFailure(normalizedStats);
     }
     const failure = record.failure as Record<string, unknown>;
     if (
@@ -2567,10 +2614,12 @@ function validateJudgeOutcome(
       return outcome as JudgeOutcome;
     }
   }
-  return judgeContractFailure();
+  return judgeContractFailure(normalizedStats);
 }
 
-function judgeContractFailure(): JudgeOutcome {
+function judgeContractFailure(
+  stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+): JudgeOutcome {
   return {
     kind: "unresolved",
     failure: {
@@ -2580,7 +2629,7 @@ function judgeContractFailure(): JudgeOutcome {
       scope: "run",
       retryable: false,
     },
-    stats: { semanticCalls: 0, transportAttempts: 0 },
+    stats,
   };
 }
 
@@ -2641,6 +2690,7 @@ function buildCounterevidenceInput(args: {
       args.connectedContext.contexts.has(args.candidate.hunkIdx) &&
       !args.connectedContext.omittedBySeed.has(args.candidate.hunkIdx) &&
       !args.renderedContext.truncated &&
+      !args.hunks.some((hunk) => hunk.truncated === true) &&
       args.prContext?.titleTruncated !== true &&
       args.prContext?.descriptionTruncated !== true &&
       omittedCompanions === 0,
@@ -2679,18 +2729,18 @@ function validateCounterevidenceOutcome(
   };
   if (record.kind === "verdict") {
     if ((stats.semanticCalls as number) < 1)
-      return counterevidenceContractFailure();
-    const parsed = parseCounterevidenceVerdict(
-      JSON.stringify({
-        evidence: record.evidence,
-        reason: record.reason,
-        verdict: record.verdict,
-      }),
-      expectedHunkIds,
-    );
+      return counterevidenceContractFailure(normalizedStats);
+    const serialized = safeJsonStringify({
+      evidence: record.evidence,
+      reason: record.reason,
+      verdict: record.verdict,
+    });
+    if (serialized === null)
+      return counterevidenceContractFailure(normalizedStats);
+    const parsed = parseCounterevidenceVerdict(serialized, expectedHunkIds);
     return parsed
       ? { kind: "verdict", ...parsed, stats: normalizedStats }
-      : counterevidenceContractFailure();
+      : counterevidenceContractFailure(normalizedStats);
   }
   if (
     record.kind === "unresolved" &&
@@ -2715,10 +2765,12 @@ function validateCounterevidenceOutcome(
       };
     }
   }
-  return counterevidenceContractFailure();
+  return counterevidenceContractFailure(normalizedStats);
 }
 
-function counterevidenceContractFailure(): CounterevidenceOutcome {
+function counterevidenceContractFailure(
+  stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+): CounterevidenceOutcome {
   return {
     kind: "unresolved",
     failure: {
@@ -2727,7 +2779,7 @@ function counterevidenceContractFailure(): CounterevidenceOutcome {
       scope: "run",
       retryable: false,
     },
-    stats: { semanticCalls: 0, transportAttempts: 0 },
+    stats,
   };
 }
 
@@ -2761,15 +2813,17 @@ function validateHolisticLintOutcome(
     transportAttempts,
   };
   if (outcome.kind === "results") {
-    if (semanticCalls < 1) return holisticContractFailure();
+    if (semanticCalls < 1) return holisticContractFailure(normalizedStats);
+    const serialized = safeJsonStringify({ results: outcome.results });
+    if (serialized === null) return holisticContractFailure(normalizedStats);
     const results = parseHolisticLintResults(
-      JSON.stringify({ results: outcome.results }),
+      serialized,
       expectedInvariantIds,
       expectedHunkIds,
     );
     return results
       ? { kind: "results", results, stats: normalizedStats }
-      : holisticContractFailure();
+      : holisticContractFailure(normalizedStats);
   }
   if (
     outcome.kind === "unresolved" &&
@@ -2790,10 +2844,12 @@ function validateHolisticLintOutcome(
       stats: normalizedStats,
     };
   }
-  return holisticContractFailure();
+  return holisticContractFailure(normalizedStats);
 }
 
-function holisticContractFailure(): HolisticLintOutcome {
+function holisticContractFailure(
+  stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+): HolisticLintOutcome {
   return {
     kind: "unresolved",
     failure: {
@@ -2802,7 +2858,7 @@ function holisticContractFailure(): HolisticLintOutcome {
       scope: "run",
       retryable: false,
     },
-    stats: { semanticCalls: 0, transportAttempts: 0 },
+    stats,
   };
 }
 
@@ -3000,7 +3056,13 @@ async function runHolisticLint(args: {
         message: boundedMessage(error, "HolisticLintJudge threw"),
         scope: "run",
       },
-      stats: { semanticCalls: 0, transportAttempts: 0 },
+      stats: {
+        semanticCalls: semanticCallsFromError(
+          error,
+          Math.min(2, MAX_JUDGE_CALLS),
+        ),
+        transportAttempts: transportAttemptsFromError(error),
+      },
     };
   }
 

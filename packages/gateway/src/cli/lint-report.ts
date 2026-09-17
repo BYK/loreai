@@ -573,6 +573,14 @@ function validateLintCoverage(value: unknown): asserts value is LintCoverage {
       !value.contextComplete,
       "non-holistic semantic lint cannot claim complete context",
     );
+    if (value.strategy === "none") {
+      assert(
+        value.inputTokens === 0 &&
+          numbers.includedHunks === 0 &&
+          numbers.includedInvariants === 0,
+        "none coverage cannot claim included work",
+      );
+    }
   }
 }
 
@@ -703,6 +711,10 @@ function validateCandidateVerification(
       candidate.stats.transportAttempts >= value.stats.transportAttempts,
     "candidate stats must include verification stats",
   );
+  assert(
+    candidate.stats.semanticCalls - value.stats.semanticCalls <= 2,
+    "candidate first-pass semantic calls exceed their per-candidate budget",
+  );
   if (value.state === "confirmed" || value.state === "cleared") {
     assert(
       value.contextComplete,
@@ -711,6 +723,10 @@ function validateCandidateVerification(
     assert(
       value.stats.semanticCalls > 0,
       "confirmed or cleared verification requires a semantic call",
+    );
+    assert(
+      value.inputTokens > 0,
+      "confirmed or cleared verification requires input-token accounting",
     );
     assert(
       candidate.state === "resolved" && candidate.verdict === "violates",
@@ -757,8 +773,10 @@ function validateCandidateVerification(
     validateFailure(value.failure, true);
     if (value.state === "not-attempted") {
       assert(
-        value.stats.semanticCalls === 0 && value.stats.transportAttempts === 0,
-        "not-attempted verification stats must be zero",
+        value.stats.semanticCalls === 0 &&
+          value.stats.transportAttempts === 0 &&
+          value.inputTokens === 0,
+        "not-attempted verification accounting must be zero",
       );
     }
   }
@@ -880,6 +898,12 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   ] as const;
   for (const name of counterNames)
     assertCount(value.counters[name], `counters.${name}`);
+  if (value.coverage.strategy === "holistic") {
+    assert(
+      value.coverage.includedInvariants <= Number(value.counters.candidates),
+      "holistic coverage lacks candidate work",
+    );
+  }
   assert(
     Number(value.counters.semanticCalls) <= MAX_REPORT_JUDGE_CALLS,
     "counters.semanticCalls exceeds the shared semantic-call budget",
@@ -969,6 +993,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   let verificationSemanticCalls = 0;
   let verificationTransportAttempts = 0;
   let verificationInputTokens = 0;
+  const verificationContexts: boolean[] = [];
   for (const candidate of value.candidates) {
     assert(isRecord(candidate), "candidate must be an object");
     assert(
@@ -1010,9 +1035,16 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       candidate.stats.transportAttempts,
       "candidate.stats.transportAttempts",
     );
+    const verificationState = isRecord(candidate.verification)
+      ? candidate.verification.state
+      : undefined;
     assert(
       candidate.stats.semanticCalls <=
-        (candidate.verification === undefined ? 2 : 4),
+        (verificationState === "confirmed" ||
+        verificationState === "cleared" ||
+        verificationState === "unresolved"
+          ? 4
+          : 2),
       "candidate semantic calls exceed the per-candidate budget",
     );
     semanticCalls += candidate.stats.semanticCalls;
@@ -1056,6 +1088,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     if (candidate.verification !== undefined) {
       const verification = candidate.verification;
       validateCandidateVerification(verification, candidate);
+      verificationContexts.push(verification.contextComplete);
       verificationSelected++;
       verificationSemanticCalls += verification.stats.semanticCalls;
       verificationTransportAttempts += verification.stats.transportAttempts;
@@ -1107,6 +1140,18 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       verification.inputTokens === verificationInputTokens,
     "candidate verification records do not sum to verification summary",
   );
+  if (verification.strategy === "counterevidence") {
+    assert(
+      value.coverage.strategy === "isolated-hunk",
+      "counterevidence requires isolated-hunk coverage",
+    );
+    assert(
+      verification.contextComplete ===
+        (verificationContexts.length > 0 &&
+          verificationContexts.every(Boolean)),
+      "verification context completeness disagrees with candidates",
+    );
+  }
 
   assert(
     Array.isArray(value.findings) &&

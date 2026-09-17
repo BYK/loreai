@@ -163,32 +163,16 @@ export async function runSemanticLint(
     }
 
     /** Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts. */
-    const prContext = semanticLint.normalizeSemanticLintContext?.({
-      title: options.prTitle ?? process.env.LORE_PR_TITLE,
-      description: options.prDescription ?? process.env.LORE_PR_DESCRIPTION,
-      base: range.base,
-      head: range.head,
-    });
-
-    // PR metadata is author-controlled input. Keep semantic lint advisory when
-    // it is present; gate mode fails closed instead of allowing prompt-injected
-    // context to produce an apparently clean blocking decision.
-    if (options.gate && prContext) {
-      phase = "diff";
-      report = failedReport({
-        options,
-        startedAt,
-        model,
-        effort,
-        range,
-        phase,
-        code: "untrusted-context-gate-disabled",
-        error:
-          "Gate mode is disabled when untrusted pull-request metadata is supplied",
-      });
-      await options.publishReport?.(report);
-      return report;
-    }
+    // PR metadata is author-controlled input. Gate mode deliberately omits it
+    // instead of allowing prompt-injected context to affect a blocking result.
+    const prContext = options.gate
+      ? undefined
+      : semanticLint.normalizeSemanticLintContext?.({
+          title: options.prTitle ?? process.env.LORE_PR_TITLE,
+          description: options.prDescription ?? process.env.LORE_PR_DESCRIPTION,
+          base: range.base,
+          head: range.head,
+        });
 
     phase = "diff";
     throwIfDeadlineExceeded();

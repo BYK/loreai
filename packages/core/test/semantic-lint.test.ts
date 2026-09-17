@@ -22,6 +22,7 @@ import {
   MAX_GIT_OUTPUT_BYTES,
   MAX_HUNK_TEXT_BYTES,
   MAX_COUNTEREVIDENCE_RESPONSE_BYTES,
+  MAX_JUDGE_RESPONSE_BYTES,
   MAX_PR_DESCRIPTION_BYTES,
   MAX_PR_TITLE_BYTES,
   normalizeSemanticLintContext,
@@ -1037,6 +1038,11 @@ describe("parseInvariantVerdict", () => {
       parseInvariantVerdict('```json\n{"verdict":"satisfies","reason":"ok"}'),
     ).toBeNull();
   });
+  it("rejects oversized responses before JSON parsing", () => {
+    expect(
+      parseInvariantVerdict("x".repeat(MAX_JUDGE_RESPONSE_BYTES + 1)),
+    ).toBeNull();
+  });
 });
 
 describe("parseCounterevidenceVerdict", () => {
@@ -2046,6 +2052,45 @@ describe("checkInvariants typed judge outcomes", () => {
       ),
     ).toBe(result.transportAttempts);
   });
+
+  it("spends unused verifier reserve on clean large fallback candidates", async () => {
+    const project = "/tmp/ic-test-clean-large-fallback";
+    const hunks = await seedCandidateSet(project, 20);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict",
+      verdict: "satisfies",
+      reason: "The change remains consistent with the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = confirmingVerifier();
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      holisticJudge: {
+        lint: vi.fn(async () => {
+          throw new Error("holistic lint must not run over budget");
+        }),
+      },
+      holisticInputTokenBudget: 1,
+      sessionID: "clean-large-fallback",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(20);
+    expect(verifier.verify).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      candidates: 20,
+      attempted: 20,
+      resolved: 20,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 20,
+      transportAttempts: 20,
+    });
+  });
 });
 
 describe("counterevidence semantic-lint verification", () => {
@@ -2104,7 +2149,6 @@ describe("counterevidence semantic-lint verification", () => {
         range: FAKE_RANGE,
         judge,
         verifier,
-        holisticJudge: holisticFallbackJudge(),
         holisticInputTokenBudget: 2_000,
         sessionID: "counterevidence-confirmed",
       });
@@ -2142,7 +2186,7 @@ describe("counterevidence semantic-lint verification", () => {
     }
   });
 
-  it("stops the run when a verifier throws before reporting call usage", async () => {
+  it("counts a conservative call when a verifier throws before reporting usage", async () => {
     const project = "/tmp/lore-counterevidence-verifier-throws";
     const hunks = await seedCandidateSet(project, 2);
     const { judge, judgeCall } = stubJudge(() => ({
@@ -2176,7 +2220,7 @@ describe("counterevidence semantic-lint verification", () => {
       state: "not-attempted",
       failure: { code: "judge-contract-error", scope: "run" },
     });
-    expect(result.semanticCalls).toBe(1);
+    expect(result.semanticCalls).toBe(2);
     expect(result.transportAttempts).toBe(3);
     expect(result.findings).toHaveLength(0);
   });

@@ -855,12 +855,14 @@ export function renderConnectedContextDetails(
   const seedContext = truncateUtf8(seed.text, MAX_CONTEXT_BYTES);
   let output = seedContext.text;
   let omittedCompanions = 0;
+  let companionTruncated = false;
   for (const companion of companions) {
     const hunk = hunks[companion.hunkIndex];
     if (!hunk) {
       omittedCompanions++;
       continue;
     }
+    if (hunk.truncated === true) companionTruncated = true;
     const block =
       "\n\n[connected context: " +
       companion.reason +
@@ -885,7 +887,8 @@ export function renderConnectedContextDetails(
     text: output,
     // Rendering or parser truncation means that the diff evidence is
     // incomplete and must fail closed.
-    truncated: seedContext.truncated || seed.truncated === true,
+    truncated:
+      seedContext.truncated || seed.truncated === true || companionTruncated,
     omittedCompanions,
   };
 }
