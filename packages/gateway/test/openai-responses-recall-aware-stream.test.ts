@@ -637,6 +637,7 @@ describe("streamResponsesRecallAware", () => {
 
   test("suppresses a recall function_call and emits a marker (mixed tools)", async () => {
     let completedResponse: GatewayResponse | undefined;
+    let recoveryCalls = 0;
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_mixed", "gpt-5.6-terra"),
@@ -681,9 +682,14 @@ describe("streamResponsesRecallAware", () => {
         runFollowUp: async () => {
           throw new Error("runFollowUp should not run for mixed tools");
         },
+        runRecovery: async () => {
+          recoveryCalls++;
+          throw new Error("recovery must not run for mixed tools");
+        },
       },
     );
     const out = await drain(client);
+    expect(recoveryCalls).toBe(0);
 
     // The recall function_call must NOT leak to the client.
     expect(out).not.toMatch(/name":\s*"recall/);
@@ -1415,12 +1421,21 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("retries a dropped recall continuation before exposing any output", async () => {
+    let droppedPulls = 0;
     const droppedFollowUp = new Response(
       new ReadableStream<Uint8Array>({
-        start(controller) {
+        pull(controller) {
+          if (droppedPulls++ > 0) {
+            controller.error(new Error("socket reset"));
+            return;
+          }
           controller.enqueue(
             new TextEncoder().encode(
               created("resp_dropped_followup", "gpt-5.6-terra") +
+                Array.from(
+                  { length: MAX_CODEX_RATE_LIMIT_EVENTS },
+                  (_, index) => maximalQuotaEvent(index + 1),
+                ).join("") +
                 sseEvent("response.output_item.added", {
                   output_index: 0,
                   item: {
@@ -1431,13 +1446,13 @@ describe("streamResponsesRecallAware", () => {
                 }),
             ),
           );
-          controller.error(new Error("socket reset"));
         },
       }),
       { headers: { "content-type": "text/event-stream" } },
     );
     const recoveredFollowUp = streamFrom([
       created("resp_recovered_followup", "gpt-5.6-terra"),
+      maximalQuotaEvent(MAX_CODEX_RATE_LIMIT_EVENTS + 1),
       textItem(0, "recovered answer", "msg_retry_identity"),
       completed("resp_recovered_followup"),
     ]);
@@ -1467,6 +1482,15 @@ describe("streamResponsesRecallAware", () => {
     expect(followUps).toBe(2);
     expect(out).toContain("recovered answer");
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    const quotaEvents = out
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("event: codex.rate_limits\n"))
+      .map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+    expect(quotaEvents).toEqual([
+      JSON.parse(
+        maximalQuotaEvent(MAX_CODEX_RATE_LIMIT_EVENTS + 1).split("\ndata: ")[1],
+      ),
+    ]);
     expect(
       out.match(
         /event: response\.output_text\.delta\ndata: [^\n]*"delta":"recovered answer"/g,
@@ -9622,6 +9646,47 @@ describe("streamResponsesRecallAware", () => {
     ).resolves.toBe("cancelled");
   });
 
+  test("cancellation never waits for non-settling recovery", async () => {
+    const recoveryStarted = Promise.withResolvers<void>();
+    let commits = 0;
+    let rollbacks = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_pending_recovery", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_pending_recovery"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async ({ query }) => ({
+          anchorText: buildAnchor(query),
+          resultText: "accepted recall results",
+          commit: () => commits++,
+          rollback: () => rollbacks++,
+        }),
+        runFollowUp: async () => {
+          throw new Error("follow-up unavailable");
+        },
+        runRecovery: async () => {
+          recoveryStarted.resolve();
+          return new Promise<never>(() => {});
+        },
+      },
+    );
+    const reader = client.body!.getReader();
+    await recoveryStarted.promise;
+    await expect(
+      Promise.race([
+        reader.cancel().then(() => "cancelled"),
+        new Promise<string>((resolve) =>
+          setImmediate(() => resolve("still pending")),
+        ),
+      ]),
+    ).resolves.toBe("cancelled");
+    expect(commits).toBe(0);
+    expect(rollbacks).toBe(1);
+  });
+
   test("foreground timeout settles a non-settling follow-up setup", async () => {
     const followUpStarted = Promise.withResolvers<void>();
     const foreground = new AbortController();
@@ -10183,47 +10248,293 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_RECALL_ERROR);
   });
 
-  test("recall-only: fails the response when the continuation fails", async () => {
-    const failures: RecallContinuationFailureCategory[] = [];
-    const errors: string[] = [];
-    setRecallContinuationFailureHook((category) => failures.push(category));
-    log.registerSink({
-      info: () => {},
-      warn: () => {},
-      error: (message) => errors.push(message),
-      captureException: () => {},
-    });
+  test("recall-only: synthesizes a real answer after the continuation fails", async () => {
+    let commits = 0;
+    let rollbacks = 0;
+    const completions: Array<{
+      response: GatewayResponse;
+      successful: boolean;
+    }> = [];
+    let recoveryCalls = 0;
+    const options = {
+      onComplete: (response: GatewayResponse, successful: boolean) => {
+        completions.push({ response, successful });
+      },
+      onRecall: async ({ query }: { query: string }) => ({
+        anchorText: buildAnchor(query),
+        resultText: "accepted recall results",
+        commit: () => commits++,
+        rollback: () => rollbacks++,
+      }),
+      runFollowUp: async () => {
+        throw new Error("follow-up unavailable");
+      },
+      runRecovery: async () => {
+        recoveryCalls++;
+        return {
+          id: "resp_recovered_synthesis",
+          model: "gpt-5.6-terra",
+          content: [{ type: "text" as const, text: "real recovered answer" }],
+          stopReason: "end_turn",
+          usage: { inputTokens: 5, outputTokens: 3 },
+          codexRateLimits: [
+            { type: "codex.rate_limits", plan_type: "recovery_plan" },
+          ],
+        };
+      },
+    };
     const client = streamResponsesRecallAware(
       streamFrom([
-        created("resp_failure", "gpt-5.6-terra"),
+        created("resp_recovery_principal", "gpt-5.6-terra"),
+        sseEvent("codex.rate_limits", {
+          plan_type: "principal_plan",
+        }),
         recallCall(0, { query: "architecture" }),
-        completed("resp_failure"),
+        completed("resp_recovery_principal"),
+      ]),
+      options,
+    );
+
+    const out = await drain(client);
+    expect(recoveryCalls).toBe(1);
+    expect(out).toContain("real recovered answer");
+    expect(out).toContain("response.completed");
+    expect(out).not.toContain("response.failed");
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain("[lore:context-warning]");
+    expect(out).not.toContain("accepted recall results");
+    const quotaPlans = out
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("event: codex.rate_limits\n"))
+      .map(
+        (frame) =>
+          (JSON.parse(frame.split("\ndata: ")[1]) as { plan_type?: string })
+            .plan_type,
+      );
+    expect(quotaPlans).toEqual(["principal_plan", "recovery_plan"]);
+    const sequenceNumbers = [...out.matchAll(/"sequence_number":(\d+)/g)].map(
+      (match) => Number(match[1]),
+    );
+    expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index));
+    const outputIndices = [...out.matchAll(/"output_index":(\d+)/g)].map(
+      (match) => Number(match[1]),
+    );
+    expect(outputIndices).not.toHaveLength(0);
+    expect(new Set(outputIndices)).toEqual(new Set([0]));
+    const terminal = JSON.parse(
+      /event: response\.completed\ndata: (.+)/.exec(out)?.[1] ?? "{}",
+    ) as { response?: { output?: Array<{ id?: string }> } };
+    expect(terminal.response?.output).toHaveLength(1);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({
+      successful: true,
+      response: {
+        id: "resp_recovery_principal",
+        content: [{ type: "text", text: "real recovered answer" }],
+      },
+    });
+    expect(commits).toBe(1);
+    expect(rollbacks).toBe(0);
+  });
+
+  test.each(["throws", "repeated-recall", "reasoning-only"] as const)(
+    "recall-only: fails closed when %s recovery is unusable",
+    async (outcome) => {
+      let commits = 0;
+      let rollbacks = 0;
+      let recoveryCalls = 0;
+      const completions: boolean[] = [];
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created(`resp_recovery_${outcome}`, "gpt-5.6-terra"),
+          recallCall(0, { query: "architecture" }),
+          completed(`resp_recovery_${outcome}`),
+        ]),
+        {
+          onComplete: (_response, successful) => completions.push(successful),
+          onRecall: async ({ query }) => ({
+            anchorText: buildAnchor(query),
+            resultText: "accepted recall results",
+            commit: () => commits++,
+            rollback: () => rollbacks++,
+          }),
+          runFollowUp: async () => {
+            throw new Error("follow-up unavailable");
+          },
+          runRecovery: async () => {
+            recoveryCalls++;
+            if (outcome === "throws") throw new Error("private recovery error");
+            if (outcome === "repeated-recall") {
+              return {
+                id: "resp_private_repeated_recall",
+                model: "gpt-5.6-terra",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "fc_private_repeated_recall",
+                    name: "recall",
+                    input: { query: "private repeated recall query" },
+                  },
+                ],
+                stopReason: "tool_use",
+              };
+            }
+            return {
+              id: "resp_private_reasoning_only",
+              model: "gpt-5.6-terra",
+              content: [],
+              rawOutputItems: [
+                {
+                  type: "reasoning",
+                  id: "rs_private_recovery",
+                  summary: [
+                    {
+                      type: "summary_text",
+                      text: "private recovery reasoning",
+                    },
+                  ],
+                },
+              ],
+              stopReason: "end_turn",
+            };
+          },
+        },
+      );
+
+      const out = await drain(client);
+      expect(recoveryCalls).toBe(1);
+      expect(out).toContain("response.failed");
+      expect(out).toContain(PUBLIC_RECALL_ERROR);
+      expect(out).not.toContain("response.completed");
+      expect(out).not.toContain("private recovery error");
+      expect(out).not.toContain("private repeated recall query");
+      expect(out).not.toContain("private recovery reasoning");
+      expect(out).not.toContain("accepted recall results");
+      expect(completions).toEqual([false]);
+      expect(commits).toBe(0);
+      expect(rollbacks).toBe(1);
+    },
+  );
+
+  test("accounts validated unusable recovery metadata without exposing it", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    const privatePlan = "private_recovery_plan";
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_recovery_metadata", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_recovery_metadata", {
+          input_tokens: 11,
+          output_tokens: 2,
+        }),
       ]),
       {
-        onComplete: () => {},
+        onComplete: (response, successful) => {
+          expect(successful).toBe(false);
+          completedResponse = response;
+        },
         onRecall: async ({ query }) => ({
           anchorText: buildAnchor(query),
-          resultText: "architecture results",
+          resultText: "accepted recall results",
         }),
         runFollowUp: async () => {
           throw new Error("follow-up unavailable");
         },
+        runRecovery: async () => ({
+          id: "resp_private_recovery_metadata",
+          model: "gpt-5.6-terra",
+          content: [],
+          rawOutputItems: [
+            {
+              type: "reasoning",
+              id: "rs_private_recovery_metadata",
+              summary: [
+                {
+                  type: "summary_text",
+                  text: "private recovery reasoning",
+                },
+              ],
+            },
+          ],
+          stopReason: "end_turn",
+          usage: { inputTokens: 5, outputTokens: 3 },
+          codexRateLimits: [
+            { type: "codex.rate_limits", plan_type: privatePlan },
+          ],
+        }),
       },
     );
 
     const out = await drain(client);
-    expect(out).toContain("response.failed");
     expect(out).toContain(PUBLIC_RECALL_ERROR);
-    expect(out).not.toContain("follow-up unavailable");
-    expect(out).not.toContain("lore-recall");
-    expect(out).not.toContain("Searching");
-    expect(out).not.toContain("response.completed");
-    expect(failures).toEqual(["follow_up_setup"]);
-    expect(errors).toEqual([
-      "recall follow-up stream failed category=follow_up_setup",
-      "openai-responses recall-aware stream failed category=follow_up_setup",
+    expect(out).not.toContain(privatePlan);
+    expect(out).not.toContain("private recovery reasoning");
+    expect(completedResponse?.usage).toEqual({
+      inputTokens: 16,
+      outputTokens: 5,
+    });
+    expect(completedResponse?.codexRateLimits).toEqual([
+      { type: "codex.rate_limits", plan_type: privatePlan },
     ]);
-    expect(errors.join("\n")).not.toContain("follow-up unavailable");
+    expect(completedResponse?.content).toEqual([]);
+    expect(completedResponse?.rawOutputItems).toEqual([]);
+  });
+
+  test("rolls back recovery effects without emitting a second terminal when onComplete fails", async () => {
+    let commits = 0;
+    let rollbacks = 0;
+    const loggedErrors: string[] = [];
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => {
+        loggedErrors.push(message);
+        throw new Error("private recovery log sink failure");
+      },
+      captureException: () => {},
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_recovery_callback_failure", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_recovery_callback_failure"),
+      ]),
+      {
+        onComplete: () => {
+          throw new Error("private completion failure");
+        },
+        onRecall: async ({ query }) => ({
+          anchorText: buildAnchor(query),
+          resultText: "accepted recall results",
+          commit: () => commits++,
+          rollback: () => rollbacks++,
+        }),
+        runFollowUp: async () => {
+          throw new Error("follow-up unavailable");
+        },
+        runRecovery: async () => ({
+          id: "resp_private_callback_synthesis",
+          model: "gpt-5.6-terra",
+          content: [{ type: "text", text: "recovered before callback" }],
+          stopReason: "end_turn",
+        }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("response.failed");
+    expect(out).not.toContain("private completion failure");
+    expect(out).not.toContain("private recovery log sink failure");
+    expect(loggedErrors).toContain(
+      "openai-responses recall-aware onComplete failed",
+    );
+    expect(loggedErrors.join("\n")).not.toContain("private completion failure");
+    expect(loggedErrors.join("\n")).not.toContain(
+      "private recovery log sink failure",
+    );
+    expect(commits).toBe(0);
+    expect(rollbacks).toBe(1);
   });
 
   test("classifies recall execution failure without exposing callback details", async () => {

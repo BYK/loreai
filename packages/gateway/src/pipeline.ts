@@ -8441,6 +8441,8 @@ export function streamResponsesRecallAware(
       /** Private source coverage; never emitted to the client. */
       coverage?: readonly import("@loreai/core").RecallCoverage[];
       commit?: () => void;
+      /** Commit only effects consumed by a no-anchor recovery synthesis. */
+      commitRecovered?: () => void;
       rollback?: () => void;
     }>;
     /** Streaming follow-up stage: build + forward + assert-SSE + reader. */
@@ -8458,6 +8460,15 @@ export function streamResponsesRecallAware(
       /** Advance request state only after this continuation starts another recall. */
       commit?: () => void;
     }>;
+    /** One request-local no-recall synthesis after an accepted recall fails. */
+    runRecovery?: (ctx: {
+      anchorText: string;
+      resultText: string;
+      acc: GatewayResponse;
+      toolUseId: string;
+      contentPosition: number;
+      signal: AbortSignal;
+    }) => Promise<GatewayResponse>;
   },
 ): Response {
   const recallDiagnostics = createRecallDiagnostics(!opts.noStore);
@@ -8465,6 +8476,7 @@ export function streamResponsesRecallAware(
   const maxSSEFrames = opts.maxSSEFrames ?? DEFAULT_MAX_SSE_FRAMES;
   const maxSparseIndex = Math.min(maxSSEFrames, DEFAULT_MAX_SSE_FRAMES);
   const publicCodexRateLimits: Array<Record<string, unknown>> = [];
+  let deliveredCodexRateLimits = 0;
   const syntheticIdentities = new Set<string>();
   const referenceIdentities = new Set<string>();
   const outputIdentities = new Set<string>();
@@ -8660,6 +8672,8 @@ export function streamResponsesRecallAware(
   };
   let transactionBaseline: ResponsesAccState | undefined;
   let transactionProviderUsage: GatewayUsage = { ...ZERO_USAGE };
+  const transactionCommits: Array<() => void> = [];
+  const recoveryTransactionCommits: Array<() => void> = [];
   const transactionRollbacks: Array<() => void> = [];
   let deferredTransaction:
     | { commit: () => void; rollback: () => void }
@@ -8678,6 +8692,8 @@ export function streamResponsesRecallAware(
   };
   const rollbackTransaction = (): void => {
     restoreTransactionBaseline();
+    transactionCommits.length = 0;
+    recoveryTransactionCommits.length = 0;
     for (const rollback of transactionRollbacks.splice(0).reverse()) {
       try {
         rollback();
@@ -8686,8 +8702,45 @@ export function streamResponsesRecallAware(
       }
     }
   };
+  const createPendingTransaction = (recovery: boolean) => {
+    let settled = false;
+    const transaction = {
+      commit: () => {
+        if (settled) return;
+        const commits = recovery
+          ? recoveryTransactionCommits
+          : transactionCommits;
+        try {
+          for (const commit of commits) commit();
+          settled = true;
+          transactionCommits.length = 0;
+          recoveryTransactionCommits.length = 0;
+          transactionRollbacks.length = 0;
+          transactionBaseline = undefined;
+        } catch (error) {
+          transactionCommits.length = 0;
+          recoveryTransactionCommits.length = 0;
+          transaction.rollback();
+          throw error;
+        }
+      },
+      rollback: () => {
+        if (settled) return;
+        settled = true;
+        rollbackTransaction();
+      },
+    };
+    return transaction;
+  };
   const encoder = new TextEncoder();
   const sessionID = opts.sessionID;
+  const reportRecallStreamFailure = (message: string): void => {
+    try {
+      log.error(message);
+    } catch {
+      // Diagnostics must never alter the model response path.
+    }
+  };
   const recallBudget = new RecallChainBudget({
     maxExecutions:
       opts.maxRecallExecutions ?? opts.maxRecallDepth ?? MAX_RECALL_EXECUTIONS,
@@ -10465,8 +10518,10 @@ export function streamResponsesRecallAware(
       opts.onComplete(resp, successful);
       completed = true;
       return true;
-    } catch (err) {
-      log.error("openai-responses recall-aware onComplete error:", err);
+    } catch {
+      reportRecallStreamFailure(
+        "openai-responses recall-aware onComplete failed",
+      );
       return false;
     }
   };
@@ -10561,6 +10616,36 @@ export function streamResponsesRecallAware(
     }
     if (signal.aborted) {
       cancelAndReleaseReader(result.reader, signal.reason);
+      throw signal.reason;
+    }
+    return result;
+  };
+  const settleRecovery = async (
+    input: Parameters<NonNullable<typeof opts.runRecovery>>[0],
+  ): ReturnType<NonNullable<typeof opts.runRecovery>> => {
+    const runRecovery = opts.runRecovery;
+    if (!runRecovery) throw new Error("recall recovery is unavailable");
+    const operation = runRecovery(input);
+    if (signal.aborted) {
+      void operation.catch(() => {});
+      throw signal.reason;
+    }
+    let rejectAbort: ((reason: unknown) => void) | undefined;
+    const abort = new Promise<never>((_, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = (): void => rejectAbort?.(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    let result: Awaited<ReturnType<NonNullable<typeof opts.runRecovery>>>;
+    try {
+      result = await Promise.race([operation, abort]);
+    } catch (error) {
+      if (signal.aborted) void operation.catch(() => {});
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+    if (signal.aborted) {
       throw signal.reason;
     }
     return result;
@@ -10807,6 +10892,7 @@ export function streamResponsesRecallAware(
           signal.throwIfAborted();
         };
         let principalEventEmitted = false;
+        let principalOutputEmitted = false;
         let ordinaryToolEmitted = false;
         const safeEnqueue = async (
           chunk: Uint8Array,
@@ -10880,6 +10966,9 @@ export function streamResponsesRecallAware(
           | undefined;
         let continuationFailureReported = false;
         let recallDetected = false;
+        let recoverySeed:
+          | Parameters<NonNullable<typeof opts.runRecovery>>[0]
+          | undefined;
         type PrincipalFailureCategory =
           | "principal_transport"
           | "principal_resource_limit"
@@ -11133,6 +11222,7 @@ export function streamResponsesRecallAware(
             ) {
               for (const deferred of deferredEvents) {
                 if (!(await enqueuePrincipal(deferred.chunk, true))) break;
+                principalOutputEmitted = true;
               }
               deferredEvents.length = 0;
               deferredBytes = 0;
@@ -11355,7 +11445,6 @@ export function streamResponsesRecallAware(
               // budget. Count it once before its first recall is admitted;
               // continuation streams are accounted for after each follow-up.
               recallBudget.recordUsage(state.usage);
-              const pendingCommits: Array<() => void> = [];
               const transactionalEvents: Uint8Array[] = [];
               let transactionalBytes = 0;
               const reserveTransactionalBytes = (chunk: Uint8Array): void => {
@@ -11400,7 +11489,20 @@ export function streamResponsesRecallAware(
                   throw new RecallContinuationFailure("recall_execution");
                 }
                 anchorTexts.push(executed.anchorText);
-                if (executed.commit) pendingCommits.push(executed.commit);
+                recoverySeed = {
+                  anchorText: executed.anchorText,
+                  resultText: executed.resultText,
+                  acc: recallAcc,
+                  toolUseId: recall.toolUseId,
+                  contentPosition,
+                  signal,
+                };
+                if (executed.commit) transactionCommits.push(executed.commit);
+                if (executed.commitRecovered ?? executed.commit) {
+                  recoveryTransactionCommits.push(
+                    executed.commitRecovered ?? executed.commit!,
+                  );
+                }
                 if (executed.rollback) {
                   transactionRollbacks.push(executed.rollback);
                 }
@@ -11466,6 +11568,7 @@ export function streamResponsesRecallAware(
                       transactionalBytes,
                       retainedStateBytes,
                       hiddenRecallBytes,
+                      publicCodexRateLimits: publicCodexRateLimits.length,
                       outputIdentities: new Set(outputIdentities),
                       referenceIdentities: new Set(referenceIdentities),
                     };
@@ -11981,6 +12084,8 @@ export function streamResponsesRecallAware(
                             continuationRetryBaseline.retainedStateBytes;
                           hiddenRecallBytes =
                             continuationRetryBaseline.hiddenRecallBytes;
+                          publicCodexRateLimits.length =
+                            continuationRetryBaseline.publicCodexRateLimits;
                           outputIdentities.clear();
                           for (const identity of continuationRetryBaseline.outputIdentities) {
                             outputIdentities.add(identity);
@@ -12093,6 +12198,7 @@ export function streamResponsesRecallAware(
                             anchorText: string;
                             resultText: string;
                             commit?: () => void;
+                            commitRecovered?: () => void;
                             rollback?: () => void;
                           }
                         | undefined;
@@ -12143,11 +12249,28 @@ export function streamResponsesRecallAware(
                           }
                           continuationFailureCategory = "follow_up_protocol";
                           if (nextExecuted.commit) {
-                            pendingCommits.push(nextExecuted.commit);
+                            transactionCommits.push(nextExecuted.commit);
+                          }
+                          if (
+                            nextExecuted.commitRecovered ??
+                            nextExecuted.commit
+                          ) {
+                            recoveryTransactionCommits.push(
+                              nextExecuted.commitRecovered ??
+                                nextExecuted.commit!,
+                            );
                           }
                           if (nextExecuted.rollback) {
                             transactionRollbacks.push(nextExecuted.rollback);
                           }
+                          recoverySeed = {
+                            anchorText: nextExecuted.anchorText,
+                            resultText: nextExecuted.resultText,
+                            acc: nextAcc,
+                            toolUseId: nextRecall.toolUseId,
+                            contentPosition: nextRecall.contentPosition,
+                            signal,
+                          };
                           const nextRecallIndex = nextRecall.outputIndex;
                           contState.items.set(nextRecallIndex, {
                             type: "text",
@@ -12192,6 +12315,7 @@ export function streamResponsesRecallAware(
                         transactionalBytes,
                         retainedStateBytes,
                         hiddenRecallBytes,
+                        publicCodexRateLimits: publicCodexRateLimits.length,
                         outputIdentities: new Set(outputIdentities),
                         referenceIdentities: new Set(referenceIdentities),
                       };
@@ -12210,7 +12334,7 @@ export function streamResponsesRecallAware(
                       err instanceof RecallContinuationFailure
                         ? err.category
                         : (continuationFailureCategory ?? "unexpected");
-                    log.error(
+                    reportRecallStreamFailure(
                       `recall follow-up stream failed category=${category}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
                     );
                     if (
@@ -12259,29 +12383,7 @@ export function streamResponsesRecallAware(
                     terminalDelivered = true;
                     const successful =
                       state.terminalEvent === "response.completed";
-                    let transactionSettled = false;
-                    const transaction = {
-                      commit: () => {
-                        if (transactionSettled) return;
-                        try {
-                          for (const commit of pendingCommits) commit();
-                          transactionSettled = true;
-                          pendingCommits.length = 0;
-                          transactionRollbacks.length = 0;
-                          transactionBaseline = undefined;
-                        } catch (error) {
-                          pendingCommits.length = 0;
-                          transaction.rollback();
-                          throw error;
-                        }
-                      },
-                      rollback: () => {
-                        if (transactionSettled) return;
-                        transactionSettled = true;
-                        pendingCommits.length = 0;
-                        rollbackTransaction();
-                      },
-                    };
+                    const transaction = createPendingTransaction(false);
                     deferredTransaction = transaction;
                     if (successful) opts.onTransactionReady?.(transaction);
                     if (!finish(visibleResp, successful)) {
@@ -12329,8 +12431,20 @@ export function streamResponsesRecallAware(
                 );
               }
               deferredEvents.push({ chunk });
-            } else if (!(await enqueuePrincipal(chunk, otherToolSeen))) {
-              break;
+            } else {
+              const enqueued = await enqueuePrincipal(
+                chunk,
+                otherToolSeen,
+                publicCodexRateLimit
+                  ? () => {
+                      deliveredCodexRateLimits++;
+                    }
+                  : undefined,
+              );
+              if (enqueued && outputIndex !== undefined) {
+                principalOutputEmitted = true;
+              }
+              if (!enqueued) break;
             }
           }
 
@@ -12429,17 +12543,22 @@ export function streamResponsesRecallAware(
             }
           }
         } catch (err) {
-          rollbackTransaction();
+          // Restore failed continuation output before deciding whether the
+          // latest accepted recall can drive one no-recall synthesis.
+          restoreTransactionBaseline();
           if (principalReader) {
             cancelAndReleaseReader(principalReader, signal.reason);
           }
           principalReader = null;
           clearKeepalive();
           if (opts.signal?.aborted && !cancelled) {
+            rollbackTransaction();
             safeError(opts.signal.reason);
             return;
           }
           if (terminalDelivered) {
+            if (deferredTransaction) deferredTransaction.rollback();
+            else rollbackTransaction();
             if (continuationAttempted && !signal.aborted) {
               reportContinuationFailure(
                 err instanceof RecallContinuationFailure
@@ -12455,6 +12574,7 @@ export function streamResponsesRecallAware(
           if (isAbort) {
             log.info("openai-responses recall-aware stream aborted");
             if (cancelled || signal.aborted) {
+              rollbackTransaction();
               if (opts.signal?.aborted && !cancelled) {
                 safeError(opts.signal.reason);
               } else {
@@ -12469,7 +12589,7 @@ export function streamResponsesRecallAware(
                 : continuationAttempted
                   ? (continuationFailureCategory ?? "unexpected")
                   : classifyPrincipalFailure(err);
-            log.error(
+            reportRecallStreamFailure(
               `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}`,
             );
           }
@@ -12491,6 +12611,140 @@ export function streamResponsesRecallAware(
             (recallDetected ||
               continuationAttempted ||
               err instanceof RecallContinuationFailure);
+          if (
+            recallFailure &&
+            opts.runRecovery &&
+            recoverySeed &&
+            !principalOutputEmitted &&
+            !ordinaryToolEmitted &&
+            !signal.aborted
+          ) {
+            try {
+              const recovered = await settleRecovery(recoverySeed);
+              transactionProviderUsage = mergeRecallUsage(
+                transactionProviderUsage,
+                recovered.usage ?? ZERO_USAGE,
+              );
+              for (const quota of recovered.codexRateLimits ?? []) {
+                appendCodexRateLimitEvent(publicCodexRateLimits, quota);
+              }
+              if (
+                hasRecallToolUse(recovered) ||
+                !isUsableRecallContinuation(recovered)
+              ) {
+                throw new RecallContinuationFailure("follow_up_failed");
+              }
+              const visibleRecovery = {
+                ...recovered,
+                id: state.id || recovered.id,
+                model: state.model || recovered.model,
+                usage: mergeRecallUsage(
+                  recoverySeed.acc.usage ?? ZERO_USAGE,
+                  transactionProviderUsage,
+                ),
+              };
+              if (publicCodexRateLimits.length > 0) {
+                visibleRecovery.codexRateLimits = publicCodexRateLimits;
+              }
+              const projectedRecovery = {
+                ...visibleRecovery,
+                codexRateLimits: publicCodexRateLimits.slice(
+                  deliveredCodexRateLimits,
+                ),
+              };
+              const projected = buildOpenAIResponsesResponse(
+                projectedRecovery,
+                true,
+              );
+              if (!projected.body) {
+                throw new Error("recall recovery projection has no body");
+              }
+              const projectedReader = projected.body.getReader();
+              let recoveryTerminalDelivered = false;
+              try {
+                for await (const { event, data } of parseSSEStream(
+                  projectedReader,
+                  {
+                    maxFrames: maxSSEFrames,
+                    inactivityMs: sseInactivityMs,
+                    signal,
+                    frameCounter,
+                  },
+                )) {
+                  if (
+                    event === "response.created" ||
+                    event === "response.in_progress"
+                  ) {
+                    continue;
+                  }
+                  const chunk = encoder.encode(
+                    formatResponsesEvent(event, data),
+                  );
+                  streamBytes += chunk.byteLength;
+                  if (streamBytes > maxStreamBytes) {
+                    throw new SSEStreamLimitError(
+                      "Responses stream exceeded byte limit",
+                    );
+                  }
+                  const terminal =
+                    event === "response.completed" ||
+                    event === "response.incomplete" ||
+                    event === "response.failed";
+                  if (
+                    !(await safeEnqueue(
+                      chunk,
+                      terminal
+                        ? () => {
+                            terminalDelivered = true;
+                            recoveryTerminalDelivered = true;
+                            const transaction = createPendingTransaction(true);
+                            deferredTransaction = transaction;
+                            try {
+                              opts.onTransactionReady?.(transaction);
+                              if (!finish(visibleRecovery, true)) {
+                                transaction.rollback();
+                                throw new Error(
+                                  "recall recovery onComplete failed after delivery",
+                                );
+                              }
+                              if (!opts.onTransactionReady) {
+                                transaction.commit();
+                              }
+                            } catch (error) {
+                              transaction.rollback();
+                              throw error;
+                            }
+                          }
+                        : undefined,
+                    ))
+                  ) {
+                    throw new Error(
+                      "client disconnected while delivering recall recovery",
+                    );
+                  }
+                }
+              } finally {
+                cancelAndReleaseReader(projectedReader, signal.reason);
+              }
+              if (!recoveryTerminalDelivered) {
+                throw new Error("recall recovery projection has no terminal");
+              }
+              clearKeepalive();
+              safeClose();
+              return;
+            } catch (recoveryError) {
+              if (signal.aborted) throw recoveryError;
+              reportRecallStreamFailure("recall recovery failed");
+              if (terminalDelivered) {
+                if (deferredTransaction) deferredTransaction.rollback();
+                else rollbackTransaction();
+                clearKeepalive();
+                safeClose();
+                return;
+              }
+            }
+          }
+          rollbackTransaction();
           const failedResponse = finalizeResponsesAcc(state);
           try {
             assertUsageMergeable(
@@ -12506,6 +12760,9 @@ export function streamResponsesRecallAware(
             );
           }
           transactionProviderUsage = { ...ZERO_USAGE };
+          if (publicCodexRateLimits.length > 0) {
+            failedResponse.codexRateLimits = publicCodexRateLimits;
+          }
           const hiddenOutputIndices = new Set([
             ...recallIndices,
             ...unresolvedToolIndices,
@@ -12875,7 +13132,10 @@ export async function accumulateNonStreamResponse(
   let response: GatewayResponse | undefined;
   try {
     if (protocol === "openai-responses") {
-      const parsed = parseResponsesNonStreamEnvelope(json);
+      const parsed = parseResponsesNonStreamEnvelope(
+        json,
+        requireValidCompletion,
+      );
       response = parsed.response;
       if (parsed.status !== "completed")
         throw new ResponsesTerminalError(response, parsed.status);
@@ -12899,14 +13159,21 @@ export async function accumulateNonStreamResponse(
   }
 }
 
-function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
+function parseResponsesNonStreamEnvelope(
+  json: Record<string, unknown>,
+  requireSuccessfulCompletion = false,
+): {
   response: GatewayResponse;
   status: string;
 } {
   const response = accumulateResponsesNonStreamJSON(json);
   const status = typeof json.status === "string" ? json.status : "unknown";
   if (status === "completed" || status === "incomplete") {
-    assertValidNonStreamCompletion(json, "openai-responses");
+    assertValidNonStreamCompletion(
+      json,
+      "openai-responses",
+      requireSuccessfulCompletion,
+    );
   }
   return { response, status };
 }
@@ -12930,6 +13197,7 @@ async function preserveIncompleteResponsesTerminal(
 function assertValidNonStreamCompletion(
   json: Record<string, unknown>,
   protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+  requireSuccessfulCompletion = false,
 ): void {
   if (json.error !== undefined && json.error !== null) {
     throw new Error("upstream response contained an error");
@@ -12989,7 +13257,9 @@ function assertValidNonStreamCompletion(
     ) {
       throw new Error("upstream Responses request did not complete");
     }
-    if (status === "completed") assertSuccessfulResponsesCompletion(json);
+    if (requireSuccessfulCompletion && status === "completed") {
+      assertSuccessfulResponsesCompletion(json);
+    }
     const seenIdentities = new Set<string>();
     for (const rawItem of json.output) {
       if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
@@ -13008,12 +13278,13 @@ function assertValidNonStreamCompletion(
       }
       seenIdentities.add(item.id);
       if (item.type === "message") {
-        const validItemStatus =
-          item.status === "completed" ||
-          (status === "incomplete" && item.status === "incomplete");
         if (
           item.role !== "assistant" ||
-          !validItemStatus ||
+          !isValidResponsesOutputItemStatus(
+            item.type,
+            item.status,
+            "terminal",
+          ) ||
           !Array.isArray(item.content)
         ) {
           throw new Error("upstream Responses request did not complete");
@@ -13036,9 +13307,6 @@ function assertValidNonStreamCompletion(
           }
         }
       } else if (item.type === "function_call") {
-        const validItemStatus =
-          item.status === "completed" ||
-          (status === "incomplete" && item.status === "incomplete");
         if (
           typeof item.call_id !== "string" ||
           !item.call_id ||
@@ -13046,17 +13314,15 @@ function assertValidNonStreamCompletion(
           typeof item.name !== "string" ||
           !item.name ||
           typeof item.arguments !== "string" ||
-          !validItemStatus
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
         ) {
           throw new Error("upstream Responses request did not complete");
         }
         seenIdentities.add(item.call_id);
       } else if (item.type === "reasoning") {
-        const validItemStatus =
-          item.status === undefined ||
-          item.status === "completed" ||
-          (status === "incomplete" && item.status === "incomplete");
-        if (!validItemStatus) {
+        if (
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
+        ) {
           throw new Error("upstream Responses request did not complete");
         }
         for (const [field, partType] of [
@@ -19915,6 +20181,11 @@ async function handleConversationTurn(
                     persistStore();
                     recallPersistenceCommitObserver?.();
                   },
+                  commitRecovered: () => {
+                    if (suppressTemporalStorage) return;
+                    for (const record of deferredTransferRecordings) record();
+                    recallPersistenceCommitObserver?.();
+                  },
                   rollback: () => {
                     if (suppressTemporalStorage) return;
                     if (sessionState.recallStore.delete(storeKey))
@@ -19981,6 +20252,64 @@ async function handleConversationTurn(
                     responsesRecallRequest = follow.followUp;
                   },
                 };
+              },
+              runRecovery: async ({
+                acc,
+                resultText,
+                toolUseId,
+                contentPosition,
+                signal,
+              }) => {
+                const recallBlock = acc.content[contentPosition];
+                if (
+                  recallBlock?.type !== "tool_use" ||
+                  recallBlock.id !== toolUseId ||
+                  recallBlock.name !== RECALL_TOOL_NAME
+                ) {
+                  throw new Error(
+                    "recall recovery: recall block not found in accumulated response",
+                  );
+                }
+                const recoveryCtx: RecallFollowUpCtx = {
+                  forward: (request, recoverySignal) =>
+                    forwardToUpstream(
+                      request,
+                      config,
+                      undefined,
+                      {
+                        ...cacheOptions,
+                        cacheConversation: false,
+                      },
+                      recoverySignal,
+                      requestUpstreamRoute,
+                    ),
+                  parseJSON: () => {
+                    throw new Error(
+                      "parseJSON must not be called on the streaming recall recovery path",
+                    );
+                  },
+                  parseSSE: (response, recoverySignal) =>
+                    accumulateResponsesSSEStream(response, {
+                      signal: recoverySignal,
+                      validation: req.codex ? "codex" : "public",
+                      stopAtTerminal: true,
+                      requireCompletedTerminal: true,
+                      requireSuccessfulCompletion: true,
+                    }),
+                };
+                const recovery = await runRecallRecovery(
+                  recoveryCtx,
+                  responsesRecallRequest,
+                  acc,
+                  resultText,
+                  recallBlock,
+                  true,
+                  signal,
+                );
+                if (!recovery.ok) {
+                  throw new Error("recall recovery upstream failed");
+                }
+                return recovery.continuation;
               },
             }),
           );

@@ -3790,6 +3790,106 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("synthesizes a real native Responses answer after a failed recall continuation", async () => {
+    const alias = "native-recall-recovery-alias";
+    const knowledgeId = ltm.create({
+      projectPath: "/test/responses-recall-recovery/origin",
+      category: "gotcha",
+      title: "Native recovery terms",
+      content:
+        "one two three four five six seven eight nine native recovery terms",
+      scope: "project",
+      crossProject: true,
+    });
+    const upstreamBodies: Record<string, unknown>[] = [];
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async (body) => {
+      upstreamCall++;
+      upstreamBodies.push(body as Record<string, unknown>);
+      if (upstreamCall === 1) {
+        return new Response(
+          recallResponsesSSE(
+            "resp_native_recovery_principal",
+            "one two three four five six seven eight nine native recovery terms",
+          ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (upstreamCall === 2) {
+        return new Response("private follow-up diagnostic", { status: 503 });
+      }
+      return new Response(
+        validResponsesSSE(
+          "resp_private_recovery_synthesis",
+          "real native recovered answer",
+          { input_tokens: 20, output_tokens: 4 },
+        ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-session-affinity": alias },
+      });
+      request.extras = {
+        tool_choice: { type: "function", name: "recall" },
+        prompt_cache_key: "private-cache-key",
+      };
+      const response = await handleRequest(request, loadLocalConfig());
+      const output = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(upstreamCall).toBe(3);
+      expect(output.match(/^event: response\.created$/gm)).toHaveLength(1);
+      expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(output).toContain("real native recovered answer");
+      expect(output).not.toContain("response.failed");
+      expect(output).not.toContain("[lore:context-warning]");
+      expect(output).not.toContain("private follow-up diagnostic");
+      expect(output).not.toContain("resp_private_recovery_synthesis");
+      const sequenceNumbers = [
+        ...output.matchAll(/"sequence_number":(\d+)/g),
+      ].map((match) => Number(match[1]));
+      expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index));
+      expect(
+        new Set(
+          [...output.matchAll(/"output_index":(\d+)/g)].map((match) =>
+            Number(match[1]),
+          ),
+        ),
+      ).toEqual(new Set([0]));
+
+      const recoveryBody = upstreamBodies[2];
+      expect(recoveryBody).toBeDefined();
+      expect(recoveryBody).not.toHaveProperty("tool_choice");
+      expect(recoveryBody).not.toHaveProperty("prompt_cache_key");
+      expect(recoveryBody?.tools).toEqual([
+        expect.objectContaining({ name: "read" }),
+      ]);
+      expect(JSON.stringify(recoveryBody)).toContain(
+        "Continue the user's task using the accepted recall results",
+      );
+      expect(JSON.stringify(recoveryBody)).toContain("native recovery terms");
+
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      await vi.waitFor(() => {
+        expect(state?.recallStore.size).toBe(0);
+        expect(ltm.transferCount(knowledgeId)).toBeGreaterThan(0);
+      });
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.recallStore,
+      ).toBeNull();
+    } finally {
+      ltm.remove(knowledgeId);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("rolls back all DB effects when recall commit fails", async () => {
     const alias = "failed-recall-commit-atomicity-alias";
     const knowledgeId = ltm.create({

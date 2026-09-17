@@ -231,7 +231,10 @@ describe.each([
       "unfinished",
     ] as const)("final result %s", async (mode) => {
       const requiresRecovery =
-        !stream &&
+        (!stream ||
+          (protocol === "openai-responses" &&
+            stream &&
+            upstreamProtocol === "openai-responses")) &&
         (mode === "recall" ||
           mode === "failed" ||
           mode === "reasoning" ||
