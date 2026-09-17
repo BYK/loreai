@@ -681,10 +681,7 @@ export function runSemanticLintReplay(
             `${caseData.id}/${strategy} exceeded verifier-call budget`,
           );
         }
-        if (
-          observation.inputTokens >
-          config.budgets.counterevidenceInputTokenBudget
-        ) {
+        if (observation.inputTokens > observation.inputTokenBudget) {
           throw new Error(
             `${caseData.id}/${strategy} exceeded input-token budget`,
           );
