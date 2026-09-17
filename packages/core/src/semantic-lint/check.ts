@@ -2755,6 +2755,7 @@ export function buildCounterevidenceInput(args: {
       args.connectedContext.contexts.has(args.candidate.hunkIdx) &&
       !args.connectedContext.omittedBySeed.has(args.candidate.hunkIdx) &&
       !args.renderedContext.truncated &&
+      args.renderedContext.omittedCompanions === 0 &&
       !args.hunks.some((hunk) => hunk.truncated === true) &&
       args.prContext?.titleTruncated !== true &&
       args.prContext?.descriptionTruncated !== true &&

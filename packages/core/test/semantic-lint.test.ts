@@ -2199,7 +2199,7 @@ describe("counterevidence semantic-lint verification", () => {
 
     expect(input.connectedContext).toHaveLength(1);
     expect(input.omittedCompanions).toBe(0);
-    expect(input.contextComplete).toBe(true);
+    expect(input.contextComplete).toBe(false);
   });
 
   it("confirms a tentative violation with bounded counterevidence", async () => {
