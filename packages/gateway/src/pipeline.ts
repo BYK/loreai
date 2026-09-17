@@ -8380,6 +8380,77 @@ export function streamResponsesRecallAware(
   let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let currentPrincipalResponse = upstreamResponse;
 
+  const reviewedReasoningEvents = new Set([
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
+  ]);
+  const reasoningSummaryEvents = new Set([
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+  ]);
+  const reasoningTextEvents = new Set([
+    "response.reasoning_text.delta",
+    "response.reasoning_text.done",
+  ]);
+  const projectReasoningEvent = (
+    event: string,
+    parsed: Record<string, unknown>,
+    outputIndex = parsed.output_index,
+  ): Record<string, unknown> | undefined => {
+    if (!reviewedReasoningEvents.has(event)) return undefined;
+    const common = {
+      type: event,
+      output_index: outputIndex,
+      item_id: parsed.item_id,
+    };
+    if (
+      event === "response.reasoning_summary_part.added" ||
+      event === "response.reasoning_summary_part.done"
+    ) {
+      const part = parsed.part as Record<string, unknown>;
+      return {
+        ...common,
+        summary_index: parsed.summary_index,
+        part: { type: part.type, text: part.text },
+      };
+    }
+    if (event === "response.reasoning_summary_text.delta") {
+      return {
+        ...common,
+        summary_index: parsed.summary_index,
+        delta: parsed.delta,
+      };
+    }
+    if (event === "response.reasoning_summary_text.done") {
+      return {
+        ...common,
+        summary_index: parsed.summary_index,
+        text: parsed.text,
+      };
+    }
+    if (event === "response.reasoning_text.delta") {
+      return {
+        ...common,
+        content_index: parsed.content_index,
+        delta: parsed.delta,
+      };
+    }
+    if (event === "response.reasoning_text.done") {
+      return {
+        ...common,
+        content_index: parsed.content_index,
+        text: parsed.text,
+      };
+    }
+    throw new Error(`unsupported reviewed Responses reasoning event ${event}`);
+  };
+
   const outputIndexForEvent = (
     event: string,
     parsed: Record<string, unknown>,
@@ -8389,16 +8460,11 @@ export function streamResponsesRecallAware(
       item: Record<string, unknown>,
     ) => void,
   ): number | undefined => {
-    const reasoningSummaryEvent =
-      event === "response.reasoning_summary_part.added" ||
-      event === "response.reasoning_summary_part.done" ||
-      event === "response.reasoning_summary_text.delta" ||
-      event === "response.reasoning_summary_text.done";
-    if (
-      event.startsWith("response.reasoning_summary") &&
-      !reasoningSummaryEvent
-    ) {
-      throw new Error(`unsupported Responses reasoning summary event ${event}`);
+    const reasoningEvent = reviewedReasoningEvents.has(event);
+    const reasoningSummaryEvent = reasoningSummaryEvents.has(event);
+    const reasoningTextEvent = reasoningTextEvents.has(event);
+    if (event.startsWith("response.reasoning") && !reasoningEvent) {
+      throw new Error(`unsupported Responses reasoning event ${event}`);
     }
     const requiresOutputIndex =
       /^response\.(?:output_item|output_text|function_call_arguments|content_part|reasoning_(?:summary|text)|refusal)/.test(
@@ -8666,7 +8732,7 @@ export function streamResponsesRecallAware(
       if (
         (event.startsWith("response.output_text") ||
           event.startsWith("response.content_part") ||
-          event.startsWith("response.reasoning_text") ||
+          reasoningTextEvent ||
           event.startsWith("response.refusal")) &&
         (!Number.isSafeInteger(parsed.content_index) ||
           (parsed.content_index as number) < 0 ||
@@ -8677,7 +8743,7 @@ export function streamResponsesRecallAware(
       if (
         event.startsWith("response.output_text") ||
         event.startsWith("response.content_part") ||
-        event.startsWith("response.reasoning_text") ||
+        reasoningTextEvent ||
         event.startsWith("response.refusal")
       ) {
         const contentIndex = parsed.content_index as number;
@@ -8685,7 +8751,7 @@ export function streamResponsesRecallAware(
           ? "output_text"
           : event.startsWith("response.refusal")
             ? "refusal"
-            : event.startsWith("response.reasoning_text")
+            : reasoningTextEvent
               ? "reasoning_text"
               : undefined;
         const part = parsed.part as Record<string, unknown> | undefined;
@@ -9632,17 +9698,35 @@ export function streamResponsesRecallAware(
     references: Map<number, ReferenceLifecycle>,
     event: string,
     parsed: Record<string, unknown>,
+    continuationOffset = 0,
   ): boolean => {
     const rawIndex = parsed.output_index;
     const item = parsed.item as Record<string, unknown> | undefined;
-    if (
-      event === "response.output_item.added" &&
-      item?.type === "item_reference"
-    ) {
+    const referenceOutputIndex = (() => {
+      if (item?.type !== "item_reference") return undefined;
       if (!Number.isSafeInteger(rawIndex) || (rawIndex as number) < 0) {
         throw new Error("invalid Responses output_index for item_reference");
       }
       const outputIndex = rawIndex as number;
+      const shiftedOutputIndex = outputIndex + continuationOffset;
+      if (
+        outputIndex >= maxSparseIndex ||
+        !Number.isSafeInteger(shiftedOutputIndex) ||
+        shiftedOutputIndex >= maxSparseIndex
+      ) {
+        if (continuationOffset > 0) {
+          throw new RecallContinuationFailure("resource_limit");
+        }
+        throw new Error("invalid Responses output_index for item_reference");
+      }
+      return outputIndex;
+    })();
+    if (
+      event === "response.output_item.added" &&
+      item?.type === "item_reference" &&
+      referenceOutputIndex !== undefined
+    ) {
+      const outputIndex = referenceOutputIndex;
       if (
         typeof item.id !== "string" ||
         !item.id ||
@@ -10935,28 +11019,24 @@ export function streamResponsesRecallAware(
                               `Responses payload type does not match ${ce}`,
                             );
                           }
-                          const providedContinuationOutputIndex =
-                            cparsed.output_index;
-                          if (
-                            Number.isSafeInteger(
-                              providedContinuationOutputIndex,
-                            ) &&
-                            (providedContinuationOutputIndex as number) >= 0 &&
-                            (providedContinuationOutputIndex as number) <
-                              maxSparseIndex
-                          ) {
-                            boundedContinuationOutputIndex(
-                              providedContinuationOutputIndex as number,
-                              contIndex,
-                            );
-                          }
                           const contNormalizationState = normalizeCodexEvent(
                             contState,
                             ce,
                             cparsed,
                           );
+                          validateResponseLifecycle(contState, ce, cparsed);
                           if (
-                            providedContinuationOutputIndex === undefined &&
+                            consumeReferenceEvent(
+                              contState,
+                              contReferenceIndices,
+                              ce,
+                              cparsed,
+                              contIndex,
+                            )
+                          ) {
+                            continue;
+                          }
+                          if (
                             Number.isSafeInteger(cparsed.output_index) &&
                             (cparsed.output_index as number) >= 0 &&
                             (cparsed.output_index as number) < maxSparseIndex
@@ -10966,23 +11046,12 @@ export function streamResponsesRecallAware(
                               contIndex,
                             );
                           }
-                          validateResponseLifecycle(contState, ce, cparsed);
                           seedImplicitCodexItem(
                             contState,
                             contNormalizationState,
                             ce,
                             cparsed,
                           );
-                          if (
-                            consumeReferenceEvent(
-                              contState,
-                              contReferenceIndices,
-                              ce,
-                              cparsed,
-                            )
-                          ) {
-                            continue;
-                          }
                           const ci = outputIndexForEvent(
                             ce,
                             cparsed,
@@ -11216,16 +11285,24 @@ export function streamResponsesRecallAware(
                             continue;
                           }
                           if (ci !== undefined) {
+                            const shiftedIndex = shiftedOutputIndex(
+                              ci,
+                              contIndex,
+                            );
+                            const projected = projectReasoningEvent(
+                              ce,
+                              cparsed,
+                              shiftedIndex,
+                            );
                             const shifted = encoder.encode(
                               formatResponsesEvent(
                                 ce,
-                                JSON.stringify({
-                                  ...cparsed,
-                                  output_index: shiftedOutputIndex(
-                                    ci,
-                                    contIndex,
-                                  ),
-                                }),
+                                JSON.stringify(
+                                  projected ?? {
+                                    ...cparsed,
+                                    output_index: shiftedIndex,
+                                  },
+                                ),
                               ),
                             );
                             if (
@@ -11600,8 +11677,15 @@ export function streamResponsesRecallAware(
               return;
             }
 
-            // Non-terminal, non-recall event: forward verbatim.
-            const chunk = encoder.encode(formatResponsesEvent(event, data));
+            // Non-terminal, non-recall event: project reviewed reasoning
+            // schemas and forward all other validated events unchanged.
+            const projected = projectReasoningEvent(event, parsed);
+            const chunk = encoder.encode(
+              formatResponsesEvent(
+                event,
+                projected === undefined ? data : JSON.stringify(projected),
+              ),
+            );
             if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
               deferredBytes += chunk.byteLength;
               if (deferredBytes > maxDeferredBytes) {

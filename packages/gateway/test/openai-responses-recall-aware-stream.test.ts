@@ -3308,6 +3308,7 @@ describe("streamResponsesRecallAware", () => {
     "rejects forged reasoning summary event names on the %s stream",
     async (streamKind) => {
       const secret = `private forged ${streamKind} summary`;
+      const nestedQuery = `private forged ${streamKind} summary recall`;
       const completions: Array<{
         response: GatewayResponse;
         successful: boolean;
@@ -3330,15 +3331,12 @@ describe("streamResponsesRecallAware", () => {
           summary_index: 0,
           text: secret,
         }),
-        sseEvent("response.output_item.done", {
-          output_index: 0,
-          item: {
-            type: "reasoning",
-            id: `rs_forged_${streamKind}`,
-            status: "completed",
-            summary: [{ type: "summary_text", text: secret }],
-          },
-        }),
+        recallCall(
+          1,
+          { query: nestedQuery },
+          `fc_forged_summary_${streamKind}`,
+          `call_forged_summary_${streamKind}`,
+        ),
         completed(`resp_forged_${streamKind}`),
       ];
       const followUp = streamFrom(forgedStream);
@@ -3371,10 +3369,277 @@ describe("streamResponsesRecallAware", () => {
       const output = await drain(client);
       expect(output).toContain("response.failed");
       expect(output).not.toContain(secret);
+      expect(output).not.toContain(nestedQuery);
       expect(JSON.stringify(completions)).not.toContain(secret);
+      expect(JSON.stringify(completions)).not.toContain(nestedQuery);
       expect(completions.at(-1)?.successful).toBe(false);
       expect(recalls).toBe(streamKind === "principal" ? 0 : 1);
       expect(followUps).toBe(streamKind === "principal" ? 0 : 1);
+    },
+  );
+
+  test.each(["principal", "continuation"] as const)(
+    "rejects forged reasoning text event names on the %s stream before another recall",
+    async (streamKind) => {
+      const secret = `private forged ${streamKind} reasoning text`;
+      const nestedQuery = `private forged ${streamKind} reasoning text recall`;
+      const completions: Array<{
+        response: GatewayResponse;
+        successful: boolean;
+      }> = [];
+      let recalls = 0;
+      let followUps = 0;
+      const forgedStream = [
+        created(`resp_forged_text_${streamKind}`, "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: `rs_forged_text_${streamKind}`,
+            content: [],
+          },
+        }),
+        sseEvent("response.reasoning_text.private.done", {
+          output_index: 0,
+          item_id: `rs_forged_text_${streamKind}`,
+          content_index: 0,
+          text: secret,
+        }),
+        recallCall(
+          1,
+          { query: nestedQuery },
+          `fc_forged_text_${streamKind}`,
+          `call_forged_text_${streamKind}`,
+        ),
+        completed(`resp_forged_text_${streamKind}`),
+      ];
+      const followUp = streamFrom(forgedStream);
+      if (!followUp.body) throw new Error("follow-up stream has no body");
+      const followUpBody = followUp.body;
+      const client = streamResponsesRecallAware(
+        streamKind === "principal"
+          ? streamFrom(forgedStream)
+          : streamFrom([
+              created("resp_forged_text_principal", "gpt-5.6-terra"),
+              recallCall(0, { query: "forged continuation reasoning text" }),
+              completed("resp_forged_text_principal"),
+            ]),
+        {
+          validation: "codex",
+          onComplete: (response, successful) => {
+            completions.push({ response, successful });
+          },
+          onRecall: async () => {
+            recalls++;
+            return { anchorText: "anchor", resultText: "memory" };
+          },
+          runFollowUp: async () => {
+            followUps++;
+            return { reader: followUpBody.getReader() };
+          },
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).toContain("response.failed");
+      expect(output).not.toContain(secret);
+      expect(output).not.toContain(nestedQuery);
+      expect(JSON.stringify(completions)).not.toContain(secret);
+      expect(JSON.stringify(completions)).not.toContain(nestedQuery);
+      expect(completions.at(-1)?.successful).toBe(false);
+      expect(recalls).toBe(streamKind === "principal" ? 0 : 1);
+      expect(followUps).toBe(streamKind === "principal" ? 0 : 1);
+    },
+  );
+
+  test.each(["principal", "continuation"] as const)(
+    "projects valid reasoning events through exact public schemas on the %s stream",
+    async (streamKind) => {
+      const responseId = `resp_projected_reasoning_${streamKind}`;
+      const reasoningId = `rs_projected_reasoning_${streamKind}`;
+      const summary = `projected summary ${streamKind}`;
+      const reasoningText = `projected reasoning ${streamKind}`;
+      const sentinel = `private provider envelope ${streamKind}`;
+      const hostileEnvelope = {
+        provider_metadata: { secret: sentinel },
+        private_provider_value: sentinel,
+      };
+      const reasoningStream = [
+        created(responseId, "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningId,
+            summary: [],
+            content: [],
+          },
+        }),
+        sseEvent("response.reasoning_summary_part.added", {
+          output_index: 0,
+          item_id: reasoningId,
+          summary_index: 0,
+          part: { type: "summary_text", text: "" },
+          ...hostileEnvelope,
+        }),
+        sseEvent("response.reasoning_summary_text.delta", {
+          output_index: 0,
+          item_id: reasoningId,
+          summary_index: 0,
+          delta: summary,
+          ...hostileEnvelope,
+        }),
+        sseEvent("response.reasoning_summary_text.done", {
+          output_index: 0,
+          item_id: reasoningId,
+          summary_index: 0,
+          text: summary,
+          ...hostileEnvelope,
+        }),
+        sseEvent("response.reasoning_summary_part.done", {
+          output_index: 0,
+          item_id: reasoningId,
+          summary_index: 0,
+          part: { type: "summary_text", text: summary },
+          ...hostileEnvelope,
+        }),
+        sseEvent("response.reasoning_text.delta", {
+          output_index: 0,
+          item_id: reasoningId,
+          content_index: 0,
+          delta: reasoningText,
+          ...hostileEnvelope,
+        }),
+        sseEvent("response.reasoning_text.done", {
+          output_index: 0,
+          item_id: reasoningId,
+          content_index: 0,
+          text: reasoningText,
+          ...hostileEnvelope,
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: reasoningId,
+            status: "completed",
+            summary: [{ type: "summary_text", text: summary }],
+            content: [{ type: "reasoning_text", text: reasoningText }],
+          },
+        }),
+        completed(responseId),
+      ];
+      const followUp = streamFrom(reasoningStream);
+      if (!followUp.body) throw new Error("follow-up stream has no body");
+      let completedResponse: GatewayResponse | undefined;
+      let successful: boolean | undefined;
+      const callbacks = { recalls: 0, followUps: 0 };
+      const client = streamResponsesRecallAware(
+        streamKind === "principal"
+          ? streamFrom(reasoningStream)
+          : streamFrom([
+              created("resp_projected_reasoning_principal", "gpt-5.6-terra"),
+              recallCall(0, { query: "project reasoning continuation" }),
+              completed("resp_projected_reasoning_principal"),
+            ]),
+        {
+          validation: "codex",
+          onComplete: (response, didSucceed) => {
+            completedResponse = response;
+            successful = didSucceed;
+          },
+          onRecall: async () => {
+            callbacks.recalls++;
+            return { anchorText: "anchor", resultText: "memory" };
+          },
+          runFollowUp: async () => {
+            callbacks.followUps++;
+            return { reader: followUp.body!.getReader() };
+          },
+        },
+      );
+
+      const output = await drain(client);
+      const reasoningEvents = new Set([
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.reasoning_text.delta",
+        "response.reasoning_text.done",
+      ]);
+      const expectedKeys = new Map<string, string[]>([
+        [
+          "response.reasoning_summary_part.added",
+          ["type", "output_index", "item_id", "summary_index", "part"],
+        ],
+        [
+          "response.reasoning_summary_part.done",
+          ["type", "output_index", "item_id", "summary_index", "part"],
+        ],
+        [
+          "response.reasoning_summary_text.delta",
+          ["type", "output_index", "item_id", "summary_index", "delta"],
+        ],
+        [
+          "response.reasoning_summary_text.done",
+          ["type", "output_index", "item_id", "summary_index", "text"],
+        ],
+        [
+          "response.reasoning_text.delta",
+          ["type", "output_index", "item_id", "content_index", "delta"],
+        ],
+        [
+          "response.reasoning_text.done",
+          ["type", "output_index", "item_id", "content_index", "text"],
+        ],
+      ]);
+      const projectedFrames = output
+        .split("\n\n")
+        .map((frame) => frame.split("\n"))
+        .flatMap((lines) => {
+          const eventLine = lines.find((line) => line.startsWith("event: "));
+          const dataLine = lines.find((line) => line.startsWith("data: "));
+          const event = eventLine?.slice("event: ".length);
+          return event && dataLine && reasoningEvents.has(event)
+            ? [
+                {
+                  event,
+                  data: JSON.parse(dataLine.slice("data: ".length)) as Record<
+                    string,
+                    unknown
+                  >,
+                },
+              ]
+            : [];
+        });
+
+      expect(projectedFrames.map(({ event }) => event).sort()).toEqual(
+        [...reasoningEvents].sort(),
+      );
+      for (const { event, data } of projectedFrames) {
+        expect(Object.keys(data).sort()).toEqual(
+          [...(expectedKeys.get(event) ?? []), "sequence_number"].sort(),
+        );
+        expect(data.output_index).toBe(streamKind === "principal" ? 0 : 1);
+      }
+      expect(output).toContain(summary);
+      expect(output).toContain(reasoningText);
+      expect(output).not.toContain(sentinel);
+      expect(JSON.stringify(completedResponse)).not.toContain(sentinel);
+      expect(completedResponse?.rawOutputItems).toContainEqual(
+        expect.objectContaining({
+          id: reasoningId,
+          summary: [{ type: "summary_text", text: summary }],
+          content: [{ type: "reasoning_text", text: reasoningText }],
+        }),
+      );
+      expect(successful).toBe(true);
+      expect(callbacks).toEqual(
+        streamKind === "principal"
+          ? { recalls: 0, followUps: 0 }
+          : { recalls: 1, followUps: 1 },
+      );
     },
   );
 
@@ -5379,6 +5644,391 @@ describe("streamResponsesRecallAware", () => {
 
     expect(await drain(client)).toContain("response.failed");
     expect(recalled).toBe(0);
+  });
+
+  test("accepts the last valid principal item_reference index privately", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
+    const callbacks = { recalls: 0, followUps: 0 };
+    const referenceId = "private_principal_reference_15";
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_principal_reference_15", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 15,
+          item: { type: "item_reference", id: referenceId },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 15,
+          item: { type: "item_reference", id: referenceId },
+        }),
+        completed("resp_principal_reference_15"),
+      ]),
+      {
+        maxSSEFrames: 16,
+        onComplete: (response, didSucceed) => {
+          completedResponse = response;
+          successful = didSucceed;
+        },
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          callbacks.followUps++;
+          throw new Error("should not run");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("response.completed");
+    expect(output).not.toContain("response.failed");
+    expect(output).not.toContain(referenceId);
+    expect(JSON.stringify(completedResponse)).not.toContain(referenceId);
+    expect(completedResponse?.rawOutputItems).toEqual([]);
+    expect(successful).toBe(true);
+    expect(callbacks).toEqual({ recalls: 0, followUps: 0 });
+  });
+
+  test("rejects the first invalid principal item_reference index before recall side effects", async () => {
+    const referenceId = "private_principal_reference_16";
+    const nestedQuery = "private principal reference boundary recall";
+    const callbacks = { recalls: 0, followUps: 0 };
+    const completions: Array<{
+      response: GatewayResponse;
+      successful: boolean;
+    }> = [];
+    const fallback = streamFrom([
+      created("resp_principal_reference_fallback", "gpt-5.6-terra"),
+      textItem(0, "must not continue", "msg_principal_reference_fallback"),
+      completed("resp_principal_reference_fallback"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_principal_reference_16", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 16,
+          item: { type: "item_reference", id: referenceId },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 16,
+          item: { type: "item_reference", id: referenceId },
+        }),
+        recallCall(0, { query: nestedQuery }),
+        completed("resp_principal_reference_16"),
+      ]),
+      {
+        maxSSEFrames: 16,
+        onComplete: (response, successful) => {
+          completions.push({ response, successful });
+        },
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          callbacks.followUps++;
+          if (!fallback.body) throw new Error("fallback stream has no body");
+          return { reader: fallback.body.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+    expect(output).not.toContain(referenceId);
+    expect(output).not.toContain(nestedQuery);
+    expect(JSON.stringify(completions)).not.toContain(referenceId);
+    expect(JSON.stringify(completions)).not.toContain(nestedQuery);
+    expect(completions.at(-1)?.successful).toBe(false);
+    expect(callbacks).toEqual({ recalls: 0, followUps: 0 });
+  });
+
+  test("accepts the last valid shifted continuation item_reference index privately", async () => {
+    const referenceId = "private_continuation_reference_15";
+    const callbacks = { recalls: 0, followUps: 0 };
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
+    const followUp = streamFrom([
+      created("resp_continuation_reference_15", "gpt-5.6-terra"),
+      textItem(0, "visible continuation", "msg_continuation_reference"),
+      sseEvent("response.output_item.added", {
+        output_index: 14,
+        item: { type: "item_reference", id: referenceId },
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 14,
+        item: { type: "item_reference", id: referenceId },
+      }),
+      completed("resp_continuation_reference_15"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_continuation_reference_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "continuation reference boundary" }),
+        completed("resp_continuation_reference_principal"),
+      ]),
+      {
+        validation: "codex",
+        maxSSEFrames: 16,
+        onComplete: (response, didSucceed) => {
+          completedResponse = response;
+          successful = didSucceed;
+        },
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          callbacks.followUps++;
+          if (!followUp.body) throw new Error("follow-up stream has no body");
+          return { reader: followUp.body.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("visible continuation");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(referenceId);
+    expect(JSON.stringify(completedResponse)).not.toContain(referenceId);
+    expect(completedResponse?.rawOutputItems).toContainEqual(
+      expect.objectContaining({ id: "msg_continuation_reference" }),
+    );
+    expect(successful).toBe(true);
+    expect(callbacks).toEqual({ recalls: 1, followUps: 1 });
+  });
+
+  test("accepts an omitted continuation item_reference normalized below the shifted ceiling", async () => {
+    const referenceId = "private_normalized_reference_15";
+    const callbacks = { recalls: 0, followUps: 0 };
+    let completedResponse: GatewayResponse | undefined;
+    let successful: boolean | undefined;
+    const followUp = streamFrom([
+      created("resp_normalized_reference_15", "gpt-5.6-terra"),
+      textItem(0, "normalized boundary output", "msg_normalized_reference"),
+      sseEvent("response.output_item.added", {
+        item: { type: "item_reference", id: referenceId },
+      }),
+      sseEvent("response.output_item.done", {
+        item: { type: "item_reference", id: referenceId },
+      }),
+      completed("resp_normalized_reference_15"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_normalized_reference_principal", "gpt-5.6-terra"),
+        recallCall(13, { query: "normalized reference below boundary" }),
+        completed("resp_normalized_reference_principal"),
+      ]),
+      {
+        validation: "codex",
+        maxSSEFrames: 16,
+        onComplete: (response, didSucceed) => {
+          completedResponse = response;
+          successful = didSucceed;
+        },
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          callbacks.followUps++;
+          if (!followUp.body) throw new Error("follow-up stream has no body");
+          return { reader: followUp.body.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).toContain("normalized boundary output");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(referenceId);
+    expect(JSON.stringify(completedResponse)).not.toContain(referenceId);
+    expect(completedResponse?.rawOutputItems).toContainEqual(
+      expect.objectContaining({ id: "msg_normalized_reference" }),
+    );
+    expect(successful).toBe(true);
+    expect(callbacks).toEqual({ recalls: 1, followUps: 1 });
+  });
+
+  test("rejects the first invalid shifted continuation item_reference index before nested recall", async () => {
+    const referenceId = "private_continuation_reference_16";
+    const nestedQuery = "private shifted reference nested recall";
+    const callbacks = { recalls: 0, followUps: 0 };
+    const completions: Array<{
+      response: GatewayResponse;
+      successful: boolean;
+    }> = [];
+    const followUp = streamFrom([
+      created("resp_continuation_reference_16", "gpt-5.6-terra"),
+      sseEvent("response.output_item.added", {
+        output_index: 15,
+        item: { type: "item_reference", id: referenceId },
+      }),
+      sseEvent("response.output_item.done", {
+        output_index: 15,
+        item: { type: "item_reference", id: referenceId },
+      }),
+      recallCall(
+        0,
+        { query: nestedQuery },
+        "fc_shifted_reference_nested",
+        "call_shifted_reference_nested",
+      ),
+      completed("resp_continuation_reference_16"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_continuation_reference_16_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "start continuation reference boundary" }),
+        completed("resp_continuation_reference_16_principal"),
+      ]),
+      {
+        validation: "codex",
+        maxSSEFrames: 16,
+        maxRecallExecutions: 3,
+        onComplete: (response, successful) => {
+          completions.push({ response, successful });
+        },
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          callbacks.followUps++;
+          if (!followUp.body) throw new Error("follow-up stream has no body");
+          return { reader: followUp.body.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(referenceId);
+    expect(output).not.toContain(nestedQuery);
+    expect(JSON.stringify(completions)).not.toContain(referenceId);
+    expect(JSON.stringify(completions)).not.toContain(nestedQuery);
+    expect(completions.at(-1)?.successful).toBe(false);
+    expect(callbacks).toEqual({ recalls: 1, followUps: 1 });
+  });
+
+  test("rejects a continuation item_reference at the local sparse ceiling inside reference handling", async () => {
+    const referenceId = "private_continuation_reference_32";
+    const nestedQuery = "private local ceiling nested recall";
+    const callbacks = { recalls: 0, followUps: 0 };
+    const followUps = [
+      streamFrom([
+        created("resp_continuation_reference_32", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 32,
+          item: { type: "item_reference", id: referenceId },
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 32,
+          item: { type: "item_reference", id: referenceId },
+        }),
+        recallCall(
+          0,
+          { query: nestedQuery },
+          "fc_local_reference_nested",
+          "call_local_reference_nested",
+        ),
+        completed("resp_continuation_reference_32"),
+      ]),
+      streamFrom([
+        created("resp_continuation_reference_32_fallback", "gpt-5.6-terra"),
+        textItem(0, "must not continue", "msg_reference_32_fallback"),
+        completed("resp_continuation_reference_32_fallback"),
+      ]),
+    ];
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_continuation_reference_32_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "start local reference ceiling" }),
+        completed("resp_continuation_reference_32_principal"),
+      ]),
+      {
+        maxSSEFrames: 32,
+        maxRecallExecutions: 3,
+        onComplete: () => {},
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          const followUp = followUps[callbacks.followUps++];
+          if (!followUp?.body) throw new Error("follow-up stream has no body");
+          return { reader: followUp.body.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain(referenceId);
+    expect(output).not.toContain(nestedQuery);
+    expect(callbacks).toEqual({ recalls: 1, followUps: 1 });
+  });
+
+  test("rejects an omitted continuation item_reference normalized to the first invalid shifted index", async () => {
+    const invalidReferenceId = "private_normalized_reference_16";
+    const callbacks = { recalls: 0, followUps: 0 };
+    const completions: Array<{
+      response: GatewayResponse;
+      successful: boolean;
+    }> = [];
+    const followUp = streamFrom([
+      created("resp_normalized_reference_boundary", "gpt-5.6-terra"),
+      textItem(0, "last valid shifted output", "msg_normalized_boundary"),
+      sseEvent("response.output_item.added", {
+        item: { type: "item_reference", id: invalidReferenceId },
+      }),
+      sseEvent("response.output_item.done", {
+        item: { type: "item_reference", id: invalidReferenceId },
+      }),
+      completed("resp_normalized_reference_boundary"),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_normalized_reference_principal", "gpt-5.6-terra"),
+        recallCall(14, { query: "start normalized reference boundary" }),
+        completed("resp_normalized_reference_principal"),
+      ]),
+      {
+        validation: "codex",
+        maxSSEFrames: 16,
+        maxRecallExecutions: 3,
+        onComplete: (response, successful) => {
+          completions.push({ response, successful });
+        },
+        onRecall: async () => {
+          callbacks.recalls++;
+          return { anchorText: "anchor", resultText: "memory" };
+        },
+        runFollowUp: async () => {
+          callbacks.followUps++;
+          if (!followUp.body) throw new Error("follow-up stream has no body");
+          return { reader: followUp.body.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).toContain(PUBLIC_RECALL_ERROR);
+    expect(output).not.toContain("last valid shifted output");
+    expect(output).not.toContain(invalidReferenceId);
+    expect(JSON.stringify(completions)).not.toContain(
+      "last valid shifted output",
+    );
+    expect(JSON.stringify(completions)).not.toContain(invalidReferenceId);
+    expect(completions.at(-1)?.successful).toBe(false);
+    expect(callbacks).toEqual({ recalls: 1, followUps: 1 });
   });
 
   test("accepts unchanged non-empty initial message content", async () => {
