@@ -2225,6 +2225,66 @@ describe("counterevidence semantic-lint verification", () => {
     expect(result.findings).toHaveLength(0);
   });
 
+  it("does not exceed the shared verifier-call cap after earlier verifications", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-verifier-cap-"),
+    );
+    try {
+      const hunks = (await seedCandidateSet(project, 9)).map((hunk, index) => ({
+        ...hunk,
+        text: `@@\n+const candidateUniqueContext${index} = "${"x".repeat(8_000)}"`,
+      }));
+      const { judge, judgeCall } = stubJudge(() => ({
+        kind: "verdict" as const,
+        verdict: "violates" as const,
+        reason: "The isolated change appears to bypass the boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = confirmingVerifier();
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks,
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticInputTokenBudget: 16_000,
+        sessionID: "counterevidence-verifier-cap",
+      });
+
+      expect(judgeCall).toHaveBeenCalledTimes(9);
+      expect(verifier.verify).toHaveBeenCalledTimes(8);
+      expect(result).toMatchObject({
+        candidates: 9,
+        attempted: 9,
+        resolved: 8,
+        unresolved: 1,
+        semanticCalls: 17,
+        transportAttempts: 17,
+        verification: {
+          strategy: "counterevidence",
+          selected: 9,
+          attempted: 8,
+          confirmed: 8,
+          cleared: 0,
+          unresolved: 0,
+          notAttempted: 1,
+          semanticCalls: 8,
+          transportAttempts: 8,
+        },
+      });
+      expect(result.candidateOutcomes[8]).toMatchObject({
+        state: "unresolved",
+        verification: {
+          state: "not-attempted",
+          failure: { code: "verification-budget-exhausted", scope: "run" },
+        },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("stops first-pass judging after a run-scoped verifier failure", async () => {
     const project = "/tmp/lore-counterevidence-verifier-run-failure";
     const hunks = await seedCandidateSet(project, 2);

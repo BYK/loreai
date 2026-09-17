@@ -2232,7 +2232,7 @@ export async function checkInvariants(
       continue;
     }
     const remainingVerifierCalls = Math.min(
-      MAX_VERIFIER_CALLS,
+      MAX_VERIFIER_CALLS - verification.semanticCalls,
       MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
     );
     if (remainingVerifierCalls <= 0) {
