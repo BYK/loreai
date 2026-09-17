@@ -7,6 +7,11 @@ import {
   renderConnectedContextDetails,
 } from "../../src/semantic-lint/connected-context";
 import {
+  parseHolisticLintResults,
+  parseInvariantVerdict,
+} from "../../src/semantic-lint/check";
+import { parseCounterevidenceVerdict } from "../../src/semantic-lint/counterevidence";
+import {
   SEMANTIC_LINT_EVAL_SCHEMA_VERSION,
   type ConfusionMetrics,
   type DistributionMetrics,
@@ -93,11 +98,60 @@ function validateJudgeTrace(trace: RecordedJudgeTrace, label: string): void {
   if (!Number.isSafeInteger(trace.transportAttempts)) {
     throw new TypeError(`${label}.transportAttempts must be an integer`);
   }
+  const parsed = parseInvariantVerdict(
+    JSON.stringify({ verdict: trace.verdict, reason: trace.reason }),
+  );
+  if (
+    !parsed ||
+    parsed.verdict !== trace.verdict ||
+    parsed.reason !== trace.reason
+  ) {
+    throw new TypeError(
+      `${label} does not satisfy the production judge parser`,
+    );
+  }
+}
+
+function validateHolisticTrace(
+  trace: RecordedJudgeTrace,
+  caseData: SemanticLintReplayCase,
+  label: string,
+): void {
+  validateJudgeTrace(trace, label);
+  const hunkIds = new Set(
+    caseData.hunks.map(
+      (_, index) => `hunk-${String(index + 1).padStart(4, "0")}`,
+    ),
+  );
+  const evidence =
+    trace.verdict === "violates" || trace.verdict === "fixes"
+      ? [{ hunkId: "hunk-0001", reason: trace.reason }]
+      : [];
+  const parsed = parseHolisticLintResults(
+    JSON.stringify({
+      results: [
+        {
+          invariantId: caseData.invariant.id,
+          verdict: trace.verdict,
+          reason: trace.reason,
+          evidence,
+        },
+      ],
+    }),
+    new Set([caseData.invariant.id]),
+    hunkIds,
+  );
+  if (!parsed || parsed[0]?.verdict !== trace.verdict) {
+    throw new TypeError(
+      `${label} does not satisfy the production holistic parser`,
+    );
+  }
 }
 
 function validateVerifierTrace(
   trace: RecordedVerifierTrace,
   label: string,
+  expectedHunkIds: ReadonlySet<string>,
 ): void {
   for (const [key, value] of Object.entries(trace)) {
     if (key === "outcome" || key === "reason") continue;
@@ -108,6 +162,25 @@ function validateVerifierTrace(
   }
   if (!Number.isSafeInteger(trace.transportAttempts)) {
     throw new TypeError(`${label}.transportAttempts must be an integer`);
+  }
+  const verdict =
+    trace.outcome === "confirmed"
+      ? "confirmed"
+      : trace.outcome === "cleared"
+        ? "resolved"
+        : "insufficient-context";
+  const evidence =
+    verdict === "insufficient-context"
+      ? []
+      : [{ hunkId: [...expectedHunkIds][0], reason: trace.reason }];
+  const parsed = parseCounterevidenceVerdict(
+    JSON.stringify({ verdict, reason: trace.reason, evidence }),
+    expectedHunkIds,
+  );
+  if (!parsed || parsed.verdict !== verdict || parsed.reason !== trace.reason) {
+    throw new TypeError(
+      `${label} does not satisfy the production counterevidence parser`,
+    );
   }
 }
 
@@ -304,7 +377,7 @@ function runStrategy(
       inputTokenBudget: config.budgets.holisticInputTokenBudget,
     });
     const trace = caseData.recorded.holistic;
-    validateJudgeTrace(trace, `${caseData.id}.holistic`);
+    validateHolisticTrace(trace, caseData, `${caseData.id}.holistic`);
     if (plan.kind !== "fit") {
       return observationFromTraces(
         caseData,
@@ -425,7 +498,15 @@ function runStrategy(
       "verifier-not-attempted",
     );
   }
-  validateVerifierTrace(verifierTrace, `${caseData.id}.adaptive.verifier`);
+  validateVerifierTrace(
+    verifierTrace,
+    `${caseData.id}.adaptive.verifier`,
+    new Set(
+      caseData.hunks.map(
+        (_, index) => `hunk-${String(index + 1).padStart(4, "0")}`,
+      ),
+    ),
+  );
   const traces = [firstPass, verifierTrace];
   if (verifierTrace.outcome === "unresolved") {
     return observationFromTraces(
