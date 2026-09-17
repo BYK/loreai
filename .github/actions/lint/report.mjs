@@ -544,6 +544,14 @@ function validateReport(value) {
     states[candidate.state]++;
     count(candidate.stats?.semanticCalls, "candidate semanticCalls");
     count(candidate.stats?.transportAttempts, "candidate transportAttempts");
+    if (
+      candidate.stats.semanticCalls >
+      (candidate.verification === undefined ? 2 : 4)
+    ) {
+      throw new TypeError(
+        "candidate semantic calls exceed the per-candidate budget",
+      );
+    }
     semanticCalls += candidate.stats.semanticCalls;
     transportAttempts += candidate.stats.transportAttempts;
     if (candidate.state === "resolved") {

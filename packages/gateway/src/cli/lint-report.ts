@@ -1005,6 +1005,11 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       candidate.stats.transportAttempts,
       "candidate.stats.transportAttempts",
     );
+    assert(
+      candidate.stats.semanticCalls <=
+        (candidate.verification === undefined ? 2 : 4),
+      "candidate semantic calls exceed the per-candidate budget",
+    );
     semanticCalls += candidate.stats.semanticCalls;
     transportAttempts += candidate.stats.transportAttempts;
     if (candidate.state === "resolved") {
