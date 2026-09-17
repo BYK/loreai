@@ -237,7 +237,20 @@ npx tsx packages/core/eval/run.ts --mode live --inflate 400000
 
 # 2.3M mega-session (real session, no inflation needed)
 npx tsx packages/core/eval/run.ts --mode live --scenarios mega-cli-refactor
+
+# Semantic-lint labeled replay (no model spend)
+node --import tsx packages/core/eval/semantic-lint/run.ts --repetitions 3
 ```
+
+The semantic-lint replay evaluates isolated-hunk, holistic-fit, and adaptive
+connected-context strategies over locked revisions from #1766/#1768, labeled
+held-out cases, and controlled replacement-guard mutants. It reports precision,
+decided recall, abstention/unresolved rates, context coverage, semantic and
+transport calls, input/output tokens, estimated cost, and p50/p95 latency. The
+fixture corpus is intentionally separate from live model evals: it replays
+versioned judge/verifier traces so repeated CI runs are comparable and cannot
+spend credentials. A guardrail fails the run if adaptive context reduces the
+known context false positives by hiding a true mutant violation.
 
 **Cost:** Lore's memory layer runs at minimal additional cost — background distillation and curation use batch APIs (50% off on supported providers) and cheaper models. Local on-device embeddings (Nomic Embed v1.5) mean zero API cost for vector search. Predictive cache warming reduces expensive cache rebuilds.
 

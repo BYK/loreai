@@ -1,0 +1,58 @@
+# Semantic-lint replay evaluation
+
+This corpus is the final labeled replay/held-out evaluation for #1771. It is
+deterministic and has no model or database dependency.
+
+Each case records:
+
+- a fixed base/head revision (including the known #1766 and #1768 PRs);
+- one human-reviewed invariant and a bounded diff-hunk replay;
+- a truth label: context false positive, true violation, or clean change;
+- recorded first-pass and verifier traces with calls, retries, tokens, and latency;
+- controlled mutants that remove an authentication guard.
+
+This is a locked-trace metric replay, not a live model evaluation: it does not
+fetch or execute the revisions. A reviewed SHA-256 drift manifest binds every
+case's revision metadata, invariant, hunk set, labels, and recorded traces
+before any metrics are produced, and the stored judge/verifier responses are
+validated by the production response parsers. The two real PR cases also carry
+selected hunk excerpts against locked exact-diff evidence; synthetic cases are
+explicitly marked synthetic. The manifest and evidence checks are change
+detection, not a security boundary: branch protection and maintainer review
+remain the authority for changing labels or traces. The real PR cases use full
+commit SHAs.
+
+The runner compares three arms:
+
+- `isolated-baseline`: judge only the seed hunk;
+- `holistic-fit`: use one complete-diff call when the input fits the bounded budget;
+- `adaptive-connected`: judge the seed, then use bounded connected context and
+  counterevidence for tentative violations.
+
+Run it with:
+
+```bash
+node --import tsx packages/core/eval/semantic-lint/run.ts --repetitions 3
+```
+
+The JSON and Markdown reports include split-specific and aggregate precision,
+decided recall, false negatives, abstention/unresolved counts, context coverage,
+semantic/transport/verifier calls, input/output/cache tokens, estimated cost,
+and p50/p95 latency. Abstentions are not silently counted as clean: the report
+keeps them separate from decided false negatives and checks that all controlled
+mutant violations remain visible. Primary precision/recall exclude controlled
+mutants; their recall is reported separately. Held-out cases use distinct
+invariants and hunk-content fingerprints, and held-out mutants must be
+independently authored rather than naming an in-corpus labeled parent. The
+guardrails compare total recall as well as decided recall, reject increased
+adaptive abstention or aggregate false-positive rate, require non-decreasing
+precision, and count only resolved clears as false-positive reductions. Cost
+accounting treats uncached, cache-read, and cache-write token buckets as
+disjoint. `inputTokenBudget` is a per-semantic-call limit; adaptive first-pass
+and verifier tokens are both reported in the observation total and priced
+together, but each trace is validated against its own call budget.
+
+The traces are locked fixture observations, not a claim that one model run is a
+population estimate. New cases must update the reviewed digest manifest and
+remain disjoint across the labeled/held-out split; the minimum-sample and
+guardrail tests should remain green.
