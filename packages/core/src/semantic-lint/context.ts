@@ -69,6 +69,8 @@ export const DEFAULT_HOLISTIC_INPUT_TOKEN_BUDGET = 16_000;
 export const MAX_HOLISTIC_INVARIANTS = 20;
 export const HOLISTIC_SYSTEM_TOKEN_RESERVE = 2_000;
 export const APPROX_BYTES_PER_TOKEN = 4;
+/** Reserve for the malformed-response repair prompt within the same budget. */
+export const HOLISTIC_REPAIR_INPUT_TOKEN_RESERVE = 4_500;
 
 export function emptyLintCoverage(
   availableHunks = 0,
@@ -105,7 +107,8 @@ export function estimateHolisticLintInputTokens(input: {
   );
   return (
     Math.ceil(Buffer.byteLength(serialized, "utf8") / APPROX_BYTES_PER_TOKEN) +
-    HOLISTIC_SYSTEM_TOKEN_RESERVE
+    HOLISTIC_SYSTEM_TOKEN_RESERVE +
+    HOLISTIC_REPAIR_INPUT_TOKEN_RESERVE
   );
 }
 

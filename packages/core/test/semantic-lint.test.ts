@@ -11,6 +11,8 @@ import {
   changedFiles,
   checkInvariants,
   clusterHunks,
+  buildCounterevidenceInput,
+  createLLMInvariantJudge,
   enforcementLevel,
   gateDecision,
   isEnforceableInvariant,
@@ -20,17 +22,22 @@ import {
   MAX_DIFF_TEXT_BYTES,
   MAX_GIT_OUTPUT_BYTES,
   MAX_HUNK_TEXT_BYTES,
+  MAX_COUNTEREVIDENCE_RESPONSE_BYTES,
+  MAX_JUDGE_RESPONSE_BYTES,
   MAX_PR_DESCRIPTION_BYTES,
   MAX_PR_TITLE_BYTES,
   normalizeSemanticLintContext,
   overrideMatchesFinding,
   parseDiffResult,
   parseInvariantVerdict,
+  parseCounterevidenceVerdict,
   parseOverrides,
   selectCandidates,
   splitDiff,
   type DiffHunk,
   type Finding,
+  type CounterevidenceInput,
+  type CounterevidenceOutcome,
   type HolisticLintInput,
   type InvariantJudge,
   type InvariantVec,
@@ -65,6 +72,24 @@ function stubJudge(
       responder(input, ++calls),
   );
   return { judge: { judge: judgeCall }, judgeCall };
+}
+
+function confirmingVerifier(
+  reason = "The change still violates the invariant.",
+) {
+  return {
+    verify: vi.fn(
+      async (input: CounterevidenceInput): Promise<CounterevidenceOutcome> => ({
+        kind: "verdict",
+        verdict: "confirmed",
+        reason,
+        evidence: [
+          { hunkId: input.seed.id, reason: "The violating change remains." },
+        ],
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }),
+    ),
+  };
 }
 
 async function seed(
@@ -325,6 +350,19 @@ describe("splitDiff", () => {
       },
     ]);
   });
+  it("does not treat a literal truncation marker in source as parser truncation", () => {
+    const hunks = splitDiff(
+      [
+        "diff --git a/src/marker.ts b/src/marker.ts",
+        "--- a/src/marker.ts",
+        "+++ b/src/marker.ts",
+        "@@ -1 +1 @@",
+        '+const message = "hunk truncated by Lore";',
+      ].join("\n"),
+    );
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].truncated).not.toBe(true);
+  });
 });
 
 describe("parseDiffResult", () => {
@@ -346,6 +384,7 @@ describe("parseDiffResult", () => {
           MAX_HUNK_TEXT_BYTES,
         );
         expect(result.hunks[0].text).toContain("hunk truncated by Lore");
+        expect(result.hunks[0].truncated).toBe(true);
 
         await seed(
           repo,
@@ -1000,6 +1039,39 @@ describe("parseInvariantVerdict", () => {
       parseInvariantVerdict('```json\n{"verdict":"satisfies","reason":"ok"}'),
     ).toBeNull();
   });
+  it("rejects oversized responses before JSON parsing", () => {
+    expect(
+      parseInvariantVerdict("x".repeat(MAX_JUDGE_RESPONSE_BYTES + 1)),
+    ).toBeNull();
+  });
+});
+
+describe("parseCounterevidenceVerdict", () => {
+  it("parses a valid fenced JSON verdict", () => {
+    expect(
+      parseCounterevidenceVerdict(
+        '```json\n{"verdict":"confirmed","reason":"still bypasses","evidence":[{"hunkId":"hunk-0001","reason":"call remains direct"}]}\n```',
+        new Set(["hunk-0001"]),
+      ),
+    ).toEqual({
+      verdict: "confirmed",
+      reason: "still bypasses",
+      evidence: [{ hunkId: "hunk-0001", reason: "call remains direct" }],
+    });
+  });
+
+  it("rejects non-string and oversized responses before parsing", () => {
+    const expectedHunks = new Set(["hunk-0001"]);
+    expect(
+      parseCounterevidenceVerdict(42 as unknown as string, expectedHunks),
+    ).toBeNull();
+    expect(
+      parseCounterevidenceVerdict(
+        "x".repeat(MAX_COUNTEREVIDENCE_RESPONSE_BYTES + 1),
+        expectedHunks,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("checkInvariants (funnel, stubbed LLM)", () => {
@@ -1027,7 +1099,6 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
         reason: "adds node:sqlite import outside driver.node.ts",
       }),
     );
-
     const result = await checkInvariants({
       projectPath: project,
       hunks,
@@ -1183,6 +1254,18 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
     expect(result.candidates).toBe(0);
   });
 
+  it("preserves the configured input budget on an empty result", async () => {
+    const result = await checkInvariants({
+      projectPath: "/tmp/ic-test-empty-budget",
+      hunks: [],
+      range: FAKE_RANGE,
+      holisticInputTokenBudget: 4_096,
+      sessionID: "empty-budget",
+    });
+
+    expect(result.coverage.inputTokenBudget).toBe(4_096);
+  });
+
   it("admits a candidate via a ref hit even when cosine is low", async () => {
     const project = "/tmp/ic-test-proj-4";
     // Invariant cites a file:line; the diff touches that exact file. Cosine is
@@ -1274,6 +1357,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
         reason: "extends the silenced set",
       }),
     );
+    const verifier = confirmingVerifier();
     const result = await checkInvariants({
       projectPath: project,
       hunks: [
@@ -1282,6 +1366,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       ],
       range: FAKE_RANGE,
       llm,
+      verifier,
       sessionID: "s6",
     });
     // One drift per (invariant, file) — NOT one per hunk.
@@ -1428,6 +1513,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
           'diff adds `import ... from "node:sqlite"` in a non-driver file',
       }),
     );
+    const verifier = confirmingVerifier();
     const result = await checkInvariants({
       projectPath: project,
       hunks: [
@@ -1435,6 +1521,7 @@ describe("checkInvariants (funnel, stubbed LLM)", () => {
       ],
       range: FAKE_RANGE,
       llm,
+      verifier,
       sessionID: "s-violates",
     });
     expect(result.findings).toHaveLength(1);
@@ -1730,6 +1817,108 @@ describe("checkInvariants typed judge outcomes", () => {
     expect(new Set(result.candidateOutcomes.map((o) => o.id)).size).toBe(3);
   });
 
+  it("fails closed on a zero-call first-pass verdict", async () => {
+    const project = "/tmp/ic-test-zero-call-verdict";
+    const hunks = await seedCandidateSet(project, 1);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict" as const,
+      verdict: "satisfies" as const,
+      reason: "This verdict has no supporting model call.",
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    }));
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-zero-call-verdict",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      status: "failed",
+      attempted: 1,
+      resolved: 0,
+      unresolved: 1,
+      semanticCalls: 2,
+      candidateOutcomes: [
+        {
+          state: "unresolved",
+          failure: { code: "judge-contract-error", scope: "run" },
+          stats: { semanticCalls: 2, transportAttempts: 2 },
+        },
+      ],
+    });
+  });
+
+  it("charges the remaining budget for a zero-call candidate failure", async () => {
+    const project = "/tmp/ic-test-zero-call-candidate-failure";
+    const hunks = await seedCandidateSet(project, 2);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "unresolved" as const,
+      failure: {
+        code: "invalid-verdict" as const,
+        message: "The judge abstained without reporting usage.",
+        scope: "candidate" as const,
+      },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    }));
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-zero-call-candidate-failure",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      status: "failed",
+      candidates: 2,
+      attempted: 1,
+      resolved: 0,
+      unresolved: 1,
+      notAttempted: 1,
+      semanticCalls: 2,
+      transportAttempts: 2,
+    });
+    expect(result.candidateOutcomes[0]).toMatchObject({
+      state: "unresolved",
+      failure: { code: "judge-contract-error", scope: "run" },
+      stats: { semanticCalls: 2, transportAttempts: 2 },
+    });
+    expect(result.candidateOutcomes[1]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "judge-contract-error", scope: "run" },
+    });
+  });
+
+  it("does not dispatch the compatibility judge with zero budget", async () => {
+    const prompt = vi.fn(async () =>
+      JSON.stringify({ verdict: "satisfies", reason: "covered" }),
+    );
+    const judge = createLLMInvariantJudge({
+      llm: { prompt },
+      sessionID: "compat-zero-budget",
+    });
+
+    await expect(
+      judge.judge({
+        invariant: { id: "inv-1", title: "Rule", content: "must hold" },
+        file: "src/a.ts",
+        hunk: "@@ -1 +1 @@\n-old\n+new",
+        semanticCallBudget: 0,
+      }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   it("fails health when all selected candidates are unresolved", async () => {
     const project = "/tmp/ic-test-typed-unresolved";
     const hunks = await seedCandidateSet(project, 3);
@@ -1812,11 +2001,12 @@ describe("checkInvariants typed judge outcomes", () => {
     });
   });
 
-  it("caps repairs at 20 semantic calls and accounts for displaced candidates", async () => {
-    const project = "/tmp/ic-test-typed-budget";
+  it("keeps the full candidate budget for judge-only callers", async () => {
+    const project = "/tmp/ic-test-judge-only-budget";
     const hunks = await seedCandidateSet(project, 20);
     const { judge, judgeCall } = stubJudge((input) => {
-      expect(input.semanticCallBudget).toBe(2);
+      expect(input.semanticCallBudget).toBeGreaterThanOrEqual(1);
+      expect(input.semanticCallBudget).toBeLessThanOrEqual(2);
       return {
         kind: "unresolved",
         failure: {
@@ -1833,7 +2023,7 @@ describe("checkInvariants typed judge outcomes", () => {
       hunks,
       range: FAKE_RANGE,
       judge,
-      sessionID: "typed-budget",
+      sessionID: "judge-only-budget",
     });
 
     expect(judgeCall).toHaveBeenCalledTimes(10);
@@ -1847,16 +2037,54 @@ describe("checkInvariants typed judge outcomes", () => {
       semanticCalls: 20,
       transportAttempts: 20,
     });
+  });
+
+  it("keeps the full budget when no holistic verifier is selected", async () => {
+    const project = "/tmp/ic-test-typed-budget";
+    const hunks = await seedCandidateSet(project, 20);
+    const { judge, judgeCall } = stubJudge((input) => {
+      expect(input.semanticCallBudget).toBeGreaterThanOrEqual(1);
+      expect(input.semanticCallBudget).toBeLessThanOrEqual(2);
+      return {
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The changed call bypasses the boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      };
+    });
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-budget",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(20);
+    expect(result).toMatchObject({
+      candidates: 20,
+      attempted: 20,
+      resolved: 20,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 20,
+      transportAttempts: 20,
+      verification: {
+        strategy: "none",
+        selected: 0,
+        attempted: 0,
+        confirmed: 0,
+        cleared: 0,
+        unresolved: 0,
+        notAttempted: 0,
+        semanticCalls: 0,
+        transportAttempts: 0,
+      },
+    });
     expect(
-      result.candidateOutcomes
-        .slice(10)
-        .every(
-          (outcome) =>
-            outcome.state === "not-attempted" &&
-            outcome.failure.code === "semantic-budget-exhausted" &&
-            outcome.stats.semanticCalls === 0,
-        ),
+      result.candidateOutcomes.every((outcome) => outcome.state === "resolved"),
     ).toBe(true);
+    expect(result.findings).toHaveLength(20);
     expect(
       result.candidateOutcomes.reduce(
         (sum, outcome) => sum + outcome.stats.semanticCalls,
@@ -1870,9 +2098,906 @@ describe("checkInvariants typed judge outcomes", () => {
       ),
     ).toBe(result.transportAttempts);
   });
+
+  it("spends unused verifier reserve on clean large fallback candidates", async () => {
+    const project = "/tmp/ic-test-clean-large-fallback";
+    const hunks = await seedCandidateSet(project, 20);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict",
+      verdict: "satisfies",
+      reason: "The change remains consistent with the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = confirmingVerifier();
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      holisticJudge: {
+        lint: vi.fn(async () => {
+          throw new Error("holistic lint must not run over budget");
+        }),
+      },
+      holisticInputTokenBudget: 1,
+      sessionID: "clean-large-fallback",
+    });
+
+    expect(judgeCall).toHaveBeenCalledTimes(20);
+    expect(verifier.verify).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      candidates: 20,
+      attempted: 20,
+      resolved: 20,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 20,
+      transportAttempts: 20,
+    });
+  });
+});
+
+describe("counterevidence semantic-lint verification", () => {
+  function oversizedHunk() {
+    return {
+      file: "src/transport.ts",
+      text: "@@\n+" + "dispatchRequest(".padEnd(8_000, "x"),
+    };
+  }
+
+  function holisticFallbackJudge() {
+    return {
+      lint: vi.fn(async () => {
+        throw new Error("holistic lint must not run over budget");
+      }),
+    };
+  }
+
+  it("recomputes companion omissions for the JSON verifier context", () => {
+    const input = buildCounterevidenceInput({
+      candidate: {
+        hunkIdx: 0,
+        invariantIdx: 0,
+        similarity: 1,
+        refHit: false,
+      },
+      invariant: {
+        entry: {
+          id: "inv-1",
+          title: "Transport boundary",
+          content: "dispatchRequest() must use the shared transport boundary",
+        },
+        vec: null,
+        refFiles: new Set(),
+      } as InvariantVec,
+      seed: {
+        file: "src/transport.ts",
+        text: "@@ -1 +1 @@\n+dispatchRequest()",
+      },
+      hunks: [
+        {
+          file: "src/transport.ts",
+          text: "@@ -1 +1 @@\n+dispatchRequest()",
+        },
+        {
+          file: "src/wrapper.ts",
+          text: "@@ -1 +1 @@\n+sharedTransport(dispatchRequest())",
+        },
+      ],
+      connectedContext: {
+        contexts: new Map([
+          [0, [{ hunkIndex: 1, reason: "shared-symbol", score: 40_002 }]],
+        ]),
+        omittedBySeed: new Map(),
+        complete: true,
+      },
+      renderedContext: { truncated: false, omittedCompanions: 1 },
+      firstPassReason: "The isolated call appears direct.",
+    });
+
+    expect(input.connectedContext).toHaveLength(1);
+    expect(input.omittedCompanions).toBe(0);
+    expect(input.contextComplete).toBe(false);
+  });
+
+  it("confirms a tentative violation with bounded counterevidence", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-confirmed-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge, judgeCall } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(
+          async (
+            input: CounterevidenceInput,
+          ): Promise<CounterevidenceOutcome> => ({
+            kind: "verdict",
+            verdict: "confirmed",
+            reason: "The connected context still bypasses the shared boundary.",
+            evidence: [
+              { hunkId: input.seed.id, reason: "The call remains unwrapped." },
+            ],
+            stats: { semanticCalls: 1, transportAttempts: 1 },
+          }),
+        ),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [oversizedHunk()],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticInputTokenBudget: 2_000,
+        sessionID: "counterevidence-confirmed",
+      });
+
+      expect(judgeCall).toHaveBeenCalledOnce();
+      expect(verifier.verify).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({
+        candidates: 1,
+        attempted: 1,
+        resolved: 1,
+        unresolved: 0,
+        semanticCalls: 2,
+        transportAttempts: 2,
+        verification: {
+          strategy: "counterevidence",
+          selected: 1,
+          attempted: 1,
+          confirmed: 1,
+          cleared: 0,
+          unresolved: 0,
+          notAttempted: 0,
+          semanticCalls: 1,
+          transportAttempts: 1,
+        },
+      });
+      expect(result.findings).toHaveLength(1);
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "resolved",
+        verdict: "violates",
+        verification: { state: "confirmed" },
+      });
+      expect(verifier.verify.mock.calls[0][0].semanticCallBudget).toBe(2);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("counts a conservative call when a verifier throws before reporting usage", async () => {
+    const project = "/tmp/lore-counterevidence-verifier-throws";
+    const hunks = await seedCandidateSet(project, 2);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict" as const,
+      verdict: "violates" as const,
+      reason: "The isolated change appears to bypass the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = {
+      verify: vi.fn(async () => {
+        const error = new Error("verifier transport failed after dispatch");
+        Object.defineProperty(error, "attempts", { value: 2 });
+        throw error;
+      }),
+    };
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      holisticJudge: holisticFallbackJudge(),
+      holisticInputTokenBudget: 1,
+      sessionID: "counterevidence-verifier-throws",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(verifier.verify).toHaveBeenCalledOnce();
+    expect(result.candidateOutcomes[1]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "judge-contract-error", scope: "run" },
+    });
+    expect(result.semanticCalls).toBe(2);
+    expect(result.transportAttempts).toBe(3);
+    expect(result.findings).toHaveLength(0);
+  });
+
+  it("does not exceed the shared verifier-call cap after earlier verifications", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-verifier-cap-"),
+    );
+    try {
+      const hunks = (await seedCandidateSet(project, 9)).map((hunk, index) => ({
+        ...hunk,
+        text: `@@\n+const candidateUniqueContext${index} = "${"x".repeat(8_000)}"`,
+      }));
+      const { judge, judgeCall } = stubJudge(() => ({
+        kind: "verdict" as const,
+        verdict: "violates" as const,
+        reason: "The isolated change appears to bypass the boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = confirmingVerifier();
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks,
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticInputTokenBudget: 16_000,
+        sessionID: "counterevidence-verifier-cap",
+      });
+
+      expect(judgeCall).toHaveBeenCalledTimes(9);
+      expect(verifier.verify).toHaveBeenCalledTimes(8);
+      expect(result).toMatchObject({
+        candidates: 9,
+        attempted: 9,
+        resolved: 8,
+        unresolved: 1,
+        semanticCalls: 17,
+        transportAttempts: 17,
+        verification: {
+          strategy: "counterevidence",
+          selected: 9,
+          attempted: 8,
+          confirmed: 8,
+          cleared: 0,
+          unresolved: 0,
+          notAttempted: 1,
+          semanticCalls: 8,
+          transportAttempts: 8,
+        },
+      });
+      expect(result.candidateOutcomes[8]).toMatchObject({
+        state: "unresolved",
+        verification: {
+          state: "not-attempted",
+          failure: { code: "verification-budget-exhausted", scope: "run" },
+        },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("stops first-pass judging after a run-scoped verifier failure", async () => {
+    const project = "/tmp/lore-counterevidence-verifier-run-failure";
+    const hunks = await seedCandidateSet(project, 2);
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict" as const,
+      verdict: "violates" as const,
+      reason: "The isolated change appears to bypass the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = {
+      verify: vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "transport-error" as const,
+          message: "verifier transport unavailable",
+          scope: "run" as const,
+          retryable: true,
+        },
+        stats: { semanticCalls: 1, transportAttempts: 2 },
+      })),
+    };
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      holisticJudge: holisticFallbackJudge(),
+      holisticInputTokenBudget: 1,
+      sessionID: "counterevidence-verifier-run-failure",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(verifier.verify).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      semanticCalls: 2,
+      transportAttempts: 3,
+      findings: [],
+    });
+    expect(result.candidateOutcomes[1]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "transport-error", scope: "run" },
+    });
+  });
+
+  it("charges the remaining verifier budget for a zero-call candidate failure", async () => {
+    const project = "/tmp/lore-counterevidence-zero-call-failure";
+    const hunks = (await seedCandidateSet(project, 5)).map((hunk, index) => ({
+      ...hunk,
+      text: `@@\n+const uniqueVerifierContext${index} = "${"x".repeat(8_000)}"`,
+    }));
+    const { judge, judgeCall } = stubJudge(() => ({
+      kind: "verdict" as const,
+      verdict: "violates" as const,
+      reason: "The isolated change appears to bypass the boundary.",
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    }));
+    const verifier = {
+      verify: vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "invalid-verdict" as const,
+          message: "The verifier abstained without reporting usage.",
+          scope: "candidate" as const,
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      })),
+    };
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      verifier,
+      holisticJudge: holisticFallbackJudge(),
+      holisticInputTokenBudget: 16_000,
+      sessionID: "counterevidence-zero-call-failure",
+    });
+
+    expect(judgeCall).toHaveBeenCalledOnce();
+    expect(verifier.verify).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      attempted: 1,
+      resolved: 0,
+      unresolved: 1,
+      notAttempted: 4,
+      semanticCalls: 3,
+      transportAttempts: 3,
+      verification: {
+        selected: 1,
+        attempted: 1,
+        confirmed: 0,
+        cleared: 0,
+        unresolved: 1,
+        notAttempted: 0,
+        semanticCalls: 2,
+        transportAttempts: 2,
+      },
+    });
+    expect(result.candidateOutcomes[0]).toMatchObject({
+      state: "unresolved",
+      failure: { code: "judge-contract-error", scope: "run" },
+      stats: { semanticCalls: 3, transportAttempts: 3 },
+    });
+    expect(result.candidateOutcomes[1]).toMatchObject({
+      state: "not-attempted",
+      failure: { code: "judge-contract-error", scope: "run" },
+    });
+  });
+
+  it("fails closed when connected-context rendering truncates a parsed hunk", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-render-bound-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(async () => ({
+          kind: "verdict" as const,
+          verdict: "confirmed" as const,
+          reason: "This must not be accepted from truncated context.",
+          evidence: [{ hunkId: "hunk-0000", reason: "unreachable" }],
+          stats: { semanticCalls: 0, transportAttempts: 0 },
+        })),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@\n+" + "dispatchRequest(".padEnd(20_000, "x"),
+          },
+        ],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        sessionID: "counterevidence-render-bound",
+      });
+
+      expect(verifier.verify).not.toHaveBeenCalled();
+      expect(result.findings).toHaveLength(0);
+      expect(result).toMatchObject({
+        attempted: 1,
+        unresolved: 1,
+        candidateOutcomes: [
+          {
+            state: "unresolved",
+            failure: { code: "insufficient-context" },
+            stats: { semanticCalls: 0, transportAttempts: 0 },
+          },
+        ],
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when PR metadata is truncated", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-pr-context-bound-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(async () => ({
+          kind: "verdict" as const,
+          verdict: "confirmed" as const,
+          reason: "This must not be accepted from incomplete PR metadata.",
+          evidence: [{ hunkId: "hunk-0001", reason: "unreachable" }],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        })),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [oversizedHunk()],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        prContext: {
+          title: "bounded metadata",
+          description: "truncated metadata",
+          titleTruncated: false,
+          descriptionTruncated: true,
+        },
+        sessionID: "counterevidence-pr-context-bound",
+      });
+
+      expect(verifier.verify).not.toHaveBeenCalled();
+      expect(result.findings).toHaveLength(0);
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "unresolved",
+        failure: { code: "insufficient-context" },
+        verification: {
+          state: "not-attempted",
+          contextComplete: false,
+        },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a complete seed verifiable when another seed has omitted companions", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-per-seed-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue(
+        Array.from({ length: 6 }, () => v(1, 0)),
+      );
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(async (input: CounterevidenceInput) => ({
+          kind: "verdict" as const,
+          verdict: "confirmed" as const,
+          reason: "The complete seed still bypasses the boundary.",
+          evidence: [
+            { hunkId: input.seed.id, reason: "The call remains direct." },
+          ],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        })),
+      };
+      const noisy = Array.from({ length: 5 }, (_, index) => ({
+        file: "src/noisy.ts",
+        text: `@@ -${index + 1} +${index + 1} @@\n+const sharedNoise = ${index};`,
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          ...noisy,
+          { file: "src/target.ts", text: "@@ -1 +1 @@\n+dispatchRequest()" },
+        ],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        sessionID: "counterevidence-per-seed",
+      });
+
+      expect(verifier.verify).toHaveBeenCalledOnce();
+      expect(verifier.verify.mock.calls[0][0].seed.id).toBe("hunk-0006");
+      expect(
+        result.candidateOutcomes.find((outcome) => outcome.hunkIndex === 5),
+      ).toMatchObject({
+        state: "resolved",
+        verification: { state: "confirmed", contextComplete: true },
+      });
+      expect(result.verification).toMatchObject({
+        selected: 6,
+        attempted: 1,
+        confirmed: 1,
+        notAttempted: 5,
+        contextComplete: false,
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("clears a tentative violation when connected context resolves it", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-cleared-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(
+          async (
+            input: CounterevidenceInput,
+          ): Promise<CounterevidenceOutcome> => ({
+            kind: "verdict",
+            verdict: "resolved",
+            reason:
+              "A companion change routes the call through the shared boundary.",
+            evidence: [
+              {
+                hunkId: input.seed.id,
+                reason: "The companion context adds the wrapper.",
+              },
+            ],
+            stats: { semanticCalls: 1, transportAttempts: 1 },
+          }),
+        ),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [oversizedHunk()],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        sessionID: "counterevidence-cleared",
+      });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result).toMatchObject({
+        attempted: 1,
+        resolved: 1,
+        unresolved: 0,
+        semanticCalls: 2,
+        verification: {
+          strategy: "counterevidence",
+          selected: 1,
+          attempted: 1,
+          confirmed: 0,
+          cleared: 1,
+          unresolved: 0,
+          notAttempted: 0,
+        },
+      });
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "resolved",
+        verdict: "violates",
+        verification: { state: "cleared" },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("does not count a preflight-rejected verifier input as consumed", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-over-budget-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+      const verifier = {
+        verify: vi.fn(async () => ({
+          kind: "verdict" as const,
+          verdict: "confirmed" as const,
+          reason: "This should not be reached.",
+          evidence: [{ hunkId: "hunk-0", reason: "unreachable" }],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        })),
+      };
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [
+          {
+            file: "src/transport.ts",
+            text: "@@\n+" + "dispatchRequest(".padEnd(8_000, "x"),
+          },
+        ],
+        range: FAKE_RANGE,
+        judge,
+        verifier,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        prContext: {
+          title: "large context",
+          description: "x".repeat(80_000),
+          titleTruncated: false,
+          descriptionTruncated: false,
+        },
+        sessionID: "counterevidence-over-budget",
+      });
+
+      expect(verifier.verify).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        status: "failed",
+        findings: [],
+        verification: {
+          strategy: "counterevidence",
+          selected: 1,
+          attempted: 0,
+          notAttempted: 1,
+          inputTokens: 0,
+        },
+      });
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "unresolved",
+        verification: {
+          state: "not-attempted",
+          inputTokens: 0,
+          failure: { code: "insufficient-context", scope: "candidate" },
+        },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when no counterevidence verifier is available", async () => {
+    const project = mkdtempSync(
+      join(tmpdir(), "lore-counterevidence-missing-"),
+    );
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "dispatchRequest() must never bypass the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const { judge } = stubJudge(() => ({
+        kind: "verdict",
+        verdict: "violates",
+        reason: "The isolated call appears to bypass the shared boundary.",
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [oversizedHunk()],
+        range: FAKE_RANGE,
+        judge,
+        holisticJudge: holisticFallbackJudge(),
+        holisticInputTokenBudget: 2_000,
+        sessionID: "counterevidence-missing",
+      });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result).toMatchObject({
+        status: "failed",
+        attempted: 1,
+        resolved: 0,
+        unresolved: 1,
+        semanticCalls: 1,
+        verification: {
+          strategy: "counterevidence",
+          selected: 1,
+          attempted: 0,
+          confirmed: 0,
+          cleared: 0,
+          unresolved: 0,
+          notAttempted: 1,
+          semanticCalls: 0,
+          transportAttempts: 0,
+        },
+      });
+      expect(result.candidateOutcomes[0]).toMatchObject({
+        state: "unresolved",
+        verification: {
+          state: "not-attempted",
+          failure: { code: "judge-contract-error", scope: "run" },
+        },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("holistic semantic-lint orchestration", () => {
+  it("sanitizes invalid holistic transport-attempt stats", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-invalid-stats-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => {
+        throw new Error("isolated judge should not run for a fitting lint");
+      });
+      const holisticLint = vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "judge-contract-error" as const,
+          message: "The holistic judge returned invalid usage.",
+          scope: "run" as const,
+        },
+        stats: {
+          semanticCalls: Number.NaN,
+          transportAttempts: Number.POSITIVE_INFINITY,
+        },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [{ file: "src/transport.ts", text: "@@ -1 +1 @@\n+new" }],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { lint: holisticLint },
+        holisticInputTokenBudget: 16_000,
+        sessionID: "holistic-invalid-stats",
+      });
+
+      expect(result).toMatchObject({
+        status: "failed",
+        semanticCalls: 2,
+        transportAttempts: 2,
+        candidateOutcomes: [
+          {
+            state: "unresolved",
+            failure: { code: "judge-contract-error", scope: "run" },
+            stats: { semanticCalls: 2, transportAttempts: 2 },
+          },
+        ],
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a zero-call run-scoped holistic failure", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-holistic-run-failure-"));
+    try {
+      await seed(
+        project,
+        "transport boundary",
+        "src/transport.ts must use the shared transport boundary",
+        v(1, 0),
+      );
+      vi.spyOn(embedding, "embedInTokenBatches").mockResolvedValue([v(1, 0)]);
+      const isolated = stubJudge(() => {
+        throw new Error("isolated judge should not run for a fitting lint");
+      });
+      const holisticLint = vi.fn(async () => ({
+        kind: "unresolved" as const,
+        failure: {
+          code: "no-auth" as const,
+          message: "No credential is available for the holistic judge.",
+          scope: "run" as const,
+          retryable: false,
+        },
+        stats: { semanticCalls: 0, transportAttempts: 0 },
+      }));
+
+      const result = await checkInvariants({
+        projectPath: project,
+        hunks: [{ file: "src/transport.ts", text: "@@ -1 +1 @@\n+new" }],
+        range: FAKE_RANGE,
+        judge: isolated.judge,
+        holisticJudge: { lint: holisticLint },
+        holisticInputTokenBudget: 16_000,
+        sessionID: "holistic-run-failure",
+      });
+
+      expect(result).toMatchObject({
+        status: "failed",
+        semanticCalls: 0,
+        transportAttempts: 0,
+        candidateOutcomes: [
+          {
+            state: "unresolved",
+            failure: { code: "no-auth", scope: "run" },
+            stats: { semanticCalls: 0, transportAttempts: 0 },
+          },
+        ],
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it("uses one complete whole-diff lint and cites only returned evidence", async () => {
     const project = mkdtempSync(join(tmpdir(), "lore-holistic-small-"));
     try {
@@ -1956,7 +3081,7 @@ describe("holistic semantic-lint orchestration", () => {
         hunks: [
           {
             file: "src/transport.ts",
-            text: "@@\\n+" + "x".repeat(20_000),
+            text: "@@\\n+" + "x".repeat(8_000),
           },
         ],
         range: FAKE_RANGE,

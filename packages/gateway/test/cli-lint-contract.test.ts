@@ -24,7 +24,7 @@ function completeReport(
   overrides: Partial<SemanticLintReport> = {},
 ): SemanticLintReport {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: "complete",
     model: "github-copilot/gpt-5.6-luna",
     effort: "off",
@@ -41,6 +41,20 @@ function completeReport(
       availableInvariants: 0,
       includedInvariants: 0,
       omittedInvariants: 0,
+    },
+    verification: {
+      strategy: "none",
+      contextComplete: false,
+      selected: 0,
+      attempted: 0,
+      confirmed: 0,
+      cleared: 0,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 0,
+      transportAttempts: 0,
+      inputTokens: 0,
+      inputTokenBudget: 0,
     },
     health: {
       range: { status: "healthy" },
@@ -91,6 +105,19 @@ function completeReport(
 }
 
 describe("typed lore lint contract", () => {
+  test("bounds lint timer flags before they reach Node timers", async () => {
+    const { MAX_SEMANTIC_LINT_TIMEOUT_MS, parseSemanticLintTimeout } =
+      await import("../src/cli/commands/lint");
+
+    expect(parseSemanticLintTimeout("1")).toBe(1);
+    expect(parseSemanticLintTimeout(String(MAX_SEMANTIC_LINT_TIMEOUT_MS))).toBe(
+      MAX_SEMANTIC_LINT_TIMEOUT_MS,
+    );
+    expect(() =>
+      parseSemanticLintTimeout(String(MAX_SEMANTIC_LINT_TIMEOUT_MS + 1)),
+    ).toThrow(/at most/);
+  });
+
   test("report construction does not leak internal candidate fields", async () => {
     const { buildSemanticLintReport } = await import("../src/cli/lint-report");
     const internalCandidate = {
@@ -98,6 +125,7 @@ describe("typed lore lint contract", () => {
       file: "src/file.ts",
       invariantId: "inv-01",
       invariantTitle: "Keep reports strict",
+      severity: "advisory",
       state: "resolved",
       verdict: "satisfies",
       reason: "The report projects only public fields.",
@@ -164,6 +192,99 @@ describe("typed lore lint contract", () => {
     });
 
     expect(report.candidates[0]).not.toHaveProperty("hunkIndex");
+  });
+
+  test("reports would-block soft findings in advisory mode", async () => {
+    const { buildSemanticLintReport } = await import("../src/cli/lint-report");
+    const result = {
+      status: "complete",
+      range: { base: "base", head: "head", source: "test" },
+      coverage: {
+        strategy: "holistic",
+        contextComplete: true,
+        inputTokens: 2_000,
+        inputTokenBudget: 16_000,
+        availableHunks: 1,
+        includedHunks: 1,
+        omittedHunks: 0,
+        availableInvariants: 1,
+        includedInvariants: 1,
+        omittedInvariants: 0,
+      },
+      health: {
+        diff: { status: "healthy" },
+        invariantVectors: {
+          status: "healthy",
+          expected: 1,
+          available: 1,
+          missing: 0,
+        },
+        hunkVectors: {
+          status: "healthy",
+          expected: 1,
+          available: 1,
+          missing: 0,
+        },
+        judge: {
+          status: "healthy",
+          selected: 1,
+          resolved: 1,
+          unresolved: 0,
+          notAttempted: 0,
+        },
+      },
+      hunks: 1,
+      invariants: 1,
+      candidates: 1,
+      attempted: 1,
+      resolved: 1,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 1,
+      transportAttempts: 1,
+      candidateOutcomes: [
+        {
+          id: "candidate-01",
+          file: "src/file.ts",
+          invariantId: "inv-01",
+          invariantTitle: "Soft rule",
+          severity: "soft",
+          state: "resolved",
+          verdict: "violates",
+          reason: "The rule was bypassed.",
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        },
+      ],
+      findings: [
+        {
+          invariantId: "inv-01",
+          invariantTitle: "Soft rule",
+          invariantContent: "The rule must hold.",
+          file: "src/file.ts",
+          similarity: 1,
+          refHit: false,
+          reason: "The rule was bypassed.",
+          hunk: "@@ -1 +1 @@\n+bad",
+          severity: "soft",
+        },
+      ],
+    } satisfies CoreLintResultLike;
+
+    const report = buildSemanticLintReport({
+      result,
+      gate: { mode: "advisory", blocking: [], overridden: [], advisory: [] },
+      model: "test/model",
+      effort: "off",
+      elapsedMs: 1,
+      invariantSource: { status: "healthy" },
+    });
+
+    expect(report.gate).toMatchObject({
+      mode: "advisory",
+      blockingFindingIds: [],
+      advisoryFindingIds: ["finding-01"],
+      wouldBlockFindingIds: ["finding-01"],
+    });
   });
 
   test("lint is routed through Stricli, not the legacy route set", async () => {
@@ -382,7 +503,7 @@ describe("typed lore lint contract", () => {
     const path = join(directory, "report.json");
     await writeSemanticLintReport(path, failed);
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual(failed);
-    expect(failed.schemaVersion).toBe(3);
+    expect(failed.schemaVersion).toBe(4);
     expect(failed.status).toBe("failed");
     expect(semanticLintExitCode(failed)).toBe(3);
   });

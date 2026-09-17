@@ -53,15 +53,31 @@ import {
 } from "./context";
 import {
   buildConnectedContextDetails,
+  MAX_CONTEXT_BYTES,
   renderConnectedContextDetails,
 } from "./connected-context";
+import {
+  COUNTEREVIDENCE_INPUT_TOKEN_BUDGET,
+  emptyCounterevidenceSummary,
+  estimateCounterevidenceInputTokens,
+  parseCounterevidenceVerdict,
+  type CounterevidenceHunk,
+  type CounterevidenceInput,
+  type CounterevidenceOutcome,
+  type CounterevidenceRecord,
+  type CounterevidenceSummary,
+  type CounterevidenceVerifier,
+} from "./counterevidence";
 import { extractReferences } from "../references";
 import type { LLMClient } from "../types";
 
 export {
   INVARIANT_HOLISTIC_LINT_SYSTEM,
+  INVARIANT_COUNTEREVIDENCE_SYSTEM,
   invariantHolisticLintRepairUser,
   invariantHolisticLintUser,
+  invariantCounterevidenceRepairUser,
+  invariantCounterevidenceUser,
 } from "./prompt";
 export {
   buildHolisticLintInput,
@@ -76,6 +92,25 @@ export type {
   HolisticLintInput,
   LintCoverage,
 } from "./context";
+export {
+  COUNTEREVIDENCE_INPUT_TOKEN_BUDGET,
+  MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS,
+  MAX_COUNTEREVIDENCE_RESPONSE_BYTES,
+  emptyCounterevidenceSummary,
+  estimateCounterevidenceInputTokens,
+  parseCounterevidenceVerdict,
+} from "./counterevidence";
+export type {
+  CounterevidenceEvidence,
+  CounterevidenceHunk,
+  CounterevidenceInput,
+  CounterevidenceOutcome,
+  CounterevidenceRecord,
+  CounterevidenceResult,
+  CounterevidenceSummary,
+  CounterevidenceVerifier,
+  CounterevidenceVerdict,
+} from "./counterevidence";
 
 // ---------------------------------------------------------------------------
 // Constants (mirror contradiction.ts bounds so cost stays capped)
@@ -162,7 +197,14 @@ export const UNPARSEABLE_WARN_RATIO = 0.5;
  *  pairs are judged most-similar-first; the cap is the cost ceiling per PR. */
 export const MAX_HOLISTIC_EVIDENCE_PER_RESULT = 8;
 export const MAX_LINT_FINDINGS = 200;
+/** Shared semantic-call ceiling for one run, including verification. */
 export const MAX_JUDGE_CALLS = 20;
+/** Reserved for counterevidence verification and its schema repair. */
+export const MAX_VERIFIER_CALLS = 8;
+/** First-pass calls are capped so verification cannot be starved. */
+export const MAX_FIRST_PASS_JUDGE_CALLS = MAX_JUDGE_CALLS - MAX_VERIFIER_CALLS;
+/** Reject untrusted judge payloads before trim/JSON.parse can allocate on them. */
+export const MAX_JUDGE_RESPONSE_BYTES = 1 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Enforceable-invariant filter
@@ -509,6 +551,8 @@ export interface DiffHunk {
   oldFile?: string;
   /** True when the changed file has no new-side path (a full file deletion). */
   deleted?: boolean;
+  /** True when the parser truncated this hunk to the semantic-lint bound. */
+  truncated?: boolean;
   /** The unified-diff hunk text (the `@@ ... @@` header + its body). */
   text: string;
 }
@@ -537,9 +581,9 @@ class DiffLimitError extends Error {
   override name = "DiffLimitError";
 }
 
-function truncateHunkText(text: string): string {
+function truncateHunkText(text: string): { text: string; truncated: boolean } {
   const bytes = Buffer.from(text);
-  if (bytes.length <= MAX_HUNK_TEXT_BYTES) return text;
+  if (bytes.length <= MAX_HUNK_TEXT_BYTES) return { text, truncated: false };
 
   const markerBytes = Buffer.byteLength(HUNK_TRUNCATION_MARKER);
   const available = MAX_HUNK_TEXT_BYTES - markerBytes;
@@ -551,7 +595,10 @@ function truncateHunkText(text: string): string {
   while (tailStart < bytes.length && (bytes[tailStart] & 0xc0) === 0x80)
     tailStart++;
 
-  return `${bytes.subarray(0, headEnd).toString("utf8")}${HUNK_TRUNCATION_MARKER}${bytes.subarray(tailStart).toString("utf8")}`;
+  return {
+    text: `${bytes.subarray(0, headEnd).toString("utf8")}${HUNK_TRUNCATION_MARKER}${bytes.subarray(tailStart).toString("utf8")}`,
+    truncated: true,
+  };
 }
 
 /**
@@ -670,7 +717,8 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
         );
       }
-      const text = truncateHunkText(cur.join("\n"));
+      const truncated = truncateHunkText(cur.join("\n"));
+      const text = truncated.text;
       textBytes += Buffer.byteLength(text);
       if (textBytes > MAX_DIFF_TEXT_BYTES) {
         throw new DiffLimitError(
@@ -682,6 +730,7 @@ export function splitDiff(raw: string): DiffHunk[] {
         text,
         ...(oldFile && oldFile !== f ? { oldFile } : {}),
         ...(file.length === 0 && oldFile ? { deleted: true } : {}),
+        ...(truncated.truncated ? { truncated: true } : {}),
       });
     }
     cur = null;
@@ -703,20 +752,26 @@ export function splitDiff(raw: string): DiffHunk[] {
           `Diff exceeds semantic lint limit of ${MAX_DIFF_HUNKS} hunks`,
         );
       }
-      const text = truncateHunkText(
+      const truncated = truncateHunkText(
         [
           "@@ -1,1 +1,1 @@ rename-only path change",
           `- rename from ${pathChangeFrom}`,
           `+ rename to ${pathChangeTo}`,
         ].join("\n"),
       );
+      const text = truncated.text;
       textBytes += Buffer.byteLength(text);
       if (textBytes > MAX_DIFF_TEXT_BYTES) {
         throw new DiffLimitError(
           `Diff exceeds semantic lint limit of ${MAX_DIFF_TEXT_BYTES} parsed text bytes`,
         );
       }
-      hunks.push({ file: f, oldFile: pathChangeFrom, text });
+      hunks.push({
+        file: f,
+        oldFile: pathChangeFrom,
+        text,
+        ...(truncated.truncated ? { truncated: true } : {}),
+      });
     }
     pathChangeFrom = "";
     pathChangeTo = "";
@@ -798,6 +853,7 @@ export function parseInvariantVerdict(
   text: string | null,
 ): InvariantVerdict | null {
   if (!text) return null;
+  if (Buffer.byteLength(text, "utf8") > MAX_JUDGE_RESPONSE_BYTES) return null;
   let payload = text.trim();
   const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fenced) payload = fenced[1];
@@ -831,6 +887,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function tupleKey(...values: string[]): string {
+  return JSON.stringify(values);
+}
+
+function safeJsonStringify(value: unknown): string | null {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Validate one complete holistic judge response. The response must contain
  * exactly one result for every expected invariant, with evidence IDs that
@@ -849,6 +918,7 @@ export function parseHolisticLintResults(
   expectedHunkIds: ReadonlySet<string>,
 ): HolisticLintResult[] | null {
   if (!text) return null;
+  if (Buffer.byteLength(text, "utf8") > MAX_JUDGE_RESPONSE_BYTES) return null;
   let payload = text.trim();
   const fenced = /^```json[ \t]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fenced) payload = fenced[1];
@@ -1119,6 +1189,7 @@ export type JudgeFailureCode =
   | "invalid-verdict"
   | "judge-contract-error"
   | "semantic-budget-exhausted"
+  | "verification-budget-exhausted"
   | "insufficient-context";
 
 export interface JudgeFailure {
@@ -1181,25 +1252,32 @@ interface CandidateOutcomeBase {
   hunkIndex: number;
   invariantId: string;
   invariantTitle: string;
+  /** Trusted enforcement level copied from the selected invariant metadata. */
+  severity: EnforcementLevel;
   similarity: number;
   refHit: boolean;
   stats: JudgeStats;
 }
 
-export type CandidateOutcome =
-  | (CandidateOutcomeBase & {
-      state: "resolved";
-      verdict: Verdict;
-      reason: string;
-    })
-  | (CandidateOutcomeBase & {
-      state: "unresolved";
-      failure: JudgeFailure;
-    })
-  | (CandidateOutcomeBase & {
-      state: "not-attempted";
-      failure: JudgeFailure;
-    });
+export type CandidateOutcome = CandidateOutcomeBase &
+  (
+    | {
+        state: "resolved";
+        verdict: Verdict;
+        reason: string;
+      }
+    | {
+        state: "unresolved";
+        failure: JudgeFailure;
+      }
+    | {
+        state: "not-attempted";
+        failure: JudgeFailure;
+      }
+  ) & {
+    /** Present only when a tentative first-pass violation was re-checked. */
+    verification?: CounterevidenceRecord;
+  };
 
 export type HealthStatus = "healthy" | "degraded" | "failed" | "not-run";
 
@@ -1247,6 +1325,8 @@ export interface CheckResult {
   semanticCalls: number;
   transportAttempts: number;
   candidateOutcomes: CandidateOutcome[];
+  /** Counterevidence pass accounting; holistic runs report strategy "none". */
+  verification: CounterevidenceSummary;
   findings: Finding[];
   /** @deprecated Use `attempted`. Kept for the current gateway renderer. */
   judged: number;
@@ -1428,7 +1508,7 @@ export function parseOverrides(messages: string[]): Override[] {
       const target = m[1].trim();
       const reason = m[2].trim();
       if (!target || !reason) continue;
-      const dedup = `${target.toLowerCase()}\x1f${reason.toLowerCase()}`;
+      const dedup = tupleKey(target.toLowerCase(), reason.toLowerCase());
       if (seen.has(dedup)) continue; // idempotent: same trailer in 2 commits = 1
       seen.add(dedup);
       out.push({ target, reason });
@@ -1480,6 +1560,10 @@ export function createLLMInvariantJudge(
         return response;
       };
       const stats = (): JudgeStats => ({ semanticCalls, transportAttempts });
+
+      if (input.semanticCallBudget < 1) {
+        return invalidVerdictOutcome(stats());
+      }
 
       let response: string | null;
       try {
@@ -1584,6 +1668,8 @@ export interface CheckInvariantsInput {
    *  models — a knob for tuning recall vs. spend. */
   effort?: ReasoningEffort;
   sessionID: string;
+  /** Optional bounded verifier for tentative large-PR violations. */
+  verifier?: CounterevidenceVerifier;
   /** Overall orchestration cancellation boundary, including hunk embedding. */
   signal?: AbortSignal;
   /** Remaining duration available to hunk embedding. */
@@ -1608,24 +1694,32 @@ export async function checkInvariants(
     hunks: input.hunks ?? [],
   };
   if (diff.kind === "failure") {
-    return emptyCheckResult(input.range, {
-      diff: { status: "failed", hunks: 0, failure: diff.failure },
-      invariantVectors: notRunVectorHealth(),
-      hunkVectors: notRunVectorHealth(),
-      judge: notRunJudgeHealth(),
-    });
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: { status: "failed", hunks: 0, failure: diff.failure },
+        invariantVectors: notRunVectorHealth(),
+        hunkVectors: notRunVectorHealth(),
+        judge: notRunJudgeHealth(),
+      },
+      { inputTokenBudget: input.holisticInputTokenBudget },
+    );
   }
 
   const hunks = diff.hunks;
   const files = changedFiles(hunks);
   const diffHealth: DiffHealth = { status: "healthy", hunks: hunks.length };
   if (hunks.length === 0) {
-    return emptyCheckResult(input.range, {
-      diff: diffHealth,
-      invariantVectors: healthyVectorHealth(0, 0),
-      hunkVectors: healthyVectorHealth(0, 0),
-      judge: healthyJudgeHealth(0),
-    });
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: healthyVectorHealth(0, 0),
+        hunkVectors: healthyVectorHealth(0, 0),
+        judge: healthyJudgeHealth(0),
+      },
+      { inputTokenBudget: input.holisticInputTokenBudget },
+    );
   }
 
   // Load invariants (confidence DESC), gate on confidence + enforceability,
@@ -1639,21 +1733,25 @@ export async function checkInvariants(
       .filter((e) => isEnforceableInvariant(e))
       .slice(0, MAX_INVARIANTS_SCAN);
   } catch (error) {
-    return emptyCheckResult(input.range, {
-      diff: diffHealth,
-      invariantVectors: {
-        status: "failed",
-        expected: 0,
-        available: 0,
-        missing: 0,
-        failure: {
-          code: "invariant-source-read-failed",
-          message: boundedMessage(error, "Could not load invariants"),
+    return emptyCheckResult(
+      input.range,
+      {
+        diff: diffHealth,
+        invariantVectors: {
+          status: "failed",
+          expected: 0,
+          available: 0,
+          missing: 0,
+          failure: {
+            code: "invariant-source-read-failed",
+            message: boundedMessage(error, "Could not load invariants"),
+          },
         },
+        hunkVectors: notRunVectorHealth(hunks.length),
+        judge: notRunJudgeHealth(),
       },
-      hunkVectors: notRunVectorHealth(hunks.length),
-      judge: notRunJudgeHealth(),
-    });
+      { inputTokenBudget: input.holisticInputTokenBudget },
+    );
   }
   input.signal?.throwIfAborted();
   if (allEntries.length === 0) {
@@ -1665,7 +1763,7 @@ export async function checkInvariants(
         hunkVectors: healthyVectorHealth(0, 0),
         judge: healthyJudgeHealth(0),
       },
-      { hunks: hunks.length },
+      { hunks: hunks.length, inputTokenBudget: input.holisticInputTokenBudget },
     );
   }
 
@@ -1685,7 +1783,11 @@ export async function checkInvariants(
         hunkVectors: notRunVectorHealth(hunks.length),
         judge: notRunJudgeHealth(),
       },
-      { hunks: hunks.length, invariants: allEntries.length },
+      {
+        hunks: hunks.length,
+        invariants: allEntries.length,
+        inputTokenBudget: input.holisticInputTokenBudget,
+      },
     );
   }
   const vecById = invariantVecResult.vecs;
@@ -1724,7 +1826,11 @@ export async function checkInvariants(
         hunkVectors: hunkVecResult.health,
         judge: notRunJudgeHealth(),
       },
-      { hunks: hunks.length, invariants: allEntries.length },
+      {
+        hunks: hunks.length,
+        invariants: allEntries.length,
+        inputTokenBudget: input.holisticInputTokenBudget,
+      },
     );
   }
   const hunkVecs = hunkVecResult.vecs;
@@ -1738,7 +1844,9 @@ export async function checkInvariants(
 
   // Select (representative-hunk, invariant) pairs to judge: coverage across
   // clusters (round-robin), relevance within each (ref-hits + top cosine).
-  const selected = selectCandidates(clusters, hunkVecs, invariants, hunks);
+  const selected = selectCandidates(clusters, hunkVecs, invariants, hunks, {
+    cap: MAX_JUDGE_CALLS,
+  });
 
   const judge =
     input.judge ??
@@ -1771,11 +1879,9 @@ export async function checkInvariants(
       content: invariants[index].entry.content,
     }),
   );
-  const hasTruncatedHunk = hunks.some((hunk) =>
-    hunk.text.includes("hunk truncated by Lore"),
-  );
+  const hasTruncatedHunk = hunks.some((hunk) => hunk.truncated === true);
   const holisticPlan =
-    input.holisticJudge && holisticInvariants.length > 0 && !hasTruncatedHunk
+    holisticInvariants.length > 0 && !hasTruncatedHunk
       ? buildHolisticLintInput({
           invariants: holisticInvariants,
           hunks: holisticHunks,
@@ -1784,6 +1890,8 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget,
         })
       : null;
+
+  const counterevidenceEnabled = holisticPlan?.kind === "too-large";
 
   if (holisticPlan?.kind === "fit" && input.holisticJudge) {
     return runHolisticLint({
@@ -1866,15 +1974,24 @@ export async function checkInvariants(
           inputTokenBudget: input.holisticInputTokenBudget ?? 16_000,
         });
 
-  // Stage 2: judge the selected pairs (capped, coverage-ordered).
+  // Stage 2: judge selected pairs, then verify tentative violations. The
+  // first pass and counterevidence pass share MAX_JUDGE_CALLS. A large
+  // holistic fallback reserves verifier capacity up front; when no holistic
+  // plan exists, the loop spends the shared budget dynamically so clean runs
+  // can use all calls without allowing interleaved verification to overrun it.
   const findings: Finding[] = [];
-  // Dedup key = `${invariantId}\x1f${file}`: one drift per (invariant, file),
-  // regardless of how many hunks or judge calls surface it.
   const seenFindings = new Set<string>();
   const candidateOutcomes: CandidateOutcome[] = [];
+  const verification = emptyCounterevidenceSummary();
+  let firstPassCalls = 0;
   let semanticCalls = 0;
   let transportAttempts = 0;
   let stopFailure: JudgeFailure | null = null;
+  let verificationStopFailure: JudgeFailure | null = null;
+  const reservedFirstPassCallBudget =
+    holisticPlan?.kind === "too-large" && input.verifier
+      ? MAX_FIRST_PASS_JUDGE_CALLS
+      : MAX_JUDGE_CALLS;
 
   for (
     let candidateIndex = 0;
@@ -1895,12 +2012,23 @@ export async function checkInvariants(
       continue;
     }
 
-    const remainingSemanticCalls = MAX_JUDGE_CALLS - semanticCalls;
-    if (remainingSemanticCalls === 0) {
+    // Keep the verifier reserve while tentative violations exist. If the
+    // initial reserve is consumed entirely by clean candidates, spend the
+    // otherwise-unused capacity so a clean large PR is not left unexplored.
+    const firstPassCallBudget =
+      reservedFirstPassCallBudget === MAX_FIRST_PASS_JUDGE_CALLS &&
+      verification.selected === 0
+        ? MAX_JUDGE_CALLS
+        : reservedFirstPassCallBudget;
+    const remainingFirstPassCalls = Math.min(
+      firstPassCallBudget - firstPassCalls,
+      MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
+    );
+    if (remainingFirstPassCalls <= 0) {
       candidateOutcomes.push({
         ...base,
         state: "not-attempted",
-        failure: semanticBudgetFailure(),
+        failure: semanticBudgetFailure(firstPassCallBudget),
       });
       continue;
     }
@@ -1945,7 +2073,7 @@ export async function checkInvariants(
           file: hunk.file,
           hunk: renderedContext.text,
           prContext: isolatedPrContext,
-          semanticCallBudget: Math.min(2, remainingSemanticCalls),
+          semanticCallBudget: Math.min(2, remainingFirstPassCalls),
         });
       } catch (error) {
         outcome = {
@@ -1955,12 +2083,19 @@ export async function checkInvariants(
             message: boundedMessage(error, "InvariantJudge threw"),
             scope: "run",
           },
-          stats: { semanticCalls: 0, transportAttempts: 0 },
+          stats: {
+            semanticCalls: semanticCallsFromError(
+              error,
+              Math.min(2, remainingFirstPassCalls),
+            ),
+            transportAttempts: transportAttemptsFromError(error),
+          },
         };
       }
     }
 
-    outcome = validateJudgeOutcome(outcome, remainingSemanticCalls);
+    outcome = validateJudgeOutcome(outcome, remainingFirstPassCalls);
+    firstPassCalls += outcome.stats.semanticCalls;
     semanticCalls += outcome.stats.semanticCalls;
     transportAttempts += outcome.stats.transportAttempts;
 
@@ -1975,26 +2110,26 @@ export async function checkInvariants(
       continue;
     }
 
-    candidateOutcomes.push({
-      ...base,
-      state: "resolved",
-      verdict: outcome.verdict,
-      reason: outcome.reason,
-      stats: outcome.stats,
-    });
-    // Only "violates" produces a finding. "fixes", "satisfies", and "unrelated"
-    // are all non-finding verdicts — the four-category frame exists precisely to
-    // let the judge say "this is the fix" or "this hunk isn't actually related"
-    // without flagging. The old binary verdict space could not express either,
-    // which is what produced the dominant false-positive class (a fix being read
-    // as a violation).
-    if (outcome.verdict !== "violates") continue;
-    // A verdict belongs only to the seed hunk that was actually judged.
-    // Companion context is evidence for investigation, never a second verdict.
-    const memberIdxs = [c.hunkIdx];
-    const severity = enforcementLevel(inv.entry);
-    for (const mi of memberIdxs) {
-      const dedupKey = `${inv.entry.id}\x1f${hunks[mi].file}`;
+    if (outcome.verdict !== "violates") {
+      candidateOutcomes.push({
+        ...base,
+        state: "resolved",
+        verdict: outcome.verdict,
+        reason: outcome.reason,
+        stats: outcome.stats,
+      });
+      continue;
+    }
+
+    if (!counterevidenceEnabled) {
+      candidateOutcomes.push({
+        ...base,
+        state: "resolved",
+        verdict: outcome.verdict,
+        reason: outcome.reason,
+        stats: outcome.stats,
+      });
+      const dedupKey = tupleKey(inv.entry.id, hunk.file);
       if (seenFindings.has(dedupKey)) continue;
       seenFindings.add(dedupKey);
       if (findings.length >= MAX_LINT_FINDINGS) continue;
@@ -2002,14 +2137,266 @@ export async function checkInvariants(
         invariantId: inv.entry.id,
         invariantTitle: inv.entry.title,
         invariantContent: inv.entry.content,
-        file: hunks[mi].file,
+        file: hunk.file,
         similarity: c.similarity,
         refHit: c.refHit,
         reason: outcome.reason,
-        hunk: hunks[mi].text,
-        severity,
+        hunk: hunk.text,
+        severity: enforcementLevel(inv.entry),
       });
+      continue;
     }
+
+    verification.strategy = "counterevidence";
+    verification.selected++;
+    verification.inputTokenBudget += COUNTEREVIDENCE_INPUT_TOKEN_BUDGET;
+    const counterevidenceInput = buildCounterevidenceInput({
+      candidate: c,
+      invariant: inv,
+      seed: hunk,
+      hunks,
+      connectedContext,
+      renderedContext,
+      firstPassReason: outcome.reason,
+      prContext: input.prContext,
+    });
+    const estimatedInputTokens =
+      estimateCounterevidenceInputTokens(counterevidenceInput);
+    // Only accepted verifier calls consume input-token accounting. A
+    // preflight-rejected or not-attempted candidate reports zero consumed input.
+    let inputTokens = 0;
+    verification.contextComplete =
+      verification.selected === 1
+        ? counterevidenceInput.contextComplete
+        : verification.contextComplete && counterevidenceInput.contextComplete;
+
+    const firstPassStats = outcome.stats;
+    const unresolvedVerification = (
+      failure: JudgeFailure,
+      state: "unresolved" | "not-attempted",
+      stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+    ): void => {
+      if (state === "not-attempted") {
+        verification.notAttempted++;
+      } else {
+        verification.attempted++;
+        verification.unresolved++;
+      }
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure,
+        stats: {
+          semanticCalls: firstPassStats.semanticCalls + stats.semanticCalls,
+          transportAttempts:
+            firstPassStats.transportAttempts + stats.transportAttempts,
+        },
+        verification: {
+          state,
+          failure,
+          stats,
+          inputTokens,
+          contextComplete: counterevidenceInput.contextComplete,
+        },
+      });
+    };
+
+    if (verificationStopFailure) {
+      unresolvedVerification(verificationStopFailure, "not-attempted");
+      continue;
+    }
+    if (!counterevidenceInput.contextComplete) {
+      unresolvedVerification(
+        {
+          code: "insufficient-context",
+          message:
+            "Connected context was truncated or incompletely retrieved; verification was not attempted",
+          scope: "candidate",
+          retryable: false,
+        },
+        "not-attempted",
+      );
+      continue;
+    }
+    if (!input.verifier) {
+      const failure: JudgeFailure = {
+        code: "judge-contract-error",
+        message:
+          "No CounterevidenceVerifier was provided for a tentative violation",
+        scope: "run",
+        retryable: false,
+      };
+      stopFailure = failure;
+      verificationStopFailure = failure;
+      unresolvedVerification(failure, "not-attempted");
+      continue;
+    }
+    const remainingVerifierCalls = Math.min(
+      MAX_VERIFIER_CALLS - verification.semanticCalls,
+      MAX_JUDGE_CALLS - firstPassCalls - verification.semanticCalls,
+    );
+    if (remainingVerifierCalls <= 0) {
+      const failure: JudgeFailure = {
+        code: "verification-budget-exhausted",
+        message: "Reserved counterevidence semantic-call budget was exhausted",
+        scope: "run",
+        retryable: false,
+      };
+      stopFailure = failure;
+      verificationStopFailure = failure;
+      unresolvedVerification(failure, "not-attempted");
+      continue;
+    }
+    if (estimatedInputTokens > COUNTEREVIDENCE_INPUT_TOKEN_BUDGET) {
+      unresolvedVerification(
+        {
+          code: "insufficient-context",
+          message: "Counterevidence input exceeded its bounded token budget",
+          scope: "candidate",
+          retryable: false,
+        },
+        "not-attempted",
+      );
+      continue;
+    }
+
+    inputTokens = estimatedInputTokens;
+    verification.inputTokens += inputTokens;
+    let verificationOutcome: CounterevidenceOutcome;
+    try {
+      verificationOutcome = await input.verifier.verify({
+        ...counterevidenceInput,
+        semanticCallBudget: Math.min(2, remainingVerifierCalls),
+      });
+    } catch (error) {
+      const failure: JudgeFailure = {
+        code: "judge-contract-error",
+        message: boundedMessage(error, "CounterevidenceVerifier threw"),
+        scope: "run",
+        retryable: false,
+      };
+      verificationOutcome = {
+        kind: "unresolved",
+        failure,
+        stats: {
+          semanticCalls: semanticCallsFromError(
+            error,
+            Math.min(2, remainingVerifierCalls),
+          ),
+          transportAttempts: transportAttemptsFromError(error),
+        },
+      };
+      // A custom verifier may have dispatched a call before throwing, but its
+      // contract gives us no reliable stats. Stop the run so the first-pass
+      // judge cannot spend calls beyond the shared ceiling or cost budget.
+      stopFailure = failure;
+      verificationStopFailure = failure;
+    }
+    verificationOutcome = validateCounterevidenceOutcome(
+      verificationOutcome,
+      new Set([
+        counterevidenceInput.seed.id,
+        ...counterevidenceInput.connectedContext.map((entry) => entry.id),
+      ]),
+      remainingVerifierCalls,
+    );
+    verification.semanticCalls += verificationOutcome.stats.semanticCalls;
+    verification.transportAttempts +=
+      verificationOutcome.stats.transportAttempts;
+    semanticCalls += verificationOutcome.stats.semanticCalls;
+    transportAttempts += verificationOutcome.stats.transportAttempts;
+
+    if (verificationOutcome.kind === "unresolved") {
+      if (verificationOutcome.failure.scope === "run") {
+        stopFailure = verificationOutcome.failure;
+        verificationStopFailure = verificationOutcome.failure;
+      }
+      unresolvedVerification(
+        verificationOutcome.failure,
+        "unresolved",
+        verificationOutcome.stats,
+      );
+      continue;
+    }
+
+    verification.attempted++;
+    if (verificationOutcome.verdict === "insufficient-context") {
+      const failure: JudgeFailure = {
+        code: "insufficient-context",
+        message: verificationOutcome.reason,
+        scope: "candidate",
+        retryable: false,
+      };
+      verification.unresolved++;
+      candidateOutcomes.push({
+        ...base,
+        state: "unresolved",
+        failure,
+        stats: {
+          semanticCalls:
+            firstPassStats.semanticCalls +
+            verificationOutcome.stats.semanticCalls,
+          transportAttempts:
+            firstPassStats.transportAttempts +
+            verificationOutcome.stats.transportAttempts,
+        },
+        verification: {
+          state: "unresolved",
+          failure,
+          stats: verificationOutcome.stats,
+          inputTokens,
+          contextComplete: counterevidenceInput.contextComplete,
+        },
+      });
+      continue;
+    }
+
+    const verificationState =
+      verificationOutcome.verdict === "confirmed" ? "confirmed" : "cleared";
+    if (verificationState === "confirmed") verification.confirmed++;
+    else verification.cleared++;
+    const combinedStats = {
+      semanticCalls:
+        firstPassStats.semanticCalls + verificationOutcome.stats.semanticCalls,
+      transportAttempts:
+        firstPassStats.transportAttempts +
+        verificationOutcome.stats.transportAttempts,
+    };
+    candidateOutcomes.push({
+      ...base,
+      state: "resolved",
+      verdict: "violates",
+      reason:
+        verificationState === "confirmed"
+          ? verificationOutcome.reason
+          : outcome.reason,
+      stats: combinedStats,
+      verification: {
+        state: verificationState,
+        reason: verificationOutcome.reason,
+        evidence: verificationOutcome.evidence,
+        stats: verificationOutcome.stats,
+        inputTokens,
+        contextComplete: counterevidenceInput.contextComplete,
+      },
+    });
+    if (verificationState !== "confirmed") continue;
+
+    const dedupKey = tupleKey(inv.entry.id, hunk.file);
+    if (seenFindings.has(dedupKey)) continue;
+    seenFindings.add(dedupKey);
+    if (findings.length >= MAX_LINT_FINDINGS) continue;
+    findings.push({
+      invariantId: inv.entry.id,
+      invariantTitle: inv.entry.title,
+      invariantContent: inv.entry.content,
+      file: hunk.file,
+      similarity: c.similarity,
+      refHit: c.refHit,
+      reason: verificationOutcome.reason,
+      hunk: hunk.text,
+      severity: enforcementLevel(inv.entry),
+    });
   }
 
   const resolved = candidateOutcomes.filter(
@@ -2052,6 +2439,7 @@ export async function checkInvariants(
     semanticCalls,
     transportAttempts,
     candidateOutcomes,
+    verification,
     findings,
     judged: attempted,
     judgeCalls: semanticCalls,
@@ -2089,6 +2477,7 @@ const JUDGE_FAILURE_CODES = new Set<JudgeFailureCode>([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "verification-budget-exhausted",
   "insufficient-context",
 ]);
 
@@ -2100,6 +2489,49 @@ function boundedMessage(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error);
   const sanitized = message.replace(/[\r\n\t]+/g, " ").trim();
   return (sanitized || fallback).slice(0, 400);
+}
+
+function transportAttemptsFromError(error: unknown): number {
+  if (!isRecord(error)) return 0;
+  const attempts = error.attempts;
+  return typeof attempts === "number" &&
+    Number.isSafeInteger(attempts) &&
+    attempts >= 0
+    ? attempts
+    : 0;
+}
+
+function semanticCallsFromError(error: unknown, maxCalls: number): number {
+  if (isRecord(error)) {
+    const calls = error.semanticCalls;
+    if (typeof calls === "number" && Number.isSafeInteger(calls) && calls >= 0)
+      return Math.min(calls, maxCalls);
+  }
+  // A throwing adapter may have dispatched before it could return stats. Count
+  // one conservative call so telemetry and the shared ceiling cannot undercount
+  // an invocation whose usage is otherwise unknowable.
+  return Math.min(1, maxCalls);
+}
+
+function conservativeContractStats(
+  remainingSemanticCalls: number,
+  observedTransportAttempts: unknown = 0,
+): JudgeStats {
+  // Every typed judge boundary receives at most two calls (initial response
+  // plus one schema repair). Charge that entire invocation budget when the
+  // callback cannot provide trustworthy usage, then make the failure run
+  // scoped so no later candidate can spend more calls.
+  const semanticCalls = Math.min(2, Math.max(0, remainingSemanticCalls));
+  const transportAttempts =
+    typeof observedTransportAttempts === "number" &&
+    Number.isSafeInteger(observedTransportAttempts) &&
+    observedTransportAttempts >= 0
+      ? observedTransportAttempts
+      : 0;
+  return {
+    semanticCalls,
+    transportAttempts: Math.max(semanticCalls, transportAttempts),
+  };
 }
 
 function judgeErrorOutcome(error: unknown, stats: JudgeStats): JudgeOutcome {
@@ -2136,10 +2568,12 @@ function invalidVerdictOutcome(stats: JudgeStats): JudgeOutcome {
   };
 }
 
-function semanticBudgetFailure(): JudgeFailure {
+function semanticBudgetFailure(
+  firstPassCallBudget = MAX_FIRST_PASS_JUDGE_CALLS,
+): JudgeFailure {
   return {
     code: "semantic-budget-exhausted",
-    message: `Run-wide semantic-call budget of ${MAX_JUDGE_CALLS} was exhausted`,
+    message: `First-pass semantic-call budget of ${firstPassCallBudget} was exhausted`,
     scope: "run",
     retryable: false,
   };
@@ -2150,11 +2584,15 @@ function validateJudgeOutcome(
   remainingSemanticCalls: number,
 ): JudgeOutcome {
   if (!outcome || typeof outcome !== "object") {
-    return judgeContractFailure();
+    return judgeContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const record = outcome as Record<string, unknown>;
   if (!record.stats || typeof record.stats !== "object") {
-    return judgeContractFailure();
+    return judgeContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const stats = record.stats as Record<string, unknown>;
   const statsValid =
@@ -2163,9 +2601,31 @@ function validateJudgeOutcome(
     (stats.semanticCalls as number) <= Math.min(2, remainingSemanticCalls) &&
     Number.isSafeInteger(stats.transportAttempts) &&
     (stats.transportAttempts as number) >= 0;
-  if (!statsValid) return judgeContractFailure();
+  if (!statsValid) {
+    return judgeContractFailure(
+      conservativeContractStats(
+        remainingSemanticCalls,
+        typeof stats.transportAttempts === "number" &&
+          Number.isSafeInteger(stats.transportAttempts) &&
+          stats.transportAttempts >= 0
+          ? stats.transportAttempts
+          : 0,
+      ),
+    );
+  }
+  const normalizedStats: JudgeStats = {
+    semanticCalls: stats.semanticCalls as number,
+    transportAttempts: stats.transportAttempts as number,
+  };
 
   if (record.kind === "verdict") {
+    if ((stats.semanticCalls as number) < 1)
+      return judgeContractFailure(
+        conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+      );
     if (
       isVerdict(record.verdict) &&
       typeof record.reason === "string" &&
@@ -2174,12 +2634,19 @@ function validateJudgeOutcome(
     ) {
       return outcome as JudgeOutcome;
     }
-    return judgeContractFailure();
+    return judgeContractFailure(normalizedStats);
   }
 
   if (record.kind === "unresolved") {
     if (!record.failure || typeof record.failure !== "object") {
-      return judgeContractFailure();
+      return judgeContractFailure(
+        normalizedStats.semanticCalls > 0
+          ? normalizedStats
+          : conservativeContractStats(
+              remainingSemanticCalls,
+              normalizedStats.transportAttempts,
+            ),
+      );
     }
     const failure = record.failure as Record<string, unknown>;
     if (
@@ -2192,13 +2659,33 @@ function validateJudgeOutcome(
       (failure.retryable === undefined ||
         typeof failure.retryable === "boolean")
     ) {
+      if (
+        failure.scope === "candidate" &&
+        normalizedStats.semanticCalls === 0
+      ) {
+        return judgeContractFailure(
+          conservativeContractStats(
+            remainingSemanticCalls,
+            normalizedStats.transportAttempts,
+          ),
+        );
+      }
       return outcome as JudgeOutcome;
     }
   }
-  return judgeContractFailure();
+  return judgeContractFailure(
+    normalizedStats.semanticCalls > 0
+      ? normalizedStats
+      : conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+  );
 }
 
-function judgeContractFailure(): JudgeOutcome {
+function judgeContractFailure(
+  stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+): JudgeOutcome {
   return {
     kind: "unresolved",
     failure: {
@@ -2208,7 +2695,193 @@ function judgeContractFailure(): JudgeOutcome {
       scope: "run",
       retryable: false,
     },
-    stats: { semanticCalls: 0, transportAttempts: 0 },
+    stats,
+  };
+}
+
+export function buildCounterevidenceInput(args: {
+  candidate: Candidate;
+  invariant: InvariantVec;
+  seed: DiffHunk;
+  hunks: DiffHunk[];
+  connectedContext: ReturnType<typeof buildConnectedContextDetails>;
+  renderedContext: { truncated: boolean; omittedCompanions: number };
+  firstPassReason: string;
+  prContext?: SemanticLintContext;
+}): CounterevidenceInput {
+  const seedEntry: CounterevidenceHunk = {
+    id: holisticHunkId(args.candidate.hunkIdx),
+    file: args.seed.file,
+    relationship: "seed",
+    text: args.seed.text,
+  };
+  const connected: CounterevidenceHunk[] = [];
+  let omittedCompanions =
+    args.connectedContext.omittedBySeed.get(args.candidate.hunkIdx) ?? 0;
+  for (const companion of args.connectedContext.contexts.get(
+    args.candidate.hunkIdx,
+  ) ?? []) {
+    const hunk = args.hunks[companion.hunkIndex];
+    if (!hunk || hunk.truncated === true) {
+      omittedCompanions++;
+      continue;
+    }
+    const entry: CounterevidenceHunk = {
+      id: holisticHunkId(companion.hunkIndex),
+      file: hunk.file,
+      relationship: companion.reason,
+      text: hunk.text,
+    };
+    const candidateContext = [...connected, entry];
+    const bytes = Buffer.byteLength(
+      JSON.stringify({ seed: seedEntry, connectedContext: candidateContext }),
+      "utf8",
+    );
+    if (bytes > MAX_CONTEXT_BYTES) {
+      omittedCompanions++;
+      continue;
+    }
+    connected.push(entry);
+  }
+  return {
+    invariant: {
+      id: args.invariant.entry.id,
+      title: args.invariant.entry.title,
+      content: args.invariant.entry.content,
+    },
+    seed: seedEntry,
+    connectedContext: connected,
+    contextComplete:
+      args.connectedContext.contexts.has(args.candidate.hunkIdx) &&
+      !args.connectedContext.omittedBySeed.has(args.candidate.hunkIdx) &&
+      !args.renderedContext.truncated &&
+      args.renderedContext.omittedCompanions === 0 &&
+      !args.hunks.some((hunk) => hunk.truncated === true) &&
+      args.prContext?.titleTruncated !== true &&
+      args.prContext?.descriptionTruncated !== true &&
+      omittedCompanions === 0,
+    omittedCompanions,
+    firstPassReason: args.firstPassReason,
+    prContext: args.prContext,
+    semanticCallBudget: 0,
+  };
+}
+
+function validateCounterevidenceOutcome(
+  outcome: unknown,
+  expectedHunkIds: ReadonlySet<string>,
+  remainingSemanticCalls: number,
+): CounterevidenceOutcome {
+  if (!outcome || typeof outcome !== "object") {
+    return counterevidenceContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
+  }
+  const record = outcome as Record<string, unknown>;
+  if (!record.stats || typeof record.stats !== "object") {
+    return counterevidenceContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
+  }
+  const stats = record.stats as Record<string, unknown>;
+  if (
+    !Number.isSafeInteger(stats.semanticCalls) ||
+    (stats.semanticCalls as number) < 0 ||
+    (stats.semanticCalls as number) > Math.min(2, remainingSemanticCalls) ||
+    !Number.isSafeInteger(stats.transportAttempts) ||
+    (stats.transportAttempts as number) < 0
+  ) {
+    return counterevidenceContractFailure(
+      conservativeContractStats(
+        remainingSemanticCalls,
+        typeof stats.transportAttempts === "number" &&
+          Number.isSafeInteger(stats.transportAttempts) &&
+          stats.transportAttempts >= 0
+          ? stats.transportAttempts
+          : 0,
+      ),
+    );
+  }
+  const normalizedStats: JudgeStats = {
+    semanticCalls: stats.semanticCalls as number,
+    transportAttempts: stats.transportAttempts as number,
+  };
+  if (record.kind === "verdict") {
+    if ((stats.semanticCalls as number) < 1)
+      return counterevidenceContractFailure(
+        conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+      );
+    const serialized = safeJsonStringify({
+      evidence: record.evidence,
+      reason: record.reason,
+      verdict: record.verdict,
+    });
+    if (serialized === null)
+      return counterevidenceContractFailure(normalizedStats);
+    const parsed = parseCounterevidenceVerdict(serialized, expectedHunkIds);
+    return parsed
+      ? { kind: "verdict", ...parsed, stats: normalizedStats }
+      : counterevidenceContractFailure(normalizedStats);
+  }
+  if (
+    record.kind === "unresolved" &&
+    record.failure &&
+    typeof record.failure === "object"
+  ) {
+    const failure = record.failure as Record<string, unknown>;
+    if (
+      typeof failure.code === "string" &&
+      JUDGE_FAILURE_CODES.has(failure.code as JudgeFailureCode) &&
+      typeof failure.message === "string" &&
+      failure.message.trim().length > 0 &&
+      failure.message.length <= 400 &&
+      (failure.scope === "candidate" || failure.scope === "run") &&
+      (failure.retryable === undefined ||
+        typeof failure.retryable === "boolean")
+    ) {
+      if (
+        failure.scope === "candidate" &&
+        normalizedStats.semanticCalls === 0
+      ) {
+        return counterevidenceContractFailure(
+          conservativeContractStats(
+            remainingSemanticCalls,
+            normalizedStats.transportAttempts,
+          ),
+        );
+      }
+      return {
+        kind: "unresolved",
+        failure: failure as unknown as JudgeFailure,
+        stats: normalizedStats,
+      };
+    }
+  }
+  return counterevidenceContractFailure(
+    normalizedStats.semanticCalls > 0
+      ? normalizedStats
+      : conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+  );
+}
+
+function counterevidenceContractFailure(
+  stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+): CounterevidenceOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "judge-contract-error",
+      message: "CounterevidenceVerifier returned an invalid outcome",
+      scope: "run",
+      retryable: false,
+    },
+    stats,
   };
 }
 
@@ -2216,9 +2889,12 @@ function validateHolisticLintOutcome(
   outcome: unknown,
   expectedInvariantIds: ReadonlySet<string>,
   expectedHunkIds: ReadonlySet<string>,
+  remainingSemanticCalls = MAX_JUDGE_CALLS,
 ): HolisticLintOutcome {
   if (!isRecord(outcome) || !isRecord(outcome.stats)) {
-    return holisticContractFailure();
+    return holisticContractFailure(
+      conservativeContractStats(remainingSemanticCalls),
+    );
   }
   const semanticCalls =
     typeof outcome.stats.semanticCalls === "number"
@@ -2235,21 +2911,30 @@ function validateHolisticLintOutcome(
     !Number.isSafeInteger(transportAttempts) ||
     transportAttempts < 0
   ) {
-    return holisticContractFailure();
+    return holisticContractFailure(
+      conservativeContractStats(remainingSemanticCalls, transportAttempts),
+    );
   }
   const normalizedStats: JudgeStats = {
     semanticCalls,
     transportAttempts,
   };
   if (outcome.kind === "results") {
+    if (semanticCalls < 1) {
+      return holisticContractFailure(
+        conservativeContractStats(remainingSemanticCalls, transportAttempts),
+      );
+    }
+    const serialized = safeJsonStringify({ results: outcome.results });
+    if (serialized === null) return holisticContractFailure(normalizedStats);
     const results = parseHolisticLintResults(
-      JSON.stringify({ results: outcome.results }),
+      serialized,
       expectedInvariantIds,
       expectedHunkIds,
     );
     return results
       ? { kind: "results", results, stats: normalizedStats }
-      : holisticContractFailure();
+      : holisticContractFailure(normalizedStats);
   }
   if (
     outcome.kind === "unresolved" &&
@@ -2264,16 +2949,30 @@ function validateHolisticLintOutcome(
     (outcome.failure.retryable === undefined ||
       typeof outcome.failure.retryable === "boolean")
   ) {
+    if (semanticCalls === 0 && outcome.failure.scope === "candidate") {
+      return holisticContractFailure(
+        conservativeContractStats(remainingSemanticCalls, transportAttempts),
+      );
+    }
     return {
       kind: "unresolved",
       failure: outcome.failure as unknown as JudgeFailure,
       stats: normalizedStats,
     };
   }
-  return holisticContractFailure();
+  return holisticContractFailure(
+    normalizedStats.semanticCalls > 0
+      ? normalizedStats
+      : conservativeContractStats(
+          remainingSemanticCalls,
+          normalizedStats.transportAttempts,
+        ),
+  );
 }
 
-function holisticContractFailure(): HolisticLintOutcome {
+function holisticContractFailure(
+  stats: JudgeStats = { semanticCalls: 0, transportAttempts: 0 },
+): HolisticLintOutcome {
   return {
     kind: "unresolved",
     failure: {
@@ -2282,7 +2981,7 @@ function holisticContractFailure(): HolisticLintOutcome {
       scope: "run",
       retryable: false,
     },
-    stats: { semanticCalls: 0, transportAttempts: 0 },
+    stats,
   };
 }
 
@@ -2368,11 +3067,16 @@ function overallStatus(
 function emptyCheckResult(
   range: ResolvedRange,
   health: CheckHealth,
-  counts: { hunks?: number; invariants?: number } = {},
+  counts: {
+    hunks?: number;
+    invariants?: number;
+    inputTokenBudget?: number;
+  } = {},
 ): CheckResult {
   const coverage = emptyLintCoverage(
     counts.hunks ?? health.diff.hunks,
     counts.invariants ?? 0,
+    counts.inputTokenBudget,
   );
   return {
     range,
@@ -2389,6 +3093,7 @@ function emptyCheckResult(
     semanticCalls: 0,
     transportAttempts: 0,
     candidateOutcomes: [],
+    verification: emptyCounterevidenceSummary(),
     findings: [],
     judged: 0,
     judgeCalls: 0,
@@ -2474,7 +3179,13 @@ async function runHolisticLint(args: {
         message: boundedMessage(error, "HolisticLintJudge threw"),
         scope: "run",
       },
-      stats: { semanticCalls: 0, transportAttempts: 0 },
+      stats: {
+        semanticCalls: semanticCallsFromError(
+          error,
+          Math.min(2, MAX_JUDGE_CALLS),
+        ),
+        transportAttempts: transportAttemptsFromError(error),
+      },
     };
   }
 
@@ -2551,6 +3262,7 @@ async function runHolisticLint(args: {
       semanticCalls: validated.stats.semanticCalls,
       transportAttempts: validated.stats.transportAttempts,
       candidateOutcomes,
+      verification: emptyCounterevidenceSummary(),
       findings: [],
       judged: unresolved,
       judgeCalls: validated.stats.semanticCalls,
@@ -2633,7 +3345,7 @@ async function runHolisticLint(args: {
     for (const evidence of result.evidence) {
       const hunk = hunkById.get(evidence.hunkId);
       if (!hunk) continue;
-      const dedupKey = `${result.invariantId}\x1f${hunk.file}`;
+      const dedupKey = tupleKey(result.invariantId, hunk.file);
       if (seen.has(dedupKey)) continue;
       seen.add(dedupKey);
       findings.push({
@@ -2686,6 +3398,7 @@ async function runHolisticLint(args: {
     semanticCalls: validated.stats.semanticCalls,
     transportAttempts: validated.stats.transportAttempts,
     candidateOutcomes,
+    verification: emptyCounterevidenceSummary(),
     findings,
     judged: attempted,
     judgeCalls: validated.stats.semanticCalls,
@@ -2705,6 +3418,7 @@ function unavailableHolisticCandidateOutcome(
     hunkIndex: -1,
     invariantId: invariant.entry.id,
     invariantTitle: invariant.entry.title,
+    severity: enforcementLevel(invariant.entry),
     similarity: 0,
     refHit: false,
     state,
@@ -2725,6 +3439,7 @@ function candidateOutcomeBase(
     hunkIndex: candidate.hunkIdx,
     invariantId: invariant.entry.id,
     invariantTitle: invariant.entry.title,
+    severity: enforcementLevel(invariant.entry),
     similarity: candidate.similarity,
     refHit: candidate.refHit,
     stats: { semanticCalls: 0, transportAttempts: 0 },

@@ -54,6 +54,46 @@ describe("createGatewayInvariantJudge", () => {
     });
   });
 
+  test("does not call the model with zero judge budget", async () => {
+    const client = clientWith([]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "lint-zero-budget",
+    });
+
+    await expect(
+      judge.judge({ ...INPUT, semanticCallBudget: 0 }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
+  test("converts thrown judge transport failures into accounted outcomes", async () => {
+    const error = Object.assign(new Error("transport disconnected"), {
+      attempts: 3,
+    });
+    const client: GatewayLLMClient = {
+      prompt: vi.fn(async () => null),
+      promptDetailed: vi.fn(async () => {
+        throw error;
+      }),
+    };
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "lint-thrown-transport",
+    });
+
+    await expect(judge.judge(INPUT)).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "transport-error", scope: "candidate" },
+      stats: { semanticCalls: 1, transportAttempts: 3 },
+    });
+  });
+
   test("repairs one invalid verdict and sums transport attempts", async () => {
     const client = clientWith([
       {
@@ -297,6 +337,23 @@ describe("holistic gateway judge", () => {
     semanticCallBudget: 2,
   };
 
+  test("does not call the model with zero holistic budget", async () => {
+    const client = clientWith([]);
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "holistic-zero-budget",
+    });
+
+    await expect(
+      judge.lint({ ...holisticInput, semanticCallBudget: 0 }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
   test("parses a complete lint result set and counts transport attempts", async () => {
     const client = clientWith([
       {
@@ -368,6 +425,172 @@ describe("holistic gateway judge", () => {
     expect(outcome.stats).toEqual({
       semanticCalls: 2,
       transportAttempts: 2,
+    });
+  });
+});
+
+describe("counterevidence gateway verifier", () => {
+  const counterevidenceInput = {
+    invariant: {
+      id: "inv-1",
+      title: "Boundary",
+      content: "The shared boundary must remain enforced.",
+    },
+    seed: {
+      id: "hunk-0001",
+      file: "src/a.ts",
+      relationship: "seed" as const,
+      text: "@@ -1 +1 @@\n-old\n+new",
+    },
+    connectedContext: [],
+    contextComplete: true,
+    omittedCompanions: 0,
+    firstPassReason: "The isolated change appears to bypass the boundary.",
+    prContext: {
+      title: "Context",
+      description: "The description is untrusted.",
+      titleTruncated: false,
+      descriptionTruncated: false,
+    },
+    semanticCallBudget: 2,
+  };
+
+  test("rejects a verifier call when context is incomplete", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([
+        {
+          kind: "success",
+          text: JSON.stringify({
+            verdict: "confirmed",
+            reason: "The isolated call still bypasses the boundary.",
+            evidence: [
+              { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+            ],
+          }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        },
+      ]),
+      model: MODEL,
+      sessionID: "counterevidence-incomplete",
+    });
+
+    await expect(
+      judge.verify({ ...counterevidenceInput, contextComplete: false }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "insufficient-context" },
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    });
+  });
+
+  test("does not call the model with zero verifier budget", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([]),
+      model: MODEL,
+      sessionID: "counterevidence-zero-budget",
+    });
+
+    await expect(
+      judge.verify({ ...counterevidenceInput, semanticCallBudget: 0 }),
+    ).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "invalid-verdict" },
+      stats: { semanticCalls: 0, transportAttempts: 0 },
+    });
+  });
+
+  test("converts thrown verifier transport failures into accounted outcomes", async () => {
+    const error = Object.assign(new Error("verifier transport disconnected"), {
+      attempts: 2,
+    });
+    const client: GatewayLLMClient = {
+      prompt: vi.fn(async () => null),
+      promptDetailed: vi.fn(async () => {
+        throw error;
+      }),
+    };
+    const judge = createGatewayInvariantJudge({
+      client,
+      model: MODEL,
+      sessionID: "counterevidence-thrown-transport",
+    });
+
+    await expect(judge.verify(counterevidenceInput)).resolves.toMatchObject({
+      kind: "unresolved",
+      failure: { code: "transport-error", scope: "candidate" },
+      stats: { semanticCalls: 1, transportAttempts: 2 },
+    });
+  });
+
+  test("parses a confirmed verdict with bounded evidence", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([
+        {
+          kind: "success",
+          text: JSON.stringify({
+            verdict: "confirmed",
+            reason: "The connected context still bypasses the boundary.",
+            evidence: [
+              { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+            ],
+          }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 2,
+        },
+      ]),
+      model: MODEL,
+      sessionID: "counterevidence-confirmed",
+    });
+
+    await expect(judge.verify(counterevidenceInput)).resolves.toEqual({
+      kind: "verdict",
+      verdict: "confirmed",
+      reason: "The connected context still bypasses the boundary.",
+      evidence: [
+        { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+      ],
+      stats: { semanticCalls: 1, transportAttempts: 2 },
+    });
+  });
+
+  test("repairs an invalid verdict within the verifier budget", async () => {
+    const judge = createGatewayInvariantJudge({
+      client: clientWith([
+        {
+          kind: "success",
+          text: "not json",
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        },
+        {
+          kind: "success",
+          text: JSON.stringify({
+            verdict: "resolved",
+            reason: "A companion change adds the required wrapper.",
+            evidence: [
+              {
+                hunkId: "hunk-0001",
+                reason: "The wrapper is in the connected change.",
+              },
+            ],
+          }),
+          model: "github-copilot/gpt-5.6-luna",
+          protocol: "openai-responses",
+          attempts: 1,
+        },
+      ]),
+      model: MODEL,
+      sessionID: "counterevidence-repair",
+    });
+
+    await expect(judge.verify(counterevidenceInput)).resolves.toMatchObject({
+      kind: "verdict",
+      verdict: "resolved",
+      stats: { semanticCalls: 2, transportAttempts: 2 },
     });
   });
 });

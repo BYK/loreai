@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendCandidates,
   buildConnectedContext,
+  buildConnectedContextDetails,
   renderConnectedContext,
   renderConnectedContextDetails,
 } from "../src/semantic-lint/connected-context";
@@ -13,6 +15,13 @@ const hunk = (
 ): DiffHunk => ({ file, text, ...extras });
 
 describe("connected semantic-lint context", () => {
+  it("does not mark duplicate candidates as truncated at capacity", () => {
+    const target = new Set([1, 2]);
+
+    expect(appendCandidates(target, [1, 2], 0, 2)).toBe(false);
+    expect(target).toEqual(new Set([1, 2]));
+  });
+
   it("selects bounded deterministic companions without transitive fan-out", () => {
     const hunks = [
       hunk("src/core.ts", "@@\n const sharedSymbol = true;"),
@@ -23,6 +32,21 @@ describe("connected semantic-lint context", () => {
     expect(context.get(0)?.map((entry) => entry.hunkIndex)).toEqual([1]);
     expect(context.get(0)?.[0]?.reason).toBe("same-file");
     expect(context.get(2)).toEqual([]);
+  });
+
+  it("marks companion-cap omissions as incomplete context", () => {
+    const hunks = Array.from({ length: 10 }, (_, index) =>
+      hunk(
+        "src/core.ts",
+        `@@ -${index + 1},1 +${index + 1},1 @@
++sharedSymbol${index} = true;`,
+      ),
+    );
+    const details = buildConnectedContextDetails(hunks);
+
+    expect(details.complete).toBe(false);
+    expect(details.contexts.get(0)).toHaveLength(3);
+    expect(details.omittedBySeed.get(0)).toBeGreaterThan(0);
   });
 
   it("renders companion evidence with an explicit relationship label", () => {
@@ -184,13 +208,16 @@ describe("connected semantic-lint context", () => {
   });
 
   it("keeps oversized seed context within the byte bound", () => {
-    const rendered = renderConnectedContext(
+    const details = renderConnectedContextDetails(
       hunk("src/large.ts", "x".repeat(40_000)),
       [],
       [],
     );
-    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(12 * 1024);
-    expect(rendered).toContain("seed hunk truncated");
+    expect(Buffer.byteLength(details.text, "utf8")).toBeLessThanOrEqual(
+      12 * 1024,
+    );
+    expect(details.text).toContain("seed hunk truncated");
+    expect(details.truncated).toBe(true);
   });
 
   it("skips an oversized companion and still considers later companions", () => {

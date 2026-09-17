@@ -4,7 +4,10 @@ import {
   estimateHolisticLintInputTokens,
   estimateIsolatedLintInputTokens,
 } from "../src/semantic-lint/context";
-import { parseHolisticLintResults } from "../src/semantic-lint/check";
+import {
+  MAX_JUDGE_RESPONSE_BYTES,
+  parseHolisticLintResults,
+} from "../src/semantic-lint/check";
 
 const invariants = [
   {
@@ -192,5 +195,15 @@ describe("bounded holistic semantic lint", () => {
         expectedHunkIds,
       )?.[0].verdict,
     ).toBe("insufficient-context");
+  });
+
+  it("rejects oversized holistic judge responses before parsing", () => {
+    expect(
+      parseHolisticLintResults(
+        "x".repeat(MAX_JUDGE_RESPONSE_BYTES + 1),
+        new Set(["inv-1"]),
+        new Set(["hunk-0001"]),
+      ),
+    ).toBeNull();
   });
 });

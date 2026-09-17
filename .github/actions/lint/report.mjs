@@ -10,6 +10,9 @@ const MAX_LINT_REPORT_FINDINGS = 200;
 const MAX_LINT_REPORT_CANDIDATES = 20;
 const MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH = 400;
 const MAX_LINT_REPORT_RESOLVED_REASON_LENGTH = 400;
+const MAX_REPORT_JUDGE_CALLS = 20;
+const MAX_REPORT_VERIFIER_CALLS = 8;
+const MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS = 16_000;
 const candidateFailureCodes = new Set([
   "no-auth",
   "auth-rejected",
@@ -29,6 +32,7 @@ const candidateFailureCodes = new Set([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "verification-budget-exhausted",
   "insufficient-context",
 ]);
 const phaseFailureCodes = new Set([
@@ -86,6 +90,10 @@ function count(value, name) {
   }
 }
 
+function tupleKey(...values) {
+  return JSON.stringify(values);
+}
+
 function validateCoverage(coverage, counters) {
   if (!coverage || typeof coverage !== "object" || Array.isArray(coverage)) {
     throw new TypeError("coverage must be an object");
@@ -135,6 +143,201 @@ function validateCoverage(coverage, counters) {
     }
   } else if (coverage.contextComplete) {
     throw new TypeError("non-holistic lint cannot claim complete context");
+  } else if (
+    coverage.strategy === "none" &&
+    (coverage.inputTokens !== 0 ||
+      coverage.includedHunks !== 0 ||
+      coverage.includedInvariants !== 0)
+  ) {
+    throw new TypeError("none coverage cannot claim included work");
+  }
+  if (
+    coverage.strategy === "holistic" &&
+    coverage.includedInvariants > counters.candidates
+  ) {
+    throw new TypeError("holistic coverage lacks candidate work");
+  }
+}
+
+function validateVerification(summary) {
+  if (
+    !summary ||
+    typeof summary !== "object" ||
+    Array.isArray(summary) ||
+    !["none", "counterevidence"].includes(summary.strategy) ||
+    typeof summary.contextComplete !== "boolean"
+  ) {
+    throw new TypeError("invalid verification summary");
+  }
+  for (const name of [
+    "selected",
+    "attempted",
+    "confirmed",
+    "cleared",
+    "unresolved",
+    "notAttempted",
+    "semanticCalls",
+    "transportAttempts",
+    "inputTokens",
+    "inputTokenBudget",
+  ]) {
+    count(summary[name], `verification.${name}`);
+  }
+  if (summary.selected !== summary.attempted + summary.notAttempted) {
+    throw new TypeError("verification selected count does not add up");
+  }
+  if (
+    summary.attempted !==
+    summary.confirmed + summary.cleared + summary.unresolved
+  ) {
+    throw new TypeError("verification attempted count does not add up");
+  }
+  if (summary.strategy === "none") {
+    if (
+      summary.contextComplete ||
+      summary.selected !== 0 ||
+      summary.semanticCalls !== 0 ||
+      summary.transportAttempts !== 0 ||
+      summary.inputTokens !== 0 ||
+      summary.inputTokenBudget !== 0
+    ) {
+      throw new TypeError("empty verification summary contains work");
+    }
+  } else if (
+    summary.inputTokenBudget <= 0 ||
+    summary.inputTokenBudget !==
+      summary.selected * MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS ||
+    summary.semanticCalls > MAX_REPORT_VERIFIER_CALLS ||
+    summary.inputTokens > summary.inputTokenBudget
+  ) {
+    throw new TypeError("verification input accounting exceeds its budget");
+  }
+}
+
+function validateCandidateVerification(verification, candidate) {
+  if (
+    !verification ||
+    typeof verification !== "object" ||
+    Array.isArray(verification) ||
+    !["confirmed", "cleared", "unresolved", "not-attempted"].includes(
+      verification.state,
+    ) ||
+    typeof verification.contextComplete !== "boolean"
+  ) {
+    throw new TypeError("invalid candidate verification");
+  }
+  count(verification.inputTokens, "candidate verification inputTokens");
+  count(
+    verification.stats?.semanticCalls,
+    "candidate verification semanticCalls",
+  );
+  count(
+    verification.stats?.transportAttempts,
+    "candidate verification transportAttempts",
+  );
+  if (verification.inputTokens > MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS) {
+    throw new TypeError(
+      "candidate verification inputTokens exceeds its budget",
+    );
+  }
+  if (verification.stats.semanticCalls > 2) {
+    throw new TypeError(
+      "candidate verification semantic calls exceed its per-candidate budget",
+    );
+  }
+  if (
+    !candidate.stats ||
+    candidate.stats.semanticCalls < verification.stats.semanticCalls ||
+    candidate.stats.transportAttempts < verification.stats.transportAttempts
+  ) {
+    throw new TypeError("candidate stats must include verification stats");
+  }
+  if (candidate.stats.semanticCalls - verification.stats.semanticCalls > 2) {
+    throw new TypeError(
+      "candidate first-pass semantic calls exceed their per-candidate budget",
+    );
+  }
+  if (verification.state === "confirmed" || verification.state === "cleared") {
+    if (!verification.contextComplete) {
+      throw new TypeError(
+        "confirmed or cleared verification requires complete context",
+      );
+    }
+    if (verification.stats.semanticCalls < 1) {
+      throw new TypeError(
+        "confirmed or cleared verification requires a semantic call",
+      );
+    }
+    if (verification.inputTokens < 1) {
+      throw new TypeError(
+        "confirmed or cleared verification requires input-token accounting",
+      );
+    }
+    if (candidate.state !== "resolved" || candidate.verdict !== "violates") {
+      throw new TypeError("verification requires a violated candidate");
+    }
+    if (
+      typeof verification.reason !== "string" ||
+      verification.reason.trim().length === 0 ||
+      verification.reason.length > MAX_LINT_REPORT_RESOLVED_REASON_LENGTH
+    ) {
+      throw new TypeError("candidate verification reason is invalid");
+    }
+    if (
+      !Array.isArray(verification.evidence) ||
+      verification.evidence.length === 0 ||
+      verification.evidence.length > 4
+    ) {
+      throw new TypeError("candidate verification evidence is invalid");
+    }
+    for (const evidence of verification.evidence) {
+      if (
+        !evidence ||
+        typeof evidence !== "object" ||
+        typeof evidence.hunkId !== "string" ||
+        evidence.hunkId.length === 0 ||
+        typeof evidence.reason !== "string" ||
+        evidence.reason.trim().length === 0 ||
+        evidence.reason.length > MAX_LINT_REPORT_RESOLVED_REASON_LENGTH
+      ) {
+        throw new TypeError("candidate verification evidence is invalid");
+      }
+    }
+    if (verification.failure !== undefined) {
+      throw new TypeError("confirmed or cleared verification cannot fail");
+    }
+  } else {
+    if (candidate.state !== "unresolved") {
+      throw new TypeError(
+        "unresolved verification requires an unresolved candidate",
+      );
+    }
+    if (
+      verification.reason !== undefined ||
+      verification.evidence !== undefined ||
+      !candidateFailureCodes.has(verification.failure?.code) ||
+      typeof verification.failure?.message !== "string" ||
+      verification.failure.message.trim().length === 0 ||
+      verification.failure.message.length >
+        MAX_LINT_REPORT_FAILURE_MESSAGE_LENGTH ||
+      !["candidate", "run"].includes(verification.failure.scope)
+    ) {
+      throw new TypeError("unresolved verification requires a scoped failure");
+    }
+    if (
+      verification.failure.retryable !== undefined &&
+      typeof verification.failure.retryable !== "boolean"
+    ) {
+      throw new TypeError("candidate failure retryable must be a boolean");
+    }
+    if (
+      verification.state === "not-attempted" &&
+      (verification.stats.semanticCalls !== 0 ||
+        verification.stats.transportAttempts !== 0 ||
+        verification.inputTokens !== 0)
+    ) {
+      throw new TypeError("not-attempted verification accounting must be zero");
+    }
   }
 }
 
@@ -142,13 +345,15 @@ function validateReport(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("report root must be an object");
   }
-  if (value.schemaVersion !== 3)
+  if (value.schemaVersion !== 4)
     throw new TypeError("unsupported schemaVersion");
   if (!["complete", "partial", "failed"].includes(value.status)) {
     throw new TypeError("invalid status");
   }
-  if (!value.health || !value.counters || !value.gate) {
-    throw new TypeError("health, counters, and gate are required");
+  if (!value.health || !value.counters || !value.gate || !value.verification) {
+    throw new TypeError(
+      "health, counters, gate, and verification are required",
+    );
   }
   if (typeof value.model !== "string" || !value.model)
     throw new TypeError("model is required");
@@ -200,6 +405,12 @@ function validateReport(value) {
       ) {
         throw new TypeError(`invalid ${phase} failure`);
       }
+      if (
+        health.failure.retryable !== undefined &&
+        typeof health.failure.retryable !== "boolean"
+      ) {
+        throw new TypeError(`${phase} failure retryable must be a boolean`);
+      }
     } else if (status === "failed" && phase !== "judge") {
       throw new TypeError(`${phase} failure details are required`);
     }
@@ -238,6 +449,7 @@ function validateReport(value) {
 
   const counters = value.counters;
   validateCoverage(value.coverage, counters);
+  validateVerification(value.verification);
   for (const name of [
     "hunks",
     "invariants",
@@ -250,6 +462,11 @@ function validateReport(value) {
     "transportAttempts",
   ]) {
     count(counters[name], `counters.${name}`);
+  }
+  if (counters.semanticCalls > MAX_REPORT_JUDGE_CALLS) {
+    throw new TypeError(
+      "counters.semanticCalls exceeds the shared semantic-call budget",
+    );
   }
   if (counters.candidates !== counters.attempted + counters.notAttempted) {
     throw new TypeError("candidates != attempted + notAttempted");
@@ -317,6 +534,16 @@ function validateReport(value) {
   const states = { resolved: 0, unresolved: 0, "not-attempted": 0 };
   let semanticCalls = 0;
   let transportAttempts = 0;
+  let verificationSelected = 0;
+  let verificationAttempted = 0;
+  let verificationConfirmed = 0;
+  let verificationCleared = 0;
+  let verificationUnresolved = 0;
+  let verificationNotAttempted = 0;
+  let verificationSemanticCalls = 0;
+  let verificationTransportAttempts = 0;
+  let verificationInputTokens = 0;
+  const verificationContexts = [];
   for (const candidate of value.candidates) {
     if (
       typeof candidate?.id !== "string" ||
@@ -336,9 +563,24 @@ function validateReport(value) {
     ) {
       throw new TypeError("candidate identity fields are required");
     }
+    if (!["advisory", "soft", "strict"].includes(candidate.severity)) {
+      throw new TypeError("invalid candidate severity");
+    }
     states[candidate.state]++;
     count(candidate.stats?.semanticCalls, "candidate semanticCalls");
     count(candidate.stats?.transportAttempts, "candidate transportAttempts");
+    if (
+      candidate.stats.semanticCalls >
+      (candidate.verification?.state === "confirmed" ||
+      candidate.verification?.state === "cleared" ||
+      candidate.verification?.state === "unresolved"
+        ? 4
+        : 2)
+    ) {
+      throw new TypeError(
+        "candidate semantic calls exceed the per-candidate budget",
+      );
+    }
     semanticCalls += candidate.stats.semanticCalls;
     transportAttempts += candidate.stats.transportAttempts;
     if (candidate.state === "resolved") {
@@ -370,6 +612,12 @@ function validateReport(value) {
       ) {
         throw new TypeError("unresolved candidate requires a scoped failure");
       }
+      if (
+        candidate.failure.retryable !== undefined &&
+        typeof candidate.failure.retryable !== "boolean"
+      ) {
+        throw new TypeError("candidate failure retryable must be a boolean");
+      }
       if (candidate.verdict !== undefined || candidate.reason !== undefined) {
         throw new TypeError("unresolved candidate cannot have a verdict");
       }
@@ -379,6 +627,39 @@ function validateReport(value) {
           candidate.stats.transportAttempts !== 0)
       ) {
         throw new TypeError("not-attempted candidate stats must be zero");
+      }
+    }
+    if (
+      candidate.state === "resolved" &&
+      candidate.verdict === "violates" &&
+      !(
+        candidate.verification !== undefined ||
+        value.verification.strategy !== "counterevidence"
+      )
+    ) {
+      throw new TypeError(
+        "violations require counterevidence outside holistic lint",
+      );
+    }
+    if (candidate.verification !== undefined) {
+      const verification = candidate.verification;
+      validateCandidateVerification(verification, candidate);
+      verificationContexts.push(verification.contextComplete);
+      verificationSelected++;
+      verificationSemanticCalls += verification.stats.semanticCalls;
+      verificationTransportAttempts += verification.stats.transportAttempts;
+      verificationInputTokens += verification.inputTokens;
+      if (verification.state === "confirmed") {
+        verificationAttempted++;
+        verificationConfirmed++;
+      } else if (verification.state === "cleared") {
+        verificationAttempted++;
+        verificationCleared++;
+      } else if (verification.state === "unresolved") {
+        verificationAttempted++;
+        verificationUnresolved++;
+      } else {
+        verificationNotAttempted++;
       }
     }
   }
@@ -392,6 +673,34 @@ function validateReport(value) {
     throw new TypeError(
       "candidate state or attempt totals disagree with counters",
     );
+  }
+  if (
+    value.verification.selected !== verificationSelected ||
+    value.verification.attempted !== verificationAttempted ||
+    value.verification.confirmed !== verificationConfirmed ||
+    value.verification.cleared !== verificationCleared ||
+    value.verification.unresolved !== verificationUnresolved ||
+    value.verification.notAttempted !== verificationNotAttempted ||
+    value.verification.semanticCalls !== verificationSemanticCalls ||
+    value.verification.transportAttempts !== verificationTransportAttempts ||
+    value.verification.inputTokens !== verificationInputTokens
+  ) {
+    throw new TypeError(
+      "candidate verification totals disagree with verification summary",
+    );
+  }
+  if (value.verification.strategy === "counterevidence") {
+    if (value.coverage.strategy !== "isolated-hunk") {
+      throw new TypeError("counterevidence requires isolated-hunk coverage");
+    }
+    if (
+      value.verification.contextComplete !==
+      (verificationContexts.length > 0 && verificationContexts.every(Boolean))
+    ) {
+      throw new TypeError(
+        "verification context completeness disagrees with candidates",
+      );
+    }
   }
 
   if (
@@ -498,6 +807,98 @@ function validateReport(value) {
       throw new TypeError("gate blocking findings disagree with severities");
     if (!sameIds(value.gate.advisoryFindingIds, expectedAdvisory))
       throw new TypeError("gate advisory findings disagree with severities");
+  }
+  const candidatesByKey = new Map();
+  const candidatesByInvariant = new Map();
+  for (const candidate of value.candidates) {
+    const key = tupleKey(candidate.invariantId, candidate.file);
+    const byKey = candidatesByKey.get(key) ?? [];
+    byKey.push(candidate);
+    candidatesByKey.set(key, byKey);
+    const byInvariant = candidatesByInvariant.get(candidate.invariantId) ?? [];
+    byInvariant.push(candidate);
+    candidatesByInvariant.set(candidate.invariantId, byInvariant);
+  }
+  const findingsByKey = new Map();
+  for (const finding of value.findings) {
+    const key = tupleKey(finding.invariantId, finding.file);
+    const byKey = findingsByKey.get(key) ?? [];
+    byKey.push(finding);
+    findingsByKey.set(key, byKey);
+  }
+  for (const candidate of value.candidates) {
+    if (candidate.verification === undefined) continue;
+    const key = tupleKey(candidate.invariantId, candidate.file);
+    const sameKeyCandidates = candidatesByKey.get(key) ?? [];
+    const hasConfirmedCandidate = sameKeyCandidates.some(
+      (sameKeyCandidate) =>
+        sameKeyCandidate.state === "resolved" &&
+        sameKeyCandidate.verdict === "violates" &&
+        sameKeyCandidate.verification?.state === "confirmed",
+    );
+    const matchingFindings = findingsByKey.get(key) ?? [];
+    if (candidate.verification.state === "confirmed") {
+      if (matchingFindings.length === 0)
+        throw new TypeError("confirmed violations require a matching finding");
+      if (
+        matchingFindings.some(
+          (finding) => finding.severity !== candidate.severity,
+        )
+      )
+        throw new TypeError(
+          "finding severity disagrees with trusted candidate severity",
+        );
+    } else if (matchingFindings.length > 0) {
+      if (!hasConfirmedCandidate)
+        throw new TypeError("only confirmed verification may back a finding");
+    }
+  }
+  for (const finding of value.findings) {
+    const key = tupleKey(finding.invariantId, finding.file);
+    const matchingCandidates = candidatesByKey.get(key) ?? [];
+    if (value.verification.strategy === "counterevidence") {
+      if (
+        !matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.verification?.state === "confirmed" &&
+            candidate.severity === finding.severity,
+        )
+      ) {
+        throw new TypeError(
+          "isolated findings require confirmed matching candidates",
+        );
+      }
+    } else if (value.coverage.strategy !== "holistic") {
+      if (
+        !matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === finding.severity,
+        )
+      ) {
+        throw new TypeError(
+          "isolated findings require matching violated candidates",
+        );
+      }
+    } else {
+      const invariantCandidates =
+        candidatesByInvariant.get(finding.invariantId) ?? [];
+      if (
+        !invariantCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === finding.severity,
+        )
+      ) {
+        throw new TypeError(
+          "holistic findings require matching violated candidates",
+        );
+      }
+    }
   }
   if (
     value.status === "complete" &&
@@ -614,17 +1015,21 @@ if (report) {
     .map(([code, count]) => `${code}: ${count}`)
     .join(", ");
   const funnel = `${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates · ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted`;
+  const verificationSummary =
+    report.verification.strategy === "counterevidence"
+      ? `counterevidence: ${report.verification.confirmed} confirmed, ${report.verification.cleared} cleared, ${report.verification.unresolved} unresolved, ${report.verification.notAttempted} not attempted`
+      : "counterevidence: not run";
   if (report.status === "complete" && report.findings.length === 0) {
     annotation(
       "notice",
       "Lore semantic lint",
-      `✓ no suspected invariant violations among selected candidates (${funnel})`,
+      `✓ no suspected invariant violations among selected candidates (${funnel} · ${verificationSummary})`,
     );
   } else if (report.status !== "complete") {
     annotation(
       "warning",
       "Lore semantic lint inconclusive",
-      `${report.status}: ${funnel}${failureSummary ? ` · causes: ${failureSummary}` : ""}`,
+      `${report.status}: ${funnel} · ${verificationSummary}${failureSummary ? ` · causes: ${failureSummary}` : ""}`,
     );
   }
   if (summaryFile) {
@@ -648,7 +1053,7 @@ if (report) {
             : `⚠ **${report.findings.length} advisory finding(s)**.`;
     appendFileSync(
       summaryFile,
-      `## 🧭 Lore semantic linter\n\n${headline}\n\n${funnel}\n` +
+      `## 🧭 Lore semantic linter\n\n${headline}\n\n${funnel}\n\n${verificationSummary}\n` +
         (failureSummary ? `\n**Unresolved causes:** ${failureSummary}\n` : "") +
         (rows
           ? `\n| severity | state | invariant | file | why |\n|---|---|---|---|---|\n${rows}\n`

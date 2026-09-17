@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { semanticLint } from "@loreai/core";
+
+// Keep report validation compatible with hosts that provide a partial semantic
+// lint namespace (for example older embedded callers and focused test doubles).
+// Production core exports these same limits; the fallbacks only prevent an
+// absent optional export from turning every failure report into invalid NaN
+// accounting.
+const MAX_REPORT_JUDGE_CALLS = semanticLint.MAX_JUDGE_CALLS ?? 20;
+const MAX_REPORT_VERIFIER_CALLS = semanticLint.MAX_VERIFIER_CALLS ?? 8;
+const MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS =
+  semanticLint.COUNTEREVIDENCE_INPUT_TOKEN_BUDGET ?? 16_000;
 
 export type LintStatus = "complete" | "partial" | "failed";
 export type LintPhaseStatus = "healthy" | "degraded" | "failed" | "not-run";
@@ -37,16 +48,44 @@ export interface LintCoverage {
   omittedInvariants: number;
 }
 
+export interface LintCandidateVerification {
+  state: "confirmed" | "cleared" | "unresolved" | "not-attempted";
+  reason?: string;
+  evidence?: Array<{ hunkId: string; reason: string }>;
+  failure?: LintFailure;
+  stats: { semanticCalls: number; transportAttempts: number };
+  inputTokens: number;
+  contextComplete: boolean;
+}
+
 export interface LintCandidateOutcome {
   id: string;
   file: string;
   invariantId: string;
   invariantTitle: string;
+  /** Copied from the invariant metadata before report serialization. */
+  severity: "advisory" | "soft" | "strict";
   state: "resolved" | "unresolved" | "not-attempted";
   verdict?: "violates" | "fixes" | "satisfies" | "unrelated";
   reason?: string;
   failure?: LintFailure;
   stats: { semanticCalls: number; transportAttempts: number };
+  verification?: LintCandidateVerification;
+}
+
+export interface LintVerification {
+  strategy: "none" | "counterevidence";
+  contextComplete: boolean;
+  selected: number;
+  attempted: number;
+  confirmed: number;
+  cleared: number;
+  unresolved: number;
+  notAttempted: number;
+  semanticCalls: number;
+  transportAttempts: number;
+  inputTokens: number;
+  inputTokenBudget: number;
 }
 
 export interface LintFinding {
@@ -72,13 +111,14 @@ export interface SerializedLintGate {
 }
 
 export interface SemanticLintReport {
-  schemaVersion: 3;
+  schemaVersion: 4;
   status: LintStatus;
   model: string;
   effort: "off" | "low" | "medium" | "high" | "xhigh";
   elapsedMs: number;
   range: { base: string; head: string; source: string } | null;
   coverage: LintCoverage;
+  verification: LintVerification;
   health: {
     range: LintPhaseHealth;
     diff: LintPhaseHealth;
@@ -107,6 +147,7 @@ export interface CoreLintResultLike {
   status: LintStatus;
   range: NonNullable<SemanticLintReport["range"]>;
   coverage: LintCoverage;
+  verification?: LintVerification;
   health: {
     diff: LintPhaseHealth;
     invariantVectors: LintPhaseHealth;
@@ -173,6 +214,7 @@ const CANDIDATE_FAILURE_CODES = new Set([
   "invalid-verdict",
   "judge-contract-error",
   "semantic-budget-exhausted",
+  "verification-budget-exhausted",
   "insufficient-context",
 ]);
 const PHASE_FAILURE_CODES = new Set([
@@ -191,7 +233,24 @@ const PHASE_FAILURE_CODES = new Set([
 ]);
 
 function findingKey(finding: { invariantId: string; file: string }): string {
-  return `${finding.invariantId}\x1f${finding.file}`;
+  return JSON.stringify([finding.invariantId, finding.file]);
+}
+
+function emptyLintVerification(): LintVerification {
+  return {
+    strategy: "none",
+    contextComplete: false,
+    selected: 0,
+    attempted: 0,
+    confirmed: 0,
+    cleared: 0,
+    unresolved: 0,
+    notAttempted: 0,
+    semanticCalls: 0,
+    transportAttempts: 0,
+    inputTokens: 0,
+    inputTokenBudget: 0,
+  };
 }
 
 function emptyLintCoverage(
@@ -278,6 +337,12 @@ export function buildSemanticLintReport(input: {
       advisoryFindingIds.push(id);
     }
   }
+  const wouldBlockFindingIds = findings
+    .filter(
+      (finding) =>
+        finding.severity !== "advisory" && !overriddenIds.has(finding.id),
+    )
+    .map((finding) => finding.id);
 
   const invariantVectors = clonePhase(input.result.health.invariantVectors);
   let invariantSource = clonePhase(input.invariantSource);
@@ -296,7 +361,7 @@ export function buildSemanticLintReport(input: {
   }
 
   const report: SemanticLintReport = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: input.result.status,
     model: input.model,
     effort: input.effort,
@@ -305,6 +370,9 @@ export function buildSemanticLintReport(input: {
     coverage: {
       ...(input.result.coverage ??
         emptyLintCoverage(input.result.hunks, input.result.invariants)),
+    },
+    verification: {
+      ...(input.result.verification ?? emptyLintVerification()),
     },
     health: {
       range: { status: "healthy" },
@@ -330,6 +398,7 @@ export function buildSemanticLintReport(input: {
       file: candidate.file,
       invariantId: candidate.invariantId,
       invariantTitle: candidate.invariantTitle,
+      severity: candidate.severity,
       state: candidate.state,
       ...(candidate.verdict !== undefined
         ? { verdict: candidate.verdict }
@@ -337,6 +406,26 @@ export function buildSemanticLintReport(input: {
       ...(candidate.reason !== undefined ? { reason: candidate.reason } : {}),
       stats: { ...candidate.stats },
       ...(candidate.failure ? { failure: { ...candidate.failure } } : {}),
+      ...(candidate.verification
+        ? {
+            verification: {
+              ...candidate.verification,
+              ...(candidate.verification.evidence
+                ? {
+                    evidence: candidate.verification.evidence.map(
+                      (evidence) => ({
+                        ...evidence,
+                      }),
+                    ),
+                  }
+                : {}),
+              ...(candidate.verification.failure
+                ? { failure: { ...candidate.verification.failure } }
+                : {}),
+              stats: { ...candidate.verification.stats },
+            },
+          }
+        : {}),
     })),
     findings,
     gate: {
@@ -344,7 +433,7 @@ export function buildSemanticLintReport(input: {
       blockingFindingIds,
       overridden,
       advisoryFindingIds,
-      wouldBlockFindingIds: blocking,
+      wouldBlockFindingIds,
     },
   };
   report.status = deriveStatus(report);
@@ -387,13 +476,14 @@ export function failedSemanticLintReport(input: {
       : {}),
   };
   return validateSemanticLintReport({
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: "failed",
     model: input.model,
     effort: input.effort,
     elapsedMs: input.elapsedMs,
     range: input.range ?? null,
     coverage: emptyLintCoverage(0, 0, input.holisticInputTokenBudget ?? 16_000),
+    verification: emptyLintVerification(),
     health,
     counters: {
       hunks: 0,
@@ -489,6 +579,14 @@ function validateLintCoverage(value: unknown): asserts value is LintCoverage {
       !value.contextComplete,
       "non-holistic semantic lint cannot claim complete context",
     );
+    if (value.strategy === "none") {
+      assert(
+        value.inputTokens === 0 &&
+          numbers.includedHunks === 0 &&
+          numbers.includedInvariants === 0,
+        "none coverage cannot claim included work",
+      );
+    }
   }
 }
 
@@ -511,11 +609,188 @@ function validateFailure(value: unknown, candidate: boolean): void {
       "candidate failure scope is invalid",
     );
   }
+  if (value.retryable !== undefined) {
+    assert(
+      typeof value.retryable === "boolean",
+      "failure.retryable must be a boolean when present",
+    );
+  }
+}
+
+function validateVerificationSummary(
+  value: unknown,
+): asserts value is LintVerification {
+  assert(isRecord(value), "verification must be an object");
+  assert(
+    value.strategy === "none" || value.strategy === "counterevidence",
+    "verification.strategy is invalid",
+  );
+  assert(
+    typeof value.contextComplete === "boolean",
+    "verification.contextComplete must be boolean",
+  );
+  for (const field of [
+    "selected",
+    "attempted",
+    "confirmed",
+    "cleared",
+    "unresolved",
+    "notAttempted",
+    "semanticCalls",
+    "transportAttempts",
+    "inputTokens",
+    "inputTokenBudget",
+  ]) {
+    assertCount(value[field], `verification.${field}`);
+  }
+  const summary = value as unknown as LintVerification;
+  assert(
+    summary.selected === summary.attempted + summary.notAttempted,
+    "verification selected count does not add up",
+  );
+  assert(
+    summary.attempted ===
+      summary.confirmed + summary.cleared + summary.unresolved,
+    "verification attempted count does not add up",
+  );
+  if (summary.strategy === "none") {
+    assert(
+      !summary.contextComplete &&
+        summary.selected === 0 &&
+        summary.semanticCalls === 0 &&
+        summary.transportAttempts === 0 &&
+        summary.inputTokens === 0 &&
+        summary.inputTokenBudget === 0,
+      "empty verification summary contains work",
+    );
+  } else {
+    assert(
+      summary.inputTokenBudget > 0 &&
+        summary.inputTokenBudget ===
+          summary.selected * MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS &&
+        summary.semanticCalls <= MAX_REPORT_VERIFIER_CALLS &&
+        summary.inputTokens <= summary.inputTokenBudget,
+      "verification input accounting exceeds its budget",
+    );
+  }
+}
+
+function validateCandidateVerification(
+  value: unknown,
+  candidate: Record<string, unknown>,
+): asserts value is LintCandidateVerification {
+  assert(isRecord(value), "candidate.verification must be an object");
+  assert(
+    value.state === "confirmed" ||
+      value.state === "cleared" ||
+      value.state === "unresolved" ||
+      value.state === "not-attempted",
+    "candidate.verification.state is invalid",
+  );
+  assert(
+    typeof value.contextComplete === "boolean",
+    "candidate.verification.contextComplete must be boolean",
+  );
+  assertCount(value.inputTokens, "candidate.verification.inputTokens");
+  assert(isRecord(value.stats), "candidate.verification.stats is required");
+  assertCount(
+    value.stats.semanticCalls,
+    "candidate.verification.stats.semanticCalls",
+  );
+  assertCount(
+    value.stats.transportAttempts,
+    "candidate.verification.stats.transportAttempts",
+  );
+  assert(
+    value.inputTokens <= MAX_REPORT_COUNTEREVIDENCE_INPUT_TOKENS,
+    "candidate.verification.inputTokens exceeds its budget",
+  );
+  assert(
+    value.stats.semanticCalls <= 2,
+    "candidate.verification semantic calls exceed its per-candidate budget",
+  );
+  assert(
+    isRecord(candidate.stats) &&
+      typeof candidate.stats.semanticCalls === "number" &&
+      candidate.stats.semanticCalls >= value.stats.semanticCalls &&
+      typeof candidate.stats.transportAttempts === "number" &&
+      candidate.stats.transportAttempts >= value.stats.transportAttempts,
+    "candidate stats must include verification stats",
+  );
+  assert(
+    candidate.stats.semanticCalls - value.stats.semanticCalls <= 2,
+    "candidate first-pass semantic calls exceed their per-candidate budget",
+  );
+  if (value.state === "confirmed" || value.state === "cleared") {
+    assert(
+      value.contextComplete,
+      "confirmed or cleared verification requires complete context",
+    );
+    assert(
+      value.stats.semanticCalls > 0,
+      "confirmed or cleared verification requires a semantic call",
+    );
+    assert(
+      value.inputTokens > 0,
+      "confirmed or cleared verification requires input-token accounting",
+    );
+    assert(
+      candidate.state === "resolved" && candidate.verdict === "violates",
+      "confirmed or cleared verification requires a violated candidate",
+    );
+    assert(
+      typeof value.reason === "string" &&
+        value.reason.trim().length > 0 &&
+        value.reason.length <= MAX_LINT_REPORT_RESOLVED_REASON_LENGTH,
+      "candidate verification reason is invalid",
+    );
+    assert(
+      Array.isArray(value.evidence) &&
+        value.evidence.length > 0 &&
+        value.evidence.length <= 4,
+      "candidate verification evidence is invalid",
+    );
+    for (const evidence of value.evidence) {
+      assert(isRecord(evidence), "candidate verification evidence is invalid");
+      assert(
+        typeof evidence.hunkId === "string" && evidence.hunkId.length > 0,
+        "candidate verification evidence hunkId is required",
+      );
+      assert(
+        typeof evidence.reason === "string" &&
+          evidence.reason.trim().length > 0 &&
+          evidence.reason.length <= MAX_LINT_REPORT_RESOLVED_REASON_LENGTH,
+        "candidate verification evidence reason is invalid",
+      );
+    }
+    assert(
+      value.failure === undefined,
+      "confirmed or cleared verification cannot have a failure",
+    );
+  } else {
+    assert(
+      candidate.state === "unresolved",
+      "unresolved verification requires an unresolved candidate",
+    );
+    assert(
+      value.reason === undefined && value.evidence === undefined,
+      "unresolved verification cannot have a verdict reason or evidence",
+    );
+    validateFailure(value.failure, true);
+    if (value.state === "not-attempted") {
+      assert(
+        value.stats.semanticCalls === 0 &&
+          value.stats.transportAttempts === 0 &&
+          value.inputTokens === 0,
+        "not-attempted verification accounting must be zero",
+      );
+    }
+  }
 }
 
 export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   assert(isRecord(value), "root must be an object");
-  assert(value.schemaVersion === 3, "schemaVersion must be 3");
+  assert(value.schemaVersion === 4, "schemaVersion must be 4");
   assert(
     value.status === "complete" ||
       value.status === "partial" ||
@@ -611,6 +886,7 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
 
   assert(isRecord(value.counters), "counters is required");
   validateLintCoverage(value.coverage);
+  validateVerificationSummary(value.verification);
   assert(
     value.coverage.availableHunks === value.counters.hunks,
     "coverage hunk coverage disagrees with hunk counter",
@@ -628,6 +904,16 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   ] as const;
   for (const name of counterNames)
     assertCount(value.counters[name], `counters.${name}`);
+  if (value.coverage.strategy === "holistic") {
+    assert(
+      value.coverage.includedInvariants <= Number(value.counters.candidates),
+      "holistic coverage lacks candidate work",
+    );
+  }
+  assert(
+    Number(value.counters.semanticCalls) <= MAX_REPORT_JUDGE_CALLS,
+    "counters.semanticCalls exceeds the shared semantic-call budget",
+  );
   assert(
     value.counters.candidates ===
       Number(value.counters.attempted) + Number(value.counters.notAttempted),
@@ -704,6 +990,16 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
   const stateCounts = { resolved: 0, unresolved: 0, "not-attempted": 0 };
   let semanticCalls = 0;
   let transportAttempts = 0;
+  let verificationSelected = 0;
+  let verificationAttempted = 0;
+  let verificationConfirmed = 0;
+  let verificationCleared = 0;
+  let verificationUnresolved = 0;
+  let verificationNotAttempted = 0;
+  let verificationSemanticCalls = 0;
+  let verificationTransportAttempts = 0;
+  let verificationInputTokens = 0;
+  const verificationContexts: boolean[] = [];
   for (const candidate of value.candidates) {
     assert(isRecord(candidate), "candidate must be an object");
     assert(
@@ -727,6 +1023,12 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
       "candidate.invariantTitle is required",
     );
     assert(
+      candidate.severity === "advisory" ||
+        candidate.severity === "soft" ||
+        candidate.severity === "strict",
+      "candidate.severity is invalid",
+    );
+    assert(
       candidate.state === "resolved" ||
         candidate.state === "unresolved" ||
         candidate.state === "not-attempted",
@@ -738,6 +1040,18 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     assertCount(
       candidate.stats.transportAttempts,
       "candidate.stats.transportAttempts",
+    );
+    const verificationState = isRecord(candidate.verification)
+      ? candidate.verification.state
+      : undefined;
+    assert(
+      candidate.stats.semanticCalls <=
+        (verificationState === "confirmed" ||
+        verificationState === "cleared" ||
+        verificationState === "unresolved"
+          ? 4
+          : 2),
+      "candidate semantic calls exceed the per-candidate budget",
     );
     semanticCalls += candidate.stats.semanticCalls;
     transportAttempts += candidate.stats.transportAttempts;
@@ -770,6 +1084,34 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
         "not-attempted candidate stats must be zero",
       );
     }
+    if (candidate.state === "resolved" && candidate.verdict === "violates") {
+      assert(
+        candidate.verification !== undefined ||
+          value.verification.strategy !== "counterevidence",
+        "violations require counterevidence outside holistic lint",
+      );
+    }
+    if (candidate.verification !== undefined) {
+      const verification = candidate.verification;
+      validateCandidateVerification(verification, candidate);
+      verificationContexts.push(verification.contextComplete);
+      verificationSelected++;
+      verificationSemanticCalls += verification.stats.semanticCalls;
+      verificationTransportAttempts += verification.stats.transportAttempts;
+      verificationInputTokens += verification.inputTokens;
+      if (verification.state === "confirmed") {
+        verificationAttempted++;
+        verificationConfirmed++;
+      } else if (verification.state === "cleared") {
+        verificationAttempted++;
+        verificationCleared++;
+      } else if (verification.state === "unresolved") {
+        verificationAttempted++;
+        verificationUnresolved++;
+      } else {
+        verificationNotAttempted++;
+      }
+    }
   }
   assert(
     stateCounts.resolved === value.counters.resolved,
@@ -791,6 +1133,31 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     transportAttempts === value.counters.transportAttempts,
     "candidate transport attempts do not sum to report total",
   );
+  const verification = value.verification;
+  assert(
+    verification.selected === verificationSelected &&
+      verification.attempted === verificationAttempted &&
+      verification.confirmed === verificationConfirmed &&
+      verification.cleared === verificationCleared &&
+      verification.unresolved === verificationUnresolved &&
+      verification.notAttempted === verificationNotAttempted &&
+      verification.semanticCalls === verificationSemanticCalls &&
+      verification.transportAttempts === verificationTransportAttempts &&
+      verification.inputTokens === verificationInputTokens,
+    "candidate verification records do not sum to verification summary",
+  );
+  if (verification.strategy === "counterevidence") {
+    assert(
+      value.coverage.strategy === "isolated-hunk",
+      "counterevidence requires isolated-hunk coverage",
+    );
+    assert(
+      verification.contextComplete ===
+        (verificationContexts.length > 0 &&
+          verificationContexts.every(Boolean)),
+      "verification context completeness disagrees with candidates",
+    );
+  }
 
   assert(
     Array.isArray(value.findings) &&
@@ -930,6 +1297,117 @@ export function validateSemanticLintReport(value: unknown): SemanticLintReport {
     );
   }
 
+  const candidatesByKey = new Map<string, Array<Record<string, unknown>>>();
+  const candidatesByInvariant = new Map<
+    string,
+    Array<Record<string, unknown>>
+  >();
+  for (const candidate of value.candidates) {
+    const record = candidate as unknown as Record<string, unknown>;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
+    const byKey = candidatesByKey.get(key) ?? [];
+    byKey.push(record);
+    candidatesByKey.set(key, byKey);
+    const byInvariant =
+      candidatesByInvariant.get(String(record.invariantId)) ?? [];
+    byInvariant.push(record);
+    candidatesByInvariant.set(String(record.invariantId), byInvariant);
+  }
+  const findingsByKey = new Map<string, Array<Record<string, unknown>>>();
+  for (const finding of value.findings) {
+    const record = finding as unknown as Record<string, unknown>;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
+    const byKey = findingsByKey.get(key) ?? [];
+    byKey.push(record);
+    findingsByKey.set(key, byKey);
+  }
+  for (const candidate of value.candidates) {
+    const record = candidate as unknown as Record<string, unknown>;
+    const verification = isRecord(record.verification)
+      ? record.verification
+      : undefined;
+    if (!verification) continue;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
+    const sameKeyCandidates = candidatesByKey.get(key) ?? [];
+    const hasConfirmedCandidate = sameKeyCandidates.some(
+      (candidate) =>
+        candidate.state === "resolved" &&
+        candidate.verdict === "violates" &&
+        isRecord(candidate.verification) &&
+        candidate.verification.state === "confirmed",
+    );
+    const matchingFindings = findingsByKey.get(key) ?? [];
+    if (verification.state === "confirmed") {
+      assert(
+        matchingFindings.length > 0,
+        "confirmed violations require a matching finding",
+      );
+      assert(
+        matchingFindings.every(
+          (finding) => finding.severity === record.severity,
+        ),
+        "finding severity disagrees with trusted candidate severity",
+      );
+    } else {
+      assert(
+        matchingFindings.length === 0 || hasConfirmedCandidate,
+        "only confirmed verification may back a finding",
+      );
+    }
+  }
+  for (const finding of value.findings) {
+    const record = finding as unknown as Record<string, unknown>;
+    const key = JSON.stringify([
+      String(record.invariantId),
+      String(record.file),
+    ]);
+    const matchingCandidates = candidatesByKey.get(key) ?? [];
+    if (value.verification.strategy === "counterevidence") {
+      assert(
+        matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            isRecord(candidate.verification) &&
+            candidate.verification.state === "confirmed" &&
+            candidate.severity === record.severity,
+        ),
+        "isolated findings require confirmed matching candidates",
+      );
+    } else if (value.coverage.strategy !== "holistic") {
+      assert(
+        matchingCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === record.severity,
+        ),
+        "isolated findings require matching violated candidates",
+      );
+    } else {
+      const invariantCandidates =
+        candidatesByInvariant.get(String(record.invariantId)) ?? [];
+      assert(
+        invariantCandidates.some(
+          (candidate) =>
+            candidate.state === "resolved" &&
+            candidate.verdict === "violates" &&
+            candidate.severity === record.severity,
+        ),
+        "holistic findings require matching violated candidates",
+      );
+    }
+  }
+
   const report = value as unknown as SemanticLintReport;
   assert(
     report.status === deriveStatus(report),
@@ -989,6 +1467,7 @@ export function renderSemanticLintReport(report: SemanticLintReport): string {
     `Status: ${report.status.toUpperCase()}   Model: ${report.model}   Effort: ${report.effort}`,
     `Funnel: ${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates`,
     `Coverage: ${report.coverage.strategy} · ${report.coverage.includedHunks}/${report.coverage.availableHunks} hunks, ${report.coverage.includedInvariants}/${report.coverage.availableInvariants} invariants${report.coverage.contextComplete ? "" : " · bounded/partial context"}`,
+    `Counterevidence: ${report.verification.strategy === "counterevidence" ? `${report.verification.confirmed} confirmed, ${report.verification.cleared} cleared, ${report.verification.unresolved} unresolved, ${report.verification.notAttempted} not attempted` : "not run"}`,
     `Checks: ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted · ${(report.elapsedMs / 1000).toFixed(1)}s`,
     "─".repeat(64),
   ];

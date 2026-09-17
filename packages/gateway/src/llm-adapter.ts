@@ -5160,7 +5160,7 @@ export function createGatewayLLMClient(
               { model: context.model, protocol: context.protocol },
             );
           } else {
-            throw error;
+            throw attachPromptAttempts(error, context.attempts);
           }
         }
         return (
@@ -5194,7 +5194,9 @@ export interface GatewayInvariantJudgeOptions {
 /** Bridge detailed gateway transport outcomes into core's semantic judge. */
 export function createGatewayInvariantJudge(
   options: GatewayInvariantJudgeOptions,
-): semanticLint.InvariantJudge & semanticLint.HolisticLintJudge {
+): semanticLint.InvariantJudge &
+  semanticLint.HolisticLintJudge &
+  semanticLint.CounterevidenceVerifier {
   return {
     async judge(input): Promise<semanticLint.JudgeOutcome> {
       let semanticCalls = 0;
@@ -5211,6 +5213,9 @@ export function createGatewayInvariantJudge(
         semanticCalls,
         transportAttempts,
       });
+      if (input.semanticCallBudget < 1) {
+        return invalidGatewayVerdict(stats());
+      }
       const call = async (user: string): Promise<PromptOutcome> => {
         semanticCalls++;
         const outcome = await options.client.promptDetailed(
@@ -5252,14 +5257,19 @@ export function createGatewayInvariantJudge(
         return outcome;
       };
 
-      let outcome = await call(
-        semanticLint.invariantJudgeUser({
-          invariant: input.invariant,
-          file: input.file,
-          hunk: input.hunk,
-          prContext: input.prContext,
-        }),
-      );
+      let outcome: PromptOutcome;
+      try {
+        outcome = await call(
+          semanticLint.invariantJudgeUser({
+            invariant: input.invariant,
+            file: input.file,
+            hunk: input.hunk,
+            prContext: input.prContext,
+          }),
+        );
+      } catch (error) {
+        return gatewayJudgeTransportFailure(error, stats(), options.signal);
+      }
       if (outcome.kind === "failure") {
         return promptFailureToJudgeOutcome(outcome, stats(), options.signal);
       }
@@ -5275,15 +5285,19 @@ export function createGatewayInvariantJudge(
         return invalidGatewayVerdict(stats());
       }
 
-      outcome = await call(
-        semanticLint.invariantJudgeRepairUser({
-          invariant: input.invariant,
-          file: input.file,
-          hunk: input.hunk,
-          prContext: input.prContext,
-          invalidResponse: outcome.text.slice(0, 2_000),
-        }),
-      );
+      try {
+        outcome = await call(
+          semanticLint.invariantJudgeRepairUser({
+            invariant: input.invariant,
+            file: input.file,
+            hunk: input.hunk,
+            prContext: input.prContext,
+            invalidResponse: outcome.text.slice(0, 2_000),
+          }),
+        );
+      } catch (error) {
+        return gatewayJudgeTransportFailure(error, stats(), options.signal);
+      }
       if (outcome.kind === "failure") {
         return promptFailureToJudgeOutcome(outcome, stats(), options.signal);
       }
@@ -5297,6 +5311,160 @@ export function createGatewayInvariantJudge(
       return verdict
         ? { kind: "verdict", ...verdict, stats: stats() }
         : invalidGatewayVerdict(stats());
+    },
+    async verify(
+      input: semanticLint.CounterevidenceInput,
+    ): Promise<semanticLint.CounterevidenceOutcome> {
+      let semanticCalls = 0;
+      let transportAttempts = 0;
+      const timeoutSignal =
+        options.candidateTimeoutMs == null
+          ? undefined
+          : AbortSignal.timeout(options.candidateTimeoutMs);
+      const signal =
+        options.signal && timeoutSignal
+          ? AbortSignal.any([options.signal, timeoutSignal])
+          : (options.signal ?? timeoutSignal);
+      const stats = (): semanticLint.JudgeStats => ({
+        semanticCalls,
+        transportAttempts,
+      });
+      if (input.semanticCallBudget < 1) {
+        return invalidCounterevidenceOutcome(stats());
+      }
+      const call = async (user: string): Promise<PromptOutcome> => {
+        semanticCalls++;
+        const outcome = await options.client.promptDetailed(
+          semanticLint.INVARIANT_COUNTEREVIDENCE_SYSTEM,
+          user,
+          {
+            model: options.model,
+            ...(options.upstreamUrl
+              ? {
+                  upstreamUrl: options.upstreamUrl,
+                  upstreamProviderID: options.model.providerID,
+                }
+              : {}),
+            workerID: "lore-semantic-lint",
+            thinking: false,
+            reasoningEffort: options.effort,
+            urgent: true,
+            sessionID: options.sessionID,
+            maxTokens: semanticLint.judgeMaxTokens(options.effort),
+            temperature: 0,
+            signal,
+          },
+        );
+        transportAttempts += outcome.attempts;
+        if (signal?.aborted) {
+          return {
+            kind: "failure",
+            code:
+              signal.reason instanceof DOMException &&
+              signal.reason.name === "TimeoutError"
+                ? "timeout"
+                : "aborted",
+            message:
+              "Counterevidence verifier cancelled before accepting output",
+            retryable: !options.signal?.aborted,
+            model: outcome.model,
+            attempts: outcome.attempts,
+          };
+        }
+        return outcome;
+      };
+
+      let outcome: PromptOutcome;
+      try {
+        outcome = await call(semanticLint.invariantCounterevidenceUser(input));
+      } catch (error) {
+        return gatewayCounterevidenceTransportFailure(
+          error,
+          stats(),
+          options.signal,
+        );
+      }
+      if (outcome.kind === "failure") {
+        return promptFailureToCounterevidenceOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+      const expectedHunkIds = new Set([
+        input.seed.id,
+        ...input.connectedContext.map((entry) => entry.id),
+      ]);
+      let result = semanticLint.parseCounterevidenceVerdict(
+        outcome.text,
+        expectedHunkIds,
+      );
+      if (result) {
+        if (
+          !input.contextComplete &&
+          result.verdict !== "insufficient-context"
+        ) {
+          return insufficientCounterevidenceOutcome(stats());
+        }
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-semantic-lint",
+        );
+        return { kind: "verdict", ...result, stats: stats() };
+      }
+      if (input.semanticCallBudget < 2) {
+        return invalidCounterevidenceOutcome(stats());
+      }
+
+      try {
+        outcome = await call(
+          semanticLint.invariantCounterevidenceRepairUser({
+            invariant: input.invariant,
+            seed: input.seed,
+            connectedContext: input.connectedContext,
+            contextComplete: input.contextComplete,
+            omittedCompanions: input.omittedCompanions,
+            firstPassReason: input.firstPassReason,
+            prContext: input.prContext,
+            invalidResponse: outcome.text.slice(
+              0,
+              semanticLint.MAX_COUNTEREVIDENCE_REPAIR_RESPONSE_CHARS,
+            ),
+          }),
+        );
+      } catch (error) {
+        return gatewayCounterevidenceTransportFailure(
+          error,
+          stats(),
+          options.signal,
+        );
+      }
+      if (outcome.kind === "failure") {
+        return promptFailureToCounterevidenceOutcome(
+          outcome,
+          stats(),
+          options.signal,
+        );
+      }
+      result = semanticLint.parseCounterevidenceVerdict(
+        outcome.text,
+        expectedHunkIds,
+      );
+      if (result) {
+        if (
+          !input.contextComplete &&
+          result.verdict !== "insufficient-context"
+        ) {
+          return insufficientCounterevidenceOutcome(stats());
+        }
+        options.client.recordWorkerSuccess?.(
+          options.sessionID,
+          "lore-semantic-lint",
+        );
+      }
+      return result
+        ? { kind: "verdict", ...result, stats: stats() }
+        : invalidCounterevidenceOutcome(stats());
     },
     async lint(
       input: semanticLint.HolisticLintInput,
@@ -5315,6 +5483,9 @@ export function createGatewayInvariantJudge(
         semanticCalls,
         transportAttempts,
       });
+      if (input.semanticCallBudget < 1) {
+        return invalidHolisticLintOutcome(stats());
+      }
       const call = async (user: string): Promise<PromptOutcome> => {
         semanticCalls++;
         const outcome = await options.client.promptDetailed(
@@ -5462,7 +5633,7 @@ function holisticLintTransportFailure(
           : "candidate",
       retryable: code !== "abort",
     },
-    stats,
+    stats: addThrownTransportAttempts(error, stats),
   };
 }
 
@@ -5495,6 +5666,152 @@ function invalidGatewayVerdict(
     failure: {
       code: "invalid-verdict",
       message: "Judge response did not match the required verdict schema",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
+  };
+}
+
+function gatewayJudgeTransportFailure(
+  error: unknown,
+  stats: semanticLint.JudgeStats,
+  overallSignal?: AbortSignal,
+): semanticLint.JudgeOutcome {
+  const failure = gatewayThrownTransportFailure(error, overallSignal);
+  return {
+    kind: "unresolved",
+    failure,
+    stats: addThrownTransportAttempts(error, stats),
+  };
+}
+
+function invalidCounterevidenceOutcome(
+  stats: semanticLint.JudgeStats,
+): semanticLint.CounterevidenceOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "invalid-verdict",
+      message:
+        "Counterevidence response did not match the required verdict schema",
+      scope: "candidate",
+      retryable: true,
+    },
+    stats,
+  };
+}
+
+function gatewayCounterevidenceTransportFailure(
+  error: unknown,
+  stats: semanticLint.JudgeStats,
+  overallSignal?: AbortSignal,
+): semanticLint.CounterevidenceOutcome {
+  const failure = gatewayThrownTransportFailure(error, overallSignal);
+  return {
+    kind: "unresolved",
+    failure,
+    stats: addThrownTransportAttempts(error, stats),
+  };
+}
+
+function addThrownTransportAttempts(
+  error: unknown,
+  stats: semanticLint.JudgeStats,
+): semanticLint.JudgeStats {
+  return {
+    ...stats,
+    transportAttempts: stats.transportAttempts + promptAttemptsFromError(error),
+  };
+}
+
+function promptAttemptsFromError(error: unknown): number {
+  if (!error || typeof error !== "object") return 0;
+  const attempts = (error as { attempts?: unknown }).attempts;
+  return typeof attempts === "number" &&
+    Number.isSafeInteger(attempts) &&
+    attempts > 0
+    ? attempts
+    : 0;
+}
+
+function attachPromptAttempts(error: unknown, attempts: number): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const target = error instanceof Error ? error : new Error(message);
+  try {
+    Object.defineProperty(target, "attempts", {
+      configurable: true,
+      enumerable: false,
+      value: attempts,
+      writable: false,
+    });
+    return target;
+  } catch {
+    const wrapped = new Error(message);
+    Object.defineProperty(wrapped, "attempts", {
+      configurable: true,
+      enumerable: false,
+      value: attempts,
+      writable: false,
+    });
+    wrapped.name = target.name;
+    return wrapped;
+  }
+}
+
+function gatewayThrownTransportFailure(
+  error: unknown,
+  overallSignal?: AbortSignal,
+): semanticLint.JudgeFailure {
+  const name = error instanceof Error ? error.name : "";
+  const code: semanticLint.JudgeFailureCode =
+    name === "AbortError"
+      ? "abort"
+      : name === "TimeoutError"
+        ? "timeout"
+        : "transport-error";
+  return {
+    code,
+    message:
+      error instanceof Error
+        ? error.message.slice(0, 400)
+        : String(error).slice(0, 400),
+    scope:
+      (code === "abort" || code === "timeout") && overallSignal?.aborted
+        ? "run"
+        : "candidate",
+    retryable: code !== "abort",
+  };
+}
+
+function insufficientCounterevidenceOutcome(
+  stats: semanticLint.JudgeStats,
+): semanticLint.CounterevidenceOutcome {
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "insufficient-context",
+      message:
+        "Counterevidence context was incomplete; confirmed or resolved verdicts are not accepted",
+      scope: "candidate",
+      retryable: false,
+    },
+    stats,
+  };
+}
+
+function promptFailureToCounterevidenceOutcome(
+  outcome: Extract<PromptOutcome, { kind: "failure" }>,
+  stats: semanticLint.JudgeStats,
+  overallSignal?: AbortSignal,
+): semanticLint.CounterevidenceOutcome {
+  const translated = promptFailureToJudgeOutcome(outcome, stats, overallSignal);
+  if (translated.kind === "unresolved") return translated;
+  return {
+    kind: "unresolved",
+    failure: {
+      code: "transport-error",
+      message: "Counterevidence verifier transport failed",
       scope: "candidate",
       retryable: true,
     },

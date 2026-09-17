@@ -26,10 +26,23 @@ type LintFlags = {
   "allow-author-overrides": boolean;
 };
 
+/** Keep every lint timer below Node's finite timer range with ample margin. */
+export const MAX_SEMANTIC_LINT_TIMEOUT_MS = 86_400_000;
+
 function positiveInteger(value: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new TypeError("must be a positive integer");
+  }
+  return parsed;
+}
+
+export function parseSemanticLintTimeout(value: string): number {
+  const parsed = positiveInteger(value);
+  if (parsed > MAX_SEMANTIC_LINT_TIMEOUT_MS) {
+    throw new TypeError(
+      `must be at most ${MAX_SEMANTIC_LINT_TIMEOUT_MS} milliseconds`,
+    );
   }
   return parsed;
 }
@@ -113,13 +126,13 @@ export const lintCommand = buildOutputCommand<SemanticLintReport, LintFlags>({
       },
       "deadline-ms": {
         kind: "parsed",
-        parse: positiveInteger,
+        parse: parseSemanticLintTimeout,
         brief: "Overall lint deadline in milliseconds",
         default: "1200000",
       },
       "candidate-timeout-ms": {
         kind: "parsed",
-        parse: positiveInteger,
+        parse: parseSemanticLintTimeout,
         brief: "Per-candidate judge timeout in milliseconds",
         default: "90000",
       },

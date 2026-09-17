@@ -28,7 +28,7 @@ afterEach(() => {
 
 function report(): SemanticLintReport {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     status: "complete",
     model: "test/model",
     effort: "off",
@@ -45,6 +45,20 @@ function report(): SemanticLintReport {
       availableInvariants: 0,
       includedInvariants: 0,
       omittedInvariants: 0,
+    },
+    verification: {
+      strategy: "none",
+      contextComplete: false,
+      selected: 0,
+      attempted: 0,
+      confirmed: 0,
+      cleared: 0,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 0,
+      transportAttempts: 0,
+      inputTokens: 0,
+      inputTokenBudget: 0,
     },
     health: {
       range: { status: "healthy" },
@@ -144,6 +158,7 @@ function resolvedReport(
     file: `src/file-${index + 1}.ts`,
     invariantId: `inv-${index + 1}`,
     invariantTitle: "Rule",
+    severity: "advisory",
     state: "resolved",
     verdict: "satisfies",
     reason,
@@ -175,6 +190,7 @@ function unresolvedReport(): SemanticLintReport {
       file: "src/file.ts",
       invariantId: "inv-1",
       invariantTitle: "Rule",
+      severity: "advisory",
       state: "unresolved",
       failure: {
         code: "timeout",
@@ -184,6 +200,110 @@ function unresolvedReport(): SemanticLintReport {
       stats: { semanticCalls: 1, transportAttempts: 0 },
     },
   ];
+  return value;
+}
+
+function confirmedCounterevidenceReport(
+  options: {
+    contextComplete?: boolean;
+    semanticCalls?: number;
+  } = {},
+): SemanticLintReport {
+  const value = resolvedReport();
+  const contextComplete = options.contextComplete ?? true;
+  const verificationSemanticCalls = options.semanticCalls ?? 1;
+  value.status = "partial";
+  value.coverage = {
+    ...value.coverage,
+    strategy: "isolated-hunk",
+    availableHunks: 1,
+    includedHunks: 1,
+    omittedHunks: 0,
+    availableInvariants: 1,
+    includedInvariants: 1,
+    omittedInvariants: 0,
+  };
+  value.verification = {
+    strategy: "counterevidence",
+    contextComplete,
+    selected: 1,
+    attempted: 1,
+    confirmed: 1,
+    cleared: 0,
+    unresolved: 0,
+    notAttempted: 0,
+    semanticCalls: verificationSemanticCalls,
+    transportAttempts: verificationSemanticCalls,
+    inputTokens: 3_000,
+    inputTokenBudget: 16_000,
+  };
+  value.health.invariantVectors = {
+    status: "healthy",
+    expected: 1,
+    available: 1,
+    missing: 0,
+  };
+  value.health.hunkVectors = {
+    status: "healthy",
+    expected: 1,
+    available: 1,
+    missing: 0,
+  };
+  value.counters = {
+    ...value.counters,
+    hunks: 1,
+    invariants: 1,
+    candidates: 1,
+    attempted: 1,
+    resolved: 1,
+    semanticCalls: 1 + verificationSemanticCalls,
+    transportAttempts: 1 + verificationSemanticCalls,
+  };
+  value.candidates = [
+    {
+      ...value.candidates[0],
+      verdict: "violates",
+      reason: "The connected change still bypasses the boundary.",
+      stats: {
+        semanticCalls: 1 + verificationSemanticCalls,
+        transportAttempts: 1 + verificationSemanticCalls,
+      },
+      verification: {
+        state: "confirmed",
+        reason: "The connected change still bypasses the boundary.",
+        evidence: [
+          { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+        ],
+        stats: {
+          semanticCalls: verificationSemanticCalls,
+          transportAttempts: verificationSemanticCalls,
+        },
+        inputTokens: 3_000,
+        contextComplete,
+      },
+    },
+  ];
+  value.findings = [
+    {
+      id: "finding-01",
+      invariantId: "inv-1",
+      invariantTitle: "Rule",
+      invariantContent: "The boundary must remain enforced.",
+      file: "src/file-1.ts",
+      similarity: 1,
+      refHit: false,
+      reason: "The connected change still bypasses the boundary.",
+      hunk: "@@ -1,1 +1,1 @@",
+      severity: "advisory",
+    },
+  ];
+  value.gate = {
+    mode: "advisory",
+    blockingFindingIds: [],
+    overridden: [],
+    advisoryFindingIds: ["finding-01"],
+    wouldBlockFindingIds: [],
+  };
   return value;
 }
 
@@ -397,6 +517,290 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value, 3)).toBe(false);
   });
 
+  test("accepts an ordinary isolated violation without selected counterevidence", () => {
+    const value = resolvedReport();
+    value.status = "partial";
+    value.coverage = {
+      ...value.coverage,
+      strategy: "isolated-hunk",
+      availableHunks: 1,
+      includedHunks: 1,
+      omittedHunks: 0,
+      availableInvariants: 1,
+      includedInvariants: 1,
+      omittedInvariants: 0,
+    };
+    value.counters.hunks = 1;
+    value.counters.invariants = 1;
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
+    value.health.invariantVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
+    value.candidates[0].verdict = "violates";
+    value.candidates[0].reason = "The changed call bypasses the boundary.";
+    value.findings = [
+      {
+        id: "finding-01",
+        invariantId: "inv-1",
+        invariantTitle: "Rule",
+        invariantContent: "The boundary must remain enforced.",
+        file: "src/file-1.ts",
+        similarity: 1,
+        refHit: false,
+        reason: "The changed call bypasses the boundary.",
+        hunk: "@@ -1,1 +1,1 @@",
+        severity: "advisory",
+      },
+    ];
+    value.gate.advisoryFindingIds = ["finding-01"];
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
+  test("accepts a report with confirmed counterevidence", () => {
+    const value = report();
+    value.status = "partial";
+    value.coverage = {
+      ...value.coverage,
+      strategy: "isolated-hunk",
+      availableHunks: 1,
+      includedHunks: 1,
+      omittedHunks: 0,
+      availableInvariants: 1,
+      includedInvariants: 1,
+      omittedInvariants: 0,
+    };
+    value.verification = {
+      strategy: "counterevidence",
+      contextComplete: true,
+      selected: 1,
+      attempted: 1,
+      confirmed: 1,
+      cleared: 0,
+      unresolved: 0,
+      notAttempted: 0,
+      semanticCalls: 1,
+      transportAttempts: 1,
+      inputTokens: 3_000,
+      inputTokenBudget: 16_000,
+    };
+    value.health.judge = {
+      status: "healthy",
+      selected: 1,
+      resolved: 1,
+      unresolved: 0,
+      notAttempted: 0,
+    };
+    value.health.invariantVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 1,
+      available: 1,
+      missing: 0,
+    };
+    value.counters = {
+      ...value.counters,
+      hunks: 1,
+      invariants: 1,
+      candidates: 1,
+      attempted: 1,
+      resolved: 1,
+      semanticCalls: 2,
+      transportAttempts: 2,
+    };
+    value.candidates = [
+      {
+        id: "candidate-1",
+        file: "src/file.ts",
+        invariantId: "inv-1",
+        invariantTitle: "Rule",
+        severity: "advisory",
+        state: "resolved",
+        verdict: "violates",
+        reason: "The violation survived connected-context verification.",
+        stats: { semanticCalls: 2, transportAttempts: 2 },
+        verification: {
+          state: "confirmed",
+          reason: "The connected change still bypasses the boundary.",
+          evidence: [
+            { hunkId: "hunk-0001", reason: "The call remains unwrapped." },
+          ],
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+          inputTokens: 3_000,
+          contextComplete: true,
+        },
+      },
+    ];
+    value.findings = [
+      {
+        id: "finding-01",
+        invariantId: "inv-1",
+        invariantTitle: "Rule",
+        invariantContent: "The boundary must remain enforced.",
+        file: "src/file.ts",
+        similarity: 1,
+        refHit: false,
+        reason: "The connected change still bypasses the boundary.",
+        hunk: "@@ -1,1 +1,1 @@",
+        severity: "advisory",
+      },
+    ];
+    value.gate = {
+      mode: "advisory",
+      blockingFindingIds: [],
+      overridden: [],
+      advisoryFindingIds: ["finding-01"],
+      wouldBlockFindingIds: [],
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    const result = runReporter(value, false, 3);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("unreadable or invalid report");
+    expect(result.summary).toContain("confirmed");
+  });
+
+  test.each([
+    [
+      "more than the shared semantic-call budget",
+      (value: SemanticLintReport) => {
+        value.candidates[0].stats.semanticCalls = 21;
+        value.counters.semanticCalls = 21;
+      },
+    ],
+    [
+      "candidate verifier input above its budget",
+      (value: SemanticLintReport) => {
+        const verification = value.candidates[0].verification;
+        if (!verification) throw new Error("test fixture lacks verification");
+        verification.inputTokens = 16_001;
+        value.verification.inputTokens = 16_001;
+      },
+    ],
+    [
+      "candidate totals that omit verifier calls",
+      (value: SemanticLintReport) => {
+        value.candidates[0].stats = {
+          semanticCalls: 0,
+          transportAttempts: 0,
+        };
+        value.counters.semanticCalls = 0;
+        value.counters.transportAttempts = 0;
+      },
+    ],
+  ])("rejects reports with invalid budget accounting: %s", (_, mutate) => {
+    const value = confirmedCounterevidenceReport();
+    mutate(value);
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test("CLI and action reject a malformed retryable failure", () => {
+    const value = unresolvedReport() as unknown as {
+      candidates: Array<{
+        failure?: Record<string, unknown>;
+      }>;
+    };
+    const failure = value.candidates[0].failure;
+    if (!failure) throw new Error("test fixture lacks failure");
+    failure.retryable = "sometimes";
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test.each([
+    ["incomplete context", { contextComplete: false, semanticCalls: 1 }],
+    ["zero semantic calls", { contextComplete: true, semanticCalls: 0 }],
+  ])("rejects confirmed counterevidence with %s", (_, options) => {
+    const value = confirmedCounterevidenceReport(options);
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test.each([
+    [
+      "a confirmed candidate without a finding",
+      (value: SemanticLintReport) => {
+        value.findings = [];
+        value.gate = {
+          mode: "advisory",
+          blockingFindingIds: [],
+          overridden: [],
+          advisoryFindingIds: [],
+          wouldBlockFindingIds: [],
+        };
+      },
+    ],
+    [
+      "a cleared candidate with a finding",
+      (value: SemanticLintReport) => {
+        const candidate = value.candidates[0].verification;
+        if (!candidate) throw new Error("test fixture lacks verification");
+        candidate.state = "cleared";
+        value.verification.confirmed = 0;
+        value.verification.cleared = 1;
+      },
+    ],
+    [
+      "a finding with downgraded severity",
+      (value: SemanticLintReport) => {
+        value.findings[0].severity = "soft";
+      },
+    ],
+  ])("rejects report integrity failure: %s", (_, mutate) => {
+    const value = confirmedCounterevidenceReport();
+    mutate(value);
+    expect(() => validateSemanticLintReport(value)).toThrow();
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test("accepts mixed same-key verification when one candidate is confirmed", () => {
+    const value = confirmedCounterevidenceReport();
+    const confirmed = value.candidates[0].verification;
+    if (!confirmed) throw new Error("test fixture lacks verification");
+    value.candidates.push({
+      ...value.candidates[0],
+      id: "candidate-2",
+      verification: {
+        ...confirmed,
+        state: "cleared",
+        reason: "Connected context routes the second hunk safely.",
+      },
+    });
+    value.health.judge.selected = 2;
+    value.health.judge.resolved = 2;
+    value.counters.candidates = 2;
+    value.counters.attempted = 2;
+    value.counters.resolved = 2;
+    value.counters.semanticCalls = 4;
+    value.counters.transportAttempts = 4;
+    value.verification.selected = 2;
+    value.verification.attempted = 2;
+    value.verification.confirmed = 1;
+    value.verification.cleared = 1;
+    value.verification.semanticCalls = 2;
+    value.verification.transportAttempts = 2;
+    value.verification.inputTokens = 6_000;
+    value.verification.inputTokenBudget = 32_000;
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(actionAccepts(value, 3)).toBe(true);
+  });
+
   test("reports a valid complete advisory run without blocking", () => {
     const result = runReporter(report(), false, 0);
     expect(result.status).toBe(0);
@@ -422,7 +826,9 @@ describe("semantic lint action reporter", () => {
   });
 
   test("fails gate mode on blocking finding exit 2", () => {
-    const value = report();
+    const value = confirmedCounterevidenceReport();
+    value.candidates[0].file = "src/file.ts";
+    value.candidates[0].severity = "strict";
     value.gate = {
       mode: "gate",
       blockingFindingIds: ["finding-01"],
@@ -433,7 +839,7 @@ describe("semantic lint action reporter", () => {
     value.findings = [
       {
         id: "finding-01",
-        invariantId: "inv",
+        invariantId: "inv-1",
         invariantTitle: "Never bypass validation",
         invariantContent: "Validation must never be bypassed.",
         file: "src/file.ts",
@@ -444,6 +850,7 @@ describe("semantic lint action reporter", () => {
         severity: "strict",
       },
     ];
+    expect(validateSemanticLintReport(value)).toBe(value);
     const result = runReporter(value, true, 2);
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("exit 2: complete with blocking findings");
@@ -463,7 +870,8 @@ describe("semantic lint action reporter", () => {
       hunk: "@@ -1,1 +1,1 @@",
       severity: "strict" as const,
     };
-    const advisory = report();
+    const advisory = confirmedCounterevidenceReport();
+    advisory.candidates[0].severity = "strict";
     advisory.findings = [finding];
     advisory.gate = {
       mode: "advisory",
@@ -480,7 +888,8 @@ describe("semantic lint action reporter", () => {
       "No suspected invariant violations",
     );
 
-    const gate = report();
+    const gate = confirmedCounterevidenceReport();
+    gate.candidates[0].severity = "strict";
     gate.findings = [finding];
     gate.gate = {
       mode: "gate",
@@ -538,6 +947,7 @@ describe("semantic lint action reporter", () => {
             file: "src/file.ts",
             invariantId: "inv",
             invariantTitle: "Rule",
+            severity: "advisory",
             state: "unresolved",
             failure: {
               code: "timeout",
@@ -560,24 +970,15 @@ describe("semantic lint action reporter", () => {
   });
 
   test("neutralizes and caps report-controlled Markdown summary fields", () => {
-    const value = report();
-    value.findings = [
-      {
-        id: "finding-01",
-        invariantId: "inv",
-        invariantTitle: "<img src=x onerror=alert(1)> [title](https://bad)",
-        invariantContent: "Rule",
-        file: "[file](https://bad/file)",
-        similarity: 1,
-        refHit: true,
-        reason: `![image](https://bad/image) ${"x".repeat(1_000)}`,
-        hunk: "@@ -1,1 +1,1 @@",
-        severity: "advisory",
-      },
-    ];
+    const value = confirmedCounterevidenceReport();
+    value.candidates[0].file = "[file](https://bad/file)";
+    value.findings[0].invariantTitle =
+      "<img src=x onerror=alert(1)> [title](https://bad)";
+    value.findings[0].file = value.candidates[0].file;
+    value.findings[0].reason = `![image](https://bad/image) ${"x".repeat(1_000)}`;
     value.gate.advisoryFindingIds = ["finding-01"];
 
-    const result = runReporter(value, false, 0);
+    const result = runReporter(value, false, 3);
     expect(result.status).toBe(0);
     expect(result.summary).toContain("&lt;img src=x onerror=alert\\(1\\)&gt;");
     expect(result.summary).not.toContain("<img");
@@ -610,6 +1011,7 @@ describe("semantic lint action reporter", () => {
         file: "src/file.ts",
         invariantId: "inv",
         invariantTitle: "Rule",
+        severity: "advisory",
         state: "unresolved",
         failure: {
           code: "no-auth",
