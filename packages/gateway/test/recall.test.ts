@@ -2083,6 +2083,88 @@ describe("recall follow-up error-body privacy", () => {
       }
     },
   );
+
+  test.each(["streaming", "json", "accumulated-sse"] as const)(
+    "%s bounds a stalled non-OK diagnostic body without awaiting cancellation",
+    async (mode) => {
+      vi.useFakeTimers();
+      const warnings: string[] = [];
+      let cancelCalled = false;
+      log.registerSink({
+        info: () => {},
+        warn: (message) => warnings.push(message),
+        error: () => {},
+        captureException: () => {},
+      });
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            return new Promise(() => {});
+          },
+          cancel() {
+            cancelCalled = true;
+            return new Promise(() => {});
+          },
+        }),
+        { status: 503 },
+      );
+      const ctx: RecallFollowUpCtx = {
+        forward: async () => ({ response, effectiveProtocol: "anthropic" }),
+        parseJSON: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+        parseSSE: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+      };
+
+      try {
+        const pending =
+          mode === "streaming"
+            ? runRecallFollowUpStreaming(
+                ctx,
+                makeRequest(),
+                resp,
+                "recall results",
+                recallBlock,
+              )
+            : mode === "json"
+              ? runRecallFollowUpJSON(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                )
+              : runRecallFollowUpStreamAccumulated(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                );
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toMatchObject({
+          ok: false,
+          status: 503,
+          detail: "",
+        });
+        expect(cancelCalled).toBe(true);
+        expect(warnings).toEqual([
+          "recall follow-up error body could not be read",
+        ]);
+      } finally {
+        vi.useRealTimers();
+        log.registerSink({
+          info: () => {},
+          warn: () => {},
+          error: () => {},
+          captureException: () => {},
+        });
+      }
+    },
+  );
 });
 
 describe("runRecallRecovery", () => {

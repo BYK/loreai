@@ -1206,6 +1206,16 @@ export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
     )
   )
     return false;
+  if (
+    resp.rawOutputItems?.some(
+      (item) =>
+        item.type === "function_call" &&
+        item.status !== undefined &&
+        item.status !== "completed",
+    )
+  ) {
+    return false;
+  }
   return (
     resp.content.some((block) => {
       if (block.type === "text") return block.text.trim().length > 0;
@@ -1477,6 +1487,11 @@ async function readResponseTextLimited(
   maxBytes = 500,
   signal?: AbortSignal,
 ): Promise<string> {
+  const diagnosticSignal = AbortSignal.any(
+    [signal, AbortSignal.timeout(1_000)].filter(
+      (value): value is AbortSignal => value !== undefined,
+    ),
+  );
   const reader = response.body?.getReader();
   if (!reader) return "";
   const decoder = new TextDecoder();
@@ -1484,12 +1499,12 @@ async function readResponseTextLimited(
   let readBytes = 0;
   try {
     while (readBytes < maxBytes) {
-      signal?.throwIfAborted();
+      diagnosticSignal.throwIfAborted();
       const { done, value } = await promiseAgainstAbort(
         () => reader.read(),
-        signal,
+        diagnosticSignal,
       );
-      signal?.throwIfAborted();
+      diagnosticSignal.throwIfAborted();
       if (done) break;
       if (!value) continue;
       const chunk = value.subarray(0, maxBytes - readBytes);
@@ -1497,7 +1512,7 @@ async function readResponseTextLimited(
       text += decoder.decode(chunk, { stream: readBytes < maxBytes });
     }
   } finally {
-    cancelAndReleaseReader(reader, signal?.reason);
+    cancelAndReleaseReader(reader, diagnosticSignal.reason);
   }
   return text;
 }

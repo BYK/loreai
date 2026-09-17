@@ -60,6 +60,7 @@ export async function accumulateGeminiSSEStream(
     strict?: boolean;
     maxFrames?: number;
     onSemanticContent?: () => void;
+    requireSuccessfulCompletion?: boolean;
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
   } = {},
 ): Promise<GatewayResponse> {
@@ -73,6 +74,9 @@ export async function accumulateGeminiSSEStream(
   let responseId = "";
   let usage: GatewayUsage = { ...ZERO_USAGE };
   let terminalSeen = false;
+  let terminalCandidateCount = 0;
+  let terminalRole: unknown;
+  let terminalUsageComplete = false;
   const toolIdentitiesByCandidate = new Map<number, Set<string>>();
 
   const reader = upstreamResponse.body.getReader();
@@ -334,6 +338,17 @@ export async function accumulateGeminiSSEStream(
         "malformed Gemini stream event",
       );
       if (um) usage = geminiUsageFromMetadata(um);
+      if (
+        typeof first.finishReason === "string" &&
+        first.finishReason !== "" &&
+        first.finishReason !== "FINISH_REASON_UNSPECIFIED"
+      ) {
+        terminalCandidateCount = candidates.length;
+        terminalRole = content.role;
+        terminalUsageComplete =
+          typeof um?.promptTokenCount === "number" &&
+          typeof um?.candidatesTokenCount === "number";
+      }
       await opts.onValidatedEvent?.(event, data);
       if (
         opts.stopAtTerminal &&
@@ -351,6 +366,17 @@ export async function accumulateGeminiSSEStream(
 
   if (opts.stopAtTerminal && !terminalSeen) {
     throw new Error("missing Gemini finishReason terminal");
+  }
+  if (
+    opts.requireSuccessfulCompletion &&
+    (!responseId ||
+      !model ||
+      finishReason !== "STOP" ||
+      terminalCandidateCount !== 1 ||
+      terminalRole !== "model" ||
+      !terminalUsageComplete)
+  ) {
+    throw new Error("upstream Gemini request did not complete");
   }
 
   const hasToolCall = contentBlocks.some((block) => block.type === "tool_use");

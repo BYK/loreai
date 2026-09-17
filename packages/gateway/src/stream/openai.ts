@@ -534,6 +534,7 @@ export async function accumulateOpenAISSEStream(
     consumeUntilDone?: boolean;
     /** Allow OpenCode Zen's empty choice trailer before [DONE]. */
     allowPostTerminalNoop?: boolean;
+    requireSuccessfulCompletion?: boolean;
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
   } = {},
 ): Promise<GatewayResponse> {
@@ -558,6 +559,10 @@ export async function accumulateOpenAISSEStream(
   let terminalSeen = false;
   let doneSeen = false;
   let choiceIndex: number | undefined;
+  const seenChoiceIndices = new Set<number>();
+  let assistantRoleSeen = false;
+  let inputUsageSeen = false;
+  let outputUsageSeen = false;
   const toolCallIndexById = new Map<string, number>();
   // Every choice is validated even though the gateway projects choices[0].
   const validatedToolCalls = new Map<string, { id: string; name: string }>();
@@ -571,6 +576,8 @@ export async function accumulateOpenAISSEStream(
       inputTokens = usage.prompt_tokens;
     if (typeof usage.completion_tokens === "number")
       outputTokens = usage.completion_tokens;
+    inputUsageSeen ||= typeof usage.prompt_tokens === "number";
+    outputUsageSeen ||= typeof usage.completion_tokens === "number";
     const details = usage.prompt_tokens_details as
       | Record<string, number>
       | undefined;
@@ -761,6 +768,7 @@ export async function accumulateOpenAISSEStream(
           const choice = normalizedChoices[position];
           const currentChoiceIndex =
             typeof choice.index === "number" ? choice.index : position;
+          seenChoiceIndices.add(currentChoiceIndex);
           if (frameChoiceIndices.has(currentChoiceIndex)) {
             throw malformedOpenAIStream("duplicate-choice-index");
           }
@@ -818,6 +826,7 @@ export async function accumulateOpenAISSEStream(
         }
         const delta = firstChoice.delta as Record<string, unknown> | undefined;
         if (delta) {
+          if (delta.role === "assistant") assistantRoleSeen = true;
           if (typeof delta.content === "string") {
             textContent += delta.content;
           }
@@ -937,6 +946,18 @@ export async function accumulateOpenAISSEStream(
     Array.from(validatedToolCalls.values()).some((call) => !call.id)
   ) {
     throw malformedOpenAIStream("missing-tool-identity");
+  }
+  if (
+    opts.requireSuccessfulCompletion &&
+    (!id ||
+      !model ||
+      seenChoiceIndices.size !== 1 ||
+      !assistantRoleSeen ||
+      !inputUsageSeen ||
+      !outputUsageSeen ||
+      (stopReason !== "end_turn" && stopReason !== "tool_use"))
+  ) {
+    throw new Error("upstream OpenAI request did not complete");
   }
 
   const content: GatewayContentBlock[] = [];

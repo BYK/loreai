@@ -8076,13 +8076,10 @@ export function buildStreamingResponse(
                   throw new RecallContinuationFailure("follow_up_failed");
                 log.error(
                   `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
-                  new Error(
-                    `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
-                  ),
                 );
                 captureToolPairing400({
                   status: streamingFollowUp.status ?? 0,
-                  errorBody: streamingFollowUp.detail,
+                  errorBody: "",
                   messages: currentModifiedReq.messages,
                   // Layer is not in scope on the streaming recall continuation;
                   // -1 signals "unknown" while still tagging the error class.
@@ -8697,8 +8694,8 @@ export function streamResponsesRecallAware(
     for (const rollback of transactionRollbacks.splice(0).reverse()) {
       try {
         rollback();
-      } catch (err) {
-        log.error("recall transaction rollback failed:", err);
+      } catch {
+        log.error("recall transaction rollback failed");
       }
     }
   };
@@ -10561,8 +10558,8 @@ export function streamResponsesRecallAware(
     if (signal.aborted) {
       try {
         result.rollback?.();
-      } catch (err) {
-        log.error("late recall rollback failed:", err);
+      } catch {
+        log.error("late recall rollback failed");
       }
       throw signal.reason;
     }
@@ -13095,6 +13092,7 @@ export async function accumulateNonStreamResponse(
           strict: true,
           stopAtTerminal: true,
           consumeUntilDone: true,
+          requireSuccessfulCompletion: requireValidCompletion,
         });
       case "openai-responses":
         return accumulateResponsesSSEStream(sse, {
@@ -13109,6 +13107,7 @@ export async function accumulateNonStreamResponse(
           signal,
           strict: true,
           stopAtTerminal: true,
+          requireSuccessfulCompletion: requireValidCompletion,
         });
       default:
         // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
@@ -13116,6 +13115,7 @@ export async function accumulateNonStreamResponse(
           signal,
           strict: true,
           stopAtTerminal: true,
+          requireSuccessfulCompletion: requireValidCompletion,
         });
     }
   }
@@ -19790,11 +19790,10 @@ async function handleConversationTurn(
       if (!jsonFollowUp.ok) {
         log.error(
           `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
-          new Error(`recall follow-up upstream ${jsonFollowUp.status ?? "?"}`),
         );
         captureToolPairing400({
           status: jsonFollowUp.status ?? 0,
-          errorBody: jsonFollowUp.detail,
+          errorBody: "",
           messages: currentModifiedReq.messages,
           // `result` here is the recall string (shadowed); the transform layer
           // is not in scope on the recall continuation. -1 signals "unknown".

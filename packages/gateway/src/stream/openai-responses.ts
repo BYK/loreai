@@ -273,10 +273,15 @@ export function assertSuccessfulResponsesCompletion(
     throw new Error("upstream Responses request did not complete");
   }
   for (const rawItem of response.output) {
-    if (!isRecord(rawItem)) {
-      throw new Error("upstream Responses request did not complete");
-    }
-    if (rawItem.status !== undefined && rawItem.status !== "completed") {
+    if (
+      !isRecord(rawItem) ||
+      !isSupportedResponsesOutputItemType(rawItem.type) ||
+      !isValidResponsesOutputItemStatus(
+        rawItem.type,
+        rawItem.status,
+        "terminal",
+      )
+    ) {
       throw new Error("upstream Responses request did not complete");
     }
   }

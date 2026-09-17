@@ -5158,12 +5158,20 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("retries the current follow-up in a chained recall", async () => {
+    const failedAttemptQuotas = Array.from(
+      { length: MAX_CODEX_RATE_LIMIT_EVENTS },
+      (_, index) => maximalQuotaEvent(index),
+    );
+    const successfulQuota = JSON.parse(
+      maximalQuotaEvent(MAX_CODEX_RATE_LIMIT_EVENTS).split("\ndata: ")[1],
+    );
     const droppedSecondFollowUp = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(
             new TextEncoder().encode(
-              created("resp_chained_retry_dropped", "gpt-5.6-terra"),
+              created("resp_chained_retry_dropped", "gpt-5.6-terra") +
+                failedAttemptQuotas.join(""),
             ),
           );
           controller.error(new Error("socket reset"));
@@ -5179,6 +5187,7 @@ describe("streamResponsesRecallAware", () => {
     ]);
     const recoveredSecondFollowUp = streamFrom([
       created("resp_chained_retry_recovered", "gpt-5.6-terra"),
+      maximalQuotaEvent(MAX_CODEX_RATE_LIMIT_EVENTS),
       textItem(0, "chained recovered answer", "msg_chained_retry_recovered"),
       completed("resp_chained_retry_recovered"),
     ]);
@@ -5218,6 +5227,11 @@ describe("streamResponsesRecallAware", () => {
       "second recall result",
       "second recall result",
     ]);
+    const emittedQuotas = out
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("event: codex.rate_limits\n"))
+      .map((frame) => JSON.parse(frame.split("\ndata: ")[1]));
+    expect(emittedQuotas).toEqual([successfulQuota]);
   });
 
   test("rejects terminal omission of added-only provisional reasoning in Codex recall-aware mode", async () => {
