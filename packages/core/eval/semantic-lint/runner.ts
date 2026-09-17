@@ -818,7 +818,7 @@ export function contextFalsePositiveReductionForReplay(
   ).length;
 }
 
-function guardrails(
+export function guardrails(
   metrics: StrategyMetrics[],
   observations: readonly ReplayObservation[],
   cases: readonly SemanticLintReplayCase[],
@@ -878,7 +878,7 @@ function guardrails(
   if (precisionDelta !== null && precisionDelta < 0) {
     notes.push("adaptive-connected precision is below isolated-baseline");
   }
-  if (controlledMutantRecall !== 1) {
+  if (controlledMutantRecall !== null && controlledMutantRecall !== 1) {
     notes.push(
       "adaptive-connected did not preserve every controlled mutant finding",
     );

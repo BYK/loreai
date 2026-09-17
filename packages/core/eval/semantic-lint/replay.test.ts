@@ -5,6 +5,7 @@ import {
   confusionMetrics,
   contextFalsePositiveReductionForReplay,
   costFor,
+  guardrails,
   renderSemanticLintReplayMarkdown,
   runSemanticLintReplay,
   runStrategy,
@@ -343,6 +344,23 @@ describe("semantic-lint labeled replay evaluation", () => {
     expect(adaptive?.controlledMutantTruePositives).toBe(
       adaptive?.controlledMutantSamples,
     );
+  });
+
+  test("does not fail guardrails when the corpus has no mutants", () => {
+    const report = runSemanticLintReplay({ repetitions: 1 });
+    const metricsWithoutMutants = report.metrics.map((metric) => ({
+      ...metric,
+      controlledMutantTruePositives: 0,
+      controlledMutantSamples: 0,
+    }));
+    const result = guardrails(
+      metricsWithoutMutants,
+      report.observations,
+      SEMANTIC_LINT_REPLAY_FIXTURES.filter((item) => !item.mutation),
+      report.configuration,
+    );
+    expect(result.status).toBe("pass");
+    expect(result.controlledMutantRecall).toBeNull();
   });
 
   test("records holistic budget abstention separately from a false negative", () => {
