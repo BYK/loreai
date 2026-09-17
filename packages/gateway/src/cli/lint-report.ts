@@ -337,6 +337,12 @@ export function buildSemanticLintReport(input: {
       advisoryFindingIds.push(id);
     }
   }
+  const wouldBlockFindingIds = findings
+    .filter(
+      (finding) =>
+        finding.severity !== "advisory" && !overriddenIds.has(finding.id),
+    )
+    .map((finding) => finding.id);
 
   const invariantVectors = clonePhase(input.result.health.invariantVectors);
   let invariantSource = clonePhase(input.invariantSource);
@@ -427,7 +433,7 @@ export function buildSemanticLintReport(input: {
       blockingFindingIds,
       overridden,
       advisoryFindingIds,
-      wouldBlockFindingIds: blocking,
+      wouldBlockFindingIds,
     },
   };
   report.status = deriveStatus(report);
