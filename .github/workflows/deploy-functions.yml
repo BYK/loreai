@@ -28,7 +28,7 @@ concurrency:
 jobs:
   deploy:
     name: Deploy Edge Functions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Run in the `production` environment so the SUPABASE_ACCESS_TOKEN secret — scoped to that
     # environment for security (not a plain repo secret) — is available to this job only.
     environment: production

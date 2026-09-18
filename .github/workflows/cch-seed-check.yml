@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   check-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       needs-extraction: ${{ steps.check.outputs.needs-extraction }}
       latest-version: ${{ steps.check.outputs.latest-version }}
@@ -87,7 +87,7 @@ jobs:
   extract-seed:
     needs: check-version
     if: needs.check-version.outputs.needs-extraction == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -219,7 +219,7 @@ jobs:
   notify-failure:
     needs: [check-version, extract-seed]
     if: always() && (needs.check-version.result == 'failure' || needs.extract-seed.result == 'failure')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:

@@ -25,7 +25,7 @@ on:
 jobs:
   eval-fixture:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'fixture'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -47,7 +47,7 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.mode == 'live')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       copilot-requests: write
@@ -93,7 +93,7 @@ jobs:
     if: >
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.mode == 'live')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     continue-on-error: true
     permissions:

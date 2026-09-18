@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The Bluesky app password that authenticates the standard.site record
     # publish lives in the `production` environment, so the job must opt into
     # it to read the secret. Mapped to a (possibly empty) env var so the

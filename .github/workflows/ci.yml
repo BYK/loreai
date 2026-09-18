@@ -21,7 +21,7 @@ jobs:
   # Change detection: skip heavy CI for docs-only changes
   # ---------------------------------------------------------------------------
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -84,7 +84,7 @@ jobs:
   # should never slip through regardless of which files changed.
   # ---------------------------------------------------------------------------
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Install actionlint
@@ -104,7 +104,7 @@ jobs:
   # ---------------------------------------------------------------------------
   semantic-lint-action-smoke:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -133,7 +133,7 @@ jobs:
   # sub-second and a regression here blocks every macOS install.
   # ---------------------------------------------------------------------------
   install-script-bash-compat:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Check installer bash-3.2 compatibility
@@ -142,7 +142,7 @@ jobs:
   install-script-portability:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -160,7 +160,7 @@ jobs:
   test:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Override the workflow-default permissions (contents: read, packages: write)
     # to also grant what the Codecov upload step needs to post PR comments and
     # commit statuses. A job-level block REPLACES the default, so the inherited
@@ -601,7 +601,7 @@ jobs:
     name: Check generated docs
     needs: [changes]
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -634,7 +634,7 @@ jobs:
     name: Check docs links
     needs: [changes]
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -666,7 +666,7 @@ jobs:
     name: Check preview links
     needs: [changes]
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -697,7 +697,7 @@ jobs:
     name: Check social meta tags
     needs: [changes]
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.docs == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -724,7 +724,7 @@ jobs:
     name: Check Sentry patches
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -869,7 +869,7 @@ jobs:
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -1058,7 +1058,7 @@ jobs:
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       # Check out so the local composite action at packages/binpatch/action is
@@ -1122,7 +1122,7 @@ jobs:
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Check out so the local composite action is available to this job.
       - uses: actions/checkout@v6
@@ -1191,7 +1191,7 @@ jobs:
     if: >-
       needs.changes.outputs.code == 'true' &&
       startsWith(github.ref, 'refs/heads/release/')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       # Check out so the local composite action is available to this job.
@@ -1252,7 +1252,7 @@ jobs:
     name: Sync integration (real Postgres)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -1283,7 +1283,7 @@ jobs:
     name: Hermes plugin tests (Python)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -1314,7 +1314,7 @@ jobs:
     name: Hermes real ContextEngine ABC (drift + conformance)
     needs: [changes]
     if: needs.changes.outputs.hermes == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -1338,7 +1338,7 @@ jobs:
     name: CI Status
     if: always()
     needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, install-script-bash-compat, install-script-portability, sync-integration, hermes-test, hermes-real-abc]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check CI result
         run: |
