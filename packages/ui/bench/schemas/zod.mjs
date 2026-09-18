@@ -102,7 +102,9 @@ export const sessionDetail = z
   .loose();
 
 export const cursorPage = (item) =>
-  z.object({ items: z.array(item), next_cursor: z.string().nullable() }).loose();
+  z
+    .object({ items: z.array(item), next_cursor: z.string().nullable() })
+    .loose();
 
 export const apiError = z
   .object({

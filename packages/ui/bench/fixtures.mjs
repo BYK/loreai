@@ -31,7 +31,13 @@ function id(prefix, i) {
   return `${prefix}-019e18ec-${i.toString(16).padStart(8, "0")}-${Math.floor(rand() * 1e9).toString(16)}`;
 }
 
-const CATEGORIES = ["decision", "pattern", "preference", "architecture", "gotcha"];
+const CATEGORIES = [
+  "decision",
+  "pattern",
+  "preference",
+  "architecture",
+  "gotcha",
+];
 const BASE_TS = 1_789_000_000_000;
 
 export function knowledgeEntry(i) {
@@ -131,7 +137,11 @@ export const accountStatus = {
 export const sharingStatus = {
   linked: true,
   team: { id: "t-1", name: "Core" },
-  policy: { effective: "manual", project_override: null, team_default: "manual" },
+  policy: {
+    effective: "manual",
+    project_override: null,
+    team_default: "manual",
+  },
   state: "linked",
   detail: null,
 };

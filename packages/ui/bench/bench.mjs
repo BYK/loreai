@@ -106,10 +106,12 @@ for (const name of LIBS) {
   lib.parse(lib.sharing, fx.sharingStatus);
   const broken = structuredClone(knowledgePage);
   broken.items[137].confidence = 1.5;
-  if (lib.check(lib.knowledgePage, broken)) throw new Error(`${name} accepted confidence 1.5`);
+  if (lib.check(lib.knowledgePage, broken))
+    throw new Error(`${name} accepted confidence 1.5`);
   const missing = structuredClone(sessionDetail);
   delete missing.messages[999].created_at;
-  if (lib.check(lib.sessionDetail, missing)) throw new Error(`${name} accepted missing created_at`);
+  if (lib.check(lib.sessionDetail, missing))
+    throw new Error(`${name} accepted missing created_at`);
 
   const k = await bench(`${name} knowledge page (200)`, cloneKnowledge, (d) =>
     lib.parse(lib.knowledgePage, d),
@@ -118,8 +120,14 @@ for (const name of LIBS) {
     lib.parse(lib.sessionDetail, d),
   );
   const r = await retention(lib);
-  results.push({ ...k }, { ...s }, { label: `${name} retained after 10k parses`, retainedKb: r.retainedKb });
+  results.push(
+    { ...k },
+    { ...s },
+    { label: `${name} retained after 10k parses`, retainedKb: r.retainedKb },
+  );
 }
 
-console.log(`node ${process.version}, iterations=${ITERS}, rounds=${ROUNDS} (median)`);
+console.log(
+  `node ${process.version}, iterations=${ITERS}, rounds=${ROUNDS} (median)`,
+);
 console.table(results);

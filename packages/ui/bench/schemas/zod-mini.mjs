@@ -85,7 +85,10 @@ const distillationShape = {
   created_at: epochMs,
 };
 
-export const distillationSummary = obj({ ...distillationShape, call_type: nullable(str()) });
+export const distillationSummary = obj({
+  ...distillationShape,
+  call_type: nullable(str()),
+});
 
 export const distillationDetail = obj({
   ...distillationShape,
@@ -99,7 +102,8 @@ export const sessionDetail = obj({
   distillations: z.array(distillationSummary),
 });
 
-export const cursorPage = (item) => obj({ items: z.array(item), next_cursor: nullable(str()) });
+export const cursorPage = (item) =>
+  obj({ items: z.array(item), next_cursor: nullable(str()) });
 
 export const apiError = obj({
   type: z.literal("error"),
@@ -108,7 +112,9 @@ export const apiError = obj({
 
 export const account = obj({
   signed_in: z.boolean(),
-  user: nullable(obj({ id: str(), email: nullable(str()), display_name: nullable(str()) })),
+  user: nullable(
+    obj({ id: str(), email: nullable(str()), display_name: nullable(str()) }),
+  ),
   provider: nullable(str()),
   expires_at: nullable(str()),
   state: z.enum(["signed_in", "anonymous", "expired"]),
@@ -117,7 +123,14 @@ export const account = obj({
 const policy = z.enum(["manual", "auto"]);
 
 export const teams = obj({
-  teams: z.array(obj({ id: str(), name: nullable(str()), role: str(), member_count: nonNeg() })),
+  teams: z.array(
+    obj({
+      id: str(),
+      name: nullable(str()),
+      role: str(),
+      member_count: nonNeg(),
+    }),
+  ),
 });
 
 export const sharing = obj({

@@ -102,7 +102,10 @@ export const sessionDetail = Type.Object({
 });
 
 export const cursorPage = (item) =>
-  Type.Object({ items: Type.Array(item), next_cursor: nullable(Type.String()) });
+  Type.Object({
+    items: Type.Array(item),
+    next_cursor: nullable(Type.String()),
+  });
 
 export const apiError = Type.Object({
   type: Type.Literal("error"),
@@ -142,7 +145,9 @@ export const teams = Type.Object({
 
 export const sharing = Type.Object({
   linked: Type.Boolean(),
-  team: nullable(Type.Object({ id: Type.String(), name: nullable(Type.String()) })),
+  team: nullable(
+    Type.Object({ id: Type.String(), name: nullable(Type.String()) }),
+  ),
   policy: Type.Object({
     effective: policy,
     project_override: nullable(policy),
