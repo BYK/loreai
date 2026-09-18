@@ -558,6 +558,11 @@ export function atomicWriteTrustedFile(
     fchmodSync(descriptor, mode);
     fsyncSync(descriptor);
     tempIdentity = fileIdentity(fstatSync(descriptor, { bigint: true }));
+    // Windows can finalize file metadata when the descriptor is closed. Close
+    // it before publishing so the identity returned to callers remains valid
+    // for a subsequent trusted operation (such as removing an install journal).
+    closeSync(descriptor);
+    descriptor = undefined;
 
     const parentBeforeRename = inspectTrustedDirectory(dirname(file));
     if (
@@ -628,6 +633,7 @@ export function atomicWriteTrustedFile(
     ) {
       throw unsafePath(file, "atomic replace installed an unexpected file");
     }
+    tempIdentity = installed;
     if (displaced) {
       const artifactIdentity = inspectTrustedFile(displaced);
       if (!artifactIdentity) {
