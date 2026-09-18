@@ -8,13 +8,13 @@ package as a compatibility smoke project plus documentation; UI-02 (#1797) adds
 the shell, gateway static serving and removes the legacy server-rendered
 dashboard.
 
-Documents in this package:
+Reference documents:
 
-- [`docs/api-inventory.md`](docs/api-inventory.md) — every `/api/v1` route,
-  response shape, service ownership, gaps, and the management boundary the SPA
-  must preserve.
-- [`docs/baseline.md`](docs/baseline.md) — reproducible gateway startup / RSS
-  / proxy-latency measurements before and after the UI.
+- [API inventory and gateway baseline](https://github.com/BYK/loreai/issues/1796#issuecomment-5736848368)
+  (comment on #1796, not committed) — every `/api/v1` route, response shape,
+  service ownership, gaps, the management boundary the SPA must preserve, and
+  the reproducible startup / RSS / proxy-latency measurements before and after
+  the UI (`scripts/ui-baseline.mjs`).
 - [`src/components/ui/ATTRIBUTION.md`](src/components/ui/ATTRIBUTION.md) —
   provenance and licence of the copied Solid UI primitives.
 
@@ -176,5 +176,4 @@ packages/ui/
   src/lib/utils.ts        cn()
   src/styles/app.css      Tailwind 4 + Lore tokens
   test/                   Vitest (jsdom) unit tests
-  docs/                   api-inventory.md, baseline.md
 ```
