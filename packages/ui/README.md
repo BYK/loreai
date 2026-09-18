@@ -8,6 +8,17 @@ package as a compatibility smoke project plus documentation; UI-02 (#1797) adds
 the shell, gateway static serving and removes the legacy server-rendered
 dashboard.
 
+Routes (all under `/ui`, history-API fallback served by the gateway):
+
+| Route | What |
+|---|---|
+| `/ui` | Workspace: project navigation + "choose a project" document |
+| `/ui/projects/:projectId` | Knowledge list for a project (list pane) |
+| `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
+| `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
+| `/ui/fixture` (`?view=focus`) | Design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state |
+| `/ui/_compat` | UI-01 compatibility smoke page |
+
 Documents in this package:
 
 - [`docs/api-inventory.md`](docs/api-inventory.md) — every `/api/v1` route,
@@ -103,6 +114,8 @@ pnpm --filter @loreai/ui typecheck
 pnpm --filter @loreai/ui test           # Vitest, jsdom
 pnpm --filter @loreai/ui build          # -> packages/ui/dist (hashed assets)
 pnpm --filter @loreai/ui preview        # serve dist locally
+pnpm --filter @loreai/ui test:e2e       # Playwright against the BUILT gateway (see below)
+node scripts/ui-deep-link-smoke.mjs     # browser-free deep-link smoke against the built gateway
 
 pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm test && pnpm run build   # root flows include this package
 ```
@@ -119,6 +132,61 @@ Production never runs a frontend dev server: the gateway serves `packages/ui/dis
    default `http://127.0.0.1:3207`). The dev server binds to loopback so the
    gateway's socket-peer management check still passes.
 
+### How the gateway serves the SPA
+
+`pnpm --filter @loreai/gateway build` / `bundle` run
+`packages/gateway/script/ui-assets.ts`, which builds this package when
+`packages/ui/dist` is missing or stale and writes
+`packages/gateway/src/ui-assets.generated.ts` (git-ignored): every file in
+`dist/` as a `Uint8Array` with its MIME type and a strong ETag. The bundle
+therefore embeds the UI — nothing is read from disk at runtime and the
+published tarball / SEA binary need no extra files.
+`packages/gateway/src/ui-static.ts` answers `/ui`, `/ui/` and `/ui/*`:
+
+- `/ui/assets/<hash>.js|css` → the embedded file, `Cache-Control: public,
+  max-age=31536000, immutable`, correct MIME type, `ETag` / `304`.
+- any other `/ui/...` path → `index.html`, `Cache-Control: no-cache`
+  (history fallback for client routes); unknown `/ui/assets/*` is a 404, never
+  HTML.
+- every response carries a strict `Content-Security-Policy`
+  (`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'
+  data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri
+  'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'`),
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
+  `Referrer-Policy: no-referrer`. No
+  inline scripts or styles: Vite emits `<script type="module" src>` and a
+  linked stylesheet only.
+- the SPA and its assets sit behind the **same management authorization as
+  `/api`** (`server.ts`): non-loopback peers get the bodyless 404 unless
+  `LORE_ALLOW_REMOTE_MANAGEMENT` is set, `Origin` is checked the same way and
+  `LORE_GATEWAY_AUTH_TOKEN` applies. `/` keeps redirecting to `/ui`.
+
+### Tests
+
+| Layer | Command | Where it runs |
+|---|---|---|
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/shell.test.tsx` (shell, real-data routes with a mocked client, fixture), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
+| Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+
+## Baseline (before / after UI-02)
+
+From [`docs/baseline.md`](docs/baseline.md), `node scripts/ui-baseline.mjs
+--runs 5 --requests 40` on the same VM (Xeon 8559C ×8, Node v24.19.0), p50s:
+
+| Metric | clean `main` (`a4e6af5b`) | after UI-02 |
+|---|---|---|
+| Gateway bundle `dist/index.cjs` | 17,565,653 B | 17,834,027 B (+1.5 %) |
+| Startup → `200 /health` | 1297 ms | 1129 ms |
+| RSS after start | 361.8 MB | 363.9 MB |
+| Proxy `POST /v1/messages` (mock upstream) | 32.7 ms | 32.9 ms |
+| `GET /health` | 0.86 ms | 0.81 ms |
+| `GET /api/v1/projects` | 0.62 ms | 0.66 ms |
+
+The SPA is embedded in the bundle and loaded lazily on the first `/ui`
+request; the proxy path is unchanged.
+
 ## Data authority
 
 - The gateway (`packages/core` SQLite via `packages/gateway/src/api.ts`) is
@@ -129,11 +197,21 @@ Production never runs a frontend dev server: the gateway serves `packages/ui/dis
 - The SPA calls the **read** routes only (`GET /api/v1/projects`,
   `GET /api/v1/projects/:id/knowledge`, `GET /api/v1/knowledge/:id`), with
   same-origin `fetch`, no credentials, and runtime validation of every
-  response (`zod`). External knowledge `id`s are the **stable logical ids**
-  the API already exposes; the UI never keys on per-version ids.
+  response (`zod`, `src/lib/schemas.ts`; timestamps are epoch milliseconds).
+  External knowledge `id`s are the **stable logical ids** the API already
+  exposes; the UI never keys on per-version ids.
+- `src/lib/api.ts` classifies failures for the shell: network error →
+  `unreachable`; 401/403 or a **bodyless** 404 (the gateway's way of hiding
+  management routes from non-loopback peers) → `unauthorized`; a JSON 404 →
+  `not_found`; a 2xx body that fails validation → `invalid`.
+- `src/lib/db.ts` opens an IndexedDB (`lore-ui`, one `meta` store) and
+  nothing else. It is a scaffold for UI-03; nothing is read from or written
+  to it in this slice, and it is never authoritative.
 - The browser bundle imports nothing from `packages/gateway` or
   `packages/core`: no boot code, credentials, database, ACP or Git process
-  control. Response types are re-declared as schemas in `src/api/`.
+  control. Response types are re-declared as schemas in `src/lib/schemas.ts`.
+  (The Playwright *seed* script under `e2e/` is Node-only tooling and does
+  load `@loreai/core`; it is not part of the bundle.)
 
 ## UX → component mapping
 
@@ -142,22 +220,22 @@ and the smoke page; the fixture and shell rows land in UI-02.
 
 | Fixture element / §0 primitive | Component | Primitive / lib | Slice |
 |---|---|---|---|
-| Pane chrome (nav / list / detail), responsive collapse | `Shell`, `ListPane`, `DetailPane` | CSS grid + Tailwind breakpoints | UI-02 |
-| Project rows, knowledge rows | `ProjectRow`, `KnowledgeRow` | `<A>` (router), `Badge` | UI-02 |
-| Global search entry (placeholder) | `SearchEntry` | `TextField` (Kobalte) | UI-02 (real in UI-04) |
-| Connection status (reachable / unreachable / unauthorized) | `ConnectionStatus` | `Badge`, `createResource` | UI-02 |
-| Dark / light | `ThemeToggle` | `Button`, `.dark` class on `<html>` | UI-02 |
-| Document-first detail, eyebrow labels | `KnowledgeDetail` | `.eyebrow`, `Separator` | UI-02 |
-| Source block (message + tool blocks) | `MessageBlock`, `ToolBlock` | plain Solid, `Badge` | UI-02 (fixture only) |
-| Anchor (stable passage id, `#anchor` in URL) | `PassageAnchor` | `id` attribute + router `location.hash` | UI-02 (fixture only) |
-| Selection (selected passage), source links | `PassageTarget`, `SourceLink` | `.passage-target`, `<A>` | UI-02 (fixture only) |
-| Discussion indicator (collapsed), inline discussion (expanded replies) | `DiscussionMarker`, `DiscussionThread` | `Button`, `Separator` | UI-02 (fixture only) |
-| Focused discussion with source quote | `FocusedDiscussion` | `Dialog` (Kobalte) | UI-02 (fixture only) |
-| Action menu (per passage / per finding) | `ActionMenu` | `Button` group now; Kobalte `DropdownMenu` when > 3 actions | UI-02 (fixture only, all disabled) |
-| Coverage label (which sources a finding rests on) | `CoverageLabel` | `Badge` outline | UI-02 (fixture only) |
-| Draft / saved / sent / unknown states, participant & scope labels | `StateBadge`, `ParticipantLabel` | `Badge` variants | UI-02 (fixture only) |
-| Empty / error / locked states | `EmptyState`, `ErrorState`, `LockedState` | plain Solid | UI-02 |
-| Mobile navigation | `MobileNav` | `Dialog` (sheet) or `Select` | UI-02 |
+| Pane chrome (nav / list / detail), responsive collapse | `Shell` (`components/shell`), `PaneHead` | CSS grid + Tailwind `md`/`lg` breakpoints; one pane below `md`, nav drawer (`Dialog`) below `lg` | UI-02 |
+| Project rows, knowledge rows | `Nav` items, `ListRow` | `<A>` (router, `aria-current`), `Badge` | UI-02 |
+| Global search entry (placeholder) | `SearchEntry` | button + `Dialog` (Kobalte) explaining UI-04; icon-only below `md` | UI-02 (real in UI-04) |
+| Connection status (checking / reachable / unreachable / unauthorized) | `ConnectionStatus` | `lib/connection.ts` store fed by the API client | UI-02 |
+| Dark / light | `ThemeToggle` | `lib/theme.ts`: `.dark` on `<html>`, `color-scheme`, `localStorage` `lore.ui.theme`, follows the OS until toggled | UI-02 |
+| Document-first detail, eyebrow labels | `KnowledgeDocument`, `DocHeader`, `Crumb`, `Tabs` | `.eyebrow`, `Badge` | UI-02 |
+| Source block (message + tool blocks) | `Message`, `ToolBlock` | plain Solid, `Badge` | UI-02 (fixture only) |
+| Anchor (stable passage id, `#anchor` in URL) | `Passage` (`id` prop) | `id` attribute + `SourceLink href="#…"` | UI-02 (fixture only) |
+| Selection (selected passage), source links | `Passage selected`, `SourceLink`, `Quote` | `.passage-target`, `<A>` | UI-02 (fixture only) |
+| Discussion indicator (collapsed), inline discussion (expanded replies) | `Passage marker`, `InlineDiscussion`, `Reply`, `Draft` | plain Solid | UI-02 (fixture only) |
+| Focused discussion with source quote | `FocusSide` (`/ui/fixture?view=focus`) | side pane ≥ `lg`, full pane below; `Quote` + back-to-source link | UI-02 (fixture only) |
+| Action menu (per passage / per finding) | `FutureActionRow` | `Button` group (all disabled) | UI-02 (fixture only, all disabled) |
+| Coverage label (which sources a finding rests on) | `DocHeader trailing` ("Native transcript · linked") | text | UI-02 (fixture only) |
+| Draft / saved / sent / unknown states, participant & scope labels | `NoteStateBadge`, `AuthorLine`, `ScopeLabel`, `Avatar` | `Badge` variants | UI-02 (fixture; `AuthorLine`/`ScopeLabel` also on real documents) |
+| Empty / error / locked states | `StateCard kind="empty" \| "error" \| "locked"` | plain Solid, `role="alert"` for error/locked | UI-02 |
+| Mobile navigation | `Shell` (`mobilePane`, back link, nav drawer) | Kobalte `Dialog` as a left sheet | UI-02 |
 | Future actions (Save note, Ask agent, Explore separately, Start with selected context, Share finding) | `FutureAction` | `Button disabled` + "not available yet" | UI-02 (disabled) |
 | Tables with sorting (sessions, knowledge) | — | `@tanstack/solid-table` | UI-04 |
 | Long lists | — | `@tanstack/solid-virtual` | UI-04 / UI-06 |
@@ -171,10 +249,14 @@ packages/ui/
   index.html              Vite entry (served as /ui/index.html by the gateway)
   src/index.tsx           mounts <App/>
   src/app.tsx             Router (base /ui) + route table
-  src/compat/             compatibility smoke page + probes
+  src/routes/             Browse.tsx (real data), Fixture.tsx (/ui/fixture), workspace.tsx (provider)
+  src/components/shell/   Shell, AppBar, Nav, SearchEntry
+  src/components/lore/    document primitives (Document.tsx), KnowledgeDocument, Panes, StateCard, FutureAction, Avatar
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
-  src/lib/utils.ts        cn()
+  src/compat/             compatibility smoke page + probes
+  src/lib/                api.ts (typed client), schemas.ts (zod), loader.ts, connection.ts, theme.ts, db.ts (idb scaffold), format.ts, utils.ts
   src/styles/app.css      Tailwind 4 + Lore tokens
   test/                   Vitest (jsdom) unit tests
+  e2e/                    Playwright specs + gateway.mjs / seed.mjs (built-gateway harness)
   docs/                   api-inventory.md, baseline.md
 ```

@@ -19,7 +19,7 @@
     "lore-gateway": "./dist/bin.cjs"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsx script/ui-assets.ts --ensure && tsc --noEmit",
     "build": "tsx script/build.ts",
     "bundle": "tsx script/bundle.ts",
     "build:binary": "tsx script/build.ts --binary",
@@ -73,6 +73,7 @@
   "author": "BYK",
   "devDependencies": {
     "@loreai/core": "workspace:*",
+    "@loreai/ui": "workspace:*",
     "@sentry/bun": "^10.52.0",
     "@types/bun": "^1.2.0",
     "@types/qrcode-terminal": "^0.12.2",

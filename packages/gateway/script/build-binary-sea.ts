@@ -51,6 +51,7 @@ import { ortNativePlugin } from "./ort-native-plugin";
 import { jsoncParserEsmPlugin } from "./jsonc-parser-plugin";
 import { ensureVecBinaries, vecAssetKey } from "./vendor-sqlite-vec";
 import { ortNativeAssets } from "./vendor-ort-native";
+import { describeUiAssets, generateUiAssetsModule } from "./ui-assets";
 import { fossilize } from "fossilize";
 
 const require = createRequire(import.meta.url);
@@ -509,6 +510,12 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // Step 1: esbuild main bundle
   // -------------------------------------------------------------------------
+  // The SPA rides along inside the main bundle (src/ui-assets.generated.ts),
+  // so the binary serves /ui without any extra SEA asset.
+  console.log(
+    `  ${describeUiAssets(generateUiAssetsModule({ build: "always" }))}`,
+  );
+
   const bundlePath = join(stagingDir, "sea-entry.cjs");
   const mapPath = join(stagingDir, "sea-entry.cjs.map");
 

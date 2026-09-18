@@ -544,7 +544,7 @@ export function checkCircuitBreaker(
 /**
  * Reset the circuit breaker. Pass a bucket key to clear a single bucket, or
  * omit to clear ALL buckets. The production recovery path — reachable via the
- * /lore:warm:reset slash command and the POST /ui/api/warming/reset route.
+ * /lore:warm:reset slash command.
  */
 export function resetCircuitBreaker(bucketKey?: string): void {
   ensureCircuitBreakersLoaded();

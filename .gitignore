@@ -21,6 +21,10 @@ packages/*/src/**/*.d.ts.map
 # ...except hand-authored ambient type references (e.g. Astro/Starlight env)
 !packages/website/src/env.d.ts
 
+# Embedded Lore UI manifest (generated from packages/ui/dist by
+# packages/gateway/script/ui-assets.ts on every gateway build/bundle)
+packages/gateway/src/ui-assets.generated.ts
+
 
 # Eval results and recorded fixtures (generated, potentially large)
 packages/core/eval/results/
@@ -63,3 +67,5 @@ __pycache__/
 
 # Local opencode worktree config (agent rules, etc.)
 opencode.json
+packages/ui/e2e-results/
+packages/ui/playwright-report/

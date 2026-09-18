@@ -905,8 +905,8 @@ function promptChoice(
 
 /**
  * `lore data contradictions` — list open contradictions detected between
- * knowledge entries (#1123). Read-only surface; resolve them on the dashboard
- * (/ui/knowledge) or by editing/removing one side of the pair.
+ * knowledge entries (#1123). Read-only surface; resolve them by editing or
+ * removing one side of the pair (`lore data delete`).
  */
 async function cmdContradictions(
   _args: string[],
@@ -936,9 +936,7 @@ async function cmdContradictions(
     );
     console.log("");
   }
-  console.log(
-    "Resolve in the dashboard (/ui/knowledge), or edit/remove one side to clear it.",
-  );
+  console.log("Edit or remove one side (`lore data delete <id>`) to clear it.");
 }
 
 async function cmdDedup(
