@@ -4,6 +4,17 @@ export type SqlParam = ReadParam;
 
 const SQL_FRAGMENT_TOKEN: unique symbol = Symbol("SqlFragment");
 
+export interface Queryable {
+  query(sql: string): {
+    all(...params: unknown[]): unknown[];
+    get(...params: unknown[]): unknown;
+    run(...params: unknown[]): {
+      changes: number;
+      lastInsertRowid: bigint;
+    };
+  };
+}
+
 /** Immutable SQL text plus positional parameters. */
 export class SqlFragment {
   readonly text: string;
@@ -18,8 +29,7 @@ export class SqlFragment {
       throw new TypeError("SqlFragment constructor is internal");
     }
     this.text = text;
-    this.params = Object.freeze([...params]);
-    Object.freeze(this);
+    this.params = params;
   }
 }
 
@@ -114,73 +124,30 @@ export namespace sql {
     return fragment(`IN (${values.map(() => "?").join(", ")})`, values);
   }
 
-  export const all = runAll;
-  export const get = runGet;
-  export const run = runFragment;
+  export const all = allRows;
+  export const get = getRow;
+  export const run = runStatement;
 }
 
-export function all<T = Record<string, unknown>>(
-  dbLike: {
-    query(sql: string): {
-      all(...params: unknown[]): unknown[];
-    };
-  },
+export function allRows<T = Record<string, unknown>>(
+  dbLike: Queryable,
   frag: SqlFragment,
 ): T[] {
   return dbLike.query(frag.text).all(...frag.params) as T[];
 }
 
-export function get<T = Record<string, unknown>>(
-  dbLike: {
-    query(sql: string): {
-      get(...params: unknown[]): unknown;
-    };
-  },
+export function getRow<T = Record<string, unknown>>(
+  dbLike: Queryable,
   frag: SqlFragment,
 ): T | null {
   return (dbLike.query(frag.text).get(...frag.params) ?? null) as T | null;
 }
 
-export function run(
-  dbLike: {
-    query(sql: string): {
-      run(...params: unknown[]): { changes: number; lastInsertRowid: bigint };
-    };
-  },
+export function runStatement(
+  dbLike: Queryable,
   frag: SqlFragment,
 ): { changes: number; lastInsertRowid: bigint } {
   return dbLike.query(frag.text).run(...frag.params);
 }
 
-function runFragment(
-  dbLike: {
-    query(sql: string): {
-      run(...params: unknown[]): { changes: number; lastInsertRowid: bigint };
-    };
-  },
-  frag: SqlFragment,
-): { changes: number; lastInsertRowid: bigint } {
-  return run(dbLike, frag);
-}
-
-function runAll<T = Record<string, unknown>>(
-  dbLike: {
-    query(sql: string): {
-      all(...params: unknown[]): unknown[];
-    };
-  },
-  frag: SqlFragment,
-): T[] {
-  return all<T>(dbLike, frag);
-}
-
-function runGet<T = Record<string, unknown>>(
-  dbLike: {
-    query(sql: string): {
-      get(...params: unknown[]): unknown;
-    };
-  },
-  frag: SqlFragment,
-): T | null {
-  return get<T>(dbLike, frag);
-}
+export { allRows as all, getRow as get, runStatement as run };
