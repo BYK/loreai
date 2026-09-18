@@ -36,6 +36,7 @@ import {
 } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import { ReadPathTimer } from "./read-telemetry";
+import { sql } from "./sql";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import {
@@ -839,23 +840,18 @@ export function update(
   const now = Date.now();
   // Mutable METADATA on the current version row (NOT confidence — that's a metric
   // register field now, A2 3b). updated_at always bumps (a re-confirmation).
-  const sets: string[] = ["updated_at = ?"];
-  const params: unknown[] = [now];
+  const sets = [sql`updated_at = ${now}`];
   if (input.updatedBy !== undefined) {
-    sets.push("updated_by = ?");
-    params.push(input.updatedBy);
+    sets.push(sql`updated_by = ${input.updatedBy}`);
   }
   if (input.sensitivity !== undefined) {
-    sets.push("sensitivity = ?");
-    params.push(input.sensitivity);
+    sets.push(sql`sensitivity = ${input.sensitivity}`);
   }
-  params.push(logicalId);
   // Target the CURRENT version (the freshly-appended one if content changed).
-  db()
-    .query(
-      `UPDATE knowledge SET ${sets.join(", ")} WHERE logical_id = ? AND is_current = 1`,
-    )
-    .run(...(params as [string, ...string[]]));
+  sql.run(
+    db(),
+    sql`UPDATE knowledge SET ${sql.join(sets, ", ")} WHERE logical_id = ${logicalId} AND is_current = 1`,
+  );
 
   // Metric register (A2 3b): any update is a re-confirmation → reset the decay
   // clock so a freshly-touched entry never ages out (v48). last_reinforced_at is
@@ -3523,25 +3519,25 @@ function searchLike(input: {
     .split(/\s+/)
     .filter((t) => t.length > 2);
   if (!terms.length) return [];
-  const conditions = terms
-    .map(() => "(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)")
-    .join(" AND ");
-  const likeParams = terms.flatMap((t) => [`%${t}%`, `%${t}%`]);
-  if (input.projectPath) {
-    const pid = ensureProject(input.projectPath);
-    return db()
-      .query(
-        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
-      )
-      .all(currentTenantId(), pid, ...likeParams, input.limit)
-      .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
-  }
-  return db()
-    .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+  const pid = input.projectPath ? ensureProject(input.projectPath) : null;
+  const scope = pid
+    ? sql`project_id = ${pid} OR project_id IS NULL OR cross_project = 1`
+    : null;
+  const conditions = sql.and([
+    sql`tenant_id = ${currentTenantId()}`,
+    scope,
+    sql`confidence > 0.2`,
+    ...terms.map(
+      (term) =>
+        sql`LOWER(title) LIKE ${`%${term}%`} OR LOWER(content) LIKE ${`%${term}%`}`,
+    ),
+  ]);
+  return sql
+    .all<KnowledgeEntry>(
+      db(),
+      sql`SELECT ${sql.raw(KNOWLEDGE_COLS)} FROM knowledge_current WHERE ${conditions} ORDER BY updated_at DESC LIMIT ${input.limit}`,
     )
-    .all(currentTenantId(), ...likeParams, input.limit)
-    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+    .map(hydrateKnowledgeEntry);
 }
 
 export function search(input: {

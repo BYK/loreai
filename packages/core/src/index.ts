@@ -33,6 +33,7 @@ export {
 } from "./references";
 export * as syncData from "./sync-data";
 export * as data from "./data";
+export * as sql from "./sql";
 export * as dedupApply from "./dedup-apply";
 export * as listQuery from "./list-query";
 export type {
