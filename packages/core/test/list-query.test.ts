@@ -508,7 +508,7 @@ describe("listSessionsPage", () => {
     expect(all.next).toBeNull();
 
     const paged: string[] = [];
-    let after = undefined as ReturnType<typeof listSessionsPage>["next"];
+    let after: ReturnType<typeof listSessionsPage>["next"] = null;
     let pages = 0;
     for (;;) {
       const p = listSessionsPage(project, {
