@@ -46,6 +46,7 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | CSS | `tailwindcss` / `@tailwindcss/vite` | 4.3.3 | 2026-07-16 | CSS-first config, no `tailwind.config.js` |
 | Local cache (scaffold) | `idb` | 8.0.3 | 2025-05-07 | UI-03 fills the repositories |
 | Response validation | `zod` | 4.5.4 | 2026-08-29 | |
+| Relative timestamps | `date-fns` | 4.4.0 | 2026-05-29 | `formatRelative` in `src/lib/format.ts`; en-US locale until UI has a locale setting |
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
@@ -90,9 +91,10 @@ mapping). The full list of edits is in `src/components/ui/ATTRIBUTION.md`.
 
 ## Compatibility smoke (UI-01)
 
-`src/compat/CompatSmoke.tsx`, mounted at `/ui/_compat` and labelled "not a
-product screen". It is exercised three ways, all in the normal CI job — no
-browser:
+`src/compat/CompatSmoke.tsx`, mounted at `/ui/_compat` in the Vite dev server
+only (`import.meta.env.DEV`; production builds drop the route and its code)
+and labelled "not a product screen". It is exercised three ways, all in the
+normal CI job — no browser:
 
 | Check | Command | What it proves |
 |---|---|---|

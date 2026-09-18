@@ -36,7 +36,9 @@ export const routes: RouteDefinition[] = [
     component: Browse,
   },
   { path: "/fixture", component: Fixture },
-  compatRoutes,
+  // The UI-01 compatibility smoke is a dev/test aid, not a product screen:
+  // production builds drop it (and its chunk) from the route table.
+  ...(import.meta.env.DEV ? [compatRoutes] : []),
   { path: "*", component: NotFound },
 ];
 
