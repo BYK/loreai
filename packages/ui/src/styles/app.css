@@ -1,0 +1,164 @@
+@import "tailwindcss";
+
+/* Dark mode is a class on <html> (or any ancestor), toggled by the theme
+   store. Tailwind 4 has no `darkMode` config key; the variant is declared
+   here instead of in a tailwind.config.js (Solid UI's Tailwind 3 recipe). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Lore design tokens (design-fixture v2.2). These custom properties are the
+   single source of truth; Tailwind utilities below are mapped onto them via
+   `@theme inline` so `bg-surface`, `text-muted`, `border-line`, … all
+   resolve to the same variables and flip with the `.dark` class. */
+:root {
+  --bg: #f5f8fa;
+  --surface: #fff;
+  --chrome: #eaf2f6;
+  --text: #172a36;
+  --muted: #526572;
+  --accent: #0f666a;
+  --accent-contrast: #ffffff;
+  --accent-soft: #dbe9ee;
+  --accent-soft-text: #104f56;
+  --line: #cbd8df;
+  --mark: #fff0c2;
+  --mark-edge: #bd9a45;
+  --soft: #f0f6f6;
+  --shade: #eff4f7;
+  --gold: #806125;
+  --nav: #f0f5f8;
+  --danger: #a33a3a;
+  --danger-soft: #fbeaea;
+  --avatar-bg: #d6e8e9;
+  --avatar-text: #17565a;
+  --avatar-agent-bg: #e9e1f0;
+  --avatar-agent-text: #655275;
+  --thread: #a7c6cc;
+  --quote-edge: #c5a259;
+}
+
+.dark {
+  --bg: #101a22;
+  --surface: #172630;
+  --chrome: #203541;
+  --text: #eaf2f6;
+  --muted: #b0c0cb;
+  --accent: #7bd4cd;
+  --accent-contrast: #10292b;
+  --accent-soft: #203b43;
+  --accent-soft-text: #c3e8e7;
+  --line: #3a505d;
+  --mark: #4a3f24;
+  --mark-edge: #bd9a45;
+  --soft: #1b3438;
+  --shade: #1c2b34;
+  --gold: #d9b86a;
+  --nav: #14212b;
+  --danger: #f0a1a1;
+  --danger-soft: #3a2426;
+  --avatar-bg: #28535a;
+  --avatar-text: #d6edee;
+  --avatar-agent-bg: #49445d;
+  --avatar-agent-text: #eae1f8;
+  --thread: #426c70;
+  --quote-edge: #c5a259;
+}
+
+@theme inline {
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+  /* Lore token names, usable directly: bg-bg, bg-surface, text-text, … */
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-chrome: var(--chrome);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-accent-foreground: var(--accent-contrast);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-soft-text: var(--accent-soft-text);
+  --color-line: var(--line);
+  --color-mark: var(--mark);
+  --color-mark-edge: var(--mark-edge);
+  --color-soft: var(--soft);
+  --color-shade: var(--shade);
+  --color-gold: var(--gold);
+  --color-nav: var(--nav);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-thread: var(--thread);
+  --color-quote-edge: var(--quote-edge);
+
+  /* Solid UI (shadcn) semantic names used by the copied components in
+     src/components/ui. Mapped onto the Lore tokens above so the copied
+     class strings resolve to Lore colours. Solid UI's `accent` (a hover
+     surface) collides with Lore's brand `--accent`; the copied components
+     were edited to use `soft` for hover fills instead. */
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--text);
+  --color-popover: var(--surface);
+  --color-popover-foreground: var(--text);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--accent-contrast);
+  --color-secondary: var(--chrome);
+  --color-secondary-foreground: var(--text);
+  --color-muted-foreground: var(--muted);
+  --color-destructive: var(--danger);
+  --color-destructive-foreground: var(--accent-contrast);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--accent);
+
+  --radius-md: 7px;
+  --radius-lg: 8px;
+  --radius-sm: 5px;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--line);
+  }
+  html {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 var(--font-sans);
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    margin: 0;
+    min-height: 100dvh;
+  }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+@layer utilities {
+  .eyebrow {
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    color: var(--muted);
+  }
+  .passage-target {
+    background: var(--mark);
+    border-bottom: 2px solid var(--mark-edge);
+    padding: 2px 1px;
+    border-radius: 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+}

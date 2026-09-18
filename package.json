@@ -50,9 +50,9 @@
   },
   "scripts": {
     "typecheck": "pnpm -r run typecheck",
-    "test": "vitest run",
+    "test": "vitest run && pnpm --filter @loreai/ui test",
     "pretest": "pnpm --filter @loreai/gateway run bundle",
-    "test:coverage": "pnpm --filter @loreai/gateway run bundle && vitest run --coverage",
+    "test:coverage": "pnpm --filter @loreai/gateway run bundle && vitest run --coverage && pnpm --filter @loreai/ui test",
     "build": "pnpm -r run build",
     "site:dev": "pnpm --filter '@loreai/website' dev",
     "site:build": "pnpm --filter '@loreai/website' build",
