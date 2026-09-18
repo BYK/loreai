@@ -50,7 +50,7 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Virtual rows | `@tanstack/solid-virtual` | 3.13.38 | 2026-09-07 | |
 | CSS | `tailwindcss` / `@tailwindcss/vite` | 4.3.3 | 2026-07-16 | CSS-first config, no `tailwind.config.js` |
 | Local cache | `idb` | 8.0.3 | 2025-05-07 | `src/db/` repositories and migrations (UI-03) |
-| Response validation | `valibot` | 1.5.0 | 2026-09-09 | see [Schema library](#schema-library-ui-03-decision); replaces `zod` 4.5.4 from UI-02 |
+| Response validation | `arktype` | 2.2.3 | 2026-07-07 | jitless (CSP); see [Schema library](#schema-library-ui-03-decision); replaces `zod` 4.5.4 from UI-02 |
 | Relative timestamps | `date-fns` | 4.4.0 | 2026-05-29 | `formatRelative` in `src/lib/format.ts`; en-US locale until UI has a locale setting |
 | IndexedDB in tests | `fake-indexeddb` | 6.2.5 | 2025-11-07 | dev only; see [Tests](#tests) |
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
@@ -61,95 +61,159 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 ### Schema library (UI-03 decision)
 
 UI-02 shipped its three response schemas with `zod` 4.5.4 (classic API). Before
-growing that to the ~15 contracts UI-03 needs, the owner asked for a
-measured choice between Zod v4, Valibot, TypeBox and ArkType. The benchmark
-lives in [`bench/`](bench/) (`npm install && npm run bundle && npm run bench`
-inside that directory; it is a standalone npm package, not a workspace member,
-and is **not** run in CI). All five adapters declare the *same* 15 schemas
+growing that to the ~15 contracts UI-03 needs, the owner asked for a measured
+choice between Zod v4, Valibot, TypeBox and ArkType, **decided on runtime
+performance and memory footprint first**, bundle size second. The benchmark
+lives in [`bench/`](bench/) (`npm install`, then `npm run bench`,
+`npm run bench:browser`, `npm run bench:ts`, `npm run bundle` inside that
+directory; it is a standalone npm package, not a workspace member, and is
+**not** run in CI). All five adapters declare the *same* 15 schemas
 (`bench/schemas/*.mjs`) over the same deterministic fixtures
-(`bench/fixtures.mjs`): a 200-entry knowledge cursor page, a 2 000-message
-session detail, a 12-project list, account and sharing status. Unknown keys
-are tolerated in every adapter (loose objects) to match the contract rule.
+(`bench/fixtures.mjs`). Unknown keys are tolerated in every adapter to match
+the contract rule.
 
 Versions measured (all published ≥ 7 days before 2026-09-18): `zod` 4.6.2
 (`zod` and `zod/mini` entry points), `valibot` 1.5.0, `@sinclair/typebox`
-0.34.52 (`Value.Check`, not `TypeCompiler` — see CSP below), `arktype` 2.2.3.
-Node v24.19.0, `esbuild` 0.28.2 for the bundle numbers.
+0.34.52 (`Value.Check`), `arktype` 2.2.3. Node v24.19.0; Chromium 153.0.8010.12
+via Playwright 1.63.0; `esbuild` 0.28.2 for the bundles.
 
-**Bundle contribution** (`bench/bundle-size.mjs`: esbuild, `bundle + minify +
-treeShaking`, browser platform, only the 15 schemas imported):
+**CSP first.** The SPA is served with `script-src 'self'` (no
+`'unsafe-eval'`). Zod 4's object fast path and ArkType's compiled validators
+both use `new Function`, and TypeBox's `TypeCompiler` does too, so every
+adapter is measured on the path that can actually run in our tab:
+`z.config({ jitless: true })`, `configure({ jitless: true })` for ArkType,
+`Value.Check` for TypeBox. (With JIT, Zod parses the page 2.9× faster and
+ArkType 11× faster than the rows below — irrelevant under our CSP.)
+
+Payloads: `entry` = one knowledge entry, `page` = 200-entry knowledge cursor
+page, `session` = session detail with 2 000 messages. Every parse gets a
+fresh input from a pool of 32–64 distinct payloads.
+
+**Sustained throughput, Node** (`bench/bench.mjs`, `node --expose-gc`, 2 s
+warm-up then 10 s timed per payload, per-op latency percentiles):
+
+| Library | entry ops/s · p50 · p99 | page ops/s · p50 · p99 | session ops/s · p50 · p99 |
+|---|---|---|---|
+| `zod` (jitless) | 530 361 · 1.8 µs · 2.3 µs | 2 511 · 0.390 ms · 0.510 ms | 514 · 1.886 ms · 3.326 ms |
+| `zod/mini` (jitless) | 405 348 · 2.4 µs · 3.9 µs | 2 024 · 0.481 ms · 0.771 ms | 423 · 2.228 ms · 3.441 ms |
+| `valibot` | 291 015 · 3.3 µs · 4.8 µs | 1 479 · 0.664 ms · 0.870 ms | 683 · 1.434 ms · 2.002 ms |
+| `@sinclair/typebox` | 643 332 · 1.5 µs · 2.5 µs | 3 288 · 0.298 ms · 0.429 ms | 539 · 1.791 ms · 2.451 ms |
+| **`arktype` (jitless)** | **876 043 · 1.1 µs · 2.1 µs** | **4 955 · 0.198 ms · 0.334 ms** | **840 · 1.160 ms · 1.504 ms** |
+
+**Sustained throughput, Chromium** (`bench/browser.mjs`, same workload
+bundled with esbuild and run in headless Chromium with `--js-flags=--expose-gc`):
+
+| Library | entry ops/s · p50 · p99 | page ops/s · p50 · p99 | session ops/s · p50 · p99 |
+|---|---|---|---|
+| `zod` (jitless) | 595 817 · 1.7 µs · 2.0 µs | 2 827 · 0.345 ms · 0.455 ms | 563 · 1.730 ms · 2.465 ms |
+| `zod/mini` (jitless) | 566 650 · 1.7 µs · 2.1 µs | 2 750 · 0.360 ms · 0.440 ms | 557 · 1.735 ms · 2.615 ms |
+| `valibot` | 390 675 · 2.5 µs · 3.3 µs | 1 963 · 0.500 ms · 0.635 ms | 743 · 1.315 ms · 1.815 ms |
+| `@sinclair/typebox` | 823 476 · 1.2 µs · 1.5 µs | 4 050 · 0.240 ms · 0.355 ms | 704 · 1.390 ms · 1.730 ms |
+| **`arktype` (jitless)** | **1 074 147 · 0.9 µs · 1.3 µs** | **5 261 · 0.185 ms · 0.280 ms** | **916 · 1.075 ms · 1.255 ms** |
+
+**Allocation per parse and GC pressure** (Node: heap delta per op with forced
+GCs before/after, N = 1 000 distinct inputs, results retained; GC events from
+`PerformanceObserver` `gc` entries over 1 000 further parses with results
+dropped — all minor, no major GC for any library):
+
+| Library | heap/op entry · page · session | GCs (count · ms) page | GCs (count · ms) session |
+|---|---|---|---|
+| `zod` (jitless) | 0.89 kB · 53.2 kB · 282.9 kB | 16 · 3.3 ms | 71 · 58.0 ms |
+| `zod/mini` (jitless) | 0.89 kB · 53.2 kB · 282.9 kB | 20 · 5.4 ms | 93 · 82.3 ms |
+| `valibot` | 0.85 kB · 53.5 kB · 290.4 kB | 9 · 3.0 ms | 30 · 24.8 ms |
+| `@sinclair/typebox` | 0 · 0 · 0 | 4 · 1.5 ms | 13 · 18.2 ms |
+| **`arktype` (jitless)** | **0 · 0 · 0** | 12 · 3.0 ms | 53 · 42.5 ms |
+
+Chromium heap/op (pointer compression halves object sizes): `zod`/`zod/mini`
+0.46 · 29.0 · 149 kB, `valibot` 0.46 · 29.1 · 153 kB, `typebox` and `arktype`
+0 · 0 · 0. Zod and Valibot return a *copy* of the validated object — every
+parse allocates a second page/session; TypeBox `Value.Check` and ArkType
+(no morphs) validate in place and return the input, so a validated response
+costs nothing beyond the response itself. ArkType's GC events in the
+drop-results loop are the short-lived inputs the harness creates, not
+library allocations (heap/op is 0).
+
+**Retained heap after a long-lived loop** keeping results in a 50-slot LRU
+(the SPA store shape): 100 000 parses for `entry` and `page`, 10 000 for
+`session` (10× the objects per parse), forced GCs before/after. Baseline =
+the same loop with `structuredClone` instead of a parser.
+
+| Library | retained (Node) entry · page · session | retained (Chromium) entry · page · session |
+|---|---|---|
+| `zod` (jitless) | 13 kB · 2 667 kB · 14 149 kB | 20 kB · 1 450 kB · 7 466 kB |
+| `zod/mini` (jitless) | 12 kB · 2 666 kB · 14 150 kB | 21 kB · 1 452 kB · 7 479 kB |
+| `valibot` | 83 kB · 2 805 kB · 14 553 kB | 11 kB · 1 550 kB · 7 694 kB |
+| `@sinclair/typebox` | 5 kB · 3 kB · 3 kB | 2 kB · 3 kB · 3 kB |
+| **`arktype` (jitless)** | 16 kB · 3 kB · 4 kB | 2 kB · 3 kB · 3 kB |
+
+`structuredClone` baseline (Node): 73 kB · 9.4 MB · 104 MB — the LRU holds
+50 full copies. Zod/Valibot retain 50 parsed copies (≈ 50 × heap/op, e.g.
+50 × 53 kB ≈ 2.7 MB for the page) and nothing beyond that; ArkType/TypeBox
+retain only the LRU bookkeeping because the store keeps the response objects
+themselves. No library grows with the parse count: "excess" over
+50 × heap/op is ≤ 132 kB everywhere (Valibot page, its IC warm-up).
+`performance.measureUserAgentSpecificMemory()` in full Chromium reports the
+same ordering but is dominated by the input pool and not-yet-collected
+garbage (≈ 13–14.7 MB after the page loop for every library), so it is
+recorded in `bench/browser.mjs` output but not used for the decision.
+
+**TypeScript cost** (`bench/ts-cost.mjs`: `tsc --noEmit --extendedDiagnostics`
+over the adapter plus a probe materialising the inferred output type of all
+15 schemas; median of 3 runs):
+
+| Library | types | instantiations | check time | memory |
+|---|---|---|---|---|
+| `zod` | 2 284 | 5 581 | 0.10 s | 73 MB |
+| `zod/mini` | 2 311 | 2 288 | 0.08 s | 72 MB |
+| `valibot` | 5 830 | 19 109 | 0.16 s | 116 MB |
+| `@sinclair/typebox` | 1 642 | 7 704 | 0.10 s | 73 MB |
+| `arktype` | 7 355 | 64 741 | 0.25 s | 141 MB |
+
+**Bundle contribution** (secondary; `bench/bundle-size.mjs`: esbuild,
+`bundle + minify + treeShaking`, browser platform, only the 15 schemas
+imported):
 
 | Library | minified | gzip |
 |---|---|---|
 | `zod` (classic) | 443.5 kB | 90.3 kB |
 | `zod/mini` | 23.3 kB | 7.7 kB |
-| **`valibot`** | **9.8 kB** | **3.0 kB** |
+| `valibot` | 9.8 kB | 3.0 kB |
 | `@sinclair/typebox` | 105.6 kB | 25.8 kB |
 | `arktype` | 158.7 kB | 49.7 kB |
 
-The UI-02 SPA JS is 354.7 kB / 109.2 kB gzip; the classic-Zod row is why.
+**Standard Schema** (`"~standard"`): `zod`, `zod/mini`, `valibot`, `arktype`
+yes; `@sinclair/typebox` 0.34 no.
 
-**Parse throughput** (`bench/bench.mjs`, `node --expose-gc`, 400 parses per
-round, median of 5 rounds; inputs are fresh `structuredClone`s so no library
-can memoise on identity; minor GCs are per round of 400 parses):
+**Decision: ArkType 2.2.3 (jitless)**, pinned exactly. Rationale, in order:
 
-| Library | knowledge page (200 entries) | session detail (2 000 messages) | minor GCs (page / session) |
-|---|---|---|---|
-| `zod` (classic) | 6 817 ops/s · 0.147 ms | 1 119 ops/s · 0.89 ms | 4 / 13 |
-| `zod/mini` | 2 142 ops/s · 0.467 ms | 429 ops/s · 2.33 ms | 7 / 37 |
-| **`valibot`** | 1 531 ops/s · 0.653 ms | 630 ops/s · 1.59 ms | **3 / 12** |
-| `@sinclair/typebox` | 3 592 ops/s · 0.278 ms | 544 ops/s · 1.84 ms | 1 / 5 |
-| `arktype` (jitless) | 5 102 ops/s · 0.196 ms | 775 ops/s · 1.29 ms | 4 / 21 |
-| `arktype` (JIT, for reference) | ~47 000 ops/s | — | — |
+1. Runtime: fastest on every payload in both runtimes — 3.3× Valibot and 2×
+   jitless Zod on the 200-entry page (0.198 ms vs 0.664 / 0.390 ms), 1.2× /
+   1.6× on the 2 000-message session, with the tightest p99 (0.334 ms page,
+   1.50 ms session in Node; 0.28 / 1.26 ms in Chromium).
+2. Memory: zero allocation per parse and zero retained per cached result,
+   because valid data is returned in place. Zod and Valibot allocate a full
+   copy per parse (53 kB page, 283–290 kB session) and the store then holds
+   that copy — for a tab that keeps 50 sessions cached that is 14 MB of
+   duplicates in Node, 7.5 MB in Chromium, versus ~0.
+3. It fits the contract rules: undeclared keys are ignored by default (forward
+   compatibility), no coercion, structured `ArkErrors` with `path`, `expected`
+   and `actual` that map straight onto `ContractError.issues`, Standard Schema.
+4. Costs accepted: +49.7 kB gzip over Valibot's 3.0 kB (the SPA is served by
+   the local gateway; the owner ranked this below runtime/memory), and the
+   heaviest TS inference (0.25 s check for 15 schemas — negligible next to the
+   Solid/JSX check of this package). `src/contracts/config.ts` sets
+   `jitless: true` and is imported before `arktype` in every contract module;
+   a unit test asserts the resolved config and the e2e run exercises the real
+   CSP.
 
-**Heap retention after 10 000 parses** of the knowledge page in one process
-(three forced GCs before and after, only the last result kept, as a store
-would): `zod` +30 kB, `zod/mini` +3 kB, `typebox` 0 kB, `arktype` +3 kB,
-`valibot` +2.4 MB *on the first 10k* — but re-running the same experiment at
-1k / 10k / 50k / 100k parses shows Valibot's retention plateauing (+129 kB,
-+365 kB, +23 kB, −11 kB): it is V8 feedback/IC warm-up for its
-function-per-schema design, not a leak. No candidate leaks per parse.
-
-**TypeScript cost** (`tsc --extendedDiagnostics --checkJs` over the adapter
-file, i.e. inference of the 15 schemas only): `zod` 1 986 instantiations /
-0.09 s check, `zod/mini` 3 469 / 0.13 s, `valibot` 13 558 / 0.24 s, `typebox`
-2 875 / 0.17 s, `arktype` 52 943 / 0.25 s. All are negligible next to the
-Solid/JSX check of this package; ArkType's string-DSL inference is the only
-one that would be felt as the contract count grows.
-
-**Standard Schema** (`"~standard"` on a schema instance): `zod`, `zod/mini`,
-`valibot`, `arktype` yes; `@sinclair/typebox` 0.34 no.
-
-**CSP.** The SPA is served with `script-src 'self'` (no `'unsafe-eval'`).
-ArkType compiles validators with `new Function` unless configured
-`jitless`, so the jitless row is the one we could ship (still 49.7 kB gzip);
-TypeBox's `TypeCompiler` has the same problem, hence `Value.Check`.
-
-**Decision: Valibot 1.5.0**, pinned exactly. Rationale, in order:
-
-1. Bundle: 3.0 kB gzip vs 7.7 kB for the closest alternative (`zod/mini`) and
-   ~90 kB for what UI-02 ships today. The SPA is loaded from a local gateway,
-   but it is also embedded in the gateway binary and served to every tab; the
-   contract layer should not be the largest thing in it.
-2. Throughput is adequate where it matters: 0.65 ms for a 200-entry page and
-   1.6 ms for a 2 000-message session are both far below one frame, and
-   Valibot has the lowest GC pressure of the tree-shakeable options. Classic
-   Zod is 4× faster per parse but pays for it with 30× the bytes on every
-   load; `zod/mini` is slower than Valibot on the large payload.
-3. Standard Schema support, tolerant objects (`looseObject`), no `eval`, no
-   retention growth, first-class `safeParse` with structured issues we map to
-   `ContractError.issues` without adapters.
-4. Precedent: `getsentry/cli` moved Zod → Valibot for the same bundle/memory
-   reasons.
-
-Not chosen: `zod` classic (bundle), `zod/mini` (2.5× the bytes and slower on
-large payloads, and mixing `zod/mini` in the UI with classic `zod` in core
-would invite the wrong import), TypeBox (no Standard Schema, 8× bytes,
-JSON-Schema surface is not needed here), ArkType (bundle, `new Function`
-under our CSP, heaviest TS inference).
+Not chosen: TypeBox (`Value.Check` is second on runtime/memory but 1.5–1.7×
+slower than ArkType on page/session, no Standard Schema, JSON-Schema surface
+unused), `valibot` (smallest bundle but 3.3× slower on the page and allocates a
+copy per parse), `zod` classic (a copy per parse, slowest p99 on the session,
+90 kB gzip), `zod/mini` (slowest overall here).
 
 `packages/core` keeps its own `zod` dependency; that is an independent
-decision for a Node process where bundle size is irrelevant.
+decision for a Node process where none of the browser constraints apply.
 
 ### Solid 2 status
 
@@ -324,7 +388,7 @@ request; the proxy path is unchanged.
   `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),
   `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations and
   the folk status routes), with same-origin `fetch`, no credentials, and
-  runtime validation of every response (`valibot`, `src/contracts/`;
+  runtime validation of every response (`arktype`, `src/contracts/`;
   timestamps are epoch milliseconds). A 2xx body that fails its contract
   throws `ContractError` (an `ApiError` of kind `invalid`) — never a silent
   coercion.
@@ -454,7 +518,7 @@ packages/ui/
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
   src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts
-  src/contracts/          valibot response contracts (relative imports only) + ContractError
+  src/contracts/          ArkType response contracts (relative imports only) + ContractError
   src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
   src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status
   src/styles/app.css      Tailwind 4 + Lore tokens (values from the website theme, see mapping above)
