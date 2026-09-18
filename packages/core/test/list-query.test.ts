@@ -578,7 +578,25 @@ describe("knowledgeVersionHistory", () => {
     const v3 = ltm.appendVersion(v1, { isDeleted: true })!; // death cert
     // Deleted head is invisible, same as GET /knowledge/:id.
     expect(knowledgeVersionHistory(v1)).toBeNull();
+    expect(knowledgeVersionHistory(v1, { includeDeleted: false })).toBeNull();
     expect(ltm.getByLogical(v1)).toBeNull();
+    // ...unless the caller opts in: the tombstone is then the current version.
+    const tomb = knowledgeVersionHistory(v3, { includeDeleted: true })!;
+    expect(tomb.id).toBe(v1);
+    expect(tomb.current_version_id).toBe(v3);
+    expect(
+      tomb.versions.map((v) => [v.version_id, v.is_deleted, v.is_current]),
+    ).toEqual([
+      [v1, false, false],
+      [v2, false, false],
+      [v3, true, true],
+    ]);
+    expect(tomb.versions[2].superseded_at).toBeNull();
+    expect(
+      knowledgeVersionHistory("00000000-0000-0000-0000-000000000000", {
+        includeDeleted: true,
+      }),
+    ).toBeNull();
     // Re-append resurrects; the death cert stays in the history.
     const v4 = ltm.appendVersion(v1, {
       content: "v4 content",

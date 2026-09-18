@@ -377,14 +377,18 @@ type VersionRow = {
 /**
  * Full ordered version history (oldest first) for a logical knowledge id.
  * Accepts any version id or the logical id. Returns null when the id is
- * unknown OR when the entry's head is a death certificate — the same
- * visibility rule as `ltm.getByLogical()` / `GET /api/v1/knowledge/:id`, so
- * a deleted entry cannot be enumerated through its history. Superseded and
- * historical deleted versions (a delete later followed by a re-append) ARE
- * included. Pure read: no LLM, no maintenance side effects.
+ * unknown OR (unless `includeDeleted`) when the entry's head is a death
+ * certificate — the same visibility rule as `ltm.getByLogical()` /
+ * `GET /api/v1/knowledge/:id`, so a deleted entry cannot be enumerated
+ * through its history by default. With `includeDeleted` the tombstone head is
+ * reported as the current version with `is_deleted: true` (needed to show and
+ * restore entries removed by a reviewed dedup merge). Superseded and
+ * historical deleted versions (a delete later followed by a re-append) are
+ * always included. Pure read: no LLM, no maintenance side effects.
  */
 export function knowledgeVersionHistory(
   id: string,
+  opts: { includeDeleted?: boolean } = {},
 ): KnowledgeVersionHistory | null {
   const logicalId = logicalIdOf(id);
   const rows = db()
@@ -400,7 +404,8 @@ export function knowledgeVersionHistory(
     )
     .all(currentTenantId(), logicalId) as VersionRow[];
   const head = rows.find((r) => r.is_current === 1);
-  if (!head || head.is_deleted === 1) return null;
+  if (!head) return null;
+  if (head.is_deleted === 1 && !opts.includeDeleted) return null;
 
   const versions = rows.map((r, i) => {
     const next = rows[i + 1];

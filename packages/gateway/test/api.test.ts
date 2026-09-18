@@ -1824,6 +1824,84 @@ describe("GET /api/v1/knowledge/:id/versions", () => {
     expect(shown.content).toBe("fourth");
   });
 
+  it("?include_deleted=true returns the history of a tombstoned entry; default stays 404", async () => {
+    const { ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/versions-deleted/${Date.now()}`;
+    const v1 = ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Merged away by dedup",
+      content: "original",
+    });
+    const v2 = ltm.appendVersion(v1, { content: "edited" })!;
+    const tomb = ltm.appendVersion(v1, { isDeleted: true })!;
+
+    // Default and explicit false: same visibility as GET /knowledge/:id.
+    expect((await api(`/api/v1/knowledge/${v1}/versions`)).status).toBe(404);
+    expect(
+      (await api(`/api/v1/knowledge/${v1}/versions?include_deleted=false`))
+        .status,
+    ).toBe(404);
+
+    for (const lookup of [v1, v2, tomb]) {
+      const res = await api(
+        `/api/v1/knowledge/${lookup}/versions?include_deleted=true`,
+      );
+      expect(res.status, lookup).toBe(200);
+      const body = (await res.json()) as VersionsBody;
+      expect(body.id).toBe(v1);
+      expect(body.current_version_id).toBe(tomb);
+      expect(body.versions.map((v) => v.version_id)).toEqual([v1, v2, tomb]);
+      expect(body.versions.map((v) => v.is_deleted)).toEqual([
+        false,
+        false,
+        true,
+      ]);
+      expect(body.versions.map((v) => v.is_current)).toEqual([
+        false,
+        false,
+        true,
+      ]);
+      expect(body.versions[2].superseded_at).toBeNull();
+      expect(body.versions[2].content).toBe("edited");
+    }
+
+    // A live entry is unaffected by the flag.
+    const live = ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Still alive",
+      content: "x",
+    });
+    const liveBody = await apiJSON<VersionsBody>(
+      `/api/v1/knowledge/${live}/versions?include_deleted=true`,
+    );
+    expect(liveBody.current_version_id).toBe(live);
+    expect(liveBody.versions).toHaveLength(1);
+
+    // Unknown id is still 404 with the flag.
+    const unknown = await api(
+      "/api/v1/knowledge/00000000-0000-0000-0000-000000000000/versions?include_deleted=true",
+    );
+    expect(unknown.status).toBe(404);
+    expect(((await unknown.json()) as ApiError).error.type).toBe("not_found");
+
+    // Invalid flag values → 400 invalid_request.
+    for (const raw of ["1", "yes", "TRUE", ""]) {
+      const res = await api(
+        `/api/v1/knowledge/${v1}/versions?include_deleted=${raw}`,
+      );
+      expect(res.status, `include_deleted=${raw}`).toBe(400);
+      const err = (await res.json()) as ApiError;
+      expect(err.type).toBe("error");
+      expect(err.error.type).toBe("invalid_request");
+    }
+  });
+
   it("returns 404 for unknown ids and does not shadow /knowledge/:id/move", async () => {
     const res = await api(
       "/api/v1/knowledge/00000000-0000-0000-0000-000000000000/versions",

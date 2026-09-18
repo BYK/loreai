@@ -24,6 +24,13 @@
  * for another project is rejected with 400 (`invalid_cursor`). Filters (`q`,
  * `category`, `scope`) are not embedded — the caller re-sends them with each
  * page, so a cursor never leaks the query it was minted under.
+ *
+ * Version history
+ * ---------------
+ * `GET /knowledge/:id/versions` follows the visibility of `GET /knowledge/:id`:
+ * a tombstoned head is a 404. `?include_deleted=true` opts into returning the
+ * history anyway (the tombstone is the current version, `is_deleted: true`) so
+ * reviewed dedup merges can be inspected and restored. Any other value → 400.
  */
 import {
   listQuery,
@@ -358,11 +365,30 @@ export function handleListSessionsCursor(
  * prefix resolution `GET /knowledge/:id` applies (current, superseded or
  * logical id). 404 when unknown or when the head is deleted.
  */
+function parseIncludeDeleted(url: URL): boolean {
+  const raw = url.searchParams.get("include_deleted");
+  if (raw === null || raw === "false") return false;
+  if (raw === "true") return true;
+  throw new BadRequest(
+    "invalid_request",
+    `Invalid include_deleted: ${raw} (expected true or false)`,
+  );
+}
+
 export function handleKnowledgeVersions(
+  url: URL,
   requestedId: string,
   resolvedId: string,
 ): Response {
-  const history = listQuery.knowledgeVersionHistory(resolvedId);
+  let includeDeleted: boolean;
+  try {
+    includeDeleted = parseIncludeDeleted(url);
+  } catch (err) {
+    return toResponse(err);
+  }
+  const history = listQuery.knowledgeVersionHistory(resolvedId, {
+    includeDeleted,
+  });
   if (!history)
     return errorResponse(
       404,

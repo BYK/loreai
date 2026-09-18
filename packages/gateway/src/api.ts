@@ -896,6 +896,7 @@ export async function handleAPIRequest(
     params = matchRoute(pathname, "/api/v1/knowledge/:id/versions");
     if (params) {
       return handleKnowledgeVersions(
+        url,
         params.id,
         data.resolveId("knowledge", params.id) ?? params.id,
       );
