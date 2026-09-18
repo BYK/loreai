@@ -1,20 +1,30 @@
 /**
  * ui-static.ts — serves the Lore UI single-page app at /ui and /ui/*.
  *
- * The SPA is a Vite build embedded at gateway build time (see
- * script/ui-assets.ts → src/ui-assets.generated.ts), so serving never touches
- * the filesystem: every lookup is a Map hit on the embedded manifest and there
- * is no path-traversal surface.
+ * The SPA is a Vite build staged by script/ui-assets.ts as a file tree plus a
+ * manifest (ui-manifest.json, see ui-manifest.ts). At runtime the tree is
+ * read through one `UiAssetSource`:
+ *
+ *   - Node SEA binary → `sea.getRawAsset("ui/<path>")` (files embedded by
+ *     fossilize from build-binary-sea.ts's asset manifest);
+ *   - otherwise      → dist/ui/ next to the bundle (dist/index.cjs,
+ *     dist/index.bun.js) or ../dist/ui/ from a source checkout.
+ *
+ * Request paths are only ever matched against the manifest's key set — the
+ * source is asked for manifest keys (and their fixed variant suffixes), never
+ * for anything derived from a URL — so there is no path-traversal surface.
+ * The manifest is parsed once and bodies are read lazily on first use, then
+ * kept in memory (the whole SPA is ~1 MB).
  *
  *   /ui, /ui/                  → index.html (no-cache)
  *   /ui/assets/<hashed file>   → immutable, one-year cache (Vite content-hashes
  *                                everything under assets/)
- *   /ui/<other embedded file>  → no-cache (e.g. favicon)
+ *   /ui/<other staged file>    → no-cache (e.g. favicon)
  *   /ui/<client route>         → index.html (history-API fallback)
  *   /ui/assets/<unknown>       → 404 (never fall back to HTML for an asset URL)
  *
- * Compressible assets (js/css/html/svg/json/webmanifest) are embedded with
- * precompressed brotli/gzip variants; `Accept-Encoding` is negotiated per
+ * Compressible assets (js/css/html/svg/json/webmanifest) are staged with
+ * precompressed brotli/gzip siblings; `Accept-Encoding` is negotiated per
  * request (server preference br > gzip > identity, client q-values
  * honoured) and such responses always carry `Vary: Accept-Encoding` plus an
  * ETag that differs per encoding. Nothing is compressed at request time.
@@ -23,11 +33,17 @@
  * server.ts BEFORE this module is imported; this module only decides what to
  * serve once a request has been admitted.
  */
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  UI_ASSET_FILES,
-  UI_BUILD_ID,
+  parseUiManifest,
+  UI_MANIFEST_FILE,
+  UI_SEA_ASSET_PREFIX,
+  UI_VARIANT_SUFFIX,
   type UiContentEncoding,
-} from "./ui-assets.generated";
+  type UiManifest,
+} from "./ui-manifest";
 
 export const UI_BASE_PATH = "/ui";
 const HASHED_ASSET_PREFIX = "assets/";
@@ -65,58 +81,159 @@ export const UI_ENCODING_PREFERENCE: readonly UiEncoding[] = [
   "identity",
 ];
 
-interface UiAssetVariant {
-  body: Uint8Array<ArrayBuffer>;
-  etag: string;
+/** Where staged UI files come from; see the module comment. */
+export interface UiAssetSource {
+  /** Human-readable origin for diagnostics (a directory, or "SEA assets"). */
+  readonly description: string;
+  /**
+   * Bytes of a staged file by its manifest-relative path (POSIX separators),
+   * or null when the file does not exist there.
+   */
+  read(path: string): Uint8Array<ArrayBuffer> | null;
 }
 
-interface UiAsset {
-  contentType: string;
-  cacheControl: string;
-  /** Always has an `identity` entry; encoded variants only when embedded. */
-  variants: ReadonlyMap<UiEncoding, UiAssetVariant>;
-  /** True when the asset type is negotiable (has or could have variants). */
-  negotiable: boolean;
-}
-
-let assetsByPath: Map<string, UiAsset> | null = null;
-
-function toStandalone(buf: Buffer): Uint8Array<ArrayBuffer> {
-  // Copy into a standalone ArrayBuffer (Buffer.from may use the shared pool).
-  return new Uint8Array(buf);
-}
-
-function loadAssets(): Map<string, UiAsset> {
-  if (assetsByPath) return assetsByPath;
-  const map = new Map<string, UiAsset>();
-  for (const [path, contentType, encoding, data, embedded] of UI_ASSET_FILES) {
-    const baseTag = `${UI_BUILD_ID ?? "dev"}-${path}`;
-    const variants = new Map<UiEncoding, UiAssetVariant>();
-    variants.set("identity", {
-      body: toStandalone(Buffer.from(data, encoding)),
-      etag: `"${baseTag}"`,
-    });
-    for (const [contentEncoding, base64] of embedded) {
-      variants.set(contentEncoding, {
-        body: toStandalone(Buffer.from(base64, "base64")),
-        etag: `"${baseTag}-${contentEncoding}"`,
-      });
-    }
-    map.set(path, {
-      contentType,
-      cacheControl: path.startsWith(HASHED_ASSET_PREFIX)
-        ? IMMUTABLE_CACHE
-        : NO_CACHE,
-      variants,
-      negotiable: embedded.length > 0,
-    });
+function seaSource(): UiAssetSource | null {
+  let sea: typeof import("node:sea");
+  try {
+    // Not a static import: Bun (the @loreai/opencode in-process gateway) has
+    // no node:sea, and a missing builtin must simply mean "not a SEA".
+    const builtin = process.getBuiltinModule("node:sea");
+    if (typeof builtin?.isSea !== "function" || !builtin.isSea()) return null;
+    sea = builtin;
+  } catch {
+    return null;
   }
-  assetsByPath = map;
-  return map;
+  const { getRawAsset } = sea;
+  return {
+    description: "SEA assets",
+    read(path) {
+      try {
+        return new Uint8Array(getRawAsset(`${UI_SEA_ASSET_PREFIX}${path}`));
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+function directorySource(dir: string): UiAssetSource {
+  return {
+    description: dir,
+    read(path) {
+      try {
+        // Copy into a standalone ArrayBuffer (readFileSync may hand out a
+        // slice of Buffer's shared pool for small files).
+        return new Uint8Array(readFileSync(join(dir, path)));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw err;
+      }
+    },
+  };
+}
+
+function diskSource(): UiAssetSource | null {
+  // In the CJS bundle `import.meta.url` is rewritten to the bundle's own file
+  // URL (script/import-meta-url.js); in the SEA bundle it is empty, but that
+  // path never gets here because seaSource() wins.
+  const here: unknown = import.meta.url;
+  if (typeof here !== "string" || here === "") return null;
+  const candidates = [
+    // dist/index.cjs, dist/index.bun.js → dist/ui/
+    new URL("./ui/", here),
+    // src/ui-static.ts (tsx, vitest, the dev shim) → dist/ui/
+    new URL("../dist/ui/", here),
+  ];
+  for (const url of candidates) {
+    if (url.protocol !== "file:") continue;
+    const dir = fileURLToPath(url);
+    if (existsSync(join(dir, UI_MANIFEST_FILE))) return directorySource(dir);
+  }
+  return null;
+}
+
+interface LoadedUi {
+  manifest: UiManifest;
+  source: UiAssetSource;
+  /** `${encoding}:${path}` → bytes, filled on first use. */
+  bodies: Map<string, Uint8Array<ArrayBuffer>>;
+  /** Keys of `bodies` the source turned out not to have (logged once). */
+  missing: Set<string>;
+}
+
+/** undefined = not resolved yet; null = no usable UI (memoized). */
+let loaded: LoadedUi | null | undefined;
+let sourceOverride: UiAssetSource | null = null;
+
+/**
+ * Point the handler at an explicit source (tests, embedding hosts), or pass
+ * null to go back to auto-detection. Drops the parsed manifest and every
+ * cached body either way.
+ */
+export function setUiAssetSource(source: UiAssetSource | null): void {
+  sourceOverride = source;
+  loaded = undefined;
+}
+
+function load(): LoadedUi | null {
+  if (loaded !== undefined) return loaded;
+  const source = sourceOverride ?? seaSource() ?? diskSource();
+  if (!source) {
+    loaded = null;
+    return loaded;
+  }
+  const raw = source.read(UI_MANIFEST_FILE);
+  if (!raw) {
+    loaded = null;
+    return loaded;
+  }
+  try {
+    loaded = {
+      manifest: parseUiManifest(Buffer.from(raw).toString("utf8")),
+      source,
+      bodies: new Map(),
+      missing: new Set(),
+    };
+  } catch (err) {
+    console.error(
+      `[lore] ignoring invalid Lore UI manifest from ${source.description}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    loaded = null;
+  }
+  return loaded;
+}
+
+/** The manifest in use, or null when the UI is unavailable. For tests/tools. */
+export function uiAssetManifest(): UiManifest | null {
+  return load()?.manifest ?? null;
 }
 
 export function uiAssetsAvailable(): boolean {
-  return UI_ASSET_FILES.length > 0;
+  return load() !== null;
+}
+
+function readBody(
+  ui: LoadedUi,
+  path: string,
+  encoding: UiEncoding,
+): Uint8Array<ArrayBuffer> | null {
+  const key = `${encoding}:${path}`;
+  const cached = ui.bodies.get(key);
+  if (cached) return cached;
+  if (ui.missing.has(key)) return null;
+  const file =
+    encoding === "identity" ? path : `${path}${UI_VARIANT_SUFFIX[encoding]}`;
+  const body = ui.source.read(file);
+  if (body) ui.bodies.set(key, body);
+  else {
+    ui.missing.add(key);
+    console.error(
+      `[lore] Lore UI asset ${file} is missing from ${ui.source.description}`,
+    );
+  }
+  return body;
 }
 
 function securityHeaders(headers: Headers): void {
@@ -217,39 +334,64 @@ export function negotiateEncoding(
   return best;
 }
 
-function serveAsset(req: Request, asset: UiAsset): Response {
-  const encoding = asset.negotiable
-    ? negotiateEncoding(
-        req.headers.get("accept-encoding"),
-        new Set(asset.variants.keys()),
-      )
+function serveAsset(
+  req: Request,
+  ui: LoadedUi,
+  path: string,
+  file: UiManifest["files"][string],
+): Response {
+  const variants = file.variants ?? {};
+  const negotiable = Object.keys(variants).length > 0;
+  const available = new Set<UiEncoding>(["identity"]);
+  for (const encoding of Object.keys(variants) as UiContentEncoding[]) {
+    available.add(encoding);
+  }
+  let encoding: UiEncoding = negotiable
+    ? negotiateEncoding(req.headers.get("accept-encoding"), available)
     : "identity";
-  const variant =
-    asset.variants.get(encoding) ?? asset.variants.get("identity");
-  if (!variant) throw new Error("UI asset has no identity variant");
 
+  let body = readBody(ui, path, encoding);
+  if (!body && encoding !== "identity") {
+    // A variant the manifest promised is missing from the source: serve
+    // identity (with its own ETag) rather than fail the page.
+    encoding = "identity";
+    body = readBody(ui, path, encoding);
+  }
+  if (!body) {
+    return jsonError(
+      500,
+      "ui_asset_unreadable",
+      `Lore UI asset ${path} is missing from ${ui.source.description}`,
+    );
+  }
+
+  const baseTag = `${ui.manifest.buildId}-${path}`;
+  const etag =
+    encoding === "identity" ? `"${baseTag}"` : `"${baseTag}-${encoding}"`;
   const headers = new Headers({
-    "content-type": asset.contentType,
-    "cache-control": asset.cacheControl,
-    etag: variant.etag,
+    "content-type": file.type,
+    "cache-control": path.startsWith(HASHED_ASSET_PREFIX)
+      ? IMMUTABLE_CACHE
+      : NO_CACHE,
+    etag,
   });
-  if (asset.negotiable) headers.set("vary", "Accept-Encoding");
+  if (negotiable) headers.set("vary", "Accept-Encoding");
   securityHeaders(headers);
 
-  if (etagMatches(req.headers.get("if-none-match"), variant.etag)) {
+  if (etagMatches(req.headers.get("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers });
   }
 
   if (encoding !== "identity") headers.set("content-encoding", encoding);
-  headers.set("content-length", String(variant.body.byteLength));
-  return new Response(req.method === "HEAD" ? null : variant.body, {
+  headers.set("content-length", String(body.byteLength));
+  return new Response(req.method === "HEAD" ? null : body, {
     status: 200,
     headers,
   });
 }
 
 /**
- * Map a request path under /ui to the embedded file it should serve, or null
+ * Map a request path under /ui to the staged file it should serve, or null
  * for "not found". Exported for tests.
  */
 export function resolveUiAssetPath(pathname: string): string | null {
@@ -265,8 +407,8 @@ export function resolveUiAssetPath(pathname: string): string | null {
     return null;
   }
 
-  const assets = loadAssets();
-  if (assets.has(rel)) return rel;
+  const files = load()?.manifest.files;
+  if (files && Object.hasOwn(files, rel)) return rel;
   // Asset URLs never fall back to HTML: a stale hashed filename must 404 so a
   // browser does not execute index.html as a script or style sheet.
   if (rel.startsWith(HASHED_ASSET_PREFIX)) return null;
@@ -284,7 +426,8 @@ export function handleUIRequest(req: Request, url: URL): Response {
     return res;
   }
 
-  if (!uiAssetsAvailable()) {
+  const ui = load();
+  if (!ui) {
     return jsonError(
       503,
       "ui_unavailable",
@@ -293,9 +436,12 @@ export function handleUIRequest(req: Request, url: URL): Response {
   }
 
   const path = resolveUiAssetPath(url.pathname);
-  const asset = path ? loadAssets().get(path) : undefined;
-  if (!asset) {
+  const file =
+    path && Object.hasOwn(ui.manifest.files, path)
+      ? ui.manifest.files[path]
+      : undefined;
+  if (!path || !file) {
     return jsonError(404, "not_found", `No UI asset at ${url.pathname}`);
   }
-  return serveAsset(req, asset);
+  return serveAsset(req, ui, path, file);
 }

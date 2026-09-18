@@ -19,7 +19,7 @@
     "lore-gateway": "./dist/bin.cjs"
   },
   "scripts": {
-    "typecheck": "tsx script/ui-assets.ts --ensure && tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "build": "tsx script/build.ts",
     "bundle": "tsx script/bundle.ts",
     "build:binary": "tsx script/build.ts --binary",
@@ -47,6 +47,7 @@
     "dist/index.d.cts",
     "dist/ort-wasm-simd-threaded.mjs",
     "dist/ort-wasm-simd-threaded.wasm",
+    "dist/ui",
     "dist/vector-worker.cjs",
     "dist/vector-worker.js"
   ],

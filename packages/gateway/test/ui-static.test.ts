@@ -13,12 +13,16 @@
  *   - method restrictions
  *   - non-loopback peers are refused exactly like /api unless remote
  *     management is enabled
+ *   - the asset source abstraction: an explicit (SEA-style) source, missing
+ *     or invalid manifests → 503, variants missing from the source → identity
  *
- * Requires the UI to have been embedded (`pnpm --filter @loreai/gateway build`
+ * Requires the UI to have been staged (`pnpm --filter @loreai/gateway build`
  * or the root `pnpm test`, whose pretest bundles the gateway).
  */
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { brotliDecompressSync, gunzipSync } from "node:zlib";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { brotliDecompressSync, gunzipSync, gzipSync } from "node:zlib";
 import { loadConfig, type GatewayConfig } from "../src/config";
 import { startServer } from "../src/server";
 import {
@@ -26,11 +30,21 @@ import {
   negotiateEncoding,
   parseAcceptEncoding,
   resolveUiAssetPath,
+  setUiAssetSource,
   UI_CONTENT_SECURITY_POLICY,
+  uiAssetManifest,
   uiAssetsAvailable,
+  type UiAssetSource,
   type UiEncoding,
 } from "../src/ui-static";
-import { UI_ASSET_FILES } from "../src/ui-assets.generated";
+import {
+  UI_MANIFEST_FILE,
+  UI_MANIFEST_VERSION,
+  UI_VARIANT_SUFFIX,
+  type UiContentEncoding,
+  type UiManifest,
+} from "../src/ui-manifest";
+import { UI_STAGE_DIR } from "../script/ui-assets";
 import { loopbackRequest } from "./helpers/loopback-request";
 
 type ServerHandle = Awaited<ReturnType<typeof startServer>>;
@@ -48,23 +62,41 @@ function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   };
 }
 
-function assetPath(ext: string): string {
-  const record = UI_ASSET_FILES.find(
-    ([path]) => path.startsWith("assets/") && path.endsWith(ext),
-  );
-  if (!record) {
+function manifest(): UiManifest {
+  const m = uiAssetManifest();
+  if (!m) {
     throw new Error(
-      `no hashed ${ext} asset embedded — run \`pnpm --filter @loreai/gateway build\``,
+      "UI assets are not staged — run `pnpm --filter @loreai/gateway build`",
     );
   }
-  return `/ui/${record[0]}`;
+  return m;
 }
 
-function embeddedVariants(path: string): Set<UiEncoding> {
+function assetPath(ext: string): string {
+  const rel = Object.keys(manifest().files).find(
+    (path) => path.startsWith("assets/") && path.endsWith(ext),
+  );
+  if (!rel) {
+    throw new Error(
+      `no hashed ${ext} asset staged — run \`pnpm --filter @loreai/gateway build\``,
+    );
+  }
+  return `/ui/${rel}`;
+}
+
+function stagedVariants(path: string): Set<UiEncoding> {
   const rel = path.slice("/ui/".length);
-  const record = UI_ASSET_FILES.find(([p]) => p === rel);
-  if (!record) throw new Error(`no embedded asset at ${path}`);
-  return new Set<UiEncoding>(["identity", ...record[4].map(([enc]) => enc)]);
+  const entry = manifest().files[rel];
+  if (!entry) throw new Error(`no staged asset at ${path}`);
+  return new Set<UiEncoding>([
+    "identity",
+    ...(Object.keys(entry.variants ?? {}) as UiContentEncoding[]),
+  ]);
+}
+
+/** Read a staged file straight from dist/ui (the ground truth for bodies). */
+function stagedBytes(rel: string): Buffer {
+  return readFileSync(join(UI_STAGE_DIR, rel));
 }
 
 function direct(path: string, init?: RequestInit): Response {
@@ -86,7 +118,7 @@ function expectSecurityHeaders(res: Response): void {
 beforeAll(() => {
   if (!uiAssetsAvailable()) {
     throw new Error(
-      "UI assets are not embedded — run `pnpm --filter @loreai/gateway build` first",
+      "UI assets are not staged — run `pnpm --filter @loreai/gateway build` first",
     );
   }
 });
@@ -341,27 +373,21 @@ describe("precompressed asset serving", () => {
     gzip: (b) => gunzipSync(b),
   };
 
-  test("the build embeds exactly br and gzip for the app script (no zstd)", () => {
-    const variants = embeddedVariants(js());
+  test("the build stages exactly br and gzip for the app script (no zstd)", () => {
+    const variants = stagedVariants(js());
     expect(variants).toEqual(new Set(["identity", "br", "gzip"]));
-    expect(embeddedVariants(css()).has("gzip")).toBe(true);
+    expect(stagedVariants(css()).has("gzip")).toBe(true);
   });
 
-  test("does not embed variants for fonts", () => {
-    expect(embeddedVariants(assetPath(".woff2"))).toEqual(
-      new Set(["identity"]),
-    );
+  test("does not stage variants for fonts", () => {
+    expect(stagedVariants(assetPath(".woff2"))).toEqual(new Set(["identity"]));
   });
 
-  test("cached bodies are standalone copies: repeated serves equal the embedded bytes", async () => {
+  test("cached bodies are standalone copies: repeated serves equal the staged bytes", async () => {
     const path = js();
-    const record = UI_ASSET_FILES.find(
-      ([p]) => p === path.slice("/ui/".length),
-    );
-    if (!record) throw new Error(`no embedded asset at ${path}`);
-    const source = Buffer.from(record[3], record[2]);
-    const brSource = record[4].find(([enc]) => enc === "br")?.[1];
-    if (!brSource) throw new Error("no br variant embedded");
+    const rel = path.slice("/ui/".length);
+    const source = stagedBytes(rel);
+    const brSource = stagedBytes(`${rel}${UI_VARIANT_SUFFIX.br}`);
     for (let i = 0; i < 3; i++) {
       const identity = Buffer.from(await direct(path).arrayBuffer());
       expect(identity.equals(source)).toBe(true);
@@ -370,7 +396,7 @@ describe("precompressed asset serving", () => {
           headers: { "accept-encoding": "br" },
         }).arrayBuffer(),
       );
-      expect(br.equals(Buffer.from(brSource, "base64"))).toBe(true);
+      expect(br.equals(brSource)).toBe(true);
     }
   });
 
@@ -407,11 +433,21 @@ describe("precompressed asset serving", () => {
     },
   );
 
-  test("every embedded variant of every asset decodes to its identity bytes", () => {
-    for (const [path, , encoding, data, variants] of UI_ASSET_FILES) {
-      const identity = Buffer.from(data, encoding);
-      for (const [contentEncoding, base64] of variants) {
-        const encoded = Buffer.from(base64, "base64");
+  test("every staged variant of every asset decodes to its identity bytes and matches the manifest sizes", () => {
+    const { files } = manifest();
+    expect(Object.keys(files).length).toBeGreaterThan(0);
+    for (const [path, entry] of Object.entries(files)) {
+      const identity = stagedBytes(path);
+      expect(identity.byteLength, `${path} size`).toBe(entry.size);
+      for (const [contentEncoding, size] of Object.entries(
+        entry.variants ?? {},
+      ) as [UiContentEncoding, number][]) {
+        const encoded = stagedBytes(
+          `${path}${UI_VARIANT_SUFFIX[contentEncoding]}`,
+        );
+        expect(encoded.byteLength, `${path} ${contentEncoding} size`).toBe(
+          size,
+        );
         expect(encoded.byteLength, `${path} ${contentEncoding}`).toBeLessThan(
           identity.byteLength,
         );
@@ -421,6 +457,24 @@ describe("precompressed asset serving", () => {
         ).toBe(true);
       }
     }
+  });
+
+  test("the manifest itself and variant siblings are not served as assets", async () => {
+    // Not manifest keys → history fallback (HTML), never the raw file.
+    for (const path of [
+      `/ui/${UI_MANIFEST_FILE}`,
+      `/ui/index.html${UI_VARIANT_SUFFIX.br}`,
+    ]) {
+      const res = direct(path);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    }
+    // Under assets/ they are plain 404s.
+    const res = direct(`${js()}${UI_VARIANT_SUFFIX.gzip}`);
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { type: "not_found" },
+    });
   });
 
   test("index.html is negotiated too and keeps no-cache", () => {
@@ -649,5 +703,218 @@ describe("UI serving through the gateway", () => {
       { method: "POST" },
     );
     expect(res.status).toBe(405);
+  });
+});
+
+describe("asset sources (SEA-style in-memory source vs. disk)", () => {
+  afterEach(() => setUiAssetSource(null));
+
+  /** In-memory source keyed like sea.getRawAsset("ui/<path>") minus prefix. */
+  function memorySource(
+    files: Record<string, Uint8Array | string>,
+    description = "memory",
+  ): UiAssetSource & { reads: string[] } {
+    const reads: string[] = [];
+    return {
+      description,
+      reads,
+      read(path) {
+        reads.push(path);
+        if (!Object.hasOwn(files, path)) return null;
+        const value = files[path];
+        const bytes =
+          typeof value === "string" ? Buffer.from(value, "utf8") : value;
+        return new Uint8Array(bytes);
+      },
+    };
+  }
+
+  const html = '<!doctype html><div id="root"></div>';
+  const script = "console.log('lore')";
+  const gz = gzipSync(Buffer.from(script, "utf8"));
+  const validManifest: UiManifest = {
+    version: UI_MANIFEST_VERSION,
+    buildId: "feedfacecafebeef",
+    files: {
+      "index.html": { type: "text/html; charset=utf-8", size: html.length },
+      "assets/app-abc123.js": {
+        type: "text/javascript; charset=utf-8",
+        size: script.length,
+        variants: { gzip: gz.byteLength },
+      },
+    },
+  };
+
+  test("serves from an explicit source, reading the manifest once and bodies lazily", async () => {
+    const source = memorySource({
+      [UI_MANIFEST_FILE]: JSON.stringify(validManifest),
+      "index.html": html,
+      "assets/app-abc123.js": script,
+      [`assets/app-abc123.js${UI_VARIANT_SUFFIX.gzip}`]: gz,
+    });
+    setUiAssetSource(source);
+    expect(uiAssetsAvailable()).toBe(true);
+    expect(source.reads).toEqual([UI_MANIFEST_FILE]);
+
+    const page = direct("/ui/anything");
+    expect(page.status).toBe(200);
+    expect(await page.text()).toBe(html);
+    expect(page.headers.get("etag")).toBe('"feedfacecafebeef-index.html"');
+    expect(page.headers.get("vary")).toBeNull();
+    expectSecurityHeaders(page);
+
+    const gzipped = direct("/ui/assets/app-abc123.js", {
+      headers: { "accept-encoding": "gzip, br" },
+    });
+    expect(gzipped.status).toBe(200);
+    // br is not staged for this file → gzip is the best available encoding.
+    expect(gzipped.headers.get("content-encoding")).toBe("gzip");
+    expect(gzipped.headers.get("vary")).toBe("Accept-Encoding");
+    expect(gzipped.headers.get("etag")).toBe(
+      '"feedfacecafebeef-assets/app-abc123.js-gzip"',
+    );
+    expect(gzipped.headers.get("cache-control")).toContain("immutable");
+    expect(
+      gunzipSync(Buffer.from(await gzipped.arrayBuffer())).toString("utf8"),
+    ).toBe(script);
+
+    // Bodies are cached after the first read.
+    direct("/ui/assets/app-abc123.js", {
+      headers: { "accept-encoding": "gzip" },
+    });
+    expect(
+      source.reads.filter((p) => p.endsWith(UI_VARIANT_SUFFIX.gzip)),
+    ).toHaveLength(1);
+
+    // Unknown hashed assets 404 even though the fallback page exists.
+    expect(direct("/ui/assets/other-000.js").status).toBe(404);
+  });
+
+  test("a variant the manifest promises but the source lacks falls back to identity with the identity ETag", async () => {
+    setUiAssetSource(
+      memorySource({
+        [UI_MANIFEST_FILE]: JSON.stringify(validManifest),
+        "index.html": html,
+        "assets/app-abc123.js": script,
+        // no .gz sibling
+      }),
+    );
+    const res = direct("/ui/assets/app-abc123.js", {
+      headers: { "accept-encoding": "gzip" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("etag")).toBe(
+      '"feedfacecafebeef-assets/app-abc123.js"',
+    );
+    expect(res.headers.get("content-length")).toBe(String(script.length));
+    expect(await res.text()).toBe(script);
+  });
+
+  test("an identity file missing from the source is a 500, not a crash or HTML", async () => {
+    setUiAssetSource(
+      memorySource({
+        [UI_MANIFEST_FILE]: JSON.stringify(validManifest),
+        "index.html": html,
+      }),
+    );
+    const res = direct("/ui/assets/app-abc123.js");
+    expect(res.status).toBe(500);
+    expectSecurityHeaders(res);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { type: "ui_asset_unreadable" },
+    });
+  });
+
+  test("a source without a manifest means the UI is unavailable (503)", async () => {
+    setUiAssetSource(memorySource({ "index.html": html }));
+    expect(uiAssetsAvailable()).toBe(false);
+    const res = direct("/ui");
+    expect(res.status).toBe(503);
+    expectSecurityHeaders(res);
+    await expect(res.json()).resolves.toMatchObject({
+      error: { type: "ui_unavailable" },
+    });
+  });
+
+  test.each<[string, string]>([
+    ["truncated JSON", '{"version":1,"buildId":"x","files":{'],
+    ["wrong version", JSON.stringify({ ...validManifest, version: 2 })],
+    ["empty buildId", JSON.stringify({ ...validManifest, buildId: "" })],
+    [
+      "path traversal key",
+      JSON.stringify({
+        ...validManifest,
+        files: { "../secret": { type: "text/plain", size: 1 } },
+      }),
+    ],
+    [
+      "absolute key",
+      JSON.stringify({
+        ...validManifest,
+        files: { "/etc/passwd": { type: "text/plain", size: 1 } },
+      }),
+    ],
+    [
+      "unknown encoding",
+      JSON.stringify({
+        ...validManifest,
+        files: {
+          "index.html": {
+            type: "text/html",
+            size: 1,
+            variants: { zstd: 1 },
+          },
+        },
+      }),
+    ],
+  ])(
+    "an invalid manifest (%s) disables the UI instead of serving it",
+    (_, text) => {
+      setUiAssetSource(
+        memorySource({ [UI_MANIFEST_FILE]: text, "index.html": html }),
+      );
+      expect(uiAssetsAvailable()).toBe(false);
+      expect(direct("/ui").status).toBe(503);
+      expect(direct("/ui/index.html").status).toBe(503);
+    },
+  );
+
+  test("manifest keys named like Object.prototype members are plain files", async () => {
+    setUiAssetSource(
+      memorySource({
+        // Object.fromEntries creates own "__proto__" data properties (an
+        // object literal would set the prototype instead).
+        [UI_MANIFEST_FILE]: JSON.stringify({
+          ...validManifest,
+          files: Object.fromEntries([
+            ...Object.entries(validManifest.files),
+            ["__proto__", { type: "text/plain; charset=utf-8", size: 2 }],
+            ["constructor", { type: "text/plain; charset=utf-8", size: 2 }],
+          ]),
+        }),
+        ...Object.fromEntries([
+          ["index.html", html],
+          ["__proto__", "pp"],
+          ["constructor", "cc"],
+        ]),
+      }),
+    );
+    expect(uiAssetsAvailable()).toBe(true);
+    expect(await direct("/ui/__proto__").text()).toBe("pp");
+    expect(await direct("/ui/constructor").text()).toBe("cc");
+    // Inherited names that are NOT in the manifest fall back to the page.
+    expect(direct("/ui/toString").headers.get("content-type")).toBe(
+      "text/html; charset=utf-8",
+    );
+    expect(direct("/ui/assets/hasOwnProperty").status).toBe(404);
+  });
+
+  test("resetting to auto-detection serves the staged build again", () => {
+    setUiAssetSource(memorySource({}));
+    expect(uiAssetsAvailable()).toBe(false);
+    setUiAssetSource(null);
+    expect(uiAssetsAvailable()).toBe(true);
+    expect(direct(assetPath(".js")).status).toBe(200);
   });
 });

@@ -21,9 +21,6 @@ packages/*/src/**/*.d.ts.map
 # ...except hand-authored ambient type references (e.g. Astro/Starlight env)
 !packages/website/src/env.d.ts
 
-# Embedded Lore UI manifest (generated from packages/ui/dist by
-# packages/gateway/script/ui-assets.ts on every gateway build/bundle)
-packages/gateway/src/ui-assets.generated.ts
 
 
 # Eval results and recorded fixtures (generated, potentially large)

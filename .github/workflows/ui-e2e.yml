@@ -11,7 +11,7 @@ on:
     paths:
       - 'packages/ui/**'
       - 'packages/gateway/src/ui-static.ts'
-      - 'packages/gateway/src/ui-assets.generated.ts'
+      - 'packages/gateway/src/ui-manifest.ts'
       - 'packages/gateway/src/server.ts'
       - 'packages/gateway/src/api.ts'
       - 'packages/gateway/script/ui-assets.ts'
