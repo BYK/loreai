@@ -359,6 +359,24 @@ describe("shell: empty, error, not-found and locked states", () => {
     );
   });
 
+  it("does not flip the connection status when a read is aborted", async () => {
+    let attempts = 0;
+    const client = fakeClient({
+      async listProjectKnowledge() {
+        attempts++;
+        // `abort(reason)` rejects with the raw reason, which need not be an Error.
+        if (attempts === 1) throw { name: "AbortError", reason: "superseded" };
+        return ENTRIES;
+      },
+    });
+    mount("/projects/p-lore", client);
+    await screen.findAllByTestId("nav-project");
+    await waitFor(() => expect(attempts).toBe(1));
+    const status = screen.getByTestId("connection-status");
+    expect(status).toHaveAttribute("data-connection", "reachable");
+    expect(status).not.toHaveTextContent("Gateway unreachable");
+  });
+
   it("reports the gateway as unreachable and offers a retry", async () => {
     let attempts = 0;
     const client = fakeClient({

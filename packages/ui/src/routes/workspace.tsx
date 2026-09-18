@@ -1,7 +1,7 @@
 import type { ParentComponent } from "solid-js";
 import { createContext, useContext } from "solid-js";
 
-import { api, type ApiClient } from "~/lib/api";
+import { api, isAbortError, type ApiClient } from "~/lib/api";
 import {
   ConnectionContext,
   createConnectionStore,
@@ -44,8 +44,7 @@ export const WorkspaceProvider: ParentComponent<{ client?: ApiClient }> = (
       connection.markReachable();
       return value;
     } catch (error) {
-      const aborted = error instanceof Error && error.name === "AbortError";
-      if (!aborted) connection.markError(error);
+      if (!isAbortError(error)) connection.markError(error);
       throw error;
     }
   };

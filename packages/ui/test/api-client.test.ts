@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError, createApiClient, isApiError } from "~/lib/api";
+import { ApiError, createApiClient, isAbortError, isApiError } from "~/lib/api";
 import { createConnectionStore } from "~/lib/connection";
 
 const PROJECT = {
@@ -170,6 +170,27 @@ describe("api client: error classification", () => {
     await expect(client.listProjects(controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
+  });
+
+  it("propagates a custom abort reason untouched instead of calling it unreachable", async () => {
+    const controller = new AbortController();
+    const reason = { name: "AbortError", why: "navigated away" };
+    const { client } = clientFor(() => {
+      throw reason;
+    });
+    controller.abort(reason);
+    await expect(client.listProjects(controller.signal)).rejects.toBe(reason);
+  });
+
+  it("recognises aborts by name regardless of the error class", () => {
+    expect(isAbortError(new DOMException("aborted", "AbortError"))).toBe(true);
+    expect(isAbortError({ name: "AbortError" })).toBe(true);
+    const named = new Error("aborted");
+    named.name = "AbortError";
+    expect(isAbortError(named)).toBe(true);
+    expect(isAbortError(new Error("AbortError"))).toBe(false);
+    expect(isAbortError("AbortError")).toBe(false);
+    expect(isAbortError(null)).toBe(false);
   });
 });
 

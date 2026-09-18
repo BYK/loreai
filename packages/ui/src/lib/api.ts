@@ -57,6 +57,16 @@ export function isApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
 }
 
+/** True for any abort rejection (`DOMException`, `Error`, or a custom `abort(reason)`). */
+export function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
+}
+
 export type FetchLike = (
   input: string,
   init?: RequestInit,
@@ -99,9 +109,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         signal,
       });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw error;
-      }
+      if (isAbortError(error)) throw error;
       throw new ApiError("unreachable", path, "Gateway unreachable");
     }
 
