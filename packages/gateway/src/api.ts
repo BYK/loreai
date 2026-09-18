@@ -34,6 +34,12 @@ import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
 import { handleDedupApply, handleDedupPreview } from "./dedup-api";
+import {
+  handleListKnowledgeCursor,
+  handleListKnowledgeFiltered,
+  handleListSessionsCursor,
+  handleKnowledgeVersions,
+} from "./api-lists";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -863,7 +869,11 @@ export async function handleAPIRequest(
           "not_found",
           `Project not found: ${params.id}`,
         );
-      return handleListKnowledge(url, project.path);
+      return (
+        handleListKnowledgeCursor(url, project) ??
+        handleListKnowledgeFiltered(url, project) ??
+        handleListKnowledge(url, project.path)
+      );
     }
 
     // GET /api/v1/projects/:id/sessions
@@ -876,7 +886,19 @@ export async function handleAPIRequest(
           "not_found",
           `Project not found: ${params.id}`,
         );
-      return handleListSessions(url, project.path);
+      return (
+        handleListSessionsCursor(url, project) ??
+        handleListSessions(url, project.path)
+      );
+    }
+
+    // GET /api/v1/knowledge/:id/versions
+    params = matchRoute(pathname, "/api/v1/knowledge/:id/versions");
+    if (params) {
+      return handleKnowledgeVersions(
+        params.id,
+        data.resolveId("knowledge", params.id) ?? params.id,
+      );
     }
 
     // GET /api/v1/projects/:id/distillations
