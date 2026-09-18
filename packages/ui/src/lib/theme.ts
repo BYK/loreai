@@ -1,13 +1,19 @@
 /**
- * Light/dark theme. Explicit choice is persisted in localStorage; `system`
- * follows `prefers-color-scheme`. Applied as the `.dark` class on <html>,
- * which is what the Tailwind `dark:` variant and the Lore tokens key off.
+ * Light/dark theme. The default is `system`, which follows
+ * `prefers-color-scheme` live; forcing `light` or `dark` is persisted in
+ * localStorage. Applied as the `.dark` class on <html>, which is what the
+ * Tailwind `dark:` variant and the Lore tokens key off.
  */
 import { createEffect, createMemo, createRoot, createSignal } from "solid-js";
 
 export type ThemeChoice = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
 
+export const THEME_CHOICES: readonly ThemeChoice[] = [
+  "system",
+  "light",
+  "dark",
+];
 export const THEME_STORAGE_KEY = "lore.ui.theme";
 
 function readStoredChoice(): ThemeChoice {
@@ -62,11 +68,7 @@ function createThemeStore() {
       }
     }
 
-    function toggle(): void {
-      setChoice(resolved() === "dark" ? "light" : "dark");
-    }
-
-    return { choice, resolved, setChoice, toggle };
+    return { choice, resolved, setChoice };
   });
 }
 

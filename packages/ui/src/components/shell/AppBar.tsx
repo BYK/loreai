@@ -1,33 +1,56 @@
 import type { Component, JSX } from "solid-js";
-import { Show } from "solid-js";
+import { For, Show } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { Button } from "~/components/ui/button";
-import { theme } from "~/lib/theme";
+import { THEME_CHOICES, theme, type ThemeChoice } from "~/lib/theme";
 
 import { Avatar } from "../lore/Avatar";
 import { Logo } from "./Logo";
 import { SearchEntry } from "./SearchEntry";
 
+const THEME_OPTIONS: Record<ThemeChoice, { icon: string; label: string }> = {
+  system: { icon: "◐", label: "System" },
+  light: { icon: "☀", label: "Light" },
+  dark: { icon: "☾", label: "Dark" },
+};
+
+/**
+ * Segmented System / Light / Dark control. `System` (the default) follows the
+ * OS preference live; the other two force a mode and persist it.
+ */
 export const ThemeToggle: Component<{ class?: string }> = (props) => {
   const t = theme();
   return (
-    <Button
-      variant="ghost"
-      size="sm"
-      class={props.class}
-      aria-label={
-        t.resolved() === "dark" ? "Switch to light mode" : "Switch to dark mode"
-      }
-      aria-pressed={t.resolved() === "dark"}
+    <div
+      role="group"
+      aria-label="Colour theme"
       data-testid="theme-toggle"
-      onClick={() => t.toggle()}
+      data-theme-choice={t.choice()}
+      class={`inline-flex items-center rounded-md border border-line bg-chrome p-0.5 ${props.class ?? ""}`}
     >
-      <span aria-hidden="true">{t.resolved() === "dark" ? "☾" : "☀"}</span>
-      <span class="hidden sm:inline">
-        {t.resolved() === "dark" ? "Dark" : "Light"}
-      </span>
-    </Button>
+      <For each={THEME_CHOICES}>
+        {(choice) => (
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-7 px-2 aria-pressed:bg-surface aria-pressed:text-heading aria-pressed:shadow-sm"
+            aria-label={`${THEME_OPTIONS[choice].label} theme`}
+            aria-pressed={t.choice() === choice}
+            title={
+              choice === "system"
+                ? `Follow the system setting (currently ${t.resolved()})`
+                : `Always use ${choice} mode`
+            }
+            data-testid={`theme-${choice}`}
+            onClick={() => t.setChoice(choice)}
+          >
+            <span aria-hidden="true">{THEME_OPTIONS[choice].icon}</span>
+            <span class="hidden md:inline">{THEME_OPTIONS[choice].label}</span>
+          </Button>
+        )}
+      </For>
+    </div>
   );
 };
 

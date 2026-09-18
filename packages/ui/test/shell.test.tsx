@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@solidjs/testing-library";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import { knowledgeHref } from "~/routes/Browse";
@@ -132,6 +132,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   resetThemeStoreForTests();
 });
 
@@ -475,19 +476,72 @@ describe("shell: search entry, theme and fixture", () => {
     expect(screen.queryByRole("searchbox")).toBeNull();
   });
 
-  it("toggles dark mode via the .dark class and persists the choice", async () => {
+  it("defaults to the system theme and lets the user force light or dark", async () => {
     mount("/", fakeClient());
-    const toggle = screen.getByTestId("theme-toggle");
+    const group = screen.getByTestId("theme-toggle");
+    expect(group).toHaveAttribute("data-theme-choice", "system");
+    expect(screen.getByTestId("theme-system")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
     expect(document.documentElement).not.toHaveClass("dark");
-    fireEvent.click(toggle);
+
+    fireEvent.click(screen.getByTestId("theme-dark"));
     await waitFor(() => expect(document.documentElement).toHaveClass("dark"));
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(toggle);
+    expect(screen.getByTestId("theme-dark")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByTestId("theme-system")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+
+    fireEvent.click(screen.getByTestId("theme-light"));
     await waitFor(() =>
       expect(document.documentElement).not.toHaveClass("dark"),
     );
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
+  });
+
+  it("follows the OS preference while on system and stops once a mode is forced", async () => {
+    let systemDark = false;
+    let onChange: ((e: { matches: boolean }) => void) | undefined;
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      media: query,
+      get matches() {
+        return systemDark;
+      },
+      addEventListener: (_: string, cb: (e: { matches: boolean }) => void) => {
+        onChange = cb;
+      },
+    }));
+    resetThemeStoreForTests();
+    mount("/", fakeClient());
+    expect(document.documentElement).not.toHaveClass("dark");
+
+    systemDark = true;
+    onChange?.({ matches: true });
+    await waitFor(() => expect(document.documentElement).toHaveClass("dark"));
+    // Nothing persisted: still following the system.
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+
+    fireEvent.click(screen.getByTestId("theme-light"));
+    await waitFor(() =>
+      expect(document.documentElement).not.toHaveClass("dark"),
+    );
+    systemDark = false;
+    onChange?.({ matches: false });
+    systemDark = true;
+    onChange?.({ matches: true });
+    expect(document.documentElement).not.toHaveClass("dark");
+
+    // Back to system picks the live OS value up again and clears storage.
+    fireEvent.click(screen.getByTestId("theme-system"));
+    await waitFor(() => expect(document.documentElement).toHaveClass("dark"));
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
   });
 
   it("swaps the header logo between the light and dark website marks", async () => {
@@ -499,7 +553,7 @@ describe("shell: search entry, theme and fixture", () => {
     expect(img?.getAttribute("src")).toMatch(/loreai\.svg/);
     // The wordmark stays a real link target for assistive tech.
     expect(screen.getByRole("link", { name: /Lore\.AI — home/ })).toBeVisible();
-    fireEvent.click(screen.getByTestId("theme-toggle"));
+    fireEvent.click(screen.getByTestId("theme-dark"));
     await waitFor(() =>
       expect(logo).toHaveAttribute("data-logo-theme", "dark"),
     );
@@ -511,6 +565,22 @@ describe("shell: search entry, theme and fixture", () => {
     resetThemeStoreForTests();
     theme();
     expect(document.documentElement).toHaveClass("dark");
+  });
+
+  it("mounts the compatibility smoke in dev only, never in production builds", async () => {
+    const paths = (defs: typeof routes) =>
+      defs.flatMap((r) => (Array.isArray(r.path) ? r.path : [r.path]));
+    expect(import.meta.env.DEV).toBe(true);
+    expect(paths(routes)).toContain("/_compat");
+
+    vi.stubEnv("DEV", false);
+    vi.resetModules();
+    const prod = await import("~/app");
+    expect(paths(prod.routes)).not.toContain("/_compat");
+    expect(paths(prod.routes)).toEqual(
+      expect.arrayContaining(["/", "/fixture", "*"]),
+    );
+    vi.unstubAllEnvs();
   });
 
   it("renders the fixture as a labelled non-production specimen without API calls", async () => {
