@@ -4,7 +4,7 @@ import { createEffect, createSignal, on, onCleanup, untrack } from "solid-js";
 export interface Loader<T> {
   /** Last successfully loaded value; kept while a reload is in flight. */
   data: Accessor<T | undefined>;
-  /** Error of the most recent attempt, cleared when a reload succeeds. */
+  /** Error of the most recent settled attempt; cleared as soon as a new attempt starts. */
   error: Accessor<unknown>;
   loading: Accessor<boolean>;
   reload: () => void;
@@ -42,8 +42,8 @@ export function createLoader<S, T>(
         // A new key is a different subject: never show the previous one's data.
         lastKey = key;
         setData(undefined);
-        setError(undefined);
       }
+      setError(undefined);
       if (key == null) {
         setLoading(false);
         return;

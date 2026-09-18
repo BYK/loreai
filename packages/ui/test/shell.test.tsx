@@ -383,6 +383,36 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(status).toHaveAttribute("data-connection", "reachable");
   });
 
+  it("clears the error card while a retry is in flight instead of keeping the stale error", async () => {
+    let attempts = 0;
+    let release: (entries: KnowledgeEntry[]) => void = () => {};
+    const client = fakeClient({
+      async listProjectKnowledge() {
+        attempts++;
+        if (attempts === 1) {
+          throw new ApiError("http", "/projects/p-lore/knowledge", "boom", 500);
+        }
+        return new Promise<KnowledgeEntry[]>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    mount("/projects/p-lore", client);
+    await screen.findByText("Knowledge unavailable");
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(screen.queryByText("Knowledge unavailable")).toBeNull(),
+    );
+    expect(screen.getByText("Loading knowledge…")).toBeInTheDocument();
+    expect(attempts).toBe(2);
+
+    release(ENTRIES);
+    await screen.findByText("Keep SQLite");
+    expect(screen.queryByText("Loading knowledge…")).toBeNull();
+    expect(screen.queryByText("Knowledge unavailable")).toBeNull();
+  });
+
   it("renders the locked state when the gateway hides management from this peer", async () => {
     const client = fakeClient({
       async listProjects() {
