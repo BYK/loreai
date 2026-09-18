@@ -221,6 +221,9 @@ async function contractRoute<
 // ---------------------------------------------------------------------------
 // Routes the SPA calls
 // ---------------------------------------------------------------------------
+// TODO(#1827): record the cursor-page/versions fixtures
+// (packages/ui/test/fixtures/cursor/*) live once api-lists.ts merges; until
+// then they are hand-recorded from origin/devin/1789739012-api-cursor-pagination.
 
 describe("ui contracts against the real gateway", () => {
   it("GET /projects", async () => {

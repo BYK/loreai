@@ -47,12 +47,16 @@ export function createSessionsState({
             repos.sessions.getScope(id),
             repos.sessions.collection(id),
           ]);
-          if (rows.length === 0 && !collection) return undefined;
+          if (!collection) return undefined;
           for (const s of rows) store.reconcileOne(s);
           // Server order: last_message_at DESC.
-          return [...rows].sort(
-            (a, b) => b.last_message_at - a.last_message_at,
-          );
+          return {
+            value: [...rows].sort(
+              (a, b) => b.last_message_at - a.last_message_at,
+            ),
+            // Rows lost to TTL/LRU eviction → render them, marked partial.
+            partial: rows.length !== collection.count,
+          };
         },
         async onServer(id, values) {
           for (const s of values) store.reconcileOne(s);
@@ -60,6 +64,7 @@ export function createSessionsState({
           await repos.sessions.putMany(values, id, { replaceScope: true });
           await repos.sessions.setCollection(id, {
             complete: true,
+            count: values.length,
             nextCursor: null,
             fetchedAt: Date.now(),
           });
@@ -73,10 +78,14 @@ export function createSessionsState({
     projectId: Accessor<string | null>,
     sessionId: Accessor<string | null>,
   ): { loader: Loader<SessionDetail>; status: Accessor<KeyStatus> } {
+    // The source stays null until the project path is known: resolving it
+    // inside the fetcher would fire once with `undefined` and surface a
+    // permanent error on deep links before projects load.
     const source: Accessor<string | null> = () => {
       const pid = projectId();
       const sid = sessionId();
-      return pid && sid ? sessionKeyOf(pid, sid) : null;
+      const path = pid ? projectPathOf?.(pid) : undefined;
+      return pid && sid && path !== undefined ? sessionKeyOf(pid, sid) : null;
     };
     const loader = createLoader(
       source,
