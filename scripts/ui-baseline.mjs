@@ -377,10 +377,11 @@ async function main() {
   let latency = null;
   try {
     for (let i = 0; i < RUNS; i++) {
-      const run = await measureRun(upstream.url, { withLatency: i === 0 });
+      const isLast = i === RUNS - 1;
+      const run = await measureRun(upstream.url, { withLatency: isLast });
       startups.push(run.startupMs);
       rss.push(run.rssAfterStartMb);
-      if (i === 0) {
+      if (isLast) {
         latency = {
           proxyLatencyMs: run.proxyLatencyMs,
           healthLatencyMs: run.healthLatencyMs,
