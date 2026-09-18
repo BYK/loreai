@@ -150,12 +150,19 @@ function isJson(value: string): boolean {
 function makeNormaliser() {
   const uuids = new Map<string, string>();
   const paths = new Map<string, string>();
+  const tmIds = new Map<string, string>();
   let uuidN = 0;
   let epochN = 0;
   let pathN = 0;
+  let tmN = 0;
 
   function norm(value: unknown): unknown {
     if (typeof value === "string") {
+      if (value.startsWith("lore_tm_v1_")) {
+        let tag = tmIds.get(value);
+        if (!tag) tmIds.set(value, (tag = `<tm-${tmN++}>`));
+        return tag;
+      }
       if (UUID_RE.test(value)) {
         let tag = uuids.get(value);
         if (!tag) uuids.set(value, (tag = `<uuid-${uuidN++}>`));
@@ -203,7 +210,12 @@ async function contractRoute<
   }
   expect(parsed.ok).toBe(true);
   const normalised = makeNormaliser()(body);
-  await expect(normalised).toMatchFileSnapshot(`${FIXTURES}/${fixture}`);
+  // Snapshot a stringified document: the object serializer's style
+  // (trailing commas) drifts between vitest configs and gets reformatted
+  // by oxfmt, breaking the comparison. A plain string is written verbatim.
+  await expect(JSON.stringify(normalised, null, 2) + "\n").toMatchFileSnapshot(
+    `${FIXTURES}/${fixture}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +324,8 @@ describe("ui contracts against the real gateway", () => {
     const parsed = safeParseContract("/knowledge/:id", apiErrorBody, body);
     if (!parsed.ok) console.error("api-error issues:", parsed.error.issues);
     expect(parsed.ok).toBe(true);
-    await expect(body).toMatchFileSnapshot(`${FIXTURES}/api-error.json`);
+    await expect(JSON.stringify(body, null, 2) + "\n").toMatchFileSnapshot(
+      `${FIXTURES}/api-error.json`,
+    );
   });
 });

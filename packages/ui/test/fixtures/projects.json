@@ -1,13 +1,13 @@
 [
   {
-    "created_at": 1700000000000,
-    "distillation_count": 1,
-    "git_remote": "git@github.com:test/ui-contracts.git",
     "id": "<uuid-0>",
-    "knowledge_count": 1,
-    "message_count": 2,
-    "name": "ui-contracts",
     "path": "/tmp/<project-0>",
-    "session_count": 1
+    "name": "ui-contracts",
+    "git_remote": "git@github.com:test/ui-contracts.git",
+    "created_at": 1700000000000,
+    "knowledge_count": 1,
+    "session_count": 1,
+    "message_count": 2,
+    "distillation_count": 1
   }
 ]

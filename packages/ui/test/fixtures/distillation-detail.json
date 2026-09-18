@@ -1,13 +1,13 @@
 {
-  "archived": 0,
-  "c_norm": 0.9,
-  "created_at": 1700000000000,
-  "generation": 0,
   "id": "d-ui-contracts",
-  "observations": "distilled observations",
   "project_id": "<uuid-0>",
-  "r_compression": 0.4,
   "session_id": "ui-contracts-session",
+  "observations": "distilled observations",
   "source_ids": "<json>",
-  "token_count": 42
+  "generation": 0,
+  "token_count": 42,
+  "r_compression": 0.4,
+  "c_norm": 0.9,
+  "archived": 0,
+  "created_at": 1700000000000
 }

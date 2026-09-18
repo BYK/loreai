@@ -1,7 +1,7 @@
 {
-  "expires_at": null,
-  "provider": null,
   "signed_in": false,
-  "state": "anonymous",
-  "user": null
+  "user": null,
+  "provider": null,
+  "expires_at": null,
+  "state": "anonymous"
 }
