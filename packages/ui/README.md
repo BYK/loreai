@@ -177,12 +177,12 @@ From [`docs/baseline.md`](docs/baseline.md), `node scripts/ui-baseline.mjs
 
 | Metric | clean `main` (`a4e6af5b`) | after UI-02 |
 |---|---|---|
-| Gateway bundle `dist/index.cjs` | 17,565,653 B | 17,834,027 B (+1.5 %) |
-| Startup → `200 /health` | 1297 ms | 1129 ms |
-| RSS after start | 361.8 MB | 363.9 MB |
-| Proxy `POST /v1/messages` (mock upstream) | 32.7 ms | 32.9 ms |
-| `GET /health` | 0.86 ms | 0.81 ms |
-| `GET /api/v1/projects` | 0.62 ms | 0.66 ms |
+| Gateway bundle `dist/index.cjs` | 17,565,653 B | 18,125,556 B (+3.2 %, incl. self-hosted fonts + logos) |
+| Startup → `200 /health` | 1297 ms | 1144 ms |
+| RSS after start | 361.8 MB | 356.1 MB |
+| Proxy `POST /v1/messages` (mock upstream) | 32.7 ms | 30.5 ms |
+| `GET /health` | 0.86 ms | 0.58 ms |
+| `GET /api/v1/projects` | 0.62 ms | 0.57 ms |
 
 The SPA is embedded in the bundle and loaded lazily on the first `/ui`
 request; the proxy path is unchanged.
