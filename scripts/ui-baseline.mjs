@@ -36,8 +36,16 @@ function flag(name, fallback) {
   const i = args.indexOf(`--${name}`);
   return i === -1 ? fallback : args[i + 1];
 }
-const RUNS = Number(flag("runs", 5));
-const REQUESTS = Number(flag("requests", 40));
+function positiveInt(name, fallback) {
+  const raw = flag(name, fallback);
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`--${name} must be an integer >= 1 (got ${String(raw)})`);
+  }
+  return value;
+}
+const RUNS = positiveInt("runs", 5);
+const REQUESTS = positiveInt("requests", 40);
 const WARMUP = 5;
 const jsonOut = flag("json", null);
 
