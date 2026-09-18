@@ -44,10 +44,10 @@ function positiveInt(name, fallback) {
   }
   return value;
 }
-const RUNS = positiveInt("runs", 5);
-const REQUESTS = positiveInt("requests", 40);
 const WARMUP = 5;
-const jsonOut = flag("json", null);
+const PORT_RETRIES = 3;
+let RUNS = 5;
+let REQUESTS = 40;
 
 function req(url, { method = "GET", headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -167,7 +167,11 @@ async function waitForHealth(base, child) {
   let exited = false;
   child.once("exit", () => (exited = true));
   while (Date.now() < deadline) {
-    if (exited) throw new Error("gateway exited before becoming healthy");
+    if (exited) {
+      throw new Error("gateway exited before becoming healthy", {
+        cause: "exited",
+      });
+    }
     try {
       const res = await req(`${base}/health`);
       if (res.status === 200) return;
@@ -190,7 +194,30 @@ async function stopChild(child) {
   }
 }
 
-async function measureRun(upstreamUrl, { withLatency }) {
+class PortCollision extends Error {}
+
+/**
+ * `freePort()` is a probe-then-release check, so another process can grab the
+ * port between the release and the gateway's bind. When the gateway dies on
+ * EADDRINUSE we simply pick another port and try again; nothing has been
+ * measured yet at that point.
+ */
+async function measureRun(upstreamUrl, opts) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await measureRunOnce(upstreamUrl, opts);
+    } catch (error) {
+      if (!(error instanceof PortCollision) || attempt >= PORT_RETRIES) {
+        throw error;
+      }
+      process.stderr.write(
+        `port ${error.port} was taken before the gateway bound it; retrying (${attempt}/${PORT_RETRIES})\n`,
+      );
+    }
+  }
+}
+
+async function measureRunOnce(upstreamUrl, { withLatency }) {
   const dataHome = mkdtempSync(join(tmpdir(), "lore-ui-baseline-"));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
@@ -289,6 +316,12 @@ async function measureRun(upstreamUrl, { withLatency }) {
       out.rssAfterLoadMb = round(rssKb(child.pid) / 1024);
     }
   } catch (error) {
+    if (
+      error?.cause === "exited" &&
+      /EADDRINUSE|port\b.*\bin use/i.test(stderr)
+    ) {
+      throw Object.assign(new PortCollision(error.message), { port });
+    }
     console.error(stderr);
     throw error;
   } finally {
@@ -326,6 +359,9 @@ function machineInfo() {
 }
 
 async function main() {
+  RUNS = positiveInt("runs", 5);
+  REQUESTS = positiveInt("requests", 40);
+  const jsonOut = flag("json", null);
   try {
     readFileSync(binPath);
   } catch {
