@@ -12,6 +12,12 @@
  * Text assets are stored as UTF-8 string literals, binary assets as base64.
  * Vite content-hashes everything under dist/assets/, so the gateway can serve
  * that directory with immutable caching; index.html is served no-cache.
+ *
+ * Compressible text assets additionally carry precompressed variants (zstd,
+ * brotli, gzip — each at its maximum setting, base64) so the gateway can
+ * negotiate `Accept-Encoding` without compressing at request time. A variant
+ * is dropped when it is not smaller than the identity bytes; zstd is skipped
+ * with a warning on Node builds without `zlib.zstdCompressSync`.
  */
 import { createHash } from "node:crypto";
 import {
@@ -25,6 +31,7 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as zlib from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -67,6 +74,59 @@ const TEXT_EXTENSIONS = new Set([
   ".txt",
 ]);
 
+/** Assets worth precompressing; fonts and images are already compressed. */
+const COMPRESSIBLE_EXTENSIONS = new Set([
+  ".html",
+  ".js",
+  ".mjs",
+  ".css",
+  ".json",
+  ".webmanifest",
+  ".svg",
+]);
+
+export type UiContentEncoding = "zstd" | "br" | "gzip";
+export const UI_CONTENT_ENCODINGS: readonly UiContentEncoding[] = [
+  "zstd",
+  "br",
+  "gzip",
+];
+
+type Compressor = (buf: Buffer) => Buffer;
+/** zstd's "ultra" ceiling (`zstd --ultra -22`); Node exposes no constant for it. */
+const ZSTD_MAX_LEVEL = 22;
+
+function compressors(
+  warn: (message: string) => void,
+): Map<UiContentEncoding, Compressor> {
+  const out = new Map<UiContentEncoding, Compressor>();
+  // Node < 22.15 / 23.8 has no zstd bindings; the build still succeeds and
+  // the gateway simply never offers `Content-Encoding: zstd`.
+  if (typeof zlib.zstdCompressSync === "function") {
+    out.set("zstd", (buf) =>
+      zlib.zstdCompressSync(buf, {
+        params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_MAX_LEVEL },
+      }),
+    );
+  } else {
+    warn(
+      `ui-assets: zlib.zstdCompressSync is unavailable on ${process.version}; skipping zstd variants`,
+    );
+  }
+  out.set("br", (buf) =>
+    zlib.brotliCompressSync(buf, {
+      params: {
+        [zlib.constants.BROTLI_PARAM_QUALITY]:
+          zlib.constants.BROTLI_MAX_QUALITY,
+        [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
+        [zlib.constants.BROTLI_PARAM_SIZE_HINT]: buf.byteLength,
+      },
+    }),
+  );
+  out.set("gzip", (buf) => zlib.gzipSync(buf, { level: 9 }));
+  return out;
+}
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir).sort()) {
@@ -101,6 +161,14 @@ export interface UiAssetsResult {
   files: number;
   bytes: number;
   buildId: string | null;
+  /** Per-file sizes: identity plus every emitted precompressed variant. */
+  sizes: UiAssetSizes[];
+}
+
+export interface UiAssetSizes {
+  path: string;
+  identity: number;
+  variants: Partial<Record<UiContentEncoding, number>>;
 }
 
 /**
@@ -123,23 +191,44 @@ export function generateUiAssetsModule(
 
   const entries: string[] = [];
   const digest = createHash("sha256");
+  const sizes: UiAssetSizes[] = [];
   let bytes = 0;
   let files = 0;
 
   if (existsSync(join(uiDistDir, "index.html"))) {
+    const compress = compressors((message) => console.warn(message));
     for (const full of walk(uiDistDir)) {
       const rel = relative(uiDistDir, full).split("\\").join("/");
       const ext = extname(full).toLowerCase();
       const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
       const buf = readFileSync(full);
+      // The build ID covers identity bytes only, so it is stable across build
+      // hosts with and without zstd support.
       digest.update(rel).update("\0").update(buf);
       bytes += buf.byteLength;
       files++;
       const encoding = TEXT_EXTENSIONS.has(ext) ? "utf8" : "base64";
       const data =
         encoding === "utf8" ? buf.toString("utf8") : buf.toString("base64");
+      const variants: string[] = [];
+      const variantSizes: UiAssetSizes["variants"] = {};
+      if (COMPRESSIBLE_EXTENSIONS.has(ext)) {
+        for (const [name, fn] of compress) {
+          const compressed = fn(buf);
+          if (compressed.byteLength >= buf.byteLength) continue;
+          variantSizes[name] = compressed.byteLength;
+          variants.push(
+            `[${JSON.stringify(name)}, ${JSON.stringify(compressed.toString("base64"))}]`,
+          );
+        }
+      }
+      sizes.push({
+        path: rel,
+        identity: buf.byteLength,
+        variants: variantSizes,
+      });
       entries.push(
-        `  [${JSON.stringify(rel)}, ${JSON.stringify(contentType)}, ${JSON.stringify(encoding)}, ${JSON.stringify(data)}],`,
+        `  [${JSON.stringify(rel)}, ${JSON.stringify(contentType)}, ${JSON.stringify(encoding)}, ${JSON.stringify(data)}, [${variants.join(", ")}]],`,
       );
     }
   }
@@ -151,13 +240,21 @@ export function generateUiAssetsModule(
     "/* oxlint-disable */",
     "",
     'export type UiAssetEncoding = "utf8" | "base64";',
+    'export type UiContentEncoding = "zstd" | "br" | "gzip";',
     "",
-    "/** [relative path under /ui/, content type, encoding, data] */",
+    "/** [content encoding, base64 of the precompressed bytes] */",
+    "export type UiAssetVariant = readonly [",
+    "  contentEncoding: UiContentEncoding,",
+    "  base64: string,",
+    "];",
+    "",
+    "/** [relative path under /ui/, content type, encoding, data, precompressed variants] */",
     "export type UiAssetRecord = readonly [",
     "  path: string,",
     "  contentType: string,",
     "  encoding: UiAssetEncoding,",
     "  data: string,",
+    "  variants: readonly UiAssetVariant[],",
     "];",
     "",
     `export const UI_BUILD_ID: string | null = ${JSON.stringify(buildId)};`,
@@ -169,14 +266,37 @@ export function generateUiAssetsModule(
   ].join("\n");
 
   writeFileSync(GENERATED_MODULE, source);
-  return { files, bytes, buildId };
+  return { files, bytes, buildId, sizes };
 }
 
 export function describeUiAssets(result: UiAssetsResult): string {
   if (result.files === 0) {
     return "ui-assets.generated.ts: empty manifest (packages/ui not built)";
   }
-  return `ui-assets.generated.ts: ${result.files} files, ${(result.bytes / 1024).toFixed(1)} KiB, build ${result.buildId}`;
+  const total = (name: UiContentEncoding) =>
+    result.sizes.reduce((sum, s) => sum + (s.variants[name] ?? s.identity), 0);
+  const kib = (n: number) => `${(n / 1024).toFixed(1)} KiB`;
+  return `ui-assets.generated.ts: ${result.files} files, ${kib(result.bytes)} identity (zstd ${kib(total("zstd"))}, br ${kib(total("br"))}, gzip ${kib(total("gzip"))}), build ${result.buildId}`;
+}
+
+/** Markdown size table (identity / zstd / br / gzip per file), for PR bodies. */
+export function formatUiAssetSizeTable(result: UiAssetsResult): string {
+  const bytes = (n: number) => `${n.toLocaleString("en-US")} B`;
+  const cell = (n: number | undefined, identity: number) =>
+    n === undefined
+      ? "—"
+      : `${bytes(n)} (${Math.round((n / identity) * 100)} %)`;
+  const rows = result.sizes
+    .filter((s) => Object.keys(s.variants).length > 0)
+    .map(
+      (s) =>
+        `| \`${s.path}\` | ${bytes(s.identity)} | ${cell(s.variants.zstd, s.identity)} | ${cell(s.variants.br, s.identity)} | ${cell(s.variants.gzip, s.identity)} |`,
+    );
+  return [
+    "| Asset | identity | zstd | br | gzip |",
+    "|---|---|---|---|---|",
+    ...rows,
+  ].join("\n");
 }
 
 /**
@@ -197,9 +317,15 @@ if (
   if (mode === "--ensure") {
     ensureUiAssetsModule();
   } else if (mode === "--build") {
-    console.log(describeUiAssets(generateUiAssetsModule({ build: "always" })));
+    const result = generateUiAssetsModule({ build: "always" });
+    console.log(describeUiAssets(result));
+  } else if (mode === "--sizes") {
+    const result = generateUiAssetsModule({ build: "never" });
+    console.log(formatUiAssetSizeTable(result));
   } else {
-    console.error(`usage: tsx script/ui-assets.ts [--ensure | --build]`);
+    console.error(
+      `usage: tsx script/ui-assets.ts [--ensure | --build | --sizes]`,
+    );
     process.exit(2);
   }
 }

@@ -145,7 +145,14 @@ Production never runs a frontend dev server: the gateway serves `packages/ui/dis
 `packages/gateway/script/ui-assets.ts`, which builds this package when
 `packages/ui/dist` is missing or stale and writes
 `packages/gateway/src/ui-assets.generated.ts` (git-ignored): every file in
-`dist/` as a `Uint8Array` with its MIME type and a strong ETag. The bundle
+`dist/` as a `Uint8Array` with its MIME type and a strong ETag, plus
+precompressed variants for compressible types (`.js`, `.css`, `.html`,
+`.svg`, `.json`, `.webmanifest` — not fonts or images) made at build time with
+`node:zlib` only: zstd (level 22), brotli (quality 11, text mode, size hint)
+and gzip (level 9). A variant is dropped when it is not smaller than the
+identity bytes; zstd is skipped with a warning on a build host whose Node has
+no `zlib.zstdCompressSync` (< 22.15 / 23.8). The build ID digests identity
+bytes only, so it is identical across such hosts. The bundle
 therefore embeds the UI — nothing is read from disk at runtime and the
 published tarball / SEA binary need no extra files.
 `packages/gateway/src/ui-static.ts` answers `/ui`, `/ui/` and `/ui/*`:
@@ -155,6 +162,20 @@ published tarball / SEA binary need no extra files.
 - any other `/ui/...` path → `index.html`, `Cache-Control: no-cache`
   (history fallback for client routes); unknown `/ui/assets/*` is a 404, never
   HTML.
+- `Accept-Encoding` is negotiated per request from the embedded variants:
+  the acceptable encoding with the highest client q-value wins, ties broken by
+  the server preference zstd > br > gzip > identity (browsers send all three
+  unweighted, so Chromium/Firefox get zstd and Safari gets br). `identity;q=0`
+  and `*` (incl. `*;q=0`) are honoured; an encoding the client did not list is
+  never sent; a malformed header (bad q-value, unknown parameter, invalid
+  token) or an absent/empty header means identity. If the client excludes
+  every encoding we have, identity is served rather than a 406. Every response
+  for a compressible asset — including identity and `304` — carries `Vary:
+  Accept-Encoding`; the ETag is suffixed per encoding
+  (`"<build>-<path>-zstd"`), so a validator only revalidates its own
+  encoding; `Content-Length` is the encoded length (also on `HEAD`). Fonts
+  and images have no variants and no `Vary`. Nothing is compressed at
+  request time.
 - every response carries a strict `Content-Security-Policy`
   (`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'
   data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri

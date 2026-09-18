@@ -134,4 +134,28 @@ test.describe("real data browsing", () => {
       await expect(page.getByTestId("fixture-banner")).toHaveCount(0);
     }
   });
+
+  test("the main script is served precompressed (zstd, or br where the browser lacks zstd)", async ({
+    page,
+  }) => {
+    const script = page.waitForResponse((res) =>
+      /\/ui\/assets\/[^/?]+\.js$/.test(res.url()),
+    );
+    await page.goto("/ui");
+    const res = await script;
+    expect(res.status()).toBe(200);
+    const accepted =
+      (await res.request().allHeaders())["accept-encoding"] ?? "";
+    expect(accepted).toMatch(/\b(zstd|br)\b/);
+    const headers = await res.allHeaders();
+    expect(headers["content-encoding"]).toBe(
+      /\bzstd\b/.test(accepted) ? "zstd" : "br",
+    );
+    expect(headers["vary"]).toMatch(/accept-encoding/i);
+    // The page actually booted from the encoded script.
+    await expect(page.getByTestId("connection-status")).toHaveAttribute(
+      "data-connection",
+      "reachable",
+    );
+  });
 });

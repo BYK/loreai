@@ -5,6 +5,8 @@
  *   - hashed assets: correct MIME, immutable caching, ETag/304, 404 (never
  *     HTML) for unknown asset URLs
  *   - index.html: no-cache
+ *   - Accept-Encoding negotiation over the precompressed variants (zstd > br >
+ *     gzip > identity, q-values, malformed headers, per-encoding ETags, Vary)
  *   - strict CSP + X-Frame-Options on every UI response (kept intact by the
  *     management CORS wrapper)
  *   - method restrictions
@@ -15,13 +17,21 @@
  * or the root `pnpm test`, whose pretest bundles the gateway).
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import {
+  brotliDecompressSync,
+  gunzipSync,
+  zstdDecompressSync,
+} from "node:zlib";
 import { loadConfig, type GatewayConfig } from "../src/config";
 import { startServer } from "../src/server";
 import {
   handleUIRequest,
+  negotiateEncoding,
+  parseAcceptEncoding,
   resolveUiAssetPath,
   UI_CONTENT_SECURITY_POLICY,
   uiAssetsAvailable,
+  type UiEncoding,
 } from "../src/ui-static";
 import { UI_ASSET_FILES } from "../src/ui-assets.generated";
 import { loopbackRequest } from "./helpers/loopback-request";
@@ -52,6 +62,16 @@ function assetPath(ext: string): string {
   }
   return `/ui/${record[0]}`;
 }
+
+function embeddedVariants(path: string): Set<UiEncoding> {
+  const rel = path.slice("/ui/".length);
+  const record = UI_ASSET_FILES.find(([p]) => p === rel);
+  if (!record) throw new Error(`no embedded asset at ${path}`);
+  return new Set<UiEncoding>(["identity", ...record[4].map(([enc]) => enc)]);
+}
+
+/** The build host has zstd bindings iff the test host does (same Node). */
+const zstdSupported = typeof zstdDecompressSync === "function";
 
 function direct(path: string, init?: RequestInit): Response {
   const url = new URL(`http://127.0.0.1${path}`);
@@ -143,8 +163,9 @@ describe("handleUIRequest", () => {
       "public, max-age=31536000, immutable",
     );
     expect(res.headers.get("etag")).toMatch(/^".+"$/);
-    // Assets are served uncompressed, so nothing varies on the request.
-    expect(res.headers.get("vary")).toBeNull();
+    // No Accept-Encoding → identity, but the representation still varies.
+    expect(res.headers.get("vary")).toBe("Accept-Encoding");
+    expect(res.headers.get("content-encoding")).toBeNull();
     expect(res.headers.get("content-length")).toBe(
       String((await res.arrayBuffer()).byteLength),
     );
@@ -226,6 +247,268 @@ describe("handleUIRequest", () => {
   });
 });
 
+describe("parseAcceptEncoding", () => {
+  test("absent or empty header accepts anything", () => {
+    expect(parseAcceptEncoding(null)).toEqual(new Map());
+    expect(parseAcceptEncoding("")).toEqual(new Map());
+    expect(parseAcceptEncoding("   ")).toEqual(new Map());
+  });
+
+  test("parses codings with q-values, case-insensitively, aliasing x-gzip", () => {
+    expect(
+      parseAcceptEncoding(
+        "GZIP, Br;q=0.9, zstd ; q=1.0, identity;q=0, *;q=0.1",
+      ),
+    ).toEqual(
+      new Map([
+        ["gzip", 1],
+        ["br", 0.9],
+        ["zstd", 1],
+        ["identity", 0],
+        ["*", 0.1],
+      ]),
+    );
+    expect(parseAcceptEncoding("x-gzip")).toEqual(new Map([["gzip", 1]]));
+  });
+
+  test.each([
+    "gzip;q=abc",
+    "gzip;q=1.5",
+    "gzip;q=-1",
+    "gzip;q=.5",
+    "gzip;q=0.1234",
+    "gzip;level=9",
+    "gzip;q",
+    "gz ip",
+    "br, ,gzip",
+    'gzip"',
+    "gzip;q=1;q=0",
+  ])("rejects malformed header %j", (header) => {
+    expect(parseAcceptEncoding(header)).toBeNull();
+  });
+});
+
+describe("negotiateEncoding", () => {
+  const all = new Set<UiEncoding>(["identity", "zstd", "br", "gzip"]);
+  const brGzip = new Set<UiEncoding>(["identity", "br", "gzip"]);
+  const identityOnly = new Set<UiEncoding>(["identity"]);
+
+  test.each<[string | null, UiEncoding]>([
+    [null, "identity"],
+    ["", "identity"],
+    ["gzip, deflate, br, zstd", "zstd"],
+    ["gzip, deflate, br", "br"],
+    ["gzip, deflate", "gzip"],
+    ["deflate", "identity"],
+    ["zstd", "zstd"],
+    ["br", "br"],
+    ["gzip", "gzip"],
+    ["identity", "identity"],
+    ["*", "zstd"],
+    ["gzip, *;q=0.5", "gzip"],
+    ["*;q=0.5, gzip;q=0.4", "zstd"],
+    ["gzip;q=1, zstd;q=0.5", "gzip"],
+    ["gzip;q=0.5, br;q=0.5", "identity"],
+    ["gzip;q=0.5, br;q=0.5, identity;q=0.4", "br"],
+    ["zstd;q=0, br;q=0, gzip", "gzip"],
+    ["gzip;q=0.5", "identity"],
+    ["gzip;q=0.5, identity;q=0.4", "gzip"],
+    ["identity;q=0, gzip", "gzip"],
+    ["identity;q=0, *", "zstd"],
+    ["identity;q=0", "identity"],
+    ["*;q=0", "identity"],
+    ["*;q=0, br", "br"],
+    ["gzip;q=abc", "identity"],
+    ["gz ip, br", "identity"],
+  ])("Accept-Encoding %j → %s", (header, expected) => {
+    expect(negotiateEncoding(header, all)).toBe(expected);
+  });
+
+  test("falls back to the next preferred encoding when a variant is missing", () => {
+    expect(negotiateEncoding("gzip, br, zstd", brGzip)).toBe("br");
+    expect(negotiateEncoding("zstd", brGzip)).toBe("identity");
+    expect(negotiateEncoding("zstd, gzip;q=0.1", brGzip)).toBe("identity");
+    expect(negotiateEncoding("zstd, gzip;q=0.1, identity;q=0", brGzip)).toBe(
+      "gzip",
+    );
+    expect(negotiateEncoding("gzip, br, zstd", identityOnly)).toBe("identity");
+  });
+});
+
+describe("precompressed asset serving", () => {
+  const js = () => assetPath(".js");
+  const css = () => assetPath(".css");
+
+  const decoders: Record<
+    Exclude<UiEncoding, "identity">,
+    (b: Buffer) => Buffer
+  > = {
+    zstd: (b) => zstdDecompressSync(b),
+    br: (b) => brotliDecompressSync(b),
+    gzip: (b) => gunzipSync(b),
+  };
+
+  test("the build embeds br and gzip (and zstd where Node supports it) for the app script", () => {
+    const variants = embeddedVariants(js());
+    expect(variants.has("br")).toBe(true);
+    expect(variants.has("gzip")).toBe(true);
+    expect(variants.has("zstd")).toBe(zstdSupported);
+    expect(embeddedVariants(css()).has("gzip")).toBe(true);
+  });
+
+  test("does not embed variants for fonts", () => {
+    expect(embeddedVariants(assetPath(".woff2"))).toEqual(
+      new Set(["identity"]),
+    );
+  });
+
+  test.each<[string, UiEncoding]>([
+    ["gzip, deflate, br, zstd", zstdSupported ? "zstd" : "br"],
+    ["gzip, deflate, br", "br"],
+    ["gzip", "gzip"],
+    ["deflate", "identity"],
+  ])(
+    "Accept-Encoding %j serves the %s variant whose bytes round-trip to identity",
+    async (accept, expected) => {
+      const path = js();
+      const identity = Buffer.from(await direct(path).arrayBuffer());
+      const res = direct(path, { headers: { "accept-encoding": accept } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-encoding")).toBe(
+        expected === "identity" ? null : expected,
+      );
+      expect(res.headers.get("vary")).toBe("Accept-Encoding");
+      expect(res.headers.get("content-type")).toBe(
+        "text/javascript; charset=utf-8",
+      );
+      expect(res.headers.get("cache-control")).toContain("immutable");
+      expectSecurityHeaders(res);
+      const body = Buffer.from(await res.arrayBuffer());
+      expect(res.headers.get("content-length")).toBe(String(body.byteLength));
+      if (expected === "identity") {
+        expect(body.equals(identity)).toBe(true);
+      } else {
+        expect(body.byteLength).toBeLessThan(identity.byteLength);
+        expect(decoders[expected](body).equals(identity)).toBe(true);
+      }
+    },
+  );
+
+  test("every embedded variant of every asset decodes to its identity bytes", () => {
+    for (const [path, , encoding, data, variants] of UI_ASSET_FILES) {
+      const identity = Buffer.from(data, encoding);
+      for (const [contentEncoding, base64] of variants) {
+        const encoded = Buffer.from(base64, "base64");
+        expect(encoded.byteLength, `${path} ${contentEncoding}`).toBeLessThan(
+          identity.byteLength,
+        );
+        expect(
+          decoders[contentEncoding](encoded).equals(identity),
+          `${path} ${contentEncoding} round-trip`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  test("index.html is negotiated too and keeps no-cache", () => {
+    const res = direct("/ui/projects/deep/link", {
+      headers: { "accept-encoding": "br" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBe("br");
+    expect(res.headers.get("vary")).toBe("Accept-Encoding");
+    expect(res.headers.get("cache-control")).toBe("no-cache");
+    expectSecurityHeaders(res);
+  });
+
+  test("uncompressible assets carry neither Vary nor Content-Encoding", () => {
+    const res = direct(assetPath(".woff2"), {
+      headers: { "accept-encoding": "gzip, br, zstd" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("font/woff2");
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("vary")).toBeNull();
+    expect(res.headers.get("etag")).not.toMatch(/-(zstd|br|gzip)"$/);
+  });
+
+  test("never sends an encoding the client did not list", () => {
+    for (const accept of ["deflate", "identity", "compress, deflate;q=0.5"]) {
+      const res = direct(js(), { headers: { "accept-encoding": accept } });
+      expect(res.headers.get("content-encoding")).toBeNull();
+    }
+  });
+
+  test("malformed Accept-Encoding degrades to identity", async () => {
+    const identity = Buffer.from(await direct(js()).arrayBuffer());
+    const res = direct(js(), { headers: { "accept-encoding": "gzip;q=lots" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("vary")).toBe("Accept-Encoding");
+    expect(Buffer.from(await res.arrayBuffer()).equals(identity)).toBe(true);
+  });
+
+  test("ETags differ per encoding and revalidate only against their own encoding", () => {
+    const path = js();
+    const etagFor = (accept?: string): string => {
+      const res = direct(path, {
+        headers: accept === undefined ? {} : { "accept-encoding": accept },
+      });
+      const etag = res.headers.get("etag");
+      if (!etag) throw new Error(`no ETag for Accept-Encoding ${accept}`);
+      return etag;
+    };
+    const identityTag = etagFor();
+    const gzipTag = etagFor("gzip");
+    const brTag = etagFor("br");
+    expect(gzipTag).toBe(identityTag.replace(/"$/, '-gzip"'));
+    expect(brTag).toBe(identityTag.replace(/"$/, '-br"'));
+    expect(new Set([identityTag, gzipTag, brTag]).size).toBe(3);
+
+    const fresh = direct(path, {
+      headers: { "accept-encoding": "gzip", "if-none-match": gzipTag },
+    });
+    expect(fresh.status).toBe(304);
+    expect(fresh.headers.get("etag")).toBe(gzipTag);
+    expect(fresh.headers.get("vary")).toBe("Accept-Encoding");
+    expect(fresh.headers.get("cache-control")).toContain("immutable");
+    expectSecurityHeaders(fresh);
+
+    // A cached identity/br response is not fresh for a gzip negotiation.
+    for (const stale of [identityTag, brTag]) {
+      const res = direct(path, {
+        headers: { "accept-encoding": "gzip", "if-none-match": stale },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-encoding")).toBe("gzip");
+    }
+    // And a gzip validator does not satisfy an identity request.
+    expect(direct(path, { headers: { "if-none-match": gzipTag } }).status).toBe(
+      200,
+    );
+  });
+
+  test("HEAD reports the encoded Content-Length without a body", async () => {
+    const path = js();
+    for (const accept of ["gzip", "br", zstdSupported ? "zstd" : "br", ""]) {
+      const full = direct(path, { headers: { "accept-encoding": accept } });
+      const head = direct(path, {
+        method: "HEAD",
+        headers: { "accept-encoding": accept },
+      });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("content-encoding")).toBe(
+        full.headers.get("content-encoding"),
+      );
+      expect(head.headers.get("etag")).toBe(full.headers.get("etag"));
+      expect(head.headers.get("content-length")).toBe(
+        String((await full.arrayBuffer()).byteLength),
+      );
+      expect(await head.text()).toBe("");
+    }
+  });
+});
+
 describe("UI serving through the gateway", () => {
   let loopback: ServerHandle;
   let remotePeer: ServerHandle;
@@ -276,6 +559,26 @@ describe("UI serving through the gateway", () => {
       "public, max-age=31536000, immutable",
     );
     expectSecurityHeaders(res);
+  });
+
+  test("the server negotiates zstd for a browser-style Accept-Encoding and keeps CORS Vary", async () => {
+    const origin = `http://localhost:${loopback.port}`;
+    const res = await loopbackRequest(urlFor(loopback, assetPath(".js")), {
+      headers: { "accept-encoding": "gzip, deflate, br, zstd", origin },
+    });
+    expect(res.status).toBe(200);
+    const expected = zstdSupported ? "zstd" : "br";
+    expect(res.headers.get("content-encoding")).toBe(expected);
+    expect(res.headers.get("vary")).toBe("Accept-Encoding, Origin");
+    expectSecurityHeaders(res);
+    const body = Buffer.from(await res.arrayBuffer());
+    expect(res.headers.get("content-length")).toBe(String(body.byteLength));
+    const identity = Buffer.from(await direct(assetPath(".js")).arrayBuffer());
+    const decoded =
+      expected === "zstd"
+        ? zstdDecompressSync(body)
+        : brotliDecompressSync(body);
+    expect(decoded.equals(identity)).toBe(true);
   });
 
   test("/api responses keep their own frame-ancestors policy", async () => {
