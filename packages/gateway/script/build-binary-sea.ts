@@ -30,6 +30,7 @@
 import * as esbuild from "esbuild";
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -56,6 +57,11 @@ import { fossilize } from "fossilize";
 import { UI_SEA_ASSET_PREFIX } from "../src/ui-manifest";
 
 const require = createRequire(import.meta.url);
+
+// Directory name of the UI tree inside the staging dir; must match what
+// runFossilize passes to fossilize's `assets` so --from-staging stays
+// self-contained.
+const UI_STAGE_BASENAME = "ui";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -373,6 +379,12 @@ async function runFossilize(
           outDir: targetOutDir,
           cacheDir: join(packageDir, ".node-cache"),
           assetManifest: manifestPath,
+          // The UI tree is embedded as a directory (fossilize >= 0.11): every
+          // file under <staging>/ui becomes the SEA asset `ui/<relative path>`
+          // that src/ui-static.ts reads, so no per-file manifest entries.
+          assets: [
+            `${join(stagingDir, UI_STAGE_BASENAME)}=${UI_SEA_ASSET_PREFIX}`,
+          ],
           sign: false,
           concurrencyLimit: 1,
         },
@@ -697,9 +709,9 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // Step 3: Build asset list for fossilize
   // -------------------------------------------------------------------------
-  // Fossilize's --assets flag derives the SEA asset key from the path
-  // (which becomes absolute after `path.resolve`). To use predictable,
-  // short keys at runtime, we write a Vite-style manifest and pass
+  // Fossilize's `assets` option keys a single file by the path as given, so
+  // for the per-file native/model/worker assets we write a Vite-style
+  // manifest with predictable, short keys and pass
   // --asset-manifest. The manifest's `entry.file` field is the asset
   // key, and `entry.src` (or `file` path) is where fossilize reads
   // the bytes from.
@@ -733,11 +745,13 @@ async function buildBinary() {
     }
   }
 
-  // Lore UI: every staged file (SPA files, .br/.gz siblings, ui-manifest.json)
+  // Lore UI: the whole staged tree (SPA files, .br/.gz siblings,
+  // ui-manifest.json) is copied as a directory and handed to fossilize's
+  // `assets` as `<staging>/ui=ui/` in runFossilize, which embeds it recursively
   // under the `ui/` key prefix src/ui-static.ts reads in SEA mode.
-  for (const rel of uiAssets.staged) {
-    stageAsset(`${UI_SEA_ASSET_PREFIX}${rel}`, join(UI_STAGE_DIR, rel));
-  }
+  const uiStagingDir = join(stagingDir, UI_STAGE_BASENAME);
+  rmSync(uiStagingDir, { recursive: true, force: true });
+  cpSync(UI_STAGE_DIR, uiStagingDir, { recursive: true });
 
   // Stage the native sqlite-vec loadable extension for every target in this
   // build. fossilize embeds a single shared asset set into each platform
@@ -804,10 +818,6 @@ async function buildBinary() {
       const key = `model/${rel}`;
       sharedManifest[key] = { file: key, src: key };
     }
-  }
-  for (const rel of uiAssets.staged) {
-    const key = `${UI_SEA_ASSET_PREFIX}${rel}`;
-    sharedManifest[key] = { file: key, src: key };
   }
 
   // Sentry sourcemap upload (runs before fossilize — the .map file lives

@@ -8,8 +8,8 @@
  * `readAsset(path)` abstraction: the npm CJS bundle (dist/index.cjs) and the
  * Bun ESM bundle (dist/index.bun.js) read dist/ui/ beside themselves, a plain
  * `tsx src/index.ts` / vitest checkout reads ../dist/ui/, and the Node SEA
- * binaries read the same files as SEA assets keyed `ui/<path>` (staged by
- * build-binary-sea.ts, embedded by fossilize). Nothing is generated into
+ * binaries read the same files as SEA assets keyed `ui/<path>` (the whole
+ * tree is embedded as a directory by fossilize, see build-binary-sea.ts). Nothing is generated into
  * src/; dist/ is git-ignored and rebuilt by build.ts, bundle.ts and
  * build-binary-sea.ts.
  *
@@ -140,12 +140,6 @@ export interface UiAssetsResult {
   buildId: string | null;
   /** Per-file sizes: identity plus every emitted precompressed variant. */
   sizes: UiAssetSizes[];
-  /**
-   * Every file written under UI_STAGE_DIR, relative with POSIX separators:
-   * the SPA files, their precompressed siblings and the manifest. Empty when
-   * the UI was not built.
-   */
-  staged: string[];
 }
 
 export interface UiAssetSizes {
@@ -178,13 +172,12 @@ export function stageUiAssets(
 
   const digest = createHash("sha256");
   const sizes: UiAssetSizes[] = [];
-  const staged: string[] = [];
   const manifestFiles: Record<string, UiManifestFile> = Object.create(null);
   let bytes = 0;
   let files = 0;
 
   if (!existsSync(join(uiDistDir, "index.html"))) {
-    return { files, bytes, buildId: null, sizes, staged };
+    return { files, bytes, buildId: null, sizes };
   }
 
   const compress = compressors();
@@ -200,7 +193,6 @@ export function stageUiAssets(
     mkdirSync(dirname(dest), { recursive: true });
     if (src !== undefined) copyFileSync(src, dest);
     else if (data) writeFileSync(dest, data);
-    staged.push(rel);
   };
   for (const full of walk(uiDistDir)) {
     const rel = relative(uiDistDir, full).split("\\").join("/");
@@ -244,8 +236,7 @@ export function stageUiAssets(
     join(UI_STAGE_DIR, UI_MANIFEST_FILE),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
-  staged.push(UI_MANIFEST_FILE);
-  return { files, bytes, buildId, sizes, staged };
+  return { files, bytes, buildId, sizes };
 }
 
 export function describeUiAssets(result: UiAssetsResult): string {
