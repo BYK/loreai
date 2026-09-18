@@ -57,6 +57,21 @@ function feedbackRows(kind: "knowledge" | "entity") {
   }>;
 }
 
+/**
+ * Produce a version id of `logicalId` that is neither the logical id nor the
+ * current head: bump twice and hand back the middle version's id.
+ */
+function staleVersionId(logicalId: string): string {
+  ltm.update(logicalId, { content: `${logicalId} v2` });
+  const middle = ltm.getByLogical(logicalId);
+  if (!middle) throw new Error("entry vanished");
+  ltm.update(logicalId, { content: `${logicalId} v3` });
+  expect(middle.id).not.toBe(logicalId);
+  expect(ltm.get(middle.id)).toBeNull();
+  expect(ltm.logicalIdOf(middle.id)).toBe(logicalId);
+  return middle.id;
+}
+
 beforeEach(() => {
   for (const c of ltm.listOpenContradictions()) {
     ltm.setContradictionStatus(c.logicalIdA, c.logicalIdB, "dismissed");
@@ -120,6 +135,44 @@ describe("contradiction decisions (#1123)", () => {
     ltm.remove(b);
     expect(resolveContradiction(a, b)).toBe(false);
     expect(ltm.get(a)).not.toBeNull();
+  });
+
+  it("resolve accepts superseded version ids for either side", () => {
+    const { a, b } = seedPair("Rule five", "Rule six");
+    const staleA = staleVersionId(a);
+    const staleB = staleVersionId(b);
+
+    expect(resolveContradiction(staleA, staleB)).toBe(true);
+
+    expect(ltm.getByLogical(b)).toBeNull();
+    expect(ltm.isTombstoned(b)).toBe(true);
+    expect(ltm.getByLogical(a)).not.toBeNull();
+    expect(ltm.listOpenContradictions()).toHaveLength(0);
+  });
+
+  it("resolve is a no-op when both ids are versions of the same entry", () => {
+    const { a, b } = seedPair("Rule seven", "Rule eight");
+    const staleA = staleVersionId(a);
+    const currentA = ltm.getByLogical(a);
+    if (!currentA) throw new Error("entry a vanished");
+    expect(currentA.id).not.toBe(staleA);
+
+    expect(resolveContradiction(staleA, currentA.id)).toBe(false);
+    expect(ltm.getByLogical(a)).not.toBeNull();
+    expect(ltm.getByLogical(b)).not.toBeNull();
+    expect(ltm.listOpenContradictions()).toHaveLength(1);
+  });
+
+  it("dismiss accepts superseded version ids", () => {
+    const { a, b } = seedPair("Rule nine", "Rule ten");
+    const staleB = staleVersionId(b);
+
+    dismissContradiction(a, staleB);
+
+    expect(ltm.listOpenContradictions()).toHaveLength(0);
+    expect(ltm.getByLogical(a)).not.toBeNull();
+    expect(ltm.getByLogical(b)).not.toBeNull();
+    expect(ltm.contradictionExists(a, b)).toBe(true);
   });
 });
 

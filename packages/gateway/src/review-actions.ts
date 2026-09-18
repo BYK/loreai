@@ -26,25 +26,34 @@ export function resolveKnowledgeRef(id: string): ltm.KnowledgeEntry | null {
  * — `contradictionExists` is order-independent. `ltm.remove()` also purges the
  * pair row, so the contradiction leaves the open list either way.
  *
+ * Both ids may be stale version ids; the pair table is keyed on logical ids,
+ * so they are canonicalised first.
+ *
  * Returns true when an entry was removed.
  */
 export function resolveContradiction(
   keepId: string,
   removeId: string,
 ): boolean {
-  if (keepId === removeId) return false;
-  if (!ltm.contradictionExists(keepId, removeId)) return false;
-  if (!resolveKnowledgeRef(removeId)) return false;
-  ltm.remove(removeId);
+  const keep = ltm.logicalIdOf(keepId);
+  const remove = ltm.logicalIdOf(removeId);
+  if (keep === remove) return false;
+  if (!ltm.contradictionExists(keep, remove)) return false;
+  if (!ltm.getByLogical(remove)) return false;
+  ltm.remove(remove);
   return true;
 }
 
 /**
  * Keep both entries: mark the pair dismissed so it stops surfacing and is never
- * re-judged by the detector.
+ * re-judged by the detector. Accepts stale version ids like `resolveContradiction`.
  */
 export function dismissContradiction(idA: string, idB: string): void {
-  ltm.setContradictionStatus(idA, idB, "dismissed");
+  ltm.setContradictionStatus(
+    ltm.logicalIdOf(idA),
+    ltm.logicalIdOf(idB),
+    "dismissed",
+  );
 }
 
 export interface DedupDecision {
