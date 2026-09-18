@@ -34,7 +34,12 @@ const bundlePath = join(repoRoot, "packages/gateway/dist/index.cjs");
 const args = process.argv.slice(2);
 function flag(name, fallback) {
   const i = args.indexOf(`--${name}`);
-  return i === -1 ? fallback : args[i + 1];
+  if (i === -1) return fallback;
+  const value = args[i + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`--${name} requires a value`);
+  }
+  return value;
 }
 function positiveInt(name, fallback) {
   const raw = flag(name, fallback);
