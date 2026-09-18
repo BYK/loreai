@@ -1,11 +1,13 @@
 import { uuidv7 } from "uuidv7";
 import {
+  databaseInTransaction,
   db,
   effectivePromotionPolicy,
   ensureProject,
   getKV,
   projectScope,
   setKV,
+  withSavepoint,
   withSyncApplying,
   withTransaction,
 } from "./db";
@@ -456,8 +458,14 @@ export function appendVersion(
   // (logical_id WHERE is_current=1) is checked per-statement, so inserting a
   // second current row before demoting would violate it. The forward-copy SELECT
   // still reads the (now-demoted) row by id. The current-row lookup is INSIDE the
-  // txn so it can't race a concurrent append (no TOCTOU).
-  const ok = withTransaction(() => {
+  // txn so it can't race a concurrent append (no TOCTOU). Inside an enclosing
+  // transaction the append joins it as a savepoint so a caller can group several
+  // appends atomically.
+  const appendAtomically = <T>(fn: () => T): T =>
+    databaseInTransaction(db())
+      ? withSavepoint("knowledge_append_version", fn)
+      : withTransaction(fn);
+  const ok = appendAtomically(() => {
     const cur = db()
       .query(
         "SELECT id FROM knowledge WHERE tenant_id = ? AND logical_id = ? AND is_current = 1 LIMIT 1",

@@ -33,6 +33,7 @@ export {
 } from "./references";
 export * as syncData from "./sync-data";
 export * as data from "./data";
+export * as dedupApply from "./dedup-apply";
 export * as distillation from "./distillation";
 export * as contradiction from "./contradiction";
 export * as semanticLint from "./semantic-lint";
