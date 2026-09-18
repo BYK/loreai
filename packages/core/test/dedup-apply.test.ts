@@ -29,6 +29,7 @@ import * as ltm from "../src/ltm";
 import { currentTenantId } from "../src/tenant";
 import {
   applyDedupDecisions,
+  currentRevisions,
   DedupApplyError,
   dedupApplyPayloadHash,
   dedupProvenanceFor,
@@ -580,6 +581,42 @@ describe("idempotency", () => {
 
     expect(() => apply(req)).toThrow(/never finished/);
     expect(isLive(dupe)).toBe(true);
+  });
+});
+
+describe("currentRevisions", () => {
+  test("reports the revision apply will check, for logical and version ids", () => {
+    const keep = createEntry("Rev Keep");
+    const edited = createEntry("Rev Edited");
+    const gone = createEntry("Rev Gone");
+    ltm.update(edited, { content: "second version" });
+    const editedV2 = ltm.getByLogical(edited)?.id ?? "";
+    ltm.remove(gone);
+
+    const revs = currentRevisions([keep, edited, editedV2, gone, "nope", keep]);
+
+    expect(revs.get(keep)).toBe(1);
+    expect(revs.get(edited)).toBe(2);
+    expect(revs.get(editedV2)).toBe(2);
+    expect(revs.has(gone)).toBe(false);
+    expect(revs.has("nope")).toBe(false);
+    expect(revs.size).toBe(3);
+
+    // A decision built from these revisions is exactly what apply accepts.
+    const receipt = apply(
+      request([
+        {
+          keepId: keep,
+          mergeIds: [editedV2],
+          expectedRevisions: {
+            [keep]: revs.get(keep) ?? -1,
+            [editedV2]: revs.get(editedV2) ?? -1,
+          },
+        },
+      ]),
+    );
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied[0].merged[0].revision).toBe(2);
   });
 });
 

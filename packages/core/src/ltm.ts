@@ -4217,6 +4217,15 @@ export function dedupPairKey(idA: string, idB: string): string {
   return idA < idB ? `${idA}:${idB}` : `${idB}:${idA}`;
 }
 
+/** Why two entries were treated as duplicate candidates. */
+export type DedupMatchReason = "title_overlap" | "embedding_similarity";
+
+export type DedupPairMatch = {
+  /** max(title-overlap coefficient, cosine similarity) for the pair. */
+  score: number;
+  reasons: DedupMatchReason[];
+};
+
 export type DedupResult = {
   clusters: DedupCluster[];
   totalRemoved: number;
@@ -4224,6 +4233,10 @@ export type DedupResult = {
   pairSimilarities: Map<string, number>;
   /** All entry titles by ID — for feedback recording after entries are deleted. */
   entryTitles: Map<string, string>;
+  /** Pairs that crossed a dedup threshold, with the signals that fired.
+   *  Key: dedupPairKey(idA, idB). Optional so hand-built results (entity
+   *  dedup, tests) keep compiling. */
+  pairMatches?: Map<string, DedupPairMatch>;
 };
 
 /**
@@ -4261,6 +4274,7 @@ function _dedup(
       totalRemoved: 0,
       pairSimilarities: new Map(),
       entryTitles: new Map(),
+      pairMatches: new Map(),
     };
 
   // --- Build neighbor map using title overlap + embedding similarity ---
@@ -4304,6 +4318,7 @@ function _dedup(
   type DedupHit = { id: string; score: number };
   const neighborMap = new Map<string, DedupHit[]>();
   const pairSimilarities = new Map<string, number>();
+  const pairMatches = new Map<string, DedupPairMatch>();
 
   for (let i = 0; i < entries.length; i++) {
     if (!neighborMap.has(entries[i].id)) neighborMap.set(entries[i].id, []);
@@ -4340,6 +4355,10 @@ function _dedup(
 
       if (titleMatch || embeddingMatch) {
         const score = Math.max(coefficient, similarity);
+        const reasons: DedupMatchReason[] = [];
+        if (titleMatch) reasons.push("title_overlap");
+        if (embeddingMatch) reasons.push("embedding_similarity");
+        pairMatches.set(dedupPairKey(entry.id, other.id), { score, reasons });
         const entryNeighbors = neighborMap.get(entry.id);
         if (entryNeighbors) entryNeighbors.push({ id: other.id, score });
         if (!neighborMap.has(other.id)) neighborMap.set(other.id, []);
@@ -4418,7 +4437,13 @@ function _dedup(
   // Build title map from all input entries — survives entry deletion.
   const entryTitles = new Map(entries.map((e) => [e.id, e.title]));
 
-  return { clusters: result, totalRemoved, pairSimilarities, entryTitles };
+  return {
+    clusters: result,
+    totalRemoved,
+    pairSimilarities,
+    entryTitles,
+    pairMatches,
+  };
 }
 
 export async function deduplicate(
