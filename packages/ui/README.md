@@ -38,6 +38,7 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
+| Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
 
 ### Solid 2 status
 
@@ -139,7 +140,7 @@ Production never runs a frontend dev server: the gateway serves `packages/ui/dis
 From the design fixture (v2.2) to Solid components. UI-01 ships the primitives
 and the smoke page; the fixture and shell rows land in UI-02.
 
-| Fixture element | Component | Primitive / lib | Slice |
+| Fixture element / §0 primitive | Component | Primitive / lib | Slice |
 |---|---|---|---|
 | Pane chrome (nav / list / detail), responsive collapse | `Shell`, `ListPane`, `DetailPane` | CSS grid + Tailwind breakpoints | UI-02 |
 | Project rows, knowledge rows | `ProjectRow`, `KnowledgeRow` | `<A>` (router), `Badge` | UI-02 |
@@ -147,10 +148,13 @@ and the smoke page; the fixture and shell rows land in UI-02.
 | Connection status (reachable / unreachable / unauthorized) | `ConnectionStatus` | `Badge`, `createResource` | UI-02 |
 | Dark / light | `ThemeToggle` | `Button`, `.dark` class on `<html>` | UI-02 |
 | Document-first detail, eyebrow labels | `KnowledgeDetail` | `.eyebrow`, `Separator` | UI-02 |
-| Message + tool blocks | `MessageBlock`, `ToolBlock` | plain Solid, `Badge` | UI-02 (fixture only) |
-| Selected passage, source links | `PassageTarget`, `SourceLink` | `.passage-target`, `<A>` | UI-02 (fixture only) |
-| Collapsed discussion indicator, expanded inline replies | `DiscussionMarker`, `DiscussionThread` | `Button`, `Separator` | UI-02 (fixture only) |
+| Source block (message + tool blocks) | `MessageBlock`, `ToolBlock` | plain Solid, `Badge` | UI-02 (fixture only) |
+| Anchor (stable passage id, `#anchor` in URL) | `PassageAnchor` | `id` attribute + router `location.hash` | UI-02 (fixture only) |
+| Selection (selected passage), source links | `PassageTarget`, `SourceLink` | `.passage-target`, `<A>` | UI-02 (fixture only) |
+| Discussion indicator (collapsed), inline discussion (expanded replies) | `DiscussionMarker`, `DiscussionThread` | `Button`, `Separator` | UI-02 (fixture only) |
 | Focused discussion with source quote | `FocusedDiscussion` | `Dialog` (Kobalte) | UI-02 (fixture only) |
+| Action menu (per passage / per finding) | `ActionMenu` | `Button` group now; Kobalte `DropdownMenu` when > 3 actions | UI-02 (fixture only, all disabled) |
+| Coverage label (which sources a finding rests on) | `CoverageLabel` | `Badge` outline | UI-02 (fixture only) |
 | Draft / saved / sent / unknown states, participant & scope labels | `StateBadge`, `ParticipantLabel` | `Badge` variants | UI-02 (fixture only) |
 | Empty / error / locked states | `EmptyState`, `ErrorState`, `LockedState` | plain Solid | UI-02 |
 | Mobile navigation | `MobileNav` | `Dialog` (sheet) or `Select` | UI-02 |
@@ -158,6 +162,7 @@ and the smoke page; the fixture and shell rows land in UI-02.
 | Tables with sorting (sessions, knowledge) | — | `@tanstack/solid-table` | UI-04 |
 | Long lists | — | `@tanstack/solid-virtual` | UI-04 / UI-06 |
 | Local cache, drafts | — | `idb` | UI-03 |
+| Charts (cost / compression / latency) | `PlotContainer` (Solid owns the container, Plot owns descendants) | `@observablehq/plot` | UI-05 (lazy) |
 
 ## Layout
 
