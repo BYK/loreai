@@ -129,19 +129,17 @@ export function createRepository<T>(
       for (const value of values) {
         const key = keyOf(value, scope);
         keys.add(key);
-        const record: CachedRecord<T> = {
+        const record = {
           key,
           scope,
           value,
           storedAt: t,
           accessedAt: t,
-        };
-        await tx.store.put(record as never);
+        } satisfies CachedRecord<T>;
+        await tx.store.put(record as CachedRecord<never>);
       }
       if (opts?.replaceScope) {
-        const existing = (await tx.store
-          .index("by-scope")
-          .getAllKeys(scope)) as string[];
+        const existing = await tx.store.index("by-scope").getAllKeys(scope);
         for (const key of existing) {
           if (!keys.has(key)) await tx.store.delete(key);
         }

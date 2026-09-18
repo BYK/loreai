@@ -1,0 +1,45 @@
+{
+  "distillations": [
+    {
+      "archived": 0,
+      "c_norm": 0.9,
+      "call_type": "batch",
+      "created_at": 1700000002000,
+      "generation": 0,
+      "id": "d-ui-contracts",
+      "r_compression": 0.4,
+      "session_id": "ui-contracts-session",
+      "token_count": 42
+    }
+  ],
+  "messages": [
+    {
+      "content": "message 0 body",
+      "created_at": 1700000000000,
+      "distilled": 0,
+      "embedding": null,
+      "id": "lore_tm_v1_tKHMzcyw58xPjzyQ5o3k6BRARN7FyPgLDOL0CPdQBJA",
+      "metadata": "<json>",
+      "project_id": "<uuid-0>",
+      "restored_at": null,
+      "role": "user",
+      "session_id": "ui-contracts-session",
+      "source_id": "msg-0",
+      "tokens": 4
+    },
+    {
+      "content": "message 1 body",
+      "created_at": 1700000001000,
+      "distilled": 0,
+      "embedding": null,
+      "id": "lore_tm_v1_L8NnFCDJU7S7MDCSy7OvWBEYndTuhR1vDyJihyXiNK8",
+      "metadata": "<json>",
+      "project_id": "<uuid-0>",
+      "restored_at": null,
+      "role": "assistant",
+      "session_id": "ui-contracts-session",
+      "source_id": "msg-1",
+      "tokens": 4
+    }
+  ]
+}

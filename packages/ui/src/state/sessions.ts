@@ -2,11 +2,7 @@ import type { Accessor } from "solid-js";
 
 import type { SessionDetail, SessionSummary } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
-import {
-  MESSAGE_BLOCK_SIZE,
-  type MessageBlock,
-  type Repository,
-} from "~/db";
+import { MESSAGE_BLOCK_SIZE, type MessageBlock, type Repository } from "~/db";
 import { createLoader, type Loader } from "~/lib/loader";
 
 import { createEntityStore } from "./entity-store";

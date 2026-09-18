@@ -1,0 +1,11 @@
+[
+  {
+    "distillation_count": 1,
+    "distilled_count": 0,
+    "first_message_at": 1700000000000,
+    "last_message_at": 1700000001000,
+    "message_count": 2,
+    "session_id": "ui-contracts-session",
+    "undistilled_count": 2
+  }
+]

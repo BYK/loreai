@@ -62,7 +62,10 @@ export function createEntityStore<T>(keyOf: (value: T) => string) {
       }));
     },
     setStatus(key: string, patch: Partial<KeyStatus>) {
-      setState("status", key, (prev) => ({ ...(prev ?? IDLE_STATUS), ...patch }));
+      setState("status", key, (prev) => ({
+        ...(prev ?? IDLE_STATUS),
+        ...patch,
+      }));
     },
   };
 }

@@ -1,0 +1,28 @@
+{
+  "__source": "recorded by hand from origin/devin/1789739012-api-cursor-pagination; replace with a live recording when it merges",
+  "items": [
+    {
+      "id": "019e18ec-e328-76c4-9c3c-09dbe8d51c6e",
+      "logical_id": "019e18ec-e328-76c4-9c3c-09dbe8d51c6e",
+      "tenant_id": "local",
+      "project_id": "019e18ec-0000-7000-8000-0000000000aa",
+      "category": "preference",
+      "title": "Prefer terse commit messages",
+      "content": "Conventional commits, one line.",
+      "source_session": null,
+      "cross_project": 0,
+      "confidence": 0.6,
+      "created_at": 1789728002000,
+      "updated_at": 1789814402000,
+      "metadata": null,
+      "created_by": null,
+      "updated_by": null,
+      "sensitivity": "normal",
+      "promotion_status": null,
+      "approval_status": "auto",
+      "last_accessed_at": null,
+      "last_reinforced_at": null
+    }
+  ],
+  "next_cursor": null
+}

@@ -267,9 +267,7 @@ describe("api client: error classification", () => {
     expect(calls[0]).toBe("/api/v1/projects/p%201/sessions");
     expect(sessions[0]?.session_id).toBe("s-1");
     const got = await client.getSession("/home/me/lore", "s 1");
-    expect(calls[1]).toBe(
-      "/api/v1/sessions/s%201?path=%2Fhome%2Fme%2Flore",
-    );
+    expect(calls[1]).toBe("/api/v1/sessions/s%201?path=%2Fhome%2Fme%2Flore");
     expect(got.messages).toHaveLength(1);
   });
 
@@ -286,7 +284,11 @@ describe("api client: error classification", () => {
       }
       if (url.endsWith("/teams")) return json({ teams: [] });
       if (url.endsWith("/sync/status")) {
-        return json({ enabled: false, state: "disabled", pending_changes: null });
+        return json({
+          enabled: false,
+          state: "disabled",
+          pending_changes: null,
+        });
       }
       return json({
         linked: false,

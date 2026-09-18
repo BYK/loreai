@@ -184,7 +184,9 @@ export function createApiClient(options: ApiClientOptions = {}) {
       cursor: string | null,
       signal?: AbortSignal,
     ): Promise<CursorPage<KnowledgeEntry>> {
-      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "?page=cursor";
+      const query = cursor
+        ? `?cursor=${encodeURIComponent(cursor)}`
+        : "?page=cursor";
       return getJson(
         `/projects/${encodeURIComponent(projectId)}/knowledge${query}`,
         cursorPage(knowledgeEntry),

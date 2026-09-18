@@ -20,5 +20,9 @@ export function mergeCursorPage<T>(
   const prior = prev?.items ?? [];
   const seen = new Set(prior.map(keyOf));
   const items = [...prior, ...page.items.filter((v) => !seen.has(keyOf(v)))];
-  return { items, nextCursor: page.next_cursor, complete: page.next_cursor === null };
+  return {
+    items,
+    nextCursor: page.next_cursor,
+    complete: page.next_cursor === null,
+  };
 }

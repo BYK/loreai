@@ -1,0 +1,50 @@
+{
+  "__source": "recorded by hand from origin/devin/1789739012-api-cursor-pagination; replace with a live recording when it merges",
+  "items": [
+    {
+      "id": "019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      "logical_id": "019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      "tenant_id": "local",
+      "project_id": "019e18ec-0000-7000-8000-0000000000aa",
+      "category": "decision",
+      "title": "Keep SQLite as the only store",
+      "content": "Portability is a requirement.",
+      "source_session": "session-1",
+      "cross_project": 0,
+      "confidence": 0.92,
+      "created_at": 1789728000000,
+      "updated_at": 1789814400000,
+      "metadata": null,
+      "created_by": null,
+      "updated_by": null,
+      "sensitivity": "normal",
+      "promotion_status": null,
+      "approval_status": "auto",
+      "last_accessed_at": null,
+      "last_reinforced_at": null
+    },
+    {
+      "id": "019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+      "logical_id": "019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+      "tenant_id": "local",
+      "project_id": "019e18ec-0000-7000-8000-0000000000aa",
+      "category": "gotcha",
+      "title": "Management routes hide behind a bodyless 404",
+      "content": "Non-loopback peers get an empty 404.",
+      "source_session": null,
+      "cross_project": 1,
+      "confidence": 0.8,
+      "created_at": 1789728001000,
+      "updated_at": 1789814401000,
+      "metadata": null,
+      "created_by": null,
+      "updated_by": null,
+      "sensitivity": "normal",
+      "promotion_status": null,
+      "approval_status": "auto",
+      "last_accessed_at": null,
+      "last_reinforced_at": null
+    }
+  ],
+  "next_cursor": "eyJ2IjoxLCJraW5kIjoia25vd2xlZGdlIn0"
+}

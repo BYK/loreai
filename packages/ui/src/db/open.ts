@@ -14,11 +14,7 @@
  */
 import { deleteDB, wrap } from "idb";
 
-import {
-  LORE_DB_NAME,
-  LORE_DB_VERSION,
-  type LoreUiDb,
-} from "./schema";
+import { LORE_DB_NAME, LORE_DB_VERSION, type LoreUiDb } from "./schema";
 
 export type CacheStatus = "ready" | "unavailable" | "blocked" | "reset";
 
@@ -53,7 +49,9 @@ export function indexedDbAvailable(factory?: IDBFactory): boolean {
   return typeof globalThis.indexedDB !== "undefined";
 }
 
-function upgrade(db: LoreUiDb, oldVersion: number) {
+// Runs inside `onupgradeneeded` — raw IDBDatabase only (wrapping the
+// database here aborts the versionchange transaction in fake-indexeddb).
+function upgrade(db: IDBDatabase, oldVersion: number) {
   if (oldVersion < 1) {
     db.createObjectStore("meta", { keyPath: "key" });
   }
@@ -88,7 +86,7 @@ function tryOpen(
     // promise.
     const timer = setTimeout(() => resolve("blocked"), blockedTimeoutMs);
     request.onupgradeneeded = (event) => {
-      upgrade(wrap(request.result) as LoreUiDb, event.oldVersion);
+      upgrade(request.result, event.oldVersion);
     };
     request.onblocked = () => undefined;
     request.onerror = () => {
@@ -127,13 +125,7 @@ async function openOnce(
   return db;
 }
 
-/** Delete the whole database so the next open recreates it cleanly. */
-export async function resetCache(opts?: OpenOptions): Promise<void> {
-  const pending = opening;
-  opening = null;
-  const db = await pending;
-  if (db) db.close();
-  const factory = opts?.factory;
+async function deleteLoreDb(factory: IDBFactory | undefined): Promise<void> {
   if (factory) {
     await new Promise<void>((resolve, reject) => {
       const request = factory.deleteDatabase(LORE_DB_NAME);
@@ -145,6 +137,15 @@ export async function resetCache(opts?: OpenOptions): Promise<void> {
   } else {
     await deleteDB(LORE_DB_NAME);
   }
+}
+
+/** Delete the whole database so the next open recreates it cleanly. */
+export async function resetCache(opts?: OpenOptions): Promise<void> {
+  const pending = opening;
+  opening = null;
+  const db = await pending;
+  if (db) db.close();
+  await deleteLoreDb(opts?.factory);
   opts?.onStatus?.("reset");
 }
 
@@ -171,12 +172,11 @@ export function openLoreDb(opts?: OpenOptions): Promise<LoreUiDb | null> {
       return null;
     }
     if (db === null) {
-      // Missing stores → reset and try once more; any open error lands here
-      // too (see below).
-      await resetCache(options).catch(() => undefined);
-      db = await openOnce(options?.factory, blockedTimeoutMs).catch(
-        () => null,
-      );
+      // Missing stores → delete and try once more. (`deleteLoreDb`, not
+      // `resetCache`: `opening` is the very promise being computed here, so
+      // awaiting it would self-deadlock.)
+      await deleteLoreDb(options?.factory).catch(() => undefined);
+      db = await openOnce(options?.factory, blockedTimeoutMs).catch(() => null);
       if (db === null || db === "blocked") {
         options?.onStatus?.(db === "blocked" ? "blocked" : "unavailable");
         opening = null;
@@ -186,9 +186,9 @@ export function openLoreDb(opts?: OpenOptions): Promise<LoreUiDb | null> {
     options?.onStatus?.("ready");
     return db;
   })().catch(async () => {
-    // Open rejected (e.g. VersionError: a higher version exists) → reset,
+    // Open rejected (e.g. VersionError: a higher version exists) → delete,
     // retry once, then give up.
-    await resetCache(options).catch(() => undefined);
+    await deleteLoreDb(options?.factory).catch(() => undefined);
     const retry = await openOnce(options?.factory, blockedTimeoutMs).catch(
       () => null,
     );

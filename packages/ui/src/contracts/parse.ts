@@ -2,7 +2,9 @@ import * as v from "valibot";
 
 import { ContractError, type ContractIssue } from "./error";
 
-function toIssues(issues: readonly v.InferIssue<v.GenericSchema>[]): ContractIssue[] {
+function toIssues(
+  issues: readonly v.InferIssue<v.GenericSchema>[],
+): ContractIssue[] {
   return issues.map((issue) => ({
     path: v.getDotPath(issue) ?? "",
     message: issue.message,
@@ -32,7 +34,10 @@ export function safeParseContract<S extends v.GenericSchema>(
 ): { ok: true; value: v.InferOutput<S> } | { ok: false; error: ContractError } {
   const result = v.safeParse(schema, input, { abortEarly: false });
   if (!result.success) {
-    return { ok: false, error: new ContractError(route, toIssues(result.issues)) };
+    return {
+      ok: false,
+      error: new ContractError(route, toIssues(result.issues)),
+    };
   }
   return { ok: true, value: result.output };
 }

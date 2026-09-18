@@ -79,7 +79,10 @@ export function createLoader<S, T>(
       if (options?.cached) {
         options.cached(key, c.signal).then(
           (value) => {
-            if (current !== generation || serverSettled) return;
+            if (current !== generation) return;
+            // A server *answer* wins over a late cache read; a server
+            // *failure* doesn't — cached data still fills the empty screen.
+            if (serverSettled && error() === undefined) return;
             if (value !== undefined) {
               setData(() => value);
               setStale(true);

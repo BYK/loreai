@@ -1,12 +1,10 @@
-import { createMemo } from "solid-js";
-
 import type { ProjectSummary } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
 import type { Repository } from "~/db";
 import { createLoader, type Loader } from "~/lib/loader";
 
 import { createEntityStore } from "./entity-store";
-import { statusOf, type KeyStatus } from "./status";
+import { statusOf } from "./status";
 
 export interface ProjectsDeps {
   client: ApiClient;
@@ -50,7 +48,9 @@ export function createProjectsState({ client, repo, tracked }: ProjectsDeps) {
   return {
     list,
     byId(id: string | null | undefined): ProjectSummary | undefined {
-      return id ? (store.select(id) ?? list.data()?.find((p) => p.id === id)) : undefined;
+      return id
+        ? (store.select(id) ?? list.data()?.find((p) => p.id === id))
+        : undefined;
     },
     all(): ProjectSummary[] | undefined {
       return list.data() ?? store.selectList(SCOPE);
