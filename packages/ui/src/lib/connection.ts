@@ -1,7 +1,7 @@
 /**
  * Gateway connection state, derived from the outcome of API calls rather
  * than a dedicated probe: the shell reports what the last read actually
- * experienced. There is no auth/sync REST surface yet (docs/api-inventory.md),
+ * experienced. There is no auth/sync REST surface yet (API inventory on #1796),
  * so "unauthorized" means the gateway refused or hid the management API from
  * this browser (remote peer without LORE_ALLOW_REMOTE_MANAGEMENT, or a token
  * requirement), not a per-user login.

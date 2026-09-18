@@ -24,13 +24,13 @@ server, Vitest); production builds drop them and their chunks from the route
 table, so the gateway's shipped bundle answers them with the SPA's
 not-found screen.
 
-Documents in this package:
+Reference documents:
 
-- [`docs/api-inventory.md`](docs/api-inventory.md) — every `/api/v1` route,
-  response shape, service ownership, gaps, and the management boundary the SPA
-  must preserve.
-- [`docs/baseline.md`](docs/baseline.md) — reproducible gateway startup / RSS
-  / proxy-latency measurements before and after the UI.
+- [API inventory and gateway baseline](https://github.com/BYK/loreai/issues/1796#issuecomment-5736848368)
+  (comment on #1796, not committed) — every `/api/v1` route, response shape,
+  service ownership, gaps, the management boundary the SPA must preserve, and
+  the reproducible startup / RSS / proxy-latency measurements before and after
+  the UI (`scripts/ui-baseline.mjs`).
 - [`src/components/ui/ATTRIBUTION.md`](src/components/ui/ATTRIBUTION.md) —
   provenance and licence of the copied Solid UI primitives.
 
@@ -201,7 +201,7 @@ the published tarball / SEA binary need no extra files.
 
 ## Baseline (before / after UI-02)
 
-From [`docs/baseline.md`](docs/baseline.md), `node scripts/ui-baseline.mjs
+From the [baseline posted on #1796](https://github.com/BYK/loreai/issues/1796#issuecomment-5736848368), `node scripts/ui-baseline.mjs
 --runs 5 --requests 40` on the same VM (Xeon 8559C ×8, Node v24.19.0), p50s:
 
 | Metric | clean `main` (`a4e6af5b`) | after UI-02 |
@@ -352,5 +352,4 @@ packages/ui/
   public/favicon.svg      copied from the website
   test/                   Vitest (jsdom) unit tests
   e2e/                    Playwright specs + gateway.mjs / seed.mjs (built-gateway harness)
-  docs/                   api-inventory.md, baseline.md
 ```

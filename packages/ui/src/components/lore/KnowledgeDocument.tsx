@@ -47,7 +47,7 @@ const Meta: Component<{ label: string; value: string | null | undefined }> = (
 
 /**
  * Read-only, document-first rendering of one knowledge entry (the current
- * version — the API has no history route yet, see docs/api-inventory.md).
+ * version — the API has no history route yet, see the API inventory on #1796).
  */
 export const KnowledgeDocument: Component<{
   entry: KnowledgeEntry;

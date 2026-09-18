@@ -4,7 +4,7 @@
  * (`.loose()`) so core stays the authority on the record shape and later
  * slices can add fields without breaking this client.
  *
- * See docs/api-inventory.md for the full, code-verified response shapes.
+ * See the API inventory on #1796 for the full, code-verified response shapes.
  */
 import { z } from "zod";
 
