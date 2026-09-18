@@ -82,9 +82,12 @@ function tryOpen(
     const idb = factory ?? globalThis.indexedDB;
     const request = idb.open(LORE_DB_NAME, LORE_DB_VERSION);
     // A `blocked` upgrade is surfaced by this timer; if the underlying
-    // request later completes anyway its handlers no-op on the settled
-    // promise.
-    const timer = setTimeout(() => resolve("blocked"), blockedTimeoutMs);
+    // request later completes anyway, the orphaned connection is closed.
+    let gaveUp = false;
+    const timer = setTimeout(() => {
+      gaveUp = true;
+      resolve("blocked");
+    }, blockedTimeoutMs);
     request.onupgradeneeded = (event) => {
       upgrade(request.result, event.oldVersion);
     };
@@ -96,6 +99,10 @@ function tryOpen(
     request.onsuccess = () => {
       clearTimeout(timer);
       const raw = request.result;
+      if (gaveUp) {
+        raw.close();
+        return;
+      }
       raw.onversionchange = () => {
         // Another tab wants to upgrade: close so it can proceed.
         void opening?.then((db) => db?.close());
