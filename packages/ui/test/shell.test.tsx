@@ -745,4 +745,26 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
       expect(screen.queryByText("Knowledge entry unavailable")).toBeNull();
     });
   });
+
+  it("keeps cached projects in the nav when the gateway is unreachable", async () => {
+    const db = await seededDb();
+    const client = fakeClient({
+      listProjects: () => {
+        throw new ApiError("unreachable", "/projects", "down");
+      },
+      listProjectKnowledge: () => {
+        throw new ApiError("unreachable", "/projects/p-lore/knowledge", "down");
+      },
+    });
+    mount("/projects/p-lore", client, Promise.resolve(db));
+    const rows = await screen.findAllByTestId("nav-project");
+    expect(rows.map((r) => r.textContent)).toContain("lore2");
+    const badges = await screen.findAllByTestId("stale-indicator");
+    expect(badges.map((b) => b.textContent)).toContain(
+      "Cached · gateway unavailable",
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Projects unavailable")).toBeNull(),
+    );
+  });
 });
