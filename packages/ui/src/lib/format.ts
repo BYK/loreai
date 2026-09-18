@@ -7,6 +7,13 @@ function parseDate(value: number | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+/** Whole local calendar days from `date` to `now` (negative for the future). */
+function calendarDaysBetween(date: Date, now: Date): number {
+  const startOfDay = (d: Date) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.round((startOfDay(now) - startOfDay(date)) / DAY_MS);
+}
+
 /**
  * Short, inbox-style timestamp: time of day for today, weekday within a
  * week, otherwise a compact date. `now` is injectable for tests.
@@ -17,15 +24,15 @@ export function formatWhen(
 ): string {
   const date = parseDate(value);
   if (!date) return "—";
-  const diff = now.getTime() - date.getTime();
-  if (diff < DAY_MS && date.getDate() === now.getDate()) {
+  const days = calendarDaysBetween(date, now);
+  if (days === 0) {
     return date.toLocaleTimeString(undefined, {
       hour: "2-digit",
       minute: "2-digit",
     });
   }
-  if (diff < 2 * DAY_MS) return "Yesterday";
-  if (diff < 7 * DAY_MS) {
+  if (days === 1) return "Yesterday";
+  if (days > 1 && days < 7) {
     return date.toLocaleDateString(undefined, { weekday: "long" });
   }
   return date.toLocaleDateString(undefined, {
