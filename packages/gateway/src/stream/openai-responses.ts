@@ -284,6 +284,9 @@ export function assertSuccessfulResponsesCompletion(
     ) {
       throw new Error("upstream Responses request did not complete");
     }
+    if (rawItem.status !== undefined && rawItem.status !== "completed") {
+      throw new Error("upstream Responses request did not complete");
+    }
   }
 }
 

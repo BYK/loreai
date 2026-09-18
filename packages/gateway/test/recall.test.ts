@@ -929,6 +929,13 @@ describe("buildRecallFollowUpRequest", () => {
               thinking: "preserve this reasoning",
               signature: "signed",
             },
+            { type: "text", text: "already delivered answer prefix" },
+            {
+              type: "tool_use",
+              id: "call_delivered_read",
+              name: "Read",
+              input: { path: "README.md" },
+            },
             recall,
           ],
           "tool_use",
@@ -971,9 +978,25 @@ describe("buildRecallFollowUpRequest", () => {
               type: "text",
               text: expect.stringContaining("Continue the user's task"),
             }),
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining("already delivered answer prefix"),
+            }),
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining('tool Read: {"path":"README.md"}'),
+            }),
           ]),
         }),
       );
+      expect(
+        recovery.messages
+          .at(-2)
+          ?.content.filter(
+            (block) =>
+              block.type === "tool_use" && block.id === "call_delivered_read",
+          ),
+      ).toEqual([]);
       expect(request).toEqual(original);
     },
   );

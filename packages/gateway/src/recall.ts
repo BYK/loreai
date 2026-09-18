@@ -1231,6 +1231,256 @@ export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  const allowedKeys = new Set(allowed);
+  return Object.keys(value).every((key) => allowedKeys.has(key));
+}
+
+function cloneJSONValue(value: unknown): unknown {
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) return undefined;
+    return JSON.parse(serialized) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the only response shape allowed to leave failure synthesis. */
+export function projectRecallRecoveryResponse(
+  resp: GatewayResponse,
+): GatewayResponse | undefined {
+  const content: GatewayContentBlock[] = [];
+  for (const block of resp.content) {
+    if (block.type === "text") {
+      content.push({ type: "text", text: block.text });
+      continue;
+    }
+    if (block.type === "thinking") {
+      content.push({
+        type: "thinking",
+        thinking: block.thinking,
+        ...(block.signature ? { signature: block.signature } : {}),
+      });
+      continue;
+    }
+    if (
+      block.type === "tool_use" &&
+      block.name !== RECALL_TOOL_NAME &&
+      block.name.trim().length > 0
+    ) {
+      const input = cloneJSONValue(block.input);
+      if (input === undefined) return undefined;
+      content.push({
+        type: "tool_use",
+        id: block.id,
+        name: block.name,
+        input,
+      });
+      continue;
+    }
+    if (block.type !== "opaque" || block.responsesItem !== true) {
+      return undefined;
+    }
+    return undefined;
+  }
+
+  let rawOutputItems: Array<Record<string, unknown>> | undefined;
+  const rawContent: GatewayContentBlock[] = [];
+  if (resp.rawOutputItems) {
+    rawOutputItems = [];
+    for (const rawItem of resp.rawOutputItems) {
+      if (!isRecord(rawItem) || rawItem.status !== "completed")
+        return undefined;
+      if (
+        rawItem.type === "message" &&
+        typeof rawItem.id === "string" &&
+        rawItem.id &&
+        rawItem.role === "assistant" &&
+        Array.isArray(rawItem.content) &&
+        hasOnlyKeys(rawItem, ["type", "id", "role", "status", "content"])
+      ) {
+        const projectedParts: Array<Record<string, unknown>> = [];
+        for (const rawPart of rawItem.content) {
+          if (!isRecord(rawPart)) return undefined;
+          if (
+            rawPart.type === "output_text" &&
+            typeof rawPart.text === "string" &&
+            hasOnlyKeys(rawPart, ["type", "text", "annotations"])
+          ) {
+            if (
+              rawPart.annotations !== undefined &&
+              !Array.isArray(rawPart.annotations)
+            ) {
+              return undefined;
+            }
+            projectedParts.push({
+              type: "output_text",
+              text: rawPart.text,
+              ...(Array.isArray(rawPart.annotations)
+                ? { annotations: [] }
+                : {}),
+            });
+            continue;
+          }
+          if (
+            rawPart.type === "refusal" &&
+            typeof rawPart.refusal === "string" &&
+            hasOnlyKeys(rawPart, ["type", "refusal"])
+          ) {
+            projectedParts.push({ type: "refusal", refusal: rawPart.refusal });
+            continue;
+          }
+          return undefined;
+        }
+        rawOutputItems.push({
+          type: "message",
+          id: rawItem.id,
+          role: "assistant",
+          status: "completed",
+          content: projectedParts,
+        });
+        for (const projectedPart of projectedParts) {
+          if (
+            projectedPart.type === "output_text" &&
+            typeof projectedPart.text === "string"
+          ) {
+            rawContent.push({ type: "text", text: projectedPart.text });
+          } else if (
+            projectedPart.type === "refusal" &&
+            typeof projectedPart.refusal === "string"
+          ) {
+            rawContent.push({ type: "text", text: projectedPart.refusal });
+          }
+        }
+        continue;
+      }
+      if (
+        rawItem.type === "function_call" &&
+        typeof rawItem.id === "string" &&
+        rawItem.id &&
+        typeof rawItem.call_id === "string" &&
+        rawItem.call_id &&
+        typeof rawItem.name === "string" &&
+        rawItem.name &&
+        rawItem.name !== RECALL_TOOL_NAME &&
+        typeof rawItem.arguments === "string" &&
+        hasOnlyKeys(rawItem, [
+          "type",
+          "id",
+          "call_id",
+          "name",
+          "arguments",
+          "status",
+        ])
+      ) {
+        rawOutputItems.push({
+          type: "function_call",
+          id: rawItem.id,
+          call_id: rawItem.call_id,
+          name: rawItem.name,
+          arguments: rawItem.arguments,
+          status: "completed",
+        });
+        let input: unknown;
+        try {
+          input = JSON.parse(rawItem.arguments);
+        } catch {
+          input = rawItem.arguments;
+        }
+        rawContent.push({
+          type: "tool_use",
+          id: rawItem.call_id,
+          name: rawItem.name,
+          input,
+        });
+        continue;
+      }
+      if (
+        rawItem.type === "reasoning" &&
+        typeof rawItem.id === "string" &&
+        rawItem.id &&
+        hasOnlyKeys(rawItem, [
+          "type",
+          "id",
+          "status",
+          "summary",
+          "content",
+          "encrypted_content",
+        ])
+      ) {
+        const projectParts = (
+          rawParts: unknown,
+          partType: "summary_text" | "reasoning_text",
+        ): Array<Record<string, unknown>> | undefined => {
+          if (rawParts === undefined) return [];
+          if (!Array.isArray(rawParts)) return undefined;
+          const parts: Array<Record<string, unknown>> = [];
+          for (const rawPart of rawParts) {
+            if (
+              !isRecord(rawPart) ||
+              rawPart.type !== partType ||
+              typeof rawPart.text !== "string" ||
+              !hasOnlyKeys(rawPart, ["type", "text"])
+            ) {
+              return undefined;
+            }
+            parts.push({ type: partType, text: rawPart.text });
+          }
+          return parts;
+        };
+        const summary = projectParts(rawItem.summary, "summary_text");
+        const reasoningContent = projectParts(
+          rawItem.content,
+          "reasoning_text",
+        );
+        if (
+          !summary ||
+          !reasoningContent ||
+          (rawItem.encrypted_content !== undefined &&
+            rawItem.encrypted_content !== null &&
+            typeof rawItem.encrypted_content !== "string")
+        ) {
+          return undefined;
+        }
+        rawOutputItems.push({
+          type: "reasoning",
+          id: rawItem.id,
+          status: "completed",
+          ...(rawItem.summary !== undefined ? { summary } : {}),
+          ...(rawItem.content !== undefined
+            ? { content: reasoningContent }
+            : {}),
+          ...(typeof rawItem.encrypted_content === "string"
+            ? { encrypted_content: rawItem.encrypted_content }
+            : {}),
+        });
+        continue;
+      }
+      return undefined;
+    }
+  }
+
+  return {
+    id: resp.id,
+    model: resp.model,
+    content: rawOutputItems?.length ? rawContent : content,
+    ...(rawOutputItems ? { rawOutputItems } : {}),
+    ...(resp.codexRateLimits
+      ? { codexRateLimits: resp.codexRateLimits.map((event) => ({ ...event })) }
+      : {}),
+    stopReason: resp.stopReason,
+    ...(resp.usage ? { usage: { ...resp.usage } } : {}),
+  };
+}
+
 /**
  * Build a follow-up request after recall execution.
  *
@@ -1341,6 +1591,31 @@ export function buildRecallFollowUpRequest(
 const RECALL_RECOVERY_INSTRUCTION =
   "Continue the user's task using the accepted recall results and the context already available. Give your best supported answer or use an available non-recall tool. Do not request recall and do not mention recovery or provider failures.";
 
+const MAX_RECOVERY_DELIVERED_CONTEXT_CHARS = 8 * 1024;
+
+function recoveryDeliveredContext(resp: GatewayResponse): string | undefined {
+  const delivered: string[] = [];
+  for (const block of resp.content) {
+    if (block.type === "text" && block.text.trim()) {
+      delivered.push(`text:\n${block.text}`);
+    } else if (block.type === "tool_use" && block.name !== RECALL_TOOL_NAME) {
+      let input: string;
+      try {
+        input = JSON.stringify(block.input);
+      } catch {
+        input = "[unserializable input]";
+      }
+      delivered.push(`tool ${block.name}: ${input}`);
+    }
+  }
+  if (delivered.length === 0) return undefined;
+  const summary = delivered.join("\n\n");
+  return [
+    "The following output was already delivered to the client before synthesis. Continue after it. Never repeat this text and never repeat these tool calls:",
+    summary.slice(0, MAX_RECOVERY_DELIVERED_CONTEXT_CHARS),
+  ].join("\n\n");
+}
+
 /** Build the single request-local synthesis attempt after recall continuation failure. */
 export function buildRecallRecoveryRequest(
   originalReq: GatewayRequest,
@@ -1359,6 +1634,7 @@ export function buildRecallRecoveryRequest(
   const messages = [...followUp.messages];
   const resultMessage = messages.at(-1);
   if (!resultMessage) throw new Error("recall recovery result message missing");
+  const deliveredContext = recoveryDeliveredContext(resp);
   messages[messages.length - 1] = {
     ...resultMessage,
     content: resultMessage.content.map((block) =>
@@ -1367,6 +1643,9 @@ export function buildRecallRecoveryRequest(
             ...block,
             content: [
               ...block.content,
+              ...(deliveredContext
+                ? [{ type: "text" as const, text: deliveredContext }]
+                : []),
               { type: "text", text: RECALL_RECOVERY_INSTRUCTION },
             ],
           }

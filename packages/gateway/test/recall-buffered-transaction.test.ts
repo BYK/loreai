@@ -58,6 +58,16 @@ describe.each([
         expect(ltm.transferCount(id)).toBe(0);
         if (outcome === "fallback" && calls === 2)
           return new Response("failure", { status: 503 });
+        if (
+          (outcome === "fallback" && calls > 2) ||
+          (outcome !== "fallback" && calls > FINAL_RECALL_CALL)
+        )
+          return providerResponse(
+            protocol,
+            calls,
+            "answer",
+            (body as Record<string, unknown>).stream === true,
+          );
         return providerResponse(
           protocol,
           calls,
@@ -80,16 +90,22 @@ describe.each([
       const body = await response.text();
       await settled();
       expect(calls).toBe(
-        outcome === "answer" ? FINAL_RECALL_CALL : outcome === "mixed" ? 1 : 2,
+        outcome === "answer" ? FINAL_RECALL_CALL : outcome === "mixed" ? 1 : 3,
       );
       expect(body).toContain(
         outcome === "answer"
           ? "Completed answer"
           : outcome === "mixed"
             ? "Read"
-            : "lore-recall:",
+            : outcome === "fallback"
+              ? "Completed answer"
+              : "lore-recall:",
       );
-      if (protocol === "openai-responses" && outcome !== "answer") {
+      if (
+        protocol === "openai-responses" &&
+        outcome !== "answer" &&
+        outcome !== "fallback"
+      ) {
         const envelope = JSON.parse(body);
         expect(body).toContain("lore-recall:");
         expect(
@@ -231,7 +247,7 @@ describe.each([
       await response.text();
       await settled();
       const state = stateFor(alias);
-      expect(calls).toBe(FINAL_RECALL_CALL);
+      expect(calls).toBe(FINAL_RECALL_CALL + 1);
       expect.soft(state.recallStore.size).toBe(0);
       expect
         .soft(
@@ -275,9 +291,13 @@ describe.each([
         getSessionCosts(stateFor(alias).sessionID)?.conversation,
       ).toMatchObject({
         inputTokens:
-          TEST_RECALL_EXECUTION_CAP * 3 + (outcome === "invalid" ? 1000 : 0),
+          TEST_RECALL_EXECUTION_CAP * 3 +
+          (outcome === "invalid" ? 1000 : 0) +
+          (codex ? 0 : 3),
         outputTokens:
-          TEST_RECALL_EXECUTION_CAP * 2 + (outcome === "invalid" ? 100 : 0),
+          TEST_RECALL_EXECUTION_CAP * 2 +
+          (outcome === "invalid" ? 100 : 0) +
+          (codex ? 0 : 2),
         turns: 1,
       });
     },
