@@ -868,6 +868,54 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     expect(live).toContain(b);
   });
 
+  it("offers an entry edited after clustering under its current version, and drops a deleted one", async () => {
+    const { projectPath, projectId, a, b, unrelated } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const { dedupPreviewGroups } = await import("../src/dedup-api");
+    // Clustering saw the original version ids; the entries change before the
+    // groups are built (the deduplicators await embeddings in between).
+    const clustered = {
+      clusters: [
+        {
+          surviving: { id: a, title: "a" },
+          merged: [
+            { id: b, title: "b" },
+            { id: unrelated, title: "u" },
+          ],
+        },
+      ],
+      totalRemoved: 2,
+      pairSimilarities: new Map<string, number>(),
+      entryTitles: new Map<string, string>(),
+    };
+    ltm.remove(unrelated);
+    const stableGroupId = dedupPreviewGroups(clustered, "project", projectId)[0]
+      .group_id;
+    ltm.update(a, { content: "edited after clustering" });
+    const current = ltm.getByLogical(a);
+    if (!current) throw new Error("expected a to still be live");
+    expect(current.id).not.toBe(a);
+
+    const groups = dedupPreviewGroups(clustered, "project", projectId);
+    expect(groups).toHaveLength(1);
+    const [group] = groups;
+    expect(group.candidates.map((c) => c.id).sort()).toEqual(
+      [current.id, b].sort(),
+    );
+    const edited = group.candidates.find((c) => c.logical_id === a);
+    expect(edited).toMatchObject({
+      id: current.id,
+      revision: 2,
+      content_excerpt: "edited after clustering",
+    });
+    expect(group.suggested_keep_id).toBe(current.id);
+    // Membership by logical id is unchanged, so the group id is too.
+    expect(group.group_id).toBe(stableGroupId);
+    expect(ltm.forProject(projectPath, false).map((e) => e.logical_id)).toEqual(
+      expect.arrayContaining([a, b]),
+    );
+  });
+
   it.each([
     ["not json", "{not json"],
     ["array body", "[]"],

@@ -68,16 +68,23 @@ function excerpt(content: string): string {
   return `${collapsed.slice(0, CONTENT_EXCERPT_LENGTH - 1).trimEnd()}…`;
 }
 
-/** Stable across previews as long as the cluster's membership is unchanged. */
-function groupIdFor(scope: DedupScope, memberIds: string[]): string {
+/** Stable across previews (and edits) as long as the cluster's membership is unchanged. */
+function groupIdFor(scope: DedupScope, logicalIds: string[]): string {
   const digest = createHash("sha256")
-    .update([...memberIds].sort().join("\n"))
+    .update([...logicalIds].sort().join("\n"))
     .digest("hex")
     .slice(0, 16);
   return `${scope}:${digest}`;
 }
 
-function toGroups(
+/**
+ * Typed groups for one `DedupResult`. Cluster members are re-read by logical
+ * id: the clustering is async (embeddings), so an entry may have been edited or
+ * deleted since. Edited entries are offered under their CURRENT version id and
+ * revision; deleted ones drop out instead of carrying a revision apply would
+ * refuse.
+ */
+export function dedupPreviewGroups(
   result: DedupResult,
   scope: DedupScope,
   projectId: string | null,
@@ -90,14 +97,15 @@ function toGroups(
       cluster.surviving.id,
       ...cluster.merged.map((m) => m.id),
     ];
-    // Revisions are read after clustering; an entry deleted in between simply
-    // drops out instead of being offered with a revision apply would refuse.
     const revisions = dedupApply.currentRevisions(memberIds);
     const candidates: DedupPreviewCandidate[] = [];
+    let keepId: string | null = null;
     for (const id of memberIds) {
       const revision = revisions.get(id);
-      const entry = revision === undefined ? null : ltm.get(id);
+      const entry =
+        revision === undefined ? null : ltm.getByLogical(ltm.logicalIdOf(id));
       if (revision === undefined || !entry) continue;
+      if (id === cluster.surviving.id) keepId = entry.id;
       let score = 0;
       const reasons = new Set<string>();
       for (const other of memberIds) {
@@ -108,7 +116,7 @@ function toGroups(
         for (const reason of match.reasons) reasons.add(reason);
       }
       candidates.push({
-        id,
+        id: entry.id,
         logical_id: entry.logical_id,
         revision,
         title: entry.title,
@@ -118,18 +126,15 @@ function toGroups(
       });
     }
     if (candidates.length < 2) continue;
-    const keepId = candidates.some((c) => c.id === cluster.surviving.id)
-      ? cluster.surviving.id
-      : candidates[0].id;
     groups.push({
       group_id: groupIdFor(
         scope,
-        candidates.map((c) => c.id),
+        candidates.map((c) => c.logical_id),
       ),
       scope,
       project_id: projectId,
       candidates,
-      suggested_keep_id: keepId,
+      suggested_keep_id: keepId ?? candidates[0].id,
     });
   }
   return groups;
@@ -145,8 +150,8 @@ export async function handleDedupPreview(
   const body: DedupPreviewResponse = {
     dry_run: true,
     groups: [
-      ...toGroups(project, "project", projectId),
-      ...toGroups(global, "global", null),
+      ...dedupPreviewGroups(project, "project", projectId),
+      ...dedupPreviewGroups(global, "global", null),
     ],
     project,
     global,
