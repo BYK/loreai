@@ -388,7 +388,7 @@ describe("listKnowledgePage — filters", () => {
     ).toHaveLength(2);
   });
 
-  test("q falls back to LIKE when no FTS-indexable term remains", () => {
+  test("q with only short tokens matches nothing, like ltm.search()'s LIKE fallback", () => {
     const project = freshProject("q-like");
     ltm.create({
       id: uuidv7(),
@@ -406,11 +406,21 @@ describe("listKnowledgePage — filters", () => {
       title: "Y",
       content: "other",
     });
-    // "x" is filtered out by filterTerms (len ≤ 1) → LIKE '%x%' path.
-    const ids = listKnowledgePage(project, { q: "x", limit: 10 }).items.map(
-      (e) => e.title,
-    );
-    expect(ids).toEqual(["X"]);
+    // "x" / "is a" have no FTS-indexable and no LIKE-able (>2 chars) term:
+    // searchLike() returns [] for these, so the list filter must too rather
+    // than broad-matching the raw string.
+    for (const q of ["x", "is a", "to"]) {
+      expect(listKnowledgePage(project, { q, limit: 10 }).items).toEqual([]);
+      expect(ltm.search({ query: q, projectPath: project, limit: 10 })).toEqual(
+        [],
+      );
+    }
+    // A 3+ char token that FTS can't index still hits the LIKE path.
+    expect(
+      listKnowledgePage(project, { q: "single-letter", limit: 10 }).items.map(
+        (e) => e.title,
+      ),
+    ).toEqual(["X"]);
   });
 
   test("q + sort + keyset compose: filtered set pages deterministically", () => {

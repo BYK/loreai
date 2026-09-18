@@ -144,13 +144,9 @@ function queryFilter(q: string): { sql: string; params: ReadParam[] } | null {
     };
   }
   const terms = likeTerms(trimmed);
-  if (!terms.length) {
-    const needle = `%${trimmed.toLowerCase()}%`;
-    return {
-      sql: `(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)`,
-      params: [needle, needle],
-    };
-  }
+  // Nothing searchable (all tokens ≤ 2 chars): searchLike() returns [] here,
+  // so match nothing rather than broad-matching the raw string.
+  if (!terms.length) return { sql: "0", params: [] };
   return {
     sql: terms
       .map(() => "(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)")
