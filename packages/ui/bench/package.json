@@ -1,0 +1,17 @@
+{
+  "name": "@loreai/ui-bench",
+  "private": true,
+  "type": "module",
+  "description": "Schema-library benchmark for the UI contracts (not a workspace package, not run in CI). See README.md.",
+  "scripts": {
+    "bench": "node --expose-gc bench.mjs",
+    "bundle": "node bundle-size.mjs"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "0.34.52",
+    "arktype": "2.2.3",
+    "esbuild": "0.28.2",
+    "valibot": "1.5.0",
+    "zod": "4.6.2"
+  }
+}

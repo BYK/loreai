@@ -49,13 +49,107 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Table | `@tanstack/solid-table` | 9.2.4 | 2026-08-28 | v9 API (`createTable`, `tableFeatures`) |
 | Virtual rows | `@tanstack/solid-virtual` | 3.13.38 | 2026-09-07 | |
 | CSS | `tailwindcss` / `@tailwindcss/vite` | 4.3.3 | 2026-07-16 | CSS-first config, no `tailwind.config.js` |
-| Local cache (scaffold) | `idb` | 8.0.3 | 2025-05-07 | UI-03 fills the repositories |
-| Response validation | `zod` | 4.5.4 | 2026-08-29 | |
+| Local cache | `idb` | 8.0.3 | 2025-05-07 | `src/db/` repositories and migrations (UI-03) |
+| Response validation | `valibot` | 1.5.0 | 2026-09-09 | see [Schema library](#schema-library-ui-03-decision); replaces `zod` 4.5.4 from UI-02 |
 | Relative timestamps | `date-fns` | 4.4.0 | 2026-05-29 | `formatRelative` in `src/lib/format.ts`; en-US locale until UI has a locale setting |
+| IndexedDB in tests | `fake-indexeddb` | 6.2.5 | 2025-11-07 | dev only; see [Tests](#tests) |
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
 | Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
+
+### Schema library (UI-03 decision)
+
+UI-02 shipped its three response schemas with `zod` 4.5.4 (classic API). Before
+growing that to the ~15 contracts UI-03 needs, the owner asked for a
+measured choice between Zod v4, Valibot, TypeBox and ArkType. The benchmark
+lives in [`bench/`](bench/) (`npm install && npm run bundle && npm run bench`
+inside that directory; it is a standalone npm package, not a workspace member,
+and is **not** run in CI). All five adapters declare the *same* 15 schemas
+(`bench/schemas/*.mjs`) over the same deterministic fixtures
+(`bench/fixtures.mjs`): a 200-entry knowledge cursor page, a 2 000-message
+session detail, a 12-project list, account and sharing status. Unknown keys
+are tolerated in every adapter (loose objects) to match the contract rule.
+
+Versions measured (all published ≥ 7 days before 2026-09-18): `zod` 4.6.2
+(`zod` and `zod/mini` entry points), `valibot` 1.5.0, `@sinclair/typebox`
+0.34.52 (`Value.Check`, not `TypeCompiler` — see CSP below), `arktype` 2.2.3.
+Node v24.19.0, `esbuild` 0.28.2 for the bundle numbers.
+
+**Bundle contribution** (`bench/bundle-size.mjs`: esbuild, `bundle + minify +
+treeShaking`, browser platform, only the 15 schemas imported):
+
+| Library | minified | gzip |
+|---|---|---|
+| `zod` (classic) | 443.5 kB | 90.3 kB |
+| `zod/mini` | 23.3 kB | 7.7 kB |
+| **`valibot`** | **9.8 kB** | **3.0 kB** |
+| `@sinclair/typebox` | 105.6 kB | 25.8 kB |
+| `arktype` | 158.7 kB | 49.7 kB |
+
+The UI-02 SPA JS is 354.7 kB / 109.2 kB gzip; the classic-Zod row is why.
+
+**Parse throughput** (`bench/bench.mjs`, `node --expose-gc`, 400 parses per
+round, median of 5 rounds; inputs are fresh `structuredClone`s so no library
+can memoise on identity; minor GCs are per round of 400 parses):
+
+| Library | knowledge page (200 entries) | session detail (2 000 messages) | minor GCs (page / session) |
+|---|---|---|---|
+| `zod` (classic) | 6 817 ops/s · 0.147 ms | 1 119 ops/s · 0.89 ms | 4 / 13 |
+| `zod/mini` | 2 142 ops/s · 0.467 ms | 429 ops/s · 2.33 ms | 7 / 37 |
+| **`valibot`** | 1 531 ops/s · 0.653 ms | 630 ops/s · 1.59 ms | **3 / 12** |
+| `@sinclair/typebox` | 3 592 ops/s · 0.278 ms | 544 ops/s · 1.84 ms | 1 / 5 |
+| `arktype` (jitless) | 5 102 ops/s · 0.196 ms | 775 ops/s · 1.29 ms | 4 / 21 |
+| `arktype` (JIT, for reference) | ~47 000 ops/s | — | — |
+
+**Heap retention after 10 000 parses** of the knowledge page in one process
+(three forced GCs before and after, only the last result kept, as a store
+would): `zod` +30 kB, `zod/mini` +3 kB, `typebox` 0 kB, `arktype` +3 kB,
+`valibot` +2.4 MB *on the first 10k* — but re-running the same experiment at
+1k / 10k / 50k / 100k parses shows Valibot's retention plateauing (+129 kB,
++365 kB, +23 kB, −11 kB): it is V8 feedback/IC warm-up for its
+function-per-schema design, not a leak. No candidate leaks per parse.
+
+**TypeScript cost** (`tsc --extendedDiagnostics --checkJs` over the adapter
+file, i.e. inference of the 15 schemas only): `zod` 1 986 instantiations /
+0.09 s check, `zod/mini` 3 469 / 0.13 s, `valibot` 13 558 / 0.24 s, `typebox`
+2 875 / 0.17 s, `arktype` 52 943 / 0.25 s. All are negligible next to the
+Solid/JSX check of this package; ArkType's string-DSL inference is the only
+one that would be felt as the contract count grows.
+
+**Standard Schema** (`"~standard"` on a schema instance): `zod`, `zod/mini`,
+`valibot`, `arktype` yes; `@sinclair/typebox` 0.34 no.
+
+**CSP.** The SPA is served with `script-src 'self'` (no `'unsafe-eval'`).
+ArkType compiles validators with `new Function` unless configured
+`jitless`, so the jitless row is the one we could ship (still 49.7 kB gzip);
+TypeBox's `TypeCompiler` has the same problem, hence `Value.Check`.
+
+**Decision: Valibot 1.5.0**, pinned exactly. Rationale, in order:
+
+1. Bundle: 3.0 kB gzip vs 7.7 kB for the closest alternative (`zod/mini`) and
+   ~90 kB for what UI-02 ships today. The SPA is loaded from a local gateway,
+   but it is also embedded in the gateway binary and served to every tab; the
+   contract layer should not be the largest thing in it.
+2. Throughput is adequate where it matters: 0.65 ms for a 200-entry page and
+   1.6 ms for a 2 000-message session are both far below one frame, and
+   Valibot has the lowest GC pressure of the tree-shakeable options. Classic
+   Zod is 4× faster per parse but pays for it with 30× the bytes on every
+   load; `zod/mini` is slower than Valibot on the large payload.
+3. Standard Schema support, tolerant objects (`looseObject`), no `eval`, no
+   retention growth, first-class `safeParse` with structured issues we map to
+   `ContractError.issues` without adapters.
+4. Precedent: `getsentry/cli` moved Zod → Valibot for the same bundle/memory
+   reasons.
+
+Not chosen: `zod` classic (bundle), `zod/mini` (2.5× the bytes and slower on
+large payloads, and mixing `zod/mini` in the UI with classic `zod` in core
+would invite the wrong import), TypeBox (no Standard Schema, 8× bytes,
+JSON-Schema surface is not needed here), ArkType (bundle, `new Function`
+under our CSP, heaviest TS inference).
+
+`packages/core` keeps its own `zod` dependency; that is an independent
+decision for a Node process where bundle size is irrelevant.
 
 ### Solid 2 status
 
