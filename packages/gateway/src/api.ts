@@ -32,6 +32,7 @@ import { resolveAuth, getLastSeenAuthProvider } from "./auth";
 import { defaultModelForProvider } from "./worker-model";
 import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
+import { handleFolkStatusRequest } from "./folk-status";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -844,6 +845,10 @@ export async function handleAPIRequest(
   // -----------------------------------------------------------------------
 
   if (method === "GET") {
+    // GET /api/v1/account, /teams, /sync/status, /projects/:id/sharing (FOLK-01)
+    const folk = handleFolkStatusRequest(pathname, config);
+    if (folk) return folk;
+
     // GET /api/v1/projects
     if (pathname === "/api/v1/projects") {
       return handleListProjects();
