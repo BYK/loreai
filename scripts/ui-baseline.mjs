@@ -46,10 +46,14 @@ function positiveInt(name, fallback) {
 }
 const WARMUP = 5;
 const PORT_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 10_000;
 let RUNS = 5;
 let REQUESTS = 40;
 
-function req(url, { method = "GET", headers = {}, body } = {}) {
+function req(
+  url,
+  { method = "GET", headers = {}, body, timeoutMs = REQUEST_TIMEOUT_MS } = {},
+) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const r = httpRequest(
@@ -61,10 +65,12 @@ function req(url, { method = "GET", headers = {}, body } = {}) {
         headers: body
           ? { ...headers, "content-length": Buffer.byteLength(body) }
           : headers,
+        timeout: timeoutMs,
       },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
+        res.on("error", reject);
         res.on("end", () =>
           resolve({
             status: res.statusCode ?? 0,
@@ -74,6 +80,11 @@ function req(url, { method = "GET", headers = {}, body } = {}) {
       },
     );
     r.on("error", reject);
+    r.on("timeout", () =>
+      r.destroy(
+        new Error(`${method} ${url} did not answer within ${timeoutMs} ms`),
+      ),
+    );
     if (body) r.write(body);
     r.end();
   });
@@ -162,18 +173,24 @@ async function freePort() {
   return port;
 }
 
-async function waitForHealth(base, child) {
+async function waitForHealth(base, child, spawnError) {
   const deadline = Date.now() + 30_000;
   let exited = false;
   child.once("exit", () => (exited = true));
   while (Date.now() < deadline) {
+    const failure = spawnError();
+    if (failure) {
+      throw new Error(`failed to spawn the gateway: ${failure.message}`, {
+        cause: failure,
+      });
+    }
     if (exited) {
       throw new Error("gateway exited before becoming healthy", {
         cause: "exited",
       });
     }
     try {
-      const res = await req(`${base}/health`);
+      const res = await req(`${base}/health`, { timeoutMs: 2_000 });
       if (res.status === 200) return;
     } catch {
       // not listening yet
@@ -184,8 +201,10 @@ async function waitForHealth(base, child) {
 }
 
 async function stopChild(child) {
-  if (child.exitCode !== null) return;
-  child.kill("SIGTERM");
+  // `pid` is undefined when spawn() itself failed (ENOENT/EACCES): there is
+  // no process to stop and no `exit` event will ever fire.
+  if (child.pid === undefined || child.exitCode !== null) return;
+  if (!child.kill("SIGTERM")) return;
   const exited = once(child, "exit");
   const timeout = new Promise((r) => setTimeout(r, 8_000, "timeout"));
   if ((await Promise.race([exited, timeout])) === "timeout") {
@@ -249,9 +268,13 @@ async function measureRunOnce(upstreamUrl, { withLatency }) {
   });
   let stderr = "";
   child.stderr.on("data", (c) => (stderr += c));
+  // spawn() failures (ENOENT/EACCES) and undeliverable kill() signals surface
+  // as `error` events; without a listener they would crash the script.
+  let spawnError = null;
+  child.on("error", (error) => (spawnError ??= error));
   const out = {};
   try {
-    await waitForHealth(base, child);
+    await waitForHealth(base, child, () => spawnError);
     out.startupMs = round(performance.now() - spawnedAt);
     await new Promise((r) => setTimeout(r, 1_000));
     out.rssAfterStartMb = round(rssKb(child.pid) / 1024);
