@@ -97,16 +97,28 @@ export function createSessionsState({
       },
       {
         async cached(key) {
-          const blocks = await repos.messageBlocks.getScope(key);
+          const [blocks, collection] = await Promise.all([
+            repos.messageBlocks.getScope(key),
+            repos.messageBlocks.collection(key),
+          ]);
           if (blocks.length === 0) return undefined;
+          const messages = blocks
+            .sort((a, b) => a.index - b.index)
+            .flatMap((b) => b.messages);
           return {
-            messages: blocks
-              .sort((a, b) => a.index - b.index)
-              .flatMap((b) => b.messages),
-            // Distillations are not cached; the server fills them in. The
-            // cached projection returns what it knows.
-            distillations: [],
-          } satisfies SessionDetail;
+            value: {
+              messages,
+              // Distillations are not cached; the server fills them in. The
+              // cached projection returns what it knows.
+              distillations: [],
+            } satisfies SessionDetail,
+            // Blocks lost to TTL/LRU eviction leave gaps — render the rows,
+            // marked partial (legacy writes with no collections row too).
+            partial:
+              !collection ||
+              !collection.complete ||
+              collection.count !== messages.length,
+          };
         },
         async onServer(key, value) {
           const blocks: MessageBlock[] = [];
@@ -119,6 +131,12 @@ export function createSessionsState({
           }
           await repos.messageBlocks.putMany(blocks, key, {
             replaceScope: true,
+          });
+          await repos.messageBlocks.setCollection(key, {
+            complete: true,
+            count: value.messages.length,
+            nextCursor: null,
+            fetchedAt: Date.now(),
           });
         },
       },

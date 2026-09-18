@@ -399,6 +399,9 @@ request; the proxy path is unchanged.
   collection is complete only when `complete && rows.length === count`
   (each scope records the server's row count); rows lost to TTL/LRU
   eviction still render but are marked `partial` until the server answers.
+  Session detail applies the same rule through a per-session `collections`
+  record for `messageBlocks`: a missing block (or a missing record from a
+  legacy write) marks the cached history `partial`.
 - `src/lib/api.ts` classifies failures for the shell: network error →
   `unreachable`; 401/403 or a **bodyless** 404 (the gateway's way of hiding
   management routes from non-loopback peers) → `unauthorized`; a JSON 404 →

@@ -17,7 +17,13 @@ import {
   openLoreDb,
 } from "~/db";
 import { createRepository } from "~/db/repository";
-import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
+import type { MessageBlock } from "~/db";
+import type {
+  KnowledgeEntry,
+  ProjectSummary,
+  SessionDetail,
+  TemporalMessage,
+} from "~/contracts";
 import { mergeCursorPage } from "~/state/pages";
 import { createEntityStore } from "~/state/entity-store";
 import { createProjectsState } from "~/state/projects";
@@ -444,6 +450,111 @@ describe("sessions state: detail waits for the project path", () => {
     expect(calls).toEqual(["/home/me/lore/s1"]);
     expect(detail.loader.data()).toBeTruthy();
     expect(detail.loader.error()).toBeUndefined();
+  });
+
+  const block = (
+    key: string,
+    index: number,
+    from: number,
+    n: number,
+  ): MessageBlock => ({
+    sessionKey: key,
+    index,
+    messages: Array.from(
+      { length: n },
+      (_, i): TemporalMessage => ({
+        id: `m${from + i}`,
+        project_id: "p1",
+        session_id: "s1",
+        role: "user",
+        content: `msg ${from + i}`,
+        tokens: 1,
+        distilled: 0,
+        created_at: from + i,
+        metadata: "{}",
+      }),
+    ),
+  });
+
+  function sessionsState(
+    messageBlocks: ReturnType<typeof createMessageBlocksRepo>,
+  ) {
+    const server = deferred<SessionDetail>();
+    const client = {
+      getSession: () => server.promise,
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createSessionsState({
+        client,
+        repos: { sessions: createSessionsRepo(null), messageBlocks },
+        projectPathOf: () => "/home/me/lore",
+        tracked,
+      }),
+    );
+    return state;
+  }
+
+  it("marks cached session detail partial when a message block is missing", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const messageBlocks = createMessageBlocksRepo(db);
+    const key = "p1/s1";
+    // 250 messages = a full block of 200 plus a tail of 50.
+    await messageBlocks.putMany(
+      [block(key, 0, 0, 200), block(key, 1, 200, 50)],
+      key,
+      { replaceScope: true },
+    );
+    await messageBlocks.setCollection(key, {
+      complete: true,
+      count: 250,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+
+    const state = sessionsState(messageBlocks);
+    const detail = state.detail(
+      () => "p1",
+      () => "s1",
+    );
+    await flush();
+    expect(detail.loader.data()!.messages.length).toBe(250);
+    expect(detail.status().partial).toBe(false);
+
+    // Evict the tail block → 200 of the server's 250 messages remain.
+    await messageBlocks.delete(`${key}#1`);
+    const detail2 = state.detail(
+      () => "p1",
+      () => "s1",
+    );
+    await flush();
+    expect(detail2.loader.data()!.messages.length).toBe(200);
+    expect(detail2.status().stale).toBe(true);
+    expect(detail2.status().partial).toBe(true);
+    await closeLoreDb();
+  });
+
+  it("marks cached session detail partial when the collections row is missing", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const messageBlocks = createMessageBlocksRepo(db);
+    const key = "p1/s1";
+    // Legacy write: blocks present, no collections record at all.
+    await messageBlocks.putMany([block(key, 0, 0, 10)], key, {
+      replaceScope: true,
+    });
+
+    const state = sessionsState(messageBlocks);
+    const detail = state.detail(
+      () => "p1",
+      () => "s1",
+    );
+    await flush();
+    expect(detail.loader.data()!.messages.length).toBe(10);
+    expect(detail.status().partial).toBe(true);
+    await closeLoreDb();
   });
 });
 
