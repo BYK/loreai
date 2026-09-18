@@ -19,6 +19,15 @@ export const projectHref = (projectId: string) =>
 export const knowledgeHref = (projectId: string, knowledgeId: string) =>
   `${projectHref(projectId)}/knowledge/${encodeURIComponent(knowledgeId)}`;
 
+function decodeParam(segment: string | undefined): string | undefined {
+  if (segment === undefined) return undefined;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 function errorState(
   error: unknown,
   what: string,
@@ -136,7 +145,18 @@ const WelcomeDetail: Component<{
  *   /knowledge/:id                       entry document; project from the entry
  */
 export const Browse: Component = () => {
-  const params = useParams<{ projectId?: string; knowledgeId?: string }>();
+  const raw = useParams<{ projectId?: string; knowledgeId?: string }>();
+  // Router params are the raw (percent-encoded) path segments; `projectHref`
+  // and `knowledgeHref` encode, so decode once here before any lookup or
+  // API call.
+  const params = {
+    get projectId() {
+      return decodeParam(raw.projectId);
+    },
+    get knowledgeId() {
+      return decodeParam(raw.knowledgeId);
+    },
+  };
   const ws = useWorkspace();
 
   const entry = createLoader(

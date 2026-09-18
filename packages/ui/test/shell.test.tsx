@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
+import { knowledgeHref } from "~/routes/Browse";
 import { ApiError, type ApiClient } from "~/lib/api";
 import type { KnowledgeEntry, ProjectSummary } from "~/lib/schemas";
 import { NOT_AVAILABLE_YET } from "~/components/lore/FutureAction";
@@ -238,6 +239,49 @@ describe("shell: project navigation and real-data path", () => {
       "entry:k-wal",
       "knowledge:p-lore",
     ]);
+  });
+
+  it("decodes percent-encoded ids from the URL exactly once", async () => {
+    const [baseProject] = PROJECTS;
+    const [baseEntry] = ENTRIES;
+    if (!baseProject || !baseEntry) throw new Error("fixtures missing");
+    const project: ProjectSummary = {
+      ...baseProject,
+      id: "team/lore v2",
+      knowledge_count: 1,
+    };
+    const entry: KnowledgeEntry = {
+      ...baseEntry,
+      id: "k/1%2",
+      logical_id: "k/1%2",
+      project_id: project.id,
+    };
+    const client = fakeClient({
+      async listProjects() {
+        return [project];
+      },
+      async listProjectKnowledge(projectId) {
+        client.calls.push(`knowledge:${projectId}`);
+        return projectId === project.id ? [entry] : [];
+      },
+      async getKnowledge(id) {
+        client.calls.push(`entry:${id}`);
+        if (id !== entry.id) throw new Error(`unexpected id ${id}`);
+        return entry;
+      },
+    });
+    const { history } = mount(knowledgeHref(project.id, entry.id), client);
+    expect(history.get()).toBe(
+      "/projects/team%2Flore%20v2/knowledge/k%2F1%252",
+    );
+    const doc = await screen.findByTestId("knowledge-document");
+    expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
+      "Keep SQLite",
+    );
+    expect(client.calls).toEqual(["entry:k/1%2", "knowledge:team/lore v2"]);
+    expect(pane("list")).toHaveTextContent("Knowledge · lore");
+    const [row] = await screen.findAllByTestId("knowledge-row");
+    expect(row).toHaveAttribute("aria-current", "page");
   });
 
   it("renders the future actions disabled with the exact wording", async () => {
