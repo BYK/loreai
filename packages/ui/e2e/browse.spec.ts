@@ -99,13 +99,25 @@ test.describe("real data browsing", () => {
     );
   });
 
-  test("dark mode toggles and persists across reload", async ({ page }) => {
+  test("theme defaults to system; forcing dark persists across reload", async ({
+    page,
+  }) => {
     await page.goto("/ui");
     const html = page.locator("html");
+    await expect(page.getByTestId("theme-toggle")).toHaveAttribute(
+      "data-theme-choice",
+      "system",
+    );
     await expect(html).not.toHaveClass(/dark/);
-    await page.getByTestId("theme-toggle").click();
+    await page.getByTestId("theme-dark").click();
     await expect(html).toHaveClass(/dark/);
     await page.reload();
     await expect(html).toHaveClass(/dark/);
+    await expect(page.getByTestId("theme-dark")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await page.getByTestId("theme-system").click();
+    await expect(html).not.toHaveClass(/dark/);
   });
 });

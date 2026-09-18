@@ -33,7 +33,7 @@ test.describe("/ui/fixture design specimen", () => {
       path: testInfo.outputPath("fixture-light.png"),
       fullPage: true,
     });
-    await page.getByTestId("theme-toggle").click();
+    await page.getByTestId("theme-dark").click();
     await expect(page.locator("html")).toHaveClass(/dark/);
     await page.screenshot({
       path: testInfo.outputPath("fixture-dark.png"),
