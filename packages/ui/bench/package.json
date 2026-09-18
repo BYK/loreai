@@ -5,6 +5,8 @@
   "description": "Schema-library benchmark for the UI contracts (not a workspace package, not run in CI). See README.md.",
   "scripts": {
     "bench": "node --expose-gc bench.mjs",
+    "bench:browser": "node browser.mjs",
+    "bench:ts": "node ts-cost.mjs",
     "bundle": "node bundle-size.mjs"
   },
   "devDependencies": {

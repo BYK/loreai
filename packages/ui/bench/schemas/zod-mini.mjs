@@ -1,6 +1,11 @@
 // Same schemas via `zod/mini` (functional, tree-shakeable API).
 import * as z from "zod/mini";
 
+// The UI ships under `script-src 'self'` (no unsafe-eval), so Zod's
+// `new Function` object fast path is unavailable there; measure the same code
+// path the browser will run.
+z.config({ jitless: true });
+
 const int = () => z.int();
 const nonNeg = () => z.int().check(z.nonnegative());
 const epochMs = nonNeg();

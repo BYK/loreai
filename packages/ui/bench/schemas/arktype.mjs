@@ -2,11 +2,8 @@
 // (`script-src 'self'`, no 'unsafe-eval') forbids. `jitless` is the mode we
 // would have to ship, so it is the mode we benchmark. Set BENCH_ARKTYPE_JIT=1
 // to see the compiled numbers for reference.
-import { configure } from "arktype/config";
-
-configure({ jitless: process.env.BENCH_ARKTYPE_JIT !== "1" });
-
-const { type } = await import("arktype");
+import "./arktype-config.mjs";
+import { type } from "arktype";
 
 // ArkType ignores undeclared keys by default (forward compatibility).
 const epochMs = type("number.integer >= 0");

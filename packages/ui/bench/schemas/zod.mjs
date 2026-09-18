@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+// The UI ships under `script-src 'self'` (no unsafe-eval), so Zod's
+// `new Function` object fast path is unavailable there; measure the same code
+// path the browser will run.
+z.config({ jitless: true });
+
 const epochMs = z.number().int().nonnegative();
 const nullableOptional = (s) => s.nullable().optional();
 
