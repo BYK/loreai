@@ -26,10 +26,11 @@
     "idb": "8.0.3",
     "solid-js": "1.9.15",
     "tailwind-merge": "3.6.0",
-    "zod": "4.5.4"
+    "valibot": "1.5.0"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
+    "fake-indexeddb": "6.2.5",
     "@solidjs/testing-library": "0.8.10",
     "@tailwindcss/vite": "4.3.3",
     "@testing-library/jest-dom": "7.0.1",
