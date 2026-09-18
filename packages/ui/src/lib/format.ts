@@ -1,4 +1,4 @@
-const DAY_MS = 86_400_000;
+import { formatRelative } from "date-fns";
 
 /** Core timestamps are epoch milliseconds; `0`/null mean "unknown". */
 function parseDate(value: number | null | undefined): Date | null {
@@ -7,16 +7,11 @@ function parseDate(value: number | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/** Whole local calendar days from `date` to `now` (negative for the future). */
-function calendarDaysBetween(date: Date, now: Date): number {
-  const startOfDay = (d: Date) =>
-    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  return Math.round((startOfDay(now) - startOfDay(date)) / DAY_MS);
-}
-
 /**
- * Short, inbox-style timestamp: time of day for today, weekday within a
- * week, otherwise a compact date. `now` is injectable for tests.
+ * Relative timestamp via date-fns `formatRelative`: "today at 10:00 AM",
+ * "yesterday at …", "last Friday at …", otherwise a plain date. Calendar-day
+ * bucketing (incl. DST and future dates) is the library's. `now` is
+ * injectable for tests.
  */
 export function formatWhen(
   value: number | null | undefined,
@@ -24,22 +19,7 @@ export function formatWhen(
 ): string {
   const date = parseDate(value);
   if (!date) return "—";
-  const days = calendarDaysBetween(date, now);
-  if (days === 0) {
-    return date.toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-  if (days === 1) return "Yesterday";
-  if (days > 1 && days < 7) {
-    return date.toLocaleDateString(undefined, { weekday: "long" });
-  }
-  return date.toLocaleDateString(undefined, {
-    year: date.getFullYear() === now.getFullYear() ? undefined : "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return formatRelative(date, now);
 }
 
 export function formatFullDate(value: number | null | undefined): string {
