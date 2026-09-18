@@ -104,21 +104,23 @@ export const Nav: Component<NavProps> = (props) => {
       )}
     >
       <div class="eyebrow px-3">Workspace</div>
-      <div class="flex items-center justify-between gap-2">
-        <div class="min-w-0 grow">
-          <NavItem
-            href="/"
-            active={props.activeProjectId === null}
-            count={props.projects?.length}
-            testId="nav-projects"
-          >
-            Projects
-          </NavItem>
-        </div>
-        <Show when={props.stale}>
-          {(status) => <StaleBadge status={status()} />}
-        </Show>
-      </div>
+      <NavItem
+        href="/"
+        active={props.activeProjectId === null}
+        count={props.projects?.length}
+        testId="nav-projects"
+      >
+        Projects
+      </NavItem>
+      <Show when={props.stale}>
+        {(status) => (
+          <Show when={status().stale}>
+            <div class="px-3 pb-1">
+              <StaleBadge status={status()} />
+            </div>
+          </Show>
+        )}
+      </Show>
       <NavItem href="/" count={props.totalKnowledge ?? undefined}>
         Knowledge
       </NavItem>
@@ -130,7 +132,7 @@ export const Nav: Component<NavProps> = (props) => {
             Loading projects…
           </div>
         </Match>
-        <Match when={props.error}>
+        <Match when={props.error && !props.projects}>
           <StateCard
             kind={conn.state() === "unauthorized" ? "locked" : "error"}
             compact

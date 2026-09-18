@@ -211,14 +211,16 @@ export const Browse: Component = () => {
         <PaneHead
           title={`Knowledge · ${projectLabel()}`}
           trailing={
-            <span class="inline-flex items-center gap-2">
-              <StaleBadge status={knowledgeStatus()} />
-              <Show when={knowledgeLoader.data()}>
-                {(entries) => pluralize(entries().length, "entry", "entries")}
-              </Show>
-            </span>
+            <Show when={knowledgeLoader.data()}>
+              {(entries) => pluralize(entries().length, "entry", "entries")}
+            </Show>
           }
         />
+        <Show when={knowledgeStatus().stale}>
+          <div class="border-b border-line px-4.5 py-1.5">
+            <StaleBadge status={knowledgeStatus()} />
+          </div>
+        </Show>
         <Switch>
           <Match when={knowledgeLoader.error() && !knowledgeLoader.data()}>
             <div class="p-3">
