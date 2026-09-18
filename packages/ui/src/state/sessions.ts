@@ -101,7 +101,17 @@ export function createSessionsState({
             repos.messageBlocks.getScope(key),
             repos.messageBlocks.collection(key),
           ]);
-          if (blocks.length === 0) return undefined;
+          if (blocks.length === 0) {
+            // An intentionally empty session: the collections row proves the
+            // server answered with zero messages, so this is a cache hit.
+            if (collection?.complete && collection.count === 0) {
+              return {
+                value: { messages: [], distillations: [] },
+                partial: false,
+              };
+            }
+            return undefined;
+          }
           const messages = blocks
             .sort((a, b) => a.index - b.index)
             .flatMap((b) => b.messages);

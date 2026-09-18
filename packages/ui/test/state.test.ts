@@ -535,6 +535,51 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
   });
 
+  it("serves an intentionally empty session from cache", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const messageBlocks = createMessageBlocksRepo(db);
+    const key = "p1/s1";
+    // The server answered with zero messages: no blocks, but the
+    // collections row records `count: 0`.
+    await messageBlocks.setCollection(key, {
+      complete: true,
+      count: 0,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+
+    const state = sessionsState(messageBlocks);
+    const detail = state.detail(
+      () => "p1",
+      () => "s1",
+    );
+    await flush();
+    expect(detail.loader.data()!.messages.length).toBe(0);
+    expect(detail.status().stale).toBe(true);
+    expect(detail.status().partial).toBe(false);
+    await closeLoreDb();
+  });
+
+  it("does not cache-hit an empty session with no collections row", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const messageBlocks = createMessageBlocksRepo(db);
+
+    const state = sessionsState(messageBlocks);
+    const detail = state.detail(
+      () => "p1",
+      () => "s1",
+    );
+    await flush();
+    // No blocks and no collections record → cache miss, no stale value.
+    expect(detail.loader.data()).toBeUndefined();
+    expect(detail.status().stale).toBe(false);
+    await closeLoreDb();
+  });
+
   it("marks cached session detail partial when the collections row is missing", async () => {
     const factory = new IDBFactory();
     await closeLoreDb();
