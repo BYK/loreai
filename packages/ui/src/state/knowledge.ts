@@ -36,10 +36,14 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
             repo.getScope(id),
             repo.collection(id),
           ]);
-          if (rows.length === 0 && !collection) return undefined;
+          if (!collection) return undefined;
           const sorted = [...rows].sort(LIST_ORDER);
           for (const k of sorted) store.reconcileOne(k);
-          return sorted;
+          return {
+            value: sorted,
+            // Rows lost to TTL/LRU eviction → render them, marked partial.
+            partial: rows.length !== collection.count,
+          };
         },
         async onServer(id, values) {
           for (const k of values) store.reconcileOne(k);
@@ -47,6 +51,7 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
           await repo.putMany(values, id, { replaceScope: true });
           await repo.setCollection(id, {
             complete: true,
+            count: values.length,
             nextCursor: null,
             fetchedAt: Date.now(),
           });

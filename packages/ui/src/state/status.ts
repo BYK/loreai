@@ -29,7 +29,7 @@ export function statusOf<T>(
   return createMemo<KeyStatus>(() => ({
     loading: loader.loading(),
     stale: loader.stale(),
-    partial: partial(),
+    partial: partial() || loader.partial(),
     error: loader.error(),
     source: loader.source(),
   }));

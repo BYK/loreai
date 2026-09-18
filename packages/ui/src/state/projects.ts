@@ -26,11 +26,12 @@ export function createProjectsState({ client, repo, tracked }: ProjectsDeps) {
           repo.getScope(SCOPE),
           repo.collection(SCOPE),
         ]);
-        // An empty scope with no recorded collection means "never fetched",
-        // not "no projects" — let the server answer first in that case.
-        if (rows.length === 0 && !collection) return undefined;
+        // No recorded collection means "never fetched" — let the server
+        // answer first. A row count below the recorded count means rows
+        // were lost to TTL/LRU eviction: render them, marked partial.
+        if (!collection) return undefined;
         for (const p of rows) store.reconcileOne(p);
-        return rows;
+        return { value: rows, partial: rows.length !== collection.count };
       },
       async onServer(_, values) {
         for (const p of values) store.reconcileOne(p);
@@ -38,6 +39,7 @@ export function createProjectsState({ client, repo, tracked }: ProjectsDeps) {
         await repo.putMany(values, SCOPE, { replaceScope: true });
         await repo.setCollection(SCOPE, {
           complete: true,
+          count: values.length,
           nextCursor: null,
           fetchedAt: Date.now(),
         });

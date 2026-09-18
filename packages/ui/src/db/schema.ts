@@ -37,6 +37,9 @@ export interface CollectionState {
   store: CachedStoreName;
   scope: string;
   complete: boolean;
+  /** Rows the server reported — survives row eviction; a cached scope whose
+   * row count differs renders as `partial`, not complete. */
+  count: number;
   nextCursor: string | null;
   fetchedAt: number;
 }

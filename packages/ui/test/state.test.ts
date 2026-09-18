@@ -11,14 +11,18 @@ import type { ApiClient } from "~/lib/api";
 import {
   closeLoreDb,
   createKnowledgeRepo,
+  createMessageBlocksRepo,
   createProjectsRepo,
+  createSessionsRepo,
   openLoreDb,
 } from "~/db";
+import { createRepository } from "~/db/repository";
 import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
 import { mergeCursorPage } from "~/state/pages";
 import { createEntityStore } from "~/state/entity-store";
 import { createProjectsState } from "~/state/projects";
 import { createKnowledgeState } from "~/state/knowledge";
+import { createSessionsState } from "~/state/sessions";
 
 const PROJECTS: ProjectSummary[] = [
   {
@@ -89,6 +93,7 @@ describe("projects state: cached-first then server", () => {
     });
     await createProjectsRepo(handle).setCollection("all", {
       complete: true,
+      count: 1,
       nextCursor: null,
       fetchedAt: Date.now(),
     });
@@ -130,6 +135,7 @@ describe("projects state: cached-first then server", () => {
     await repo.putMany(PROJECTS, "all", { replaceScope: true });
     await repo.setCollection("all", {
       complete: true,
+      count: 1,
       nextCursor: null,
       fetchedAt: 0,
     });
@@ -212,6 +218,7 @@ describe("knowledge state", () => {
     });
     await repo.setCollection("p1", {
       complete: true,
+      count: 2,
       nextCursor: null,
       fetchedAt: 0,
     });
@@ -270,6 +277,173 @@ describe("knowledge state", () => {
     expect(seen).toEqual([null, "tok"]);
     await paged.loadMore();
     expect(call).toBe(2); // complete lists stop fetching
+  });
+});
+
+describe("knowledge state: partial collections", () => {
+  const ENTRY3: KnowledgeEntry = { ...ENTRIES[0]!, id: "k3" };
+
+  function knowledgeRepoWith(
+    db: Parameters<typeof createKnowledgeRepo>[0],
+    limits: { maxEntries: number; maxAgeMs: number },
+    now?: () => number,
+  ) {
+    return createRepository<KnowledgeEntry>(
+      db,
+      "knowledge",
+      (k) => k.id,
+      limits,
+      now,
+    );
+  }
+
+  it("marks cached rows partial when cap eviction dropped rows", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const repo = knowledgeRepoWith(db, { maxEntries: 2, maxAgeMs: 1e12 });
+    // 3 rows under a cap of 2 → one is evicted on write; collection.count
+    // records the server's 3.
+    await repo.putMany([...ENTRIES, ENTRY3], "p1", { replaceScope: true });
+    await repo.setCollection("p1", {
+      complete: true,
+      count: 3,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+
+    const server = deferred<KnowledgeEntry[]>();
+    const client = {
+      listProjectKnowledge: () => server.promise,
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createKnowledgeState({ client, repo, tracked }),
+    );
+    const list = state.list(() => "p1");
+    await flush();
+    expect(list.loader.data()!.length).toBe(2);
+    expect(list.status().stale).toBe(true);
+    expect(list.status().partial).toBe(true);
+
+    server.resolve([...ENTRIES, ENTRY3]);
+    await flush();
+    expect(list.status().partial).toBe(false);
+    expect(list.status().stale).toBe(false);
+    await closeLoreDb();
+  });
+
+  it("marks scope A partial when scope B's writes evicted its rows", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const clock = { t: 1000 };
+    const repo = knowledgeRepoWith(
+      db,
+      { maxEntries: 3, maxAgeMs: 1e12 },
+      () => clock.t,
+    );
+    // Scope A's two rows are the least-recently-accessed once scope B fills
+    // the store past the cap.
+    clock.t += 1;
+    await repo.putMany(ENTRIES, "a", { replaceScope: true });
+    await repo.setCollection("a", {
+      complete: true,
+      count: 2,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+    for (const id of ["b1", "b2", "b3", "b4"]) {
+      clock.t += 1;
+      await repo.put({ ...ENTRIES[0]!, id }, "b");
+    }
+
+    const server = deferred<KnowledgeEntry[]>();
+    const client = {
+      listProjectKnowledge: () => server.promise,
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createKnowledgeState({ client, repo, tracked }),
+    );
+    const list = state.list(() => "a");
+    await flush();
+    expect(list.loader.data()!.length).toBeLessThan(2);
+    expect(list.status().partial).toBe(true);
+    await closeLoreDb();
+  });
+
+  it("marks a cached list partial when a row aged out", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const clock = { t: 1000 };
+    const repo = knowledgeRepoWith(
+      db,
+      { maxEntries: 50, maxAgeMs: 150 },
+      () => clock.t,
+    );
+    await repo.put(ENTRIES[0]!, "p1"); // stored at t=1000
+    clock.t += 100;
+    await repo.put(ENTRIES[1]!, "p1"); // stored at t=1100
+    await repo.setCollection("p1", {
+      complete: true,
+      count: 2,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+    clock.t += 140; // t=1240 → cutoff 1090: first row expired, second alive
+
+    const server = deferred<KnowledgeEntry[]>();
+    const client = {
+      listProjectKnowledge: () => server.promise,
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createKnowledgeState({ client, repo, tracked }),
+    );
+    const list = state.list(() => "p1");
+    await flush();
+    expect(list.loader.data()!.length).toBe(1);
+    expect(list.status().stale).toBe(true);
+    expect(list.status().partial).toBe(true);
+    await closeLoreDb();
+  });
+});
+
+describe("sessions state: detail waits for the project path", () => {
+  it("does not fetch (or error) until projectPathOf resolves", async () => {
+    const calls: string[] = [];
+    const client = {
+      getSession: (path: string, sid: string) => {
+        calls.push(`${path}/${sid}`);
+        return Promise.resolve({ messages: [], distillations: [] });
+      },
+    } as unknown as ApiClient;
+    const [path, setPath] = createSignal<string | undefined>(undefined);
+    const state = createRoot(() =>
+      createSessionsState({
+        client,
+        repos: {
+          sessions: createSessionsRepo(null),
+          messageBlocks: createMessageBlocksRepo(null),
+        },
+        projectPathOf: () => path(),
+        tracked,
+      }),
+    );
+    const detail = state.detail(
+      () => "p1",
+      () => "s1",
+    );
+    await flush();
+    // Deep link before projects load: idle, not an error.
+    expect(calls).toEqual([]);
+    expect(detail.loader.error()).toBeUndefined();
+    expect(detail.loader.loading()).toBe(false);
+
+    setPath("/home/me/lore");
+    await flush();
+    expect(calls).toEqual(["/home/me/lore/s1"]);
+    expect(detail.loader.data()).toBeTruthy();
+    expect(detail.loader.error()).toBeUndefined();
   });
 });
 

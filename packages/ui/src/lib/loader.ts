@@ -12,11 +12,34 @@ export interface Loader<T> {
   stale: Accessor<boolean>;
   /** Where the current `data` came from. */
   source: Accessor<"cache" | "server" | null>;
+  /** True while cached data is known-incomplete (rows lost to eviction). */
+  partial: Accessor<boolean>;
+}
+
+/** Cache reads may report a value known to be an incomplete projection. */
+export interface CachedResult<T> {
+  value: T;
+  partial?: boolean;
+}
+
+function isCachedResult<T>(
+  v: T | CachedResult<T> | undefined,
+): v is CachedResult<T> {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    !Array.isArray(v) &&
+    "value" in v &&
+    Object.keys(v).every((k) => k === "value" || k === "partial")
+  );
 }
 
 export interface LoaderOptions<S, T> {
   /** Cache read, raced against the fetcher; its failures are ignored. */
-  cached?: (source: S, signal: AbortSignal) => Promise<T | undefined>;
+  cached?: (
+    source: S,
+    signal: AbortSignal,
+  ) => Promise<T | CachedResult<T> | undefined>;
   /** Runs after every successful fetch (e.g. write-through to cache). Errors are swallowed. */
   onServer?: (source: S, value: T) => void | Promise<void>;
 }
@@ -41,6 +64,7 @@ export function createLoader<S, T>(
   const [error, setError] = createSignal<unknown>(undefined);
   const [loading, setLoading] = createSignal(false);
   const [stale, setStale] = createSignal(false);
+  const [partial, setPartial] = createSignal(false);
   const [dataSource, setDataSource] = createSignal<"cache" | "server" | null>(
     null,
   );
@@ -64,6 +88,7 @@ export function createLoader<S, T>(
         lastKey = key;
         setData(undefined);
         setStale(false);
+        setPartial(false);
         setDataSource(null);
       }
       setError(undefined);
@@ -78,14 +103,16 @@ export function createLoader<S, T>(
 
       if (options?.cached) {
         options.cached(key, c.signal).then(
-          (value) => {
+          (raw) => {
             if (current !== generation) return;
             // A server *answer* wins over a late cache read; a server
             // *failure* doesn't — cached data still fills the empty screen.
             if (serverSettled && error() === undefined) return;
-            if (value !== undefined) {
+            if (raw !== undefined) {
+              const value = isCachedResult(raw) ? raw.value : raw;
               setData(() => value);
               setStale(true);
+              setPartial(isCachedResult(raw) && raw.partial === true);
               setDataSource("cache");
             }
           },
@@ -102,6 +129,7 @@ export function createLoader<S, T>(
           setData(() => value);
           setError(undefined);
           setStale(false);
+          setPartial(false);
           setDataSource("server");
           setLoading(false);
           try {
@@ -133,5 +161,6 @@ export function createLoader<S, T>(
     reload: () => setTick(untrack(tick) + 1),
     stale,
     source: dataSource,
+    partial,
   };
 }

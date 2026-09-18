@@ -271,6 +271,7 @@ describe("repositories", () => {
     expect(await repo.collection("p1")).toBeUndefined();
     await repo.setCollection("p1", {
       complete: false,
+      count: 0,
       nextCursor: "tok",
       fetchedAt: 1,
     });
@@ -280,6 +281,35 @@ describe("repositories", () => {
       complete: false,
       nextCursor: "tok",
     });
+  });
+
+  it("collection count outlives the rows it counts", async () => {
+    const db = await open(factory());
+    const clock = { t: 1000 };
+    const repo = createRepository<KnowledgeEntry>(
+      db,
+      "knowledge",
+      (k) => k.id,
+      { maxEntries: 2, maxAgeMs: 1e12 },
+      () => clock.t,
+    );
+    await repo.putMany(
+      [ENTRY, { ...ENTRY, id: "k2" }, { ...ENTRY, id: "k3" }],
+      "p1",
+      {
+        replaceScope: true,
+      },
+    );
+    await repo.setCollection("p1", {
+      complete: true,
+      count: 3,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+    // Cap of 2 evicted one row on write; the count still reports the
+    // server's 3 so the cache can tell "complete but thinned".
+    expect((await repo.getScope("p1")).length).toBe(2);
+    expect((await repo.collection("p1"))?.count).toBe(3);
   });
 
   it("keys sessions by `${projectId}/${session_id}`", async () => {
@@ -320,6 +350,7 @@ describe("repositories", () => {
     expect(await repo.collection("p1")).toBeUndefined();
     await repo.setCollection("p1", {
       complete: true,
+      count: 0,
       nextCursor: null,
       fetchedAt: 0,
     });

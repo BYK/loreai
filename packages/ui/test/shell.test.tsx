@@ -137,6 +137,7 @@ async function seededDb(): Promise<Promise<LoreUiDb | null>> {
   });
   await createProjectsRepo(db).setCollection("all", {
     complete: true,
+    count: 2,
     nextCursor: null,
     fetchedAt: Date.now(),
   });
@@ -145,6 +146,7 @@ async function seededDb(): Promise<Promise<LoreUiDb | null>> {
   });
   await createKnowledgeRepo(db).setCollection("p-lore", {
     complete: true,
+    count: 2,
     nextCursor: null,
     fetchedAt: Date.now(),
   });

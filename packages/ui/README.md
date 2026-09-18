@@ -331,7 +331,10 @@ request; the proxy path is unchanged.
 - Every loader races the cache read against the server fetch: a cached
   answer renders immediately as `stale` (the `StaleBadge`), the server
   answer replaces it; a server failure keeps the cached rows and flips the
-  badge to "gateway unavailable" rather than an error card.
+  badge to "gateway unavailable" rather than an error card. A cached
+  collection is complete only when `complete && rows.length === count`
+  (each scope records the server's row count); rows lost to TTL/LRU
+  eviction still render but are marked `partial` until the server answers.
 - `src/lib/api.ts` classifies failures for the shell: network error →
   `unreachable`; 401/403 or a **bodyless** 404 (the gateway's way of hiding
   management routes from non-loopback peers) → `unauthorized`; a JSON 404 →
