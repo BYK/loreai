@@ -13,11 +13,13 @@
  * Vite content-hashes everything under dist/assets/, so the gateway can serve
  * that directory with immutable caching; index.html is served no-cache.
  *
- * Compressible text assets additionally carry precompressed variants (zstd,
- * brotli, gzip — each at its maximum setting, base64) so the gateway can
- * negotiate `Accept-Encoding` without compressing at request time. A variant
- * is dropped when it is not smaller than the identity bytes; zstd is skipped
- * with a warning on Node builds without `zlib.zstdCompressSync`.
+ * Compressible text assets additionally carry precompressed variants (brotli
+ * and gzip, each at its maximum setting, base64) so the gateway can negotiate
+ * `Accept-Encoding` without compressing at request time. A variant is dropped
+ * when it is not smaller than the identity bytes. zstd is deliberately not
+ * emitted: at its level-22 ceiling it stayed 5–8 % larger than brotli on every
+ * asset (brotli's built-in dictionary wins on small text), so it would only
+ * grow the bundle.
  */
 import { createHash } from "node:crypto";
 import {
@@ -85,34 +87,16 @@ const COMPRESSIBLE_EXTENSIONS = new Set([
   ".svg",
 ]);
 
-export type UiContentEncoding = "zstd" | "br" | "gzip";
+export type UiContentEncoding = "br" | "gzip";
 export const UI_CONTENT_ENCODINGS: readonly UiContentEncoding[] = [
-  "zstd",
   "br",
   "gzip",
 ];
 
 type Compressor = (buf: Buffer) => Buffer;
-/** zstd's "ultra" ceiling (`zstd --ultra -22`); Node exposes no constant for it. */
-const ZSTD_MAX_LEVEL = 22;
 
-function compressors(
-  warn: (message: string) => void,
-): Map<UiContentEncoding, Compressor> {
+function compressors(): Map<UiContentEncoding, Compressor> {
   const out = new Map<UiContentEncoding, Compressor>();
-  // Node < 22.15 / 23.8 has no zstd bindings; the build still succeeds and
-  // the gateway simply never offers `Content-Encoding: zstd`.
-  if (typeof zlib.zstdCompressSync === "function") {
-    out.set("zstd", (buf) =>
-      zlib.zstdCompressSync(buf, {
-        params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_MAX_LEVEL },
-      }),
-    );
-  } else {
-    warn(
-      `ui-assets: zlib.zstdCompressSync is unavailable on ${process.version}; skipping zstd variants`,
-    );
-  }
   out.set("br", (buf) =>
     zlib.brotliCompressSync(buf, {
       params: {
@@ -196,14 +180,14 @@ export function generateUiAssetsModule(
   let files = 0;
 
   if (existsSync(join(uiDistDir, "index.html"))) {
-    const compress = compressors((message) => console.warn(message));
+    const compress = compressors();
     for (const full of walk(uiDistDir)) {
       const rel = relative(uiDistDir, full).split("\\").join("/");
       const ext = extname(full).toLowerCase();
       const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
       const buf = readFileSync(full);
-      // The build ID covers identity bytes only, so it is stable across build
-      // hosts with and without zstd support.
+      // The build ID covers identity bytes only, so it does not depend on the
+      // compressor set or zlib version of the build host.
       digest.update(rel).update("\0").update(buf);
       bytes += buf.byteLength;
       files++;
@@ -240,7 +224,7 @@ export function generateUiAssetsModule(
     "/* oxlint-disable */",
     "",
     'export type UiAssetEncoding = "utf8" | "base64";',
-    'export type UiContentEncoding = "zstd" | "br" | "gzip";',
+    'export type UiContentEncoding = "br" | "gzip";',
     "",
     "/** [content encoding, base64 of the precompressed bytes] */",
     "export type UiAssetVariant = readonly [",
@@ -276,10 +260,10 @@ export function describeUiAssets(result: UiAssetsResult): string {
   const total = (name: UiContentEncoding) =>
     result.sizes.reduce((sum, s) => sum + (s.variants[name] ?? s.identity), 0);
   const kib = (n: number) => `${(n / 1024).toFixed(1)} KiB`;
-  return `ui-assets.generated.ts: ${result.files} files, ${kib(result.bytes)} identity (zstd ${kib(total("zstd"))}, br ${kib(total("br"))}, gzip ${kib(total("gzip"))}), build ${result.buildId}`;
+  return `ui-assets.generated.ts: ${result.files} files, ${kib(result.bytes)} identity (br ${kib(total("br"))}, gzip ${kib(total("gzip"))}), build ${result.buildId}`;
 }
 
-/** Markdown size table (identity / zstd / br / gzip per file), for PR bodies. */
+/** Markdown size table (identity / br / gzip per file), for PR bodies. */
 export function formatUiAssetSizeTable(result: UiAssetsResult): string {
   const bytes = (n: number) => `${n.toLocaleString("en-US")} B`;
   const cell = (n: number | undefined, identity: number) =>
@@ -290,11 +274,11 @@ export function formatUiAssetSizeTable(result: UiAssetsResult): string {
     .filter((s) => Object.keys(s.variants).length > 0)
     .map(
       (s) =>
-        `| \`${s.path}\` | ${bytes(s.identity)} | ${cell(s.variants.zstd, s.identity)} | ${cell(s.variants.br, s.identity)} | ${cell(s.variants.gzip, s.identity)} |`,
+        `| \`${s.path}\` | ${bytes(s.identity)} | ${cell(s.variants.br, s.identity)} | ${cell(s.variants.gzip, s.identity)} |`,
     );
   return [
-    "| Asset | identity | zstd | br | gzip |",
-    "|---|---|---|---|---|",
+    "| Asset | identity | br | gzip |",
+    "|---|---|---|---|",
     ...rows,
   ].join("\n");
 }

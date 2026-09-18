@@ -14,8 +14,8 @@
  *   /ui/assets/<unknown>       → 404 (never fall back to HTML for an asset URL)
  *
  * Compressible assets (js/css/html/svg/json/webmanifest) are embedded with
- * precompressed zstd/brotli/gzip variants; `Accept-Encoding` is negotiated per
- * request (server preference zstd > br > gzip > identity, client q-values
+ * precompressed brotli/gzip variants; `Accept-Encoding` is negotiated per
+ * request (server preference br > gzip > identity, client q-values
  * honoured) and such responses always carry `Vary: Accept-Encoding` plus an
  * ETag that differs per encoding. Nothing is compressed at request time.
  *
@@ -60,7 +60,6 @@ export type UiEncoding = UiContentEncoding | "identity";
 
 /** Server preference when the client rates several encodings equally. */
 export const UI_ENCODING_PREFERENCE: readonly UiEncoding[] = [
-  "zstd",
   "br",
   "gzip",
   "identity",

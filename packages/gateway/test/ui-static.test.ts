@@ -5,8 +5,9 @@
  *   - hashed assets: correct MIME, immutable caching, ETag/304, 404 (never
  *     HTML) for unknown asset URLs
  *   - index.html: no-cache
- *   - Accept-Encoding negotiation over the precompressed variants (zstd > br >
- *     gzip > identity, q-values, malformed headers, per-encoding ETags, Vary)
+ *   - Accept-Encoding negotiation over the precompressed variants (br > gzip >
+ *     identity, q-values, malformed headers, per-encoding ETags, Vary; codings
+ *     we do not embed, such as zstd, are never sent even when advertised)
  *   - strict CSP + X-Frame-Options on every UI response (kept intact by the
  *     management CORS wrapper)
  *   - method restrictions
@@ -17,11 +18,7 @@
  * or the root `pnpm test`, whose pretest bundles the gateway).
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import {
-  brotliDecompressSync,
-  gunzipSync,
-  zstdDecompressSync,
-} from "node:zlib";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { loadConfig, type GatewayConfig } from "../src/config";
 import { startServer } from "../src/server";
 import {
@@ -69,9 +66,6 @@ function embeddedVariants(path: string): Set<UiEncoding> {
   if (!record) throw new Error(`no embedded asset at ${path}`);
   return new Set<UiEncoding>(["identity", ...record[4].map(([enc]) => enc)]);
 }
-
-/** The build host has zstd bindings iff the test host does (same Node). */
-const zstdSupported = typeof zstdDecompressSync === "function";
 
 function direct(path: string, init?: RequestInit): Response {
   const url = new URL(`http://127.0.0.1${path}`);
@@ -289,32 +283,32 @@ describe("parseAcceptEncoding", () => {
 });
 
 describe("negotiateEncoding", () => {
-  const all = new Set<UiEncoding>(["identity", "zstd", "br", "gzip"]);
-  const brGzip = new Set<UiEncoding>(["identity", "br", "gzip"]);
+  const all = new Set<UiEncoding>(["identity", "br", "gzip"]);
+  const gzipOnly = new Set<UiEncoding>(["identity", "gzip"]);
   const identityOnly = new Set<UiEncoding>(["identity"]);
 
   test.each<[string | null, UiEncoding]>([
     [null, "identity"],
     ["", "identity"],
-    ["gzip, deflate, br, zstd", "zstd"],
+    ["gzip, deflate, br, zstd", "br"],
     ["gzip, deflate, br", "br"],
     ["gzip, deflate", "gzip"],
     ["deflate", "identity"],
-    ["zstd", "zstd"],
+    ["zstd", "identity"],
     ["br", "br"],
     ["gzip", "gzip"],
     ["identity", "identity"],
-    ["*", "zstd"],
+    ["*", "br"],
     ["gzip, *;q=0.5", "gzip"],
-    ["*;q=0.5, gzip;q=0.4", "zstd"],
-    ["gzip;q=1, zstd;q=0.5", "gzip"],
+    ["*;q=0.5, gzip;q=0.4", "br"],
+    ["gzip;q=1, br;q=0.5", "gzip"],
     ["gzip;q=0.5, br;q=0.5", "identity"],
     ["gzip;q=0.5, br;q=0.5, identity;q=0.4", "br"],
-    ["zstd;q=0, br;q=0, gzip", "gzip"],
+    ["zstd, br;q=0, gzip", "gzip"],
     ["gzip;q=0.5", "identity"],
     ["gzip;q=0.5, identity;q=0.4", "gzip"],
     ["identity;q=0, gzip", "gzip"],
-    ["identity;q=0, *", "zstd"],
+    ["identity;q=0, *", "br"],
     ["identity;q=0", "identity"],
     ["*;q=0", "identity"],
     ["*;q=0, br", "br"],
@@ -325,10 +319,10 @@ describe("negotiateEncoding", () => {
   });
 
   test("falls back to the next preferred encoding when a variant is missing", () => {
-    expect(negotiateEncoding("gzip, br, zstd", brGzip)).toBe("br");
-    expect(negotiateEncoding("zstd", brGzip)).toBe("identity");
-    expect(negotiateEncoding("zstd, gzip;q=0.1", brGzip)).toBe("identity");
-    expect(negotiateEncoding("zstd, gzip;q=0.1, identity;q=0", brGzip)).toBe(
+    expect(negotiateEncoding("gzip, br, zstd", gzipOnly)).toBe("gzip");
+    expect(negotiateEncoding("br", gzipOnly)).toBe("identity");
+    expect(negotiateEncoding("br, gzip;q=0.1", gzipOnly)).toBe("identity");
+    expect(negotiateEncoding("br, gzip;q=0.1, identity;q=0", gzipOnly)).toBe(
       "gzip",
     );
     expect(negotiateEncoding("gzip, br, zstd", identityOnly)).toBe("identity");
@@ -343,16 +337,13 @@ describe("precompressed asset serving", () => {
     Exclude<UiEncoding, "identity">,
     (b: Buffer) => Buffer
   > = {
-    zstd: (b) => zstdDecompressSync(b),
     br: (b) => brotliDecompressSync(b),
     gzip: (b) => gunzipSync(b),
   };
 
-  test("the build embeds br and gzip (and zstd where Node supports it) for the app script", () => {
+  test("the build embeds exactly br and gzip for the app script (no zstd)", () => {
     const variants = embeddedVariants(js());
-    expect(variants.has("br")).toBe(true);
-    expect(variants.has("gzip")).toBe(true);
-    expect(variants.has("zstd")).toBe(zstdSupported);
+    expect(variants).toEqual(new Set(["identity", "br", "gzip"]));
     expect(embeddedVariants(css()).has("gzip")).toBe(true);
   });
 
@@ -362,10 +353,32 @@ describe("precompressed asset serving", () => {
     );
   });
 
+  test("cached bodies are standalone copies: repeated serves equal the embedded bytes", async () => {
+    const path = js();
+    const record = UI_ASSET_FILES.find(
+      ([p]) => p === path.slice("/ui/".length),
+    );
+    if (!record) throw new Error(`no embedded asset at ${path}`);
+    const source = Buffer.from(record[3], record[2]);
+    const brSource = record[4].find(([enc]) => enc === "br")?.[1];
+    if (!brSource) throw new Error("no br variant embedded");
+    for (let i = 0; i < 3; i++) {
+      const identity = Buffer.from(await direct(path).arrayBuffer());
+      expect(identity.equals(source)).toBe(true);
+      const br = Buffer.from(
+        await direct(path, {
+          headers: { "accept-encoding": "br" },
+        }).arrayBuffer(),
+      );
+      expect(br.equals(Buffer.from(brSource, "base64"))).toBe(true);
+    }
+  });
+
   test.each<[string, UiEncoding]>([
-    ["gzip, deflate, br, zstd", zstdSupported ? "zstd" : "br"],
+    ["gzip, deflate, br, zstd", "br"],
     ["gzip, deflate, br", "br"],
     ["gzip", "gzip"],
+    ["zstd", "identity"],
     ["deflate", "identity"],
   ])(
     "Accept-Encoding %j serves the %s variant whose bytes round-trip to identity",
@@ -490,7 +503,7 @@ describe("precompressed asset serving", () => {
 
   test("HEAD reports the encoded Content-Length without a body", async () => {
     const path = js();
-    for (const accept of ["gzip", "br", zstdSupported ? "zstd" : "br", ""]) {
+    for (const accept of ["gzip", "br", "zstd", ""]) {
       const full = direct(path, { headers: { "accept-encoding": accept } });
       const head = direct(path, {
         method: "HEAD",
@@ -561,24 +574,19 @@ describe("UI serving through the gateway", () => {
     expectSecurityHeaders(res);
   });
 
-  test("the server negotiates zstd for a browser-style Accept-Encoding and keeps CORS Vary", async () => {
+  test("the server negotiates br for a browser-style Accept-Encoding and keeps CORS Vary", async () => {
     const origin = `http://localhost:${loopback.port}`;
     const res = await loopbackRequest(urlFor(loopback, assetPath(".js")), {
       headers: { "accept-encoding": "gzip, deflate, br, zstd", origin },
     });
     expect(res.status).toBe(200);
-    const expected = zstdSupported ? "zstd" : "br";
-    expect(res.headers.get("content-encoding")).toBe(expected);
+    expect(res.headers.get("content-encoding")).toBe("br");
     expect(res.headers.get("vary")).toBe("Accept-Encoding, Origin");
     expectSecurityHeaders(res);
     const body = Buffer.from(await res.arrayBuffer());
     expect(res.headers.get("content-length")).toBe(String(body.byteLength));
     const identity = Buffer.from(await direct(assetPath(".js")).arrayBuffer());
-    const decoded =
-      expected === "zstd"
-        ? zstdDecompressSync(body)
-        : brotliDecompressSync(body);
-    expect(decoded.equals(identity)).toBe(true);
+    expect(brotliDecompressSync(body).equals(identity)).toBe(true);
   });
 
   test("/api responses keep their own frame-ancestors policy", async () => {

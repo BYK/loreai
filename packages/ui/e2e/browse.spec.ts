@@ -135,7 +135,7 @@ test.describe("real data browsing", () => {
     }
   });
 
-  test("the main script is served precompressed (zstd, or br where the browser lacks zstd)", async ({
+  test("the main script is served precompressed with brotli", async ({
     page,
   }) => {
     const script = page.waitForResponse((res) =>
@@ -146,11 +146,9 @@ test.describe("real data browsing", () => {
     expect(res.status()).toBe(200);
     const accepted =
       (await res.request().allHeaders())["accept-encoding"] ?? "";
-    expect(accepted).toMatch(/\b(zstd|br)\b/);
+    expect(accepted).toMatch(/\bbr\b/);
     const headers = await res.allHeaders();
-    expect(headers["content-encoding"]).toBe(
-      /\bzstd\b/.test(accepted) ? "zstd" : "br",
-    );
+    expect(headers["content-encoding"]).toBe("br");
     expect(headers["vary"]).toMatch(/accept-encoding/i);
     // The page actually booted from the encoded script.
     await expect(page.getByTestId("connection-status")).toHaveAttribute(
