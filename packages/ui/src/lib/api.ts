@@ -1,7 +1,7 @@
 /**
  * Minimal typed fetch client for the gateway management API.
  *
- * Every response is validated at runtime (Valibot contracts in
+ * Every response is validated at runtime (ArkType contracts in
  * `~/contracts`) before it reaches a view, and every failure is classified
  * into one of a few `ApiErrorKind`s so the shell can show the right
  * connection state:
@@ -13,7 +13,7 @@
  *   - `invalid`      2xx whose body failed validation (`ContractError`)
  *   - `http`         any other non-2xx
  */
-import * as v from "valibot";
+import { type Type } from "arktype";
 
 import {
   accountStatus,
@@ -27,6 +27,7 @@ import {
   knowledgeVersionHistory,
   parseContract,
   projectList,
+  safeParseContract,
   sessionDetail,
   sessionList,
   sharingStatus,
@@ -83,8 +84,8 @@ async function readErrorMessage(res: Response): Promise<string | null> {
   const text = await res.text().catch(() => "");
   if (!text) return null;
   try {
-    const parsed = v.safeParse(apiErrorBody, JSON.parse(text));
-    return parsed.success ? parsed.output.error.message : text.slice(0, 200);
+    const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
+    return parsed.ok ? parsed.value.error.message : text.slice(0, 200);
   } catch {
     return text.slice(0, 200);
   }
@@ -95,11 +96,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => globalThis.fetch(input, init));
 
-  async function getJson<S extends v.GenericSchema>(
+  async function getJson<T>(
     path: string,
-    schema: S,
+    schema: Type<T>,
     signal?: AbortSignal,
-  ): Promise<v.InferOutput<S>> {
+  ): Promise<T> {
     let res: Response;
     try {
       res = await doFetch(`${base}${path}`, {

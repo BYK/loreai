@@ -1,4 +1,5 @@
-import * as v from "valibot";
+import "./config";
+import { type } from "arktype";
 
 import { epochMs, nonEmptyString, nonNegInt } from "./primitives";
 
@@ -7,11 +8,11 @@ import { epochMs, nonEmptyString, nonNegInt } from "./primitives";
  * (`packages/core/src/data.ts`): `name` is nullable and the counts are
  * plain non-negative integers.
  */
-export const projectSummary = v.looseObject({
+export const projectSummary = type({
   id: nonEmptyString,
-  path: v.string(),
-  name: v.nullable(v.string()),
-  git_remote: v.nullable(v.string()),
+  path: "string",
+  name: "string | null",
+  git_remote: "string | null",
   created_at: epochMs,
   knowledge_count: nonNegInt,
   session_count: nonNegInt,
@@ -19,6 +20,6 @@ export const projectSummary = v.looseObject({
   distillation_count: nonNegInt,
 });
 
-export type ProjectSummary = v.InferOutput<typeof projectSummary>;
+export type ProjectSummary = typeof projectSummary.infer;
 
-export const projectList = v.array(projectSummary);
+export const projectList = projectSummary.array();

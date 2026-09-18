@@ -9,13 +9,23 @@
 import { writeFileSync } from "node:fs";
 import { performance, PerformanceObserver } from "node:perf_hooks";
 
-import { PAYLOADS, allocation, retention, sanity, throughput } from "./workload.mjs";
+import {
+  PAYLOADS,
+  allocation,
+  retention,
+  sanity,
+  throughput,
+} from "./workload.mjs";
 
-const LIBS = (process.env.BENCH_LIBS ?? "zod,zod-mini,valibot,typebox,arktype").split(",");
+const LIBS = (
+  process.env.BENCH_LIBS ?? "zod,zod-mini,valibot,typebox,arktype"
+).split(",");
 const RUN_MS = Number(process.env.BENCH_RUN_MS ?? 10_000);
 const WARM_MS = Number(process.env.BENCH_WARM_MS ?? 2_000);
 const RETAIN = Number(process.env.BENCH_RETAIN ?? 100_000);
-const PAYLOAD_NAMES = (process.env.BENCH_PAYLOADS ?? Object.keys(PAYLOADS).join(",")).split(",");
+const PAYLOAD_NAMES = (
+  process.env.BENCH_PAYLOADS ?? Object.keys(PAYLOADS).join(",")
+).split(",");
 
 if (typeof globalThis.gc !== "function") {
   console.error("run with node --expose-gc");
@@ -63,7 +73,10 @@ for (const name of LIBS) {
   const lib = await import(`./schemas/${name}.mjs`);
   sanity(lib);
   for (const payload of PAYLOAD_NAMES) {
-    const t = throughput(lib, payload, host, { warmMs: WARM_MS, runMs: RUN_MS });
+    const t = throughput(lib, payload, host, {
+      warmMs: WARM_MS,
+      runMs: RUN_MS,
+    });
     const a = await allocation(lib, payload, host, { n: 1000 });
     const r = await retention(lib, payload, host, {
       // 2k-message sessions are ~10× a page; scale the count so each loop
@@ -77,6 +90,9 @@ for (const name of LIBS) {
   }
 }
 
-console.log(`node ${process.version}, run=${RUN_MS} ms/payload, retain=${RETAIN} parses`);
+console.log(
+  `node ${process.version}, run=${RUN_MS} ms/payload, retain=${RETAIN} parses`,
+);
 console.table(results);
-if (process.env.BENCH_JSON) writeFileSync(process.env.BENCH_JSON, JSON.stringify(results, null, 2));
+if (process.env.BENCH_JSON)
+  writeFileSync(process.env.BENCH_JSON, JSON.stringify(results, null, 2));

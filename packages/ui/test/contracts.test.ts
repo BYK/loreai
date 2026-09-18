@@ -1,12 +1,12 @@
 /**
  * Contract tests: every recorded fixture in `test/fixtures/**` must parse
- * against the matching contract and deep-equal the input (loose objects
+ * against the matching contract and deep-equal the input (ArkType objects
  * preserve unknown keys), plus a per-contract violation battery.
  */
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import * as v from "valibot";
+import type { Type } from "arktype";
 
 import {
   accountStatus,
@@ -39,7 +39,7 @@ function readFixture(name: string): unknown {
   return JSON.parse(raw.replace(/,(\s*[}\]])/g, "$1"));
 }
 
-const ROUTES: Record<string, { route: string; schema: v.GenericSchema }> = {
+const ROUTES: Record<string, { route: string; schema: Type }> = {
   "projects.json": { route: "/projects", schema: projectList },
   "knowledge-list.json": {
     route: "/projects/p/knowledge",
@@ -107,7 +107,7 @@ describe("contract violations", () => {
     name: string;
     fixture: string;
     route: string;
-    schema: v.GenericSchema;
+    schema: Type;
     /** path to the object to mutate ("" = root; arrays take element 0) */
     pick: (input: unknown) => Record<string, unknown>;
   }> = [
@@ -155,7 +155,7 @@ describe("contract violations", () => {
         const probe = structuredClone(input);
         // A field is "required" if deleting it makes the contract fail.
         delete c.pick(probe)[key];
-        return !v.safeParse(c.schema, probe).success;
+        return !safeParseContract("/x", c.schema, probe).ok;
       });
 
       it.each(required)("missing required field %s is a ContractError", (f) => {
@@ -184,17 +184,17 @@ describe("contract violations", () => {
         } else if (extra.length > 0) {
           (extra[0] as Record<string, unknown>).__future = { nested: true };
         }
-        const parsed = v.safeParse(c.schema, extra);
-        expect(parsed.success).toBe(true);
-        if (parsed.success) {
-          if (Array.isArray(parsed.output)) {
+        const parsed = safeParseContract("/x", c.schema, extra);
+        expect(parsed.ok).toBe(true);
+        if (parsed.ok) {
+          if (Array.isArray(parsed.value)) {
             expect(
-              (parsed.output[0] as Record<string, unknown>).__future,
+              (parsed.value[0] as Record<string, unknown>).__future,
             ).toEqual({ nested: true });
           } else {
-            expect((parsed.output as Record<string, unknown>).__future).toEqual(
-              { nested: true },
-            );
+            expect((parsed.value as Record<string, unknown>).__future).toEqual({
+              nested: true,
+            });
           }
         }
       });
@@ -202,7 +202,7 @@ describe("contract violations", () => {
   }
 
   it("mistyped fields are errors, never coerced", () => {
-    for (const [schema, input, patch] of [
+    const cases: Array<readonly [Type, unknown, Record<string, unknown>]> = [
       [projectList, readFixture("projects.json"), { created_at: "yesterday" }],
       [
         knowledgeEntry,
@@ -214,7 +214,8 @@ describe("contract violations", () => {
         readFixture("cursor/knowledge-page.json"),
         { next_cursor: 1 },
       ],
-    ] as const) {
+    ];
+    for (const [schema, input, patch] of cases) {
       const broken = structuredClone(input);
       const target = Array.isArray(broken) ? broken[0] : broken;
       Object.assign(target as Record<string, unknown>, patch);
@@ -228,10 +229,19 @@ describe("contract violations", () => {
   });
 
   it("apiErrorBody accepts the gateway error envelope", () => {
-    const parsed = v.safeParse(apiErrorBody, {
+    const parsed = safeParseContract("/x", apiErrorBody, {
       type: "error",
       error: { type: "not_found", message: "Knowledge entry not found: x" },
     });
-    expect(parsed.success).toBe(true);
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("contracts run jitless (CSP-compatible)", () => {
+    // `resolvedConfig` exists at runtime but is missing from arktype's
+    // public .d.ts — narrow structurally rather than to `any`.
+    const scope = knowledgeEntry.$ as {
+      resolvedConfig?: { jitless?: boolean };
+    };
+    expect(scope.resolvedConfig?.jitless).toBe(true);
   });
 });

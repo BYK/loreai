@@ -1,23 +1,24 @@
-import * as v from "valibot";
+import "./config";
+import { type } from "arktype";
 
 import { epochMs, nonEmptyString, nonNegInt } from "./primitives";
 
 /** `GET /api/v1/projects/:id/distillations` row — core `DistillationSummary`. */
-export const distillationSummary = v.looseObject({
+export const distillationSummary = type({
   id: nonEmptyString,
-  session_id: v.string(),
+  session_id: "string",
   generation: nonNegInt,
   token_count: nonNegInt,
-  r_compression: v.nullable(v.number()),
-  c_norm: v.nullable(v.number()),
-  archived: v.pipe(v.number(), v.integer()),
+  r_compression: "number | null",
+  c_norm: "number | null",
+  archived: "number.integer",
   created_at: epochMs,
-  call_type: v.nullable(v.string()),
+  call_type: "string | null",
 });
 
-export type DistillationSummary = v.InferOutput<typeof distillationSummary>;
+export type DistillationSummary = typeof distillationSummary.infer;
 
-export const distillationList = v.array(distillationSummary);
+export const distillationList = distillationSummary.array();
 
 /**
  * `GET /api/v1/distillations/:id` — `data.getDistillation` returns the full
@@ -25,19 +26,19 @@ export const distillationList = v.array(distillationSummary);
  * CHECK result: `getDistillation`'s SELECT omits `call_type` (only the
  * summary query selects it), so it is optional here.
  */
-export const distillationDetail = v.looseObject({
+export const distillationDetail = type({
   id: nonEmptyString,
-  session_id: v.string(),
-  project_id: v.string(),
+  session_id: "string",
+  project_id: "string",
   generation: nonNegInt,
   token_count: nonNegInt,
-  r_compression: v.nullable(v.number()),
-  c_norm: v.nullable(v.number()),
-  archived: v.pipe(v.number(), v.integer()),
+  r_compression: "number | null",
+  c_norm: "number | null",
+  archived: "number.integer",
   created_at: epochMs,
-  call_type: v.optional(v.nullable(v.string())),
-  observations: v.string(),
-  source_ids: v.string(),
+  "call_type?": "string | null",
+  observations: "string",
+  source_ids: "string",
 });
 
-export type DistillationDetail = v.InferOutput<typeof distillationDetail>;
+export type DistillationDetail = typeof distillationDetail.infer;

@@ -7,7 +7,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const LIBS = (process.env.BENCH_LIBS ?? "zod,zod-mini,valibot,typebox,arktype").split(",");
+const LIBS = (
+  process.env.BENCH_LIBS ?? "zod,zod-mini,valibot,typebox,arktype"
+).split(",");
 const here = new URL(".", import.meta.url).pathname;
 const tsc = join(here, "../../../node_modules/typescript/bin/tsc");
 
@@ -45,7 +47,9 @@ function parseDiagnostics(text) {
   return {
     types: pick("Types"),
     instantiations: pick("Instantiations"),
-    memoryMb: pick("Memory used") ? Math.round(pick("Memory used") / 1024) : null,
+    memoryMb: pick("Memory used")
+      ? Math.round(pick("Memory used") / 1024)
+      : null,
     checkS: pick("Check time"),
     totalS: pick("Total time"),
   };
@@ -55,7 +59,8 @@ const results = [];
 for (const lib of LIBS) {
   const dir = mkdtempSync(join(tmpdir(), `ui-bench-ts-${lib}-`));
   const probe = SCHEMAS.map(
-    (s) => `export type T_${s} = ${OUTPUT_TYPE[lib](s)};\nexport const c_${s}: T_${s} = S.parse(S.${s}, {});`,
+    (s) =>
+      `export type T_${s} = ${OUTPUT_TYPE[lib](s)};\nexport const c_${s}: T_${s} = S.parse(S.${s}, {});`,
   ).join("\n");
   writeFileSync(
     join(dir, "probe.ts"),
@@ -76,12 +81,14 @@ for (const lib of LIBS) {
         types: [],
         baseUrl: here,
         paths: {
-          "zod": [join(here, "node_modules/zod")],
+          zod: [join(here, "node_modules/zod")],
           "zod/*": [join(here, "node_modules/zod/*")],
-          "valibot": [join(here, "node_modules/valibot")],
+          valibot: [join(here, "node_modules/valibot")],
           "@sinclair/typebox": [join(here, "node_modules/@sinclair/typebox")],
-          "@sinclair/typebox/*": [join(here, "node_modules/@sinclair/typebox/*")],
-          "arktype": [join(here, "node_modules/arktype")],
+          "@sinclair/typebox/*": [
+            join(here, "node_modules/@sinclair/typebox/*"),
+          ],
+          arktype: [join(here, "node_modules/arktype")],
         },
       },
       files: ["probe.ts"],
@@ -89,9 +96,13 @@ for (const lib of LIBS) {
   );
   let out;
   try {
-    out = execFileSync(process.execPath, [tsc, "-p", dir, "--extendedDiagnostics"], {
-      encoding: "utf8",
-    });
+    out = execFileSync(
+      process.execPath,
+      [tsc, "-p", dir, "--extendedDiagnostics"],
+      {
+        encoding: "utf8",
+      },
+    );
   } catch (e) {
     out = `${e.stdout ?? ""}${e.stderr ?? ""}`;
   }

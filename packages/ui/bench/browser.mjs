@@ -17,11 +17,15 @@ import { build } from "esbuild";
 const require = createRequire(import.meta.url);
 const { chromium } = require("../node_modules/@playwright/test");
 
-const LIBS = (process.env.BENCH_LIBS ?? "zod,zod-mini,valibot,typebox,arktype").split(",");
+const LIBS = (
+  process.env.BENCH_LIBS ?? "zod,zod-mini,valibot,typebox,arktype"
+).split(",");
 const RUN_MS = Number(process.env.BENCH_RUN_MS ?? 10_000);
 const WARM_MS = Number(process.env.BENCH_WARM_MS ?? 2_000);
 const RETAIN = Number(process.env.BENCH_RETAIN ?? 100_000);
-const PAYLOAD_NAMES = (process.env.BENCH_PAYLOADS ?? "entry,page,session").split(",");
+const PAYLOAD_NAMES = (
+  process.env.BENCH_PAYLOADS ?? "entry,page,session"
+).split(",");
 
 async function bundle(name) {
   const r = await build({
@@ -93,7 +97,11 @@ try {
           },
         };
         const uaMemory = async () => {
-          if (!crossOriginIsolated || !performance.measureUserAgentSpecificMemory) return null;
+          if (
+            !crossOriginIsolated ||
+            !performance.measureUserAgentSpecificMemory
+          )
+            return null;
           try {
             const m = await performance.measureUserAgentSpecificMemory();
             return Math.round(m.bytes / 1024);
@@ -123,7 +131,12 @@ try {
         }
         return out;
       },
-      { warmMs: WARM_MS, runMs: RUN_MS, retain: RETAIN, payloads: PAYLOAD_NAMES },
+      {
+        warmMs: WARM_MS,
+        runMs: RUN_MS,
+        retain: RETAIN,
+        payloads: PAYLOAD_NAMES,
+      },
     );
     for (const row of rows) {
       const full = { lib: name, ...row };
@@ -136,6 +149,9 @@ try {
   await browser.close();
 }
 
-console.log(`chromium ${browser.version()}, run=${RUN_MS} ms/payload, retain=${RETAIN} parses`);
+console.log(
+  `chromium ${browser.version()}, run=${RUN_MS} ms/payload, retain=${RETAIN} parses`,
+);
 console.table(results);
-if (process.env.BENCH_JSON) writeFileSync(process.env.BENCH_JSON, JSON.stringify(results, null, 2));
+if (process.env.BENCH_JSON)
+  writeFileSync(process.env.BENCH_JSON, JSON.stringify(results, null, 2));

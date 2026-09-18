@@ -1,43 +1,47 @@
-import * as v from "valibot";
+import "./config";
+import { type, type Type } from "arktype";
 
 import { ContractError, type ContractIssue } from "./error";
 
-function toIssues(
-  issues: readonly v.InferIssue<v.GenericSchema>[],
-): ContractIssue[] {
-  return issues.map((issue) => ({
-    path: v.getDotPath(issue) ?? "",
-    message: issue.message,
-    expected: issue.expected ?? undefined,
-    received: issue.received,
+function toIssues(errors: type.errors): ContractIssue[] {
+  return errors.map((e) => ({
+    path: e.path.map(String).join("."),
+    message: e.message,
+    expected: e.expected,
+    received: e.actual,
   }));
 }
 
 /**
  * Validate a response body against a contract. Throws `ContractError`
- * listing every issue (no early abort) on mismatch.
+ * listing every issue on mismatch. On success the input object is returned
+ * as-is (ArkType does not clone valid data — intentional).
  */
-export function parseContract<S extends v.GenericSchema>(
+export function parseContract<T>(
   route: string,
-  schema: S,
+  schema: Type<T>,
   input: unknown,
-): v.InferOutput<S> {
-  const result = v.safeParse(schema, input, { abortEarly: false });
-  if (!result.success) throw new ContractError(route, toIssues(result.issues));
-  return result.output;
+): T {
+  const out = schema(input);
+  if (out instanceof type.errors) {
+    throw new ContractError(route, toIssues(out));
+  }
+  // ArkType types the call result as its morph-resolution wrapper; once
+  // ArkErrors is excluded it is exactly `T`.
+  return out as T;
 }
 
-export function safeParseContract<S extends v.GenericSchema>(
+export function safeParseContract<T>(
   route: string,
-  schema: S,
+  schema: Type<T>,
   input: unknown,
-): { ok: true; value: v.InferOutput<S> } | { ok: false; error: ContractError } {
-  const result = v.safeParse(schema, input, { abortEarly: false });
-  if (!result.success) {
+): { ok: true; value: T } | { ok: false; error: ContractError } {
+  const out = schema(input);
+  if (out instanceof type.errors) {
     return {
       ok: false,
-      error: new ContractError(route, toIssues(result.issues)),
+      error: new ContractError(route, toIssues(out)),
     };
   }
-  return { ok: true, value: result.output };
+  return { ok: true, value: out as T };
 }

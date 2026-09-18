@@ -2,79 +2,73 @@
  * Folk Lore (team sync) status routes — field-for-field copies of the
  * interfaces in `packages/gateway/src/folk-status.ts`, enums as picklists.
  */
-import * as v from "valibot";
+import "./config";
+import { type } from "arktype";
 
 import { nonNegInt } from "./primitives";
 
-export const accountState = v.picklist(["signed_in", "anonymous", "expired"]);
+export const accountState = type("'signed_in' | 'anonymous' | 'expired'");
 
-export const accountStatus = v.looseObject({
-  signed_in: v.boolean(),
-  user: v.nullable(
-    v.looseObject({
-      id: v.string(),
-      email: v.nullable(v.string()),
-      display_name: v.nullable(v.string()),
-    }),
-  ),
-  provider: v.nullable(v.string()),
+export const accountStatus = type({
+  signed_in: "boolean",
+  user: type({
+    id: "string",
+    email: "string | null",
+    display_name: "string | null",
+  }).or("null"),
+  provider: "string | null",
   /** ISO-8601 access-token expiry (this route reports ISO, not epoch ms). */
-  expires_at: v.nullable(v.string()),
+  expires_at: "string | null",
   state: accountState,
 });
 
-export type AccountStatus = v.InferOutput<typeof accountStatus>;
+export type AccountStatus = typeof accountStatus.infer;
 
-export const teamStatus = v.looseObject({
-  id: v.string(),
-  name: v.nullable(v.string()),
-  role: v.string(),
+export const teamStatus = type({
+  id: "string",
+  name: "string | null",
+  role: "string",
   member_count: nonNegInt,
 });
 
-export type TeamStatus = v.InferOutput<typeof teamStatus>;
+export type TeamStatus = typeof teamStatus.infer;
 
 /** `GET /api/v1/teams` wraps the rows in `{ teams: [...] }`. */
-export const teamList = v.looseObject({
-  teams: v.array(teamStatus),
+export const teamList = type({
+  teams: teamStatus.array(),
 });
 
-export type TeamList = v.InferOutput<typeof teamList>;
+export type TeamList = typeof teamList.infer;
 
-export const promotionPolicy = v.picklist(["manual", "auto"]);
+export const promotionPolicy = type("'manual' | 'auto'");
 
-export const sharingState = v.picklist([
-  "not_linked",
-  "linked",
-  "locked",
-  "degraded",
-]);
+export const sharingState = type(
+  "'not_linked' | 'linked' | 'locked' | 'degraded'",
+);
 
-export const sharingStatus = v.looseObject({
-  linked: v.boolean(),
-  team: v.nullable(
-    v.looseObject({
-      id: v.string(),
-      name: v.nullable(v.string()),
-    }),
-  ),
-  policy: v.looseObject({
+export const sharingStatus = type({
+  linked: "boolean",
+  team: type({
+    id: "string",
+    name: "string | null",
+  }).or("null"),
+  policy: type({
     effective: promotionPolicy,
-    project_override: v.nullable(promotionPolicy),
-    team_default: v.nullable(promotionPolicy),
+    project_override: promotionPolicy.or("null"),
+    team_default: promotionPolicy.or("null"),
   }),
   state: sharingState,
-  detail: v.nullable(v.string()),
+  detail: "string | null",
 });
 
-export type SharingStatus = v.InferOutput<typeof sharingStatus>;
+export type SharingStatus = typeof sharingStatus.infer;
 
-export const syncState = v.picklist(["idle", "disabled"]);
+export const syncState = type("'idle' | 'disabled'");
 
-export const syncStatus = v.looseObject({
-  enabled: v.boolean(),
+export const syncStatus = type({
+  enabled: "boolean",
   state: syncState,
-  pending_changes: v.nullable(nonNegInt),
+  pending_changes: nonNegInt.or("null"),
 });
 
-export type SyncStatus = v.InferOutput<typeof syncStatus>;
+export type SyncStatus = typeof syncStatus.infer;

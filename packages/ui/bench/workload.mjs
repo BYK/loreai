@@ -5,7 +5,11 @@
 import * as fx from "./fixtures.mjs";
 
 export const PAYLOADS = {
-  entry: { schema: "knowledgeEntry", make: () => fx.knowledgeEntry(7), batch: 200 },
+  entry: {
+    schema: "knowledgeEntry",
+    make: () => fx.knowledgeEntry(7),
+    batch: 200,
+  },
   page: { schema: "knowledgePage", make: () => fx.knowledgePage(200) },
   session: { schema: "sessionDetail", make: () => fx.sessionDetail(2000) },
 };
@@ -69,7 +73,7 @@ export async function allocation(lib, payload, host, { n = 1000 }) {
   const schema = lib[PAYLOADS[payload].schema];
   const inputs = [];
   for (let i = 0; i < n; i++) inputs.push(PAYLOADS[payload].make());
-  const keep = new Array(n);
+  const keep = Array.from({ length: n });
   const before = await host.settle();
   for (let i = 0; i < n; i++) keep[i] = lib.parse(schema, inputs[i]);
   const after = await host.settle();
@@ -117,7 +121,8 @@ export async function retention(
   const run = async (parse) => {
     const lru = new Lru(lruSize);
     const before = await host.settle();
-    for (let i = 0; i < parses; i++) lru.set(i, parse(schema, inputs[i % pool]));
+    for (let i = 0; i < parses; i++)
+      lru.set(i, parse(schema, inputs[i % pool]));
     const after = await host.settle();
     host.keep(lru);
     return after - before;

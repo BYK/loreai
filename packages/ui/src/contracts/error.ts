@@ -3,18 +3,19 @@
  * because `ContractError` extends it and this directory must not import from
  * `~/lib` — the node-side contract test resolves it by relative path only.
  */
-import * as v from "valibot";
+import "./config";
+import { type } from "arktype";
 
 /** The gateway's JSON error envelope: `{ type: "error", error: {...} }`. */
-export const apiErrorBody = v.looseObject({
-  type: v.literal("error"),
-  error: v.looseObject({
-    type: v.string(),
-    message: v.string(),
-  }),
+export const apiErrorBody = type({
+  type: "'error'",
+  error: {
+    type: "string",
+    message: "string",
+  },
 });
 
-export type ApiErrorBody = v.InferOutput<typeof apiErrorBody>;
+export type ApiErrorBody = typeof apiErrorBody.infer;
 
 export type ApiErrorKind =
   | "unreachable"

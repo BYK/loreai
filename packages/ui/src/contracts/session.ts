@@ -1,10 +1,11 @@
-import * as v from "valibot";
+import "./config";
+import { type } from "arktype";
 
 import { distillationSummary } from "./distillation";
 import { epochMs, nonEmptyString, nonNegInt } from "./primitives";
 
 /** `GET /api/v1/projects/:id/sessions` row — core `SessionSummary`. */
-export const sessionSummary = v.looseObject({
+export const sessionSummary = type({
   session_id: nonEmptyString,
   message_count: nonNegInt,
   first_message_at: epochMs,
@@ -14,33 +15,33 @@ export const sessionSummary = v.looseObject({
   distillation_count: nonNegInt,
 });
 
-export type SessionSummary = v.InferOutput<typeof sessionSummary>;
+export type SessionSummary = typeof sessionSummary.infer;
 
-export const sessionList = v.array(sessionSummary);
+export const sessionList = sessionSummary.array();
 
 /**
  * One `temporal_messages` row as `temporal.bySession` returns it (`SELECT *`
  * — `metadata` is the stored JSON string, not a parsed object).
  */
-export const temporalMessage = v.looseObject({
+export const temporalMessage = type({
   id: nonEmptyString,
-  source_id: v.optional(v.nullable(v.string())),
-  project_id: v.string(),
-  session_id: v.string(),
-  role: v.string(),
-  content: v.string(),
+  "source_id?": "string | null",
+  project_id: "string",
+  session_id: "string",
+  role: "string",
+  content: "string",
   tokens: nonNegInt,
-  distilled: v.pipe(v.number(), v.integer()),
+  distilled: "number.integer",
   created_at: epochMs,
-  metadata: v.string(),
+  metadata: "string",
 });
 
-export type TemporalMessage = v.InferOutput<typeof temporalMessage>;
+export type TemporalMessage = typeof temporalMessage.infer;
 
 /** `GET /api/v1/sessions/:id?path=…` — `{ messages, distillations }`. */
-export const sessionDetail = v.looseObject({
-  messages: v.array(temporalMessage),
-  distillations: v.array(distillationSummary),
+export const sessionDetail = type({
+  messages: temporalMessage.array(),
+  distillations: distillationSummary.array(),
 });
 
-export type SessionDetail = v.InferOutput<typeof sessionDetail>;
+export type SessionDetail = typeof sessionDetail.infer;

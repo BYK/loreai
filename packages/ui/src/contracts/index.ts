@@ -1,3 +1,4 @@
+import "./config";
 export * from "./primitives";
 export * from "./error";
 export * from "./project";
