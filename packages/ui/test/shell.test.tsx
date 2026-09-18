@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppRoot, routes } from "~/app";
 import { knowledgeHref } from "~/routes/Browse";
 import { ApiError, type ApiClient } from "~/lib/api";
-import type { KnowledgeEntry, ProjectSummary } from "~/lib/schemas";
+import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
 import { NOT_AVAILABLE_YET } from "~/components/lore/FutureAction";
 import { resetThemeStoreForTests, THEME_STORAGE_KEY, theme } from "~/lib/theme";
 
@@ -74,12 +74,12 @@ function fakeClient(
   overrides: Overrides = {},
 ): ApiClient & { calls: string[] } {
   const calls: string[] = [];
-  const client: ApiClient = {
+  const base = {
     async listProjects() {
       calls.push("projects");
       return PROJECTS;
     },
-    async listProjectKnowledge(projectId) {
+    async listProjectKnowledge(projectId: string) {
       calls.push(`knowledge:${projectId}`);
       if (projectId === "p-lore") return ENTRIES;
       if (projectId === "p-empty") return [];
@@ -90,7 +90,7 @@ function fakeClient(
         404,
       );
     },
-    async getKnowledge(id) {
+    async getKnowledge(id: string) {
       calls.push(`entry:${id}`);
       const entry = ENTRIES.find((e) => e.id === id);
       if (!entry) {
@@ -103,8 +103,8 @@ function fakeClient(
       }
       return entry;
     },
-    ...overrides,
   };
+  const client = Object.assign(base, overrides) as ApiClient;
   return Object.assign(client, { calls });
 }
 

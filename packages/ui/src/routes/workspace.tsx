@@ -7,13 +7,17 @@ import {
   createConnectionStore,
   type ConnectionStore,
 } from "~/lib/connection";
-import { createLoader, type Loader } from "~/lib/loader";
-import type { ProjectSummary } from "~/lib/schemas";
+import type { Loader } from "~/lib/loader";
+import type { ProjectSummary } from "~/contracts";
+import { openLoreDb, type LoreUiDb } from "~/db";
+import { createAppState, type AppState } from "~/state";
 
 export interface Workspace {
   client: ApiClient;
+  /** `state.projects.list` — kept as a top-level field for existing callers. */
   projects: Loader<ProjectSummary[]>;
   connection: ConnectionStore;
+  state: AppState;
   projectById: (id: string | null | undefined) => ProjectSummary | undefined;
   /** Runs a read against the gateway and mirrors its outcome into the connection state. */
   tracked: <T>(read: () => Promise<T>) => Promise<T>;
@@ -30,11 +34,13 @@ export function useWorkspace(): Workspace {
 
 /**
  * Loads the project list once for the whole shell and owns the connection
- * store. `client` is injectable so tests can feed canned responses.
+ * store. `client` and `db` are injectable so tests can feed canned
+ * responses and a fake-indexeddb-backed (or null) cache.
  */
-export const WorkspaceProvider: ParentComponent<{ client?: ApiClient }> = (
-  props,
-) => {
+export const WorkspaceProvider: ParentComponent<{
+  client?: ApiClient;
+  db?: Promise<LoreUiDb | null>;
+}> = (props) => {
   const client = props.client ?? api;
   const connection = createConnectionStore();
 
@@ -49,17 +55,18 @@ export const WorkspaceProvider: ParentComponent<{ client?: ApiClient }> = (
     }
   };
 
-  const projects = createLoader(
-    () => true,
-    (_, signal) => tracked(() => client.listProjects(signal)),
-  );
+  const state = createAppState({
+    client,
+    db: props.db ?? openLoreDb(),
+    tracked,
+  });
 
   const ws: Workspace = {
     client,
-    projects,
+    projects: state.projects.list,
     connection,
-    projectById: (id) =>
-      id ? projects.data()?.find((p) => p.id === id) : undefined,
+    state,
+    projectById: state.projects.byId,
     tracked,
   };
 

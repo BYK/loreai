@@ -4,13 +4,13 @@ import { A, useParams } from "@solidjs/router";
 
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
+import { StaleBadge } from "~/components/lore/StaleBadge";
 import { StateCard } from "~/components/lore/StateCard";
 import { Nav } from "~/components/shell/Nav";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
-import { createLoader } from "~/lib/loader";
-import type { ProjectSummary } from "~/lib/schemas";
+import type { ProjectSummary } from "~/contracts";
 
 import { useWorkspace } from "./workspace";
 
@@ -159,20 +159,16 @@ export const Browse: Component = () => {
   };
   const ws = useWorkspace();
 
-  const entry = createLoader(
-    () => params.knowledgeId ?? null,
-    (knowledgeId, signal) =>
-      ws.tracked(() => ws.client.getKnowledge(knowledgeId, signal)),
-  );
+  const entry = ws.state.knowledge.entry(() => params.knowledgeId ?? null);
 
   // `/knowledge/:id` deep links resolve their project from the entry itself.
   const projectId = createMemo(
-    () => params.projectId ?? entry.data()?.project_id ?? null,
+    () => params.projectId ?? entry.loader.data()?.project_id ?? null,
   );
 
-  const knowledge = createLoader(projectId, (id, signal) =>
-    ws.tracked(() => ws.client.listProjectKnowledge(id, signal)),
-  );
+  const knowledge = ws.state.knowledge.list(projectId);
+  const knowledgeLoader = knowledge.loader;
+  const knowledgeStatus = knowledge.status;
 
   const project = createMemo(() => ws.projectById(projectId()));
   const projectLabel = () => {
@@ -203,6 +199,7 @@ export const Browse: Component = () => {
       activeProjectId={projectId()}
       totalKnowledge={totalKnowledge()}
       onRetry={ws.projects.reload}
+      stale={ws.state.projects.status()}
     />
   );
 
@@ -214,23 +211,30 @@ export const Browse: Component = () => {
         <PaneHead
           title={`Knowledge · ${projectLabel()}`}
           trailing={
-            <Show when={knowledge.data()}>
-              {(entries) => pluralize(entries().length, "entry", "entries")}
-            </Show>
+            <span class="inline-flex items-center gap-2">
+              <StaleBadge status={knowledgeStatus()} />
+              <Show when={knowledgeLoader.data()}>
+                {(entries) => pluralize(entries().length, "entry", "entries")}
+              </Show>
+            </span>
           }
         />
         <Switch>
-          <Match when={knowledge.error()}>
+          <Match when={knowledgeLoader.error() && !knowledgeLoader.data()}>
             <div class="p-3">
-              {errorState(knowledge.error(), "Knowledge", knowledge.reload)}
+              {errorState(
+                knowledgeLoader.error(),
+                "Knowledge",
+                knowledgeLoader.reload,
+              )}
             </div>
           </Match>
-          <Match when={knowledge.loading() && !knowledge.data()}>
+          <Match when={knowledgeLoader.loading() && !knowledgeLoader.data()}>
             <div class="p-4 text-[13px] text-muted" role="status">
               Loading knowledge…
             </div>
           </Match>
-          <Match when={knowledge.data()?.length === 0}>
+          <Match when={knowledgeLoader.data()?.length === 0}>
             <div class="p-3">
               <StateCard kind="empty" title="No knowledge yet" compact>
                 This project has sessions but no distilled knowledge entries
@@ -238,7 +242,7 @@ export const Browse: Component = () => {
               </StateCard>
             </div>
           </Match>
-          <Match when={knowledge.data()}>
+          <Match when={knowledgeLoader.data()}>
             {(entries) => (
               <For each={entries()}>
                 {(k) => (
@@ -264,18 +268,29 @@ export const Browse: Component = () => {
     <Switch fallback={<WelcomeDetail projects={ws.projects.data()} />}>
       <Match when={params.knowledgeId}>
         <Switch>
-          <Match when={entry.error()}>
+          <Match when={entry.loader.error() && !entry.loader.data()}>
             <div class="p-5 sm:p-7.5">
-              {errorState(entry.error(), "Knowledge entry", entry.reload)}
+              {errorState(
+                entry.loader.error(),
+                "Knowledge entry",
+                entry.loader.reload,
+              )}
             </div>
           </Match>
-          <Match when={entry.loading() && !entry.data()}>
+          <Match when={entry.loader.loading() && !entry.loader.data()}>
             <div class="p-5 text-sm text-muted sm:p-7.5" role="status">
               Loading entry…
             </div>
           </Match>
-          <Match when={entry.data()}>
-            {(e) => <KnowledgeDocument entry={e()} project={project()} />}
+          <Match when={entry.loader.data()}>
+            {(e) => (
+              <>
+                <div class="px-5 pt-3 sm:px-7.5">
+                  <StaleBadge status={entry.status()} />
+                </div>
+                <KnowledgeDocument entry={e()} project={project()} />
+              </>
+            )}
           </Match>
         </Switch>
       </Match>
@@ -299,7 +314,7 @@ export const Browse: Component = () => {
       back={back()}
       mobileTitle={
         params.knowledgeId
-          ? (entry.data()?.title ?? "Knowledge")
+          ? (entry.loader.data()?.title ?? "Knowledge")
           : projectId()
             ? projectLabel()
             : undefined

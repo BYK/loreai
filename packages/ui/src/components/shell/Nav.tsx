@@ -3,14 +3,16 @@ import { For, Match, Show, Switch } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
-import type { ProjectSummary } from "~/lib/schemas";
+import type { ProjectSummary } from "~/contracts";
 import {
   CONNECTION_LABEL,
   useConnection,
   type ConnectionState,
 } from "~/lib/connection";
 
+import { StaleBadge } from "../lore/StaleBadge";
 import { StateCard } from "../lore/StateCard";
+import type { KeyStatus } from "~/state/status";
 
 const NavItem: Component<{
   href: string;
@@ -86,6 +88,8 @@ export interface NavProps {
   activeProjectId: string | null;
   totalKnowledge: number | null;
   onRetry?: () => void;
+  /** Stale-cache indicator shown next to the Projects header. */
+  stale?: KeyStatus;
   class?: string;
 }
 
@@ -100,14 +104,21 @@ export const Nav: Component<NavProps> = (props) => {
       )}
     >
       <div class="eyebrow px-3">Workspace</div>
-      <NavItem
-        href="/"
-        active={props.activeProjectId === null}
-        count={props.projects?.length}
-        testId="nav-projects"
-      >
-        Projects
-      </NavItem>
+      <div class="flex items-center justify-between gap-2">
+        <div class="min-w-0 grow">
+          <NavItem
+            href="/"
+            active={props.activeProjectId === null}
+            count={props.projects?.length}
+            testId="nav-projects"
+          >
+            Projects
+          </NavItem>
+        </div>
+        <Show when={props.stale}>
+          {(status) => <StaleBadge status={status()} />}
+        </Show>
+      </div>
       <NavItem href="/" count={props.totalKnowledge ?? undefined}>
         Knowledge
       </NavItem>

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError, createApiClient, isAbortError, isApiError } from "~/lib/api";
+import {
+  ApiError,
+  createApiClient,
+  isAbortError,
+  isApiError,
+  isContractError,
+} from "~/lib/api";
 import { createConnectionStore } from "~/lib/connection";
 
 const PROJECT = {
@@ -83,26 +89,41 @@ describe("api client: happy path", () => {
     expect(calls).toEqual(["/api/v1/projects/p%201/knowledge"]);
   });
 
-  it("tolerates a malformed count instead of rejecting the whole list", async () => {
+  // Spec change (UI-03): mistyped fields are contract violations, not
+  // silently repaired — the old `.catch(0)` coercion is gone.
+  it("rejects a malformed count as a contract error", async () => {
     const { client } = clientFor(() =>
       json([{ ...PROJECT, knowledge_count: -4 }]),
     );
-    const [project] = await client.listProjects();
-    expect(project?.knowledge_count).toBe(0);
+    const error = await failure(client.listProjects());
+    expect(error.kind).toBe("invalid");
+    expect(isContractError(error)).toBe(true);
+    if (isContractError(error)) {
+      expect(error.issues.length).toBeGreaterThan(0);
+      expect(error.issues[0]?.path).toContain("knowledge_count");
+      expect(error.route).toBe("/projects");
+    }
   });
 });
 
 describe("api client: error classification", () => {
-  it("rejects a 2xx body that does not match the schema as `invalid`", async () => {
+  it("rejects a 2xx body that does not match the contract as `invalid`", async () => {
     const { client } = clientFor(() => json([{ nope: true }]));
     const error = await failure(client.listProjects());
     expect(error.kind).toBe("invalid");
     expect(error.status).toBe(200);
+    expect(isContractError(error)).toBe(true);
+    if (isContractError(error)) {
+      expect(error.issues.length).toBeGreaterThan(0);
+      expect(error.route).toBe("/projects");
+    }
   });
 
   it("rejects a knowledge entry without an id as `invalid`", async () => {
     const { client } = clientFor(() => json({ ...ENTRY, id: "" }));
-    expect((await failure(client.getKnowledge("x"))).kind).toBe("invalid");
+    const error = await failure(client.getKnowledge("x"));
+    expect(error.kind).toBe("invalid");
+    expect(isContractError(error)).toBe(true);
   });
 
   it("classifies network failures as `unreachable`", async () => {
@@ -159,6 +180,165 @@ describe("api client: error classification", () => {
     expect(error.kind).toBe("http");
     expect(error.status).toBe(500);
     expect(error.message).toBe("db locked");
+  });
+
+  it("requests the cursor page with ?page=cursor and ?cursor=…", async () => {
+    const page = { items: [ENTRY], next_cursor: null };
+    const { client, calls } = clientFor(() => json(page));
+    const first = await client.listProjectKnowledgePage("p 1", null);
+    expect(calls).toEqual(["/api/v1/projects/p%201/knowledge?page=cursor"]);
+    expect(first.items).toHaveLength(1);
+    expect(first.next_cursor).toBeNull();
+
+    await client.listProjectKnowledgePage("p1", "tok en");
+    expect(calls[1]).toBe("/api/v1/projects/p1/knowledge?cursor=tok%20en");
+  });
+
+  it("requests knowledge versions with include_deleted", async () => {
+    const history = {
+      id: "logical-1",
+      current_version_id: "v-2",
+      versions: [
+        {
+          version_id: "v-1",
+          version: 1,
+          created_at: Date.UTC(2026, 8, 1, 10),
+          superseded_at: Date.UTC(2026, 8, 2, 10),
+          is_current: false,
+          is_deleted: false,
+          title: "Keep SQLite",
+          content: "Portability is a requirement.",
+          category: "decision",
+          confidence: 0.9,
+          scope: "project",
+          cross_project: false,
+          source_refs: {
+            session_id: "s-42",
+            entry_id: null,
+            user_id: null,
+            created_by: null,
+            updated_by: null,
+            worker_provider_id: null,
+            worker_model_id: null,
+          },
+        },
+      ],
+    };
+    const { client, calls } = clientFor(() => json(history));
+    const result = await client.listKnowledgeVersions("a/b", {
+      includeDeleted: true,
+    });
+    expect(calls).toEqual([
+      "/api/v1/knowledge/a%2Fb/versions?include_deleted=true",
+    ]);
+    expect(result.versions[0]?.version_id).toBe("v-1");
+  });
+
+  it("lists project sessions and fetches a session detail via ?path=", async () => {
+    const session = {
+      session_id: "s-1",
+      message_count: 2,
+      first_message_at: Date.UTC(2026, 8, 1, 10),
+      last_message_at: Date.UTC(2026, 8, 1, 11),
+      distilled_count: 1,
+      undistilled_count: 1,
+      distillation_count: 0,
+    };
+    const detail = {
+      messages: [
+        {
+          id: "m-1",
+          project_id: "p1",
+          session_id: "s-1",
+          role: "user",
+          content: "hi",
+          tokens: 3,
+          distilled: 0,
+          created_at: Date.UTC(2026, 8, 1, 10),
+          metadata: "{}",
+        },
+      ],
+      distillations: [],
+    };
+    const { client, calls } = clientFor((url) =>
+      json(url.includes("/sessions/") ? detail : [session]),
+    );
+    const sessions = await client.listProjectSessions("p 1");
+    expect(calls[0]).toBe("/api/v1/projects/p%201/sessions");
+    expect(sessions[0]?.session_id).toBe("s-1");
+    const got = await client.getSession("/home/me/lore", "s 1");
+    expect(calls[1]).toBe(
+      "/api/v1/sessions/s%201?path=%2Fhome%2Fme%2Flore",
+    );
+    expect(got.messages).toHaveLength(1);
+  });
+
+  it("reads the folk status routes", async () => {
+    const { client, calls } = clientFor((url) => {
+      if (url.endsWith("/account")) {
+        return json({
+          signed_in: false,
+          user: null,
+          provider: null,
+          expires_at: null,
+          state: "anonymous",
+        });
+      }
+      if (url.endsWith("/teams")) return json({ teams: [] });
+      if (url.endsWith("/sync/status")) {
+        return json({ enabled: false, state: "disabled", pending_changes: null });
+      }
+      return json({
+        linked: false,
+        team: null,
+        policy: {
+          effective: "manual",
+          project_override: null,
+          team_default: null,
+        },
+        state: "not_linked",
+        detail: null,
+      });
+    });
+    expect((await client.getAccount()).state).toBe("anonymous");
+    expect((await client.getTeams()).teams).toEqual([]);
+    expect((await client.getSyncStatus()).enabled).toBe(false);
+    expect((await client.getProjectSharing("p1")).state).toBe("not_linked");
+    expect(calls).toEqual([
+      "/api/v1/account",
+      "/api/v1/teams",
+      "/api/v1/sync/status",
+      "/api/v1/projects/p1/sharing",
+    ]);
+  });
+
+  it("lists project distillations and fetches one detail", async () => {
+    const summary = {
+      id: "d-1",
+      session_id: "s-1",
+      generation: 0,
+      token_count: 1200,
+      r_compression: 0.4,
+      c_norm: null,
+      archived: 0,
+      created_at: Date.UTC(2026, 8, 1, 10),
+      call_type: "observer",
+    };
+    const detail = {
+      ...summary,
+      project_id: "p1",
+      observations: "obs",
+      source_ids: "m-1,m-2",
+    };
+    const { client, calls } = clientFor((url) =>
+      json(url.includes("/distillations/d") ? detail : [summary]),
+    );
+    expect((await client.listProjectDistillations("p1"))[0]?.id).toBe("d-1");
+    expect((await client.getDistillation("d-1")).observations).toBe("obs");
+    expect(calls).toEqual([
+      "/api/v1/projects/p1/distillations",
+      "/api/v1/distillations/d-1",
+    ]);
   });
 
   it("propagates aborts untouched so callers can ignore them", async () => {

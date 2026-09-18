@@ -8,7 +8,7 @@ import {
   formatWhen,
   initials,
 } from "~/lib/format";
-import type { KnowledgeEntry, ProjectSummary } from "~/lib/schemas";
+import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
 
 import { DocHeader, ScopeLabel, type Participant } from "./Document";
 import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
