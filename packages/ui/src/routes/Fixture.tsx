@@ -69,9 +69,9 @@ const FixtureBanner: Component = () => (
   <div
     data-testid="fixture-banner"
     role="note"
-    class="flex flex-wrap items-center justify-between gap-x-6 gap-y-1 bg-[#172a36] px-4 py-2.5 text-xs tracking-[0.02em] text-white dark:bg-[#071119] sm:px-6"
+    class="flex flex-wrap items-center justify-between gap-x-6 gap-y-1 bg-inverse px-4 py-2.5 text-xs tracking-[0.02em] text-inverse-text sm:px-6"
   >
-    <strong class="text-[#b8e4e5]">
+    <strong class="text-inverse-text-dim">
       LORE DESIGN SPECIMEN · v2.2 · NOT PRODUCTION
     </strong>
     <span>

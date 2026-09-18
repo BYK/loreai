@@ -14,6 +14,8 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fontsource-variable/dm-sans": "5.3.0",
+    "@fontsource/playfair-display": "5.3.0",
     "@kobalte/core": "0.13.14",
     "@solidjs/router": "1.0.0",
     "@tanstack/solid-table": "9.2.4",

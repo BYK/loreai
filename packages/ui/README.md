@@ -242,6 +242,68 @@ and the smoke page; the fixture and shell rows land in UI-02.
 | Local cache, drafts | — | `idb` | UI-03 |
 | Charts (cost / compression / latency) | `PlotContainer` (Solid owns the container, Plot owns descendants) | `@observablehq/plot` | UI-05 (lazy) |
 
+## Design tokens: website → UI mapping
+
+The app shares the marketing website's design language. Token **names** are
+the design-fixture v2.2 names (`--bg`, `--chrome`, `--mark`, …); token
+**values** are copied from the website theme —
+`packages/website/public/theme.css` (`:root` light palette and
+`[data-theme="dark"]` dark palette) and `src/styles/starlight.css` (fonts,
+header). Only semantic token values are copied, never the website's layout
+or component CSS. Everything lives in `src/styles/app.css` (`:root`, `.dark`,
+`@theme inline`) and `src/styles/fonts.css`. Keep this table and that file in
+sync.
+
+Raw brand palette (identical in both themes, exactly as on the website):
+`--c0 #f7f2e8`, `--c1 #ede5d0`, `--c2 #dfd5bb` (cream); `--g0 #1a3320` …
+`--g6 #e8f2e9` (greens); `--ink #1a2e1b`, `--mid #4a5f4c`.
+
+| Website variable (`theme.css`) | Light value | Dark value | UI token (`app.css`) | Tailwind utility |
+|---|---|---|---|---|
+| `--bg` | `--c0` | `#0d1913` | `--bg` | `bg-bg`, `bg-background` |
+| `--surface` | `--c0` | `#14251b` | `--surface` | `bg-surface`, `bg-card`, `bg-popover` |
+| `--surface-alt` | `--c1` | `#1a3124` | `--chrome` | `bg-chrome`, `bg-secondary` |
+| `--bg-alt` | `--c1` | `#101f17` | `--nav`, `--shade` | `bg-nav`, `bg-shade` |
+| `--border` | `--c2` | `#26402f` | `--line` | `border-line`, `border-border`, `border-input` (and the base `*` border colour) |
+| `--text` | `--ink` | `#e8f1e6` | `--text` | `text-text`, `text-foreground` |
+| `--text-muted` | `--mid` | `#9fbaa6` | `--muted` | `text-muted`, `text-muted-foreground` |
+| `--heading` | `--g0` | `#f2f7ee` | `--heading` | `text-heading` (base `h1`, `h2`) |
+| `--link` | `--g2` | `#a6d6ae` | `--accent` | `text-accent`, `ring-ring` (base `a`) |
+| `--link-hover` | `--g0` | `#dcecdd` | `--accent-hover` | `text-accent-hover` (base `a:hover`) |
+| `--link-border` | `--g4` | `#4a7a55` | `--thread` | `border-thread` (discussion thread line) |
+| `--inverse-text` (light) / `--bg` (dark) | `--c0` | `#0d1913` | `--accent-contrast` | `text-accent-contrast`, `text-accent-foreground` |
+| `--highlight-bg` | `--g6` | `#172c20` | `--soft`, `--accent-soft`, `--mark`, `--avatar-bg` | `bg-soft`, `bg-accent-soft`, `bg-mark`; `.passage-target` |
+| `--highlight-text` | `--g2` | `#bfe0c4` | `--accent-soft-text`, `--avatar-text` | `text-accent-soft-text` |
+| `--eyebrow` | `--g3` | `#79ab84` | `--mark-edge`, `--quote-edge` | `text-mark-edge`, `border-quote-edge`; `.eyebrow` |
+| `--emphasis` | `--g1` | `#9ad3a4` | `--emphasis`, `--gold` | `text-emphasis`, `text-gold` |
+| `--inverse-bg` | `--g0` | `#1e3a29` | `--inverse-bg`, `--avatar-agent-bg` | `bg-inverse`, `bg-primary` (filled buttons, fixture banner) |
+| `--inverse-bg-hover` | `--g1` | `#26492f` | `--inverse-bg-hover` | `bg-inverse-hover` |
+| `--inverse-text` | `--c0` | `#f2f7ee` | `--inverse-text`, `--avatar-agent-text` | `text-inverse-text`, `text-primary-foreground` |
+| `--inverse-text-dim` | `--g5` | `#c4ddc7` | `--inverse-text-dim` | `text-inverse-text-dim` |
+| `--error` | `#8b3a3a` | `#e39393` | `--danger` (+ derived `--danger-soft`, 10 % mix over `--surface`) | `text-danger`, `bg-danger-soft`, `bg-destructive` |
+| `.card` shadow `0 4px 14px rgba(26,51,32,.06)` | as is | `0 4px 14px rgba(0,0,0,.28)` | `--shadow-soft` | `shadow-xs`, `shadow-sm`, `shadow-md` |
+| `.feature` shadow `0 16px 48px rgba(26,51,32,.08)` / `.modal` shadow `0 14px 34px rgba(0,0,0,.38)` | `.feature` | `.modal` | `--shadow-lifted` | `shadow-lg`, `shadow-xl` |
+| `--sans` `"DM Sans", sans-serif` | | | `--font-sans` (`"DM Sans Variable", "DM Sans", sans-serif`) | `font-sans` (base `html`) |
+| `--serif` `'Playfair Display', Georgia, serif` | | | `--font-serif` | `font-serif` (logo wordmark) |
+| `starlight.css --sl-font-mono` | | | `--font-mono` | `font-mono` |
+| radii: website buttons/cards 3–6 px, pills 20 px | | | `--radius-sm 4px`, `--radius-md 6px`, `--radius-lg 10px`, `--radius-xl 14px` | `rounded-sm/md/lg/xl` |
+
+Not mapped on purpose: `--nav-bg` (the website's dark marketing header — the
+app keeps a light chrome bar so the pane hierarchy stays quiet), gradients,
+hero/orbit illustrations, and every layout rule.
+
+**Fonts** are self-hosted from `@fontsource-variable/dm-sans` and
+`@fontsource/playfair-display` (OFL-1.1) via hand-written `@font-face` rules
+in `src/styles/fonts.css` (latin + latin-ext woff2 only, ≈190 kB) so the
+strict CSP (`font-src 'self'`) holds and the UI works offline; Vite hashes
+the files into `dist/assets/` and the gateway embeds them with the rest.
+
+**Logo / favicon**: `src/assets/logo/loreai.svg` (light) and
+`loreai-dark.svg` (dark) plus `public/favicon.svg` are byte-for-byte copies
+of `packages/website/src/assets/logo/*` — no cross-package import. The
+`Logo` component (`components/shell/Logo.tsx`) picks the file from the
+resolved theme, and `index.html` links `/ui/favicon.svg`.
+
 ## Layout
 
 ```
@@ -251,11 +313,14 @@ packages/ui/
   src/app.tsx             Router (base /ui) + route table
   src/routes/             Browse.tsx (real data), Fixture.tsx (/ui/fixture), workspace.tsx (provider)
   src/components/shell/   Shell, AppBar, Nav, SearchEntry
+  src/components/shell/Logo.tsx  theme-aware Lore logo (copied website SVGs in src/assets/logo)
   src/components/lore/    document primitives (Document.tsx), KnowledgeDocument, Panes, StateCard, FutureAction, Avatar
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
   src/lib/                api.ts (typed client), schemas.ts (zod), loader.ts, connection.ts, theme.ts, db.ts (idb scaffold), format.ts, utils.ts
-  src/styles/app.css      Tailwind 4 + Lore tokens
+  src/styles/app.css      Tailwind 4 + Lore tokens (values from the website theme, see mapping above)
+  src/styles/fonts.css    self-hosted DM Sans / Playfair Display @font-face
+  public/favicon.svg      copied from the website
   test/                   Vitest (jsdom) unit tests
   e2e/                    Playwright specs + gateway.mjs / seed.mjs (built-gateway harness)
   docs/                   api-inventory.md, baseline.md

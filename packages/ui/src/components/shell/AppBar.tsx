@@ -6,6 +6,7 @@ import { Button } from "~/components/ui/button";
 import { theme } from "~/lib/theme";
 
 import { Avatar } from "../lore/Avatar";
+import { Logo } from "./Logo";
 import { SearchEntry } from "./SearchEntry";
 
 export const ThemeToggle: Component<{ class?: string }> = (props) => {
@@ -44,10 +45,11 @@ export const AppBar: Component<{
     </Show>
     <A
       href="/"
-      class="text-[27px] font-bold tracking-[-1.2px] text-text lg:min-w-[150px]"
+      aria-label="Lore.AI — home"
+      class="lg:min-w-[150px]"
       classList={{ "hidden sm:block": Boolean(props.mobileTitle) }}
     >
-      Lore
+      <Logo />
     </A>
     <Show when={props.mobileTitle}>
       <b class="truncate text-[17px] sm:hidden">{props.mobileTitle}</b>

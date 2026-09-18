@@ -1,71 +1,119 @@
 @import "tailwindcss";
+@import "./fonts.css";
 
 /* Dark mode is a class on <html> (or any ancestor), toggled by the theme
    store. Tailwind 4 has no `darkMode` config key; the variant is declared
    here instead of in a tailwind.config.js (Solid UI's Tailwind 3 recipe). */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Lore design tokens (design-fixture v2.2). These custom properties are the
-   single source of truth; Tailwind utilities below are mapped onto them via
-   `@theme inline` so `bg-surface`, `text-muted`, `border-line`, … all
-   resolve to the same variables and flip with the `.dark` class. */
+/* Lore design tokens. The token *names* come from design-fixture v2.2; the
+   *values* are derived from the marketing website's theme
+   (packages/website/public/theme.css, src/styles/starlight.css) so the app
+   and the site share one palette. Only the semantic tokens are copied —
+   never the website's layout CSS. The mapping (website var → UI token) is
+   documented in packages/ui/README.md; keep the two in sync.
+
+   Raw brand palette (theme.css :root --c0..--c2 cream, --g0..--g6 greens,
+   --ink/--mid). Fixed across themes, like on the website. */
 :root {
-  --bg: #f5f8fa;
-  --surface: #fff;
-  --chrome: #eaf2f6;
-  --text: #172a36;
-  --muted: #526572;
-  --accent: #0f666a;
-  --accent-contrast: #ffffff;
-  --accent-soft: #dbe9ee;
-  --accent-soft-text: #104f56;
-  --line: #cbd8df;
-  --mark: #fff0c2;
-  --mark-edge: #bd9a45;
-  --soft: #f0f6f6;
-  --shade: #eff4f7;
-  --gold: #806125;
-  --nav: #f0f5f8;
-  --danger: #a33a3a;
-  --danger-soft: #fbeaea;
-  --avatar-bg: #d6e8e9;
-  --avatar-text: #17565a;
-  --avatar-agent-bg: #e9e1f0;
-  --avatar-agent-text: #655275;
-  --thread: #a7c6cc;
-  --quote-edge: #c5a259;
+  --c0: #f7f2e8;
+  --c1: #ede5d0;
+  --c2: #dfd5bb;
+  --g0: #1a3320;
+  --g1: #2a4d32;
+  --g2: #3d6644;
+  --g3: #5a8f63;
+  --g4: #8fba96;
+  --g5: #c4ddc7;
+  --g6: #e8f2e9;
+  --ink: #1a2e1b;
+  --mid: #4a5f4c;
+
+  /* Light theme — website light semantic tokens (theme.css :root). */
+  --bg: var(--c0); /* website --bg */
+  --surface: var(--c0); /* website --surface */
+  --chrome: var(--c1); /* website --surface-alt */
+  --nav: var(--c1); /* website --bg-alt */
+  --shade: var(--c1); /* website --bg-alt */
+  --soft: var(--g6); /* website --highlight-bg */
+  --line: var(--c2); /* website --border */
+  --text: var(--ink); /* website --text */
+  --muted: var(--mid); /* website --text-muted */
+  --heading: var(--g0); /* website --heading */
+  --accent: var(--g2); /* website --link */
+  --accent-hover: var(--g0); /* website --link-hover */
+  --accent-contrast: var(--c0); /* website --inverse-text */
+  --accent-soft: var(--g6); /* website --highlight-bg */
+  --accent-soft-text: var(--g2); /* website --highlight-text */
+  --emphasis: var(--g1); /* website --emphasis */
+  --inverse-bg: var(--g0); /* website --inverse-bg */
+  --inverse-bg-hover: var(--g1); /* website --inverse-bg-hover */
+  --inverse-text: var(--c0); /* website --inverse-text */
+  --inverse-text-dim: var(--g5); /* website --inverse-text-dim */
+  --mark: var(--g6); /* website --highlight-bg */
+  --mark-edge: var(--g3); /* website --eyebrow */
+  --gold: var(--g1); /* website --emphasis */
+  --thread: var(--g4); /* website --link-border */
+  --quote-edge: var(--g3); /* website --eyebrow */
+  --danger: #8b3a3a; /* website --error */
+  --danger-soft: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  --avatar-bg: var(--g6); /* website --highlight-bg */
+  --avatar-text: var(--g2); /* website --highlight-text */
+  --avatar-agent-bg: var(--g0); /* website --inverse-bg */
+  --avatar-agent-text: var(--c0); /* website --inverse-text */
+
+  /* Elevation — the website's two card shadows (theme.css .card / .feature). */
+  --shadow-soft: 0 4px 14px rgba(26, 51, 32, 0.06);
+  --shadow-lifted: 0 16px 48px rgba(26, 51, 32, 0.08);
 }
 
+/* Dark theme — website dark semantic tokens (theme.css [data-theme="dark"],
+   which is also what starlight.css uses for the docs). */
 .dark {
-  --bg: #101a22;
-  --surface: #172630;
-  --chrome: #203541;
-  --text: #eaf2f6;
-  --muted: #b0c0cb;
-  --accent: #7bd4cd;
-  --accent-contrast: #10292b;
-  --accent-soft: #203b43;
-  --accent-soft-text: #c3e8e7;
-  --line: #3a505d;
-  --mark: #4a3f24;
-  --mark-edge: #bd9a45;
-  --soft: #1b3438;
-  --shade: #1c2b34;
-  --gold: #d9b86a;
-  --nav: #14212b;
-  --danger: #f0a1a1;
-  --danger-soft: #3a2426;
-  --avatar-bg: #28535a;
-  --avatar-text: #d6edee;
-  --avatar-agent-bg: #49445d;
-  --avatar-agent-text: #eae1f8;
-  --thread: #426c70;
-  --quote-edge: #c5a259;
+  --bg: #0d1913; /* website --bg */
+  --surface: #14251b; /* website --surface */
+  --chrome: #1a3124; /* website --surface-alt */
+  --nav: #101f17; /* website --bg-alt */
+  --shade: #101f17; /* website --bg-alt */
+  --soft: #172c20; /* website --highlight-bg */
+  --line: #26402f; /* website --border */
+  --text: #e8f1e6; /* website --text */
+  --muted: #9fbaa6; /* website --text-muted */
+  --heading: #f2f7ee; /* website --heading */
+  --accent: #a6d6ae; /* website --link */
+  --accent-hover: #dcecdd; /* website --link-hover */
+  --accent-contrast: #0d1913; /* website --bg (dark text on the light accent) */
+  --accent-soft: #172c20; /* website --highlight-bg */
+  --accent-soft-text: #bfe0c4; /* website --highlight-text */
+  --emphasis: #9ad3a4; /* website --emphasis */
+  --inverse-bg: #1e3a29; /* website --inverse-bg */
+  --inverse-bg-hover: #26492f; /* website --inverse-bg-hover */
+  --inverse-text: #f2f7ee; /* website --inverse-text */
+  --inverse-text-dim: #c4ddc7; /* website --inverse-text-dim */
+  --mark: #172c20; /* website --highlight-bg */
+  --mark-edge: #79ab84; /* website --eyebrow */
+  --gold: #9ad3a4; /* website --emphasis */
+  --thread: #4a7a55; /* website --link-border */
+  --quote-edge: #79ab84; /* website --eyebrow */
+  --danger: #e39393; /* website --error */
+  --avatar-bg: #172c20; /* website --highlight-bg */
+  --avatar-text: #bfe0c4; /* website --highlight-text */
+  --avatar-agent-bg: #1e3a29; /* website --inverse-bg */
+  --avatar-agent-text: #f2f7ee; /* website --inverse-text */
+
+  --shadow-soft: 0 4px 14px rgba(0, 0, 0, 0.28);
+  --shadow-lifted: 0 14px 34px rgba(0, 0, 0, 0.38); /* website .modal */
 }
 
 @theme inline {
-  --font-sans:
-    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  /* Website font stack (theme.css --sans / --serif), self-hosted via
+     @fontsource so the strict CSP (font-src 'self') holds and the UI works
+     offline. "DM Sans" is listed too for users who have the static font. */
+  --font-sans: "DM Sans Variable", "DM Sans", sans-serif;
+  --font-serif: "Playfair Display", Georgia, serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
 
   /* Lore token names, usable directly: bg-bg, bg-surface, text-text, … */
   --color-bg: var(--bg);
@@ -73,11 +121,18 @@
   --color-chrome: var(--chrome);
   --color-text: var(--text);
   --color-muted: var(--muted);
+  --color-heading: var(--heading);
   --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
   --color-accent-contrast: var(--accent-contrast);
   --color-accent-foreground: var(--accent-contrast);
   --color-accent-soft: var(--accent-soft);
   --color-accent-soft-text: var(--accent-soft-text);
+  --color-emphasis: var(--emphasis);
+  --color-inverse: var(--inverse-bg);
+  --color-inverse-hover: var(--inverse-bg-hover);
+  --color-inverse-text: var(--inverse-text);
+  --color-inverse-text-dim: var(--inverse-text-dim);
   --color-line: var(--line);
   --color-mark: var(--mark);
   --color-mark-edge: var(--mark-edge);
@@ -94,27 +149,39 @@
      src/components/ui. Mapped onto the Lore tokens above so the copied
      class strings resolve to Lore colours. Solid UI's `accent` (a hover
      surface) collides with Lore's brand `--accent`; the copied components
-     were edited to use `soft` for hover fills instead. */
+     were edited to use `soft` for hover fills instead. Filled (primary)
+     controls use the website's dark-block colours (--inverse-*), which keep
+     light text in both themes exactly like the site's buttons. */
   --color-background: var(--bg);
   --color-foreground: var(--text);
   --color-card: var(--surface);
   --color-card-foreground: var(--text);
   --color-popover: var(--surface);
   --color-popover-foreground: var(--text);
-  --color-primary: var(--accent);
-  --color-primary-foreground: var(--accent-contrast);
+  --color-primary: var(--inverse-bg);
+  --color-primary-foreground: var(--inverse-text);
   --color-secondary: var(--chrome);
   --color-secondary-foreground: var(--text);
   --color-muted-foreground: var(--muted);
   --color-destructive: var(--danger);
-  --color-destructive-foreground: var(--accent-contrast);
+  --color-destructive-foreground: var(--inverse-text);
   --color-border: var(--line);
   --color-input: var(--line);
   --color-ring: var(--accent);
 
-  --radius-md: 7px;
-  --radius-lg: 8px;
-  --radius-sm: 5px;
+  /* Radii: the website's cards/buttons use 3–6px; the app rounds a step
+     further for the softer pane chrome the owner asked for. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  /* Shadows: soft, low-alpha, green-tinted like the website's cards. */
+  --shadow-xs: var(--shadow-soft);
+  --shadow-sm: var(--shadow-soft);
+  --shadow-md: var(--shadow-soft);
+  --shadow-lg: var(--shadow-lifted);
+  --shadow-xl: var(--shadow-lifted);
 }
 
 @layer base {
@@ -136,6 +203,9 @@
     color: var(--accent);
     text-decoration: none;
   }
+  a:hover {
+    color: var(--accent-hover);
+  }
   button,
   input,
   select,
@@ -143,21 +213,25 @@
     font: inherit;
     color: inherit;
   }
+  h1,
+  h2 {
+    color: var(--heading);
+  }
 }
 
 @layer utilities {
   .eyebrow {
     text-transform: uppercase;
     font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.13em;
-    color: var(--muted);
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    color: var(--mark-edge); /* website --eyebrow */
   }
   .passage-target {
     background: var(--mark);
     border-bottom: 2px solid var(--mark-edge);
     padding: 2px 1px;
-    border-radius: 2px;
+    border-radius: 3px;
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
   }

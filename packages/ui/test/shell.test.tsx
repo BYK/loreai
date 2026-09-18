@@ -442,6 +442,22 @@ describe("shell: search entry, theme and fixture", () => {
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
   });
 
+  it("swaps the header logo between the light and dark website marks", async () => {
+    mount("/", fakeClient());
+    const logo = screen.getByTestId("logo");
+    const img = logo.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(logo).toHaveAttribute("data-logo-theme", "light");
+    expect(img?.getAttribute("src")).toMatch(/loreai\.svg/);
+    // The wordmark stays a real link target for assistive tech.
+    expect(screen.getByRole("link", { name: /Lore\.AI — home/ })).toBeVisible();
+    fireEvent.click(screen.getByTestId("theme-toggle"));
+    await waitFor(() =>
+      expect(logo).toHaveAttribute("data-logo-theme", "dark"),
+    );
+    expect(img?.getAttribute("src")).toMatch(/loreai-dark\.svg/);
+  });
+
   it("applies a persisted dark choice before the first render", () => {
     localStorage.setItem(THEME_STORAGE_KEY, "dark");
     resetThemeStoreForTests();
