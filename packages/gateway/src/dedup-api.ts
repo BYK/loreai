@@ -134,6 +134,8 @@ export function dedupPreviewGroups(
       scope,
       project_id: projectId,
       candidates,
+      // `merged` is ordered by the survivor ranking, so when the survivor is
+      // gone the first remaining candidate is the algorithm's runner-up.
       suggested_keep_id: keepId ?? candidates[0].id,
     });
   }

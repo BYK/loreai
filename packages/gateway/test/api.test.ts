@@ -916,6 +916,37 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     );
   });
 
+  it("suggests the live runner-up when the survivor was deleted after clustering", async () => {
+    const { projectId, a, b, unrelated } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const { dedupPreviewGroups } = await import("../src/dedup-api");
+
+    const clustered = {
+      clusters: [
+        {
+          surviving: { id: a, title: "a" },
+          // ltm.deduplicate orders `merged` by the same survivor ranking.
+          merged: [
+            { id: b, title: "b" },
+            { id: unrelated, title: "u" },
+          ],
+        },
+      ],
+      totalRemoved: 2,
+      pairSimilarities: new Map<string, number>(),
+      entryTitles: new Map<string, string>(),
+    };
+
+    ltm.remove(a);
+
+    const groups = dedupPreviewGroups(clustered, "project", projectId);
+    expect(groups).toHaveLength(1);
+    const [group] = groups;
+    expect(group.candidates.map((c) => c.id)).toEqual([b, unrelated]);
+    expect(group.suggested_keep_id).toBe(b);
+    expect(ltm.get(group.suggested_keep_id)).not.toBeNull();
+  });
+
   it.each([
     ["not json", "{not json"],
     ["array body", "[]"],
