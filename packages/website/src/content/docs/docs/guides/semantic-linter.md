@@ -141,6 +141,18 @@ The funnel line in the report (`N hunks × M invariants → C candidates → J j
 
 On a wide PR, the cap means a complete, clean report says none of the **selected** candidates looked contradictory; it is not proof that every possible hunk/invariant pair was examined. Split broad changes before relying on an enforced rule.
 
+### Coverage budgets
+
+The run is bounded by deliberate budgets, and the report's `Coverage:` line records how much of the PR they admitted:
+
+| Budget | Default | Effect when exceeded |
+| --- | --- | --- |
+| Judge candidates per run | 20 | Lowest-similarity candidates are omitted; only the selected pairs are judged |
+| Holistic input | 16,000 tokens (`--holistic-input-tokens`) | The complete-diff (`holistic`) pass is skipped and each selected hunk is judged in isolation (`isolated-hunk`), with `bounded context` |
+| Holistic invariants | 20 | Lower-ranked invariants are omitted from the holistic pass |
+
+Hitting a budget narrows **scope**, not health. A run whose every selected candidate resolved is `complete` and exits `0` even under `isolated-hunk` coverage or with omitted invariants; the clean message then says "among the selected candidates (bounded coverage)" so the narrower claim is explicit. `partial` and `failed` are reserved for runtime problems: an unresolved or not-attempted candidate, a missing vector, a diff or judge phase that did not run.
+
 ### Where the invariants come from
 
 In CI there is no local Lore database, so the action **derives one from the committed `.lore.md`**: it imports the plaintext entries and embeds them in-process. That derivation is cached with `actions/cache`, keyed on the judge model, the `onnxruntime-node` version, **and** the `.lore.md` content hash, so a stale embedding space is never silently reused (embedding drift would quietly rot recall). The cache only rebuilds when the knowledge or the embedding stack changes.
@@ -200,15 +212,15 @@ The CLI exit contract is:
 | `0` | Complete, non-blocking report |
 | `1` | Argument/usage failure before report setup |
 | `2` | Complete gate-mode report with blocking findings |
-| `3` | Partial or failed runtime report |
+| `3` | Partial or failed runtime report (unresolved candidates, missing vectors, a phase that did not run); never bounded coverage alone |
 
 The action always consumes and validates `--report-file`, regardless of the CLI exit. Missing, malformed, wrong-version, or internally inconsistent reports are health failures. Advisory actions show those failures but remain non-blocking; gate actions fail closed.
 
 ### Report health
 
-The report distinguishes `complete`, `partial`, and `failed` runs. It records health for range resolution, diff parsing, invariant loading, invariant vectors, hunk vectors, and the judge. Every selected candidate is recorded as resolved, unresolved, or not attempted, and the report validator checks that candidate states and semantic/transport attempt totals match the funnel counters.
+The report distinguishes `complete`, `partial`, and `failed` runs by runtime health alone; the coverage strategy and omitted hunks/invariants are reported separately and never downgrade the status. It records health for range resolution, diff parsing, invariant loading, invariant vectors, hunk vectors, and the judge. Every selected candidate is recorded as resolved, unresolved, or not attempted, and the report validator checks that candidate states and semantic/transport attempt totals match the funnel counters.
 
-“No suspected invariant violations” is shown only for a complete report with zero findings. Partial and failed reports remain visibly inconclusive even when they contain no findings.
+“No suspected invariant violations” is shown only for a complete report with zero findings, suffixed with “among the selected candidates (bounded coverage)” when a budget narrowed the scope. Partial and failed reports remain visibly inconclusive even when they contain no findings.
 
 ## Enforcement tiers
 

@@ -10,6 +10,7 @@ import {
   failedSemanticLintReport,
   MAX_LINT_REPORT_CANDIDATES,
   MAX_LINT_REPORT_RESOLVED_REASON_LENGTH,
+  semanticLintExitCode,
   validateSemanticLintReport,
   type SemanticLintReport,
 } from "../src/cli/lint-report";
@@ -212,7 +213,7 @@ function confirmedCounterevidenceReport(
   const value = resolvedReport();
   const contextComplete = options.contextComplete ?? true;
   const verificationSemanticCalls = options.semanticCalls ?? 1;
-  value.status = "partial";
+  value.status = "complete";
   value.coverage = {
     ...value.coverage,
     strategy: "isolated-hunk",
@@ -393,9 +394,9 @@ describe("semantic lint action reporter", () => {
     expect(actionAccepts(value)).toBe(true);
   });
 
-  test("accepts partial diff context with bounded invariant coverage", () => {
+  test("accepts healthy holistic coverage with omitted invariants as complete", () => {
     const value = resolvedReport(1);
-    value.status = "partial";
+    value.status = "complete";
     value.counters.hunks = 2;
     value.health.hunkVectors = {
       status: "healthy",
@@ -417,7 +418,98 @@ describe("semantic lint action reporter", () => {
     };
 
     expect(validateSemanticLintReport(value)).toBe(value);
-    expect(actionAccepts(value)).toBe(true);
+    const result = runReporter(value, false, 0);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("unreadable or invalid report");
+    expect(result.stdout).toContain("exit 0: complete, non-blocking");
+    expect(result.stdout).toContain("1/3 invariants");
+    expect(result.stdout).toContain("among selected candidates");
+  });
+
+  test("reports healthy isolated-hunk coverage as complete with bounded scope", () => {
+    const value = resolvedReport(1);
+    value.status = "complete";
+    value.counters.hunks = 3;
+    value.health.hunkVectors = {
+      status: "healthy",
+      expected: 3,
+      available: 3,
+      missing: 0,
+    };
+    value.coverage = {
+      strategy: "isolated-hunk",
+      contextComplete: false,
+      inputTokens: 0,
+      inputTokenBudget: 16_000,
+      availableHunks: 3,
+      includedHunks: 1,
+      omittedHunks: 2,
+      availableInvariants: 96,
+      includedInvariants: 1,
+      omittedInvariants: 95,
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(semanticLintExitCode(value)).toBe(0);
+    const result = runReporter(value, false, 0);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("unreadable or invalid report");
+    expect(result.stdout).not.toContain("runtime health failure");
+    expect(result.stdout).toContain("exit 0: complete, non-blocking");
+    expect(result.stdout).toContain(
+      "coverage: isolated-hunk · 1/3 hunks, 1/96 invariants · bounded context",
+    );
+    expect(result.stdout).toContain("among selected candidates");
+  });
+
+  test("rejects a partial status on a healthy but bounded report", () => {
+    const value = resolvedReport(1);
+    value.status = "partial";
+    value.coverage = { ...value.coverage, strategy: "isolated-hunk" };
+
+    expect(() => validateSemanticLintReport(value)).toThrow(
+      "overall status disagrees with phase health",
+    );
+    expect(actionAccepts(value, 3)).toBe(false);
+  });
+
+  test("keeps degraded judge health as partial with exit 3", () => {
+    const value = resolvedReport(2);
+    value.status = "partial";
+    value.coverage = { ...value.coverage, strategy: "isolated-hunk" };
+    value.health.judge = {
+      status: "degraded",
+      selected: 2,
+      resolved: 1,
+      unresolved: 1,
+      notAttempted: 0,
+    };
+    value.counters = {
+      ...value.counters,
+      resolved: 1,
+      unresolved: 1,
+    };
+    value.candidates[1] = {
+      id: "candidate-2",
+      file: "src/file-2.ts",
+      invariantId: "inv-2",
+      invariantTitle: "Rule",
+      severity: "advisory",
+      state: "unresolved",
+      failure: {
+        code: "timeout",
+        message: "judge timed out",
+        scope: "candidate",
+      },
+      stats: { semanticCalls: 1, transportAttempts: 1 },
+    };
+
+    expect(validateSemanticLintReport(value)).toBe(value);
+    expect(semanticLintExitCode(value)).toBe(3);
+    const result = runReporter(value, false, 3);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("exit 3: runtime health failure");
+    expect(result.stdout).not.toContain("exit 0");
   });
 
   test.each([
@@ -519,7 +611,7 @@ describe("semantic lint action reporter", () => {
 
   test("accepts an ordinary isolated violation without selected counterevidence", () => {
     const value = resolvedReport();
-    value.status = "partial";
+    value.status = "complete";
     value.coverage = {
       ...value.coverage,
       strategy: "isolated-hunk",
@@ -563,12 +655,12 @@ describe("semantic lint action reporter", () => {
     value.gate.advisoryFindingIds = ["finding-01"];
 
     expect(validateSemanticLintReport(value)).toBe(value);
-    expect(actionAccepts(value, 3)).toBe(true);
+    expect(actionAccepts(value, 0)).toBe(true);
   });
 
   test("accepts a report with confirmed counterevidence", () => {
     const value = report();
-    value.status = "partial";
+    value.status = "complete";
     value.coverage = {
       ...value.coverage,
       strategy: "isolated-hunk",
@@ -668,7 +760,7 @@ describe("semantic lint action reporter", () => {
     };
 
     expect(validateSemanticLintReport(value)).toBe(value);
-    const result = runReporter(value, false, 3);
+    const result = runReporter(value, false, 0);
     expect(result.status).toBe(0);
     expect(result.stdout).not.toContain("unreadable or invalid report");
     expect(result.summary).toContain("confirmed");
@@ -978,7 +1070,7 @@ describe("semantic lint action reporter", () => {
     value.findings[0].reason = `![image](https://bad/image) ${"x".repeat(1_000)}`;
     value.gate.advisoryFindingIds = ["finding-01"];
 
-    const result = runReporter(value, false, 3);
+    const result = runReporter(value, false, 0);
     expect(result.status).toBe(0);
     expect(result.summary).toContain("&lt;img src=x onerror=alert\\(1\\)&gt;");
     expect(result.summary).not.toContain("<img");

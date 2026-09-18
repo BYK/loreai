@@ -43,6 +43,14 @@ To pin a specific provider, set `search.embeddings.provider` in `.lore.json`:
 
 Full architecture, benchmarks, and rationale: **[github.com/BYK/loreai](https://github.com/BYK/loreai)**
 
+### Dynamic SQL
+
+Static SQL strings stay as they are. Dynamic composition uses the zero-dependency
+`sql` fragment helper; use `sql.raw` only for code-owned identifiers from an
+allowlist, never user input. This deliberately avoids an ORM/query builder; see
+the [#1827 discussion](https://github.com/BYK/loreai/pull/1827) and the
+[core-sql-fragment branch](https://github.com/BYK/loreai/tree/devin/1789768661-core-sql-fragment).
+
 ## License
 
 FSL-1.1-Apache-2.0 — see [LICENSE](./LICENSE).
