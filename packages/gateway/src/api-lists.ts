@@ -175,16 +175,12 @@ function decodeSessionCursor(token: string, projectId: string): SessionKeyset {
 // Query-option parsing
 // ---------------------------------------------------------------------------
 
-/** True when the request opted into cursor mode (`?page=cursor` or `?cursor=`). */
+/** True when the request opted into cursor mode (`?page=cursor` or `?cursor=`).
+ *  Any other `page` value is not an opt-in and leaves the legacy path untouched. */
 export function wantsCursorMode(url: URL): boolean {
-  const page = url.searchParams.get("page");
-  if (page !== null && page !== "cursor") {
-    throw new BadRequest(
-      "invalid_request",
-      `Invalid page: ${page} (only "cursor" is supported)`,
-    );
-  }
-  return page === "cursor" || url.searchParams.has("cursor");
+  return (
+    url.searchParams.get("page") === "cursor" || url.searchParams.has("cursor")
+  );
 }
 
 function parseLimit(url: URL, defaultLimit: number, maxLimit: number): number {

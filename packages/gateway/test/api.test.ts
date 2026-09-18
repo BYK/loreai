@@ -1386,11 +1386,16 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
       "page=cursor&limit=0",
       "page=cursor&limit=abc",
       "page=cursor&limit=-1",
-      "page=offset",
     ]) {
       const res = await api(`/api/v1/projects/${projectId}/knowledge?${qs}`);
       expect(res.status, qs).toBe(400);
     }
+    // Anything other than `page=cursor` is not an opt-in: legacy array unchanged.
+    const notOptIn = await apiJSON<unknown[]>(
+      `/api/v1/projects/${projectId}/knowledge?page=2`,
+    );
+    expect(Array.isArray(notOptIn)).toBe(true);
+    expect(notOptIn).toHaveLength(7);
     const capped = await apiJSON<CursorPage<unknown>>(
       `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=99999`,
     );
