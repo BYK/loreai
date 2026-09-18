@@ -346,17 +346,27 @@ function refusal(
   };
 }
 
-/** Groups sharing any logical id are all refused; the rest still proceed. */
-function conflictingGroups(groups: ResolvedGroup[]): Set<number> {
+/**
+ * Every reference to each logical id across the request, counted per group.
+ * A logical id referenced twice — by two groups, or twice within one group
+ * through different aliases (version id + logical id) — is a conflict.
+ */
+function logicalIdReferences(groups: ResolvedGroup[]): Map<string, number[]> {
   const owners = new Map<string, number[]>();
   for (const group of groups)
-    for (const logicalId of new Set(group.logical.values())) {
+    for (const logicalId of group.logical.values()) {
       const list = owners.get(logicalId) ?? [];
       list.push(group.index);
       owners.set(logicalId, list);
     }
+  return owners;
+}
+
+/** Groups referencing a logical id more than once (anywhere) are all refused;
+ *  the rest still proceed. */
+function conflictingGroups(groups: ResolvedGroup[]): Set<number> {
   const conflicting = new Set<number>();
-  for (const indexes of owners.values())
+  for (const indexes of logicalIdReferences(groups).values())
     if (indexes.length > 1) for (const i of indexes) conflicting.add(i);
   return conflicting;
 }
@@ -365,21 +375,16 @@ function conflictRefusal(
   group: ResolvedGroup,
   groups: ResolvedGroup[],
 ): DedupGroupRefused {
+  const references = logicalIdReferences(groups);
   const details: DedupRefusalDetail[] = [];
   for (const [id, logicalId] of group.logical)
-    if (
-      groups.some(
-        (other) =>
-          other.index !== group.index &&
-          [...other.logical.values()].includes(logicalId),
-      )
-    )
+    if ((references.get(logicalId)?.length ?? 0) > 1)
       details.push({ id, reason: "conflicting_groups" });
   return refusal(group, {
     code: "conflicting_groups",
     message: `group ${group.index} refused: ${details
       .map((d) => d.id)
-      .join(", ")} also appear in another group`,
+      .join(", ")} refer to an entry that is referenced more than once`,
     details,
   });
 }
@@ -404,6 +409,10 @@ function applyGroup(
     const tenantId = currentTenantId();
     for (const id of decision.mergeIds) {
       const before = checkedRow(checked.rows, id);
+      if (before.logical_id === keepRow.logical_id)
+        throw new Error(
+          `dedup apply: ${id} aliases the survivor ${decision.keepId}`,
+        );
       ltm.remove(before.logical_id);
       const after = currentRow(before.logical_id);
       if (!after || !after.is_deleted)

@@ -400,6 +400,45 @@ describe("per-group atomicity", () => {
     expect(isLive(shared)).toBe(true);
   });
 
+  test("a group whose keepId and mergeId alias the same entry is refused, never self-merged", () => {
+    const keep = createEntry("Self Alias Keep");
+    const dupe = createEntry("Self Alias Dupe");
+    ltm.update(keep, { content: "second version" });
+    const keepVersionId = ltm.getByLogical(keep)?.id ?? "";
+    expect(keepVersionId).not.toBe(keep);
+    const other = createEntry("Self Alias Other");
+    const otherDupe = createEntry("Self Alias Other Dupe");
+
+    // keepId is the version id, mergeIds contains its logical id: the same
+    // entry twice, which parse-time string checks cannot see.
+    const receipt = apply(
+      request([
+        {
+          keepId: keepVersionId,
+          mergeIds: [keep, dupe],
+          expectedRevisions: {
+            [keepVersionId]: 2,
+            [keep]: 2,
+            [dupe]: 1,
+          },
+        },
+        decision(other, otherDupe),
+      ]),
+    );
+
+    expect(receipt.refused).toHaveLength(1);
+    expect(receipt.refused[0].groupIndex).toBe(0);
+    expect(receipt.refused[0].error.code).toBe("conflicting_groups");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: keepVersionId, reason: "conflicting_groups" },
+      { id: keep, reason: "conflicting_groups" },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(dupe)).toBe(true);
+    expect(receipt.applied.map((g) => g.keepId)).toEqual([other]);
+    expect(isLive(otherDupe)).toBe(false);
+  });
+
   test("a survivor merged away by an earlier group makes the later group not_found", () => {
     const keepA = createEntry("Chain Keep A");
     const middle = createEntry("Chain Middle");
