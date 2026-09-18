@@ -567,19 +567,30 @@ describe("shell: search entry, theme and fixture", () => {
     expect(document.documentElement).toHaveClass("dark");
   });
 
-  it("mounts the compatibility smoke in dev only, never in production builds", async () => {
+  it("mounts the fixture and compatibility smoke in dev only, never in production builds", async () => {
     const paths = (defs: typeof routes) =>
       defs.flatMap((r) => (Array.isArray(r.path) ? r.path : [r.path]));
     expect(import.meta.env.DEV).toBe(true);
-    expect(paths(routes)).toContain("/_compat");
+    expect(paths(routes)).toEqual(
+      expect.arrayContaining(["/fixture", "/_compat"]),
+    );
 
     vi.stubEnv("DEV", false);
     vi.resetModules();
     const prod = await import("~/app");
     expect(paths(prod.routes)).not.toContain("/_compat");
+    expect(paths(prod.routes)).not.toContain("/fixture");
     expect(paths(prod.routes)).toEqual(
-      expect.arrayContaining(["/", "/fixture", "*"]),
+      expect.arrayContaining([
+        "/",
+        "/projects/:projectId",
+        "/projects/:projectId/knowledge/:knowledgeId",
+        "/knowledge/:knowledgeId",
+        "*",
+      ]),
     );
+    // The catch-all keeps the SPA fallback for stale deep links.
+    expect(paths(prod.routes).at(-1)).toBe("*");
     vi.unstubAllEnvs();
   });
 

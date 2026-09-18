@@ -16,8 +16,13 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId` | Knowledge list for a project (list pane) |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
-| `/ui/fixture` (`?view=focus`) | Design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state |
-| `/ui/_compat` | UI-01 compatibility smoke page |
+| `/ui/fixture` (`?view=focus`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state |
+| `/ui/_compat` | **Dev/test only** — UI-01 compatibility smoke page |
+
+Dev/test-only routes are mounted when `import.meta.env.DEV` is set (Vite dev
+server, Vitest); production builds drop them and their chunks from the route
+table, so the gateway's shipped bundle answers them with the SPA's
+not-found screen.
 
 Documents in this package:
 
@@ -170,7 +175,7 @@ published tarball / SEA binary need no extra files.
 | Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/shell.test.tsx` (shell, real-data routes with a mocked client, fixture), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). `fixture.spec.ts` covers a dev-only screen, so its `dev-*` projects run against a Vite dev server (`LORE_E2E_DEV_PORT`, default 5174) proxying `/api` to that same seeded gateway. Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Baseline (before / after UI-02)
 

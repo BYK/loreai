@@ -23,6 +23,16 @@ const NotFound: Component = () => (
   </main>
 );
 
+/**
+ * Dev/test-only screens: the design specimen and the UI-01 compatibility
+ * smoke. Production builds drop them (and their chunks) from the route table,
+ * so the shipped bundle contains product routes only; the Vite dev server
+ * and the unit/e2e suites still mount them.
+ */
+const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
+  ? [{ path: "/fixture", component: Fixture }, compatRoutes]
+  : [];
+
 export const routes: RouteDefinition[] = [
   {
     // One route definition so the shell instance (and its loaded lists)
@@ -35,10 +45,7 @@ export const routes: RouteDefinition[] = [
     ],
     component: Browse,
   },
-  { path: "/fixture", component: Fixture },
-  // The UI-01 compatibility smoke is a dev/test aid, not a product screen:
-  // production builds drop it (and its chunk) from the route table.
-  ...(import.meta.env.DEV ? [compatRoutes] : []),
+  ...devOnlyRoutes,
   { path: "*", component: NotFound },
 ];
 

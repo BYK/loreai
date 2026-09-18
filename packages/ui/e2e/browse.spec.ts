@@ -120,4 +120,18 @@ test.describe("real data browsing", () => {
     await page.getByTestId("theme-system").click();
     await expect(html).not.toHaveClass(/dark/);
   });
+
+  test("dev-only screens are not shipped in the production build", async ({
+    page,
+  }) => {
+    for (const path of [
+      "/ui/fixture",
+      "/ui/fixture?view=focus",
+      "/ui/_compat",
+    ]) {
+      await page.goto(path);
+      await expect(page.getByTestId("not-found")).toBeVisible();
+      await expect(page.getByTestId("fixture-banner")).toHaveCount(0);
+    }
+  });
 });
