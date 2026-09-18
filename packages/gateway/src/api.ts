@@ -33,6 +33,7 @@ import { defaultModelForProvider } from "./worker-model";
 import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
+import { handleDedupApply, handleDedupPreview } from "./dedup-api";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -428,13 +429,6 @@ async function handleReindex(): Promise<Response> {
     knowledge_embedded: knowledge,
     distillations_embedded: distillations,
   });
-}
-
-async function handleDedup(projectPath: string): Promise<Response> {
-  // Always dry-run via API; apply requires explicit ?apply=true
-  const projectResult = await ltm.deduplicate(projectPath, { dryRun: true });
-  const globalResult = await ltm.deduplicateGlobal({ dryRun: true });
-  return jsonResponse({ project: projectResult, global: globalResult });
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1001,8 @@ export async function handleAPIRequest(
       return await handleClearProject(req, project.path);
     }
 
-    // POST /api/v1/projects/:id/dedup
+    // POST /api/v1/projects/:id/dedup — dry-run preview only; writes go
+    // through /dedup/apply (dedup-api.ts).
     params = matchRoute(pathname, "/api/v1/projects/:id/dedup");
     if (params) {
       const project = resolveProject(url, params.id);
@@ -1017,7 +1012,20 @@ export async function handleAPIRequest(
           "not_found",
           `Project not found: ${params.id}`,
         );
-      return await handleDedup(project.path);
+      return await handleDedupPreview(project.id, project.path);
+    }
+
+    // POST /api/v1/projects/:id/dedup/apply
+    params = matchRoute(pathname, "/api/v1/projects/:id/dedup/apply");
+    if (params) {
+      const project = resolveProject(url, params.id);
+      if (!project)
+        return errorResponse(
+          404,
+          "not_found",
+          `Project not found: ${params.id}`,
+        );
+      return await handleDedupApply(req, project.id);
     }
   }
 

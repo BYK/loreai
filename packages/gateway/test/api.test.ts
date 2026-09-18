@@ -591,3 +591,425 @@ describe("POST /api/v1/import/structured", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: dedup preview + apply (#1803 / #1804)
+// ---------------------------------------------------------------------------
+
+describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
+  type Candidate = {
+    id: string;
+    logical_id: string;
+    revision: number;
+    title: string;
+    content_excerpt: string;
+    score: number;
+    reasons: string[];
+  };
+  type Group = {
+    group_id: string;
+    scope: "project" | "global";
+    project_id: string | null;
+    candidates: Candidate[];
+    suggested_keep_id: string;
+  };
+  type Preview = {
+    dry_run: true;
+    groups: Group[];
+    project: { clusters: unknown[]; totalRemoved: number };
+    global: { clusters: unknown[]; totalRemoved: number };
+  };
+  type Receipt = {
+    operationId: string;
+    applied: Array<{ keepId: string; merged: Array<{ id: string }> }>;
+    refused: Array<{
+      groupIndex: number;
+      keepId: string;
+      error: { code: string; details: Array<{ id: string; reason: string }> };
+    }>;
+    replayed: boolean;
+  };
+  type ApiError = {
+    type: "error";
+    error: { type: string; message: string };
+  };
+
+  let seq = 0;
+  /** Fresh project per test so clusters from one test never leak into another. */
+  async function seedDuplicates() {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/api/dedup-${Date.now()}-${seq++}`;
+    const projectId = ensureProject(projectPath, "dedup-project");
+    const title = "Cache warming time slot buckets hardcoded values";
+    const create = (t: string, content: string) =>
+      ltm.create({
+        // explicit id bypasses the create-time dedup guard
+        id: crypto.randomUUID(),
+        projectPath,
+        category: "gotcha",
+        title: t,
+        content,
+        session: "test-session",
+        scope: "project",
+      });
+    const a = create(title, "Buckets are hardcoded to 15 minutes.");
+    const b = create(`${title} duplicate`, "x".repeat(600));
+    const unrelated = create(
+      "React useState async pitfall",
+      "setState is async",
+    );
+    return { projectPath, projectId, a, b, unrelated };
+  }
+
+  function groupFor(preview: Preview, projectId: string): Group {
+    const group = preview.groups.find((g) => g.project_id === projectId);
+    if (!group) throw new Error("expected a project group in the preview");
+    return group;
+  }
+
+  function decisionFrom(group: Group) {
+    const keepId = group.suggested_keep_id;
+    const mergeIds = group.candidates
+      .map((c) => c.id)
+      .filter((id) => id !== keepId);
+    const expectedRevisions = Object.fromEntries(
+      group.candidates.map((c) => [c.id, c.revision]),
+    );
+    return { keepId, mergeIds, expectedRevisions };
+  }
+
+  function post(path: string, body: unknown): Promise<Response> {
+    return api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  }
+
+  it("returns a typed dry-run preview alongside the legacy payload", async () => {
+    const { projectId, a, b, unrelated } = await seedDuplicates();
+    const res = await post(`/api/v1/projects/${projectId}/dedup`, {});
+    expect(res.status).toBe(200);
+    const preview = (await res.json()) as Preview;
+
+    expect(preview.dry_run).toBe(true);
+    // Legacy shape kept for `lore data dedup --remote`.
+    expect(preview.project.clusters).toHaveLength(1);
+    expect(preview.project.totalRemoved).toBe(1);
+    expect(preview.global).toMatchObject({
+      clusters: expect.any(Array),
+      totalRemoved: expect.any(Number),
+    });
+
+    const group = groupFor(preview, projectId);
+    expect(group.group_id).toMatch(/^project:[0-9a-f]{16}$/);
+    expect(group.scope).toBe("project");
+    expect(group.candidates.map((c) => c.id).sort()).toEqual([a, b].sort());
+    expect(group.candidates.map((c) => c.id)).toContain(
+      group.suggested_keep_id,
+    );
+    for (const c of group.candidates) {
+      expect(c.revision).toBe(1);
+      expect(c.logical_id).toBe(c.id);
+      expect(c.title).toContain("Cache warming");
+      expect(c.content_excerpt.length).toBeLessThanOrEqual(200);
+      expect(c.score).toBeGreaterThanOrEqual(0.7);
+      expect(c.reasons).toEqual(["title_overlap"]);
+    }
+    const long = group.candidates.find((c) => c.id === b);
+    expect(long?.content_excerpt.endsWith("…")).toBe(true);
+    expect(
+      preview.groups.flatMap((g) => g.candidates.map((c) => c.id)),
+    ).not.toContain(unrelated);
+  });
+
+  it("preview never writes", async () => {
+    const { projectPath, projectId } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const before = ltm.forProject(projectPath, false).length;
+    await post(`/api/v1/projects/${projectId}/dedup`, {});
+    expect(ltm.forProject(projectPath, false).length).toBe(before);
+  });
+
+  it("applies a reviewed group and replays the receipt for the same operationId", async () => {
+    const { projectPath, projectId } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const decision = decisionFrom(groupFor(preview, projectId));
+    const body = {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [decision],
+    };
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, body);
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.operationId).toBe(body.operationId);
+    expect(receipt.replayed).toBe(false);
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(receipt.applied[0].keepId).toBe(decision.keepId);
+    expect(receipt.applied[0].merged.map((m) => m.id)).toEqual(
+      decision.mergeIds,
+    );
+
+    const live = ltm.forProject(projectPath, false).map((e) => e.logical_id);
+    expect(live).toContain(decision.keepId);
+    for (const id of decision.mergeIds) {
+      expect(live).not.toContain(id);
+      // Recoverable: the merged entry keeps its history behind a tombstone.
+      const history = ltm.versionHistory(id);
+      expect(history.at(-1)?.is_deleted).toBe(1);
+    }
+
+    const replay = await post(
+      `/api/v1/projects/${projectId}/dedup/apply`,
+      body,
+    );
+    expect(replay.status).toBe(200);
+    const replayed = (await replay.json()) as Receipt;
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.applied).toEqual(receipt.applied);
+
+    const conflict = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      ...body,
+      actor: "someone-else",
+    });
+    expect(conflict.status).toBe(409);
+    const err = (await conflict.json()) as ApiError;
+    expect(err.error.type).toBe("operation_conflict");
+  });
+
+  it("reports stale_revision in the receipt (200) when an entry changed after the preview", async () => {
+    const { projectPath, projectId } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const decision = decisionFrom(groupFor(preview, projectId));
+
+    // Adversarial order: the edit lands between preview and apply.
+    ltm.update(decision.mergeIds[0], { content: "edited after the preview" });
+    const before = ltm.forProject(projectPath, false).length;
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [decision],
+    });
+    // The operation completed (nothing applied); refusal is data, not an error.
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused).toHaveLength(1);
+    expect(receipt.refused[0].error.code).toBe("stale_revision");
+    expect(receipt.refused[0].error.details).toEqual([
+      expect.objectContaining({
+        id: decision.mergeIds[0],
+        reason: "stale_revision",
+      }),
+    ]);
+    expect(ltm.forProject(projectPath, false).length).toBe(before);
+  });
+
+  it("returns 200 with a mixed receipt when one group applied and another was refused", async () => {
+    const { projectPath, projectId, a, b } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const other = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title: "Retry backoff jitter window",
+      content: "Jitter is 10%.",
+      session: "test-session",
+      scope: "project",
+    });
+    const otherDupe = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title: "Retry backoff jitter window duplicate",
+      content: "Jitter is ten percent.",
+      session: "test-session",
+      scope: "project",
+    });
+    const revisions = (ids: string[]) =>
+      Object.fromEntries(ids.map((id) => [id, 1]));
+    // Group 0 is fresh; group 1 goes stale between preview and apply.
+    ltm.update(b, { content: "edited after the preview" });
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [
+        {
+          keepId: other,
+          mergeIds: [otherDupe],
+          expectedRevisions: revisions([other, otherDupe]),
+        },
+        { keepId: a, mergeIds: [b], expectedRevisions: revisions([a, b]) },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.applied.map((g) => g.keepId)).toEqual([other]);
+    expect(receipt.refused.map((g) => [g.groupIndex, g.error.code])).toEqual([
+      [1, "stale_revision"],
+    ]);
+    const live = ltm.forProject(projectPath, false).map((e) => e.logical_id);
+    expect(live).not.toContain(otherDupe);
+    expect(live).toContain(a);
+    expect(live).toContain(b);
+  });
+
+  it("offers an entry edited after clustering under its current version, and drops a deleted one", async () => {
+    const { projectPath, projectId, a, b, unrelated } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const { dedupPreviewGroups } = await import("../src/dedup-api");
+    // Clustering saw the original version ids; the entries change before the
+    // groups are built (the deduplicators await embeddings in between).
+    const clustered = {
+      clusters: [
+        {
+          surviving: { id: a, title: "a" },
+          merged: [
+            { id: b, title: "b" },
+            { id: unrelated, title: "u" },
+          ],
+        },
+      ],
+      totalRemoved: 2,
+      pairSimilarities: new Map<string, number>(),
+      entryTitles: new Map<string, string>(),
+    };
+    ltm.remove(unrelated);
+    const stableGroupId = dedupPreviewGroups(clustered, "project", projectId)[0]
+      .group_id;
+    ltm.update(a, { content: "edited after clustering" });
+    const current = ltm.getByLogical(a);
+    if (!current) throw new Error("expected a to still be live");
+    expect(current.id).not.toBe(a);
+
+    const groups = dedupPreviewGroups(clustered, "project", projectId);
+    expect(groups).toHaveLength(1);
+    const [group] = groups;
+    expect(group.candidates.map((c) => c.id).sort()).toEqual(
+      [current.id, b].sort(),
+    );
+    const edited = group.candidates.find((c) => c.logical_id === a);
+    expect(edited).toMatchObject({
+      id: current.id,
+      revision: 2,
+      content_excerpt: "edited after clustering",
+    });
+    expect(group.suggested_keep_id).toBe(current.id);
+    // Membership by logical id is unchanged, so the group id is too.
+    expect(group.group_id).toBe(stableGroupId);
+    expect(ltm.forProject(projectPath, false).map((e) => e.logical_id)).toEqual(
+      expect.arrayContaining([a, b]),
+    );
+  });
+
+  it("suggests the live runner-up when the survivor was deleted after clustering", async () => {
+    const { projectId, a, b, unrelated } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const { dedupPreviewGroups } = await import("../src/dedup-api");
+
+    const clustered = {
+      clusters: [
+        {
+          surviving: { id: a, title: "a" },
+          // ltm.deduplicate orders `merged` by the same survivor ranking.
+          merged: [
+            { id: b, title: "b" },
+            { id: unrelated, title: "u" },
+          ],
+        },
+      ],
+      totalRemoved: 2,
+      pairSimilarities: new Map<string, number>(),
+      entryTitles: new Map<string, string>(),
+    };
+
+    ltm.remove(a);
+
+    const groups = dedupPreviewGroups(clustered, "project", projectId);
+    expect(groups).toHaveLength(1);
+    const [group] = groups;
+    expect(group.candidates.map((c) => c.id)).toEqual([b, unrelated]);
+    expect(group.suggested_keep_id).toBe(b);
+    expect(ltm.get(group.suggested_keep_id)).not.toBeNull();
+  });
+
+  it.each([
+    ["not json", "{not json"],
+    ["array body", "[]"],
+    ["missing decisions", { operationId: "op-1", reviewedAt: 1, actor: "a" }],
+    [
+      "bad expectedRevisions",
+      {
+        operationId: "op-1",
+        reviewedAt: 1,
+        actor: "a",
+        decisions: [{ keepId: "k", mergeIds: ["m"], expectedRevisions: {} }],
+      },
+    ],
+    [
+      "projectId for another project",
+      {
+        projectId: "some-other-project",
+        operationId: "op-1",
+        reviewedAt: 1,
+        actor: "a",
+        decisions: [{ keepId: "k", mergeIds: ["m"], expectedRevisions: {} }],
+      },
+    ],
+  ])("returns 400 for a malformed body (%s)", async (_label, body) => {
+    const { projectId } = await seedDuplicates();
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, body);
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as ApiError;
+    expect(err.error.type).toBe("invalid_request");
+  });
+
+  it("returns 404 for an unknown project", async () => {
+    const res = await post(`/api/v1/projects/nope/dedup/apply`, {
+      operationId: "op-1",
+      reviewedAt: 1,
+      actor: "a",
+      decisions: [{ keepId: "k", mergeIds: ["m"], expectedRevisions: {} }],
+    });
+    expect(res.status).toBe(404);
+    expect((await post(`/api/v1/projects/nope/dedup`, {})).status).toBe(404);
+  });
+
+  it("returns 403 in hosted mode without touching data", async () => {
+    const { projectPath, projectId } = await seedDuplicates();
+    const core = await import("@loreai/core");
+    const preview = (await (
+      await post(`/api/v1/projects/${projectId}/dedup`, {})
+    ).json()) as Preview;
+    const decision = decisionFrom(groupFor(preview, projectId));
+    const before = core.ltm.forProject(projectPath, false).length;
+    core.enableHostedMode();
+    try {
+      const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+        operationId: `op-${crypto.randomUUID()}`,
+        reviewedAt: Date.now(),
+        actor: "api-test",
+        decisions: [decision],
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as ApiError).error.type).toBe("forbidden");
+    } finally {
+      core._resetHostedModeForTest();
+    }
+    expect(core.ltm.forProject(projectPath, false).length).toBe(before);
+  });
+});

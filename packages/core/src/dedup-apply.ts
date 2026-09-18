@@ -608,6 +608,22 @@ export function applyDedupDecisions(
   return { ...receipt, replayed: false };
 }
 
+/**
+ * Current revision for each id (logical or version id), as `applyDedupDecisions`
+ * will check it. Ids that do not resolve to a live current row are omitted, so a
+ * preview built from this map cannot carry a revision the apply would accept for
+ * a deleted entry.
+ */
+export function currentRevisions(ids: Iterable<string>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const id of ids) {
+    if (out.has(id)) continue;
+    const row = currentRow(ltm.logicalIdOf(id));
+    if (row && !row.is_deleted) out.set(id, row.version);
+  }
+  return out;
+}
+
 /** Provenance rows written by an operation, oldest group first. */
 export function dedupProvenanceFor(operationId: string): DedupProvenanceRow[] {
   return db()

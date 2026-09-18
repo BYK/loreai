@@ -203,6 +203,43 @@ describe("dedup — core _dedup()", () => {
     expect(sim).toBeCloseTo(1.0, 2);
   });
 
+  test("pairMatches records which signal fired for each matched pair", async () => {
+    const titleA = createEntry({
+      title: "Cache warming time slot buckets hardcoded values",
+    });
+    const titleB = createEntry({
+      title: "Cache warming time slot buckets hardcoded values duplicate",
+    });
+    const embA = createEntry({ title: "Completely unique title alpha" });
+    const embB = createEntry({ title: "Completely unique title beta" });
+    injectEmbedding(embA, 42);
+    injectEmbedding(embB, 42);
+    // Below threshold on both signals: similar-ish embedding, unrelated title.
+    const loner = createEntry({ title: "SQLite FTS5 ranking algorithm" });
+    injectEmbedding(loner, 1000);
+
+    const result = await ltm.deduplicate(PROJECT, { dryRun: true });
+    const matches = result.pairMatches;
+    expect(matches).toBeDefined();
+    expect(matches?.get(dedupPairKey(titleA, titleB))).toEqual({
+      score: expect.any(Number),
+      reasons: ["title_overlap"],
+    });
+    expect(
+      matches?.get(dedupPairKey(titleA, titleB))?.score,
+    ).toBeGreaterThanOrEqual(0.7);
+    expect(matches?.get(dedupPairKey(embA, embB))).toEqual({
+      score: expect.closeTo(1.0, 2),
+      reasons: ["embedding_similarity"],
+    });
+    for (const other of [titleA, titleB, embA, embB]) {
+      expect(matches?.has(dedupPairKey(loner, other))).toBe(false);
+    }
+    // Matched pairs are exactly the clustered ones.
+    expect(matches?.size).toBe(2);
+    expect(result.clusters).toHaveLength(2);
+  });
+
   test("embedding-based dedup: high similarity triggers merge", async () => {
     const id1 = createEntry({ title: "Completely unique title alpha" });
     const id2 = createEntry({ title: "Completely unique title beta" });
