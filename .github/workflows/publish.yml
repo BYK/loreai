@@ -6,7 +6,7 @@ on:
 jobs:
   publish:
     if: github.event.label.name == 'accepted' && github.event.issue.state == 'open'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Publish release
     environment: production
     permissions:

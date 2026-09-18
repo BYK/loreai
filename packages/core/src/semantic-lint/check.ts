@@ -2426,7 +2426,7 @@ export async function checkInvariants(
 
   return {
     range: input.range,
-    status: overallStatus(health, coverage),
+    status: overallStatus(health),
     health,
     coverage,
     hunks: hunks.length,
@@ -3041,10 +3041,13 @@ function calculateJudgeHealth(
   return { status, selected, resolved, unresolved, notAttempted };
 }
 
-function overallStatus(
-  health: CheckHealth,
-  coverage?: LintCoverage,
-): CheckResult["status"] {
+/**
+ * Run status reflects runtime health only: every phase ran and every selected
+ * candidate resolved. Bounded scope (isolated-hunk strategy, candidate cap,
+ * omitted invariants) is a budget decision and is reported through
+ * `coverage`, never as a partial or failed run.
+ */
+function overallStatus(health: CheckHealth): CheckResult["status"] {
   const statuses: HealthStatus[] = [
     health.diff.status,
     health.invariantVectors.status,
@@ -3055,12 +3058,6 @@ function overallStatus(
     return "failed";
   }
   if (statuses.includes("degraded")) return "partial";
-  if (
-    coverage?.strategy === "isolated-hunk" ||
-    (coverage?.omittedInvariants ?? 0) > 0
-  ) {
-    return "partial";
-  }
   return "complete";
 }
 
@@ -3080,7 +3077,7 @@ function emptyCheckResult(
   );
   return {
     range,
-    status: overallStatus(health, coverage),
+    status: overallStatus(health),
     health,
     coverage,
     hunks: counts.hunks ?? health.diff.hunks,
@@ -3249,7 +3246,7 @@ async function runHolisticLint(args: {
     };
     return {
       range: checkInput.range,
-      status: overallStatus(health, plan.coverage),
+      status: overallStatus(health),
       health,
       coverage: plan.coverage,
       hunks: hunks.length,
@@ -3385,7 +3382,7 @@ async function runHolisticLint(args: {
   };
   return {
     range: checkInput.range,
-    status: overallStatus(health, plan.coverage),
+    status: overallStatus(health),
     health,
     coverage: plan.coverage,
     hunks: hunks.length,

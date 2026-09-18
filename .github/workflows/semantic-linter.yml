@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Warm cache ~2-4 min; cold embedding startup plus judge calls can take
     # ~10-15 min on a PR with many hunks and invariants. Keep enough headroom
     # for cold-start variation and bounded shutdown/report publication.
