@@ -288,7 +288,8 @@ the published tarball / SEA binary need no extra files.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/shell.test.tsx` (shell, real-data routes with a mocked client, fixture), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
 | Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). `fixture.spec.ts` covers a dev-only screen, so its `dev-*` projects run against a Vite dev server (`LORE_E2E_DEV_PORT`, default 5174) proxying `/api` to that same seeded gateway. Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
@@ -315,24 +316,33 @@ request; the proxy path is unchanged.
 - The gateway (`packages/core` SQLite via `packages/gateway/src/api.ts`) is
   authoritative for projects, knowledge, sessions and distillations.
 - The browser holds **derived, disposable** state only: route, theme, pane
-  layout, and (from UI-03) an IndexedDB cache of API responses and local
-  drafts. Anything in IndexedDB can be deleted without loss of Lore data.
+  layout, an IndexedDB cache of API responses (`src/db/`, database
+  `lore-ui` v2) and local working state (`drafts`, `pendingChanges` —
+  per-device, never merged into entity stores). Anything in IndexedDB can
+  be deleted without loss of Lore data; a reset never touches the server.
 - The SPA calls the **read** routes only (`GET /api/v1/projects`,
-  `GET /api/v1/projects/:id/knowledge`, `GET /api/v1/knowledge/:id`), with
-  same-origin `fetch`, no credentials, and runtime validation of every
-  response (`zod`, `src/lib/schemas.ts`; timestamps are epoch milliseconds).
-  External knowledge `id`s are the **stable logical ids** the API already
-  exposes; the UI never keys on per-version ids.
+  `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),
+  `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations and
+  the folk status routes), with same-origin `fetch`, no credentials, and
+  runtime validation of every response (`valibot`, `src/contracts/`;
+  timestamps are epoch milliseconds). A 2xx body that fails its contract
+  throws `ContractError` (an `ApiError` of kind `invalid`) — never a silent
+  coercion.
+- Every loader races the cache read against the server fetch: a cached
+  answer renders immediately as `stale` (the `StaleBadge`), the server
+  answer replaces it; a server failure keeps the cached rows and flips the
+  badge to "gateway unavailable" rather than an error card.
 - `src/lib/api.ts` classifies failures for the shell: network error →
   `unreachable`; 401/403 or a **bodyless** 404 (the gateway's way of hiding
   management routes from non-loopback peers) → `unauthorized`; a JSON 404 →
   `not_found`; a 2xx body that fails validation → `invalid`.
-- `src/lib/db.ts` opens an IndexedDB (`lore-ui`, one `meta` store) and
-  nothing else. It is a scaffold for UI-03; nothing is read from or written
-  to it in this slice, and it is never authoritative.
+- `src/db/open.ts` degrades instead of failing: missing IndexedDB, a
+  `blocked` open (3 s timeout), a corrupted/missing-store database or a
+  `VersionError` all reset-or-skip the cache so the shell still renders
+  server-only.
 - The browser bundle imports nothing from `packages/gateway` or
   `packages/core`: no boot code, credentials, database, ACP or Git process
-  control. Response types are re-declared as schemas in `src/lib/schemas.ts`.
+  control. Response types are re-declared as contracts in `src/contracts/`.
   (The Playwright *seed* script under `e2e/` is Node-only tooling and does
   load `@loreai/core`; it is not part of the bundle.)
 
@@ -440,7 +450,10 @@ packages/ui/
   src/components/lore/    document primitives (Document.tsx), KnowledgeDocument, Panes, StateCard, FutureAction, Avatar
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
-  src/lib/                api.ts (typed client), schemas.ts (zod), loader.ts, connection.ts, theme.ts, db.ts (idb scaffold), format.ts, utils.ts
+  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts
+  src/contracts/          valibot response contracts (relative imports only) + ContractError
+  src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
+  src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status
   src/styles/app.css      Tailwind 4 + Lore tokens (values from the website theme, see mapping above)
   src/styles/fonts.css    self-hosted DM Sans / Playfair Display @font-face
   public/favicon.svg      copied from the website
