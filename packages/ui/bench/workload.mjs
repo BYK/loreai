@@ -100,39 +100,40 @@ export async function allocation(lib, payload, host, { n = 1000 }) {
 }
 
 /**
- * (3) Retained heap in a long-lived tab: parse `parses` times keeping the
- * results in a bounded LRU (`lruSize` most recent), then compare the settled
- * heap with a baseline that runs the identical loop with `structuredClone`
- * as the "parser" (a plain copy of the payload, which is what a parse that
- * returns a fresh object must at least cost). `retainedKb` is what the tab
- * holds after the loop (the LRU contents); `excessKb` is anything beyond
- * `lruSize` × the per-parse footprint measured in `allocation()`, i.e. the
- * leak indicator — it should stay near zero.
+ * (3) Retained heap in a long-lived tab: every op `JSON.parse`s a fresh
+ * response body (as a real fetch would) and the result is kept in a bounded
+ * LRU (`lruSize` most recent). The input is only reachable through the LRU,
+ * so validate-in-place libraries retain the parsed input and copying
+ * libraries retain the copy (the input becomes garbage) — net retention is
+ * expected to be near-identical. `jsonBaselineKb` is the same loop with
+ * plain `JSON.parse` and no library; `excessKb` is what the library retains
+ * beyond that, i.e. the leak indicator — it should stay near zero.
  */
 export async function retention(
   lib,
   payload,
   host,
-  { parses, lruSize = 50, pool = 64, heapPerOpKb = 0 },
+  { parses, lruSize = 50, pool = 64 },
 ) {
   const schema = lib[PAYLOADS[payload].schema];
-  const inputs = [];
-  for (let i = 0; i < pool; i++) inputs.push(PAYLOADS[payload].make());
+  const bodies = [];
+  for (let i = 0; i < pool; i++)
+    bodies.push(JSON.stringify(PAYLOADS[payload].make()));
   const run = async (parse) => {
     const lru = new Lru(lruSize);
     const before = await host.settle();
     for (let i = 0; i < parses; i++)
-      lru.set(i, parse(schema, inputs[i % pool]));
+      lru.set(i, parse(schema, JSON.parse(bodies[i % pool])));
     const after = await host.settle();
     host.keep(lru);
     return after - before;
   };
-  const baseline = await run((_s, d) => structuredClone(d));
+  const baseline = await run((_s, d) => d);
   const withLib = await run((s, d) => lib.parse(s, d));
   return {
     retainedKb: Math.round(withLib / 1024),
-    cloneBaselineKb: Math.round(baseline / 1024),
-    excessKb: Math.round(withLib / 1024 - lruSize * heapPerOpKb),
+    jsonBaselineKb: Math.round(baseline / 1024),
+    excessKb: Math.round((withLib - baseline) / 1024),
   };
 }
 

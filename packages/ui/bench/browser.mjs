@@ -117,7 +117,6 @@ try {
           const uaBefore = await uaMemory();
           const r = await workload.retention(lib, payload, host, {
             parses: payload === "session" ? Math.round(retain / 10) : retain,
-            heapPerOpKb: a.heapPerOpKb,
           });
           const uaAfter = await uaMemory();
           out.push({

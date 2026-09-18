@@ -87,7 +87,14 @@ ArkType 11× faster than the rows below — irrelevant under our CSP.)
 
 Payloads: `entry` = one knowledge entry, `page` = 200-entry knowledge cursor
 page, `session` = session detail with 2 000 messages. Every parse gets a
-fresh input from a pool of 32–64 distinct payloads.
+fresh input from a pool of 32–64 distinct payloads. Throughput tables are
+from the first full run; allocation and retention are from the re-run after
+the retention harness fix (fresh `JSON.parse` per op). Throughput in the
+re-run was within −22 %/+9 % of the first run (the process now carries a
+~100 MB retained LRU from the previous payload, so GC is costlier); the
+ordering held everywhere except Node `session`, where Valibot (687 ops/s)
+edged ArkType (653) — Chromium `session` still had ArkType ahead (837 vs
+765). Raw rows: `bench/` output, run 1 and run 2, are quoted in PR #1833.
 
 **Sustained throughput, Node** (`bench/bench.mjs`, `node --expose-gc`, 2 s
 warm-up then 10 s timed per payload, per-op latency percentiles):
@@ -118,44 +125,57 @@ dropped — all minor, no major GC for any library):
 
 | Library | heap/op entry · page · session | GCs (count · ms) page | GCs (count · ms) session |
 |---|---|---|---|
-| `zod` (jitless) | 0.89 kB · 53.2 kB · 282.9 kB | 16 · 3.3 ms | 71 · 58.0 ms |
-| `zod/mini` (jitless) | 0.89 kB · 53.2 kB · 282.9 kB | 20 · 5.4 ms | 93 · 82.3 ms |
-| `valibot` | 0.85 kB · 53.5 kB · 290.4 kB | 9 · 3.0 ms | 30 · 24.8 ms |
+| `zod` (jitless) | 0.89 kB · 178.2 kB · 282.9 kB | 16 · 3.3 ms | 71 · 58.8 ms |
+| `zod/mini` (jitless) | 0.89 kB · 178.2 kB · 282.9 kB | 20 · 5.4 ms | 93 · 82.3 ms |
+| `valibot` | 0.84 kB · 178.5 kB · 290.4 kB | 9 · 3.0 ms | 30 · 24.8 ms |
 | `@sinclair/typebox` | 0 · 0 · 0 | 4 · 1.5 ms | 13 · 18.2 ms |
 | **`arktype` (jitless)** | **0 · 0 · 0** | 12 · 3.0 ms | 53 · 42.5 ms |
 
 Chromium heap/op (pointer compression halves object sizes): `zod`/`zod/mini`
-0.46 · 29.0 · 149 kB, `valibot` 0.46 · 29.1 · 153 kB, `typebox` and `arktype`
+0.46 · 91.5 · 149 kB, `valibot` 0.46 · 91.6 · 153 kB, `typebox` and `arktype`
 0 · 0 · 0. Zod and Valibot return a *copy* of the validated object — every
-parse allocates a second page/session; TypeBox `Value.Check` and ArkType
-(no morphs) validate in place and return the input, so a validated response
-costs nothing beyond the response itself. ArkType's GC events in the
+parse allocates a second page/session that then has to be collected;
+TypeBox `Value.Check` and ArkType (no morphs) validate in place and return
+the input. **Caveat on the zeros:** heap/op = 0 means "no allocation beyond
+the input", not "free" — the response object itself still exists and is
+what the store keeps (see retention below). ArkType's GC events in the
 drop-results loop are the short-lived inputs the harness creates, not
-library allocations (heap/op is 0).
+library allocations.
 
 **Retained heap after a long-lived loop** keeping results in a 50-slot LRU
 (the SPA store shape): 100 000 parses for `entry` and `page`, 10 000 for
-`session` (10× the objects per parse), forced GCs before/after. Baseline =
-the same loop with `structuredClone` instead of a parser.
+`session` (10× the objects per parse), forced GCs before/after. Every op
+`JSON.parse`s a fresh response body, as a real `fetch` would, so the input
+is reachable only through the LRU: an in-place validator retains the parsed
+input, a copying validator retains its copy and the input becomes garbage.
+Baseline = the same loop with plain `JSON.parse` and no validator; "excess"
+is what the library retains beyond that.
 
-| Library | retained (Node) entry · page · session | retained (Chromium) entry · page · session |
+| Library | retained · excess (Node) entry · page · session | retained · excess (Chromium) entry · page · session |
 |---|---|---|
-| `zod` (jitless) | 13 kB · 2 667 kB · 14 149 kB | 20 kB · 1 450 kB · 7 466 kB |
-| `zod/mini` (jitless) | 12 kB · 2 666 kB · 14 150 kB | 21 kB · 1 452 kB · 7 479 kB |
-| `valibot` | 83 kB · 2 805 kB · 14 553 kB | 11 kB · 1 550 kB · 7 694 kB |
-| `@sinclair/typebox` | 5 kB · 3 kB · 3 kB | 2 kB · 3 kB · 3 kB |
-| **`arktype` (jitless)** | 16 kB · 3 kB · 4 kB | 2 kB · 3 kB · 3 kB |
+| `zod` (jitless) | 79 · +6 kB · 18.3 · +7.5 MB · 104.7 · +1.6 MB | 81 · +23 kB · 13.6 · +3.3 MB · 95.9 · +0.8 MB |
+| `zod/mini` (jitless) | 91 · +29 kB · 18.3 · +6.6 MB · 104.7 · +1.6 MB | 82 · +24 kB · 13.6 · +3.3 MB · 95.9 · +0.8 MB |
+| `valibot` | 142 · +80 kB · 22.4 · +10.7 MB · 105.1 · +2.0 MB | 72 · +14 kB · 13.6 · +3.3 MB · 96.0 · +0.9 MB |
+| `@sinclair/typebox` | 62 · 0 kB · 11.7 · +0.04 MB · 103.2 · +0.03 MB | 54 · 0 kB · 10.3 · 0 MB · 95.1 · 0 MB |
+| **`arktype` (jitless)** | 75 · +13 kB · 11.7 · +0.5 MB · 103.2 · +0.03 MB | 53 · 0 kB · 10.3 · 0 MB · 95.1 · 0 MB |
 
-`structuredClone` baseline (Node): 73 kB · 9.4 MB · 104 MB — the LRU holds
-50 full copies. Zod/Valibot retain 50 parsed copies (≈ 50 × heap/op, e.g.
-50 × 53 kB ≈ 2.7 MB for the page) and nothing beyond that; ArkType/TypeBox
-retain only the LRU bookkeeping because the store keeps the response objects
-themselves. No library grows with the parse count: "excess" over
-50 × heap/op is ≤ 132 kB everywhere (Valibot page, its IC warm-up).
+`JSON.parse` baseline: 62–72 kB · 10.9–11.7 MB · 103 MB in Node, 58 kB ·
+10.3 MB · 95 MB in Chromium. As expected, retention is dominated by the 50
+cached responses whichever library produced them — no library grows with the
+parse count, and the retained heap for the session payload is within 2 % for
+all five. The copying libraries do retain more than the `JSON.parse` objects
+they replace on the page payload (Zod/Valibot copies are 1.6–1.9× the size
+of V8's `JSON.parse` output in Node, 1.3× in Chromium — property-by-property
+construction vs. `JSON.parse`'s compact literals), but that is a second-order
+effect. **The real memory advantage of ArkType/TypeBox is allocation and GC
+pressure per parse — no second copy of every page/session — not retained
+heap.** An earlier revision of this section measured retention with a shared
+input pool, which made in-place validators look like they retained ~0; that
+was an artifact of the harness and is superseded by the numbers above.
 `performance.measureUserAgentSpecificMemory()` in full Chromium reports the
-same ordering but is dominated by the input pool and not-yet-collected
-garbage (≈ 13–14.7 MB after the page loop for every library), so it is
-recorded in `bench/browser.mjs` output but not used for the decision.
+same ordering but is dominated by not-yet-collected garbage (≈ 27–33 MB after
+the page loop for every library), so it is recorded in `bench/browser.mjs`
+output but not used for the decision.
 
 **TypeScript cost** (`bench/ts-cost.mjs`: `tsc --noEmit --extendedDiagnostics`
 over the adapter plus a probe materialising the inferred output type of all
@@ -190,11 +210,14 @@ yes; `@sinclair/typebox` 0.34 no.
    jitless Zod on the 200-entry page (0.198 ms vs 0.664 / 0.390 ms), 1.2× /
    1.6× on the 2 000-message session, with the tightest p99 (0.334 ms page,
    1.50 ms session in Node; 0.28 / 1.26 ms in Chromium).
-2. Memory: zero allocation per parse and zero retained per cached result,
-   because valid data is returned in place. Zod and Valibot allocate a full
-   copy per parse (53 kB page, 283–290 kB session) and the store then holds
-   that copy — for a tab that keeps 50 sessions cached that is 14 MB of
-   duplicates in Node, 7.5 MB in Chromium, versus ~0.
+2. Memory: zero allocation per parse because valid data is returned in
+   place (the response object the store keeps is the one `JSON.parse`
+   produced). Zod and Valibot allocate a full copy per parse (178 kB page,
+   283–290 kB session in Node) that immediately becomes garbage-plus-copy —
+   2–7× the minor-GC count and time of ArkType/TypeBox on the page, and
+   1.3–1.9× larger retained page objects. Retained heap for a bounded store
+   is otherwise near-identical across libraries; the win is GC pressure, not
+   footprint.
 3. It fits the contract rules: undeclared keys are ignored by default (forward
    compatibility), no coercion, structured `ArkErrors` with `path`, `expected`
    and `actual` that map straight onto `ContractError.issues`, Standard Schema.

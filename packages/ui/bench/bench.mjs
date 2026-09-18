@@ -82,7 +82,6 @@ for (const name of LIBS) {
       // 2k-message sessions are ~10× a page; scale the count so each loop
       // still parses roughly the same number of objects.
       parses: payload === "session" ? Math.round(RETAIN / 10) : RETAIN,
-      heapPerOpKb: a.heapPerOpKb,
     });
     const row = { lib: name, payload, ...t, ...a, ...r };
     results.push(row);
