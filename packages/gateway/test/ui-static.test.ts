@@ -143,6 +143,8 @@ describe("handleUIRequest", () => {
       "public, max-age=31536000, immutable",
     );
     expect(res.headers.get("etag")).toMatch(/^".+"$/);
+    // Assets are served uncompressed, so nothing varies on the request.
+    expect(res.headers.get("vary")).toBeNull();
     expect(res.headers.get("content-length")).toBe(
       String((await res.arrayBuffer()).byteLength),
     );

@@ -111,7 +111,6 @@ function serveAsset(req: Request, asset: UiAsset): Response {
     "content-type": asset.contentType,
     "cache-control": asset.cacheControl,
     etag: asset.etag,
-    vary: "Accept-Encoding",
   });
   securityHeaders(headers);
 
