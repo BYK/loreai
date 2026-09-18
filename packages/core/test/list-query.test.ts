@@ -124,7 +124,7 @@ function pageAll(
 // ---------------------------------------------------------------------------
 
 describe("listKnowledgePage — deterministic keyset pagination", () => {
-  test.each(KNOWLEDGE_SORTS)(
+  test.each([...KNOWLEDGE_SORTS])(
     "sort=%s pages across ≥3 pages with equal sort keys and no gaps/dupes",
     (sort) => {
       const project = freshProject("sort");

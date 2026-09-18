@@ -24,37 +24,49 @@ import type { SessionSummary } from "./data";
 // Knowledge
 // ---------------------------------------------------------------------------
 
-export const KNOWLEDGE_SORTS = [
-  "updated_desc",
-  "created_desc",
-  "confidence_desc",
-  "title_asc",
-] as const;
-export type KnowledgeSort = (typeof KNOWLEDGE_SORTS)[number];
+export type KnowledgeSort =
+  | "updated_desc"
+  | "created_desc"
+  | "confidence_desc"
+  | "title_asc";
+export const KNOWLEDGE_SORTS: ReadonlySet<KnowledgeSort> =
+  new Set<KnowledgeSort>([
+    "updated_desc",
+    "created_desc",
+    "confidence_desc",
+    "title_asc",
+  ]);
 
 /** `project`: entries owned by the project (legacy list behaviour).
  *  `global`: project-less entries visible to every project.
  *  `all`: everything the project can see (own + global + cross_project). */
-export const KNOWLEDGE_SCOPES = ["project", "global", "all"] as const;
-export type KnowledgeScope = (typeof KNOWLEDGE_SCOPES)[number];
+export type KnowledgeScope = "project" | "global" | "all";
+export const KNOWLEDGE_SCOPES: ReadonlySet<KnowledgeScope> =
+  new Set<KnowledgeScope>(["project", "global", "all"]);
 
-export const KNOWLEDGE_CATEGORIES = [
-  "decision",
-  "pattern",
-  "preference",
-  "architecture",
-  "gotcha",
-] as const;
-export type KnowledgeCategory = (typeof KNOWLEDGE_CATEGORIES)[number];
+export type KnowledgeCategory =
+  | "decision"
+  | "pattern"
+  | "preference"
+  | "architecture"
+  | "gotcha";
+export const KNOWLEDGE_CATEGORIES: ReadonlySet<KnowledgeCategory> =
+  new Set<KnowledgeCategory>([
+    "decision",
+    "pattern",
+    "preference",
+    "architecture",
+    "gotcha",
+  ]);
 
 export function isKnowledgeSort(v: string): v is KnowledgeSort {
-  return (KNOWLEDGE_SORTS as readonly string[]).includes(v);
+  return (KNOWLEDGE_SORTS as ReadonlySet<string>).has(v);
 }
 export function isKnowledgeScope(v: string): v is KnowledgeScope {
-  return (KNOWLEDGE_SCOPES as readonly string[]).includes(v);
+  return (KNOWLEDGE_SCOPES as ReadonlySet<string>).has(v);
 }
 export function isKnowledgeCategory(v: string): v is KnowledgeCategory {
-  return (KNOWLEDGE_CATEGORIES as readonly string[]).includes(v);
+  return (KNOWLEDGE_CATEGORIES as ReadonlySet<string>).has(v);
 }
 
 /** Position of the last row of the previous page. `key` is the sort column's

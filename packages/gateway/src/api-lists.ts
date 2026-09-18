@@ -215,7 +215,7 @@ export function parseKnowledgeListOptions(url: URL): KnowledgeListOptions {
     if (!listQuery.isKnowledgeCategory(category))
       throw new BadRequest(
         "invalid_request",
-        `Invalid category: ${category} (allowed: ${listQuery.KNOWLEDGE_CATEGORIES.join(", ")})`,
+        `Invalid category: ${category} (allowed: ${[...listQuery.KNOWLEDGE_CATEGORIES].join(", ")})`,
       );
     out.category = category;
   }
@@ -224,7 +224,7 @@ export function parseKnowledgeListOptions(url: URL): KnowledgeListOptions {
     if (!listQuery.isKnowledgeScope(scope))
       throw new BadRequest(
         "invalid_request",
-        `Invalid scope: ${scope} (allowed: ${listQuery.KNOWLEDGE_SCOPES.join(", ")})`,
+        `Invalid scope: ${scope} (allowed: ${[...listQuery.KNOWLEDGE_SCOPES].join(", ")})`,
       );
     out.scope = scope;
   }
@@ -233,7 +233,7 @@ export function parseKnowledgeListOptions(url: URL): KnowledgeListOptions {
     if (!listQuery.isKnowledgeSort(sort))
       throw new BadRequest(
         "invalid_request",
-        `Invalid sort: ${sort} (allowed: ${listQuery.KNOWLEDGE_SORTS.join(", ")})`,
+        `Invalid sort: ${sort} (allowed: ${[...listQuery.KNOWLEDGE_SORTS].join(", ")})`,
       );
     out.sort = sort;
   }
