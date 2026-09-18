@@ -622,13 +622,16 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
   type Receipt = {
     operationId: string;
     applied: Array<{ keepId: string; merged: Array<{ id: string }> }>;
-    refused: Array<{ keepId: string; error: { code: string } }>;
+    refused: Array<{
+      groupIndex: number;
+      keepId: string;
+      error: { code: string; details: Array<{ id: string; reason: string }> };
+    }>;
     replayed: boolean;
   };
   type ApiError = {
     type: "error";
     error: { type: string; message: string };
-    receipt?: Receipt;
   };
 
   let seq = 0;
@@ -781,7 +784,7 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     expect(err.error.type).toBe("operation_conflict");
   });
 
-  it("refuses with 409 stale_revision when an entry changed after the preview", async () => {
+  it("reports stale_revision in the receipt (200) when an entry changed after the preview", async () => {
     const { projectPath, projectId } = await seedDuplicates();
     const { ltm } = await import("@loreai/core");
     const preview = (await (
@@ -799,13 +802,70 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
       actor: "api-test",
       decisions: [decision],
     });
-    expect(res.status).toBe(409);
-    const err = (await res.json()) as ApiError;
-    expect(err.type).toBe("error");
-    expect(err.error.type).toBe("stale_revision");
-    expect(err.receipt?.applied).toEqual([]);
-    expect(err.receipt?.refused[0].error.code).toBe("stale_revision");
+    // The operation completed (nothing applied); refusal is data, not an error.
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused).toHaveLength(1);
+    expect(receipt.refused[0].error.code).toBe("stale_revision");
+    expect(receipt.refused[0].error.details).toEqual([
+      expect.objectContaining({
+        id: decision.mergeIds[0],
+        reason: "stale_revision",
+      }),
+    ]);
     expect(ltm.forProject(projectPath, false).length).toBe(before);
+  });
+
+  it("returns 200 with a mixed receipt when one group applied and another was refused", async () => {
+    const { projectPath, projectId, a, b } = await seedDuplicates();
+    const { ltm } = await import("@loreai/core");
+    const other = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title: "Retry backoff jitter window",
+      content: "Jitter is 10%.",
+      session: "test-session",
+      scope: "project",
+    });
+    const otherDupe = ltm.create({
+      id: crypto.randomUUID(),
+      projectPath,
+      category: "gotcha",
+      title: "Retry backoff jitter window duplicate",
+      content: "Jitter is ten percent.",
+      session: "test-session",
+      scope: "project",
+    });
+    const revisions = (ids: string[]) =>
+      Object.fromEntries(ids.map((id) => [id, 1]));
+    // Group 0 is fresh; group 1 goes stale between preview and apply.
+    ltm.update(b, { content: "edited after the preview" });
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup/apply`, {
+      operationId: `op-${crypto.randomUUID()}`,
+      reviewedAt: Date.now(),
+      actor: "api-test",
+      decisions: [
+        {
+          keepId: other,
+          mergeIds: [otherDupe],
+          expectedRevisions: revisions([other, otherDupe]),
+        },
+        { keepId: a, mergeIds: [b], expectedRevisions: revisions([a, b]) },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const receipt = (await res.json()) as Receipt;
+    expect(receipt.applied.map((g) => g.keepId)).toEqual([other]);
+    expect(receipt.refused.map((g) => [g.groupIndex, g.error.code])).toEqual([
+      [1, "stale_revision"],
+    ]);
+    const live = ltm.forProject(projectPath, false).map((e) => e.logical_id);
+    expect(live).not.toContain(otherDupe);
+    expect(live).toContain(a);
+    expect(live).toContain(b);
   });
 
   it.each([

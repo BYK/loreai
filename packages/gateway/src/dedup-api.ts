@@ -58,12 +58,8 @@ function errorResponse(
   status: number,
   type: string,
   message: string,
-  extra?: Record<string, unknown>,
 ): Response {
-  return jsonResponse(
-    { type: "error", error: { type, message }, ...extra },
-    status,
-  );
+  return jsonResponse({ type: "error", error: { type, message } }, status);
 }
 
 function excerpt(content: string): string {
@@ -165,14 +161,15 @@ export async function handleDedupPreview(
  * project. `projectId: null` is accepted so the global groups a preview returns
  * can be applied through the same route; any other value must equal the route.
  *
- *   200 every group applied (or an identical operation replayed as such)
+ *   200 the operation completed: the receipt is the body. Group refusals
+ *       (`stale_revision` / `not_found` / `scope_mismatch` /
+ *       `conflicting_groups`) are reported in `receipt.refused[]`, not as an
+ *       HTTP error, because earlier groups may already have been applied.
+ *       An identical operation replayed returns the stored receipt.
  *   400 malformed body / invalid request
  *   403 hosted mode
  *   404 project vanished
- *   409 `operation_conflict`, or at least one group refused
- *       (`stale_revision` / `not_found` / `scope_mismatch` /
- *       `conflicting_groups`); the receipt is included, applied groups stay
- *       applied.
+ *   409 `operation_conflict` (same operationId, different payload)
  */
 export async function handleDedupApply(
   req: Request,
@@ -226,14 +223,5 @@ export async function handleDedupApply(
     throw err;
   }
 
-  if (receipt.refused.length > 0) {
-    const codes = [...new Set(receipt.refused.map((g) => g.error.code))];
-    return errorResponse(
-      409,
-      codes.length === 1 ? codes[0] : "groups_refused",
-      `${receipt.refused.length} of ${receipt.applied.length + receipt.refused.length} groups refused (${codes.join(", ")})`,
-      { receipt },
-    );
-  }
   return jsonResponse(receipt);
 }
