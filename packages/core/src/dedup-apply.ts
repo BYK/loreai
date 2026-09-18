@@ -21,7 +21,6 @@ import {
   db,
   isCurrentDatabase,
   projectPath as projectPathById,
-  withSavepoint,
   withTransaction,
 } from "./db";
 import * as ltm from "./ltm";
@@ -278,12 +277,6 @@ type ResolvedGroup = {
 
 type StoredReceipt = Omit<DedupApplyReceipt, "replayed">;
 
-function atomically<T>(name: string, fn: () => T): T {
-  return databaseInTransaction(db())
-    ? withSavepoint(name, fn)
-    : withTransaction(fn);
-}
-
 function currentRow(logicalId: string): CurrentRow | null {
   return db()
     .query(
@@ -399,7 +392,7 @@ function applyGroup(
   group: ResolvedGroup,
   request: DedupApplyRequest,
 ): DedupGroupApplied | DedupGroupRefused {
-  return atomically(`dedup_apply_group_${group.index}`, () => {
+  return withTransaction(() => {
     const checked = checkGroup(group, request.projectId);
     if (!("rows" in checked)) return refusal(group, checked);
     const { decision } = group;
@@ -469,7 +462,7 @@ function claimOperation(
   payloadHash: string,
   startedAt: number,
 ): StoredReceipt | null {
-  return atomically("dedup_apply_claim", () => {
+  return withTransaction(() => {
     const tenantId = currentTenantId();
     const existing = db()
       .query(
@@ -551,6 +544,10 @@ function exportAfterCommit(projectId: string | null): void {
  * `not_found` for the project, `operation_conflict`); per-group problems
  * (`stale_revision`, `not_found`, `scope_mismatch`, `conflicting_groups`) are
  * returned in `receipt.refused`.
+ *
+ * Must be called outside any transaction: inside one, the per-group
+ * transactions would collapse into savepoints of the caller's and a refused
+ * group could roll back applied ones. Such a call is refused up front.
  */
 export function applyDedupDecisions(
   database: Database,
@@ -558,6 +555,10 @@ export function applyDedupDecisions(
 ): DedupApplyReceipt {
   if (!isCurrentDatabase(database))
     invalid("database must be the current lore connection");
+  if (databaseInTransaction(database))
+    invalid(
+      "applyDedupDecisions must not run inside a transaction (per-group atomicity)",
+    );
   const request = parseDedupApplyRequest(input);
   if (request.projectId !== null && projectPathById(request.projectId) === null)
     throw new DedupApplyError(

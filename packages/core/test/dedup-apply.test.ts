@@ -22,6 +22,7 @@ import {
   ensureProject,
   MIGRATIONS,
   PROJECT_MERGE_TABLES,
+  withTransaction,
 } from "../src/db";
 import * as data from "../src/data";
 import * as ltm from "../src/ltm";
@@ -355,6 +356,29 @@ describe("per-group atomicity", () => {
     ).toEqual([dupeA]);
     // A partially applied operation still exports exactly once.
     expect(exportLoreFile).toHaveBeenCalledTimes(1);
+  });
+
+  test("refuses to run inside a caller's transaction, claiming and writing nothing", () => {
+    const keep = createEntry("Txn Keep");
+    const dupe = createEntry("Txn Dupe");
+    const req = request([decision(keep, dupe)]);
+
+    expect(() => withTransaction(() => apply(req))).toThrow(
+      expect.objectContaining({
+        code: "invalid_request",
+        message: expect.stringContaining("inside a transaction"),
+      }),
+    );
+
+    expect(isLive(dupe)).toBe(true);
+    expect(
+      db().query("SELECT COUNT(*) AS n FROM dedup_operations").get() as {
+        n: number;
+      },
+    ).toEqual({ n: 0 });
+    expect(exportLoreFile).not.toHaveBeenCalled();
+    // The same request is accepted at the top level.
+    expect(apply(req).applied).toHaveLength(1);
   });
 
   test("the same id in two groups refuses both groups but not a third", () => {
