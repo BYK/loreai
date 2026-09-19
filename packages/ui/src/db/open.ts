@@ -148,12 +148,13 @@ async function deleteLoreDb(factory: IDBFactory | undefined): Promise<void> {
 
 /** Delete the whole database so the next open recreates it cleanly. */
 export async function resetCache(opts?: OpenOptions): Promise<void> {
+  const options = opts ?? lastOptions;
   const pending = opening;
   opening = null;
   const db = await pending;
   if (db) db.close();
-  await deleteLoreDb(opts?.factory);
-  opts?.onStatus?.("reset");
+  await deleteLoreDb(options?.factory);
+  options?.onStatus?.("reset");
 }
 
 /**

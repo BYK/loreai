@@ -287,9 +287,11 @@ export const Browse: Component = () => {
           <Match when={entry.loader.data()}>
             {(e) => (
               <>
-                <div class="px-5 pt-3 sm:px-7.5">
-                  <StaleBadge status={entry.status()} />
-                </div>
+                <Show when={entry.status().stale}>
+                  <div class="px-5 pt-3 sm:px-7.5">
+                    <StaleBadge status={entry.status()} />
+                  </div>
+                </Show>
                 <KnowledgeDocument entry={e()} project={project()} />
               </>
             )}

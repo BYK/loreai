@@ -98,7 +98,8 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
         setCacheStatus("reset");
         // Repos bound to the previous handle degrade to no-ops; the next
         // app mount reopens a fresh database.
-        void openLoreDb();
+        const handle = await openLoreDb();
+        setCacheStatus(handle ? "ready" : "unavailable");
       },
     },
     /** Resolves once the db handle (and so the repos) is ready. Test hook. */

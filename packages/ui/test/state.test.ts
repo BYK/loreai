@@ -26,6 +26,7 @@ import type {
 } from "~/contracts";
 import { mergeCursorPage } from "~/state/pages";
 import { createEntityStore } from "~/state/entity-store";
+import { createAppState } from "~/state";
 import { createProjectsState } from "~/state/projects";
 import { createKnowledgeState } from "~/state/knowledge";
 import { createSessionsState } from "~/state/sessions";
@@ -659,5 +660,23 @@ describe("entity store", () => {
       expect(store.statusOf("p1").partial).toBe(false);
       dispose();
     });
+  });
+});
+
+describe("app state: cache reset", () => {
+  it("reports ready again once the database has been reopened", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const client = {
+      listProjects: async () => PROJECTS,
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createAppState({ client, db: openLoreDb({ factory }), tracked }),
+    );
+    expect(await state.ready).not.toBeNull();
+    expect(state.cache.status()).toBe("ready");
+    await state.cache.reset();
+    expect(state.cache.status()).toBe("ready");
+    await closeLoreDb();
   });
 });
