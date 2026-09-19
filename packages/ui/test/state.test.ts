@@ -278,6 +278,10 @@ describe("knowledge state", () => {
     const detail = state.entry(() => globalEntry.id);
     await flush();
     expect(detail.loader.data()).toEqual(globalEntry);
+    // The detail write-through must not move the row out of the list scope.
+    const repo = createKnowledgeRepo(db);
+    expect(await repo.getScope("p1")).toHaveLength(2);
+    expect(await repo.getScope("global")).toHaveLength(0);
 
     const fresh = createRoot(() =>
       createKnowledgeState({
