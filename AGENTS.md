@@ -21,9 +21,10 @@ Lore is a **three-tier memory architecture** for AI coding agents. It intercepts
 | Package | Path | Purpose |
 |---|---|---|
 | `@loreai/core` | `packages/core/` | Shared memory engine — DB, distillation, knowledge (LTM), recall, gradient context management, prompts |
-| `@loreai/gateway` | `packages/gateway/` | Transparent LLM proxy + CLI tool (`lore`) — intercepts API calls, manages context, serves web dashboard |
+| `@loreai/gateway` | `packages/gateway/` | Transparent LLM proxy + CLI tool (`lore`) — intercepts API calls, manages context, serves the management API and the Lore UI SPA (`/ui`, built from `packages/ui`) |
 | `@loreai/opencode` | `packages/opencode/` | OpenCode plugin adapter — hooks into OpenCode's lifecycle via `@opencode-ai/plugin` |
 | `@loreai/pi` | `packages/pi/` | Pi coding-agent extension adapter |
+| `@loreai/ui` | `packages/ui/` | Solid/Vite browser SPA (memory browser) — built into `packages/gateway/dist/ui` and served by the gateway at `/ui` |
 
 `@loreai/core` is the dependency that both `gateway` and `opencode` (and `pi`) consume. The gateway bundles core into a single CJS file via esbuild; the opencode package ships raw TS.
 

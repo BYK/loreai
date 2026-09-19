@@ -1,5 +1,5 @@
 import { ensureUiAssetsStaged } from "../../script/ui-assets";
 
-export default function setup(): void {
-  ensureUiAssetsStaged();
+export default async function setup(): Promise<void> {
+  await ensureUiAssetsStaged();
 }

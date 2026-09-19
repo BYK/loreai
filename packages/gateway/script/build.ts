@@ -54,7 +54,9 @@ async function buildLibrary() {
   // (`tsx src/index.ts`, vitest, the in-process Bun shim) serves the SPA
   // exactly like the published bundle. Builds the UI first when it has not
   // been built yet.
-  console.log(`  ${describeUiAssets(stageUiAssets({ build: "if-missing" }))}`);
+  console.log(
+    `  ${describeUiAssets(await stageUiAssets({ build: "if-missing" }))}`,
+  );
 
   // Create lightweight dev shims so workspace consumers can resolve
   // the "bun" export condition without running the full `pnpm run bundle`.

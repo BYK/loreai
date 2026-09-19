@@ -142,7 +142,8 @@ Production never runs a frontend dev server: the gateway serves `packages/ui/dis
 ### How the gateway serves the SPA
 
 `pnpm --filter @loreai/gateway build` / `bundle` run
-`packages/gateway/script/ui-assets.ts`, which builds this package when
+`packages/gateway/script/ui-assets.ts`, which builds this package in-process
+through Vite's programmatic `build()` (resolved from `packages/ui`) when
 `packages/ui/dist` is missing (`bundle` always rebuilds) and **stages** it
 into `packages/gateway/dist/ui/` (git-ignored, in the npm publish allowlist):
 every file of the Vite output (`index.html`, hashed `assets/*`, `public/`
