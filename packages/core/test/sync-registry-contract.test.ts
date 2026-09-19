@@ -338,15 +338,17 @@ describe("SYNCED_TABLES local-only secondary UNIQUE → convergence handling (#1
 });
 
 describe("server-internal tables are intentionally NOT synced", () => {
-  test.each(["semantic_token_cache", "source_windows"])(
-    "local source cache %s never enters any sync tier",
-    (table) => {
-      for (const tier of ["basic", "pro", "max"] as const)
-        expect(
-          SYNCED_TABLES[tier].find((metadata) => metadata.table === table),
-        ).toBeUndefined();
-    },
-  );
+  test.each([
+    "semantic_token_cache",
+    "source_windows",
+    "dedup_operations",
+    "dedup_provenance",
+  ])("local server-internal table %s never enters any sync tier", (table) => {
+    for (const tier of ["basic", "pro", "max"] as const)
+      expect(
+        SYNCED_TABLES[tier].find((metadata) => metadata.table === table),
+      ).toBeUndefined();
+  });
   test("the temporal embedding queue is absent from every tier's registry", () => {
     for (const tier of ["basic", "pro", "max"] as const)
       expect(

@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { describeUiAssets, generateUiAssetsModule } from "./ui-assets";
+import { describeUiAssets, stageUiAssets } from "./ui-assets";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -50,12 +50,12 @@ const { values: flags } = parseArgs({
 // ---------------------------------------------------------------------------
 
 async function buildLibrary() {
-  // Embed the Lore UI (packages/ui/dist) as src/ui-assets.generated.ts so a
-  // source checkout (`tsx src/index.ts`, vitest, the in-process Bun shim)
-  // serves the SPA exactly like the published bundle. Builds the UI first
-  // when it has not been built yet.
+  // Stage the Lore UI (packages/ui/dist) into dist/ui so a source checkout
+  // (`tsx src/index.ts`, vitest, the in-process Bun shim) serves the SPA
+  // exactly like the published bundle. Builds the UI first when it has not
+  // been built yet.
   console.log(
-    `  ${describeUiAssets(generateUiAssetsModule({ build: "if-missing" }))}`,
+    `  ${describeUiAssets(await stageUiAssets({ build: "if-missing" }))}`,
   );
 
   // Create lightweight dev shims so workspace consumers can resolve

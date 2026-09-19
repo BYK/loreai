@@ -1,4 +1,5 @@
 import { SOURCE_WINDOW_SCHEMA } from "./source-window-schema";
+import { DEDUP_APPLY_SCHEMA } from "./dedup-apply-schema";
 import { Database, registerScalarFunction } from "#db/driver";
 import { isVecAvailable, loadVecExtension, resetVecState } from "./db/vec";
 import {
@@ -2073,6 +2074,8 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   `,
   // Version 87: bounded, local accepted-source transcript windows.
   SOURCE_WINDOW_SCHEMA,
+  // Version 88: reviewed dedup apply ledger (operations + provenance).
+  DEDUP_APPLY_SCHEMA,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4144,6 +4147,7 @@ function recoverMissingObjects(database: Database) {
       ON semantic_token_cache(updated_at);
   `);
   database.exec(SOURCE_WINDOW_SCHEMA);
+  database.exec(DEDUP_APPLY_SCHEMA);
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
   // The verdict-keyed index MUST be created here, AFTER the column is ensured —
   // never in the big exec above, which runs before this ALTER and would throw
@@ -4252,6 +4256,7 @@ export function convergeProjectsByRemote(): void {
 export const PROJECT_MERGE_TABLES = Object.freeze([
   "cache_bust_stats",
   "dedup_feedback",
+  "dedup_operations",
   "distillation_vec",
   "distillations",
   "entities",
@@ -4599,6 +4604,9 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     ).run(targetId, sourceId);
     d.query(
       "UPDATE dedup_feedback SET project_id = ? WHERE project_id = ?",
+    ).run(targetId, sourceId);
+    d.query(
+      "UPDATE dedup_operations SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
     d.query(
       "UPDATE knowledge_tombstones SET project_id = ? WHERE project_id = ?",

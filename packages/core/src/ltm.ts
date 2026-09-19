@@ -1,11 +1,13 @@
 import { uuidv7 } from "uuidv7";
 import {
+  databaseInTransaction,
   db,
   effectivePromotionPolicy,
   ensureProject,
   getKV,
   projectScope,
   setKV,
+  withSavepoint,
   withSyncApplying,
   withTransaction,
 } from "./db";
@@ -34,6 +36,7 @@ import {
 } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import { ReadPathTimer } from "./read-telemetry";
+import { sql } from "./sql";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import {
@@ -456,8 +459,14 @@ export function appendVersion(
   // (logical_id WHERE is_current=1) is checked per-statement, so inserting a
   // second current row before demoting would violate it. The forward-copy SELECT
   // still reads the (now-demoted) row by id. The current-row lookup is INSIDE the
-  // txn so it can't race a concurrent append (no TOCTOU).
-  const ok = withTransaction(() => {
+  // txn so it can't race a concurrent append (no TOCTOU). Inside an enclosing
+  // transaction the append joins it as a savepoint so a caller can group several
+  // appends atomically.
+  const appendAtomically = <T>(fn: () => T): T =>
+    databaseInTransaction(db())
+      ? withSavepoint("knowledge_append_version", fn)
+      : withTransaction(fn);
+  const ok = appendAtomically(() => {
     const cur = db()
       .query(
         "SELECT id FROM knowledge WHERE tenant_id = ? AND logical_id = ? AND is_current = 1 LIMIT 1",
@@ -831,23 +840,18 @@ export function update(
   const now = Date.now();
   // Mutable METADATA on the current version row (NOT confidence — that's a metric
   // register field now, A2 3b). updated_at always bumps (a re-confirmation).
-  const sets: string[] = ["updated_at = ?"];
-  const params: unknown[] = [now];
+  const sets = [sql`updated_at = ${now}`];
   if (input.updatedBy !== undefined) {
-    sets.push("updated_by = ?");
-    params.push(input.updatedBy);
+    sets.push(sql`updated_by = ${input.updatedBy}`);
   }
   if (input.sensitivity !== undefined) {
-    sets.push("sensitivity = ?");
-    params.push(input.sensitivity);
+    sets.push(sql`sensitivity = ${input.sensitivity}`);
   }
-  params.push(logicalId);
   // Target the CURRENT version (the freshly-appended one if content changed).
-  db()
-    .query(
-      `UPDATE knowledge SET ${sets.join(", ")} WHERE logical_id = ? AND is_current = 1`,
-    )
-    .run(...(params as [string, ...string[]]));
+  sql.run(
+    db(),
+    sql`UPDATE knowledge SET ${sql.join(sets, ", ")} WHERE logical_id = ${logicalId} AND is_current = 1`,
+  );
 
   // Metric register (A2 3b): any update is a re-confirmation → reset the decay
   // clock so a freshly-touched entry never ages out (v48). last_reinforced_at is
@@ -3515,25 +3519,25 @@ function searchLike(input: {
     .split(/\s+/)
     .filter((t) => t.length > 2);
   if (!terms.length) return [];
-  const conditions = terms
-    .map(() => "(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)")
-    .join(" AND ");
-  const likeParams = terms.flatMap((t) => [`%${t}%`, `%${t}%`]);
-  if (input.projectPath) {
-    const pid = ensureProject(input.projectPath);
-    return db()
-      .query(
-        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND (project_id = ? OR project_id IS NULL OR cross_project = 1) AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
-      )
-      .all(currentTenantId(), pid, ...likeParams, input.limit)
-      .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
-  }
-  return db()
-    .query(
-      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current WHERE tenant_id = ? AND confidence > 0.2 AND ${conditions} ORDER BY updated_at DESC LIMIT ?`,
+  const pid = input.projectPath ? ensureProject(input.projectPath) : null;
+  const scope = pid
+    ? sql`project_id = ${pid} OR project_id IS NULL OR cross_project = 1`
+    : null;
+  const conditions = sql.and([
+    sql`tenant_id = ${currentTenantId()}`,
+    scope,
+    sql`confidence > 0.2`,
+    ...terms.map(
+      (term) =>
+        sql`LOWER(title) LIKE ${`%${term}%`} OR LOWER(content) LIKE ${`%${term}%`}`,
+    ),
+  ]);
+  return sql
+    .all<KnowledgeEntry>(
+      db(),
+      sql`SELECT ${sql.raw(KNOWLEDGE_COLS)} FROM knowledge_current WHERE ${conditions} ORDER BY updated_at DESC LIMIT ${input.limit}`,
     )
-    .all(currentTenantId(), ...likeParams, input.limit)
-    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+    .map(hydrateKnowledgeEntry);
 }
 
 export function search(input: {
@@ -4209,6 +4213,15 @@ export function dedupPairKey(idA: string, idB: string): string {
   return idA < idB ? `${idA}:${idB}` : `${idB}:${idA}`;
 }
 
+/** Why two entries were treated as duplicate candidates. */
+export type DedupMatchReason = "title_overlap" | "embedding_similarity";
+
+export type DedupPairMatch = {
+  /** max(title-overlap coefficient, cosine similarity) for the pair. */
+  score: number;
+  reasons: DedupMatchReason[];
+};
+
 export type DedupResult = {
   clusters: DedupCluster[];
   totalRemoved: number;
@@ -4216,6 +4229,10 @@ export type DedupResult = {
   pairSimilarities: Map<string, number>;
   /** All entry titles by ID — for feedback recording after entries are deleted. */
   entryTitles: Map<string, string>;
+  /** Pairs that crossed a dedup threshold, with the signals that fired.
+   *  Key: dedupPairKey(idA, idB). Optional so hand-built results (entity
+   *  dedup, tests) keep compiling. */
+  pairMatches?: Map<string, DedupPairMatch>;
 };
 
 /**
@@ -4253,6 +4270,7 @@ function _dedup(
       totalRemoved: 0,
       pairSimilarities: new Map(),
       entryTitles: new Map(),
+      pairMatches: new Map(),
     };
 
   // --- Build neighbor map using title overlap + embedding similarity ---
@@ -4296,6 +4314,7 @@ function _dedup(
   type DedupHit = { id: string; score: number };
   const neighborMap = new Map<string, DedupHit[]>();
   const pairSimilarities = new Map<string, number>();
+  const pairMatches = new Map<string, DedupPairMatch>();
 
   for (let i = 0; i < entries.length; i++) {
     if (!neighborMap.has(entries[i].id)) neighborMap.set(entries[i].id, []);
@@ -4332,6 +4351,10 @@ function _dedup(
 
       if (titleMatch || embeddingMatch) {
         const score = Math.max(coefficient, similarity);
+        const reasons: DedupMatchReason[] = [];
+        if (titleMatch) reasons.push("title_overlap");
+        if (embeddingMatch) reasons.push("embedding_similarity");
+        pairMatches.set(dedupPairKey(entry.id, other.id), { score, reasons });
         const entryNeighbors = neighborMap.get(entry.id);
         if (entryNeighbors) entryNeighbors.push({ id: other.id, score });
         if (!neighborMap.has(other.id)) neighborMap.set(other.id, []);
@@ -4410,7 +4433,13 @@ function _dedup(
   // Build title map from all input entries — survives entry deletion.
   const entryTitles = new Map(entries.map((e) => [e.id, e.title]));
 
-  return { clusters: result, totalRemoved, pairSimilarities, entryTitles };
+  return {
+    clusters: result,
+    totalRemoved,
+    pairSimilarities,
+    entryTitles,
+    pairMatches,
+  };
 }
 
 export async function deduplicate(

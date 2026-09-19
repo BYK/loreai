@@ -51,8 +51,9 @@ import { ortNativePlugin } from "./ort-native-plugin";
 import { jsoncParserEsmPlugin } from "./jsonc-parser-plugin";
 import { ensureVecBinaries, vecAssetKey } from "./vendor-sqlite-vec";
 import { ortNativeAssets } from "./vendor-ort-native";
-import { describeUiAssets, generateUiAssetsModule } from "./ui-assets";
+import { describeUiAssets, stageUiAssets, UI_STAGE_DIR } from "./ui-assets";
 import { fossilize } from "fossilize";
+import { UI_SEA_ASSET_PREFIX } from "../src/ui-manifest";
 
 const require = createRequire(import.meta.url);
 
@@ -510,11 +511,10 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // Step 1: esbuild main bundle
   // -------------------------------------------------------------------------
-  // The SPA rides along inside the main bundle (src/ui-assets.generated.ts),
-  // so the binary serves /ui without any extra SEA asset.
-  console.log(
-    `  ${describeUiAssets(generateUiAssetsModule({ build: "always" }))}`,
-  );
+  // The SPA travels as SEA assets keyed `ui/<path>` (staged below in step 3,
+  // read back by src/ui-static.ts through sea.getRawAsset).
+  const uiAssets = await stageUiAssets({ build: "always" });
+  console.log(`  ${describeUiAssets(uiAssets)}`);
 
   const bundlePath = join(stagingDir, "sea-entry.cjs");
   const mapPath = join(stagingDir, "sea-entry.cjs.map");
@@ -733,6 +733,12 @@ async function buildBinary() {
     }
   }
 
+  // Lore UI: every staged file (SPA files, .br/.gz siblings, ui-manifest.json)
+  // under the `ui/` key prefix src/ui-static.ts reads in SEA mode.
+  for (const rel of uiAssets.staged) {
+    stageAsset(`${UI_SEA_ASSET_PREFIX}${rel}`, join(UI_STAGE_DIR, rel));
+  }
+
   // Stage the native sqlite-vec loadable extension for every target in this
   // build. fossilize embeds a single shared asset set into each platform
   // binary, so we key each one as `vec0-<target>.<ext>`; at runtime
@@ -798,6 +804,10 @@ async function buildBinary() {
       const key = `model/${rel}`;
       sharedManifest[key] = { file: key, src: key };
     }
+  }
+  for (const rel of uiAssets.staged) {
+    const key = `${UI_SEA_ASSET_PREFIX}${rel}`;
+    sharedManifest[key] = { file: key, src: key };
   }
 
   // Sentry sourcemap upload (runs before fossilize — the .map file lives

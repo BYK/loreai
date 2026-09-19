@@ -20,12 +20,13 @@ function paragraphs(content: string): string[] {
     .filter(Boolean);
 }
 
-function authorOf(entry: KnowledgeEntry): Participant {
-  const name = entry.created_by?.trim() || "Curator";
+export function authorOf(entry: KnowledgeEntry): Participant {
+  const person = entry.created_by?.trim();
+  const name = person || "Curator";
   return {
     name,
     initials: initials(name),
-    kind: entry.created_by ? "person" : "agent",
+    kind: person ? "person" : "agent",
   };
 }
 

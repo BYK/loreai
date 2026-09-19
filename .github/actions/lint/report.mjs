@@ -433,12 +433,10 @@ function validateReport(value) {
       throw new TypeError(`${phase} vector counts disagree`);
     }
   }
-  const coveragePartial =
-    value.coverage?.strategy === "isolated-hunk" ||
-    (value.coverage?.omittedInvariants ?? 0) > 0;
+  // Status is runtime health only; bounded scope is reported via coverage.
   const derivedStatus = failedSeen
     ? "failed"
-    : degraded || coveragePartial
+    : degraded
       ? "partial"
       : "complete";
   if (value.status !== derivedStatus)
@@ -1015,6 +1013,8 @@ if (report) {
     .map(([code, count]) => `${code}: ${count}`)
     .join(", ");
   const funnel = `${counters.hunks} hunks × ${counters.invariants} invariants → ${counters.candidates} candidates · ${counters.resolved} resolved, ${counters.unresolved} unresolved, ${counters.notAttempted} not attempted`;
+  const coverage = report.coverage;
+  const coverageSummary = `coverage: ${coverage.strategy} · ${coverage.includedHunks}/${coverage.availableHunks} hunks, ${coverage.includedInvariants}/${coverage.availableInvariants} invariants${coverage.contextComplete ? "" : " · bounded context"}`;
   const verificationSummary =
     report.verification.strategy === "counterevidence"
       ? `counterevidence: ${report.verification.confirmed} confirmed, ${report.verification.cleared} cleared, ${report.verification.unresolved} unresolved, ${report.verification.notAttempted} not attempted`
@@ -1023,13 +1023,13 @@ if (report) {
     annotation(
       "notice",
       "Lore semantic lint",
-      `✓ no suspected invariant violations among selected candidates (${funnel} · ${verificationSummary})`,
+      `✓ no suspected invariant violations among selected candidates (${funnel} · ${coverageSummary} · ${verificationSummary})`,
     );
   } else if (report.status !== "complete") {
     annotation(
       "warning",
       "Lore semantic lint inconclusive",
-      `${report.status}: ${funnel} · ${verificationSummary}${failureSummary ? ` · causes: ${failureSummary}` : ""}`,
+      `${report.status}: ${funnel} · ${coverageSummary} · ${verificationSummary}${failureSummary ? ` · causes: ${failureSummary}` : ""}`,
     );
   }
   if (summaryFile) {

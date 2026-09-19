@@ -279,19 +279,21 @@ function clonePhase(phase: LintPhaseHealth): LintPhaseHealth {
   };
 }
 
-function deriveStatus(
-  report: Pick<SemanticLintReport, "health" | "coverage">,
-): LintStatus {
+// Status is runtime health only; bounded scope lives in `coverage`.
+function deriveStatus(report: Pick<SemanticLintReport, "health">): LintStatus {
   const statuses = PHASE_ORDER.map((phase) => report.health[phase].status);
   if (statuses.includes("failed")) return "failed";
-  if (
-    statuses.includes("degraded") ||
-    report.coverage.strategy === "isolated-hunk" ||
-    report.coverage.omittedInvariants > 0
-  ) {
-    return "partial";
-  }
+  if (statuses.includes("degraded")) return "partial";
   return "complete";
+}
+
+function coverageIsBounded(coverage: SemanticLintReport["coverage"]): boolean {
+  return (
+    coverage.strategy !== "holistic" ||
+    coverage.omittedHunks > 0 ||
+    coverage.omittedInvariants > 0 ||
+    !coverage.contextComplete
+  );
 }
 
 export function buildSemanticLintReport(input: {
@@ -1472,7 +1474,12 @@ export function renderSemanticLintReport(report: SemanticLintReport): string {
     "─".repeat(64),
   ];
   if (report.status === "complete" && report.findings.length === 0) {
-    lines.push("", "✓ No suspected invariant violations.");
+    lines.push(
+      "",
+      coverageIsBounded(report.coverage)
+        ? "✓ No suspected invariant violations among the selected candidates (bounded coverage)."
+        : "✓ No suspected invariant violations.",
+    );
   } else if (report.findings.length === 0) {
     lines.push(
       "",

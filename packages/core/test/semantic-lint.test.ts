@@ -1781,7 +1781,7 @@ describe("checkInvariants typed judge outcomes", () => {
     expect(result.health.judge.status).toBe("not-run");
   });
 
-  it("reports partial coverage when isolated candidate judging resolves", async () => {
+  it("reports a complete run with bounded coverage when isolated candidate judging resolves", async () => {
     const project = "/tmp/ic-test-typed-healthy";
     const hunks = await seedCandidateSet(project, 3);
     const { judge, judgeCall } = stubJudge(() => ({
@@ -1801,7 +1801,7 @@ describe("checkInvariants typed judge outcomes", () => {
 
     expect(judgeCall).toHaveBeenCalledTimes(3);
     expect(result).toMatchObject({
-      status: "partial",
+      status: "complete",
       candidates: 3,
       attempted: 3,
       resolved: 3,
@@ -1811,10 +1811,49 @@ describe("checkInvariants typed judge outcomes", () => {
       transportAttempts: 6,
     });
     expect(result.health.judge.status).toBe("healthy");
+    expect(result.coverage.strategy).toBe("isolated-hunk");
     expect(result.candidateOutcomes.every((o) => o.state === "resolved")).toBe(
       true,
     );
     expect(new Set(result.candidateOutcomes.map((o) => o.id)).size).toBe(3);
+  });
+
+  it("still reports partial when a selected candidate is unresolved", async () => {
+    const project = "/tmp/ic-test-typed-degraded";
+    const hunks = await seedCandidateSet(project, 2);
+    let calls = 0;
+    const { judge } = stubJudge(() => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          kind: "verdict",
+          verdict: "satisfies",
+          reason: "The shared transport remains in use",
+          stats: { semanticCalls: 1, transportAttempts: 1 },
+        };
+      }
+      return {
+        kind: "unresolved",
+        failure: {
+          code: "timeout",
+          message: "judge timed out",
+          scope: "candidate",
+        },
+        stats: { semanticCalls: 1, transportAttempts: 1 },
+      };
+    });
+
+    const result = await checkInvariants({
+      projectPath: project,
+      hunks,
+      range: FAKE_RANGE,
+      judge,
+      sessionID: "typed-degraded",
+    });
+
+    expect(result.status).toBe("partial");
+    expect(result.health.judge.status).toBe("degraded");
+    expect(result.unresolved).toBe(1);
   });
 
   it("fails closed on a zero-call first-pass verdict", async () => {

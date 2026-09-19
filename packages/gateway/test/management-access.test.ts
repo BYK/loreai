@@ -332,6 +332,56 @@ describe("management route access control", () => {
     ).toBe(true);
   });
 
+  test("denies remote dedup apply before touching knowledge", async () => {
+    const projectPath = `/test/remote-dedup-apply-${Date.now()}`;
+    const projectId = ensureProject(projectPath, "remote-dedup-guard");
+    const keep = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Remote dedup guard keep",
+      content: "keep",
+      session: "s",
+      scope: "project",
+    });
+    const merge = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Remote dedup guard merge",
+      content: "merge",
+      session: "s",
+      scope: "project",
+    });
+
+    const response = await fetch(
+      urlFor(remotePeer, `/api/v1/projects/${projectId}/dedup/apply`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId: "remote-op",
+          reviewedAt: 1,
+          actor: "attacker",
+          decisions: [
+            {
+              keepId: keep,
+              mergeIds: [merge],
+              expectedRevisions: { [keep]: 1, [merge]: 1 },
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("");
+    expect(
+      ltm
+        .forProject(projectPath, false)
+        .map((e) => e.id)
+        .sort(),
+    ).toEqual([keep, merge].sort());
+  });
+
   test("denies before parsing a management request body", async () => {
     const response = await fetch(urlFor(remotePeer, "/api/v1/import/record"), {
       method: "POST",

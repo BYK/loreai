@@ -323,28 +323,51 @@ Production never runs a frontend dev server: the gateway serves `packages/ui/dis
 ### How the gateway serves the SPA
 
 `pnpm --filter @loreai/gateway build` / `bundle` run
-`packages/gateway/script/ui-assets.ts`, which builds this package when
-`packages/ui/dist` is missing or stale and writes
-`packages/gateway/src/ui-assets.generated.ts` (git-ignored): every file in
-`dist/` as a `Uint8Array` with its MIME type and a strong ETag, plus
-precompressed variants for compressible types (`.js`, `.css`, `.html`,
+`packages/gateway/script/ui-assets.ts`, which builds this package in-process
+through Vite's programmatic `build()` (resolved from `packages/ui`) when
+`packages/ui/dist` is missing (`bundle` always rebuilds) and **stages** it
+into `packages/gateway/dist/ui/` (git-ignored, in the npm publish allowlist):
+every file of the Vite output (`index.html`, hashed `assets/*`, `public/`
+files such as `favicon.svg`) copied as-is, plus precompressed `.br` / `.gz`
+siblings for compressible types (`.js`, `.css`, `.html`,
 `.svg`, `.json`, `.webmanifest` — not fonts or images) made at build time with
 `node:zlib` only: brotli (quality 11, text mode, size hint) and gzip
 (level 9). A variant is dropped when it is not smaller than the identity
 bytes. zstd is deliberately not emitted: measured at its level-22 ceiling it
 was 5–8 % larger than brotli on every asset (brotli's built-in dictionary
-wins on small text), so embedding it would only grow the bundle. The build ID
-digests identity bytes only, so it does not depend on the build host's zlib.
-The bundle therefore embeds the UI — nothing is read from disk at runtime and
-the published tarball / SEA binary need no extra files.
-`packages/gateway/src/ui-static.ts` answers `/ui`, `/ui/` and `/ui/*`:
+wins on small text), so shipping it would only grow the artifact. Next to the
+files, `dist/ui/ui-manifest.json` (`packages/gateway/src/ui-manifest.ts`)
+lists every servable path with its MIME type, identity size, the sizes of the
+variants that exist, and a build ID that digests identity bytes only (so it
+does not depend on the build host's zlib). Only paths in the manifest are ever
+served; the manifest is validated (version, safe relative paths, known
+encodings) before the first response and a missing or invalid one makes the
+UI a JSON `503`, never a crash.
 
-- `/ui/assets/<hash>.js|css` → the embedded file, `Cache-Control: public,
+At runtime `packages/gateway/src/ui-static.ts` reads the staged tree through
+one `UiAssetSource`, resolved once and lazily:
+
+- **SEA binary** (`sea.isSea()`): `script/build-binary-sea.ts` adds every
+  staged file to each target's [fossilize](https://github.com/BYK/fossilize)
+  asset manifest under the key `ui/<path>` (e.g. `ui/index.html`,
+  `ui/assets/index-*.js.br`), and the source is `sea.getRawAsset("ui/<path>")`
+  — no filesystem, no extraction.
+- **everything else** (`npm` CJS bundle, the Bun ESM bundle that
+  `@loreai/opencode` runs in-process, `tsx` dev, tests): `dist/ui/` on disk
+  next to the bundle (`./ui/` relative to `dist/index.cjs`, `../dist/ui/`
+  relative to `src/`), read with `readFileSync`.
+
+Bodies are read on first use and cached in memory; the manifest (not the
+URL) decides which file is read, so no request can address a path outside
+the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
+`ui-static.ts` answers `/ui`, `/ui/` and `/ui/*`:
+
+- `/ui/assets/<hash>.js|css` → the staged file, `Cache-Control: public,
   max-age=31536000, immutable`, correct MIME type, `ETag` / `304`.
 - any other `/ui/...` path → `index.html`, `Cache-Control: no-cache`
   (history fallback for client routes); unknown `/ui/assets/*` is a 404, never
-  HTML.
-- `Accept-Encoding` is negotiated per request from the embedded variants:
+  HTML. `ui-manifest.json` and the `.br`/`.gz` siblings are not routes.
+- `Accept-Encoding` is negotiated per request from the staged variants:
   the acceptable encoding with the highest client q-value wins, ties broken by
   the server preference br > gzip > identity (every current browser advertises
   `br`, so they all get brotli; `zstd` in a request is simply ignored). `identity;q=0`
@@ -357,7 +380,8 @@ the published tarball / SEA binary need no extra files.
   (`"<build>-<path>-br"`), so a validator only revalidates its own
   encoding; `Content-Length` is the encoded length (also on `HEAD`). Fonts
   and images have no variants and no `Vary`. Nothing is compressed at
-  request time.
+  request time; a variant the manifest promises but the source lacks falls
+  back to identity.
 - every response carries a strict `Content-Security-Policy`
   (`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'
   data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri
@@ -395,8 +419,10 @@ From the [baseline posted on #1796](https://github.com/BYK/loreai/issues/1796#is
 | `GET /health` | 0.86 ms | 0.58 ms |
 | `GET /api/v1/projects` | 0.62 ms | 0.57 ms |
 
-The SPA is embedded in the bundle and loaded lazily on the first `/ui`
-request; the proxy path is unchanged.
+The SPA is staged next to the bundle (or as SEA assets) and loaded lazily on
+the first `/ui` request; the proxy path is unchanged. (The bundle size above
+predates the move from an embedded module to staged files, which took
+`dist/index.cjs` back to ≈17.45 MB.)
 
 ## Data authority
 
@@ -522,7 +548,7 @@ hero/orbit illustrations, and every layout rule.
 `@fontsource/playfair-display` (OFL-1.1) via hand-written `@font-face` rules
 in `src/styles/fonts.css` (latin + latin-ext woff2 only, ≈190 kB) so the
 strict CSP (`font-src 'self'`) holds and the UI works offline; Vite hashes
-the files into `dist/assets/` and the gateway embeds them with the rest.
+the files into `dist/assets/` and the gateway stages them with the rest.
 
 **Logo / favicon**: `src/assets/logo/loreai.svg` (light) and
 `loreai-dark.svg` (dark) plus `public/favicon.svg` are byte-for-byte copies
