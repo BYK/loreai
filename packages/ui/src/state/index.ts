@@ -31,12 +31,14 @@ export interface AppStateDeps {
  * method is a no-op.
  */
 function lazyRepo<T>(
-  db: Promise<LoreUiDb | null>,
+  handle: () => Promise<LoreUiDb | null>,
   make: (handle: LoreUiDb | null) => Repository<T>,
 ): Repository<T> {
-  const inner = db.then(make, () => make(null));
   const call = <R>(fn: (repo: Repository<T>) => Promise<R>, fallback: R) =>
-    inner.then(fn, () => fallback);
+    handle().then(
+      (h) => fn(make(h)),
+      () => fallback,
+    );
   return {
     get: (key) => call((r) => r.get(key), undefined),
     getScope: (scope) => call((r) => r.getScope(scope), []),
@@ -64,11 +66,24 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
       return null;
     },
   );
+  let current: Promise<LoreUiDb | null> = ready;
 
-  const projectsRepo = lazyRepo(ready, (h) => createProjectsRepo(h));
-  const knowledgeRepo = lazyRepo(ready, (h) => createKnowledgeRepo(h));
-  const sessionsRepo = lazyRepo(ready, (h) => createSessionsRepo(h));
-  const messageBlocksRepo = lazyRepo(ready, (h) => createMessageBlocksRepo(h));
+  const projectsRepo = lazyRepo(
+    () => current,
+    (h) => createProjectsRepo(h),
+  );
+  const knowledgeRepo = lazyRepo(
+    () => current,
+    (h) => createKnowledgeRepo(h),
+  );
+  const sessionsRepo = lazyRepo(
+    () => current,
+    (h) => createSessionsRepo(h),
+  );
+  const messageBlocksRepo = lazyRepo(
+    () => current,
+    (h) => createMessageBlocksRepo(h),
+  );
 
   const projects = createProjectsState({
     client,
@@ -97,10 +112,17 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
         await closeLoreDb();
         await resetCache();
         setCacheStatus("reset");
-        // Repos bound to the previous handle degrade to no-ops; the next
-        // app mount reopens a fresh database.
-        const handle = await openLoreDb();
-        setCacheStatus(handle ? "ready" : "unavailable");
+        current = openLoreDb().then(
+          (handle) => {
+            setCacheStatus(handle ? "ready" : "unavailable");
+            return handle;
+          },
+          () => {
+            setCacheStatus("unavailable");
+            return null;
+          },
+        );
+        await current;
       },
     },
     /** Resolves once the db handle (and so the repos) is ready. Test hook. */

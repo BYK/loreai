@@ -91,6 +91,7 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
           client.listProjectKnowledgePage(projectId, cursor),
         );
         setPage((prev) => mergeCursorPage(prev, next, (k) => k.id));
+        setError(undefined);
       } catch (reason) {
         setError(reason);
         throw reason;

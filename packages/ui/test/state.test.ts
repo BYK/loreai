@@ -328,6 +328,34 @@ describe("knowledge state", () => {
     await paged.loadMore();
     expect(call).toBe(2); // complete lists stop fetching
   });
+
+  it("clears a paged-list error after a successful retry", async () => {
+    let calls = 0;
+    const client = {
+      listProjectKnowledgePage: () => {
+        calls++;
+        return calls === 1
+          ? Promise.reject(new Error("temporary failure"))
+          : Promise.resolve({
+              items: [ENTRIES[0]!],
+              next_cursor: null,
+            });
+      },
+    } as unknown as ApiClient;
+    const state = createKnowledgeState({
+      client,
+      repo: createKnowledgeRepo(null),
+      tracked,
+    });
+    const paged = state.listPaged("p1");
+
+    await expect(paged.loadMore()).rejects.toThrow("temporary failure");
+    expect(paged.status().error).toBeInstanceOf(Error);
+    await paged.loadMore();
+
+    expect(paged.status().error).toBeUndefined();
+    expect(paged.page()?.items).toEqual([ENTRIES[0]]);
+  });
 });
 
 describe("knowledge state: partial collections", () => {
@@ -749,6 +777,43 @@ describe("app state: cache reset", () => {
     expect(state.cache.status()).toBe("ready");
     await state.cache.reset();
     expect(state.cache.status()).toBe("ready");
+    await closeLoreDb();
+  });
+
+  it("rebinds repositories to the reopened database after reset", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    let online = true;
+    const client = {
+      listProjects: async () => PROJECTS,
+      listProjectKnowledge: async () => {
+        if (!online) throw new Error("offline");
+        return ENTRIES;
+      },
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createAppState({ client, db: openLoreDb({ factory }), tracked }),
+    );
+
+    expect(await state.ready).not.toBeNull();
+    const first = state.knowledge.list(() => "p1");
+    await flush();
+    expect(first.loader.data()).toEqual(ENTRIES);
+
+    await state.cache.reset();
+    expect(state.cache.status()).toBe("ready");
+
+    const afterReset = state.knowledge.list(() => "p1");
+    await flush();
+    expect(afterReset.loader.data()).toEqual(ENTRIES);
+    const reopened = await openLoreDb({ factory });
+    expect(await createKnowledgeRepo(reopened).getScope("p1")).toEqual(ENTRIES);
+
+    online = false;
+    const cached = state.knowledge.list(() => "p1");
+    await flush();
+    expect(cached.loader.data()).toEqual(ENTRIES);
+    expect(cached.status().source).toBe("cache");
     await closeLoreDb();
   });
 });

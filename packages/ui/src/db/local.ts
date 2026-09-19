@@ -36,7 +36,7 @@ export interface PendingChange {
  * Hard cap so local state stays bounded. No TTL/LRU — this is user data,
  * only oldest-first eviction past the cap.
  */
-const LOCAL_CAP = 500;
+export const LOCAL_CAP = 500;
 
 export interface LocalStore<T extends { key: string }> {
   get(key: string): Promise<T | undefined>;
@@ -69,9 +69,11 @@ function createLocalStore<
         let cursor = await tx.store.index(index).openCursor();
         let excess = count - LOCAL_CAP;
         while (cursor && excess > 0) {
-          await cursor.delete();
+          if (cursor.primaryKey !== value.key) {
+            await cursor.delete();
+            excess--;
+          }
           cursor = await cursor.continue();
-          excess--;
         }
       }
       await tx.done;

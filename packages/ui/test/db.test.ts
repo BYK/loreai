@@ -23,6 +23,7 @@ import {
   type PendingChange,
 } from "~/db";
 import { createRepository } from "~/db/repository";
+import { LOCAL_CAP } from "~/db/local";
 import type {
   KnowledgeEntry,
   ProjectSummary,
@@ -428,6 +429,33 @@ describe("local working-state stores", () => {
     expect(await drafts.get("d1")).toBeUndefined();
     await pending.clear();
     expect(await pending.list()).toEqual([]);
+  });
+
+  it("does not evict the newly written oldest draft", async () => {
+    const db = await open(factory());
+    const drafts = createDraftsStore(db);
+    const rows: LocalDraft[] = Array.from({ length: LOCAL_CAP }, (_, i) => ({
+      key: `d${i}`,
+      kind: "knowledge",
+      target: null,
+      body: { title: `title ${i}`, content: "content", category: "pattern" },
+      updatedAt: i + 1,
+    }));
+    for (const row of rows) await drafts.put(row);
+
+    const oldest = {
+      key: "new-oldest",
+      kind: "knowledge" as const,
+      target: null,
+      body: { title: "old", content: "content", category: "pattern" },
+      updatedAt: 0,
+    };
+    await drafts.put(oldest);
+
+    expect(await drafts.list()).toHaveLength(LOCAL_CAP);
+    expect(await drafts.get(oldest.key)).toEqual(oldest);
+    expect(await drafts.get("d0")).toBeUndefined();
+    expect(await drafts.get("d1")).toEqual(rows[1]);
   });
 
   it("meta accessor round-trips", async () => {
