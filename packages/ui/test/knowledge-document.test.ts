@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { authorOf } from "~/components/lore/KnowledgeDocument";
-import type { KnowledgeEntry } from "~/lib/schemas";
+import type { KnowledgeEntry } from "~/contracts";
 
 const entry = (created_by: KnowledgeEntry["created_by"]): KnowledgeEntry => ({
   id: "k",
