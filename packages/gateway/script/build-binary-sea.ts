@@ -525,7 +525,7 @@ async function buildBinary() {
   // -------------------------------------------------------------------------
   // The SPA travels as SEA assets keyed `ui/<path>` (staged below in step 3,
   // read back by src/ui-static.ts through sea.getRawAsset).
-  const uiAssets = stageUiAssets({ build: "always" });
+  const uiAssets = await stageUiAssets({ build: "always" });
   console.log(`  ${describeUiAssets(uiAssets)}`);
 
   const bundlePath = join(stagingDir, "sea-entry.cjs");

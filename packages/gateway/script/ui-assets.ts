@@ -25,20 +25,19 @@
  * small text), so it would only grow the artifacts.
  */
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { spawnSync } from "node:child_process";
+  copyFile,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import * as zlib from "node:zlib";
 import {
   UI_MANIFEST_FILE,
@@ -58,22 +57,22 @@ const uiDistDir = join(uiDir, "dist");
 /** Where the staged SPA lives, next to the gateway bundles. */
 export const UI_STAGE_DIR = join(packageDir, "dist", "ui");
 
-const CONTENT_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".webmanifest": "application/manifest+json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".txt": "text/plain; charset=utf-8",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-  ".webp": "image/webp",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-};
+const CONTENT_TYPES = new Map<string, string>([
+  [".html", "text/html; charset=utf-8"],
+  [".js", "text/javascript; charset=utf-8"],
+  [".mjs", "text/javascript; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".json", "application/json; charset=utf-8"],
+  [".webmanifest", "application/manifest+json; charset=utf-8"],
+  [".map", "application/json; charset=utf-8"],
+  [".svg", "image/svg+xml"],
+  [".txt", "text/plain; charset=utf-8"],
+  [".png", "image/png"],
+  [".ico", "image/x-icon"],
+  [".webp", "image/webp"],
+  [".woff", "font/woff"],
+  [".woff2", "font/woff2"],
+]);
 
 /** Assets worth precompressing; fonts and images are already compressed. */
 const COMPRESSIBLE_EXTENSIONS = new Set([
@@ -86,12 +85,15 @@ const COMPRESSIBLE_EXTENSIONS = new Set([
   ".svg",
 ]);
 
-type Compressor = (buf: Buffer) => Buffer;
+type Compressor = (buf: Buffer) => Promise<Buffer>;
+
+const brotliCompress = promisify(zlib.brotliCompress);
+const gzip = promisify(zlib.gzip);
 
 function compressors(): Map<UiContentEncoding, Compressor> {
   const out = new Map<UiContentEncoding, Compressor>();
   out.set("br", (buf) =>
-    zlib.brotliCompressSync(buf, {
+    brotliCompress(buf, {
       params: {
         [zlib.constants.BROTLI_PARAM_QUALITY]:
           zlib.constants.BROTLI_MAX_QUALITY,
@@ -100,38 +102,44 @@ function compressors(): Map<UiContentEncoding, Compressor> {
       },
     }),
   );
-  out.set("gzip", (buf) => zlib.gzipSync(buf, { level: 9 }));
+  out.set("gzip", (buf) => gzip(buf, { level: 9 }));
   return out;
 }
 
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const name of readdirSync(dir).sort()) {
-    const full = join(dir, name);
-    if (statSync(full).isDirectory()) out.push(...walk(full));
-    else out.push(full);
-  }
-  return out;
+/**
+ * Every regular file under `dir` as `[absolute, relative-posix]`, sorted by
+ * relative path so the build ID digest is independent of directory order.
+ * One recursive `readdir` with dirents replaces a stat per entry.
+ */
+async function walk(dir: string): Promise<Array<[string, string]>> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry): [string, string] => {
+      const full = join(entry.parentPath, entry.name);
+      return [full, relative(dir, full).split("\\").join("/")];
+    })
+    .sort(([, a], [, b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-function runViteBuild(): void {
+/** The slice of vite's programmatic API this script relies on. */
+interface ViteModule {
+  build(config: {
+    root: string;
+    configFile?: string;
+    logLevel?: "info" | "warn" | "error" | "silent";
+  }): Promise<unknown>;
+}
+
+async function runViteBuild(): Promise<void> {
+  // vite is a dependency of packages/ui, not of the gateway: resolve it from
+  // there and drive its programmatic API in-process (same config file the
+  // `vite build` CLI would load) instead of spawning the CLI.
   const require = createRequire(join(uiDir, "package.json"));
-  // vite's package exports do not expose its bin; go through package.json.
-  const vitePkgPath = require.resolve("vite/package.json");
-  const vitePkg = JSON.parse(readFileSync(vitePkgPath, "utf8")) as {
-    bin: string | Record<string, string>;
-  };
-  const binRel =
-    typeof vitePkg.bin === "string" ? vitePkg.bin : vitePkg.bin["vite"];
-  if (!binRel) throw new Error("vite package.json has no bin entry");
-  const viteBin = join(dirname(vitePkgPath), binRel);
-  const result = spawnSync(process.execPath, [viteBin, "build"], {
-    cwd: uiDir,
-    stdio: "inherit",
-  });
-  if (result.status !== 0) {
-    throw new Error(`Lore UI build failed (exit ${result.status ?? "signal"})`);
-  }
+  const vite = (await import(
+    pathToFileURL(require.resolve("vite")).href
+  )) as ViteModule;
+  await vite.build({ root: uiDir, logLevel: "warn" });
 }
 
 export interface UiAssetsResult {
@@ -158,17 +166,17 @@ export interface UiAssetSizes {
  *                            dist/ui is removed and the gateway answers /ui
  *                            with 503.
  */
-export function stageUiAssets(
+export async function stageUiAssets(
   opts: { build: "always" | "if-missing" | "never" } = { build: "never" },
-): UiAssetsResult {
+): Promise<UiAssetsResult> {
   const hasBuild = existsSync(join(uiDistDir, "index.html"));
   if (opts.build === "always" || (opts.build === "if-missing" && !hasBuild)) {
-    runViteBuild();
+    await runViteBuild();
   }
 
   // Own the directory outright so a stale file from a previous build can
   // never be served (or embedded) alongside the new set.
-  rmSync(UI_STAGE_DIR, { recursive: true, force: true });
+  await rm(UI_STAGE_DIR, { recursive: true, force: true });
 
   const digest = createHash("sha256");
   const sizes: UiAssetSizes[] = [];
@@ -182,7 +190,7 @@ export function stageUiAssets(
 
   const compress = compressors();
   const seen = new Set<string>();
-  const stage = (rel: string, data: Buffer | null, src?: string): void => {
+  const stage = async (rel: string, data: Buffer | string): Promise<void> => {
     if (seen.has(rel)) {
       throw new Error(
         `packages/ui/dist yields ${rel} twice (variant collision)`,
@@ -190,38 +198,57 @@ export function stageUiAssets(
     }
     seen.add(rel);
     const dest = join(UI_STAGE_DIR, rel);
-    mkdirSync(dirname(dest), { recursive: true });
-    if (src !== undefined) copyFileSync(src, dest);
-    else if (data) writeFileSync(dest, data);
+    await mkdir(dirname(dest), { recursive: true });
+    if (typeof data === "string") await copyFile(data, dest);
+    else await writeFile(dest, data);
   };
-  for (const full of walk(uiDistDir)) {
-    const rel = relative(uiDistDir, full).split("\\").join("/");
+  const tree = await walk(uiDistDir);
+  for (const [, rel] of tree) {
     if (rel === UI_MANIFEST_FILE) {
       throw new Error(
         `packages/ui/dist must not contain ${UI_MANIFEST_FILE} (reserved for the gateway manifest)`,
       );
     }
-    const ext = extname(full).toLowerCase();
-    const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
-    const buf = readFileSync(full);
+  }
+
+  // Reads and compressions run concurrently (zlib works off the libuv
+  // threadpool); the loop below then folds the results back in tree order so
+  // the digest and manifest stay deterministic.
+  const prepared = await Promise.all(
+    tree.map(async ([full, rel]) => {
+      const ext = extname(rel).toLowerCase();
+      const buf = await readFile(full);
+      const variants: Array<[UiContentEncoding, Buffer]> = [];
+      if (COMPRESSIBLE_EXTENSIONS.has(ext)) {
+        for (const [name, fn] of compress) {
+          const compressed = await fn(buf);
+          if (compressed.byteLength < buf.byteLength) {
+            variants.push([name, compressed]);
+          }
+        }
+      }
+      return { full, rel, ext, buf, variants };
+    }),
+  );
+
+  for (const { full, rel, ext, buf, variants } of prepared) {
     // The build ID covers identity bytes only, so it does not depend on the
     // compressor set or zlib version of the build host.
     digest.update(rel).update("\0").update(buf);
     bytes += buf.byteLength;
     files++;
-    stage(rel, null, full);
+    await stage(rel, full);
 
-    const entry: UiManifestFile = { type: contentType, size: buf.byteLength };
+    const entry: UiManifestFile = {
+      type: CONTENT_TYPES.get(ext) ?? "application/octet-stream",
+      size: buf.byteLength,
+    };
     const variantSizes: UiAssetSizes["variants"] = {};
-    if (COMPRESSIBLE_EXTENSIONS.has(ext)) {
-      for (const [name, fn] of compress) {
-        const compressed = fn(buf);
-        if (compressed.byteLength >= buf.byteLength) continue;
-        variantSizes[name] = compressed.byteLength;
-        stage(`${rel}${UI_VARIANT_SUFFIX[name]}`, compressed);
-      }
-      if (Object.keys(variantSizes).length > 0) entry.variants = variantSizes;
+    for (const [name, compressed] of variants) {
+      variantSizes[name] = compressed.byteLength;
+      await stage(`${rel}${UI_VARIANT_SUFFIX[name]}`, compressed);
     }
+    if (variants.length > 0) entry.variants = variantSizes;
     sizes.push({ path: rel, identity: buf.byteLength, variants: variantSizes });
     manifestFiles[rel] = entry;
   }
@@ -232,7 +259,7 @@ export function stageUiAssets(
     buildId,
     files: manifestFiles,
   };
-  writeFileSync(
+  await writeFile(
     join(UI_STAGE_DIR, UI_MANIFEST_FILE),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
@@ -274,9 +301,9 @@ export function formatUiAssetSizeTable(result: UiAssetsResult): string {
  * yet (vitest global setup): never triggers a Vite build, so an unbuilt UI
  * simply leaves the gateway answering /ui with 503.
  */
-export function ensureUiAssetsStaged(): void {
+export async function ensureUiAssetsStaged(): Promise<void> {
   if (existsSync(join(UI_STAGE_DIR, UI_MANIFEST_FILE))) return;
-  stageUiAssets({ build: "never" });
+  await stageUiAssets({ build: "never" });
 }
 
 if (
@@ -285,15 +312,15 @@ if (
 ) {
   const mode = process.argv[2] ?? "--build";
   if (mode === "--build") {
-    const result = stageUiAssets({ build: "always" });
+    const result = await stageUiAssets({ build: "always" });
     console.log(describeUiAssets(result));
   } else if (mode === "--stage") {
-    const result = stageUiAssets({ build: "if-missing" });
+    const result = await stageUiAssets({ build: "if-missing" });
     console.log(describeUiAssets(result));
   } else if (mode === "--ensure") {
-    ensureUiAssetsStaged();
+    await ensureUiAssetsStaged();
   } else if (mode === "--sizes") {
-    const result = stageUiAssets({ build: "never" });
+    const result = await stageUiAssets({ build: "never" });
     console.log(formatUiAssetSizeTable(result));
   } else {
     console.error(

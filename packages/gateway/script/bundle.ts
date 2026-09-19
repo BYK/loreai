@@ -61,7 +61,7 @@ mkdirSync(distDir, { recursive: true });
 // same content-hashed assets at /ui from the directory next to it.
 // ---------------------------------------------------------------------------
 
-console.log(`  ${describeUiAssets(stageUiAssets({ build: "always" }))}`);
+console.log(`  ${describeUiAssets(await stageUiAssets({ build: "always" }))}`);
 
 // ---------------------------------------------------------------------------
 // esbuild: single CJS bundle with polyfills injected
