@@ -33,6 +33,7 @@ import { PLACEHOLDER_DEBUG_ID, injectDebugId } from "./debug-id";
 import { findOrtWebDir } from "./ort-web-plugin";
 import { ortNpmDualPlugin } from "./ort-npm-plugin";
 import { jsoncParserEsmPlugin } from "./jsonc-parser-plugin";
+import { describeUiAssets, stageUiAssets } from "./ui-assets";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageDir = dirname(here);
@@ -53,6 +54,14 @@ const mapPath = join(distDir, "index.cjs.map");
 
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
+
+// ---------------------------------------------------------------------------
+// Lore UI: build the SPA (packages/ui) and stage it into dist/ui (files +
+// ui-manifest.json + precompressed siblings) so every bundle below serves the
+// same content-hashed assets at /ui from the directory next to it.
+// ---------------------------------------------------------------------------
+
+console.log(`  ${describeUiAssets(await stageUiAssets({ build: "always" }))}`);
 
 // ---------------------------------------------------------------------------
 // esbuild: single CJS bundle with polyfills injected

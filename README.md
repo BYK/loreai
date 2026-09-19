@@ -127,7 +127,7 @@ All destructive commands prompt for confirmation. Use `--yes` to skip (for scrip
 
 ### Web dashboard
 
-When the gateway is running, visit **http://localhost:3207/ui** for a web-based dashboard that lets you browse all projects, knowledge entries, sessions, and distillations; view full detail for any entry; search across all data sources (using the same recall engine); and delete entries or clear project data. Server-rendered HTML — no external dependencies.
+When the gateway is running, visit **http://localhost:3207/ui** for the Lore memory browser: a single-page app (served by the gateway itself, no separate server) that lets you browse projects and their knowledge entries and read any entry as a document. It is a read projection of the `/api/v1` routes; the gateway's SQLite store stays the only source of truth. Search, sessions, notes and the management actions of the former server-rendered dashboard (delete/merge/clear, entities, contradictions, cost and cache-warming views) arrive in later UI slices — see `packages/ui/README.md` and https://github.com/BYK/loreai/issues/1823 for the exact list; the `lore data` CLI covers those operations meanwhile.
 
 The dashboard and `/api/*` management endpoints accept only loopback clients, even when the data-plane listener is exposed on `0.0.0.0`, a LAN address, or Tailscale. To manage a gateway on another machine, tunnel its loopback listener and open the local URL:
 

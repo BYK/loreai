@@ -44,6 +44,7 @@
     "**/.sea-staging",
     "**/.vendor-build",
     "**/*.d.ts",
+    "**/*.generated.ts",
     "**/eval/**"
   ]
 }

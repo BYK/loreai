@@ -548,12 +548,13 @@ describe("server routing", () => {
     expect(raw).toContain("websocket_not_supported");
   });
 
-  test("GET / redirects toward the dashboard (not a 500)", async () => {
+  test("GET / redirects to the Lore UI at /ui (not a 500)", async () => {
     const res = await localRequest(server.port, "/");
     // Regression guard: Response.redirect()'s headers are immutable, so
     // the old CORS wrapper used to throw and the root path returned 500.
     expect(res.status).not.toBe(500);
     expect([301, 302, 307, 308]).toContain(res.status);
+    expect(res.headers.get("location")).toBe("/ui");
   });
 });
 

@@ -21,6 +21,7 @@
     "**/.sea-staging",
     "**/.vendor-build",
     "**/*.d.ts",
+    "**/*.generated.ts",
     "**/eval/data",
     "**/eval/fixtures",
     "**/eval/results",

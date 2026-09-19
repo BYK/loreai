@@ -22,6 +22,7 @@ packages/*/src/**/*.d.ts.map
 !packages/website/src/env.d.ts
 
 
+
 # Eval results and recorded fixtures (generated, potentially large)
 packages/core/eval/results/
 packages/core/eval/fixtures/recorded-responses*/
@@ -63,3 +64,5 @@ __pycache__/
 
 # Local opencode worktree config (agent rules, etc.)
 opencode.json
+packages/ui/e2e-results/
+packages/ui/playwright-report/

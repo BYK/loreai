@@ -255,7 +255,6 @@ function subsystemOf(file: string): string {
       return "CLI / `lore` command";
     case "cache-warmer.ts":
     case "cost-tracker.ts":
-    case "ui.ts":
     case "worker-model.ts":
     case "llm-adapter.ts":
     case "translate":

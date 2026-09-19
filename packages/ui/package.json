@@ -14,12 +14,15 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@fontsource-variable/dm-sans": "5.3.0",
+    "@fontsource/playfair-display": "5.3.0",
     "@kobalte/core": "0.13.14",
     "@solidjs/router": "1.0.0",
     "@tanstack/solid-table": "9.2.4",
     "@tanstack/solid-virtual": "3.13.38",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "date-fns": "4.4.0",
     "idb": "8.0.3",
     "solid-js": "1.9.15",
     "tailwind-merge": "3.6.0",

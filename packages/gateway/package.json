@@ -47,6 +47,7 @@
     "dist/index.d.cts",
     "dist/ort-wasm-simd-threaded.mjs",
     "dist/ort-wasm-simd-threaded.wasm",
+    "dist/ui",
     "dist/vector-worker.cjs",
     "dist/vector-worker.js"
   ],
@@ -73,6 +74,7 @@
   "author": "BYK",
   "devDependencies": {
     "@loreai/core": "workspace:*",
+    "@loreai/ui": "workspace:*",
     "@sentry/bun": "^10.52.0",
     "@types/bun": "^1.2.0",
     "@types/qrcode-terminal": "^0.12.2",

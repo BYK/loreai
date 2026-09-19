@@ -342,6 +342,13 @@ jobs:
           kill $SERVER_PID
           wait $SERVER_PID 2>/dev/null || true
 
+      # The only UI check in the regular job: the bundle above embeds the
+      # built SPA; verify a deep-link route is served by the gateway with
+      # plain Node HTTP (history fallback, CSP, MIME types, caching). Browser
+      # e2e (Playwright) lives in ui-e2e.yml and is path-filtered/nightly.
+      - name: Smoke-test UI deep link (Node, no browser)
+        run: node scripts/ui-deep-link-smoke.mjs
+
       # Note: the bundle-exports test runs as part of the main `pnpm test`
       # step above (discovered via vitest.config.ts). No need to re-run it.
 

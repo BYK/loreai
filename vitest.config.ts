@@ -27,6 +27,7 @@ export default defineConfig({
     ],
     // Preload test setup for DB isolation
     setupFiles: ["./packages/core/test/setup.ts"],
+    globalSetup: ["./packages/gateway/test/helpers/ensure-ui-assets.ts"],
     // Environment
     environment: "node",
     pool: "forks",
@@ -50,6 +51,7 @@ export default defineConfig({
         "**/test/helpers/**",
         "**/script/**",
         "**/dist/**",
+        "**/*.generated.ts",
         // Non-tested / non-source packages — keep them out of the report so
         // they don't drag down or pollute patch coverage. Only core, gateway,
         // and opencode have tests.

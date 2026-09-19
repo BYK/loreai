@@ -111,9 +111,12 @@ function withManagementCors(
   response: Response,
   origin: string | null,
 ): Response {
-  // The dashboard contains destructive forms. Prevent an untrusted site from
-  // embedding it and clickjacking a loopback browser into submitting them.
-  response.headers.set("content-security-policy", "frame-ancestors 'none'");
+  // Prevent an untrusted site from embedding the management surface and
+  // clickjacking a loopback browser. The UI handler sets its own, stricter
+  // policy (which also contains frame-ancestors 'none'); keep it intact.
+  if (!response.headers.has("content-security-policy")) {
+    response.headers.set("content-security-policy", "frame-ancestors 'none'");
+  }
   response.headers.set("x-frame-options", "DENY");
 
   // Same-origin browser requests and non-browser clients do not need CORS.
@@ -1073,32 +1076,12 @@ export async function startServer(
         );
       }
 
-      // GET/POST /ui/* — Web dashboard (lazy-imported to keep proxy hot path fast)
-      // Wrapped in a 30-second timeout as a safety net for async hangs (e.g.,
-      // slow module import, embedding dedup on entities page). Note: this does
-      // NOT protect against synchronous SQLite blocking — the timer callback
-      // can't fire while sync queries hold the event loop. The real fix for
-      // query performance is the bulk-query optimization in data.ts / cost-tracker.ts.
+      // GET/HEAD /ui, /ui/* — Lore UI single-page app (static, embedded at
+      // build time; lazy-imported so the proxy hot path never loads the assets)
       if (pathname === "/ui" || pathname.startsWith("/ui/")) {
-        const { handleUIRequest } = await import("./ui");
-        const uiPromise = handleUIRequest(req, url);
-        const timeoutPromise = new Promise<Response>((resolve) =>
-          setTimeout(
-            () =>
-              resolve(
-                new Response(
-                  "<h1>Page render timed out</h1><p>The page took too long to generate. Try again — results may be cached now.</p><p><a href='/ui'>Back to dashboard</a></p>",
-                  {
-                    status: 504,
-                    headers: { "content-type": "text/html; charset=utf-8" },
-                  },
-                ),
-              ),
-            30_000,
-          ),
-        );
+        const { handleUIRequest } = await import("./ui-static");
         return withManagementCors(
-          await Promise.race([uiPromise, timeoutPromise]),
+          handleUIRequest(req, url),
           allowedManagementOrigin,
         );
       }

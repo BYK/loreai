@@ -188,6 +188,9 @@ importers:
       '@loreai/core':
         specifier: workspace:*
         version: link:../core
+      '@loreai/ui':
+        specifier: workspace:*
+        version: link:../ui
       '@sentry/bun':
         specifier: ^10.52.0
         version: 10.56.0
@@ -253,6 +256,12 @@ importers:
 
   packages/ui:
     dependencies:
+      '@fontsource-variable/dm-sans':
+        specifier: 5.3.0
+        version: 5.3.0
+      '@fontsource/playfair-display':
+        specifier: 5.3.0
+        version: 5.3.0
       '@kobalte/core':
         specifier: 0.13.14
         version: 0.13.14(solid-js@1.9.15)
@@ -271,6 +280,9 @@ importers:
       clsx:
         specifier: 2.1.1
         version: 2.1.1
+      date-fns:
+        specifier: 4.4.0
+        version: 4.4.0
       idb:
         specifier: 8.0.3
         version: 8.0.3
@@ -1184,6 +1196,12 @@ packages:
 
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
+
+  '@fontsource-variable/dm-sans@5.3.0':
+    resolution: {integrity: sha512-BpUG5bqePiDFMBM4ZtLSlPdAIOM990uB1dlXzIf4aw21yQR7BmykedLXXXMqGWsR18aMLOsbWccwJNh3ztTQaA==}
+
+  '@fontsource/playfair-display@5.3.0':
+    resolution: {integrity: sha512-uJSABalvdWc10fEPppQjQocamT21LEyRfzzWfRfqbkPz+sRv+kKpYDKyluBUskvJREkJTos9epj1WjQROGu99Q==}
 
   '@google/genai@1.52.0':
     resolution: {integrity: sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==}
@@ -3386,6 +3404,9 @@ packages:
   data-urls@7.0.0:
     resolution: {integrity: sha512-23XHcCF+coGYevirZceTVD7NdJOqVn+49IHyxgszm+JIiHLoB2TkmPtsYkNWT1pvRSGkc35L6NHs0yHkN2SumA==}
     engines: {node: ^20.19.0 || ^22.12.0 || >=24.0.0}
+
+  date-fns@4.4.0:
+    resolution: {integrity: sha512-+1UMbeh68lH1SegH83CGWwpb6OHHbpSgr3+s5Eww5M4CAgswBpoWS0AjTOfEJ33HiYKz1hdj/KTFprzXHmq/6w==}
 
   dayjs@1.11.21:
     resolution: {integrity: sha512-98IT+HOahAisibz/yjKbzuOBwYcjJ7BCLPzARyHiyEBmRz4fatF+KPJszEHXsGYjUG234aH/cOjW1wwTbKUZlA==}
@@ -7073,6 +7094,10 @@ snapshots:
 
   '@floating-ui/utils@0.2.12': {}
 
+  '@fontsource-variable/dm-sans@5.3.0': {}
+
+  '@fontsource/playfair-display@5.3.0': {}
+
   '@google/genai@1.52.0':
     dependencies:
       google-auth-library: 10.7.0
@@ -9203,6 +9228,8 @@ snapshots:
       whatwg-url: 16.0.1(@noble/hashes@2.2.0)
     transitivePeerDependencies:
       - '@noble/hashes'
+
+  date-fns@4.4.0: {}
 
   dayjs@1.11.21: {}
 

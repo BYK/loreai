@@ -1,0 +1,91 @@
+name: UI e2e
+
+# Browser end-to-end tests for the Lore UI (packages/ui/e2e, Playwright)
+# against the BUILT gateway. Deliberately kept out of the regular CI job:
+# it runs only when the UI or the gateway's UI-serving code changes, nightly
+# on main, or on demand. The regular job keeps a single browser-free
+# deep-link smoke (scripts/ui-deep-link-smoke.mjs).
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/ui/**'
+      - 'packages/gateway/src/ui-static.ts'
+      - 'packages/gateway/src/ui-manifest.ts'
+      - 'packages/gateway/src/server.ts'
+      - 'packages/gateway/src/api.ts'
+      - 'packages/gateway/script/ui-assets.ts'
+      - 'packages/gateway/script/build.ts'
+      - 'packages/gateway/script/bundle.ts'
+      - 'scripts/ui-deep-link-smoke.mjs'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/ui-e2e.yml'
+  schedule:
+    # Nightly on main, 03:17 UTC (off the hour to dodge the queue spike).
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playwright:
+    name: Playwright (built gateway)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - run: pnpm install --frozen-lockfile
+
+      # The gateway bundle embeds the built UI; the e2e server is that
+      # bundle (packages/gateway/dist/bin.cjs), seeded via @loreai/core.
+      - name: Build core and gateway bundle (embeds the UI)
+        run: |
+          pnpm --filter @loreai/core run build
+          pnpm --filter @loreai/gateway run bundle
+
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('./packages/ui/node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm --filter @loreai/ui exec playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies (cache hit)
+        if: steps.browsers.outputs.cache-hit == 'true'
+        run: pnpm --filter @loreai/ui exec playwright install-deps chromium
+
+      - name: Run e2e
+        run: pnpm --filter @loreai/ui run test:e2e
+        env:
+          CI: 'true'
+          HF_HUB_OFFLINE: '1'
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            packages/ui/playwright-report
+            packages/ui/e2e-results
+          retention-days: 14
+          if-no-files-found: ignore
