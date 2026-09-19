@@ -30,7 +30,6 @@
 import * as esbuild from "esbuild";
 import {
   copyFileSync,
-  cpSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -40,6 +39,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { cp, rm } from "node:fs/promises";
 import { execSync, spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { createRequire } from "node:module";
@@ -750,8 +750,8 @@ async function buildBinary() {
   // `assets` as `<staging>/ui=ui/` in runFossilize, which embeds it recursively
   // under the `ui/` key prefix src/ui-static.ts reads in SEA mode.
   const uiStagingDir = join(stagingDir, UI_STAGE_BASENAME);
-  rmSync(uiStagingDir, { recursive: true, force: true });
-  cpSync(UI_STAGE_DIR, uiStagingDir, { recursive: true });
+  await rm(uiStagingDir, { recursive: true, force: true });
+  await cp(UI_STAGE_DIR, uiStagingDir, { recursive: true });
 
   // Stage the native sqlite-vec loadable extension for every target in this
   // build. fossilize embeds a single shared asset set into each platform
