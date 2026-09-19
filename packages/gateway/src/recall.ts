@@ -929,6 +929,33 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
   return tools.some((t) => t.name === RECALL_TOOL_NAME);
 }
 
+/**
+ * Build a `tool_choice` that forbids parallel tool use, preserving whatever the
+ * client already asked for.
+ *
+ * The recall loop aborts a turn outright once a response carries more than one
+ * `recall` tool_use block ({@link RecallContinuationFailure} category
+ * `parallel_recall`), and on the Anthropic wire that abort tears down the
+ * client stream instead of degrading. Anthropic's `disable_parallel_tool_use`
+ * caps a turn at one tool use, which keeps the model from ever producing the
+ * shape the loop rejects.
+ *
+ * Returns `undefined` when the client asked for `none` — the flag is
+ * meaningless there (and rejected by some Anthropic-compatible proxies), so the
+ * caller should leave `tool_choice` untouched rather than overwrite it.
+ */
+export function withParallelToolUseDisabled(
+  existing: unknown,
+): Record<string, unknown> | undefined {
+  const base: Record<string, unknown> =
+    existing && typeof existing === "object" && !Array.isArray(existing)
+      ? { ...(existing as Record<string, unknown>) }
+      : { type: "auto" };
+  if (base.type === "none") return undefined;
+  if (typeof base.type !== "string") base.type = "auto";
+  return { ...base, disable_parallel_tool_use: true };
+}
+
 // ---------------------------------------------------------------------------
 // Recall execution
 // ---------------------------------------------------------------------------
