@@ -90,7 +90,9 @@ export function createSessionsState({
     const loader = createLoader(
       source,
       async (key, signal) => {
-        const [pid, sid] = key.split("/", 2) as [string, string];
+        const sep = key.indexOf("/");
+        const pid = key.slice(0, sep);
+        const sid = key.slice(sep + 1);
         const path = projectPathOf?.(pid);
         if (path === undefined) throw new Error(`No path for project ${pid}`);
         return tracked(() => client.getSession(path, sid, signal));

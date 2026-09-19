@@ -208,6 +208,21 @@ describe("repositories", () => {
     expect(await repo.getScope("other")).toEqual([]);
   });
 
+  it("keeps an existing row scope when requested", async () => {
+    const db = await open(factory());
+    const repo = createKnowledgeRepo(db);
+    await repo.put(ENTRY, "p1");
+
+    const updated = { ...ENTRY, title: "Updated title" };
+    await repo.put(updated, "other", { keepScope: true });
+    expect(await repo.getScope("p1")).toEqual([updated]);
+    expect(await repo.getScope("other")).toEqual([]);
+
+    await repo.put(updated, "other");
+    expect(await repo.getScope("p1")).toEqual([]);
+    expect(await repo.getScope("other")).toEqual([updated]);
+  });
+
   it("hides and deletes expired rows", async () => {
     const db = await open(factory());
     const now = { t: 1_000_000 };

@@ -112,7 +112,9 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
         cached: (entryId) => repo.get(entryId),
         async onServer(_, value) {
           store.reconcileOne(value);
-          await repo.put(value, value.project_id ?? "");
+          await repo.put(value, value.project_id ?? "global", {
+            keepScope: true,
+          });
         },
       },
     );

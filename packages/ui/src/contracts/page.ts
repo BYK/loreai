@@ -4,7 +4,7 @@ import { type, type Type } from "arktype";
 /**
  * Cursor-mode page envelope (`{ items, next_cursor }`) used by the
  * `?page=cursor` / `?cursor=` list routes
- * (origin/devin/1789739012-api-cursor-pagination).
+ * (packages/gateway/src/api-lists.ts).
  */
 export function cursorPage<T>(item: Type<T>): Type<CursorPage<T>> {
   return type({

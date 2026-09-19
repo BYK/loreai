@@ -253,6 +253,45 @@ describe("knowledge state", () => {
     await closeLoreDb();
   });
 
+  it("preserves a global entry in the project list after loading its detail", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const globalEntry = { ...ENTRIES[0]!, project_id: null };
+    const client = {
+      listProjectKnowledge: () => Promise.resolve([globalEntry, ENTRIES[1]!]),
+      getKnowledge: () => Promise.resolve(globalEntry),
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createKnowledgeState({
+        client,
+        repo: createKnowledgeRepo(db),
+        tracked,
+      }),
+    );
+
+    const list = state.list(() => "p1");
+    await flush();
+    expect(list.loader.data()).toHaveLength(2);
+    expect(list.status().partial).toBe(false);
+
+    const detail = state.entry(() => globalEntry.id);
+    await flush();
+    expect(detail.loader.data()).toEqual(globalEntry);
+
+    const fresh = createRoot(() =>
+      createKnowledgeState({
+        client,
+        repo: createKnowledgeRepo(db),
+        tracked,
+      }),
+    ).list(() => "p1");
+    await flush();
+    expect(fresh.loader.data()).toHaveLength(2);
+    expect(fresh.status().partial).toBe(false);
+    await closeLoreDb();
+  });
+
   it("pages via listPaged with mergeCursorPage", async () => {
     const pages = [
       { items: [ENTRIES[0]!], next_cursor: "tok" },
@@ -450,6 +489,35 @@ describe("sessions state: detail waits for the project path", () => {
     await flush();
     expect(calls).toEqual(["/home/me/lore/s1"]);
     expect(detail.loader.data()).toBeTruthy();
+    expect(detail.loader.error()).toBeUndefined();
+  });
+
+  it("passes session ids containing slashes intact", async () => {
+    const calls: Array<[string, string]> = [];
+    const client = {
+      getSession: (path: string, sid: string) => {
+        calls.push([path, sid]);
+        return Promise.resolve({ messages: [], distillations: [] });
+      },
+    } as unknown as ApiClient;
+    const state = createRoot(() =>
+      createSessionsState({
+        client,
+        repos: {
+          sessions: createSessionsRepo(null),
+          messageBlocks: createMessageBlocksRepo(null),
+        },
+        projectPathOf: () => "/home/me/lore",
+        tracked,
+      }),
+    );
+
+    const detail = state.detail(
+      () => "p1",
+      () => "a/b",
+    );
+    await flush();
+    expect(calls).toEqual([["/home/me/lore", "a/b"]]);
     expect(detail.loader.error()).toBeUndefined();
   });
 

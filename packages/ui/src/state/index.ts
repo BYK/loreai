@@ -40,7 +40,8 @@ function lazyRepo<T>(
   return {
     get: (key) => call((r) => r.get(key), undefined),
     getScope: (scope) => call((r) => r.getScope(scope), []),
-    put: (value, scope) => call((r) => r.put(value, scope), undefined),
+    put: (value, scope, opts) =>
+      call((r) => r.put(value, scope, opts), undefined),
     putMany: (values, scope, opts) =>
       call((r) => r.putMany(values, scope, opts), undefined),
     delete: (key) => call((r) => r.delete(key), undefined),

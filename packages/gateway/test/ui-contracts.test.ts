@@ -1,14 +1,14 @@
 /**
  * UI-03 contract test: every route the SPA calls is fetched from a real
  * gateway (isolated temp DB, same setup as api.test.ts), validated against
- * the Valibot contracts the browser uses (`packages/ui/src/contracts` —
+ * the ArkType contracts the browser uses (`packages/ui/src/contracts` —
  * imported by relative path; the root vitest has no `~` alias), and
  * snapshot-recorded into `packages/ui/test/fixtures/`. Volatile values
  * (uuids, epoch-ms, absolute paths) are normalised deterministically before
  * snapshotting.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { unlinkSync, existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import {
   loopbackRequest,
@@ -18,10 +18,12 @@ import {
 import {
   accountStatus,
   apiErrorBody,
+  cursorPage,
   distillationDetail,
   distillationList,
   knowledgeEntry,
   knowledgeList,
+  knowledgeVersionHistory,
   projectList,
   safeParseContract,
   sessionDetail,
@@ -44,6 +46,7 @@ const SEEDED = {
   projectPath: "",
   projectId: "",
   knowledgeId: "",
+  secondKnowledgeId: "",
   sessionId: "",
 };
 
@@ -73,6 +76,15 @@ beforeAll(async () => {
     title: "Contracts are validated at the edge",
     content:
       "Every /api/v1 response is parsed by the UI contracts before it reaches a view.",
+    session: SEEDED.sessionId,
+    scope: "project",
+  });
+  SEEDED.secondKnowledgeId = ltm.create({
+    projectPath: SEEDED.projectPath,
+    category: "pattern",
+    title: "Cursor pages are opaque tokens",
+    content:
+      "Cursor values are server-issued tokens and should be passed back unchanged.",
     session: SEEDED.sessionId,
     scope: "project",
   });
@@ -119,7 +131,7 @@ afterAll(async () => {
   for (const suffix of ["", "-shm", "-wal"]) {
     const file = `${dbPath}${suffix}`;
     try {
-      if (existsSync(file)) unlinkSync(file);
+      await rm(file, { force: true });
     } catch {
       /* best-effort */
     }
@@ -187,7 +199,10 @@ function makeNormaliser() {
     if (Array.isArray(value)) return value.map(norm);
     if (value !== null && typeof value === "object") {
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(value)) out[k] = norm(v);
+      for (const [k, v] of Object.entries(value)) {
+        out[k] =
+          k === "next_cursor" && typeof v === "string" ? "<cursor>" : norm(v);
+      }
       return out;
     }
     return value;
@@ -221,10 +236,6 @@ async function contractRoute<
 // ---------------------------------------------------------------------------
 // Routes the SPA calls
 // ---------------------------------------------------------------------------
-// TODO(#1827): record the cursor-page/versions fixtures
-// (packages/ui/test/fixtures/cursor/*) live once api-lists.ts merges; until
-// then they are hand-recorded from origin/devin/1789739012-api-cursor-pagination.
-
 describe("ui contracts against the real gateway", () => {
   it("GET /projects", async () => {
     await contractRoute(
@@ -250,6 +261,51 @@ describe("ui contracts against the real gateway", () => {
       `/knowledge/${SEEDED.knowledgeId}`,
       `/api/v1/knowledge/${SEEDED.knowledgeId}`,
       knowledgeEntry,
+    );
+  });
+
+  it("GET cursor knowledge page", async () => {
+    const path = `/api/v1/projects/${SEEDED.projectId}/knowledge?page=cursor&limit=1`;
+    await contractRoute(
+      "cursor/knowledge-page.json",
+      `/projects/${SEEDED.projectId}/knowledge`,
+      path,
+      cursorPage(knowledgeEntry),
+    );
+    const body = (await (await api(path)).json()) as {
+      next_cursor: string | null;
+    };
+    expect(body.next_cursor).toEqual(expect.any(String));
+  });
+
+  it("GET last cursor knowledge page", async () => {
+    const firstPath = `/api/v1/projects/${SEEDED.projectId}/knowledge?page=cursor&limit=1`;
+    const first = (await (await api(firstPath)).json()) as {
+      next_cursor: string | null;
+    };
+    const token = first.next_cursor;
+    expect(token).toEqual(expect.any(String));
+    if (typeof token !== "string")
+      throw new Error("cursor page did not continue");
+    const path = `/api/v1/projects/${SEEDED.projectId}/knowledge?cursor=${encodeURIComponent(token)}&limit=1`;
+    await contractRoute(
+      "cursor/knowledge-page-last.json",
+      `/projects/${SEEDED.projectId}/knowledge`,
+      path,
+      cursorPage(knowledgeEntry),
+    );
+    const body = (await (await api(path)).json()) as {
+      next_cursor: string | null;
+    };
+    expect(body.next_cursor).toBeNull();
+  });
+
+  it("GET knowledge versions", async () => {
+    await contractRoute(
+      "cursor/knowledge-versions.json",
+      `/knowledge/${SEEDED.knowledgeId}/versions`,
+      `/api/v1/knowledge/${SEEDED.knowledgeId}/versions`,
+      knowledgeVersionHistory,
     );
   });
 

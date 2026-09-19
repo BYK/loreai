@@ -22,7 +22,7 @@ export interface Repository<T> {
   get(key: string): Promise<T | undefined>;
   /** Non-expired rows of one scope; refreshes `accessedAt` on what it returns. */
   getScope(scope: string): Promise<T[]>;
-  put(value: T, scope: string): Promise<void>;
+  put(value: T, scope: string, opts?: { keepScope?: boolean }): Promise<void>;
   putMany(
     values: readonly T[],
     scope: string,
@@ -105,13 +105,17 @@ export function createRepository<T>(
       return out;
     },
 
-    async put(value, scope) {
+    async put(value, scope, opts) {
       if (!db) return;
       const tx = db.transaction(store, "readwrite");
       const t = now();
+      const key = keyOf(value, scope);
+      const existing = opts?.keepScope
+        ? ((await tx.store.get(key)) as AnyRecord | undefined)
+        : undefined;
       const record: CachedRecord<T> = {
-        key: keyOf(value, scope),
-        scope,
+        key,
+        scope: existing?.scope ?? scope,
         value,
         storedAt: t,
         accessedAt: t,

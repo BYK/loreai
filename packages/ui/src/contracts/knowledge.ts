@@ -43,8 +43,8 @@ export const knowledgeList = knowledgeEntry.array();
 
 /**
  * One row of `GET /api/v1/knowledge/:id/versions` — core's
- * `KnowledgeVersionDetail` (`packages/core/src/list-query.ts` on the
- * cursor-pagination branch). Superseded and deleted versions appear here;
+ * `KnowledgeVersionDetail` (`packages/core/src/list-query.ts`). Superseded
+ * and deleted versions appear here;
  * `superseded_at` is null on the head.
  */
 export const knowledgeVersion = type({
