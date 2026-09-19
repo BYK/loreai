@@ -210,8 +210,8 @@ importers:
         specifier: ^0.3.1
         version: 0.3.1
       fossilize:
-        specifier: ^0.10.1
-        version: 0.10.1
+        specifier: 0.11.0
+        version: 0.11.0
       onnxruntime-node:
         specifier: 1.27.0
         version: 1.27.0
@@ -3693,8 +3693,8 @@ packages:
     resolution: {integrity: sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g==}
     engines: {node: '>=12.20.0'}
 
-  fossilize@0.10.1:
-    resolution: {integrity: sha512-+7rb/72OJmlgwDGnqmtzwcZ3A4sOut/BTu4kzUo2jzsa8k0F401TXFkHSg1y2U/M442BqaYtARgWv508gjdw+g==}
+  fossilize@0.11.0:
+    resolution: {integrity: sha512-Um/g/rbxESGOpeGzi+/+SoAGna2MJ0dXLHOM2W8SmKZHgU+jQDmdthpHuS9EADrm2wNrdoHDHEmK37raY1tDAg==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -9542,7 +9542,7 @@ snapshots:
     dependencies:
       fetch-blob: 3.2.0
 
-  fossilize@0.10.1:
+  fossilize@0.11.0:
     dependencies:
       '@stricli/auto-complete': 1.2.8
       '@stricli/core': 1.2.8

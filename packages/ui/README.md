@@ -167,7 +167,7 @@ one `UiAssetSource`, resolved once and lazily:
 
 - **SEA binary** (`sea.isSea()`): `script/build-binary-sea.ts` hands the
   staged tree to [fossilize](https://github.com/BYK/fossilize) as a directory
-  asset (`<staging>/ui=ui/`, fossilize ≥ 0.11), which embeds every file under
+  asset (`<staging>/ui=ui/`, fossilize 0.11.0), which embeds every file under
   the key `ui/<path>` (e.g. `ui/index.html`, `ui/assets/index-*.js.br`), and
   the source is `sea.getRawAsset("ui/<path>")` — no filesystem, no extraction.
 - **everything else** (`npm` CJS bundle, the Bun ESM bundle that
