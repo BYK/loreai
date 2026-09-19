@@ -25,6 +25,9 @@ import {
   knowledgeList,
   knowledgeVersionHistory,
   projectList,
+  isApiError,
+  isContractError,
+  parseContract,
   safeParseContract,
   sessionDetail,
   sessionList,
@@ -232,6 +235,31 @@ async function contractRoute<
     `${FIXTURES}/${fixture}`,
   );
 }
+
+it("reports contract failures as API errors", () => {
+  const input = {
+    type: "error",
+    error: { type: 42, message: "bad error" },
+  };
+  const valid = {
+    type: "error",
+    error: { type: "not_found", message: "missing" },
+  };
+  expect(parseContract("/valid", apiErrorBody, valid)).toEqual(valid);
+  const parsed = safeParseContract("/broken", apiErrorBody, input);
+  expect(parsed.ok).toBe(false);
+  if (!parsed.ok) {
+    expect(isContractError(parsed.error)).toBe(true);
+    expect(isApiError(parsed.error)).toBe(true);
+    expect(parsed.error.kind).toBe("invalid");
+    expect(parsed.error.status).toBe(200);
+    expect(parsed.error.route).toBe("/broken");
+    expect(parsed.error.issues[0]?.path).toContain("error.type");
+  }
+  expect(() => parseContract("/broken", apiErrorBody, input)).toThrow(
+    /does not match the UI contract/,
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Routes the SPA calls
