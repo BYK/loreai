@@ -164,7 +164,9 @@ jobs:
           echo "extracted-versions=${EXTRACTED[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Verify tests pass
-        run: pnpm test packages/gateway/test/cch.test.ts
+        # Call vitest directly: the root `test` script chains `&& pnpm --filter
+        # @loreai/ui test`, so pnpm would append the file filter to the UI run.
+        run: pnpm exec vitest run packages/gateway/test/cch.test.ts
 
       - name: Check for existing PR
         id: check-pr
