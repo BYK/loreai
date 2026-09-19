@@ -1,0 +1,7 @@
+{
+  "type": "error",
+  "error": {
+    "type": "not_found",
+    "message": "Knowledge entry not found: does-not-exist"
+  }
+}

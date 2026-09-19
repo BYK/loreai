@@ -6,6 +6,7 @@ import { Browse } from "./routes/Browse";
 import { Fixture } from "./routes/Fixture";
 import { WorkspaceProvider } from "./routes/workspace";
 import type { ApiClient } from "./lib/api";
+import type { LoreUiDb } from "./db";
 import { theme } from "./lib/theme";
 
 /** Router base: the gateway serves the SPA under /ui with history fallback. */
@@ -54,9 +55,14 @@ export const routes: RouteDefinition[] = [
  * every route. `client` is injected by tests; production uses the
  * same-origin client.
  */
-export function createAppRoot(client?: ApiClient): Component<ParentProps> {
+export function createAppRoot(
+  client?: ApiClient,
+  db?: Promise<LoreUiDb | null>,
+): Component<ParentProps> {
   return (props) => (
-    <WorkspaceProvider client={client}>{props.children}</WorkspaceProvider>
+    <WorkspaceProvider client={client} db={db}>
+      {props.children}
+    </WorkspaceProvider>
   );
 }
 

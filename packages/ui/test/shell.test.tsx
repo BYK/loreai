@@ -11,7 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppRoot, routes } from "~/app";
 import { knowledgeHref } from "~/routes/Browse";
 import { ApiError, type ApiClient } from "~/lib/api";
-import type { KnowledgeEntry, ProjectSummary } from "~/lib/schemas";
+import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
+import {
+  closeLoreDb,
+  createKnowledgeRepo,
+  createProjectsRepo,
+  openLoreDb,
+  type LoreUiDb,
+} from "~/db";
 import { NOT_AVAILABLE_YET } from "~/components/lore/FutureAction";
 import { resetThemeStoreForTests, THEME_STORAGE_KEY, theme } from "~/lib/theme";
 
@@ -74,12 +81,12 @@ function fakeClient(
   overrides: Overrides = {},
 ): ApiClient & { calls: string[] } {
   const calls: string[] = [];
-  const client: ApiClient = {
+  const base = {
     async listProjects() {
       calls.push("projects");
       return PROJECTS;
     },
-    async listProjectKnowledge(projectId) {
+    async listProjectKnowledge(projectId: string) {
       calls.push(`knowledge:${projectId}`);
       if (projectId === "p-lore") return ENTRIES;
       if (projectId === "p-empty") return [];
@@ -90,7 +97,7 @@ function fakeClient(
         404,
       );
     },
-    async getKnowledge(id) {
+    async getKnowledge(id: string) {
       calls.push(`entry:${id}`);
       const entry = ENTRIES.find((e) => e.id === id);
       if (!entry) {
@@ -103,20 +110,50 @@ function fakeClient(
       }
       return entry;
     },
-    ...overrides,
   };
+  const client = Object.assign(base, overrides) as ApiClient;
   return Object.assign(client, { calls });
 }
 
-function mount(path: string, client: ApiClient) {
+function mount(path: string, client: ApiClient, db?: Promise<LoreUiDb | null>) {
   const history = createMemoryHistory();
   history.set({ value: path });
   const utils = render(() => (
-    <MemoryRouter history={history} root={createAppRoot(client)}>
+    <MemoryRouter history={history} root={createAppRoot(client, db)}>
       {routes}
     </MemoryRouter>
   ));
   return { ...utils, history };
+}
+
+/** Seed a fake-indexeddb cache with the shared fixtures and hand it to mount. */
+async function seededDb(): Promise<Promise<LoreUiDb | null>> {
+  const { IDBFactory } = await import("./idb-globals");
+  const factory = new IDBFactory();
+  await closeLoreDb();
+  const db = (await openLoreDb({ factory }))!;
+  await createProjectsRepo(db).putMany(PROJECTS, "all", {
+    replaceScope: true,
+  });
+  await createProjectsRepo(db).setCollection("all", {
+    complete: true,
+    count: 2,
+    nextCursor: null,
+    fetchedAt: Date.now(),
+  });
+  await createKnowledgeRepo(db).putMany(ENTRIES, "p-lore", {
+    replaceScope: true,
+  });
+  await createKnowledgeRepo(db).setCollection("p-lore", {
+    complete: true,
+    count: 2,
+    nextCursor: null,
+    fetchedAt: Date.now(),
+  });
+  await createKnowledgeRepo(db).put(ENTRIES[0]!, "p-lore");
+  // Return a pending-open promise so the memoised connection stays alive for
+  // the mounted shell; `openLoreDb({factory})` memoises per options.
+  return openLoreDb({ factory });
 }
 
 function pane(name: "nav" | "list" | "detail"): HTMLElement {
@@ -649,5 +686,87 @@ describe("shell: search entry, theme and fixture", () => {
     fireEvent.click(screen.getByTestId("back-to-source"));
     await waitFor(() => expect(history.get()).toBe("/fixture"));
     expect(await screen.findByTestId("inline-discussion")).toBeInTheDocument();
+  });
+});
+
+describe("shell: cached-first rendering (IndexedDB)", () => {
+  it("renders cached rows with 'Cached · refreshing…' while the server is silent", async () => {
+    const db = await seededDb();
+    const client = fakeClient({
+      listProjects: () => new Promise<ProjectSummary[]>(() => {}),
+      listProjectKnowledge: () => new Promise<KnowledgeEntry[]>(() => {}),
+      getKnowledge: () => new Promise<KnowledgeEntry>(() => {}),
+    });
+    mount("/projects/p-lore", client, Promise.resolve(db));
+    const rows = await screen.findAllByTestId("knowledge-row");
+    expect(rows[0]).toHaveTextContent("Keep SQLite");
+    const badges = await screen.findAllByTestId("stale-indicator");
+    expect(badges.map((b) => b.textContent)).toContain("Cached · refreshing…");
+    expect(screen.queryByText("Knowledge unavailable")).toBeNull();
+  });
+
+  it("replaces the cached value and drops the badge when the server answers", async () => {
+    const db = await seededDb();
+    let release: (e: KnowledgeEntry[]) => void = () => {};
+    const server = new Promise<KnowledgeEntry[]>((r) => {
+      release = r;
+    });
+    const client = fakeClient({
+      listProjectKnowledge: () => server,
+    });
+    mount("/projects/p-lore", client, Promise.resolve(db));
+    await screen.findAllByTestId("stale-indicator");
+    release([{ ...ENTRIES[0]!, title: "Keep SQLite (v2)" }]);
+    await screen.findByText("Keep SQLite (v2)");
+    await waitFor(() =>
+      expect(screen.queryByTestId("stale-indicator")).toBeNull(),
+    );
+  });
+
+  it("keeps cached rows and shows 'Cached · gateway unavailable' when the server rejects", async () => {
+    const db = await seededDb();
+    const client = fakeClient({
+      listProjectKnowledge: () => {
+        throw new ApiError("unreachable", "/projects/p-lore/knowledge", "down");
+      },
+      getKnowledge: () => {
+        throw new ApiError("unreachable", "/knowledge/k-sqlite", "down");
+      },
+    });
+    mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(db));
+    // The title appears in the list row and the open document.
+    await screen.findAllByText("Keep SQLite");
+    const badges = await screen.findAllByTestId("stale-indicator");
+    expect(badges.map((b) => b.textContent)).toContain(
+      "Cached · gateway unavailable",
+    );
+    // Cached rows stay; no error card replaces them. The list's cached read
+    // settles a few tasks after the document's, so wait the transient out.
+    await waitFor(() => {
+      expect(screen.queryByText("Knowledge unavailable")).toBeNull();
+      expect(screen.queryByText("Knowledge entry unavailable")).toBeNull();
+    });
+  });
+
+  it("keeps cached projects in the nav when the gateway is unreachable", async () => {
+    const db = await seededDb();
+    const client = fakeClient({
+      listProjects: () => {
+        throw new ApiError("unreachable", "/projects", "down");
+      },
+      listProjectKnowledge: () => {
+        throw new ApiError("unreachable", "/projects/p-lore/knowledge", "down");
+      },
+    });
+    mount("/projects/p-lore", client, Promise.resolve(db));
+    const rows = await screen.findAllByTestId("nav-project");
+    expect(rows.map((r) => r.textContent)).toContain("lore2");
+    const badges = await screen.findAllByTestId("stale-indicator");
+    expect(badges.map((b) => b.textContent)).toContain(
+      "Cached · gateway unavailable",
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Projects unavailable")).toBeNull(),
+    );
   });
 });

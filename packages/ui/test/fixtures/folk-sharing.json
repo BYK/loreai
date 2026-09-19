@@ -1,0 +1,11 @@
+{
+  "linked": false,
+  "team": null,
+  "policy": {
+    "effective": "manual",
+    "project_override": null,
+    "team_default": null
+  },
+  "state": "not_linked",
+  "detail": null
+}

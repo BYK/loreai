@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "id": "<uuid-0>",
+      "tenant_id": "",
+      "project_id": "<uuid-1>",
+      "category": "pattern",
+      "title": "Cursor pages are opaque tokens",
+      "content": "Cursor values are server-issued tokens and should be passed back unchanged.",
+      "source_session": "ui-contracts-session",
+      "cross_project": 0,
+      "confidence": 1,
+      "created_at": 1700000000000,
+      "updated_at": 1700000001000,
+      "metadata": null,
+      "created_by": null,
+      "updated_by": null,
+      "sensitivity": "normal",
+      "promotion_status": null,
+      "promoted_at": null,
+      "approval_status": "auto",
+      "approved_by": null,
+      "approved_at": null,
+      "source_user_id": null,
+      "source_entry_id": null,
+      "last_accessed_at": null,
+      "worker_provider_id": null,
+      "worker_model_id": null,
+      "last_reinforced_at": 1700000002000,
+      "logical_id": "<uuid-0>"
+    }
+  ],
+  "next_cursor": "<cursor>"
+}

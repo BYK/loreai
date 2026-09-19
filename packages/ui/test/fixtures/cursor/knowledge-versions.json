@@ -1,0 +1,29 @@
+{
+  "id": "<uuid-0>",
+  "current_version_id": "<uuid-0>",
+  "versions": [
+    {
+      "version_id": "<uuid-0>",
+      "version": 1,
+      "created_at": 1700000000000,
+      "superseded_at": null,
+      "is_current": true,
+      "is_deleted": false,
+      "title": "Contracts are validated at the edge",
+      "content": "Every /api/v1 response is parsed by the UI contracts before it reaches a view.",
+      "category": "decision",
+      "confidence": 1,
+      "scope": "project",
+      "cross_project": false,
+      "source_refs": {
+        "session_id": "ui-contracts-session",
+        "entry_id": null,
+        "user_id": null,
+        "created_by": null,
+        "updated_by": null,
+        "worker_provider_id": null,
+        "worker_model_id": null
+      }
+    }
+  ]
+}

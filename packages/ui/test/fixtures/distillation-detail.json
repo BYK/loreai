@@ -1,0 +1,13 @@
+{
+  "id": "d-ui-contracts",
+  "project_id": "<uuid-0>",
+  "session_id": "ui-contracts-session",
+  "observations": "distilled observations",
+  "source_ids": "<json>",
+  "generation": 0,
+  "token_count": 42,
+  "r_compression": 0.4,
+  "c_norm": 0.9,
+  "archived": 0,
+  "created_at": 1700000000000
+}

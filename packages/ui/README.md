@@ -49,13 +49,194 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Table | `@tanstack/solid-table` | 9.2.4 | 2026-08-28 | v9 API (`createTable`, `tableFeatures`) |
 | Virtual rows | `@tanstack/solid-virtual` | 3.13.38 | 2026-09-07 | |
 | CSS | `tailwindcss` / `@tailwindcss/vite` | 4.3.3 | 2026-07-16 | CSS-first config, no `tailwind.config.js` |
-| Local cache (scaffold) | `idb` | 8.0.3 | 2025-05-07 | UI-03 fills the repositories |
-| Response validation | `zod` | 4.5.4 | 2026-08-29 | |
+| Local cache | `idb` | 8.0.3 | 2025-05-07 | `src/db/` repositories and migrations (UI-03) |
+| Response validation | `arktype` | 2.2.3 | 2026-07-07 | jitless (CSP); see [Schema library](#schema-library-ui-03-decision); replaces `zod` 4.5.4 from UI-02 |
 | Relative timestamps | `date-fns` | 4.4.0 | 2026-05-29 | `formatRelative` in `src/lib/format.ts`; en-US locale until UI has a locale setting |
+| IndexedDB in tests | `fake-indexeddb` | 6.2.5 | 2025-11-07 | dev only; see [Tests](#tests) |
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
 | Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
+
+### Schema library (UI-03 decision)
+
+UI-02 shipped its three response schemas with `zod` 4.5.4 (classic API). Before
+growing that to the ~15 contracts UI-03 needs, the owner asked for a measured
+choice between Zod v4, Valibot, TypeBox and ArkType, **decided on runtime
+performance and memory footprint first**, bundle size second. The benchmark
+lives in [`bench/`](bench/) (`npm install`, then `npm run bench`,
+`npm run bench:browser`, `npm run bench:ts`, `npm run bundle` inside that
+directory; it is a standalone npm package, not a workspace member, and is
+**not** run in CI). All five adapters declare the *same* 15 schemas
+(`bench/schemas/*.mjs`) over the same deterministic fixtures
+(`bench/fixtures.mjs`). Unknown keys are tolerated in every adapter to match
+the contract rule.
+
+Versions measured (all published ≥ 7 days before 2026-09-18): `zod` 4.6.2
+(`zod` and `zod/mini` entry points), `valibot` 1.5.0, `@sinclair/typebox`
+0.34.52 (`Value.Check`), `arktype` 2.2.3. Node v24.19.0; Chromium 153.0.8010.12
+via Playwright 1.63.0; `esbuild` 0.28.2 for the bundles.
+
+**CSP first.** The SPA is served with `script-src 'self'` (no
+`'unsafe-eval'`). Zod 4's object fast path and ArkType's compiled validators
+both use `new Function`, and TypeBox's `TypeCompiler` does too, so every
+adapter is measured on the path that can actually run in our tab:
+`z.config({ jitless: true })`, `configure({ jitless: true })` for ArkType,
+`Value.Check` for TypeBox. (With JIT, Zod parses the page 2.9× faster and
+ArkType 11× faster than the rows below — irrelevant under our CSP.)
+
+Payloads: `entry` = one knowledge entry, `page` = 200-entry knowledge cursor
+page, `session` = session detail with 2 000 messages. Every parse gets a
+fresh input from a pool of 32–64 distinct payloads. Throughput tables are
+from the first full run; allocation and retention are from the re-run after
+the retention harness fix (fresh `JSON.parse` per op). Throughput in the
+re-run was within −22 %/+9 % of the first run (the process now carries a
+~100 MB retained LRU from the previous payload, so GC is costlier); the
+ordering held everywhere except Node `session`, where Valibot (687 ops/s)
+edged ArkType (653) — Chromium `session` still had ArkType ahead (837 vs
+765). Raw rows: `bench/` output, run 1 and run 2, are quoted in PR #1833.
+
+**Sustained throughput, Node** (`bench/bench.mjs`, `node --expose-gc`, 2 s
+warm-up then 10 s timed per payload, per-op latency percentiles):
+
+| Library | entry ops/s · p50 · p99 | page ops/s · p50 · p99 | session ops/s · p50 · p99 |
+|---|---|---|---|
+| `zod` (jitless) | 530 361 · 1.8 µs · 2.3 µs | 2 511 · 0.390 ms · 0.510 ms | 514 · 1.886 ms · 3.326 ms |
+| `zod/mini` (jitless) | 405 348 · 2.4 µs · 3.9 µs | 2 024 · 0.481 ms · 0.771 ms | 423 · 2.228 ms · 3.441 ms |
+| `valibot` | 291 015 · 3.3 µs · 4.8 µs | 1 479 · 0.664 ms · 0.870 ms | 683 · 1.434 ms · 2.002 ms |
+| `@sinclair/typebox` | 643 332 · 1.5 µs · 2.5 µs | 3 288 · 0.298 ms · 0.429 ms | 539 · 1.791 ms · 2.451 ms |
+| **`arktype` (jitless)** | **876 043 · 1.1 µs · 2.1 µs** | **4 955 · 0.198 ms · 0.334 ms** | **840 · 1.160 ms · 1.504 ms** |
+
+**Sustained throughput, Chromium** (`bench/browser.mjs`, same workload
+bundled with esbuild and run in headless Chromium with `--js-flags=--expose-gc`):
+
+| Library | entry ops/s · p50 · p99 | page ops/s · p50 · p99 | session ops/s · p50 · p99 |
+|---|---|---|---|
+| `zod` (jitless) | 595 817 · 1.7 µs · 2.0 µs | 2 827 · 0.345 ms · 0.455 ms | 563 · 1.730 ms · 2.465 ms |
+| `zod/mini` (jitless) | 566 650 · 1.7 µs · 2.1 µs | 2 750 · 0.360 ms · 0.440 ms | 557 · 1.735 ms · 2.615 ms |
+| `valibot` | 390 675 · 2.5 µs · 3.3 µs | 1 963 · 0.500 ms · 0.635 ms | 743 · 1.315 ms · 1.815 ms |
+| `@sinclair/typebox` | 823 476 · 1.2 µs · 1.5 µs | 4 050 · 0.240 ms · 0.355 ms | 704 · 1.390 ms · 1.730 ms |
+| **`arktype` (jitless)** | **1 074 147 · 0.9 µs · 1.3 µs** | **5 261 · 0.185 ms · 0.280 ms** | **916 · 1.075 ms · 1.255 ms** |
+
+**Allocation per parse and GC pressure** (Node: heap delta per op with forced
+GCs before/after, N = 1 000 distinct inputs, results retained; GC events from
+`PerformanceObserver` `gc` entries over 1 000 further parses with results
+dropped — all minor, no major GC for any library):
+
+| Library | heap/op entry · page · session | GCs (count · ms) page | GCs (count · ms) session |
+|---|---|---|---|
+| `zod` (jitless) | 0.89 kB · 178.2 kB · 282.9 kB | 16 · 3.3 ms | 71 · 58.8 ms |
+| `zod/mini` (jitless) | 0.89 kB · 178.2 kB · 282.9 kB | 20 · 5.4 ms | 93 · 82.3 ms |
+| `valibot` | 0.84 kB · 178.5 kB · 290.4 kB | 9 · 3.0 ms | 30 · 24.8 ms |
+| `@sinclair/typebox` | 0 · 0 · 0 | 4 · 1.5 ms | 13 · 18.2 ms |
+| **`arktype` (jitless)** | **0 · 0 · 0** | 12 · 3.0 ms | 53 · 42.5 ms |
+
+Chromium heap/op (pointer compression halves object sizes): `zod`/`zod/mini`
+0.46 · 91.5 · 149 kB, `valibot` 0.46 · 91.6 · 153 kB, `typebox` and `arktype`
+0 · 0 · 0. Zod and Valibot return a *copy* of the validated object — every
+parse allocates a second page/session that then has to be collected;
+TypeBox `Value.Check` and ArkType (no morphs) validate in place and return
+the input. **Caveat on the zeros:** heap/op = 0 means "no allocation beyond
+the input", not "free" — the response object itself still exists and is
+what the store keeps (see retention below). ArkType's GC events in the
+drop-results loop are the short-lived inputs the harness creates, not
+library allocations.
+
+**Retained heap after a long-lived loop** keeping results in a 50-slot LRU
+(the SPA store shape): 100 000 parses for `entry` and `page`, 10 000 for
+`session` (10× the objects per parse), forced GCs before/after. Every op
+`JSON.parse`s a fresh response body, as a real `fetch` would, so the input
+is reachable only through the LRU: an in-place validator retains the parsed
+input, a copying validator retains its copy and the input becomes garbage.
+Baseline = the same loop with plain `JSON.parse` and no validator; "excess"
+is what the library retains beyond that.
+
+| Library | retained · excess (Node) entry · page · session | retained · excess (Chromium) entry · page · session |
+|---|---|---|
+| `zod` (jitless) | 79 · +6 kB · 18.3 · +7.5 MB · 104.7 · +1.6 MB | 81 · +23 kB · 13.6 · +3.3 MB · 95.9 · +0.8 MB |
+| `zod/mini` (jitless) | 91 · +29 kB · 18.3 · +6.6 MB · 104.7 · +1.6 MB | 82 · +24 kB · 13.6 · +3.3 MB · 95.9 · +0.8 MB |
+| `valibot` | 142 · +80 kB · 22.4 · +10.7 MB · 105.1 · +2.0 MB | 72 · +14 kB · 13.6 · +3.3 MB · 96.0 · +0.9 MB |
+| `@sinclair/typebox` | 62 · 0 kB · 11.7 · +0.04 MB · 103.2 · +0.03 MB | 54 · 0 kB · 10.3 · 0 MB · 95.1 · 0 MB |
+| **`arktype` (jitless)** | 75 · +13 kB · 11.7 · +0.5 MB · 103.2 · +0.03 MB | 53 · 0 kB · 10.3 · 0 MB · 95.1 · 0 MB |
+
+`JSON.parse` baseline: 62–72 kB · 10.9–11.7 MB · 103 MB in Node, 58 kB ·
+10.3 MB · 95 MB in Chromium. As expected, retention is dominated by the 50
+cached responses whichever library produced them — no library grows with the
+parse count, and the retained heap for the session payload is within 2 % for
+all five. The copying libraries do retain more than the `JSON.parse` objects
+they replace on the page payload (Zod/Valibot copies are 1.6–1.9× the size
+of V8's `JSON.parse` output in Node, 1.3× in Chromium — property-by-property
+construction vs. `JSON.parse`'s compact literals), but that is a second-order
+effect. **The real memory advantage of ArkType/TypeBox is allocation and GC
+pressure per parse — no second copy of every page/session — not retained
+heap.** An earlier revision of this section measured retention with a shared
+input pool, which made in-place validators look like they retained ~0; that
+was an artifact of the harness and is superseded by the numbers above.
+`performance.measureUserAgentSpecificMemory()` in full Chromium reports the
+same ordering but is dominated by not-yet-collected garbage (≈ 27–33 MB after
+the page loop for every library), so it is recorded in `bench/browser.mjs`
+output but not used for the decision.
+
+**TypeScript cost** (`bench/ts-cost.mjs`: `tsc --noEmit --extendedDiagnostics`
+over the adapter plus a probe materialising the inferred output type of all
+15 schemas; median of 3 runs):
+
+| Library | types | instantiations | check time | memory |
+|---|---|---|---|---|
+| `zod` | 2 284 | 5 581 | 0.10 s | 73 MB |
+| `zod/mini` | 2 311 | 2 288 | 0.08 s | 72 MB |
+| `valibot` | 5 830 | 19 109 | 0.16 s | 116 MB |
+| `@sinclair/typebox` | 1 642 | 7 704 | 0.10 s | 73 MB |
+| `arktype` | 7 355 | 64 741 | 0.25 s | 141 MB |
+
+**Bundle contribution** (secondary; `bench/bundle-size.mjs`: esbuild,
+`bundle + minify + treeShaking`, browser platform, only the 15 schemas
+imported):
+
+| Library | minified | gzip |
+|---|---|---|
+| `zod` (classic) | 443.5 kB | 90.3 kB |
+| `zod/mini` | 23.3 kB | 7.7 kB |
+| `valibot` | 9.8 kB | 3.0 kB |
+| `@sinclair/typebox` | 105.6 kB | 25.8 kB |
+| `arktype` | 158.7 kB | 49.7 kB |
+
+**Standard Schema** (`"~standard"`): `zod`, `zod/mini`, `valibot`, `arktype`
+yes; `@sinclair/typebox` 0.34 no.
+
+**Decision: ArkType 2.2.3 (jitless)**, pinned exactly. Rationale, in order:
+
+1. Runtime: fastest on every payload in both runtimes — 3.3× Valibot and 2×
+   jitless Zod on the 200-entry page (0.198 ms vs 0.664 / 0.390 ms), 1.2× /
+   1.6× on the 2 000-message session, with the tightest p99 (0.334 ms page,
+   1.50 ms session in Node; 0.28 / 1.26 ms in Chromium).
+2. Memory: zero allocation per parse because valid data is returned in
+   place (the response object the store keeps is the one `JSON.parse`
+   produced). Zod and Valibot allocate a full copy per parse (178 kB page,
+   283–290 kB session in Node) that immediately becomes garbage-plus-copy —
+   2–7× the minor-GC count and time of ArkType/TypeBox on the page, and
+   1.3–1.9× larger retained page objects. Retained heap for a bounded store
+   is otherwise near-identical across libraries; the win is GC pressure, not
+   footprint.
+3. It fits the contract rules: undeclared keys are ignored by default (forward
+   compatibility), no coercion, structured `ArkErrors` with `path`, `expected`
+   and `actual` that map straight onto `ContractError.issues`, Standard Schema.
+4. Costs accepted: +49.7 kB gzip over Valibot's 3.0 kB (the SPA is served by
+   the local gateway; the owner ranked this below runtime/memory), and the
+   heaviest TS inference (0.25 s check for 15 schemas — negligible next to the
+   Solid/JSX check of this package). `src/contracts/config.ts` sets
+   `jitless: true` and is imported before `arktype` in every contract module;
+   a unit test asserts the resolved config and the e2e run exercises the real
+   CSP.
+
+Not chosen: TypeBox (`Value.Check` is second on runtime/memory but 1.5–1.7×
+slower than ArkType on page/session, no Standard Schema, JSON-Schema surface
+unused), `valibot` (smallest bundle but 3.3× slower on the page and allocates a
+copy per parse), `zod` classic (a copy per parse, slowest p99 on the session,
+90 kB gzip), `zod/mini` (slowest overall here).
+
+`packages/core` keeps its own `zod` dependency; that is an independent
+decision for a Node process where none of the browser constraints apply.
 
 ### Solid 2 status
 
@@ -218,7 +399,8 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/shell.test.tsx` (shell, real-data routes with a mocked client, fixture), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
 | Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). `fixture.spec.ts` covers a dev-only screen, so its `dev-*` projects run against a Vite dev server (`LORE_E2E_DEV_PORT`, default 5174) proxying `/api` to that same seeded gateway. Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
@@ -247,24 +429,39 @@ predates the move from an embedded module to staged files, which took
 - The gateway (`packages/core` SQLite via `packages/gateway/src/api.ts`) is
   authoritative for projects, knowledge, sessions and distillations.
 - The browser holds **derived, disposable** state only: route, theme, pane
-  layout, and (from UI-03) an IndexedDB cache of API responses and local
-  drafts. Anything in IndexedDB can be deleted without loss of Lore data.
+  layout, an IndexedDB cache of API responses (`src/db/`, database
+  `lore-ui` v2) and local working state (`drafts`, `pendingChanges` —
+  per-device, never merged into entity stores). Anything in IndexedDB can
+  be deleted without loss of Lore data; a reset never touches the server.
 - The SPA calls the **read** routes only (`GET /api/v1/projects`,
-  `GET /api/v1/projects/:id/knowledge`, `GET /api/v1/knowledge/:id`), with
-  same-origin `fetch`, no credentials, and runtime validation of every
-  response (`zod`, `src/lib/schemas.ts`; timestamps are epoch milliseconds).
-  External knowledge `id`s are the **stable logical ids** the API already
-  exposes; the UI never keys on per-version ids.
+  `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),
+  `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations and
+  the folk status routes), with same-origin `fetch`, no credentials, and
+  runtime validation of every response (`arktype`, `src/contracts/`;
+  timestamps are epoch milliseconds). A 2xx body that fails its contract
+  throws `ContractError` (an `ApiError` of kind `invalid`) — never a silent
+  coercion.
+- Every loader races the cache read against the server fetch: a cached
+  answer renders immediately as `stale` (the `StaleBadge`), the server
+  answer replaces it; a server failure keeps the cached rows and flips the
+  badge to "gateway unavailable" rather than an error card. A cached
+  collection is complete only when `complete && rows.length === count`
+  (each scope records the server's row count); rows lost to TTL/LRU
+  eviction still render but are marked `partial` until the server answers.
+  Session detail applies the same rule through a per-session `collections`
+  record for `messageBlocks`: a missing block (or a missing record from a
+  legacy write) marks the cached history `partial`.
 - `src/lib/api.ts` classifies failures for the shell: network error →
   `unreachable`; 401/403 or a **bodyless** 404 (the gateway's way of hiding
   management routes from non-loopback peers) → `unauthorized`; a JSON 404 →
   `not_found`; a 2xx body that fails validation → `invalid`.
-- `src/lib/db.ts` opens an IndexedDB (`lore-ui`, one `meta` store) and
-  nothing else. It is a scaffold for UI-03; nothing is read from or written
-  to it in this slice, and it is never authoritative.
+- `src/db/open.ts` degrades instead of failing: missing IndexedDB, a
+  `blocked` open (3 s timeout), a corrupted/missing-store database or a
+  `VersionError` all reset-or-skip the cache so the shell still renders
+  server-only.
 - The browser bundle imports nothing from `packages/gateway` or
   `packages/core`: no boot code, credentials, database, ACP or Git process
-  control. Response types are re-declared as schemas in `src/lib/schemas.ts`.
+  control. Response types are re-declared as contracts in `src/contracts/`.
   (The Playwright *seed* script under `e2e/` is Node-only tooling and does
   load `@loreai/core`; it is not part of the bundle.)
 
@@ -372,7 +569,10 @@ packages/ui/
   src/components/lore/    document primitives (Document.tsx), KnowledgeDocument, Panes, StateCard, FutureAction, Avatar
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
-  src/lib/                api.ts (typed client), schemas.ts (zod), loader.ts, connection.ts, theme.ts, db.ts (idb scaffold), format.ts, utils.ts
+  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts
+  src/contracts/          ArkType response contracts (relative imports only) + ContractError
+  src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
+  src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status
   src/styles/app.css      Tailwind 4 + Lore tokens (values from the website theme, see mapping above)
   src/styles/fonts.css    self-hosted DM Sans / Playfair Display @font-face
   public/favicon.svg      copied from the website

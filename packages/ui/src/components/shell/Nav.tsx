@@ -3,14 +3,16 @@ import { For, Match, Show, Switch } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
-import type { ProjectSummary } from "~/lib/schemas";
+import type { ProjectSummary } from "~/contracts";
 import {
   CONNECTION_LABEL,
   useConnection,
   type ConnectionState,
 } from "~/lib/connection";
 
+import { StaleBadge } from "../lore/StaleBadge";
 import { StateCard } from "../lore/StateCard";
+import type { KeyStatus } from "~/state/status";
 
 const NavItem: Component<{
   href: string;
@@ -86,6 +88,8 @@ export interface NavProps {
   activeProjectId: string | null;
   totalKnowledge: number | null;
   onRetry?: () => void;
+  /** Stale-cache indicator shown next to the Projects header. */
+  stale?: KeyStatus;
   class?: string;
 }
 
@@ -108,6 +112,15 @@ export const Nav: Component<NavProps> = (props) => {
       >
         Projects
       </NavItem>
+      <Show when={props.stale}>
+        {(status) => (
+          <Show when={status().stale}>
+            <div class="px-3 pb-1">
+              <StaleBadge status={status()} />
+            </div>
+          </Show>
+        )}
+      </Show>
       <NavItem href="/" count={props.totalKnowledge ?? undefined}>
         Knowledge
       </NavItem>
@@ -119,7 +132,7 @@ export const Nav: Component<NavProps> = (props) => {
             Loading projects…
           </div>
         </Match>
-        <Match when={props.error}>
+        <Match when={props.error && !props.projects}>
           <StateCard
             kind={conn.state() === "unauthorized" ? "locked" : "error"}
             compact
