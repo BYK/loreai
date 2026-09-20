@@ -129,6 +129,7 @@ export const Browse: Component<{
     () => projectId() ?? entry.loader.data()?.project_id ?? null,
   );
   const pageSource = createMemo(() =>
+    (props.view === "knowledge-table" || props.view === "entry") &&
     activeProjectId()
       ? { projectId: activeProjectId()!, query: query() }
       : null,
@@ -141,7 +142,7 @@ export const Browse: Component<{
   const searchScope = () =>
     typeof searchParams.scope === "string" ? searchParams.scope : "all";
   const sessionsPage = ws.state.sessions.page(() =>
-    activeProjectId()
+    props.view === "sessions" && activeProjectId()
       ? { projectId: activeProjectId()!, cursor: cursor() }
       : null,
   );
@@ -162,6 +163,15 @@ export const Browse: Component<{
     projectForEntry()?.name || projectForEntry()?.path || "Project";
   const mobilePane = (): MobilePane =>
     props.view === "welcome" ? "nav" : "detail";
+  const projectFallback = () => {
+    if (ws.projects.loading()) {
+      return <StateCard kind="loading" title="Loading project" />;
+    }
+    if (ws.projects.error()) {
+      return errorStateFor(ws.projects.error(), "Projects", ws.projects.reload);
+    }
+    return <StateCard kind="error" title="Project not found or inaccessible" />;
+  };
   const nav = () => (
     <Nav
       projects={ws.projects.data()}
@@ -249,48 +259,21 @@ export const Browse: Component<{
       case "welcome":
         return <WelcomeDetail projects={ws.projects.data()} />;
       case "project":
-        if (!id)
-          return (
-            <StateCard kind="error" title="Project not found or inaccessible" />
-          );
+        if (!id) return projectFallback();
         return (
-          <Show
-            when={project()}
-            fallback={
-              <Show
-                when={ws.projects.loading()}
-                fallback={
-                  ws.projects.error() ? (
-                    errorStateFor(
-                      ws.projects.error(),
-                      "Projects",
-                      ws.projects.reload,
-                    )
-                  ) : (
-                    <StateCard
-                      kind="error"
-                      title="Project not found or inaccessible"
-                    />
-                  )
-                }
-              >
-                <StateCard kind="loading" title="Loading project" />
-              </Show>
-            }
-          >
+          <Show when={project()} fallback={projectFallback()}>
             {(value) => <ProjectPage project={value()} />}
           </Show>
         );
       case "knowledge-table":
-        return id ? (
+        if (!id) return projectFallback();
+        return (
           <KnowledgeTable
             projectId={id}
             query={query()}
             selectedId={knowledgeId()}
             page={knowledgePage}
           />
-        ) : (
-          <StateCard kind="error" title="Project not found or inaccessible" />
         );
       case "entry":
         if (!knowledgeId()) {
@@ -323,17 +306,14 @@ export const Browse: Component<{
           </Switch>
         );
       case "sessions":
-        return id ? (
+        if (!id) return projectFallback();
+        return (
           <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
-        ) : (
-          <StateCard kind="error" title="Project not found or inaccessible" />
         );
       case "search":
+        if (!id) return projectFallback();
         return (
-          <Show
-            when={project()}
-            fallback={<StateCard kind="loading" title="Loading project" />}
-          >
+          <Show when={project()} fallback={projectFallback()}>
             {(value) => (
               <SearchResults
                 project={value()}
