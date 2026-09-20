@@ -1,5 +1,5 @@
-import { MemoryRouter, Route } from "@solidjs/router";
-import { render, screen } from "@solidjs/testing-library";
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 
 import { SearchResults } from "~/components/lore/SearchResults";
@@ -89,6 +89,37 @@ describe("SearchResults", () => {
     expect(
       screen.getByRole("button", { name: /Search scope/ }),
     ).toBeInTheDocument();
+  });
+
+  it("submits the selected recall scope", async () => {
+    const history = createMemoryHistory();
+    history.set({ value: "/projects/p-1/search?q=SQLite&scope=all" });
+    render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="*"
+          component={() => (
+            <WorkspaceProvider client={client} db={Promise.resolve(null)}>
+              <SearchResults project={project} q="SQLite" scope="all" />
+            </WorkspaceProvider>
+          )}
+        />
+      </MemoryRouter>
+    ));
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: /Search scope/ }),
+      {
+        button: 0,
+        pointerType: "mouse",
+      },
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "knowledge" }));
+    fireEvent.submit(screen.getByRole("search"));
+    await waitFor(() =>
+      expect(history.get()).toBe(
+        "/projects/p-1/search?q=SQLite&scope=knowledge",
+      ),
+    );
   });
 
   it("does not render recall headings for an empty query", () => {

@@ -1,8 +1,8 @@
 import type { Component } from "solid-js";
-import { For, Match, Show, Switch } from "solid-js";
+import { For, Match, Show, Switch, createSignal } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
-import type { ProjectSummary } from "~/contracts";
+import type { ProjectSummary, RecallScope } from "~/contracts";
 import { formatWhen, pluralize } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import {
@@ -29,6 +29,7 @@ import { TextField, TextFieldInput } from "../ui/text-field";
 export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
   const ws = useWorkspace();
   const navigate = useNavigate();
+  const [scope, setScope] = createSignal<RecallScope>("all");
   const sessions = ws.state.sessions.page(() => ({
     projectId: props.project.id,
     cursor: null,
@@ -190,14 +191,8 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             event.preventDefault();
             const data = new FormData(event.currentTarget);
             const rawQ = data.get("q");
-            const rawScope = data.get("scope");
             const q = typeof rawQ === "string" ? rawQ : "";
-            const scope = (typeof rawScope === "string" ? rawScope : "all") as
-              | "all"
-              | "session"
-              | "project"
-              | "knowledge";
-            navigate(searchHref(props.project.id, q, scope));
+            navigate(searchHref(props.project.id, q, scope()));
           }}
         >
           <TextField class="min-w-0 flex-1">
@@ -208,9 +203,8 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             />
           </TextField>
           <Select
-            name="scope"
-            value="all"
-            onChange={() => undefined}
+            value={scope()}
+            onChange={setScope}
             options={["all", "session", "project", "knowledge"]}
             itemComponent={(item) => (
               <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>

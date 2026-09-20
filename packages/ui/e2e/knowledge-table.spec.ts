@@ -72,6 +72,13 @@ test.describe("knowledge table routes", () => {
   }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/search?q=SQLite`);
+    await page.getByRole("button", { name: "Search scope" }).click();
+    await page.getByRole("option", { name: "knowledge" }).click();
+    await page
+      .getByRole("search")
+      .getByRole("button", { name: "Search", exact: true })
+      .click();
+    await expect(page).toHaveURL(/\/search\?q=SQLite&scope=knowledge/);
     await expect(page.getByText(/Recall Results/)).toBeVisible();
     await expect(
       page.getByRole("link", { name: /\(k:/ }).first(),

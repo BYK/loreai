@@ -1,5 +1,11 @@
 import type { Component } from "solid-js";
-import { Match, Switch, createMemo, createSignal } from "solid-js";
+import {
+  Match,
+  Switch,
+  createEffect,
+  createMemo,
+  createSignal,
+} from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { ProjectSummary, RecallScope } from "~/contracts";
 import { parseRecallMarkdown } from "~/lib/recall-text";
@@ -25,6 +31,7 @@ export const SearchResults: Component<{
   const ws = useWorkspace();
   const navigate = useNavigate();
   const [scope, setScope] = createSignal<RecallScope>(props.scope);
+  createEffect(() => setScope(props.scope));
   const search = ws.state.recall.search(() =>
     props.q ? { project: props.project, q: props.q, scope: props.scope } : null,
   );
@@ -42,12 +49,8 @@ export const SearchResults: Component<{
           e.preventDefault();
           const data = new FormData(e.currentTarget);
           const rawQ = data.get("q");
-          const rawScope = data.get("scope");
           const q = typeof rawQ === "string" ? rawQ : "";
-          const selectedScope = typeof rawScope === "string" ? rawScope : "all";
-          navigate(
-            searchHref(props.project.id, q, selectedScope as RecallScope),
-          );
+          navigate(searchHref(props.project.id, q, scope()));
         }}
       >
         <TextField class="min-w-0 flex-1">
