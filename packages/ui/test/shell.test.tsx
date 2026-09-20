@@ -447,6 +447,57 @@ describe("shell: project navigation and real-data path", () => {
 });
 
 describe("shell: empty, error, not-found and locked states", () => {
+  it("settles an unknown search project after projects load", async () => {
+    mount("/projects/nope/search?q=x", fakeClient());
+    expect(
+      await screen.findByText("Project not found or inaccessible"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps an unknown search project loading until projects resolve", async () => {
+    let release: (projects: ProjectSummary[]) => void = () => {};
+    const client = fakeClient({
+      async listProjects() {
+        return new Promise<ProjectSummary[]>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    mount("/projects/nope/search?q=x", client);
+    expect(screen.getByText("Loading project")).toBeInTheDocument();
+
+    release(PROJECTS);
+    expect(
+      await screen.findByText("Project not found or inaccessible"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not load knowledge pages while browsing sessions", async () => {
+    let knowledgePageCalls = 0;
+    const client = fakeClient({
+      async listProjectKnowledgePage() {
+        knowledgePageCalls++;
+        return { items: [], next_cursor: null };
+      },
+    });
+    mount("/projects/p-lore/sessions?cursor=abc", client);
+    expect(await screen.findByText("No captured sessions")).toBeInTheDocument();
+    expect(knowledgePageCalls).toBe(0);
+  });
+
+  it("does not load session pages while browsing knowledge", async () => {
+    let sessionPageCalls = 0;
+    const client = fakeClient({
+      async listProjectSessionsPage() {
+        sessionPageCalls++;
+        return { items: [], next_cursor: null };
+      },
+    });
+    mount("/projects/p-lore/knowledge?cursor=abc", client);
+    expect(await screen.findByText("Keep SQLite")).toBeInTheDocument();
+    expect(sessionPageCalls).toBe(0);
+  });
+
   it("shows an empty state for a project without knowledge", async () => {
     mount("/projects/p-empty/knowledge", fakeClient());
     expect(
@@ -604,7 +655,7 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(
       await screen.findByText("Knowledge hidden by the gateway"),
     ).toBeInTheDocument();
-    expect(document.querySelectorAll('[data-state="locked"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-state="locked"]')).toHaveLength(2);
   });
 
   it("shows the not-found page for unknown client routes", () => {
