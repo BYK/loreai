@@ -100,7 +100,7 @@ export const VersionHistory: Component<{
                 </details>
               )}
             </For>
-            <Show when={versions().length === 1}>
+            <Show when={versions().length <= 1}>
               <p class="m-0 text-xs text-muted">No earlier versions.</p>
             </Show>
           </div>
