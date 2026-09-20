@@ -18,11 +18,17 @@ export function parseFailure(e: unknown): Response {
   return errorResponse(400, "invalid_request_error", msg);
 }
 
+/**
+ * 400 for a request whose body could not be parsed. JSON syntax failures get
+ * the generic message; a translator's own error keeps its message.
+ */
 export function invalidStreamedBody(e?: unknown): Response {
   return closingErrorResponse(
     400,
     "invalid_request_error",
-    e instanceof Error ? e.message : "Invalid JSON body",
+    e instanceof Error && !(e instanceof SyntaxError)
+      ? e.message
+      : "Invalid JSON body",
   );
 }
 

@@ -431,11 +431,7 @@ describe("server routing", () => {
       error: { type: string; message: string };
     };
     expect(body.error.type).toBe("invalid_request_error");
-    expect(body.error.message).toBe(
-      path === "/v1/responses" || path === "/v1/codex/responses"
-        ? "Invalid JSON body"
-        : "Expected property name or '}' in JSON at position 2 (line 1 column 3)",
-    );
+    expect(body.error.message).toBe("Invalid JSON body");
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 
@@ -462,11 +458,7 @@ describe("server routing", () => {
       error: { type: string; message: string };
     };
     expect(body.error.type).toBe("invalid_request_error");
-    expect(body.error.message).toBe(
-      path === "/v1/responses" || path === "/v1/codex/responses"
-        ? "Invalid JSON body"
-        : "Expected property name or '}' in JSON at position 2 (line 1 column 3)",
-    );
+    expect(body.error.message).toBe("Invalid JSON body");
   });
 
   test("GET /v1/models returns 502 when the upstream is unreachable", async () => {
