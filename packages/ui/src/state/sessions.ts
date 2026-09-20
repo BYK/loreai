@@ -32,7 +32,7 @@ export function createSessionsState({
   const store = createEntityStore<SessionSummary>((s) => s.session_id);
 
   function sessionKeyOf(projectId: string, sessionId: string) {
-    return `${projectId}/${sessionId}`;
+    return `${encodeURIComponent(projectId)}/${sessionId}`;
   }
 
   function list(projectId: Accessor<string | null>): {
@@ -92,7 +92,7 @@ export function createSessionsState({
       source,
       async (key, signal) => {
         const sep = key.indexOf("/");
-        const pid = key.slice(0, sep);
+        const pid = decodeURIComponent(key.slice(0, sep));
         const sid = key.slice(sep + 1);
         const path = projectPathOf?.(pid);
         if (path === undefined) throw new Error(`No path for project ${pid}`);
@@ -169,7 +169,9 @@ export function createSessionsState({
     const loader = createLoader(
       () => {
         const value = source();
-        return value ? `${value.projectId}/${value.cursor ?? ""}` : null;
+        return value
+          ? `${encodeURIComponent(value.projectId)}/${encodeURIComponent(value.cursor ?? "")}`
+          : null;
       },
       (_, signal) => {
         const value = source();
@@ -184,7 +186,7 @@ export function createSessionsState({
       },
       {
         async onServer(key, value) {
-          const projectId = key.slice(0, key.indexOf("/"));
+          const projectId = decodeURIComponent(key.slice(0, key.indexOf("/")));
           for (const session of value.items) {
             store.reconcileOne(session);
             await repos.sessions.put(session, projectId, {

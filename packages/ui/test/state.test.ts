@@ -835,6 +835,36 @@ describe("paged sessions and recall state", () => {
     expect(search.loader.data()).toBeUndefined();
   });
 
+  it("refetches when slash-containing recall key components change", async () => {
+    const recall = vi.fn(async () => ({
+      query: "result",
+      scope: "project" as const,
+      projectPath: "/tmp/project",
+      result: "No results found for this query.",
+    }));
+    const state = createRecallState({
+      client: { recall } as unknown as ApiClient,
+      tracked,
+    });
+    const [source, setSource] = createSignal({
+      project: { ...PROJECTS[0]!, id: "p" },
+      q: "one/two",
+      scope: "project" as const,
+    });
+    createRoot(() => state.search(source));
+
+    await flush();
+    expect(recall).toHaveBeenCalledTimes(1);
+
+    setSource({
+      project: { ...PROJECTS[0]!, id: "p/one" },
+      q: "two",
+      scope: "project",
+    });
+    await flush();
+    expect(recall).toHaveBeenCalledTimes(2);
+  });
+
   it("non-default paged queries do not read the knowledge list cache", async () => {
     const read = vi.fn();
     const repo = createKnowledgeRepo(null);

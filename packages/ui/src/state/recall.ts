@@ -22,7 +22,9 @@ export function createRecallState({
     const loader = createLoader(
       () => {
         const value = source();
-        return value ? `${value.project.id}/${value.q}/${value.scope}` : null;
+        return value
+          ? `${encodeURIComponent(value.project.id)}/${encodeURIComponent(value.q)}/${encodeURIComponent(value.scope)}`
+          : null;
       },
       (_, signal) => {
         const value = source();
