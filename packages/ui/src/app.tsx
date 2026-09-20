@@ -1,9 +1,8 @@
 import type { Component, ParentProps } from "solid-js";
+import { lazy } from "solid-js";
 import { A, type RouteDefinition, Router } from "@solidjs/router";
 
-import { compatRoutes } from "./compat/CompatSmoke";
 import { Browse } from "./routes/Browse";
-import { Fixture } from "./routes/Fixture";
 import { WorkspaceProvider } from "./routes/workspace";
 import type { ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
@@ -29,9 +28,48 @@ const NotFound: Component = () => (
  * smoke. Production builds drop them (and their chunks) from the route table,
  * so the shipped bundle contains product routes only; the Vite dev server
  * and the unit/e2e suites still mount them.
+ *
+ * Both are `lazy()`: a static import here would put their modules in the
+ * product entry's graph, and any library they share with a product chunk
+ * (the virtualiser, the rendering engines) would then be hoisted into the
+ * entry rather than staying in that chunk.
  */
+const compatSmoke = () => import("./compat/CompatSmoke");
 const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
-  ? [{ path: "/fixture", component: Fixture }, compatRoutes]
+  ? [
+      {
+        path: "/fixture",
+        component: lazy(() =>
+          import("./routes/Fixture").then((m) => ({ default: m.Fixture })),
+        ),
+      },
+      {
+        path: "/_compat",
+        component: lazy(() =>
+          compatSmoke().then((m) => ({ default: m.CompatSmoke })),
+        ),
+        children: [
+          {
+            path: "/",
+            component: lazy(() =>
+              compatSmoke().then((m) => ({ default: m.RouteIndex })),
+            ),
+          },
+          {
+            path: "/a",
+            component: lazy(() =>
+              compatSmoke().then((m) => ({ default: m.probeRoute("a") })),
+            ),
+          },
+          {
+            path: "/b",
+            component: lazy(() =>
+              compatSmoke().then((m) => ({ default: m.probeRoute("b") })),
+            ),
+          },
+        ],
+      },
+    ]
   : [];
 
 export const routes: RouteDefinition[] = [
@@ -47,7 +85,9 @@ export const routes: RouteDefinition[] = [
   },
   {
     path: "/projects/:projectId/sessions/:sessionId",
-    component: () => <Browse view="session" />,
+    component: lazy(() =>
+      import("./routes/Session").then((m) => ({ default: m.Session })),
+    ),
   },
   {
     path: "/projects/:projectId/sessions",

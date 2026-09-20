@@ -56,15 +56,19 @@ test.describe("knowledge table routes", () => {
     );
   });
 
-  test("sessions link to the session placeholder route", async ({ page }) => {
-    await page.goto("/ui");
+  test("clicking a session row navigates to the UI-06 reader route", async ({
+    page,
+  }) => {
+    const projectId = await loreProjectId(page);
+    await page.goto(`/ui/projects/${projectId}/sessions`);
     await page
-      .getByRole("navigation", { name: "Workspace" })
-      .getByTestId("nav-project")
+      .getByRole("link")
+      .filter({ hasText: /messages/ })
       .first()
       .click();
-    await page.getByRole("link", { name: /All sessions/ }).click();
-    await expect(page).toHaveURL(/\/sessions$/);
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${projectId}/sessions/[^/]+$`),
+    );
   });
 
   test("search displays recall results and knowledge links", async ({

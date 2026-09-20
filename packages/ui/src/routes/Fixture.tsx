@@ -5,6 +5,10 @@
  * screenshot in light/dark and desktop/mobile without real data.
  *
  *   ?view=focus   focused discussion in a side pane (mobile: full screen)
+ *   ?view=blocks  UI-06a session blocks (block model + safe rendering) on an
+ *                 invented session, one of every block kind
+ *   ?view=busy    UI-06c busy-session fixture: 10k synthetic blocks streamed
+ *                 through the real reader (`&blocks=` / `&seed=` override)
  */
 import type { Component, JSX } from "solid-js";
 import { For, Show } from "solid-js";
@@ -32,12 +36,23 @@ import {
   FutureActionRow,
 } from "~/components/lore/FutureAction";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
+import {
+  DistillationBlockView,
+  MessageBlockView,
+} from "~/components/reader/SessionBlock";
 import { StateCard } from "~/components/lore/StateCard";
 import { ConnectionStatus } from "~/components/shell/Nav";
 import { Shell } from "~/components/shell/Shell";
 import { Badge } from "~/components/ui/badge";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import { cn } from "~/lib/utils";
+import { buildBlocks } from "~/reader/blocks";
+import {
+  READER_SPECIMEN,
+  READER_SPECIMEN_DISTILLATION,
+} from "~/reader/specimen";
+
+import { BusyFixture } from "./BusyFixture";
 
 const BYK: Participant = { name: "BYK", initials: "BYK", kind: "person" };
 const OC: Participant = { name: "OpenCode", initials: "OC", kind: "agent" };
@@ -450,9 +465,47 @@ const Callouts: Component = () => (
   </footer>
 );
 
+/**
+ * UI-06a specimen: the invented session detail run through the real block
+ * model and renderer. No virtualisation or selection yet (UI-06b).
+ */
+const ReaderBlocks: Component = () => {
+  const blocks = buildBlocks(READER_SPECIMEN);
+  return (
+    <section
+      class="mx-auto max-w-[760px] px-4.5 py-6 sm:px-8"
+      data-testid="reader-blocks"
+    >
+      <DocHeader
+        crumb={["Specimen", "Session"]}
+        title="Session blocks"
+        trailing="Captured history · invented"
+      />
+      <For each={blocks.messages}>
+        {(block) => <MessageBlockView block={block} />}
+      </For>
+      <For each={blocks.distillations}>
+        {(block) => (
+          <DistillationBlockView
+            block={block}
+            detail={{
+              ...block.summary,
+              project_id: "specimen",
+              observations: READER_SPECIMEN_DISTILLATION,
+              source_ids: "[]",
+            }}
+          />
+        )}
+      </For>
+    </section>
+  );
+};
+
 export const Fixture: Component = () => {
   const [search] = useSearchParams<{ view?: string }>();
   const focus = () => search.view === "focus";
+  const blocksView = () => search.view === "blocks";
+  const busyView = () => search.view === "busy";
   const connection = createConnectionStore();
   connection.markReachable();
 
@@ -461,38 +514,55 @@ export const Fixture: Component = () => {
       <Shell
         banner={<FixtureBanner />}
         nav={() => <FixtureNav />}
-        list={focus() ? undefined : <ThreadList />}
+        list={
+          focus() || blocksView() || busyView() ? undefined : <ThreadList />
+        }
         mobilePane="detail"
-        mobileTitle={focus() ? "Discussion" : "Storage architecture"}
+        mobileTitle={
+          focus()
+            ? "Discussion"
+            : blocksView()
+              ? "Session blocks"
+              : busyView()
+                ? "Busy session"
+                : "Storage architecture"
+        }
         back={
           focus()
             ? { href: "/fixture", label: "Source" }
             : { href: "/fixture", label: "Threads" }
         }
         detail={
-          <div data-fixture-view={focus() ? "focus" : "context"}>
-            <div
-              class={cn(
-                focus() && "lg:grid lg:grid-cols-[minmax(0,1fr)_450px]",
-              )}
-            >
-              <div class={cn(focus() && "hidden lg:block")}>
-                <Doc focus={focus()} />
+          <Show
+            when={!blocksView() && !busyView()}
+            fallback={busyView() ? <BusyFixture /> : <ReaderBlocks />}
+          >
+            <div data-fixture-view={focus() ? "focus" : "context"}>
+              <div
+                class={cn(
+                  focus() && "lg:grid lg:grid-cols-[minmax(0,1fr)_450px]",
+                )}
+              >
+                <div class={cn(focus() && "hidden lg:block")}>
+                  <Doc focus={focus()} />
+                </div>
+                <Show when={focus()}>
+                  <FocusSide />
+                </Show>
               </div>
               <Show when={focus()}>
-                <FocusSide />
+                <div class="border-t border-line bg-chrome px-4.5 py-3.75 text-xs text-muted lg:hidden">
+                  <b class="text-text">
+                    The source travels with the discussion.
+                  </b>
+                  <br />
+                  Save a note without a model call. Ask agent only when ready.
+                  This is an invented P3/P4 design specimen.
+                </div>
               </Show>
+              <Callouts />
             </div>
-            <Show when={focus()}>
-              <div class="border-t border-line bg-chrome px-4.5 py-3.75 text-xs text-muted lg:hidden">
-                <b class="text-text">The source travels with the discussion.</b>
-                <br />
-                Save a note without a model call. Ask agent only when ready.
-                This is an invented P3/P4 design specimen.
-              </div>
-            </Show>
-            <Callouts />
-          </div>
+          </Show>
         }
       />
     </ConnectionContext.Provider>
