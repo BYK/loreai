@@ -176,6 +176,63 @@ export function resolveAnchor(
   };
 }
 
+/** Character budget for each side of a `text=` directive. */
+export const TEXT_FRAGMENT_BUDGET = 96;
+/** A quote whose start or end "word" is longer than this gets no directive. */
+export const TEXT_FRAGMENT_MAX_WORD = 512;
+
+/** Percent-encode a `text=` term: URL-escaped plus the directive's own delimiters. */
+function encodeTerm(term: string): string {
+  return encodeURIComponent(term).replace(/-/g, "%2D").replace(/,/g, "%2C");
+}
+
+/** Take whole words from `words` up to the budget (always at least one). */
+function takeWords(words: string[], fromEnd: boolean): string[] {
+  const taken: string[] = [];
+  let length = 0;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[fromEnd ? words.length - 1 - i : i]!;
+    if (taken.length > 0 && length + 1 + w.length > TEXT_FRAGMENT_BUDGET) break;
+    taken.push(w);
+    length += (taken.length > 1 ? 1 : 0) + w.length;
+  }
+  return fromEnd ? taken.reverse() : taken;
+}
+
+/**
+ * The URL *fragment directive* for a quote, per the WICG scroll-to-text
+ * standard (`#:~:text=textStart[,textEnd]`), so a copied link also works as
+ * a plain text fragment in browsers that support it — a best-effort,
+ * standard hint that complements `?a=` rather than replacing it: text
+ * fragments carry no identity or revision (a repeated phrase matches its
+ * first occurrence; an edited passage silently matches nothing), the
+ * browser hides the directive from scripts (`location.hash` never contains
+ * it), and it is only applied on a full page load. Long quotes become a
+ * `textStart,textEnd` range whose ends are whole words within
+ * {@link TEXT_FRAGMENT_BUDGET}; an empty quote or one whose boundary word
+ * exceeds {@link TEXT_FRAGMENT_MAX_WORD} yields `null` (no directive).
+ */
+export function textFragmentFor(quote: string): string | null {
+  const words = quote.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return null;
+  if (
+    words[0]!.length > TEXT_FRAGMENT_MAX_WORD ||
+    words[words.length - 1]!.length > TEXT_FRAGMENT_MAX_WORD
+  ) {
+    return null;
+  }
+  const whole = words.join(" ");
+  if (whole.length <= TEXT_FRAGMENT_BUDGET) {
+    return `:~:text=${encodeTerm(whole)}`;
+  }
+  const head = takeWords(words, false);
+  const tail = takeWords(words, true);
+  if (head.length + tail.length >= words.length) {
+    return `:~:text=${encodeTerm(whole)}`;
+  }
+  return `:~:text=${encodeTerm(head.join(" "))},${encodeTerm(tail.join(" "))}`;
+}
+
 /** Human-readable label for a non-ok resolution. */
 export function resolutionLabel(res: AnchorResolution): string {
   switch (res.status) {

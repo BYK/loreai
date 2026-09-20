@@ -489,6 +489,22 @@ changed, never silently re-anchored. `contentHash` is `cyrb53` in base-36
 (`src/lib/hash.ts`) — fast, deterministic, pinned by tests; it detects
 edits, it is not a security primitive.
 
+**Standard text fragments.** `textFragmentFor(quote)` produces the
+[WICG scroll-to-text](https://wicg.github.io/scroll-to-text-fragment/)
+fragment directive (`:~:text=textStart[,textEnd]`, both terms
+percent-encoded including the directive's own `-` and `,` delimiters;
+quotes longer than `TEXT_FRAGMENT_BUDGET` = 96 characters become a
+whole-word `textStart,textEnd` range) so a copied passage link also works as
+a plain text fragment in browsers that implement it (Chromium, Safari 16.1+,
+Firefox 131+ — <https://caniuse.com/url-scroll-to-text-fragment>). It is a
+*hint*, not the anchor: a text fragment has no block identity or revision
+(a repeated phrase matches its first occurrence; an edited passage silently
+matches nothing), the browser strips the directive before scripts see the
+URL (`location.hash` never contains it), and it is applied only on a full
+page load. `?a=` therefore stays the authoritative, verified anchor; the
+directive is appended to the copied link (UI-06b's `deepLinkFor`) and
+never read back.
+
 ### Safe rendering (`src/lib/safe-html.ts`)
 
 The single boundary between transcript text and the DOM; `RichText` in

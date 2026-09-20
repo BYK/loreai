@@ -271,6 +271,31 @@ describe("handleUIRequest", () => {
     expect(html).not.toContain("<style");
     expect(html).not.toMatch(/\son[a-z]+=/i);
   });
+
+  test("the staged bundle carries no dev/test-only screens or specimen data", () => {
+    // Route paths, test ids and specimen ids that exist only in
+    // packages/ui/src/routes/Fixture.tsx, reader/specimen.ts and compat/.
+    const devOnlyMarkers = [
+      '"/fixture"',
+      '"/_compat"',
+      "fixture-banner",
+      "spec-sys",
+      "link-index",
+    ];
+    const { files } = manifest();
+    const textAssets = Object.keys(files).filter((path) =>
+      /\.(?:js|css|html)$/.test(path),
+    );
+    expect(textAssets.length).toBeGreaterThan(0);
+    for (const path of textAssets) {
+      const text = stagedBytes(path).toString("utf8");
+      for (const marker of devOnlyMarkers) {
+        expect(text, `${path} ships dev-only marker ${marker}`).not.toContain(
+          marker,
+        );
+      }
+    }
+  });
 });
 
 describe("parseAcceptEncoding", () => {

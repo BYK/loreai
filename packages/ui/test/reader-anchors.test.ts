@@ -4,6 +4,8 @@ import type { TemporalMessage } from "~/contracts";
 import {
   ANCHOR_MAPPING_VERSION,
   MAX_ANCHOR_OFFSET,
+  TEXT_FRAGMENT_BUDGET,
+  TEXT_FRAGMENT_MAX_WORD,
   anchorFor,
   blockAnchor,
   blockHash,
@@ -11,6 +13,7 @@ import {
   encodeAnchor,
   resolutionLabel,
   resolveAnchor,
+  textFragmentFor,
 } from "~/reader/anchors";
 import {
   CHUNK_SEPARATOR,
@@ -98,6 +101,58 @@ describe("encode/decode", () => {
       "1~m.01J~0~99999999999~99999999999~" + h,
     ];
     for (const raw of bad) expect(decodeAnchor(raw), String(raw)).toBeNull();
+  });
+});
+
+describe("textFragmentFor", () => {
+  it("emits a whole-quote directive for short quotes, whitespace normalised", () => {
+    expect(textFragmentFor("  keep\n\tSQLite  as the engine ")).toBe(
+      ":~:text=keep%20SQLite%20as%20the%20engine",
+    );
+  });
+
+  it("percent-encodes the directive's own delimiters and URL syntax", () => {
+    const directive = textFragmentFor("a-b, c&d #e ~f")!;
+    expect(directive).toBe(":~:text=a%2Db%2C%20c%26d%20%23e%20~f");
+    // The only unescaped `-` / `,` are the directive's own, so a browser cannot
+    // misread quote text as a prefix-, textEnd or -suffix term.
+    const terms = directive.slice(":~:text=".length).split(",");
+    expect(terms).toHaveLength(1);
+    expect(terms[0]).not.toContain("-");
+  });
+
+  it("turns a long quote into a textStart,textEnd range of whole words", () => {
+    const words = Array.from({ length: 80 }, (_, i) => `word${i}`);
+    const directive = textFragmentFor(words.join(" "))!;
+    const [start, end, ...rest] = directive
+      .slice(":~:text=".length)
+      .split(",")
+      .map(decodeURIComponent);
+    expect(rest).toEqual([]);
+    expect(start!.length).toBeLessThanOrEqual(TEXT_FRAGMENT_BUDGET);
+    expect(end!.length).toBeLessThanOrEqual(TEXT_FRAGMENT_BUDGET);
+    expect(start!.startsWith("word0 word1 ")).toBe(true);
+    expect(end!.endsWith(" word78 word79")).toBe(true);
+    // Ends are whole words: the range is a prefix and a suffix of the quote.
+    const quote = words.join(" ");
+    expect(quote.startsWith(start!)).toBe(true);
+    expect(quote.endsWith(end!)).toBe(true);
+    expect(quote.charAt(start!.length)).toBe(" ");
+    expect(quote.charAt(quote.length - end!.length - 1)).toBe(" ");
+  });
+
+  it("keeps a single oversized word whole rather than truncating it", () => {
+    const long = "x".repeat(TEXT_FRAGMENT_BUDGET + 40);
+    expect(textFragmentFor(`${long} tail`)).toBe(`:~:text=${long}%20tail`);
+  });
+
+  it("yields no directive for empty quotes or unmatchable boundary words", () => {
+    expect(textFragmentFor("")).toBeNull();
+    expect(textFragmentFor(" \n\t ")).toBeNull();
+    const huge = "y".repeat(TEXT_FRAGMENT_MAX_WORD + 1);
+    expect(textFragmentFor(`${huge} short`)).toBeNull();
+    expect(textFragmentFor(`short ${huge}`)).toBeNull();
+    expect(textFragmentFor("y".repeat(TEXT_FRAGMENT_MAX_WORD))).not.toBeNull();
   });
 });
 
