@@ -37,7 +37,11 @@ export const SearchEntry: Component<{
         <input
           name="q"
           aria-label="Search"
-          placeholder="Search projects, knowledge and sessions…"
+          placeholder={
+            props.searchProjectId
+              ? "Search this project's memory…"
+              : "Pick a project to search"
+          }
           class="hidden min-w-0 flex-1 bg-transparent px-3 outline-none md:block"
         />
         <button
@@ -47,9 +51,6 @@ export const SearchEntry: Component<{
           class="size-8 md:hidden"
         >
           ⌕
-        </button>
-        <button type="submit" class="hidden px-3 text-left md:block">
-          Search memory…
         </button>
       </form>
       <Dialog open={open()} onOpenChange={setOpen}>

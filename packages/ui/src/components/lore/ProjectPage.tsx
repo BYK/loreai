@@ -3,7 +3,7 @@ import { For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
 import type { ProjectSummary } from "~/contracts";
-import { formatWhen } from "~/lib/format";
+import { formatWhen, pluralize } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import {
   projectHref,
@@ -54,6 +54,10 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
     return undefined;
   };
   const recent = () => sessions.loader.data()?.items.slice(0, 5) ?? [];
+  const humanizeState = (state: string) =>
+    state
+      .replace(/_/g, " ")
+      .replace(/^./, (character) => character.toUpperCase());
   return (
     <div class="mx-auto max-w-[940px] px-5 py-7 sm:px-7.5">
       <DocHeader
@@ -107,7 +111,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
           <span>{props.project.knowledge_count} knowledge</span>
           <span>{props.project.session_count} sessions</span>
-          <span>{props.project.message_count} messages</span>
+          <span>{pluralize(props.project.message_count, "message")}</span>
           <span>{props.project.distillation_count} distillations</span>
         </div>
         <div class="mt-2 text-xs text-muted">
@@ -131,8 +135,9 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         >
           {(status) => (
             <div class="text-sm">
-              {status().state} · {status().team?.name ?? "No team"} ·{" "}
-              {status().policy.effective} policy
+              {humanizeState(status().state)} ·{" "}
+              {status().team?.name ?? "No team"} · policy:{" "}
+              {status().policy.effective}
             </div>
           )}
         </Show>
@@ -160,7 +165,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
                 <ListRow
                   href={sessionHref(props.project.id, session.session_id)}
                   title={session.session_id}
-                  preview={`${session.message_count} messages · ${session.distilled_count} distilled`}
+                  preview={`${pluralize(session.message_count, "message")} · ${session.distilled_count} distilled`}
                   footRight={formatWhen(session.last_message_at)}
                 />
               )}
@@ -169,7 +174,6 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
         </Switch>
       </section>
       <section class="py-5">
-        <p class="mb-3 text-sm text-muted">Select an entry to inspect it.</p>
         <div class="mb-3 flex items-center justify-between">
           <div class="eyebrow">Knowledge</div>
           <A

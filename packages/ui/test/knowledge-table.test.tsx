@@ -73,8 +73,16 @@ describe("KnowledgeTable", () => {
       screen.getByRole("textbox", { name: "Knowledge search" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /Sort updated_desc/ }),
+      screen.getByRole("button", { name: "Sort Updated" }),
     ).toBeInTheDocument();
+  });
+
+  it("renders human sort labels while preserving server values", () => {
+    mount([entry], { ...defaultQuery, sort: "title_asc" });
+    expect(
+      screen.getByRole("button", { name: "Sort Title A–Z" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("title_asc")).toBeNull();
   });
 
   it("keeps malicious markup inert", () => {
@@ -123,12 +131,19 @@ describe("KnowledgeTable", () => {
   });
 
   it("supports keyboard row focus", () => {
-    mount();
-    const row = screen.getByTestId("knowledge-row");
-    fireEvent.keyDown(row, { key: "ArrowDown" });
-    fireEvent.keyDown(row, { key: "ArrowUp" });
-    fireEvent.keyDown(row, { key: "Enter" });
-    expect(row).toBeInTheDocument();
+    const second = { ...entry, id: "k-2", title: "Second row" };
+    mount([entry, second]);
+    const rows = screen.getAllByTestId("knowledge-row");
+    const first = rows[0];
+    const next = rows[1];
+    if (!first || !next) throw new Error("Expected two knowledge rows");
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(next);
+    fireEvent.keyDown(next, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: "Enter" });
+    expect(first).toBeInTheDocument();
   });
 
   it("keeps the search form available for cursor-reset navigation", () => {

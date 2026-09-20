@@ -33,6 +33,12 @@ import { TextField, TextFieldInput } from "../ui/text-field";
 export const prevCursorOf = new Map<string, string | null>();
 const features = tableFeatures({});
 const helper = createColumnHelper<typeof features, KnowledgeEntry>();
+const SORT_LABELS: Record<KnowledgeQuery["sort"], string> = {
+  updated_desc: "Updated",
+  created_desc: "Created",
+  confidence_desc: "Confidence",
+  title_asc: "Title A–Z",
+};
 
 export const KnowledgeTable: Component<{
   projectId: string;
@@ -53,11 +59,18 @@ export const KnowledgeTable: Component<{
 }> = (props) => {
   const navigate = useNavigate();
   const [active, setActive] = createSignal(0);
+  let tableRef: HTMLTableElement | undefined;
   const page = () => props.page.loader.data();
   const rows = () => page()?.items ?? [];
   createEffect(() => {
     const next = page()?.next_cursor;
     if (next !== undefined) prevCursorOf.set(next ?? "", props.query.cursor);
+  });
+  createEffect(() => {
+    active();
+    const table = tableRef;
+    if (!table || !table.contains(document.activeElement)) return;
+    table.querySelector<HTMLTableRowElement>("tr[data-active]")?.focus();
   });
   const go = (query: KnowledgeQuery) =>
     navigate(knowledgeListHref(props.projectId, query));
@@ -157,12 +170,16 @@ export const KnowledgeTable: Component<{
             "title_asc",
           ]}
           itemComponent={(item) => (
-            <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
+            <SelectItem item={item.item}>
+              {SORT_LABELS[item.item.rawValue]}
+            </SelectItem>
           )}
         >
           <SelectTrigger aria-label="Sort" class="h-9 min-w-32 text-xs">
             <SelectValue<string>>
-              {(state) => state.selectedOption()}
+              {(state) =>
+                SORT_LABELS[state.selectedOption() as KnowledgeQuery["sort"]]
+              }
             </SelectValue>
           </SelectTrigger>
           <SelectContent />
@@ -210,7 +227,12 @@ export const KnowledgeTable: Component<{
           />
         </Match>
         <Match when={page()}>
-          <table class="w-full table-fixed text-left text-xs">
+          <table
+            ref={(element) => {
+              tableRef = element;
+            }}
+            class="w-full table-fixed text-left text-xs"
+          >
             <caption class="mb-2 text-left text-[11px] text-muted">
               Sorted on the server · page of up to 50
             </caption>

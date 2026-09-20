@@ -117,7 +117,11 @@ describe("ProjectPage", () => {
         />
       </MemoryRouter>
     ));
-    expect(await screen.findByText(/not_linked/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Not linked · No team · policy: manual/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("0 messages")).toBeInTheDocument();
+    expect(screen.queryByText("Select an entry to inspect it.")).toBeNull();
   });
 
   it("shows recent sessions navigation", () => {
