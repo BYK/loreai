@@ -131,7 +131,7 @@ import {
   requestTargetsOpenRouter,
   ZERO_USAGE,
 } from "./translate/types";
-import type { GatewayConfig } from "./config";
+import { GEMINI_DEFAULT_UPSTREAM, type GatewayConfig } from "./config";
 import {
   getProjectPath,
   extractGitRemoteHeader,
@@ -635,9 +635,6 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
  * output on user messages for commit indicators. Used to trigger curation at
  * commit boundaries — natural checkpoints where decisions crystallize.
  */
-/** Default upstream origin for native Gemini (Generative Language API). */
-const GEMINI_DEFAULT_UPSTREAM = "https://generativelanguage.googleapis.com";
-
 const GIT_COMMIT_RE = /\bgit\s+commit\b/i;
 function containsGitCommit(req: GatewayRequest): boolean {
   for (const msg of req.messages) {

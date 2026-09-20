@@ -32,6 +32,8 @@ export const DEFAULT_PORT = DEFAULT_PORTS[0];
 /** Match the existing owner-control token bounds used by gateway pid records. */
 export const GATEWAY_AUTH_TOKEN_MIN_LENGTH = 32;
 export const GATEWAY_AUTH_TOKEN_MAX_LENGTH = 256;
+export const GEMINI_DEFAULT_UPSTREAM =
+  "https://generativelanguage.googleapis.com";
 
 // ---------------------------------------------------------------------------
 // Config shape
