@@ -91,11 +91,13 @@ test.describe("real data browsing", () => {
     );
   });
 
-  test("search entry is a UI-04 placeholder", async ({ page }) => {
+  test("search entry asks for a project on the workspace home", async ({
+    page,
+  }) => {
     await page.goto("/ui");
     await page.getByTestId("search-entry").click();
     await expect(page.getByRole("dialog")).toContainText(
-      "Search arrives in UI-04",
+      "Pick a project first — recall is scoped to a project",
     );
   });
 

@@ -13,8 +13,12 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | Route | What |
 |---|---|
 | `/ui` | Workspace: project navigation + "choose a project" document |
-| `/ui/projects/:projectId` | Knowledge list for a project (list pane) |
+| `/ui/projects/:projectId` | Project identity, health, recent sessions and knowledge list |
+| `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
+| `/ui/projects/:projectId/sessions` | Cursor-paged sessions for a project |
+| `/ui/projects/:projectId/sessions/:sessionId` | UI-06 session-reader placeholder |
+| `/ui/projects/:projectId/search` | Scoped recall results with expansion disabled |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
 | `/ui/fixture` (`?view=focus`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state |
 | `/ui/_compat` | **Dev/test only** — UI-01 compatibility smoke page |

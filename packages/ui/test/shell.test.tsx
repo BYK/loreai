@@ -504,11 +504,11 @@ describe("shell: empty, error, not-found and locked states", () => {
 });
 
 describe("shell: search entry, theme and fixture", () => {
-  it("explains that search arrives in UI-04 instead of accepting a query", async () => {
+  it("asks for a project before accepting a search query", async () => {
     mount("/", fakeClient());
     fireEvent.click(screen.getByTestId("search-entry"));
     expect(await screen.findByRole("dialog")).toHaveTextContent(
-      "Search arrives in UI-04",
+      "Pick a project first — recall is scoped to a project",
     );
     expect(screen.queryByRole("searchbox")).toBeNull();
   });
