@@ -340,32 +340,21 @@ export function listSessionMessagesPage(
 ): SessionMessagePage {
   const pid = ensureProject(projectPath);
   const limit = Math.max(1, Math.floor(options.limit));
-  const where = options.before
-    ? `AND (created_at < ? OR (created_at = ? AND id < ?))`
-    : "";
-  const params: ReadParam[] = [pid, sessionId];
-  if (options.before) {
-    params.push(
-      options.before.created_at,
-      options.before.created_at,
-      options.before.id,
-    );
-  }
-  const rows = db()
-    .query(
-      `SELECT * FROM temporal_messages
-       WHERE project_id = ? AND session_id = ? ${where}
+  const before = options.before
+    ? sql`AND (created_at < ${options.before.created_at} OR (created_at = ${options.before.created_at} AND id < ${options.before.id}))`
+    : sql.empty;
+  const rows = sql.all<TemporalMessage>(
+    db(),
+    sql`SELECT * FROM temporal_messages
+       WHERE project_id = ${pid} AND session_id = ${sessionId} ${before}
        ORDER BY created_at DESC, id DESC
-       LIMIT ?`,
-    )
-    .all(...params, limit + 1) as TemporalMessage[];
-  const total = (
-    db()
-      .query(
-        "SELECT COUNT(*) AS n FROM temporal_messages WHERE project_id = ? AND session_id = ?",
-      )
-      .get(pid, sessionId) as { n: number }
-  ).n;
+       LIMIT ${limit + 1}`,
+  );
+  const total =
+    sql.get<{ n: number }>(
+      db(),
+      sql`SELECT COUNT(*) AS n FROM temporal_messages WHERE project_id = ${pid} AND session_id = ${sessionId}`,
+    )?.n ?? 0;
 
   const hasMore = rows.length > limit;
   const newestFirst = hasMore ? rows.slice(0, limit) : rows;
