@@ -78,12 +78,6 @@ function finishCapture(capture: TopLevelCapture): unknown {
   return capture.value;
 }
 
-function normaliseSyncBody(raw: unknown): unknown {
-  return raw !== null && typeof raw === "object" && !Array.isArray(raw)
-    ? raw
-    : {};
-}
-
 async function parseStreamedRequestInternal<M>(
   chunks: AsyncIterable<Uint8Array>,
   spec: StreamingRequestSpec<M>,
@@ -315,7 +309,7 @@ export async function parseStreamedRequest<M>(
       const next = await iterator.next();
       if (next.done) {
         const raw = JSON.parse(Buffer.concat(spool, total).toString("utf8"));
-        return spec.parseSync(normaliseSyncBody(raw));
+        return spec.parseSync(raw);
       }
       total += next.value.byteLength;
       spool.push(next.value);

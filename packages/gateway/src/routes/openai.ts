@@ -29,8 +29,8 @@ export async function handleOpenAIChatCompletions(
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
-  } catch {
-    return invalidStreamedBody();
+  } catch (e) {
+    return invalidStreamedBody(e);
   }
   return runPipeline(gatewayReq, config);
 }

@@ -37,9 +37,34 @@ describe("streaming request parsers", () => {
       system: "system",
       messages: [
         { role: "user", content: "x".repeat(STREAMING_PARSE_SPOOL_BYTES) },
-        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call-1", name: "lookup", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call-1",
+              content: [{ type: "text", text: "ok" }],
+            },
+          ],
+        },
       ],
+      tools: [
+        {
+          name: "lookup",
+          description: "Look up a value",
+          input_schema: { type: "object" },
+        },
+      ],
+      stream: true,
       max_tokens: 100,
+      metadata: { user_id: "u1" },
+      temperature: 0.3,
     };
     await expect(
       parseAnthropicRequestChunks(chunks(encoded(body)), headers),
@@ -58,7 +83,7 @@ describe("streaming request parsers", () => {
       model: "gpt",
       messages: [
         { role: "system", content: "one" },
-        { role: "user", content: "question" },
+        { role: "user", content: "x".repeat(STREAMING_PARSE_SPOOL_BYTES) },
         {
           role: "assistant",
           content: null,
@@ -79,6 +104,19 @@ describe("streaming request parsers", () => {
         { role: "tool", tool_call_id: "b", content: "B" },
         { role: "developer", content: "two" },
       ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "a",
+            description: "Call a",
+            parameters: { type: "object" },
+          },
+        },
+      ],
+      stream: true,
+      stream_options: { include_usage: true },
+      provider: { order: ["openai"] },
     };
     await expect(
       parseOpenAIRequestChunks(chunks(encoded(body)), headers),
@@ -92,10 +130,45 @@ describe("streaming request parsers", () => {
           role: "user",
           parts: [{ text: "x".repeat(STREAMING_PARSE_SPOOL_BYTES) }],
         },
-        { role: "model", parts: [{ text: "ok" }] },
+        {
+          role: "model",
+          parts: [
+            {
+              functionCall: {
+                name: "lookup",
+                args: { query: "value" },
+              },
+            },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                name: "lookup",
+                response: { value: "ok" },
+              },
+            },
+          ],
+        },
       ],
       systemInstruction: { parts: [{ text: "system" }] },
-      generationConfig: { maxOutputTokens: 10 },
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: "lookup",
+              description: "Look up a value",
+              parameters: { type: "object" },
+            },
+          ],
+        },
+      ],
+      generationConfig: { maxOutputTokens: 10, temperature: 0.2 },
+      safetySettings: [
+        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+      ],
     };
     const compressed = gzipSync(encoded(body));
     const request = new Request("http://gateway.test", {
@@ -116,18 +189,25 @@ describe("streaming request parsers", () => {
   });
 
   test("duplicate stream keys use the final array", async () => {
-    const body = `{"model":"gpt","messages":[{"role":"user","content":"discard"}],"messages":[{"role":"user","content":"keep"}]}`;
+    const body = `{"model":"gpt","messages":[{"role":"user","content":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}],"messages":"nope"}`;
     await expect(
       parseOpenAIRequestChunks(chunks(Buffer.from(body)), headers),
     ).resolves.toEqual(
       parseOpenAIRequest(
         {
           model: "gpt",
-          messages: [{ role: "user", content: "keep" }],
+          messages: "nope",
         },
         headers,
       ),
     );
+  });
+
+  test("duplicate non-array stream keys can precede the final array", async () => {
+    const body = `{"model":"gpt","messages":"nope","messages":[{"role":"user","content":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}]}`;
+    await expect(
+      parseOpenAIRequestChunks(chunks(Buffer.from(body)), headers),
+    ).resolves.toEqual(parseOpenAIRequest(JSON.parse(body), headers));
   });
 
   test("non-array stream values are retained by sync parity", async () => {
@@ -152,9 +232,10 @@ describe("streaming request parsers", () => {
   test.each([
     `{"model":"gpt","messages":[{"role":"user","content":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}]} null`,
     ` \t\uFEFF{"model":"gpt","messages":[{"role":"user","content":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}]}`,
+    `{"model":"gpt","messages":[{"role":"user","content":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"}]`,
   ])("rejects malformed streamed JSON: %s", async (body) => {
     await expect(
-      parseOpenAIRequestChunks(chunks(Buffer.from(body)), headers),
+      parseAnthropicRequestChunks(chunks(Buffer.from(body)), headers),
     ).rejects.toThrow("Invalid JSON body");
   });
 });
@@ -176,7 +257,7 @@ describe("streaming route malformed-body responses", () => {
     const response = await harness.request(path, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
-      body: "{ invalid",
+      body: `{"padding":"${"x".repeat(STREAMING_PARSE_SPOOL_BYTES)}"} null`,
     });
     expect(response.status).toBe(400);
     expect(response.headers.get("connection")).toBe("close");
