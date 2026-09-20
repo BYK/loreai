@@ -264,7 +264,7 @@ jobs:
       - name: Merge shard reports
         run: |
           ls -la .vitest-reports
-          test "$(ls .vitest-reports/blob-*.json | wc -l)" -eq 4
+          test "$(find .vitest-reports -maxdepth 1 -name 'blob-*.json' | wc -l)" -eq 4
           pnpm exec vitest run --merge-reports --coverage.enabled --coverage.reporter=text-summary --coverage.reporter=lcov
 
       # Uses Sentry's fork with the standard GITHUB_TOKEN (no CODECOV_TOKEN
