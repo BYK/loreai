@@ -16,7 +16,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId` | Knowledge list for a project (list pane) |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
-| `/ui/fixture` (`?view=focus`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state |
+| `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the UI-06a block model and renderer |
 | `/ui/_compat` | **Dev/test only** — UI-01 compatibility smoke page |
 
 Dev/test-only routes are mounted when `import.meta.env.DEV` is set (Vite dev
@@ -56,6 +56,9 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
+| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokens → HTML, raw HTML escaped; only used inside `src/lib/safe-html.ts` (UI-06a) |
+| HTML sanitiser | `dompurify` | 3.4.15 | 2026-09-06 | explicit tag/attribute allowlist + link policy hook; only used inside `src/lib/safe-html.ts` |
+| Code highlighting | `highlight.js` | 11.12.0 | 2026-08-12 | `lib/core` + 14 registered grammars, no auto-detect; regex-based, no `eval`, so `script-src 'self'` holds |
 | Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
 
 ### Schema library (UI-03 decision)
@@ -399,11 +402,161 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a)) | root `pnpm test`, regular CI job |
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
 | Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). `fixture.spec.ts` covers a dev-only screen, so its `dev-*` projects run against a Vite dev server (`LORE_E2E_DEV_PORT`, default 5174) proxying `/api` to that same seeded gateway. Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+
+## Session reader (UI-06)
+
+The session reader is a **document**, not a chat feed: history is a list of
+addressable blocks the reader can select, link to and (in P3/P4) annotate or
+continue from. UI-06a (#1801, #1508) ships the model and rendering; the
+virtualised route, selection and deep links follow in UI-06b; the busy
+fixture, in-session search and coverage labels in UI-06c.
+
+### Block model (`src/reader/blocks.ts`)
+
+`buildBlocks(sessionDetail)` turns the `GET /api/v1/sessions/:id` body into
+`ReaderBlock`s without inventing anything the server did not send:
+
+| Block | Id | Source |
+|---|---|---|
+| `MessageBlock` | `m.<temporal message id>` | one `temporal_messages` row |
+| `DistillationBlock` | `d.<distillation id>` | one distillation summary |
+
+Ids derive from **server ids only** — never from array position — so they
+are stable across reloads, paging and virtualisation. Duplicate ids from
+overlapping pages collapse to the first occurrence.
+
+A message's `content` is split on core's chunk separator (`"\n\x1f"`) into
+**parts** — `text`, `reasoning` (`[reasoning] …`) or `tool` (`[tool:<name>] …`,
+name bounded to 200 non-space characters). Each part carries `index`, `kind`,
+`tool` and `hash` (`contentHash(text)`). Empty content is one empty text
+part, so every block has at least one part.
+
+`origin` labels who produced the block: `user`, `agent`, `lore` (metadata
+`synthetic: true`, `lore: true` or `agent: "lore"`), `system` (role
+`system`) or `unknown` (any other stored role, shown with an "unrecognised
+role" badge and the raw role). Lore-injected messages and the system prompt
+render with their own badge and tint (#1508). Metadata is parsed
+defensively: malformed JSON yields an empty `MessageMeta`, never a crash.
+
+`createdAt` is `null` unless the server sent a finite positive epoch;
+`BlockTime` then renders the literal text **time unknown** — timestamps and
+ids are never manufactured.
+
+Distillations are kept in a **separate** list (`blocks.distillations`,
+ordered by generation, time, id) and render as an `<aside>` labelled
+"Compressed context — Lore's summary of the surrounding messages, not what
+anyone said". The compressed text itself is shown only on demand (a
+`<details>`, loaded through `GET /api/v1/distillations/:id`), as plain
+escaped text. They are never interleaved as speech.
+
+### Source anchors (`src/reader/anchors.ts`)
+
+```ts
+interface SourceAnchor {
+  blockId: string;      // m.<id> | d.<id>
+  partIndex?: number;   // omitted = whole block
+  start: number;        // offsets into the part's *displayed text*
+  end: number;
+  contentHash: string;  // part hash (or whole-block hash)
+}
+```
+
+Anchors are **logical**, not DOM positions: offsets index the `text` of the
+sanitised render (`RenderedHtml.text === element.textContent`), so they
+survive virtualisation (the element need not be mounted), re-rendering and
+streaming. Wire form (`encodeAnchor` / `decodeAnchor`):
+`<mapping>~<blockId>~<partIndex|''>~<start>~<end>~<hash>` — URL-safe without
+percent-encoding, bounded (`MAX_ANCHOR_OFFSET`), strictly validated;
+anything malformed decodes to `null`.
+
+`resolveAnchor(decoded, block, displayedText)` answers honestly:
+
+| Result | Meaning |
+|---|---|
+| `ok` + `quote` | same block, same part, same content hash, span inside the text |
+| `changed` (`hash`) | the passage's source text differs from when the link was made |
+| `changed` (`range`) | hash matches but the span runs past the text (a forged or truncated link) |
+| `changed` (`mapping`) | the link was made with an older offset mapping version |
+| `missing` (`block` / `part`) | the block or part is not in the loaded history |
+
+There is **no** text-similarity fallback: a changed source is reported as
+changed, never silently re-anchored. `contentHash` is `cyrb53` in base-36
+(`src/lib/hash.ts`) — fast, deterministic, pinned by tests; it detects
+edits, it is not a security primitive.
+
+**Standard text fragments.** `textFragmentFor(quote)` produces the
+[WICG scroll-to-text](https://wicg.github.io/scroll-to-text-fragment/)
+fragment directive (`:~:text=textStart[,textEnd]`, both terms
+percent-encoded including the directive's own `-` and `,` delimiters;
+quotes longer than `TEXT_FRAGMENT_BUDGET` = 96 characters become a
+whole-word `textStart,textEnd` range) so a copied passage link also works as
+a plain text fragment in browsers that implement it (Chromium, Safari 16.1+,
+Firefox 131+ — <https://caniuse.com/url-scroll-to-text-fragment>). It is a
+*hint*, not the anchor: a text fragment has no block identity or revision
+(a repeated phrase matches its first occurrence; an edited passage silently
+matches nothing), the browser strips the directive before scripts see the
+URL (`location.hash` never contains it), and it is applied only on a full
+page load. `?a=` therefore stays the authoritative, verified anchor; the
+directive is appended to the copied link (UI-06b's `deepLinkFor`) and
+never read back.
+
+### Safe rendering (`src/lib/safe-html.ts`)
+
+The single boundary between transcript text and the DOM; `RichText` in
+`components/reader/SessionBlock.tsx` is the only `innerHTML` sink in the app
+and accepts only a `RenderedHtml` from this module.
+
+Pipeline: strip bidi controls (U+202A–U+202E, U+2066–U+2069) → `marked`
+(GFM; raw HTML **escaped** and shown as text; images rendered as
+`[image: alt]` + an ordinary link, never fetched; checkboxes as text) →
+`highlight.js` for fences whose info string resolves to a registered grammar
+(bash, css, diff, go, javascript, json, markdown, python, rust, shell, sql,
+typescript, xml, yaml + common aliases; unknown languages are escaped) →
+`DOMPurify` with an explicit allowlist (`p br hr strong em del code pre
+blockquote ul ol li h1–h6 a span table thead tbody tr th td`; attributes
+`href title class start align`; `class` values restricted to `hljs*`, highlight.js sub-scopes (`function_`, `class_`),
+`language-*`, `md-image`, `md-checkbox`) → link policy: only `http:`,
+`https:` and `mailto:` keep their `href`, and get `rel="noopener
+noreferrer"`, `target="_blank"` and a `data-external` marker (CSS draws the
+↗ indicator). Everything else (`javascript:`, `data:`, `vbscript:`,
+relative, fragment) becomes inert text.
+
+Parts over `MAX_MARKDOWN_CHARS` (200 000) skip Markdown and render as
+escaped plain text (`plain: true`); tool output and reasoning always render
+plain. All three libraries are regex/DOM based — no `eval`, no `Function` —
+so the gateway's CSP (`script-src 'self'`) is unchanged.
+
+`src/reader/render.ts` caches rendered output per `blockId#partIndex#hash`
+in an LRU of `RENDER_CACHE_LIMIT` (2000) entries; a content change is a
+different key, so stale HTML is never served for edited text.
+
+**Bundle impact.** The engines initialise lazily and the only screen that
+renders blocks so far is the dev-only fixture (loaded with `lazy()`), so the
+shipped product entry is unchanged by UI-06a: `index-*.js` 386.00 kB /
+121.88 kB gzip before and after; CSS +2.73 kB (+0.70 kB gzip) for the
+Markdown/code/highlight styles. Statically linking the engines into the
+entry measured +144 kB / +47.6 kB gzip (marked ≈ 44 kB, dompurify ≈ 133 kB,
+highlight.js core + 14 grammars ≈ 117 kB of source); UI-06b loads the
+reader route as its own chunk and records the real chunk size.
+
+### Tests (UI-06a)
+
+`test/reader-blocks.test.ts` (ids, parts, envelopes, metadata, origins,
+unknown time, overlap de-duplication, distillation ordering, real fixture),
+`test/reader-anchors.test.ts` (round-trip, URL safety, hostile decode
+battery, ok / changed / missing resolution, no re-anchoring),
+`test/safe-html.test.ts` (27-payload hostile battery — `<script>`, `onerror`,
+`javascript:`/`data:`/`vbscript:` links, `srcdoc`, SVG/MathML, `<base>`,
+`<meta>`, forms, `target=_top`, code-fence info-string injection, comments,
+bidi overrides, 200 kB and 2000-item blocks — plus link policy, image
+policy, class allowlist, text/DOM parity, cache keying and LRU eviction),
+`test/session-block.test.tsx` (roles, badges, time unknown, Lore/system
+labels, expandable tool/reasoning parts, distillation labelling).
 
 ## Baseline (before / after UI-02)
 
@@ -567,9 +720,11 @@ packages/ui/
   src/components/shell/   Shell, AppBar, Nav, SearchEntry
   src/components/shell/Logo.tsx  theme-aware Lore logo (copied website SVGs in src/assets/logo)
   src/components/lore/    document primitives (Document.tsx), KnowledgeDocument, Panes, StateCard, FutureAction, Avatar
+  src/components/reader/  SessionBlock.tsx — message / part / distillation rendering (the only innerHTML sink)
+  src/reader/             blocks.ts (block model), anchors.ts (source anchors), render.ts (per-part LRU), specimen.ts (dev fixture data)
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
-  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts
+  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts, hash.ts, safe-html.ts (Markdown/code sanitising boundary)
   src/contracts/          ArkType response contracts (relative imports only) + ContractError
   src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
   src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status
