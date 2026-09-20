@@ -1,7 +1,11 @@
 /** `GET /v1/models` — passthrough to the upstream model list. */
-import { extraHeadersForUpstream, type GatewayConfig } from "../config";
+import {
+  extraHeadersForUpstream,
+  GEMINI_DEFAULT_UPSTREAM,
+  type GatewayConfig,
+} from "../config";
 import { applyUpstreamExtraHeaders } from "../translate/types";
-import { copyProviderAuthHeaders } from "../auth";
+import { copyProviderAuthHeaders, hasConflictingAuthHeaders } from "../auth";
 import { createForegroundAbortScope, wrapBodyWithCleanup } from "../pipeline";
 import { upstreamFetch } from "../fetch";
 import { responseAgainstAbort } from "../abort-race";
@@ -12,31 +16,70 @@ import {
 } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
 
-// NOTE: This endpoint only supports the Anthropic upstream. OpenAI clients
-// calling GET /v1/models will have their request forwarded to Anthropic,
-// which will likely reject the OpenAI API key. A proper fix would route
-// based on auth header type, but that's a separate enhancement.
+/** Select the models upstream from the request's credential shape. */
+export type ModelsUpstreamProvider = "anthropic" | "openai" | "gemini";
+
+export interface ModelsUpstream {
+  provider: ModelsUpstreamProvider;
+  url: string;
+}
+
+export function selectModelsUpstream(
+  headers: Record<string, string>,
+  config: Pick<GatewayConfig, "upstreamAnthropic" | "upstreamOpenAI">,
+): ModelsUpstream {
+  if (hasConflictingAuthHeaders(headers)) {
+    return {
+      provider: "anthropic",
+      url: `${config.upstreamAnthropic}/v1/models`,
+    };
+  }
+  if ("x-api-key" in headers || "anthropic-version" in headers) {
+    return {
+      provider: "anthropic",
+      url: `${config.upstreamAnthropic}/v1/models`,
+    };
+  }
+  if ("x-goog-api-key" in headers) {
+    return {
+      provider: "gemini",
+      url: `${GEMINI_DEFAULT_UPSTREAM}/v1beta/models`,
+    };
+  }
+  if (/^Bearer\s+\S+$/i.test(headers.authorization ?? "")) {
+    return {
+      provider: "openai",
+      url: `${config.upstreamOpenAI}/v1/models`,
+    };
+  }
+  return {
+    provider: "anthropic",
+    url: `${config.upstreamAnthropic}/v1/models`,
+  };
+}
+
 export async function handleModelsPassthrough(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
   const abortScope = createForegroundAbortScope(req.signal);
   try {
+    const requestHeaders = headersToRecord(req.headers);
+    const modelsUpstream = selectModelsUpstream(requestHeaders, config);
     // Forward auth headers from the original request so upstream
     // providers that require authentication don't reject with 401.
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
-    Object.assign(
-      headers,
-      copyProviderAuthHeaders(headersToRecord(req.headers)),
-    );
+    Object.assign(headers, copyProviderAuthHeaders(requestHeaders));
     // Anthropic requires the version header
-    const anthropicVersion = req.headers.get("anthropic-version");
-    if (anthropicVersion) headers["anthropic-version"] = anthropicVersion;
+    const anthropicVersion = requestHeaders["anthropic-version"];
+    if (modelsUpstream.provider === "anthropic" && anthropicVersion) {
+      headers["anthropic-version"] = anthropicVersion;
+    }
     // Apply administrator credentials as one auth overlay: if configured auth
     // is present it replaces every client auth variant rather than competing.
-    const upstreamUrl = `${config.upstreamAnthropic}/v1/models`;
+    const upstreamUrl = modelsUpstream.url;
     applyUpstreamExtraHeaders(
       headers,
       extraHeadersForUpstream(config, upstreamUrl),
