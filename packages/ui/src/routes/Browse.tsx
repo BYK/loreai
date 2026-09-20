@@ -338,9 +338,6 @@ export const Browse: Component<{
       detail={detailView()}
       mobilePane={mobilePane()}
       back={back()}
-      mobileTitle={
-        props.view === "entry" ? entry.loader.data()?.title : label()
-      }
       searchProjectId={projectId()}
     />
   );

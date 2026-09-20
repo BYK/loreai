@@ -16,7 +16,7 @@ import markDark from "~/assets/logo/loreai-dark.svg";
  */
 export const Logo: Component<{
   size?: number;
-  wordmark?: boolean;
+  wordmark?: boolean | "sm";
   class?: string;
 }> = (props) => {
   const t = theme();
@@ -37,7 +37,10 @@ export const Logo: Component<{
       />
       <span
         class="font-serif text-[22px] italic text-heading"
-        classList={{ "sr-only": props.wordmark === false }}
+        classList={{
+          "sr-only": props.wordmark === false,
+          "hidden sm:inline": props.wordmark === "sm",
+        }}
       >
         Lore<span class="text-accent">.</span>AI
       </span>

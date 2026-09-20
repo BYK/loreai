@@ -186,7 +186,6 @@ export const Session: Component = () => {
           ? { href: projectHref(projectId()!), label: projectLabel() }
           : undefined
       }
-      mobileTitle={`Session ${sessionId() ?? ""}`}
     />
   );
 };
