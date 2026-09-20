@@ -45,9 +45,21 @@ export function renderPart(block: MessageBlock, part: BlockPart): RenderedHtml {
   return remember(key, rendered);
 }
 
+/**
+ * Displayed text is kept per part object, outside the HTML LRU: in-session
+ * search walks every loaded part, and a session larger than the LRU would
+ * otherwise re-parse all of it on every scan. Parts are immutable and
+ * replaced with their block, so the entry dies with the part.
+ */
+const textCache = new WeakMap<BlockPart, string>();
+
 /** Displayed text of a part — the coordinate space of anchors into it. */
 export function displayedText(block: MessageBlock, part: BlockPart): string {
-  return renderPart(block, part).text;
+  const cached = textCache.get(part);
+  if (cached !== undefined) return cached;
+  const text = renderPart(block, part).text;
+  textCache.set(part, text);
+  return text;
 }
 
 export function renderCacheSize(): number {

@@ -28,7 +28,11 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { renderPart } from "~/reader/render";
-import { applyHighlight, clearHighlight } from "~/reader/selection";
+import {
+  type HighlightSpan,
+  applyHighlights,
+  clearHighlight,
+} from "~/reader/selection";
 
 export const TIME_UNKNOWN = "time unknown";
 
@@ -42,8 +46,18 @@ export interface PassageHighlight {
 
 export interface HighlightController {
   highlight: Accessor<PassageHighlight | null>;
+  /** The current in-session search hit; marked independently of the passage. */
+  searchHit?: Accessor<PassageHighlight | null>;
   /** Called with the first `<mark>` each time a highlight is (re)applied. */
   onApplied?: (mark: HTMLElement, highlight: PassageHighlight) => void;
+}
+
+function addresses(
+  h: PassageHighlight | null | undefined,
+  block: string,
+  part: number,
+): h is PassageHighlight {
+  return !!h && h.blockId === block && h.partIndex === part;
 }
 
 /**
@@ -93,14 +107,31 @@ export const RichText: Component<{
     // Re-run when the HTML is replaced (Solid resets innerHTML first) or
     // the highlight moves.
     void props.rendered.html;
+    const hit = controller.searchHit?.();
     const h = controller.highlight();
     if (!el) return;
-    if (!h || h.blockId !== props.block || h.partIndex !== props.part) {
+    const wanted: { span: HighlightSpan; source: PassageHighlight }[] = [];
+    if (addresses(h, props.block, props.part))
+      wanted.push({
+        span: { start: h.start, end: h.end, className: "passage-target" },
+        source: h,
+      });
+    if (addresses(hit, props.block, props.part))
+      wanted.push({
+        span: { start: hit.start, end: hit.end, className: "passage-search" },
+        source: hit,
+      });
+    if (wanted.length === 0) {
       clearHighlight(el);
       return;
     }
-    const mark = applyHighlight(el, h.start, h.end);
-    if (mark) controller.onApplied?.(mark, h);
+    const marks = applyHighlights(
+      el,
+      wanted.map((w) => w.span),
+    );
+    marks.forEach((mark, i) => {
+      if (mark) controller.onApplied?.(mark, wanted[i]!.source);
+    });
   });
   return (
     <div
@@ -192,12 +223,9 @@ export const PartView: Component<{
   const lines = () => props.part.text.split("\n").length;
   const controller = useContext(HighlightContext);
   // A highlighted tool/reasoning part must be visible to be highlighted.
-  const highlighted = () => {
-    const h = controller.highlight();
-    return (
-      !!h && h.blockId === props.block.id && h.partIndex === props.part.index
-    );
-  };
+  const highlighted = () =>
+    addresses(controller.highlight(), props.block.id, props.part.index) ||
+    addresses(controller.searchHit?.(), props.block.id, props.part.index);
   return (
     <Show
       when={props.part.kind !== "text"}

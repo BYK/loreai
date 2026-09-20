@@ -15,6 +15,10 @@
  *    history" (with older pages searched up to a bound), never a guess.
  *  - Copy-with-source is live; every discussion action is a labelled,
  *    disabled `FutureAction` until APP-02.
+ *  - In-session search (UI-06c) scans the logical rows in time-bounded
+ *    slices — mounted or not — and walks hits with a distinct mark; the
+ *    coverage declaration states what the view holds (captured / partial /
+ *    native transcript not available) from what the server reported.
  */
 import type { Component, JSX } from "solid-js";
 import {
@@ -38,18 +42,20 @@ import {
   FUTURE_ACTIONS,
   FutureActionRow,
 } from "~/components/lore/FutureAction";
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import type {
   DistillationDetail,
   DistillationSummary,
   TemporalMessage,
 } from "~/contracts";
-import { pluralize } from "~/lib/format";
 import { cn } from "~/lib/utils";
 import {
   type AnchorResolution,
   type DecodedAnchor,
   type SourceAnchor,
+  ANCHOR_MAPPING_VERSION,
+  anchorFor,
   blockAnchor,
   decodeAnchor,
   encodeAnchor,
@@ -62,8 +68,13 @@ import {
   buildBlocks,
   originLabel,
 } from "~/reader/blocks";
+import {
+  NATIVE_TRANSCRIPT_LABEL,
+  coverageDeclaration,
+} from "~/reader/coverage";
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows } from "~/reader/rows";
+import { type SearchHit, queryMatcher, searchRows } from "~/reader/search";
 import {
   anchorForReading,
   deepLinkFor,
@@ -84,6 +95,11 @@ export const DEEP_LINK_SEARCH_PAGES = 10;
 /** Estimated row height before measurement (a short message). */
 export const ROW_ESTIMATE = 120;
 export const ROW_OVERSCAN = 6;
+/** Keystroke → search debounce, and re-scan debounce when rows change. */
+export const SEARCH_DEBOUNCE_MS = 150;
+/** Main-thread time one search slice may take before yielding. */
+export const SEARCH_SLICE_MS = 12;
+const SEARCH_STEP_ROWS = 40;
 
 export interface SessionViewProps {
   sessionId: string;
@@ -125,6 +141,23 @@ type DistillationState = {
   detail?: DistillationDetail;
   loading: boolean;
   error: string | null;
+};
+
+export interface SearchState {
+  query: string;
+  hits: SearchHit[];
+  /** Rows scanned so far; equals `total` once the scan is complete. */
+  scanned: number;
+  total: number;
+  done: boolean;
+}
+
+const SEARCH_IDLE: SearchState = {
+  query: "",
+  hits: [],
+  scanned: 0,
+  total: 0,
+  done: true,
 };
 
 const SELECTION_HINT: Record<"parts" | "outside", string> = {
@@ -188,34 +221,76 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   const rowIndex = createMemo(() => indexRows(rows()));
   const rowIndexOf = (blockId: string) => rowIndex().get(blockId) ?? -1;
   const [listOffset, setListOffset] = createSignal(0);
+  const [toolbarHeight, setToolbarHeight] = createSignal(0);
+  let toolbarEl: HTMLDivElement | undefined;
 
+  // A stable key function: measurements re-derive only when the count or a
+  // measured size changes, not on every content update.
+  const itemKey = (index: number) =>
+    untrack(rows)[index]?.key ?? `row-${index}`;
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLElement>({
     get count() {
       return rows().length;
     },
-    get getItemKey() {
-      const current = rows();
-      return (index: number) => current[index]?.key ?? `row-${index}`;
-    },
+    getItemKey: itemKey,
     get scrollMargin() {
       return listOffset();
+    },
+    // The sticky toolbar covers the top of the viewport.
+    get scrollPaddingStart() {
+      return toolbarHeight();
     },
     getScrollElement: () => scrollEl ?? null,
     estimateSize: () => ROW_ESTIMATE,
     overscan: ROW_OVERSCAN,
   });
 
-  // The header (and load-older control) scroll with the document, so the
-  // list starts below them; the virtualizer needs that offset.
+  // Rows are keyed by block id, not by virtual-item object: an update that
+  // touches one block re-renders that row alone, and the others keep their
+  // DOM (and measurements) while their positions shift.
+  const virtualKeys = createMemo(() =>
+    virtualizer.getVirtualItems().map((item) => String(item.key)),
+  );
+  const virtualByKey = createMemo(() => {
+    const map = new Map<string, { index: number; start: number }>();
+    for (const item of virtualizer.getVirtualItems()) {
+      map.set(String(item.key), { index: item.index, start: item.start });
+    }
+    return map;
+  });
+
+  // The header scrolls with the document and the toolbar sticks, so the
+  // list starts below them; the virtualizer needs that offset. Everything
+  // above the list is observed because banners and the empty state resize it.
   onMount(() => {
     const list = listEl;
-    if (!list) return;
-    const measure = () => setListOffset(list.offsetTop);
+    const scroll = scrollEl;
+    if (!list || !scroll) return;
+    const measure = () => {
+      setListOffset(list.offsetTop);
+      setToolbarHeight(toolbarEl?.offsetHeight ?? 0);
+    };
     measure();
+    createEffect(on(() => rows().length === 0, measure, { defer: true }));
     if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(measure);
-      ro.observe(list.parentElement ?? list);
-      onCleanup(() => ro.disconnect());
+      // Measuring inside the observer callback would move the rows while
+      // notifications are still being delivered; defer it to the next frame.
+      let frame: number | null = null;
+      const ro = new ResizeObserver(() => {
+        if (frame !== null) return;
+        frame = requestAnimationFrame(() => {
+          frame = null;
+          measure();
+        });
+      });
+      ro.observe(scroll);
+      for (const above of Array.from(scroll.children)) {
+        if (above !== list) ro.observe(above);
+      }
+      onCleanup(() => {
+        ro.disconnect();
+        if (frame !== null) cancelAnimationFrame(frame);
+      });
     }
   });
 
@@ -408,6 +483,46 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
   });
 
+  // A selection made here is re-verified as the loaded history changes: when
+  // the selected block's text no longer matches its anchor (a streamed edit,
+  // a refetched snapshot), the highlight is dropped and the change reported
+  // rather than re-anchored. When the block itself left the loaded window
+  // (a server page replacing a wider cached window) the bounded older-history
+  // search resumes for the anchor the URL still carries.
+  createEffect(
+    on(
+      blocks,
+      (current) => {
+        const s = untrack(selection);
+        if (!s || current.byId.size === 0) return;
+        if (untrack(linkState).kind === "searching") return;
+        const { resolution } = resolveLink({
+          anchor: s.anchor,
+          mapping: ANCHOR_MAPPING_VERSION,
+        });
+        if (resolution.status === "ok") return;
+        const linked = decodeAnchor(props.anchorParam);
+        if (
+          resolution.status === "missing" &&
+          resolution.reason === "block" &&
+          linked?.anchor.blockId === s.anchor.blockId
+        ) {
+          batch(() => {
+            scrollTarget = s.anchor.blockId;
+            setSelection(null);
+            setLinkState({ kind: "searching", pages: 0 });
+          });
+          return;
+        }
+        batch(() => {
+          setLinkState({ kind: "resolved", resolution });
+          setSelection(null);
+        });
+      },
+      { defer: true },
+    ),
+  );
+
   // -- older history -------------------------------------------------------
   async function loadOlder() {
     if (
@@ -422,6 +537,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       top: scrollEl.scrollTop,
       total: virtualizer.getTotalSize(),
       count: rows().length,
+      forLink: scrollTarget !== null,
     };
     setOlderInFlight(true);
     try {
@@ -433,6 +549,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
     const added = rows().length - before.count;
     if (added <= 0) return;
+    // A deep link that found its block in this page owns the scroll position.
+    if (before.forLink && scrollTarget === null) return;
     // The prepended rows are unmeasured, so they enter at the estimate; the
     // first-measure compensation in the virtualizer corrects the rest as
     // they scroll into view.
@@ -534,14 +652,196 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
   }
 
-  // -- header numbers ------------------------------------------------------
-  const loaded = () => blocks().messages.length;
-  const coverageLine = () => {
-    const total = props.messageCount;
-    if (total === null) return `${pluralize(loaded(), "message")} loaded`;
-    if (total === loaded()) return `${pluralize(total, "message")}`;
-    return `${loaded()} of ${pluralize(total, "captured message")} loaded`;
+  // -- in-session search ---------------------------------------------------
+  const [query, setQuery] = createSignal("");
+  const [search, setSearch] = createSignal<SearchState>(SEARCH_IDLE);
+  const [hitIndex, setHitIndex] = createSignal(-1);
+  const [searchHit, setSearchHit] = createSignal<PassageHighlight | null>(null);
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let rescanTimer: ReturnType<typeof setTimeout> | undefined;
+  let scanTimer: ReturnType<typeof setTimeout> | undefined;
+  let scanGeneration = 0;
+  onCleanup(() => {
+    clearTimeout(searchTimer);
+    clearTimeout(rescanTimer);
+    clearTimeout(scanTimer);
+  });
+
+  /** Scan every row for the query in slices, yielding between them. */
+  function startScan(q: string) {
+    const generation = ++scanGeneration;
+    clearTimeout(scanTimer);
+    const matcher = queryMatcher(q);
+    const current = untrack(rows);
+    if (!matcher) {
+      batch(() => {
+        setSearch({ ...SEARCH_IDLE, query: q });
+        setHitIndex(-1);
+        setSearchHit(null);
+      });
+      return;
+    }
+    // A re-scan of the same query (rows changed) keeps the finished hit list
+    // on screen until the new one is complete, so the summary and current
+    // hit do not flicker under a live stream.
+    const previous = untrack(search);
+    const kept = previous.query === q && previous.done ? previous.hits : null;
+    const hits: SearchHit[] = [];
+    let from: number | null = 0;
+    setSearch({
+      query: q,
+      hits: kept ?? [],
+      scanned: 0,
+      total: current.length,
+      done: false,
+    });
+    const step = () => {
+      if (generation !== scanGeneration) return;
+      const started = performance.now();
+      while (from !== null && performance.now() - started < SEARCH_SLICE_MS) {
+        const slice = searchRows(current, matcher, from, SEARCH_STEP_ROWS);
+        for (const hit of slice.hits) hits.push(hit);
+        from = slice.next;
+      }
+      const done = from === null;
+      setSearch({
+        query: q,
+        hits: done || !kept ? [...hits] : kept,
+        scanned: done ? current.length : (from ?? current.length),
+        total: current.length,
+        done,
+      });
+      if (!done) scanTimer = setTimeout(step, 0);
+    };
+    step();
+  }
+
+  createEffect(
+    on(query, (q) => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => startScan(q), SEARCH_DEBOUNCE_MS);
+    }),
+  );
+  // Rows changed (older page, live update): re-scan an active query so hit
+  // row indexes stay honest. Throttled, not debounced — a stream that
+  // changes rows every frame must not postpone the re-scan forever.
+  createEffect(
+    on(
+      rows,
+      () => {
+        if (queryMatcher(untrack(query)) === null) return;
+        if (rescanTimer !== undefined) return;
+        rescanTimer = setTimeout(() => {
+          rescanTimer = undefined;
+          if (queryMatcher(untrack(query)) !== null) startScan(untrack(query));
+        }, SEARCH_DEBOUNCE_MS);
+      },
+      { defer: true },
+    ),
+  );
+
+  /** Keep the current hit pointing at the same passage across re-scans. */
+  createEffect(
+    on(search, (state) => {
+      const current = untrack(searchHit);
+      if (!current) return;
+      const index = state.hits.findIndex(
+        (h) =>
+          h.blockId === current.blockId &&
+          h.partIndex === current.partIndex &&
+          h.start === current.start,
+      );
+      if (index >= 0) setHitIndex(index);
+      else if (state.done) {
+        setHitIndex(-1);
+        setSearchHit(null);
+      }
+    }),
+  );
+
+  function goToHit(index: number) {
+    const hit = search().hits[index];
+    if (!hit) return;
+    batch(() => {
+      setHitIndex(index);
+      setSearchHit({
+        blockId: hit.blockId,
+        partIndex: hit.partIndex,
+        start: hit.start,
+        end: hit.end,
+      });
+    });
+    scrolledBlock = hit.blockId;
+    pendingMarkScroll = true;
+    scrollToBlock(hit.blockId);
+  }
+
+  function stepHit(direction: 1 | -1) {
+    const count = search().hits.length;
+    if (count === 0) return;
+    const current = hitIndex();
+    const next =
+      current < 0
+        ? direction === 1
+          ? 0
+          : count - 1
+        : (current + direction + count) % count;
+    goToHit(next);
+  }
+
+  function clearSearch() {
+    clearTimeout(searchTimer);
+    clearTimeout(rescanTimer);
+    rescanTimer = undefined;
+    scanGeneration++;
+    batch(() => {
+      setQuery("");
+      setSearch(SEARCH_IDLE);
+      setHitIndex(-1);
+      setSearchHit(null);
+    });
+  }
+
+  /** Turn the current hit into the reader's selection (anchor + panel). */
+  function selectHit() {
+    const hit = search().hits[hitIndex()];
+    if (!hit) return;
+    const block = blocks().byId.get(hit.blockId);
+    const part = block?.kind === "message" ? block.parts[hit.partIndex] : null;
+    if (!block || block.kind !== "message" || !part) return;
+    const text = displayedText(block, part);
+    setLinkState({ kind: "none" });
+    select({
+      anchor: anchorFor(block, part, hit.start, hit.end),
+      block,
+      quote: text.slice(hit.start, hit.end),
+    });
+  }
+
+  const searchSummary = () => {
+    const state = search();
+    if (queryMatcher(state.query) === null) return null;
+    const n = state.hits.length;
+    const matches = `${n.toLocaleString()} ${n === 1 ? "match" : "matches"}`;
+    if (!state.done) {
+      return `${matches} so far · scanning ${state.scanned.toLocaleString()} of ${state.total.toLocaleString()} blocks`;
+    }
+    const position = hitIndex() >= 0 ? `${hitIndex() + 1} of ${n}` : matches;
+    return n === 0
+      ? "No matches in loaded history"
+      : `${position} in loaded history`;
   };
+
+  // -- coverage ------------------------------------------------------------
+  const loaded = () => blocks().messages.length;
+  const coverage = createMemo(() =>
+    coverageDeclaration({
+      loaded: loaded(),
+      total: props.messageCount,
+      hasOlder: props.hasOlder,
+      cachedWindow: props.status?.partial === true,
+    }),
+  );
 
   const linkBanner = (): { tone: "info" | "warn"; text: string } | null => {
     const state = linkState();
@@ -579,8 +879,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     <HighlightContext.Provider
       value={{
         highlight,
+        searchHit,
         onApplied: (mark, h) => {
-          // A deep link scrolls to its passage once the mark exists.
+          // A deep link or search hit scrolls to its passage once the mark
+          // exists.
           if (pendingMarkScroll && h.blockId === scrolledBlock) {
             pendingMarkScroll = false;
             mark.scrollIntoView?.({ block: "center" });
@@ -595,17 +897,41 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       >
         <div
           ref={(el) => (scrollEl = el)}
-          class="min-h-0 flex-1 overflow-y-auto"
+          class="relative min-h-0 flex-1 overflow-y-auto"
           data-testid="session-scroll"
           onPointerUp={() => queueMicrotask(selectFromDom)}
           onKeyUp={(e) => {
             if (e.shiftKey || e.key === "Shift") queueMicrotask(selectFromDom);
           }}
         >
-          <div>
-            {props.header}
-            <div class="flex flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-xs text-muted sm:px-7.5">
-              <span data-testid="reader-coverage-line">{coverageLine()}</span>
+          {props.header}
+          <div
+            ref={(el) => (toolbarEl = el)}
+            class="sticky top-0 z-10 bg-surface"
+            data-testid="reader-toolbar"
+          >
+            <div
+              class="flex flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-xs text-muted sm:px-7.5"
+              data-testid="reader-coverage"
+              data-coverage={coverage().kind}
+              data-coverage-reason={coverage().reason ?? ""}
+            >
+              <Badge
+                variant={coverage().kind === "captured" ? "teal" : "outline"}
+                title="What this view contains, as reported by Lore"
+              >
+                {coverage().label}
+              </Badge>
+              <span data-testid="reader-coverage-line">
+                {coverage().detail}
+              </span>
+              <Badge
+                variant="outline"
+                title="No harness exposes its own transcript to Lore yet; only Lore's capture is shown"
+                data-testid="native-transcript"
+              >
+                {NATIVE_TRANSCRIPT_LABEL}
+              </Badge>
               <Show when={props.status}>
                 {(status) => <StaleBadge status={status()} />}
               </Show>
@@ -643,6 +969,100 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 )}
               </Show>
             </div>
+            <form
+              role="search"
+              aria-label="Search this session"
+              class="flex flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-xs sm:px-7.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                stepHit(1);
+              }}
+            >
+              <input
+                type="search"
+                data-testid="search-input"
+                aria-label="Find in session"
+                placeholder="Find in session…"
+                autocomplete="off"
+                class="h-8 min-w-0 flex-1 rounded-md border border-line bg-bg px-2.5 text-[13px] text-text outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-xs"
+                value={query()}
+                onInput={(e) => setQuery(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.stopPropagation();
+                    if (query()) clearSearch();
+                    else e.currentTarget.blur();
+                  } else if (e.key === "Enter" && e.shiftKey) {
+                    e.preventDefault();
+                    stepHit(-1);
+                  }
+                }}
+              />
+              <Show when={searchSummary()}>
+                {(summary) => (
+                  <>
+                    <span
+                      data-testid="search-summary"
+                      role="status"
+                      aria-live="polite"
+                      class="text-muted"
+                    >
+                      {summary()}
+                    </span>
+                    <span class="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        data-testid="search-prev"
+                        aria-label="Previous match"
+                        disabled={search().hits.length === 0}
+                        onClick={() => stepHit(-1)}
+                      >
+                        ↑
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        data-testid="search-next"
+                        aria-label="Next match"
+                        disabled={search().hits.length === 0}
+                        onClick={() => stepHit(1)}
+                      >
+                        ↓
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        data-testid="search-select"
+                        disabled={hitIndex() < 0}
+                        onClick={selectHit}
+                      >
+                        Select match
+                      </Button>
+                      <button
+                        type="button"
+                        class="text-xs text-accent underline"
+                        data-testid="search-clear"
+                        onClick={clearSearch}
+                      >
+                        Clear
+                      </button>
+                    </span>
+                    <Show when={search().done && coverage().kind === "partial"}>
+                      <span
+                        class="basis-full text-muted"
+                        data-testid="search-coverage"
+                      >
+                        Searched the loaded history only · {coverage().detail}
+                      </span>
+                    </Show>
+                  </>
+                )}
+              </Show>
+            </form>
             <Show when={linkBanner()}>
               {(banner) => (
                 <div
@@ -660,12 +1080,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 </div>
               )}
             </Show>
-            <Show when={rows().length === 0}>
-              <p class="px-5 py-8 text-sm text-muted sm:px-7.5" role="status">
-                No captured messages in this session.
-              </p>
-            </Show>
           </div>
+          <Show when={rows().length === 0}>
+            <p class="px-5 py-8 text-sm text-muted sm:px-7.5" role="status">
+              No captured messages in this session.
+            </p>
+          </Show>
           <div
             ref={(el) => (listEl = el)}
             role="feed"
@@ -675,9 +1095,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
             class="relative w-full px-5 sm:px-7.5"
             style={{ height: `${virtualizer.getTotalSize()}px` }}
           >
-            <For each={virtualizer.getVirtualItems()}>
-              {(item) => {
-                const row = () => rows()[item.index];
+            <For each={virtualKeys()}>
+              {(key) => {
+                const item = () => virtualByKey().get(key);
+                const row = () => {
+                  const index = item()?.index;
+                  return index === undefined ? undefined : rows()[index];
+                };
                 return (
                   <Show when={row()}>
                     {(row) => (
@@ -685,10 +1109,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                         ref={(el) =>
                           queueMicrotask(() => virtualizer.measureElement(el))
                         }
-                        data-index={item.index}
+                        data-index={item()?.index}
                         data-row-key={row().key}
+                        data-search-current={
+                          searchHit()?.blockId === row().key ? "" : undefined
+                        }
                         tabIndex={-1}
-                        aria-posinset={item.index + 1}
+                        aria-posinset={(item()?.index ?? 0) + 1}
                         aria-setsize={rows().length}
                         class={cn(
                           "absolute left-0 top-0 w-full px-5 pt-1 outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-7.5",
@@ -696,7 +1123,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                             "reader-row-selected",
                         )}
                         style={{
-                          transform: `translateY(${item.start - listOffset()}px)`,
+                          transform: `translateY(${(item()?.start ?? 0) - listOffset()}px)`,
                         }}
                       >
                         <RowContent

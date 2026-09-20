@@ -12,10 +12,16 @@ import { createSignal } from "solid-js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { FUTURE_ACTIONS } from "~/components/lore/FutureAction";
-import { SessionView } from "~/components/reader/SessionView";
+import {
+  SEARCH_DEBOUNCE_MS,
+  SessionView,
+} from "~/components/reader/SessionView";
 import type { TemporalMessage } from "~/contracts";
 import { anchorFor, blockAnchor, encodeAnchor } from "~/reader/anchors";
-import { messageBlock } from "~/reader/blocks";
+import { buildBlocks, messageBlock } from "~/reader/blocks";
+import { buildRows } from "~/reader/rows";
+import { queryMatcher, searchRows } from "~/reader/search";
+import { NATIVE_TRANSCRIPT_LABEL } from "~/reader/coverage";
 import { HIGHLIGHT_ATTR } from "~/reader/selection";
 import {
   READER_SPECIMEN,
@@ -25,7 +31,13 @@ import {
 const SPECIMEN = READER_SPECIMEN.messages;
 
 /** Give the virtualiser a viewport (800px) and every row a height (120px). */
-const LAYOUT_PROPS = ["offsetHeight", "getBoundingClientRect"] as const;
+const LAYOUT_PROPS = [
+  "offsetHeight",
+  "clientHeight",
+  "scrollHeight",
+  "getBoundingClientRect",
+  "scrollTo",
+] as const;
 const realLayout = LAYOUT_PROPS.map(
   (name): [(typeof LAYOUT_PROPS)[number], PropertyDescriptor | undefined] => [
     name,
@@ -40,6 +52,20 @@ beforeAll(() => {
     configurable: true,
     get(this: HTMLElement) {
       return sizeOf(this);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return sizeOf(this);
+    },
+  });
+  // The scroll container can always scroll further: the virtualiser clamps
+  // `scrollToIndex` to `scrollHeight - clientHeight`, which jsdom reports as 0.
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.dataset.testid === "session-scroll" ? 1e7 : sizeOf(this);
     },
   });
   Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
@@ -57,6 +83,17 @@ beforeAll(() => {
         height,
         toJSON: () => ({}),
       };
+    },
+  });
+  // jsdom has no `scrollTo`; the virtualiser uses it to jump to a row and
+  // listens for the resulting scroll event to move its window.
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    value(this: HTMLElement, options?: ScrollToOptions | number) {
+      const top = typeof options === "number" ? options : options?.top;
+      if (typeof top !== "number") return;
+      this.scrollTop = top;
+      this.dispatchEvent(new Event("scroll"));
     },
   });
 });
@@ -254,6 +291,114 @@ describe("SessionView: deep links", () => {
       "older message 0",
     );
   });
+
+  it("resumes the older-history search when a narrower server page replaces the window holding the linked block", async () => {
+    // Cached-first: the cache offers the whole history (target included), the
+    // server's first page then replaces it with the newest messages only.
+    const target = older(1)[0]!;
+    const anchor = blockAnchor(messageBlock(target));
+    const [msgs, setMsgs] = createSignal([target, ...SPECIMEN]);
+    const [hasOlder, setHasOlder] = createSignal<boolean | null>(false);
+    let loads = 0;
+    const onLoadOlder = async () => {
+      loads++;
+      await tick(1);
+      setMsgs((prev) => [target, ...prev]);
+      setHasOlder(false);
+    };
+    mount({
+      anchorParam: encodeAnchor(anchor),
+      get messages() {
+        return msgs();
+      },
+      get hasOlder() {
+        return hasOlder();
+      },
+      onLoadOlder,
+    });
+    await tick();
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      "older message 0",
+    );
+
+    setHasOlder(true);
+    setMsgs(SPECIMEN);
+    // Not a dead end: the search is back on and paging, not "not found".
+    expect(screen.getByTestId("link-state")).toHaveTextContent(/looking/i);
+    expect(screen.queryByTestId("selection-panel")).toBeNull();
+    await tick(10);
+    expect(loads).toBe(1);
+    expect(screen.queryByTestId("link-state")).toBeNull();
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      "older message 0",
+    );
+  });
+
+  it("still reports 'not found' when the linked block leaves the window and older history has none of it", async () => {
+    const target = older(1)[0]!;
+    const anchor = blockAnchor(messageBlock(target));
+    const [msgs, setMsgs] = createSignal([target, ...SPECIMEN]);
+    mount({
+      anchorParam: encodeAnchor(anchor),
+      get messages() {
+        return msgs();
+      },
+      hasOlder: false,
+    });
+    await tick();
+    expect(screen.getByTestId("selection-panel")).toBeInTheDocument();
+    setMsgs(SPECIMEN);
+    await tick();
+    expect(screen.queryByTestId("selection-panel")).toBeNull();
+    expect(screen.getByTestId("link-state")).toHaveTextContent(
+      /not in this session's captured history/i,
+    );
+  });
+
+  it("drops a live selection and reports the change when the selected block is edited underneath it", async () => {
+    const block = messageBlock(SPECIMEN[2]!);
+    const part = block.parts[0]!;
+    const start = part.text.indexOf("Portability");
+    const anchor = anchorFor(block, part, start, start + 11);
+    const [msgs, setMsgs] = createSignal(SPECIMEN);
+    const { changes } = mount({
+      anchorParam: encodeAnchor(anchor),
+      get messages() {
+        return msgs();
+      },
+    });
+    await tick();
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      "Portability",
+    );
+
+    // An unrelated block changes: the selection is untouched.
+    setMsgs((prev) =>
+      prev.map((m, i) =>
+        i === 0 ? { ...m, content: `${m.content}\n\nappended` } : m,
+      ),
+    );
+    await tick();
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      "Portability",
+    );
+    expect(screen.queryByTestId("link-state")).toBeNull();
+
+    // The selected block itself changes: honest state, no highlight, and
+    // the URL is not rewritten to a similar passage.
+    setMsgs((prev) =>
+      prev.map((m, i) =>
+        i === 2 ? { ...m, content: `${m.content}\n\nedited later` } : m,
+      ),
+    );
+    await tick();
+    const banner = screen.getByTestId("link-state");
+    expect(banner).toHaveAttribute("data-tone", "warn");
+    expect(banner).toHaveTextContent(/source changed/i);
+    expect(document.querySelectorAll(`[${HIGHLIGHT_ATTR}]`).length).toBe(0);
+    expect(screen.queryByTestId("selection-quote")).toBeNull();
+    expect(changes).toEqual([]);
+  });
 });
 
 describe("SessionView: selection panel", () => {
@@ -443,5 +588,266 @@ describe("SessionView: history and keyboard", () => {
     await tick();
     expect(loadDistillation).toHaveBeenCalledWith("spec-d0");
     expect(row).toHaveTextContent(READER_SPECIMEN_DISTILLATION.slice(0, 30));
+  });
+});
+
+/** Wait past the search debounce and any slice yields. */
+async function settleSearch() {
+  await new Promise((r) => setTimeout(r, SEARCH_DEBOUNCE_MS + 40));
+  await tick(6);
+}
+
+describe("SessionView: coverage badges", () => {
+  it("declares captured history only for a complete, known total and always names the native transcript gap", async () => {
+    mount();
+    await tick();
+    const coverage = screen.getByTestId("reader-coverage");
+    expect(coverage.dataset.coverage).toBe("captured");
+    expect(coverage).toHaveTextContent("Captured history");
+    expect(screen.getByTestId("native-transcript")).toHaveTextContent(
+      NATIVE_TRANSCRIPT_LABEL,
+    );
+  });
+
+  it("stays partial for a cached window even when the count matches", async () => {
+    mount({
+      status: {
+        loading: false,
+        partial: true,
+        stale: false,
+        error: undefined,
+        source: "cache",
+      },
+    });
+    await tick();
+    const coverage = screen.getByTestId("reader-coverage");
+    expect(coverage.dataset.coverage).toBe("partial");
+    expect(coverage.dataset.coverageReason).toBe("cached-window");
+    expect(coverage).toHaveTextContent("Partial history");
+    expect(screen.getByTestId("reader-coverage-line")).toHaveTextContent(
+      "from the cached window",
+    );
+  });
+
+  it("is partial with an unknown total even with no older page reported", async () => {
+    mount({ messageCount: null, hasOlder: false });
+    await tick();
+    expect(screen.getByTestId("reader-coverage").dataset.coverage).toBe(
+      "partial",
+    );
+    expect(screen.getByTestId("reader-coverage-line")).toHaveTextContent(
+      "completeness unknown",
+    );
+  });
+});
+
+describe("SessionView: in-session search", () => {
+  /** 60 rows of 120px in an 800px viewport: most are never mounted. */
+  function longHistory(): TemporalMessage[] {
+    return older(60).map((m, i) => ({
+      ...m,
+      content:
+        i === 3 || i === 47 || i === 58
+          ? `row ${i} carries the needle for search`
+          : `row ${i} says nothing of interest`,
+    }));
+  }
+
+  it("finds hits in unmounted rows, steps through them and highlights only the current one", async () => {
+    const messages = longHistory();
+    mount({ messages, messageCount: messages.length });
+    await tick();
+    const mounted = () =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>("[data-row-key]"),
+        (r) => r.dataset.rowKey,
+      );
+    expect(mounted()).not.toContain("m.old-47");
+    expect(mounted().length).toBeLessThan(messages.length);
+
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "needle" } });
+    expect(screen.queryByTestId("search-summary")).toBeNull(); // debounced
+    await settleSearch();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "3 matches in loaded history",
+    );
+    expect(screen.queryByTestId("search-coverage")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("search-next"));
+    await tick();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "1 of 3 in loaded history",
+    );
+    let marks = document.querySelectorAll<HTMLElement>(`mark.passage-search`);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.textContent).toBe("needle");
+    expect(
+      marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
+    ).toBe("m.old-3");
+
+    fireEvent.click(screen.getByTestId("search-next"));
+    await tick();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent("2 of 3");
+    marks = document.querySelectorAll<HTMLElement>(`mark.passage-search`);
+    expect(marks).toHaveLength(1);
+    expect(
+      marks[0]!.closest("[data-row-key]")?.getAttribute("data-row-key"),
+    ).toBe("m.old-47");
+    expect(mounted()).toContain("m.old-47");
+
+    // Previous wraps from the first hit to the last.
+    fireEvent.click(screen.getByTestId("search-prev"));
+    fireEvent.click(screen.getByTestId("search-prev"));
+    await tick();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent("3 of 3");
+    expect(
+      document
+        .querySelector("mark.passage-search")
+        ?.closest("[data-row-key]")
+        ?.getAttribute("data-row-key"),
+    ).toBe("m.old-58");
+
+    fireEvent.click(screen.getByTestId("search-clear"));
+    await tick();
+    expect(input.value).toBe("");
+    expect(screen.queryByTestId("search-summary")).toBeNull();
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(0);
+  });
+
+  it("ignores one-character queries and reports no matches honestly", async () => {
+    mount();
+    await tick();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "x" } });
+    await settleSearch();
+    expect(screen.queryByTestId("search-summary")).toBeNull();
+    fireEvent.input(input, { target: { value: "zzqx-not-there" } });
+    await settleSearch();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "No matches in loaded history",
+    );
+    expect(screen.getByTestId("search-next")).toBeDisabled();
+    expect(screen.getByTestId("search-select")).toBeDisabled();
+  });
+
+  it("turns the current hit into a source anchor and keeps the selection independent of the search", async () => {
+    const { changes, anchor } = mount();
+    await tick();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "Portability" } });
+    await settleSearch();
+    expect(screen.getByTestId("search-select")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("search-next"));
+    await tick();
+    fireEvent.click(screen.getByTestId("search-select"));
+    await tick();
+    expect(screen.getByTestId("selection-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      /portability/i,
+    );
+    expect(changes).toHaveLength(1);
+    // The anchor is the first logical hit, derived from block data.
+    const blocks = buildBlocks({
+      messages: SPECIMEN,
+      distillations: READER_SPECIMEN.distillations,
+    });
+    const first = searchRows(buildRows(blocks), queryMatcher("Portability")!)
+      .hits[0]!;
+    const block = blocks.byId.get(first.blockId)!;
+    expect(block.kind).toBe("message");
+    if (block.kind !== "message") return;
+    expect(anchor()).toBe(
+      encodeAnchor(
+        anchorFor(block, block.parts[first.partIndex]!, first.start, first.end),
+      ),
+    );
+    // Both marks coexist on the same part: the passage and the search hit.
+    expect(document.querySelectorAll("mark.passage-target")).toHaveLength(1);
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(1);
+
+    // Moving the search on does not move the selection…
+    fireEvent.input(input, { target: { value: "SQLite" } });
+    await settleSearch();
+    fireEvent.click(screen.getByTestId("search-next"));
+    await tick();
+    expect(anchor()).toBe(changes[0]);
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      /portability/i,
+    );
+    expect(
+      Array.from(
+        document.querySelectorAll("mark.passage-target"),
+        (m) => m.textContent,
+      ).join(""),
+    ).toMatch(/^portability$/i);
+    // …and clearing the search leaves the selected passage highlighted.
+    fireEvent.click(screen.getByTestId("search-clear"));
+    await tick();
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(0);
+    expect(
+      Array.from(
+        document.querySelectorAll("mark.passage-target"),
+        (m) => m.textContent,
+      ).join(""),
+    ).toMatch(/^portability$/i);
+    expect(screen.getByTestId("selection-panel")).toBeInTheDocument();
+  });
+
+  it("says when only the loaded part of a longer history was searched and re-scans after older rows arrive", async () => {
+    const [msgs, setMsgs] = createSignal(SPECIMEN);
+    const [hasOlder, setHasOlder] = createSignal<boolean | null>(true);
+    mount({
+      get messages() {
+        return msgs();
+      },
+      get hasOlder() {
+        return hasOlder();
+      },
+      messageCount: SPECIMEN.length + 2,
+      onLoadOlder: async () => {
+        setMsgs((prev) => [
+          ...older(2).map((m) => ({
+            ...m,
+            content: `${m.content} Portability first`,
+          })),
+          ...prev,
+        ]);
+        setHasOlder(false);
+      },
+    });
+    await tick();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "Portability" } });
+    await settleSearch();
+    const before = screen.getByTestId("search-summary").textContent;
+    expect(screen.getByTestId("search-coverage")).toHaveTextContent(
+      "Searched the loaded history only",
+    );
+    fireEvent.click(screen.getByTestId("load-older"));
+    await settleSearch();
+    expect(screen.queryByTestId("search-coverage")).toBeNull();
+    const after = screen.getByTestId("search-summary").textContent ?? "";
+    expect(after).not.toBe(before);
+    expect(Number.parseInt(after, 10)).toBe(
+      Number.parseInt(before ?? "0", 10) + 2,
+    );
+  });
+
+  it("skips distillations: compressed context is never a search hit", async () => {
+    mount();
+    await tick();
+    // The distillation row is mounted and says "Compressed context" on screen…
+    expect(
+      document.querySelector('[data-row-key="d.spec-d0"]'),
+    ).toHaveTextContent("Compressed context");
+    // …but search reads the logical session speech, not the compressed row.
+    fireEvent.input(screen.getByTestId("search-input"), {
+      target: { value: "Compressed context" },
+    });
+    await settleSearch();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "No matches in loaded history",
+    );
   });
 });

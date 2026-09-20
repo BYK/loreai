@@ -124,6 +124,13 @@ export function clearHighlight(root: HTMLElement): void {
   }
 }
 
+/** One span of displayed text to mark, with the class its `<mark>` gets. */
+export interface HighlightSpan {
+  start: number;
+  end: number;
+  className: string;
+}
+
 /**
  * Wrap the displayed text `[start, end)` of `root` in `<mark>` elements —
  * one per text node the span crosses, so element boundaries (links, code)
@@ -137,6 +144,30 @@ export function applyHighlight(
   className = "passage-target",
 ): HTMLElement | null {
   clearHighlight(root);
+  return wrapSpan(root, start, end, className);
+}
+
+/**
+ * Apply several independent spans to one part — the selected passage and
+ * the current search hit may share a part, and neither may erase the other.
+ * Spans are wrapped in order; overlapping spans nest, which keeps every
+ * displayed-text offset valid because marks only ever wrap text nodes.
+ * Returns the first mark per span (null where a span was out of range).
+ */
+export function applyHighlights(
+  root: HTMLElement,
+  spans: readonly HighlightSpan[],
+): (HTMLElement | null)[] {
+  clearHighlight(root);
+  return spans.map((s) => wrapSpan(root, s.start, s.end, s.className));
+}
+
+function wrapSpan(
+  root: HTMLElement,
+  start: number,
+  end: number,
+  className: string,
+): HTMLElement | null {
   if (end <= start || start < 0) return null;
   const walker = root.ownerDocument.createTreeWalker(
     root,

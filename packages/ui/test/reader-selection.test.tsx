@@ -20,6 +20,7 @@ import {
   HIGHLIGHT_ATTR,
   anchorForReading,
   applyHighlight,
+  applyHighlights,
   clearHighlight,
   deepLinkFor,
   readSelection,
@@ -298,6 +299,56 @@ describe("applyHighlight", () => {
     expect(applyHighlight(el, 5, 5)).toBeNull();
     expect(applyHighlight(el, -1, 3)).toBeNull();
     expect(el.querySelectorAll(`[${HIGHLIGHT_ATTR}]`).length).toBe(0);
+  });
+
+  it("applies a passage and a search hit to one part, overlapping or not, and clears both", () => {
+    const block = messageBlock(msg());
+    const { el, text } = mountPart(block);
+    const a = text.indexOf("SQLite for");
+    // Disjoint spans.
+    let marks = applyHighlights(el, [
+      { start: a, end: a + 10, className: "passage-target" },
+      { start: 0, end: 4, className: "passage-search" },
+    ]);
+    expect(marks.every((m) => m !== null)).toBe(true);
+    const text_of = (cls: string) =>
+      Array.from(el.querySelectorAll(`mark.${cls}`), (m) => m.textContent).join(
+        "",
+      );
+    expect(text_of("passage-target")).toBe("SQLite for");
+    expect(text_of("passage-search")).toBe(text.slice(0, 4));
+    expect(el.textContent).toBe(text);
+
+    // Overlapping: the hit sits inside the passage, so the marks nest and the
+    // displayed text is unchanged. Re-applying clears the previous set first.
+    marks = applyHighlights(el, [
+      { start: a, end: a + 10, className: "passage-target" },
+      { start: a + 2, end: a + 6, className: "passage-search" },
+    ]);
+    expect(marks.every((m) => m !== null)).toBe(true);
+    expect(text_of("passage-target")).toBe("SQLite for");
+    expect(text_of("passage-search")).toBe("Lite");
+    expect(
+      el.querySelector("mark.passage-search")?.closest("mark.passage-target"),
+    ).not.toBeNull();
+    expect(el.textContent).toBe(text);
+    for (const m of el.querySelectorAll(`[${HIGHLIGHT_ATTR}]`))
+      expect(m.querySelector(":not(mark)")).toBeNull();
+
+    // One out-of-range span does not prevent the other.
+    marks = applyHighlights(el, [
+      { start: 0, end: text.length + 5, className: "passage-target" },
+      { start: a, end: a + 6, className: "passage-search" },
+    ]);
+    expect(marks[0]).toBeNull();
+    expect(marks[1]).not.toBeNull();
+    expect(text_of("passage-target")).toBe("");
+    expect(text_of("passage-search")).toBe("SQLite");
+
+    clearHighlight(el);
+    expect(el.querySelectorAll(`[${HIGHLIGHT_ATTR}]`).length).toBe(0);
+    expect(el.textContent).toBe(text);
+    expect(el.querySelector("strong")?.textContent).toBe("SQLite");
   });
 });
 

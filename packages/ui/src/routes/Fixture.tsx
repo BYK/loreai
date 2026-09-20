@@ -7,6 +7,8 @@
  *   ?view=focus   focused discussion in a side pane (mobile: full screen)
  *   ?view=blocks  UI-06a session blocks (block model + safe rendering) on an
  *                 invented session, one of every block kind
+ *   ?view=busy    UI-06c busy-session fixture: 10k synthetic blocks streamed
+ *                 through the real reader (`&blocks=` / `&seed=` override)
  */
 import type { Component, JSX } from "solid-js";
 import { For, Show } from "solid-js";
@@ -49,6 +51,8 @@ import {
   READER_SPECIMEN,
   READER_SPECIMEN_DISTILLATION,
 } from "~/reader/specimen";
+
+import { BusyFixture } from "./BusyFixture";
 
 const BYK: Participant = { name: "BYK", initials: "BYK", kind: "person" };
 const OC: Participant = { name: "OpenCode", initials: "OC", kind: "agent" };
@@ -501,6 +505,7 @@ export const Fixture: Component = () => {
   const [search] = useSearchParams<{ view?: string }>();
   const focus = () => search.view === "focus";
   const blocksView = () => search.view === "blocks";
+  const busyView = () => search.view === "busy";
   const connection = createConnectionStore();
   connection.markReachable();
 
@@ -509,14 +514,18 @@ export const Fixture: Component = () => {
       <Shell
         banner={<FixtureBanner />}
         nav={() => <FixtureNav />}
-        list={focus() || blocksView() ? undefined : <ThreadList />}
+        list={
+          focus() || blocksView() || busyView() ? undefined : <ThreadList />
+        }
         mobilePane="detail"
         mobileTitle={
           focus()
             ? "Discussion"
             : blocksView()
               ? "Session blocks"
-              : "Storage architecture"
+              : busyView()
+                ? "Busy session"
+                : "Storage architecture"
         }
         back={
           focus()
@@ -524,7 +533,10 @@ export const Fixture: Component = () => {
             : { href: "/fixture", label: "Threads" }
         }
         detail={
-          <Show when={!blocksView()} fallback={<ReaderBlocks />}>
+          <Show
+            when={!blocksView() && !busyView()}
+            fallback={busyView() ? <BusyFixture /> : <ReaderBlocks />}
+          >
             <div data-fixture-view={focus() ? "focus" : "context"}>
               <div
                 class={cn(
