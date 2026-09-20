@@ -519,7 +519,7 @@ Pipeline: strip bidi controls (U+202A–U+202E, U+2066–U+2069) → `marked`
 typescript, xml, yaml + common aliases; unknown languages are escaped) →
 `DOMPurify` with an explicit allowlist (`p br hr strong em del code pre
 blockquote ul ol li h1–h6 a span table thead tbody tr th td`; attributes
-`href title class start align`; `class` values restricted to `hljs*`,
+`href title class start align`; `class` values restricted to `hljs*`, highlight.js sub-scopes (`function_`, `class_`),
 `language-*`, `md-image`, `md-checkbox`) → link policy: only `http:`,
 `https:` and `mailto:` keep their `href`, and get `rel="noopener
 noreferrer"`, `target="_blank"` and a `data-external` marker (CSS draws the

@@ -154,6 +154,19 @@ describe("renderMarkdown — hostile content", () => {
     expect(classes.has("hljs")).toBe(true);
   });
 
+  it("keeps highlight.js sub-scope classes so `.hljs-title.function_` styles apply", () => {
+    const el = dom(
+      renderMarkdown("```ts\nfunction go() {}\nclass A {}\n```").html,
+    );
+    expect(el.querySelector(".hljs-title.function_")?.textContent).toBe("go");
+    expect(el.querySelector(".hljs-title.class_")?.textContent).toBe("A");
+    for (const n of el.querySelectorAll("[class]")) {
+      for (const c of n.classList) {
+        expect(c).toMatch(/^(?:hljs|hljs-[a-z_-]+|[a-z]+_|language-ts)$/);
+      }
+    }
+  });
+
   it("falls back to plain text above the Markdown size cap, quickly", () => {
     const huge = "*".repeat(MAX_MARKDOWN_CHARS + 1);
     const t0 = performance.now();

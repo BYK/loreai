@@ -242,13 +242,14 @@ function purify(): ReturnType<typeof DOMPurify> {
     node.setAttribute("data-external", "");
   });
   // The only `class` values that may survive are the ones this module emits:
-  // highlight.js token classes and the two Markdown markers above.
+  // highlight.js token classes (`hljs-title` plus a sub-scope such as
+  // `function_` / `class_`) and the two Markdown markers above.
   instance.addHook("uponSanitizeAttribute", (_node, event) => {
     if (event.attrName !== "class") return;
     const classes = event.attrValue
       .split(/\s+/)
       .filter((c) =>
-        /^(?:hljs|hljs-[a-z_-]+|language-[a-z0-9+#._-]+|md-image|md-checkbox)$/.test(
+        /^(?:hljs|hljs-[a-z_-]+|[a-z]+_|language-[a-z0-9+#._-]+|md-image|md-checkbox)$/.test(
           c,
         ),
       );
