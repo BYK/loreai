@@ -1,7 +1,8 @@
-import type { Accessor } from "solid-js";
+import { createMemo, type Accessor } from "solid-js";
 
 import type { SessionDetail, SessionSummary } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
+import { isApiError } from "~/lib/api";
 import { MESSAGE_BLOCK_SIZE, type MessageBlock, type Repository } from "~/db";
 import { createLoader, type Loader } from "~/lib/loader";
 
@@ -21,6 +22,13 @@ export interface SessionsDeps {
    */
   projectPathOf?: (projectId: string) => string | undefined;
   tracked: <T>(read: () => Promise<T>) => Promise<T>;
+}
+
+export type EvidenceState = "available" | "summary_only" | "unavailable";
+
+export interface EvidenceResult {
+  state: EvidenceState;
+  detail?: SessionDetail;
 }
 
 export function createSessionsState({
@@ -199,5 +207,41 @@ export function createSessionsState({
     return { loader, status: statusOf(loader) };
   }
 
-  return { list, detail, page, store };
+  function evidence(
+    source: Accessor<{
+      projectPath: string;
+      sessionId: string;
+    } | null>,
+  ): {
+    loader: Loader<EvidenceResult>;
+    status: Accessor<KeyStatus>;
+  } {
+    const keyed = createMemo(() => {
+      const value = source();
+      return value ? `${value.projectPath}\u0000${value.sessionId}` : null;
+    });
+    const loader = createLoader(keyed, async (key, signal) => {
+      const separator = key.indexOf("\u0000");
+      const projectPath = key.slice(0, separator);
+      const sessionId = key.slice(separator + 1);
+      let session: SessionDetail;
+      try {
+        session = await tracked(() =>
+          client.getSession(projectPath, sessionId, signal),
+        );
+      } catch (error) {
+        if (isApiError(error) && error.kind === "not_found")
+          return { state: "unavailable" as const };
+        throw error;
+      }
+      if (session.messages.length > 0)
+        return { state: "available" as const, detail: session };
+      if (session.distillations.length > 0)
+        return { state: "summary_only" as const, detail: session };
+      return { state: "unavailable" as const, detail: session };
+    });
+    return { loader, status: statusOf(loader) };
+  }
+
+  return { list, detail, page, evidence, store };
 }

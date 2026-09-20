@@ -1,7 +1,7 @@
 import { createMemo, type Accessor } from "solid-js";
 import { createSignal } from "solid-js";
 
-import type { KnowledgeEntry } from "~/contracts";
+import type { KnowledgeEntry, KnowledgeVersionHistory } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
 import type { Repository } from "~/db";
 import { createLoader, type Loader } from "~/lib/loader";
@@ -206,11 +206,22 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     return { loader, status: statusOf(loader) };
   }
 
+  function versions(id: Accessor<string | null>): {
+    loader: Loader<KnowledgeVersionHistory>;
+    status: Accessor<KeyStatus>;
+  } {
+    const loader = createLoader(id, (entryId, signal) =>
+      tracked(() => client.listKnowledgeVersions(entryId, { signal })),
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
   return {
     list,
     page,
     listPaged,
     entry,
+    versions,
     select: (id: string) => store.select(id),
     selectList: (projectId: string) => store.selectList(projectId),
     store,
