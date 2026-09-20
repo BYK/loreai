@@ -15,7 +15,7 @@ import {
   type MessageBlock,
 } from "~/reader/blocks";
 import { displayedText, renderPart } from "~/reader/render";
-import { buildRows } from "~/reader/rows";
+import { buildRows, indexRows } from "~/reader/rows";
 import {
   HIGHLIGHT_ATTR,
   anchorForReading,
@@ -144,6 +144,26 @@ describe("buildRows", () => {
       "m.b",
       "m.c",
     ]);
+  });
+
+  it("indexes every row by its key", () => {
+    const rows = buildRows(
+      buildBlocks({
+        messages: [
+          msg({ id: "a", created_at: 5 }),
+          msg({ id: "b", created_at: 9 }),
+        ],
+        distillations: [distillation({ id: "d", created_at: 7 })],
+      }),
+    );
+    const index = indexRows(rows);
+    expect([...index.entries()]).toEqual([
+      ["m.a", 0],
+      ["d.d", 1],
+      ["m.b", 2],
+    ]);
+    expect(index.get("m.zzz")).toBeUndefined();
+    expect(indexRows([]).size).toBe(0);
   });
 });
 

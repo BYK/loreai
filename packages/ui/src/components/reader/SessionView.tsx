@@ -63,7 +63,7 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { displayedText } from "~/reader/render";
-import { buildRows, rowIndexOf } from "~/reader/rows";
+import { buildRows, indexRows } from "~/reader/rows";
 import {
   anchorForReading,
   deepLinkFor,
@@ -185,6 +185,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }),
   );
   const rows = createMemo(() => buildRows(blocks()));
+  const rowIndex = createMemo(() => indexRows(rows()));
+  const rowIndexOf = (blockId: string) => rowIndex().get(blockId) ?? -1;
   const [listOffset, setListOffset] = createSignal(0);
 
   const virtualizer = createVirtualizer<HTMLDivElement, HTMLElement>({
@@ -319,7 +321,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   let pendingMarkScroll = false;
 
   const scrollToBlock = (blockId: string) => {
-    const index = rowIndexOf(rows(), blockId);
+    const index = rowIndexOf(blockId);
     if (index < 0) return;
     virtualizer.scrollToIndex(index, { align: "center" });
   };
@@ -483,7 +485,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const rowEl = target.closest<HTMLElement>("[data-row-key]");
     if (!rowEl || target !== rowEl) return; // keys inside rows are theirs
     const key = rowEl.dataset.rowKey ?? "";
-    const index = rowIndexOf(rows(), key);
+    const index = rowIndexOf(key);
     if (index < 0) return;
     switch (event.key) {
       case "ArrowDown":

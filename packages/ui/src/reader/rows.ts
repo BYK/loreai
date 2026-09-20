@@ -8,7 +8,7 @@
  * not show and leads the document; one with no known time cannot be placed
  * and leads it too, rather than being slotted somewhere plausible.
  */
-import type { ReaderBlock, SessionBlocks } from "./blocks";
+import type { DistillationBlock, ReaderBlock, SessionBlocks } from "./blocks";
 
 export interface ReaderRow {
   /** Stable key — the block id — so measurements survive prepends. */
@@ -16,21 +16,30 @@ export interface ReaderRow {
   block: ReaderBlock;
 }
 
+type Timed<T extends ReaderBlock> = T & { createdAt: number };
+
+function isTimed<T extends ReaderBlock>(block: T): block is Timed<T> {
+  return block.createdAt !== null;
+}
+
+function partitionDistillations(distillations: readonly DistillationBlock[]) {
+  const timed: Timed<DistillationBlock>[] = [];
+  const untimed: DistillationBlock[] = [];
+  for (const d of distillations) (isTimed(d) ? timed : untimed).push(d);
+  timed.sort((a, b) => a.createdAt - b.createdAt);
+  return { timed, untimed };
+}
+
 export function buildRows(blocks: SessionBlocks): ReaderRow[] {
-  const rows: ReaderRow[] = [];
-  const timed = blocks.distillations
-    .filter((d) => d.createdAt !== null)
-    .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-  for (const d of blocks.distillations) {
-    if (d.createdAt === null) rows.push({ key: d.id, block: d });
-  }
+  const { timed, untimed } = partitionDistillations(blocks.distillations);
+  const rows: ReaderRow[] = untimed.map((d) => ({ key: d.id, block: d }));
   let next = 0;
   for (const message of blocks.messages) {
-    if (message.createdAt !== null) {
+    if (isTimed(message)) {
       // Summaries produced before this message was written sit above it.
       for (
         let d = timed[next];
-        d && (d.createdAt ?? 0) < message.createdAt;
+        d && d.createdAt < message.createdAt;
         d = timed[++next]
       ) {
         rows.push({ key: d.id, block: d });
@@ -42,7 +51,11 @@ export function buildRows(blocks: SessionBlocks): ReaderRow[] {
   return rows;
 }
 
-/** Index of a block's row, or -1. */
-export function rowIndexOf(rows: readonly ReaderRow[], blockId: string) {
-  return rows.findIndex((r) => r.key === blockId);
+/** Row index by block id, for the reader's key → index lookups. */
+export function indexRows(
+  rows: readonly ReaderRow[],
+): ReadonlyMap<string, number> {
+  const index = new Map<string, number>();
+  rows.forEach((row, i) => index.set(row.key, i));
+  return index;
 }
