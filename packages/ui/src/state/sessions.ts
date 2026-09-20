@@ -7,6 +7,7 @@ import { createLoader, type Loader } from "~/lib/loader";
 
 import { createEntityStore } from "./entity-store";
 import { statusOf, type KeyStatus } from "./status";
+import type { CursorPage } from "~/contracts";
 
 export interface SessionsDeps {
   client: ApiClient;
@@ -156,5 +157,56 @@ export function createSessionsState({
     return { loader, status: statusOf(loader) };
   }
 
-  return { list, detail, store };
+  function page(
+    source: Accessor<{
+      projectId: string;
+      cursor: string | null;
+    } | null>,
+  ): {
+    loader: Loader<CursorPage<SessionSummary>>;
+    status: Accessor<KeyStatus>;
+  } {
+    const loader = createLoader(
+      () => {
+        const value = source();
+        return value ? `${value.projectId}/${value.cursor ?? ""}` : null;
+      },
+      (_, signal) => {
+        const value = source();
+        if (!value) throw new Error("Session query changed");
+        return tracked(async () => {
+          if (typeof client.listProjectSessionsPage === "function") {
+            return client.listProjectSessionsPage(
+              value.projectId,
+              { cursor: value.cursor, limit: 50 },
+              signal,
+            );
+          }
+          const items =
+            typeof client.listProjectSessions === "function"
+              ? await client.listProjectSessions(value.projectId, signal)
+              : [];
+          return { items, next_cursor: null };
+        });
+      },
+      {
+        async onServer(key, value) {
+          const projectId = key.slice(0, key.indexOf("/"));
+          for (const session of value.items) {
+            store.reconcileOne(session);
+            await repos.sessions.put(
+              session,
+              `${projectId}/${session.session_id}`,
+              {
+                keepScope: true,
+              },
+            );
+          }
+        },
+      },
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
+  return { list, detail, page, store };
 }

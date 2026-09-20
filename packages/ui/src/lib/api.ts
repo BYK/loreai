@@ -27,9 +27,11 @@ import {
   knowledgeVersionHistory,
   parseContract,
   projectList,
+  recallResponse,
   safeParseContract,
   sessionDetail,
   sessionList,
+  sessionSummary,
   sharingStatus,
   syncStatus,
   teamList,
@@ -40,6 +42,11 @@ import {
   type KnowledgeEntry,
   type KnowledgeVersionHistory,
   type ProjectSummary,
+  type RecallResponse,
+  type RecallScope,
+  type KnowledgeCategory,
+  type KnowledgeScope,
+  type KnowledgeSort,
   type SessionDetail,
   type SessionSummary,
   type SharingStatus,
@@ -182,14 +189,31 @@ export function createApiClient(options: ApiClientOptions = {}) {
      */
     listProjectKnowledgePage(
       projectId: string,
-      cursor: string | null,
+      opts:
+        | {
+            cursor?: string | null;
+            limit?: number;
+            q?: string;
+            category?: KnowledgeCategory;
+            scope?: KnowledgeScope;
+            sort?: KnowledgeSort;
+          }
+        | string
+        | null = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<KnowledgeEntry>> {
-      const query = cursor
-        ? `?cursor=${encodeURIComponent(cursor)}`
-        : "?page=cursor";
+      const options =
+        typeof opts === "string" || opts === null ? { cursor: opts } : opts;
+      const params = new URLSearchParams({ page: "cursor" });
+      if (options.cursor) params.set("cursor", options.cursor);
+      if (options.limit !== undefined)
+        params.set("limit", String(options.limit));
+      if (options.q) params.set("q", options.q);
+      if (options.category) params.set("category", options.category);
+      if (options.scope) params.set("scope", options.scope);
+      if (options.sort) params.set("sort", options.sort);
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/knowledge${query}`,
+        `/projects/${encodeURIComponent(projectId)}/knowledge?${params.toString().replaceAll("+", "%20")}`,
         cursorPage(knowledgeEntry),
         signal,
       );
@@ -219,6 +243,46 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         `/projects/${encodeURIComponent(projectId)}/sessions`,
         sessionList,
+        signal,
+      );
+    },
+    listProjectSessionsPage(
+      projectId: string,
+      opts: { cursor?: string | null; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<CursorPage<SessionSummary>> {
+      const params = new URLSearchParams({ page: "cursor" });
+      if (opts.cursor) params.set("cursor", opts.cursor);
+      if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+      return getJson(
+        `/projects/${encodeURIComponent(projectId)}/sessions?${params.toString().replaceAll("+", "%20")}`,
+        cursorPage(sessionSummary),
+        signal,
+      );
+    },
+    recall(
+      opts: {
+        q: string;
+        project: { git_remote: string | null; path: string };
+        scope: RecallScope;
+        limit?: number;
+        session?: string;
+      },
+      signal?: AbortSignal,
+    ): Promise<RecallResponse> {
+      const params = new URLSearchParams({
+        q: opts.q,
+        scope: opts.scope,
+        expand: "false",
+        limit: String(Math.max(1, Math.min(50, opts.limit ?? 20))),
+      });
+      if (opts.project.git_remote)
+        params.set("git_remote", opts.project.git_remote);
+      else params.set("path", opts.project.path);
+      if (opts.session) params.set("session", opts.session);
+      return getJson(
+        `/recall?${params.toString().replaceAll("+", "%20")}`,
+        recallResponse,
         signal,
       );
     },

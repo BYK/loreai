@@ -483,10 +483,15 @@ async function handleRecall(
   };
 
   let llm: LLMClient | undefined;
-  try {
-    llm = getAPILLMClient(config);
-  } catch {
-    // No LLM available — proceed without query expansion
+  if (
+    url.searchParams.get("expand") !== "false" &&
+    url.searchParams.get("expand") !== "0"
+  ) {
+    try {
+      llm = getAPILLMClient(config);
+    } catch {
+      // No LLM available — proceed without query expansion
+    }
   }
 
   const result = await runRecall({

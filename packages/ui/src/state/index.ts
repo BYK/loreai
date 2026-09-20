@@ -17,6 +17,7 @@ import {
 import { createKnowledgeState } from "./knowledge";
 import { createProjectsState } from "./projects";
 import { createSessionsState } from "./sessions";
+import { createRecallState } from "./recall";
 
 export interface AppStateDeps {
   client: ApiClient;
@@ -101,11 +102,13 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     projectPathOf: (id) => projects.byId(id)?.path,
     tracked,
   });
+  const recall = createRecallState({ client, tracked });
 
   return {
     projects,
     knowledge,
     sessions,
+    recall,
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {
