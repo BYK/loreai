@@ -25,6 +25,21 @@
  * `category`, `scope`) are not embedded — the caller re-sends them with each
  * page, so a cursor never leaks the query it was minted under.
  *
+ * Session messages
+ * ----------------
+ * `GET /sessions/:id` keeps returning `{ messages, distillations }` with every
+ * message. With `?page=cursor` (or `?cursor=`) it returns the newest `limit`
+ * messages (default 100, max 1000) instead, plus the fields a history reader
+ * needs to walk backwards honestly:
+ *
+ *     { messages: [...], distillations: [...], next_cursor, message_count }
+ *
+ * `messages` stay in chronological order within a page; `next_cursor` fetches
+ * the page *older* than this one and is null at the session's first message;
+ * `message_count` is the session's total at query time. The cursor keyset is
+ * `(created_at, id)` of the page's oldest message and is bound to the project
+ * and session it was minted for.
+ *
  * Version history
  * ---------------
  * `GET /knowledge/:id/versions` follows the visibility of `GET /knowledge/:id`:
@@ -37,6 +52,7 @@ import {
   type KnowledgeKeyset,
   type KnowledgeListOptions,
   type KnowledgeSort,
+  type MessageKeyset,
   type SessionKeyset,
 } from "@loreai/core";
 
@@ -97,7 +113,18 @@ type SessionCursor = {
   session_id: string;
 };
 
-function encodeCursor(payload: KnowledgeCursor | SessionCursor): string {
+type MessageCursor = {
+  v: typeof CURSOR_VERSION;
+  kind: "messages";
+  project: string;
+  session: string;
+  created_at: number;
+  id: string;
+};
+
+function encodeCursor(
+  payload: KnowledgeCursor | SessionCursor | MessageCursor,
+): string {
   return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
 
@@ -176,6 +203,37 @@ function decodeSessionCursor(token: string, projectId: string): SessionKeyset {
     );
   }
   return { last_message_at: c.last_message_at, session_id: c.session_id };
+}
+
+function decodeMessageCursor(
+  token: string,
+  projectId: string,
+  sessionId: string,
+): MessageKeyset {
+  const c = decodeCursorObject(token);
+  if (
+    c.kind !== "messages" ||
+    typeof c.project !== "string" ||
+    typeof c.session !== "string" ||
+    typeof c.id !== "string" ||
+    typeof c.created_at !== "number" ||
+    !Number.isFinite(c.created_at)
+  ) {
+    throw new BadRequest("invalid_cursor", "Malformed cursor");
+  }
+  if (c.project !== projectId) {
+    throw new BadRequest(
+      "invalid_cursor",
+      "Cursor was issued for a different project",
+    );
+  }
+  if (c.session !== sessionId) {
+    throw new BadRequest(
+      "invalid_cursor",
+      "Cursor was issued for a different session",
+    );
+  }
+  return { created_at: c.created_at, id: c.id };
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +412,50 @@ export function handleListSessionsCursor(
             session_id: page.next.session_id,
           })
         : null,
+    });
+  } catch (err) {
+    return toResponse(err);
+  }
+}
+
+/**
+ * Cursor-mode `GET /api/v1/sessions/:id`; null when not opted in so the
+ * legacy all-messages handler runs unchanged. `distillations` is the same
+ * complete list the legacy response carries (they are few and the reader
+ * needs all of them to place compressed context).
+ */
+export function handleShowSessionCursor(
+  url: URL,
+  project: { id: string; path: string },
+  sessionId: string,
+  distillations: unknown[],
+): Response | null {
+  try {
+    if (!wantsCursorMode(url)) return null;
+    const limit = parseLimit(url, 100, 1000);
+    const token = url.searchParams.get("cursor");
+    const before =
+      token !== null && token !== ""
+        ? decodeMessageCursor(token, project.id, sessionId)
+        : undefined;
+    const page = listQuery.listSessionMessagesPage(project.path, sessionId, {
+      limit,
+      before,
+    });
+    return jsonResponse({
+      messages: page.items,
+      distillations,
+      next_cursor: page.next
+        ? encodeCursor({
+            v: CURSOR_VERSION,
+            kind: "messages",
+            project: project.id,
+            session: sessionId,
+            created_at: page.next.created_at,
+            id: page.next.id,
+          })
+        : null,
+      message_count: page.total,
     });
   } catch (err) {
     return toResponse(err);

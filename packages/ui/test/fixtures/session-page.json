@@ -1,0 +1,33 @@
+{
+  "messages": [
+    {
+      "id": "<tm-0>",
+      "project_id": "<uuid-0>",
+      "session_id": "ui-contracts-session",
+      "role": "user",
+      "content": "message 1 body",
+      "tokens": 4,
+      "distilled": 0,
+      "created_at": 1700000000000,
+      "metadata": "<json>",
+      "embedding": null,
+      "restored_at": null,
+      "source_id": "msg-1"
+    }
+  ],
+  "distillations": [
+    {
+      "id": "d-ui-contracts",
+      "session_id": "ui-contracts-session",
+      "generation": 0,
+      "token_count": 42,
+      "r_compression": 0.4,
+      "c_norm": 0.9,
+      "archived": 0,
+      "created_at": 1700000001000,
+      "call_type": "batch"
+    }
+  ],
+  "next_cursor": "<cursor>",
+  "message_count": 2
+}

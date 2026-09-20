@@ -45,3 +45,18 @@ export const sessionDetail = type({
 });
 
 export type SessionDetail = typeof sessionDetail.infer;
+
+/**
+ * `GET /api/v1/sessions/:id?path=…&page=cursor` (or `&cursor=`) — the newest
+ * `limit` messages in chronological order, every distillation, the cursor
+ * for the next *older* page (null at the session's first message) and the
+ * session's total message count at query time.
+ */
+export const sessionPage = type({
+  messages: temporalMessage.array(),
+  distillations: distillationSummary.array(),
+  next_cursor: "string | null",
+  message_count: nonNegInt,
+});
+
+export type SessionPage = typeof sessionPage.infer;

@@ -30,6 +30,7 @@ import {
   safeParseContract,
   sessionDetail,
   sessionList,
+  sessionPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -41,6 +42,7 @@ import {
   type KnowledgeVersionHistory,
   type ProjectSummary,
   type SessionDetail,
+  type SessionPage,
   type SessionSummary,
   type SharingStatus,
   type SyncStatus,
@@ -235,6 +237,27 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         `/sessions/${encodeURIComponent(sessionId)}?path=${encodeURIComponent(projectPath)}`,
         sessionDetail,
+        signal,
+      );
+    },
+    /**
+     * Opt-in paged variant of `getSession` (`?page=cursor&limit=` /
+     * `?cursor=`). `cursor === null` fetches the newest `limit` messages;
+     * each `next_cursor` fetches the page *older* than the previous one.
+     */
+    getSessionPage(
+      projectPath: string,
+      sessionId: string,
+      cursor: string | null,
+      limit: number,
+      signal?: AbortSignal,
+    ): Promise<SessionPage> {
+      const query = cursor
+        ? `&cursor=${encodeURIComponent(cursor)}`
+        : `&page=cursor&limit=${encodeURIComponent(String(limit))}`;
+      return getJson(
+        `/sessions/${encodeURIComponent(sessionId)}?path=${encodeURIComponent(projectPath)}${query}`,
+        sessionPage,
         signal,
       );
     },

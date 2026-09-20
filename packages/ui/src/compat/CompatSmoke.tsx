@@ -72,7 +72,7 @@ const CounterProbe: Component = () => {
   );
 };
 
-function probeRoute(name: string): Component {
+export function probeRoute(name: string): Component {
   return () => {
     onMount(() => routeProbe.recordMount(name));
     onCleanup(() => routeProbe.recordDispose(name));
@@ -389,7 +389,7 @@ export const CompatSmoke: ParentComponent = (props): JSX.Element => (
   </main>
 );
 
-const RouteIndex: Component = () => (
+export const RouteIndex: Component = () => (
   <p data-testid="route-index" class="text-sm text-muted">
     No probe route selected.
   </p>

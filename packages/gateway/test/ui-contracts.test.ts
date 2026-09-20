@@ -31,6 +31,7 @@ import {
   safeParseContract,
   sessionDetail,
   sessionList,
+  sessionPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -352,6 +353,15 @@ describe("ui contracts against the real gateway", () => {
       `/sessions/${SEEDED.sessionId}`,
       `/api/v1/sessions/${SEEDED.sessionId}?path=${encodeURIComponent(SEEDED.projectPath)}`,
       sessionDetail,
+    );
+  });
+
+  it("GET /sessions/:id?path=…&page=cursor", async () => {
+    await contractRoute(
+      "session-page.json",
+      `/sessions/${SEEDED.sessionId}?page=cursor`,
+      `/api/v1/sessions/${SEEDED.sessionId}?path=${encodeURIComponent(SEEDED.projectPath)}&page=cursor&limit=1`,
+      sessionPage,
     );
   });
 

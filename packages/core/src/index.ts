@@ -44,6 +44,7 @@ export type {
   KnowledgeCategory,
   KnowledgePage,
   SessionKeyset,
+  MessageKeyset,
   SessionPage,
   KnowledgeVersionDetail,
   KnowledgeVersionHistory,
