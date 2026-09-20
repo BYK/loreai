@@ -130,6 +130,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
       );
     }
 
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      const message = await readErrorMessage(res);
+      throw new ApiError(
+        "unreachable",
+        path,
+        message ?? `Gateway responded ${res.status}`,
+        res.status,
+      );
+    }
+
     if (!res.ok) {
       const message = await readErrorMessage(res);
       if (res.status === 404) {

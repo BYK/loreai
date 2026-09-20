@@ -163,6 +163,16 @@ describe("api client: error classification", () => {
     expect((await failure(client.listProjects())).kind).toBe("unreachable");
   });
 
+  it.each([502, 503, 504])(
+    "classifies proxy status %s as `unreachable`",
+    async (status) => {
+      const { client } = clientFor(() => new Response(null, { status }));
+      const error = await failure(client.listProjects());
+      expect(error.kind).toBe("unreachable");
+      expect(error.status).toBe(status);
+    },
+  );
+
   it.each([401, 403])("classifies %s as `unauthorized`", async (status) => {
     const { client } = clientFor(() => new Response(null, { status }));
     const error = await failure(client.listProjects());

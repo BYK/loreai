@@ -506,6 +506,26 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(status).toHaveAttribute("data-connection", "reachable");
   });
 
+  it("renders proxy 503 responses as gateway unreachable", async () => {
+    const client = fakeClient({
+      async listProjectKnowledgePage() {
+        throw new ApiError(
+          "unreachable",
+          "/projects/p-lore/knowledge",
+          "Gateway responded 503",
+          503,
+        );
+      },
+    });
+    mount("/projects/p-lore/knowledge", client);
+    expect(await screen.findByText("Gateway unreachable")).toBeInTheDocument();
+    expect(screen.getByText(/lore start/)).toBeInTheDocument();
+    expect(screen.getByTestId("connection-status")).toHaveAttribute(
+      "data-connection",
+      "unreachable",
+    );
+  });
+
   it("clears the error card while a retry is in flight instead of keeping the stale error", async () => {
     let attempts = 0;
     let release: (page: {
