@@ -117,10 +117,16 @@ test.describe("session reader", () => {
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     expect(copied).toContain(PASSAGE);
     expect(copied).toContain(link);
+    // The copied link is the route's `?a=` link plus the standard text
+    // fragment for the quote (a hint browsers strip before scripts see it).
+    const copiedLink = copied.trim().split("\n").at(-1)!;
+    expect(copiedLink.startsWith(link)).toBe(true);
+    expect(new URL(copiedLink).hash).toMatch(/^#:~:text=/);
 
-    // Fresh load of the link: the passage is on an older page, so the reader
-    // pages back through the real API until it finds the block.
-    await page.goto(link);
+    // Fresh load of the copied link: the passage is on an older page, so the
+    // reader pages back through the real API until it finds the block.
+    await page.goto(copiedLink);
+    expect(new URL(page.url()).hash).toBe("");
     const marks = page.locator("mark.passage-target");
     await expect(marks.first()).toBeVisible();
     expect((await marks.allTextContents()).join("")).toBe(PASSAGE);
