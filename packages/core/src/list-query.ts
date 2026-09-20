@@ -15,8 +15,8 @@
  */
 import { db, ensureProject } from "./db";
 import { hydrateKnowledgeEntry, type KnowledgeEntry, logicalIdOf } from "./ltm";
-import type { ReadParam } from "./read-job";
 import { ftsQuery, EMPTY_QUERY } from "./search";
+import { sql, type SqlFragment } from "./sql";
 import { currentTenantId } from "./tenant";
 import type { SessionSummary } from "./data";
 
@@ -142,29 +142,26 @@ function likeTerms(q: string): string[] {
  * is what makes the page boundary stable. No relaxed cascade here: relaxing
  * per page would change the result set between pages.
  */
-function queryFilter(q: string): { sql: string; params: ReadParam[] } | null {
+function queryFilter(q: string): SqlFragment | null {
   const trimmed = q.trim();
   if (!trimmed) return null;
   const match = ftsQuery(trimmed);
   if (match !== EMPTY_QUERY) {
-    return {
-      // knowledge_current is a view (no rowid): hop through the base table to
-      // translate FTS rowids into version ids.
-      sql: `id IN (SELECT k.id FROM knowledge k
-                    WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?))`,
-      params: [match],
-    };
+    // knowledge_current is a view (no rowid): hop through the base table to
+    // translate FTS rowids into version ids.
+    return sql`id IN (SELECT k.id FROM knowledge k
+                    WHERE k.rowid IN (SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ${match}))`;
   }
   const terms = likeTerms(trimmed);
   // Nothing searchable (all tokens ≤ 2 chars): searchLike() returns [] here,
   // so match nothing rather than broad-matching the raw string.
-  if (!terms.length) return { sql: "0", params: [] };
-  return {
-    sql: terms
-      .map(() => "(LOWER(title) LIKE ? OR LOWER(content) LIKE ?)")
-      .join(" AND "),
-    params: terms.flatMap((t) => [`%${t}%`, `%${t}%`]),
-  };
+  if (!terms.length) return sql.raw("0");
+  return sql.and(
+    terms.map(
+      (term) =>
+        sql`LOWER(title) LIKE ${`%${term}%`} OR LOWER(content) LIKE ${`%${term}%`}`,
+    ),
+  );
 }
 
 const KNOWLEDGE_LIST_COLS =
@@ -188,32 +185,30 @@ export function listKnowledgePage(
   const pid = ensureProject(projectPath);
   const sort = options.sort ?? "updated_desc";
   const spec = SORT_SPEC[sort];
-  const where: string[] = ["tenant_id = ?", "confidence > 0.2"];
-  const params: ReadParam[] = [currentTenantId()];
+  const where: SqlFragment[] = [
+    sql`tenant_id = ${currentTenantId()}`,
+    sql`confidence > 0.2`,
+  ];
 
   switch (options.scope ?? "project") {
     case "project":
-      where.push("project_id = ?");
-      params.push(pid);
+      where.push(sql`project_id = ${pid}`);
       break;
     case "global":
-      where.push("project_id IS NULL");
+      where.push(sql`project_id IS NULL`);
       break;
     case "all":
-      where.push("(project_id = ? OR project_id IS NULL OR cross_project = 1)");
-      params.push(pid);
+      where.push(
+        sql`project_id = ${pid} OR project_id IS NULL OR cross_project = 1`,
+      );
       break;
   }
   if (options.category) {
-    where.push("category = ?");
-    params.push(options.category);
+    where.push(sql`category = ${options.category}`);
   }
   if (options.q !== undefined) {
     const f = queryFilter(options.q);
-    if (f) {
-      where.push(f.sql);
-      params.push(...f.params);
-    }
+    if (f) where.push(f);
   }
   if (options.after) {
     // Keyset predicate: rows strictly after (key, id) in sort order. DESC sorts
@@ -221,21 +216,20 @@ export function listKnowledgePage(
     // same direction.
     const cmp = spec.dir === "DESC" ? "<" : ">";
     where.push(
-      `(${spec.column} ${cmp} ? OR (${spec.column} = ? AND id ${cmp} ?))`,
+      sql`(${sql.raw(spec.column)} ${sql.raw(cmp)} ${options.after.key} OR (${sql.raw(spec.column)} = ${options.after.key} AND id ${sql.raw(cmp)} ${options.after.id}))`,
     );
-    params.push(options.after.key, options.after.key, options.after.id);
   }
 
   const limit = Math.max(1, Math.floor(options.limit));
-  const rows = db()
-    .query(
-      `SELECT ${KNOWLEDGE_LIST_COLS} FROM knowledge_current
-        WHERE ${where.join(" AND ")}
-        ORDER BY ${spec.column} ${spec.dir}, id ${spec.dir}
-        LIMIT ?`,
+  const rows = sql
+    .all<KnowledgeEntry>(
+      db(),
+      sql`SELECT ${sql.raw(KNOWLEDGE_LIST_COLS)} FROM knowledge_current
+        WHERE ${sql.and(where)}
+        ORDER BY ${sql.raw(spec.column)} ${sql.raw(spec.dir)}, id ${sql.raw(spec.dir)}
+        LIMIT ${limit + 1}`,
     )
-    .all(...params, limit + 1)
-    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+    .map(hydrateKnowledgeEntry);
 
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
@@ -274,19 +268,11 @@ export function listSessionsPage(
   const pid = ensureProject(projectPath);
   const limit = Math.max(1, Math.floor(options.limit));
   const having = options.after
-    ? `HAVING (MAX(t.created_at) < ? OR (MAX(t.created_at) = ? AND t.session_id < ?))`
-    : "";
-  const params: ReadParam[] = [pid, pid];
-  if (options.after) {
-    params.push(
-      options.after.last_message_at,
-      options.after.last_message_at,
-      options.after.session_id,
-    );
-  }
-  const rows = db()
-    .query(
-      `SELECT
+    ? sql`HAVING (MAX(t.created_at) < ${options.after.last_message_at} OR (MAX(t.created_at) = ${options.after.last_message_at} AND t.session_id < ${options.after.session_id}))`
+    : sql.empty;
+  const rows = sql.all<SessionSummary>(
+    db(),
+    sql`SELECT
         t.session_id,
         COUNT(*) as message_count,
         MIN(t.created_at) as first_message_at,
@@ -298,16 +284,15 @@ export function listSessionsPage(
        LEFT JOIN (
          SELECT session_id, COUNT(*) AS cnt
          FROM distillations
-         WHERE project_id = ?
+         WHERE project_id = ${pid}
          GROUP BY session_id
        ) d ON d.session_id = t.session_id
-       WHERE t.project_id = ?
+       WHERE t.project_id = ${pid}
        GROUP BY t.session_id
        ${having}
        ORDER BY MAX(t.created_at) DESC, t.session_id DESC
-       LIMIT ?`,
-    )
-    .all(...params, limit + 1) as SessionSummary[];
+       LIMIT ${limit + 1}`,
+  );
 
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
