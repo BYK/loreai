@@ -13,7 +13,12 @@
  * a part, has no single-part anchor: `readSelection` reports it as
  * `ambiguous` so the UI can say so instead of guessing which part was meant.
  */
-import { anchorFor, encodeAnchor, type SourceAnchor } from "./anchors";
+import {
+  anchorFor,
+  encodeAnchor,
+  textFragmentFor,
+  type SourceAnchor,
+} from "./anchors";
 import { type MessageBlock, originLabel } from "./blocks";
 
 export const PART_SELECTOR = "[data-block][data-part]";
@@ -168,11 +173,20 @@ export function applyHighlight(
   return first;
 }
 
-/** The reader URL (path + `?a=`) for an anchor, relative to `base`. */
-export function deepLinkFor(base: URL | string, anchor: SourceAnchor): string {
+/**
+ * The reader URL for an anchor, relative to `base`: `?a=` carries the
+ * verified anchor; with a `quote`, the fragment carries the standard
+ * `:~:text=` directive as a best-effort hint for browsers (never read back —
+ * browsers hide it from scripts, and it has no identity or revision).
+ */
+export function deepLinkFor(
+  base: URL | string,
+  anchor: SourceAnchor,
+  quote?: string,
+): string {
   const url = new URL(String(base));
   url.searchParams.set("a", encodeAnchor(anchor));
-  url.hash = "";
+  url.hash = (quote === undefined ? null : textFragmentFor(quote)) ?? "";
   return url.toString();
 }
 

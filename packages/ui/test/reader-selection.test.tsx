@@ -306,6 +306,21 @@ describe("copy with source", () => {
       anchor: { blockId: block.id, start: 5, end: 11 },
     });
 
+    // With the quote, the link also carries the standard text fragment; the
+    // stale `#h` is replaced, `?a=` is untouched and the URL setter does not
+    // re-encode the directive's percent-escapes.
+    const withQuote = new URL(
+      deepLinkFor(
+        "http://gw.local/ui/projects/p/sessions/s?x=1#h",
+        anchor,
+        "keep SQLite, as-is",
+      ),
+    );
+    expect(withQuote.hash).toBe("#:~:text=keep%20SQLite%2C%20as%2Dis");
+    expect(withQuote.searchParams.get("a")).toBe(url.searchParams.get("a"));
+    // An empty quote yields no directive at all rather than `#:~:text=`.
+    expect(new URL(deepLinkFor("http://x/ui/p", anchor, "  ")).hash).toBe("");
+
     const text = sourceReferenceText({
       quote: "SQLite",
       block,

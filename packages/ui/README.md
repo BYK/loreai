@@ -613,7 +613,11 @@ opens the passage panel: the quote, **Copy with source** (quote + block
 origin/time — `time unknown` stays literal — + deep link) and **Copy link**
 are live; `Save note`, `Ask agent`, `Explore separately`, `Start with
 selected context`, `Share finding` render disabled with the visible
-"not available yet" label (`FutureAction`).
+"not available yet" label (`FutureAction`). The copied link is
+`deepLinkFor(base, anchor, quote)`: `?a=` plus the standard `#:~:text=`
+directive for the quote (see [Source anchors](#source-anchors-srcreaderanchorsts)),
+so it also scrolls to the passage as a plain text fragment where the browser
+supports that; the reader itself only ever reads `?a=`.
 
 **Coverage line.** The header states `N of M captured messages loaded`
 (server count known), `M messages` when everything is loaded, or `N

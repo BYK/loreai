@@ -286,7 +286,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   async function copy(kind: "reference" | "link") {
     const s = selection();
     if (!s) return;
-    const link = deepLinkFor(props.linkBase(), s.anchor);
+    const link = deepLinkFor(props.linkBase(), s.anchor, s.quote);
     const text =
       kind === "link"
         ? link

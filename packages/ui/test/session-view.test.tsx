@@ -289,6 +289,8 @@ describe("SessionView: selection panel", () => {
     expect(clipboard[0]).toContain('"Should we"');
     const copiedLink = clipboard[0]!.split("\n").at(-1)!;
     expect(new URL(copiedLink).searchParams.get("a")).toBe(changes[0]);
+    // The copied link also carries the quote as a standard text fragment.
+    expect(new URL(copiedLink).hash).toBe("#:~:text=Should%20we");
     expect(clipboard[0]).toContain("session specimen");
     expect(screen.getByTestId("copy-with-source")).toHaveTextContent("Copied");
 
