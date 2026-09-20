@@ -45,9 +45,9 @@ import { responseAgainstAbort } from "./abort-race";
 import {
   constantTimeTokenMatches,
   hasRawConflictingProviderAuth,
-  isDataPlanePath,
   singleRawHeaderValue,
 } from "./management-access";
+import { isDataPlanePath } from "./routes/registry";
 
 export { handleForegroundBodyRoute, handleModelsPassthrough } from "./app";
 export { isLoopbackAddress } from "./management-access";
