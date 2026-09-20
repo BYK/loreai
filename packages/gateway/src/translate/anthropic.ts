@@ -20,6 +20,10 @@ import {
   toAnthropicStopReason,
 } from "../anthropic-protocol";
 import { validateAnthropicUsage } from "../usage-validation";
+import {
+  parseStreamedRequest,
+  type StreamedItemsBuilder,
+} from "./streaming-request";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -120,6 +124,24 @@ function normalizeContent(content: unknown): GatewayContentBlock[] {
 
   // Null / undefined / unexpected → empty
   return [];
+}
+
+export function createAnthropicMessagesBuilder(): StreamedItemsBuilder<
+  GatewayMessage[]
+> {
+  const messages: GatewayMessage[] = [];
+  return {
+    add(item) {
+      const msg = item as Record<string, unknown>;
+      messages.push({
+        role: msg.role === "assistant" ? "assistant" : "user",
+        content: normalizeContent(msg.content),
+      });
+    },
+    finish() {
+      return messages;
+    },
+  };
 }
 
 /**
@@ -248,6 +270,23 @@ export function parseAnthropicRequest(
     metadata,
     rawHeaders: headers,
   };
+}
+
+export function parseAnthropicRequestChunks(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+): Promise<GatewayRequest> {
+  return parseStreamedRequest(chunks, {
+    streamKey: "messages",
+    captureKeys: "*",
+    createItemsBuilder: createAnthropicMessagesBuilder,
+    parseSync: (raw) => parseAnthropicRequest(raw, headers),
+    assemble(raw, streamed) {
+      const req = parseAnthropicRequest(raw, headers);
+      if (streamed !== undefined) req.messages = streamed;
+      return req;
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

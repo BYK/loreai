@@ -30,6 +30,10 @@ import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
 import { safeTokenSum, validateGeminiUsageMetadata } from "../usage-validation";
+import {
+  parseStreamedRequest,
+  type StreamedItemsBuilder,
+} from "./streaming-request";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -190,6 +194,32 @@ function partToBlock(part: GeminiPart): GatewayContentBlock | null {
   return { type: "opaque", raw: part };
 }
 
+export function createGeminiContentsBuilder(): StreamedItemsBuilder<
+  GatewayMessage[]
+> {
+  const messages: GatewayMessage[] = [];
+  return {
+    add(item) {
+      const content = item as Record<string, unknown>;
+      const geminiRole = asString(content.role, "user");
+      const role: "user" | "assistant" =
+        geminiRole === "model" ? "assistant" : "user";
+      const parts = Array.isArray(content.parts)
+        ? (content.parts as GeminiPart[])
+        : [];
+      const blocks: GatewayContentBlock[] = [];
+      for (const part of parts) {
+        const block = partToBlock(part);
+        if (block) blocks.push(block);
+      }
+      messages.push({ role, content: blocks });
+    },
+    finish() {
+      return messages;
+    },
+  };
+}
+
 /**
  * Parse a Gemini `generateContent` request body into a `GatewayRequest`.
  *
@@ -210,20 +240,11 @@ export function parseGeminiRequest(
   const system = partsText(raw.systemInstruction ?? raw.system_instruction);
 
   const rawContents = Array.isArray(raw.contents) ? raw.contents : [];
-  const messages: GatewayMessage[] = [];
-  for (const c of rawContents as Array<Record<string, unknown>>) {
-    const geminiRole = asString(c.role, "user");
-    // Gemini roles: "model" → assistant; "user"/"function" → user.
-    const role: "user" | "assistant" =
-      geminiRole === "model" ? "assistant" : "user";
-    const parts = Array.isArray(c.parts) ? (c.parts as GeminiPart[]) : [];
-    const blocks: GatewayContentBlock[] = [];
-    for (const p of parts) {
-      const block = partToBlock(p);
-      if (block) blocks.push(block);
-    }
-    messages.push({ role, content: blocks });
+  const messageBuilder = createGeminiContentsBuilder();
+  for (const content of rawContents as Array<Record<string, unknown>>) {
+    messageBuilder.add(content);
   }
+  const messages = messageBuilder.finish();
 
   // Tools: `[{functionDeclarations:[{name,description,parameters}]}]`.
   const tools: GatewayTool[] = [];
@@ -266,6 +287,35 @@ export function parseGeminiRequest(
     metadata,
     rawHeaders: { ...headers },
   };
+}
+
+const GEMINI_STREAM_CAPTURE_KEYS = new Set([
+  "systemInstruction",
+  "system_instruction",
+  "tools",
+  "generationConfig",
+  "safetySettings",
+  "toolConfig",
+  "cachedContent",
+]);
+
+export function parseGeminiRequestChunks(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+  model: string,
+  stream: boolean,
+): Promise<GatewayRequest> {
+  return parseStreamedRequest(chunks, {
+    streamKey: "contents",
+    captureKeys: GEMINI_STREAM_CAPTURE_KEYS,
+    createItemsBuilder: createGeminiContentsBuilder,
+    parseSync: (raw) => parseGeminiRequest(raw, headers, model, stream),
+    assemble(raw, streamed) {
+      const req = parseGeminiRequest(raw, headers, model, stream);
+      if (streamed !== undefined) req.messages = streamed;
+      return req;
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
