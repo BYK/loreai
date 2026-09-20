@@ -205,7 +205,23 @@ export function originOf(role: string, meta: MessageMeta): BlockOrigin {
   }
 }
 
+/**
+ * Blocks are derived once per message *object*: pages and streamed updates
+ * replace only the messages that changed, so a rebuild over thousands of
+ * messages costs one map lookup each instead of re-parsing and re-hashing
+ * every part.
+ */
+const blockCache = new WeakMap<TemporalMessage, MessageBlock>();
+
 export function messageBlock(message: TemporalMessage): MessageBlock {
+  const cached = blockCache.get(message);
+  if (cached) return cached;
+  const block = uncachedMessageBlock(message);
+  blockCache.set(message, block);
+  return block;
+}
+
+function uncachedMessageBlock(message: TemporalMessage): MessageBlock {
   const meta = parseMeta(message.metadata);
   return {
     kind: "message",

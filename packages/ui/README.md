@@ -414,8 +414,9 @@ The session reader is a **document**, not a chat feed: history is a list of
 addressable blocks the reader can select, link to and (in P3/P4) annotate or
 continue from. UI-06a (#1801, #1508) ships the model and rendering; UI-06b
 the virtualised route (`/ui/projects/:id/sessions/:sid`), server paging,
-selection and deep links; the busy fixture, in-session search and coverage
-labels follow in UI-06c.
+selection and deep links; UI-06c the coverage declaration, in-session
+search over the logical history and the deterministic busy-session fixture
+with its measured budgets.
 
 ### Block model (`src/reader/blocks.ts`)
 
@@ -608,7 +609,11 @@ operations, never HTML strings). Resolution states surface as banners:
 highlighted), `missing` (older pages are searched up to
 `DEEP_LINK_SEARCH_PAGES` = 10, then "not found in the loaded history" /
 "not in this session's captured history"), malformed ("passage reference is
-not understood"). Selecting a passage
+not understood"). A resolved selection is re-verified whenever the loaded
+history changes: a text change becomes `changed`; the block dropping out
+of the window (the server's first page replacing a wider cached window)
+resumes the bounded older-history search for the URL's anchor instead of
+declaring it missing. Selecting a passage
 opens the passage panel: the quote, **Copy with source** (quote + block
 origin/time — `time unknown` stays literal — + deep link) and **Copy link**
 are live; `Save note`, `Ask agent`, `Explore separately`, `Start with
@@ -619,11 +624,203 @@ directive for the quote (see [Source anchors](#source-anchors-srcreaderanchorsts
 so it also scrolls to the passage as a plain text fragment where the browser
 supports that; the reader itself only ever reads `?a=`.
 
-**Coverage line.** The header states `N of M captured messages loaded`
-(server count known), `M messages` when everything is loaded, or `N
-messages loaded` when the count is unknown; a `partial` cache shows the
-partial indicator until the server answers. The three-way
-captured/partial/native-transcript declaration is UI-06c.
+**Coverage line.** See [Coverage declaration](#coverage-declaration-ui-06c).
+
+### Coverage declaration (UI-06c)
+
+`src/reader/coverage.ts` `coverageDeclaration({ loaded, total, hasOlder,
+cachedWindow })` turns what the server and cache *reported* into the
+header's declaration (`data-testid="reader-coverage"`,
+`data-coverage="captured" | "partial"`, `data-coverage-reason`):
+
+| Situation | Kind | Detail | `reason` |
+|---|---|---|---|
+| window served from a partial cache | partial | `N of M captured messages, from the cached window` / `N messages from the cached window; completeness unknown` | `cached-window` |
+| server said older pages exist | partial | `N of M captured messages loaded` / `N messages loaded; older history not loaded` | `older` |
+| total or `hasOlder` still unknown | partial | `N messages loaded; completeness unknown` | `unknown-total` |
+| server total known, fewer loaded | partial | `N of M captured messages loaded` | `count` |
+| everything the server counted is loaded | **captured** | `N messages, complete as captured` | `null` |
+
+Unknown is never promoted to complete: the cache alone (`hasOlder === null`)
+and a missing `message_count` are both partial. Every declaration also
+states `Native transcript not yet available` (`NATIVE_TRANSCRIPT_LABEL`):
+the harness's own transcript is a distinct source no adapter exposes, so it
+is declared absent rather than left implied by "captured". The search
+summary repeats the detail (`Searched the loaded history only · …`) when
+the view is partial.
+
+### In-session search (UI-06c)
+
+`src/reader/search.ts` scans the **logical** rows (`ReaderRow[]`), not the
+DOM, so hits in rows the virtualiser has not mounted are found. Matching is
+a case-insensitive literal (`escapeRegExp` → `RegExp(…, "giu")`, so no
+user-controlled regex), minimum 2 characters (`MIN_QUERY_LENGTH`), over
+the **displayed** text of each part (`displayedText`, the same coordinates
+source anchors use — a hit in a code fence or tool output is what the
+reader sees, not the raw Markdown). Distillation rows are skipped:
+compressed context is not session speech. `searchRows(rows, matcher,
+from, budget)` scans `[from, from + budget)` and returns `next`, and
+`SessionView` drives it in time slices (`SEARCH_DEBOUNCE_MS` 150,
+`SEARCH_SLICE_MS` 12 per step, 40 rows per `searchRows` call, `setTimeout
+0` between steps) so a 10k-block scan never blocks a frame; the summary
+shows `n matches so far · scanning i of N blocks` while it runs. Rows
+changing (older page, live stream) re-scan the active query — throttled,
+not debounced, so a stream that changes rows every frame cannot postpone it
+forever — and the finished hit list stays on screen until the new one
+completes; the current hit is re-found by `(blockId, partIndex, start)`.
+Enter / Shift+Enter step through hits (`search-next` / `search-prev`); the
+current hit is scrolled to and marked with `mark.passage-search`,
+independent of the source highlight (`applyHighlights` applies both spans;
+navigating search does not erase the selection). **Select** turns the
+current hit into a real selection — `anchorFor(block, part, start, end)`,
+the passage panel and the `?a=` deep link — so a finding can be linked or
+copied with source like any pointer selection.
+
+### Busy-session fixture (UI-06c, plan §16.1)
+
+`/ui/fixture?view=busy` (dev-only route, `routes/BusyFixture.tsx`; not in
+the production bundle) mounts the real `SessionView` over
+`src/fixture/busy-session.ts` with no backend:
+
+- `generateBusySession({ blocks = 10_000, seed = 7 })` — `mulberry32`
+  PRNG, so the same seed gives byte-identical history; ids
+  `busy-000000 … busy-009999` (`busyMessageId`), strictly increasing
+  `created_at`. Mix (10k, seed 7): one system prompt, Lore-injected
+  `## Project knowledge` blocks (every 97th), prose with inline Markdown,
+  fenced code, tool calls with tool output (some long), reasoning parts
+  (10k, seed 7: 7,203 text, 1,215 code, 1,477 tool, 104 Lore, 1 system)
+  and one distillation per 500 blocks (19). ~7.0 M characters, generated
+  in **46 ms** (Chromium, `generateMs` in the report). `?blocks=` and `?seed=` override; `blocks`
+  is clamped to `BUSY_MAX_BLOCKS` = 100 000 and anything not a positive
+  number falls back to the default.
+- `BusyStreamEngine` — `BUSY_STREAMS` = 4 lanes, `tick()` every 20 ms
+  (`BUSY_DELTAS_PER_SECOND` = 50 per lane) emits one `replace` event per
+  lane carrying a 6–42 char text delta (`BUSY_DELTA_MIN/MAX_CHARS`);
+  lanes walk text → tool running → tool done → (approval requested →
+  approved) → complete → new turn (`append`). Tool status transitions
+  *replace* the same block, never add a second. `burst(n)` ticks until at
+  least `n` events exist; `snapshot()` / `expected()` give the server's
+  view for reconciliation and verification; `mutateMessage` edits one
+  block in place (the source-changed scenario).
+- Client merge: events are **coalesced per message id** (newest wins,
+  `append` sticky) and applied once per animation frame (`applyEvents`),
+  so the pending queue is bounded by the number of live messages, not by
+  the event rate; `received` counts wire events, `applied` the coalesced
+  ones. `reconcile(prev, snapshot)` merges by id and re-sorts on
+  `(created_at, id)`.
+
+Controls and what they prove: **Start/Stop** (4 × 50 deltas/s),
+**Burst 1,000**, **Disconnect** (live events lost on the wire, reader
+shows `Cached`), **Reconnect** (fresh snapshot converges in one reconcile)
+vs **Reconnect stale** (snapshot taken *at* disconnect: messages that
+started and finished offline are missing and never re-appear in the delta
+stream — the reader stays `stale` and **Verify** reports `n missing` until
+**Refetch**), **Hide tab 2 s** (plus a real `visibilitychange` listener:
+no frames are applied while hidden, the coalesced queue stays bounded by
+live messages, replay on return), **Fail cache writes** (the simulated
+IndexedDB write-through rejects; counted and logged, reader untouched),
+**Edit linked block** (mutates the block the current `?a=` link points at
+→ honest `Source changed` state, highlight and panel removed, URL kept),
+**Verify** (`verifyAgainst`: duplicates / missing / mismatched / extra /
+ordering against the engine's expected state) and **Metrics** (JSON
+report, `busy-report-json`).
+
+`src/fixture/busy-metrics.ts` records input→next-paint (`PerformanceObserver`
+`event`, 16 ms `durationThreshold`, `duration` is bucketed to 8 ms), frame
+intervals (rAF loop), long tasks (`longtask`; buffered entries such as
+generation and first render are replayed on the first `start()` only),
+apply time / queue high-water, delta sizes and `performance.memory`
+(Chromium only, coarse unless `--enable-precise-memory-info`). Samples are
+bounded (newest 5 000); totals and maxima cover every sample.
+
+**Measured budgets** (headless Chromium 153 via Playwright 1.63, 1280×800
+and Pixel 7 emulation, `pnpm --filter @loreai/ui test:e2e` `busy-report`
+attachment; scroll runs from a throw-away script wheeling through the
+list for 6 s). The fixture is a dev-only route, so every number is from the
+Vite dev build (unminified, Solid dev mode) — a ceiling for the production
+bundle, not a measurement of it:
+
+| Scenario | input→paint p95 | frame p95 / max | long tasks (count / total / max) | apply p95 | queue high-water | mounted rows |
+|---|---|---|---|---|---|---|
+| 10k blocks, burst 1,000 + 3 s streaming, desktop | 16 ms | 16.8 / 16.8 ms | 2 / 266 ms / 191 ms | 2.8 ms | 48 | 8 |
+| same, mobile | 16 ms | 16.7 / 16.8 ms | 2 / 234 ms / 179 ms | 2.8 ms | 48 | 7 |
+| 10k blocks, wheel scroll, idle, desktop | 16 ms | 16.7 / 16.8 ms | 2 / 248 ms / 188 ms | – | 4 | 15 |
+| 10k blocks, wheel scroll while streaming, desktop | 32 ms | 16.7 / 16.8 ms | 2 / 248 ms / 188 ms | 2.6 ms | 8 | 14 |
+| 10k blocks, wheel scroll, idle, mobile | 16 ms | 16.8 / 16.8 ms | 2 / 227 ms / 171 ms | – | 4 | 14 |
+| 10k blocks, wheel scroll while streaming, mobile | 16 ms | 16.7 / 16.8 ms | 2 / 227 ms / 171 ms | 2.3 ms | 8 | 14 |
+
+The two long tasks in every row are buffered entries from before
+`start()` — the one-off generation + first mount of 10k blocks (≤ 191 ms);
+the count does not grow while streaming, bursting or scrolling. Frames sit
+on the 60 Hz vsync (16.7 ms) with no dropped frame (max 16.8 ms); the one
+32 ms input→paint bucket is a single wheel event landing on a frame that
+also applied a stream batch. Heap: `usedJSHeapSize` 38–97 MiB depending on
+run (coarse); the disposal check uses CDP `Runtime.getHeapUsage` after a
+forced GC: three mount → stream → unmount cycles of a 3k-block fixture end
+within 25 % of the first sample (a leaked session would add far more).
+Asserted in `e2e/busy-fixture.spec.ts`: mounted rows < 60, queue high-water
+< 400 with ≥ 1,000 events received, `Verify` ok after burst / stream /
+reconnect / hidden tab / cache failure (structural, machine-independent).
+The wall-clock budget (longest task < 250 ms) is asserted only with
+`LORE_E2E_STRICT_BUDGET=1` on an otherwise idle machine — with four
+Playwright workers sharing the CPU one run showed a 277 ms mount and three
+extra long tasks during the burst — and the default run only rejects
+pathologies (> 2 s). The table above
+comes from strict solo runs; the `busy-report` attachment of every run
+carries the numbers for that run.
+
+**Bundle (production, `pnpm --filter @loreai/ui build`).** `Session-*.js`
+203.09 kB / 66.74 kB gzip (was 195.55 / 64.27 in UI-06b: +7.5 kB raw /
++2.5 kB gzip for search, coverage and the dual highlight), entry
+`index-*.js` 325.66 kB / 104.14 kB gzip (unchanged), CSS 41.50 kB / 8.94 kB
+gzip. The fixture, generator, engine and metrics are only reachable from
+the dev-only route and are not emitted in production builds.
+
+### Tests (UI-06c)
+
+`test/reader-coverage-search.test.ts` (every coverage branch incl. cache
+→ server → older-page ordering and "unknown never becomes complete";
+search: literal escaping, case folding, min length, displayed-text
+coordinates, distillation skip, slicing with `next`, hits on unmounted
+rows), `test/busy-session.test.ts` (determinism per seed, mixed kinds,
+10k in bounded time, PRNG; engine lane count, delta sizes, transition
+sequence, tool transitions replace not add, 1,000-event burst with no
+lost / duplicated / reordered text, coalescing ≡ applying every event,
+prefix-preserving appends; disconnect: fresh snapshot converges, stale
+snapshot leaves gaps live deltas cannot fill and refetch fills them in
+order, reconcile never duplicates; `mutateMessage`; `verifyAgainst`;
+query-parameter clamping), `test/busy-metrics.test.ts` (percentile,
+bounded samples with full totals, idempotent start / stop, buffered
+replay once, frame gaps), `test/reader-selection.test.tsx` (independent
+source + search highlights), `test/session-view.test.tsx` (coverage
+declaration states, search over unmounted rows and select-hit → anchor,
+live edit of the linked block → honest source-changed state, linked block
+leaving the window → search resumes / honest not-found).
+
+Playwright (`e2e/reader.spec.ts`, against the built gateway seeded by
+`e2e/seed.mjs` — 230 messages + one gen-0 distillation — desktop + mobile
+projects): load older history twice → `history-start` + coverage
+`captured` / `complete as captured`; select → link → reload → same
+highlight (UX-01); changed source → honest state (UX-02); search over
+unmounted history → select as anchor; keyboard rows; distillation labelled
+compressed context, placed after its sources, never a search hit, details
+loaded on demand. `e2e/busy-fixture.spec.ts` (Vite dev
+server, desktop + mobile): virtualisation bounds; selection, focus and
+link survive burst + streaming and reload; disconnect → stale → refetch;
+hidden tab + failing cache writes; edit linked block; search across
+unmounted rows → anchor; disposal (heap after three mount / unmount
+cycles).
+
+Known notice: during the busy-fixture specs the Vite dev overlay logs
+`ResizeObserver loop completed with undelivered notifications` a few
+times. It is Chrome reporting that a resize-observer delivery changed the
+size of an observed element, so delivery finished on the next frame; it
+does not throw into app code or fail a test (the production bundle has no
+overlay, so the reader specs surface nothing either way). `SessionView`'s own observer
+(list height) defers its work to `requestAnimationFrame`; the remaining
+source is most likely the virtualizer's per-row `measureElement` observer
+re-laying out rows while streaming rows grow — not proven, tracked as an
+open item.
 
 ### Tests (UI-06b)
 

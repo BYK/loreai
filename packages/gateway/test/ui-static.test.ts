@@ -274,13 +274,15 @@ describe("handleUIRequest", () => {
 
   test("the staged bundle carries no dev/test-only screens or specimen data", () => {
     // Route paths, test ids and specimen ids that exist only in
-    // packages/ui/src/routes/Fixture.tsx, reader/specimen.ts and compat/.
+    // packages/ui/src/routes/Fixture.tsx, routes/BusyFixture.tsx,
+    // reader/specimen.ts and compat/.
     const devOnlyMarkers = [
       '"/fixture"',
       '"/_compat"',
       "fixture-banner",
       "spec-sys",
       "link-index",
+      "busy-fixture",
     ];
     const { files } = manifest();
     const textAssets = Object.keys(files).filter((path) =>

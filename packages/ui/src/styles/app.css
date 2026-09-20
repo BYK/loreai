@@ -235,6 +235,15 @@
     box-decoration-break: clone;
     -webkit-box-decoration-break: clone;
   }
+  .passage-search {
+    background: transparent;
+    color: inherit;
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    border-radius: 3px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
 }
 
 /* Session reader (UI-06): sanitised Markdown / code / tool output produced by

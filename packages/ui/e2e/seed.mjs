@@ -9,6 +9,7 @@
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -66,9 +67,91 @@ core.ltm.create({
   confidence: 0.6,
 });
 
+// A session with more messages than one reader page (READER_PAGE_SIZE = 100)
+// so the specs can page older history, search unmounted blocks and follow
+// deep links through the real /api/v1 paging route. Message `k` mentions
+// "needle-k" so a search hit is unambiguous; message 5 carries the passage
+// the deep-link scenario anchors.
+const SESSION = "e2e-reader";
+const MESSAGES = 230;
+const T0 = Date.UTC(2026, 4, 3, 8, 0, 0);
+for (let k = 0; k < MESSAGES; k++) {
+  const user = k % 2 === 0;
+  const id = `e2e-m${String(k).padStart(3, "0")}`;
+  const created = T0 + k * 60_000;
+  const info = user
+    ? {
+        id,
+        sessionID: SESSION,
+        role: "user",
+        time: { created },
+        agent: "build",
+        model: { providerID: "anthropic", modelID: "m" },
+      }
+    : {
+        id,
+        sessionID: SESSION,
+        role: "assistant",
+        time: { created },
+        parentID: `e2e-m${String(k - 1).padStart(3, "0")}`,
+        modelID: "m",
+        providerID: "anthropic",
+        mode: "build",
+        path: { cwd: "/", root: "/" },
+        cost: 0,
+        tokens: {
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      };
+  const text =
+    k === 5
+      ? "The anchored passage: portability is a requirement, so SQLite stays the store (needle-5)."
+      : `Message ${k} of the e2e reader session discusses needle-${k} and nothing else.`;
+  core.temporal.store({
+    projectPath: lore,
+    info,
+    parts: [
+      {
+        id: `part-${id}`,
+        sessionID: SESSION,
+        messageID: id,
+        type: "text",
+        text,
+        time: { start: 0, end: 0 },
+      },
+    ],
+  });
+}
+
 core.close();
+
+// One gen-0 distillation over the first ten messages, written the way
+// distillation.ts stores it (core has no public write path for summaries;
+// only the distiller produces them). The reader must show it as labelled
+// compressed context after message 9, never as speech.
+const db = new DatabaseSync(process.env.LORE_DB_PATH);
+db.prepare(
+  `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
+   VALUES (?, (SELECT id FROM projects WHERE name = 'lore'), ?, '', '[]', ?, ?, 0, ?, ?, ?, ?, 'batch')`,
+).run(
+  "e2e-distillation-0",
+  SESSION,
+  "Compressed context for messages 0-9: the session opens by walking through needle-0 to needle-9; message 5 fixes SQLite as the store for portability.",
+  JSON.stringify(
+    Array.from({ length: 10 }, (_, k) => `e2e-m${String(k).padStart(3, "0")}`),
+  ),
+  38,
+  T0 + 9 * 60_000 + 30_000,
+  6.4,
+  0.9,
+);
+db.close();
+
 console.log(
-  `seeded ${entries.length + 1} knowledge entries into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 1} knowledge entries, ${MESSAGES} messages and 1 distillation into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);
