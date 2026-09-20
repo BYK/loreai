@@ -23,6 +23,81 @@ import type { AnthropicCacheOptions } from "./anthropic";
 import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
+import {
+  parseStreamedRequest,
+  type StreamedItemsBuilder,
+} from "./streaming-request";
+
+export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<{
+  system: string;
+  messages: GatewayMessage[];
+}> {
+  let system = "";
+  const messages: GatewayMessage[] = [];
+  return {
+    add(item) {
+      const msg = item as Record<string, unknown>;
+      const role = msg.role as string;
+      const content = msg.content;
+
+      if (role === "system" || role === "developer") {
+        let text = "";
+        if (typeof content === "string") {
+          text = content;
+        } else if (Array.isArray(content)) {
+          text = (content as Array<Record<string, unknown>>)
+            .filter((b) => b.type === "text")
+            .map((b) => asString(b.text))
+            .join("\n");
+        }
+        if (system) {
+          system += `\n\n${text}`;
+        } else {
+          system = text;
+        }
+        return;
+      }
+
+      if (role === "user") {
+        const blocks = parseUserContent(
+          content,
+          msg.tool_calls as Array<Record<string, unknown>> | undefined,
+        );
+        messages.push({ role: "user", content: blocks });
+        return;
+      }
+
+      if (role === "assistant") {
+        const blocks = parseAssistantContent(
+          content,
+          msg.tool_calls as Array<Record<string, unknown>> | undefined,
+        );
+        messages.push({ role: "assistant", content: blocks });
+        return;
+      }
+
+      if (role === "tool") {
+        const toolResultBlocks = parseToolResult(msg);
+        if (toolResultBlocks.length > 0) {
+          const last = messages[messages.length - 1];
+          const lastIsToolResultMessage =
+            last !== undefined &&
+            last.role === "user" &&
+            last.content.length > 0 &&
+            last.content.every((b) => b.type === "tool_result");
+          if (lastIsToolResultMessage) {
+            last.content.push(...toolResultBlocks);
+          } else {
+            messages.push({ role: "user", content: toolResultBlocks });
+          }
+        }
+      }
+    },
+    finish() {
+      return { system, messages };
+    },
+  };
+}
 
 function openAIUsage(usage: GatewayUsage): Record<string, unknown> {
   const inclusiveInputTokens = safeTokenSum(
@@ -105,78 +180,11 @@ export function parseOpenAIRequest(
 
   // Parse messages and extract system prompt
   const rawMessages = Array.isArray(raw.messages) ? raw.messages : [];
-  let system = "";
-  const messages: GatewayMessage[] = [];
-
+  const messageBuilder = createOpenAIMessagesBuilder();
   for (const msg of rawMessages as Array<Record<string, unknown>>) {
-    const role = msg.role as string;
-    const content = msg.content;
-
-    if (role === "system" || role === "developer") {
-      // Concatenate multiple system/developer messages with double newline.
-      // Content can be a string or an array of content parts — extract text
-      // from both forms instead of coercing arrays to "".
-      let text = "";
-      if (typeof content === "string") {
-        text = content;
-      } else if (Array.isArray(content)) {
-        text = (content as Array<Record<string, unknown>>)
-          .filter((b) => b.type === "text")
-          .map((b) => asString(b.text))
-          .join("\n");
-      }
-      if (system) {
-        system += `\n\n${text}`;
-      } else {
-        system = text;
-      }
-      continue;
-    }
-
-    if (role === "user") {
-      const blocks = parseUserContent(
-        content,
-        msg.tool_calls as Array<Record<string, unknown>> | undefined,
-      );
-      messages.push({ role: "user", content: blocks });
-      continue;
-    }
-
-    if (role === "assistant") {
-      const blocks = parseAssistantContent(
-        content,
-        msg.tool_calls as Array<Record<string, unknown>> | undefined,
-      );
-      messages.push({ role: "assistant", content: blocks });
-      continue;
-    }
-
-    if (role === "tool") {
-      // OpenAI sends each tool response as its own `role:"tool"` message, but
-      // the gateway's downstream tool-pairing (loreMessagesToGateway +
-      // removeOrphanedToolResults) assumes the Anthropic shape: the single
-      // user message immediately after an assistant carries ALL matching
-      // tool_result blocks. Coalesce consecutive tool messages into one user
-      // message so an assistant emitting N tool_calls keeps its N tool_use
-      // blocks paired with N tool_result blocks in that one following message.
-      const toolResultBlocks = parseToolResult(msg);
-      if (toolResultBlocks.length > 0) {
-        const last = messages[messages.length - 1];
-        // Only merge into a user message that was itself produced from tool
-        // messages — never a genuine user text turn.
-        const lastIsToolResultMessage =
-          last !== undefined &&
-          last.role === "user" &&
-          last.content.length > 0 &&
-          last.content.every((b) => b.type === "tool_result");
-        if (lastIsToolResultMessage) {
-          last.content.push(...toolResultBlocks);
-        } else {
-          messages.push({ role: "user", content: toolResultBlocks });
-        }
-      }
-    }
+    messageBuilder.add(msg);
   }
+  const { system, messages } = messageBuilder.finish();
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
@@ -201,6 +209,42 @@ export function parseOpenAIRequest(
     rawHeaders: { ...headers },
     extras,
   };
+}
+
+const OPENAI_STREAM_CAPTURE_KEYS = new Set([
+  "model",
+  "stream",
+  "max_tokens",
+  "temperature",
+  "top_p",
+  "frequency_penalty",
+  "presence_penalty",
+  "user",
+  "logprobs",
+  "top_logprobs",
+  "provider",
+  "stream_options",
+  "tools",
+]);
+
+export function parseOpenAIRequestChunks(
+  chunks: AsyncIterable<Uint8Array>,
+  headers: Record<string, string>,
+): Promise<GatewayRequest> {
+  return parseStreamedRequest(chunks, {
+    streamKey: "messages",
+    captureKeys: OPENAI_STREAM_CAPTURE_KEYS,
+    createItemsBuilder: createOpenAIMessagesBuilder,
+    parseSync: (raw) => parseOpenAIRequest(raw, headers),
+    assemble(raw, streamed) {
+      const req = parseOpenAIRequest(raw, headers);
+      if (streamed !== undefined) {
+        req.system = streamed.system;
+        req.messages = streamed.messages;
+      }
+      return req;
+    },
+  });
 }
 
 function parseUserContent(

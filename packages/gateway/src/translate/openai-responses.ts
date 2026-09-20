@@ -11,8 +11,6 @@
  *   - Tools use `parameters` directly (not wrapped in `function`)
  */
 import { asString, log } from "@loreai/core";
-import { TokenParser, TokenType, Tokenizer } from "@streamparser/json";
-import type { ParsedElementInfo, ParsedTokenInfo } from "@streamparser/json";
 import type {
   GatewayContentBlock,
   GatewayMessage,
@@ -30,6 +28,12 @@ import {
 } from "./types";
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
+import {
+  parseStreamedRequest,
+  type StreamingRequestSpec,
+} from "./streaming-request";
+
+export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
 
 function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
   const inclusiveInputTokens = safeTokenSum(
@@ -164,63 +168,6 @@ const CODEX_TOP_LEVEL_KEYS = new Set([
   "service_tier",
 ]);
 
-// Keep native JSON.parse for ordinary requests. This is deliberately bounded:
-// once crossed, the raw prefix is replayed into the streaming parser and is
-// released, so large transcripts never accumulate a decoded body buffer.
-export const STREAMING_PARSE_SPOOL_BYTES = 256 * 1024;
-
-type InputItemsBuilder = ReturnType<typeof createInputItemsBuilder>;
-
-interface TopLevelCapture {
-  key: string;
-  nesting: number;
-  parser: TokenParser;
-  value: unknown;
-}
-
-interface ActiveTopLevelValue {
-  key: string;
-  nesting: number;
-  capture?: TopLevelCapture;
-  inputBuilder?: InputItemsBuilder;
-  inputString?: string;
-}
-
-function isOpeningToken(token: TokenType): boolean {
-  return token === TokenType.LEFT_BRACE || token === TokenType.LEFT_BRACKET;
-}
-
-function isClosingToken(token: TokenType): boolean {
-  return token === TokenType.RIGHT_BRACE || token === TokenType.RIGHT_BRACKET;
-}
-
-function createTopLevelCapture(key: string): TopLevelCapture {
-  const parser = new TokenParser({ paths: ["$"], keepStack: false });
-  const capture: TopLevelCapture = {
-    key,
-    nesting: 0,
-    parser,
-    value: undefined,
-  };
-  parser.onValue = ({ value }: ParsedElementInfo): void => {
-    capture.value = value;
-  };
-  return capture;
-}
-
-function feedCapture(capture: TopLevelCapture, token: ParsedTokenInfo): void {
-  capture.parser.write({
-    token: token.token,
-    value: token.value,
-    partial: token.partial,
-  });
-}
-
-function finishCapture(capture: TopLevelCapture): unknown {
-  if (!capture.parser.isEnded) capture.parser.end();
-  return capture.value;
-}
-
 function addCodexControls(
   req: GatewayRequest,
   raw: Record<string, unknown>,
@@ -245,291 +192,33 @@ function addCodexControls(
   return req;
 }
 
-/**
- * Parse a Responses request without materializing its raw `input` array. The
- * tokenizer validates the complete document; a structural parser retains only
- * the current input item, and controls the normalized request needs.
- */
-async function parseOpenAIResponsesRequestChunksInternal(
-  chunks: AsyncIterable<Uint8Array>,
+const responsesSpec = (
   headers: Record<string, string>,
   codex: boolean,
-  onDrain: () => void,
-): Promise<GatewayRequest> {
-  const raw: Record<string, unknown> = {};
-  const inputParser = new TokenParser({
-    paths: ["$.input.*"],
-    keepStack: false,
-  });
-  const tokenizer = new Tokenizer();
-  // Preserve BOM characters so JSON's whitespace rules can reject them outside
-  // strings, including after otherwise valid leading whitespace.
-  const textDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
-  let inString = false;
-  let escapingStringCharacter = false;
-  let rootState: RootState = "start";
-  let rootIsObject = false;
-  let rootComplete = false;
-  let sawToken = false;
-  let rootKey: string | undefined;
-  let active: ActiveTopLevelValue | undefined;
-  let selectedInput: InputItemsBuilder | string | undefined;
-
-  inputParser.onValue = ({ value }: ParsedElementInfo): void => {
-    active?.inputBuilder?.add(value);
-  };
-
-  const finishActive = (): void => {
-    if (!active) return;
-    if (active.capture) raw[active.key] = finishCapture(active.capture);
-    if (active.inputBuilder) selectedInput = active.inputBuilder;
-    if (active.inputString !== undefined) selectedInput = active.inputString;
-    active = undefined;
-    rootKey = undefined;
-    rootState = "comma-or-end";
-  };
-
-  const consumeTopLevelToken = (token: ParsedTokenInfo): void => {
-    if (rootState === "start") {
-      if (token.token === TokenType.LEFT_BRACE) {
-        rootIsObject = true;
-        rootState = "key-or-end";
-      }
-      return;
-    }
-
-    if (active) {
-      if (active.capture) feedCapture(active.capture, token);
-      if (isOpeningToken(token.token)) active.nesting += 1;
-      if (isClosingToken(token.token)) active.nesting -= 1;
-      if (active.nesting === 0) {
-        finishActive();
-      }
-      return;
-    }
-
-    switch (rootState) {
-      case "key-or-end":
-        if (token.token === TokenType.RIGHT_BRACE) {
-          rootState = "complete";
-          rootComplete = true;
-        } else if (token.token === TokenType.STRING) {
-          rootKey = typeof token.value === "string" ? token.value : undefined;
-          rootState = "colon";
-        }
-        return;
-      case "colon":
-        if (token.token === TokenType.COLON) rootState = "value";
-        return;
-      case "value": {
-        const key = rootKey ?? "";
-        const nesting = isOpeningToken(token.token) ? 1 : 0;
-        const captureInputString =
-          key === "input" && token.token === TokenType.STRING;
-        const streamInputArray =
-          key === "input" && token.token === TokenType.LEFT_BRACKET;
-        if (key === "input") selectedInput = undefined;
-        active = {
-          key,
-          nesting,
-          inputBuilder: streamInputArray
-            ? createInputItemsBuilder()
-            : undefined,
-          inputString:
-            captureInputString && typeof token.value === "string"
-              ? token.value
-              : undefined,
-          capture:
-            !streamInputArray &&
-            !captureInputString &&
-            (RESPONSES_TOP_LEVEL_KEYS.has(key) ||
-              (codex && CODEX_TOP_LEVEL_KEYS.has(key)))
-              ? createTopLevelCapture(key)
-              : undefined,
-        };
-        const current = active;
-        if (current.capture) feedCapture(current.capture, token);
-        if (current.nesting === 0) finishActive();
-        return;
-      }
-      case "comma-or-end":
-        if (token.token === TokenType.COMMA) {
-          rootState = "key-or-end";
-        } else if (token.token === TokenType.RIGHT_BRACE) {
-          rootState = "complete";
-          rootComplete = true;
-        }
-        return;
-      case "complete":
-        return;
-    }
-  };
-
-  tokenizer.onToken = (token): void => {
-    sawToken = true;
-    consumeTopLevelToken(token);
-    // The parser needs root/object tokens to match `$.input.*`; `keepStack`
-    // prevents it from retaining unrelated top-level values.
-    inputParser.write({
-      token: token.token,
-      value: token.value,
-      partial: token.partial,
-    });
-  };
-
-  const write = (chunk: Uint8Array, stream: boolean): void => {
-    // Buffer.toString("utf8") historically replaced malformed sequences before
-    // JSON.parse. Keep that non-fatal decoding behavior while retaining only
-    // the decoder's incomplete UTF-8 suffix between chunks.
-    const text = textDecoder.decode(chunk, { stream });
-    for (const character of text) {
-      if (inString) {
-        if (escapingStringCharacter) {
-          escapingStringCharacter = false;
-        } else if (character === "\\") {
-          escapingStringCharacter = true;
-        } else if (character === '"') {
-          inString = false;
-        }
-      } else if (character === "\uFEFF") {
-        throw new Error("Invalid JSON body");
-      } else if (character === '"') {
-        inString = true;
-      }
-    }
-    if (text) tokenizer.write(Buffer.from(text, "utf8"));
-  };
-
-  const iterator = chunks[Symbol.asyncIterator]();
-  let parseError: unknown;
-  let draining = false;
-  const drain = (): void => {
-    draining = true;
-    onDrain();
-    void (async () => {
-      try {
-        while (!(await iterator.next()).done) {
-          // Keep Node's request body flowing so the handler can return a 400.
-        }
-      } catch {
-        // The public error is already fixed; decoder cleanup is best effort.
-      } finally {
-        void iterator.return?.(undefined);
-      }
-    })();
-  };
-  try {
-    while (true) {
-      const { done, value } = await iterator.next();
-      if (done) break;
-      if (parseError) continue;
-      try {
-        write(value, true);
-      } catch (error) {
-        // Drain the request after a syntax failure. Cancelling the Node request
-        // body here aborts its socket before the handler can send its 400.
-        parseError = error;
-        drain();
-        break;
-      }
-    }
-  } finally {
-    if (!draining) void iterator.return?.(undefined);
-  }
-  if (!parseError) {
-    try {
-      write(new Uint8Array(), false);
-      tokenizer.end();
-      if (!inputParser.isEnded) inputParser.end();
-    } catch (error) {
-      parseError =
-        error instanceof Error ? error : new Error("Invalid JSON body");
-    }
-  }
-  if (parseError || !sawToken || active || !tokenizer.isEnded) {
-    throw new Error("Invalid JSON body");
-  }
-  if (rootIsObject && !rootComplete) throw new Error("Invalid JSON body");
-
-  // Native parsing treats primitive/array roots as an empty request. Preserve
-  // that behavior without retaining the root value on the streaming path.
-  const req = parseOpenAIResponsesRequest(rootIsObject ? raw : {}, headers);
-  if (typeof selectedInput === "string") {
-    req.messages = parseInputItems(selectedInput);
-  } else if (selectedInput) {
-    req.messages = selectedInput.finish();
-  }
-  return codex ? addCodexControls(req, raw) : req;
-}
-
-async function parseOpenAIResponsesRequestChunksWithFastPath(
-  chunks: AsyncIterable<Uint8Array>,
-  headers: Record<string, string>,
-  codex: boolean,
-): Promise<GatewayRequest> {
-  const iterator = chunks[Symbol.asyncIterator]();
-  const spool: Uint8Array[] = [];
-  let total = 0;
-  let handedOff = false;
-  let draining = false;
-  try {
-    while (true) {
-      const next = await iterator.next();
-      if (next.done) {
-        const raw = JSON.parse(Buffer.concat(spool, total).toString("utf8"));
-        return codex
-          ? parseOpenAICodexRequest(raw, headers)
-          : parseOpenAIResponsesRequest(raw, headers);
-      }
-      total += next.value.byteLength;
-      spool.push(next.value);
-      if (total > STREAMING_PARSE_SPOOL_BYTES) {
-        async function* replay(): AsyncGenerator<Uint8Array> {
-          try {
-            yield* spool;
-            while (true) {
-              const remaining = await iterator.next();
-              if (remaining.done) return;
-              yield remaining.value;
-            }
-          } finally {
-            void iterator.return?.(undefined);
-          }
-        }
-        handedOff = true;
-        try {
-          return await parseOpenAIResponsesRequestChunksInternal(
-            replay(),
-            headers,
-            codex,
-            () => {
-              draining = true;
-            },
-          );
-        } finally {
-          handedOff = false;
-        }
-      }
-    }
-  } finally {
-    if (!handedOff && !draining) void iterator.return?.(undefined);
-  }
-}
-
-type RootState =
-  | "start"
-  | "key-or-end"
-  | "colon"
-  | "value"
-  | "comma-or-end"
-  | "complete";
+): StreamingRequestSpec<GatewayMessage[]> => ({
+  streamKey: "input",
+  captureKeys: codex
+    ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
+    : RESPONSES_TOP_LEVEL_KEYS,
+  createItemsBuilder: createInputItemsBuilder,
+  parseSync: (raw) =>
+    codex
+      ? parseOpenAICodexRequest(raw, headers)
+      : parseOpenAIResponsesRequest(raw, headers),
+  assemble(raw, streamed) {
+    const req = parseOpenAIResponsesRequest(raw, headers);
+    if (streamed) req.messages = streamed;
+    else if ("input" in raw) req.messages = parseInputItems(raw.input);
+    return codex ? addCodexControls(req, raw) : req;
+  },
+});
 
 /** Parse a streamed OpenAI Responses request. */
 export function parseOpenAIResponsesRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
-  return parseOpenAIResponsesRequestChunksWithFastPath(chunks, headers, false);
+  return parseStreamedRequest(chunks, responsesSpec(headers, false));
 }
 
 /**
@@ -557,7 +246,7 @@ export function parseOpenAICodexRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
-  return parseOpenAIResponsesRequestChunksWithFastPath(chunks, headers, true);
+  return parseStreamedRequest(chunks, responsesSpec(headers, true));
 }
 
 // ---------------------------------------------------------------------------

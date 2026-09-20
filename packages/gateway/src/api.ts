@@ -39,6 +39,7 @@ import {
   handleListKnowledgeFiltered,
   handleListSessionsCursor,
   handleKnowledgeVersions,
+  handleShowSessionCursor,
 } from "./api-lists";
 
 // ---------------------------------------------------------------------------
@@ -211,8 +212,10 @@ function handleShowSession(url: URL, sessionId: string): Response {
       "Session show requires ?git_remote or ?path to identify the project",
     );
   }
-  const messages = temporal.bySession(project.path, sessionId);
   const distillations = data.listDistillations(project.path, { sessionId });
+  const paged = handleShowSessionCursor(url, project, sessionId, distillations);
+  if (paged) return paged;
+  const messages = temporal.bySession(project.path, sessionId);
   return jsonResponse({ messages, distillations });
 }
 

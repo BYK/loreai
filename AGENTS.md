@@ -111,7 +111,7 @@ Fields: `id` (UUIDv7), `project_id`, `category`, `title`, `content` (max 1200 ch
 | File sync | `packages/core/src/agents-file.ts` |
 | Curator | `packages/core/src/curator.ts` |
 | Configuration | `packages/core/src/config.ts` (loads `.lore.json`) |
-| Gateway server | `packages/gateway/src/server.ts` |
+| Gateway server | `packages/gateway/src/server.ts` (node:http bridge + lifecycle), `packages/gateway/src/app.ts` (Hono app + access middleware), `packages/gateway/src/routes/` (per-provider/management route modules + `registry.ts`, the single source of truth for data/management-plane path classification), `packages/gateway/src/management-access.ts` (access policy helpers) |
 | Compaction intercept | `packages/gateway/src/compaction.ts` |
 | LLM proxy pipeline | `packages/gateway/src/pipeline.ts` |
 | CLI commands | `packages/gateway/src/cli/` |

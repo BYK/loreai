@@ -30,6 +30,7 @@ const PROJECT = `/tmp/lore-gateway-access-${process.pid}`;
 const SESSION = "gateway-access-session";
 const COMPACT_SESSION = "gateway-access-compact-session";
 const ADMIN_ANTHROPIC_ORIGIN = "https://gateway-access-admin.invalid";
+const GEMINI_ORIGIN = "https://generativelanguage.googleapis.com";
 const BEDROCK_ORIGIN = "https://bedrock-runtime.gateway-access-1.amazonaws.com";
 
 type HeaderValue = string | string[];
@@ -447,6 +448,7 @@ function installDispatcher(
 ) {
   for (const origin of [
     ADMIN_ANTHROPIC_ORIGIN,
+    GEMINI_ORIGIN,
     "https://api.openai.com",
     "https://chatgpt.com",
     BEDROCK_ORIGIN,

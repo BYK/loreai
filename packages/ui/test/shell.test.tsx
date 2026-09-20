@@ -6,7 +6,15 @@ import {
   waitFor,
   within,
 } from "@solidjs/testing-library";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { createAppRoot, routes } from "~/app";
 import { knowledgeHref } from "~/routes/Browse";
@@ -214,6 +222,16 @@ async function seededDb(): Promise<Promise<LoreUiDb | null>> {
   // Return a pending-open promise so the memoised connection stays alive for
   // the mounted shell; `openLoreDb({factory})` memoises per options.
   return openLoreDb({ factory });
+}
+
+function isPreloadable(
+  value: unknown,
+): value is { preload: () => Promise<unknown> } {
+  return (
+    typeof value === "function" &&
+    "preload" in value &&
+    typeof value.preload === "function"
+  );
 }
 
 function pane(name: "nav" | "list" | "detail"): HTMLElement {
@@ -631,6 +649,15 @@ describe("shell: empty, error, not-found and locked states", () => {
 });
 
 describe("shell: search entry, theme and fixture", () => {
+  // `/fixture` is a lazy route. Resolve it through the route table's own
+  // `lazy()` wrapper once, so later mounts render synchronously from the
+  // same module graph (the production-routes test below resets modules).
+  beforeAll(async () => {
+    const component = routes.find((r) => r.path === "/fixture")?.component;
+    if (!isPreloadable(component)) throw new Error("fixture route not lazy");
+    await component.preload();
+  });
+
   it("asks for a project before accepting a search query", async () => {
     mount("/", fakeClient());
     fireEvent.click(screen.getByTestId("search-entry"));
@@ -761,7 +788,7 @@ describe("shell: search entry, theme and fixture", () => {
   it("renders the fixture as a labelled non-production specimen without API calls", async () => {
     const client = fakeClient();
     mount("/fixture", client);
-    expect(screen.getByTestId("fixture-banner")).toHaveTextContent(
+    expect(await screen.findByTestId("fixture-banner")).toHaveTextContent(
       "NOT PRODUCTION",
     );
     expect(screen.getAllByTestId("fixture-thread-row")).toHaveLength(4);
@@ -801,7 +828,7 @@ describe("shell: search entry, theme and fixture", () => {
 
   it("switches to the focused discussion view and back", async () => {
     const { history } = mount("/fixture", fakeClient());
-    fireEvent.click(screen.getByTestId("open-focus"));
+    fireEvent.click(await screen.findByTestId("open-focus"));
     await waitFor(() => expect(history.get()).toBe("/fixture?view=focus"));
     expect(await screen.findByTestId("focus-discussion")).toHaveTextContent(
       "Keep the local store",
@@ -813,6 +840,32 @@ describe("shell: search entry, theme and fixture", () => {
     fireEvent.click(screen.getByTestId("back-to-source"));
     await waitFor(() => expect(history.get()).toBe("/fixture"));
     expect(await screen.findByTestId("inline-discussion")).toBeInTheDocument();
+  });
+
+  it("renders the invented session through the block model at ?view=blocks", async () => {
+    const client = fakeClient();
+    mount("/fixture?view=blocks", client);
+    const section = await screen.findByTestId("reader-blocks");
+    expect(screen.getByTestId("fixture-banner")).toHaveTextContent(
+      "NOT PRODUCTION",
+    );
+    expect(screen.queryByTestId("inline-discussion")).toBeNull();
+    // Every origin the model distinguishes is on the page, labelled.
+    for (const origin of ["system", "lore", "user", "agent"]) {
+      expect(
+        section.querySelector(`[data-block-id][data-origin="${origin}"]`),
+      ).not.toBeNull();
+    }
+    expect(
+      section.querySelector('[data-origin="distillation"]'),
+    ).toHaveTextContent("Compressed context");
+    expect(section.querySelector('[data-part-kind="tool"]')).not.toBeNull();
+    expect(section.textContent).toContain("time unknown");
+    // Block ids come from the server ids, never from position.
+    expect(section.querySelector("#m\\.spec-sys")).not.toBeNull();
+    // No script survives the sanitiser anywhere in the specimen.
+    expect(section.querySelector("script")).toBeNull();
+    await waitFor(() => expect(client.calls).toEqual(["projects"]));
   });
 });
 

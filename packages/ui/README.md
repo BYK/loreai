@@ -17,10 +17,10 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/projects/:projectId/sessions` | Cursor-paged sessions for a project |
-| `/ui/projects/:projectId/sessions/:sessionId` | UI-06 session-reader placeholder |
+| `/ui/projects/:projectId/sessions/:sessionId` | UI-06 session reader |
 | `/ui/projects/:projectId/search` | Scoped recall results with expansion disabled |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
-| `/ui/fixture` (`?view=focus`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state |
+| `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the UI-06a block model and renderer |
 | `/ui/_compat` | **Dev/test only** — UI-01 compatibility smoke page |
 
 Dev/test-only routes are mounted when `import.meta.env.DEV` is set (Vite dev
@@ -60,6 +60,9 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
+| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokens → HTML, raw HTML escaped; only used inside `src/lib/safe-html.ts` (UI-06a) |
+| HTML sanitiser | `dompurify` | 3.4.15 | 2026-09-06 | explicit tag/attribute allowlist + link policy hook; only used inside `src/lib/safe-html.ts` |
+| Code highlighting | `highlight.js` | 11.12.0 | 2026-08-12 | `lib/core` + 14 registered grammars, no auto-detect; regex-based, no `eval`, so `script-src 'self'` holds |
 | Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
 
 ### Schema library (UI-03 decision)
@@ -403,11 +406,457 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx` | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a) and [Tests (UI-06b)](#tests-ui-06b)) | root `pnpm test`, regular CI job |
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway. Requires core/gateway builds and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+
+## Session reader (UI-06)
+
+The session reader is a **document**, not a chat feed: history is a list of
+addressable blocks the reader can select, link to and (in P3/P4) annotate or
+continue from. UI-06a (#1801, #1508) ships the model and rendering; UI-06b
+the virtualised route (`/ui/projects/:id/sessions/:sid`), server paging,
+selection and deep links; UI-06c the coverage declaration, in-session
+search over the logical history and the deterministic busy-session fixture
+with its measured budgets.
+
+### Block model (`src/reader/blocks.ts`)
+
+`buildBlocks(sessionDetail)` turns the `GET /api/v1/sessions/:id` body into
+`ReaderBlock`s without inventing anything the server did not send:
+
+| Block | Id | Source |
+|---|---|---|
+| `MessageBlock` | `m.<temporal message id>` | one `temporal_messages` row |
+| `DistillationBlock` | `d.<distillation id>` | one distillation summary |
+
+Ids derive from **server ids only** — never from array position — so they
+are stable across reloads, paging and virtualisation. Duplicate ids from
+overlapping pages collapse to the first occurrence.
+
+A message's `content` is split on core's chunk separator (`"\n\x1f"`) into
+**parts** — `text`, `reasoning` (`[reasoning] …`) or `tool` (`[tool:<name>] …`,
+name bounded to 200 non-space characters). Each part carries `index`, `kind`,
+`tool` and `hash` (`contentHash(text)`). Empty content is one empty text
+part, so every block has at least one part.
+
+`origin` labels who produced the block: `user`, `agent`, `lore` (metadata
+`synthetic: true`, `lore: true` or `agent: "lore"`), `system` (role
+`system`) or `unknown` (any other stored role, shown with an "unrecognised
+role" badge and the raw role). Lore-injected messages and the system prompt
+render with their own badge and tint (#1508). Metadata is parsed
+defensively: malformed JSON yields an empty `MessageMeta`, never a crash.
+
+`createdAt` is `null` unless the server sent a finite positive epoch;
+`BlockTime` then renders the literal text **time unknown** — timestamps and
+ids are never manufactured.
+
+Distillations are kept in a **separate** list (`blocks.distillations`,
+ordered by generation, time, id) and render as an `<aside>` labelled
+"Compressed context — Lore's summary of the surrounding messages, not what
+anyone said". The compressed text itself is shown only on demand (a
+`<details>`, loaded through `GET /api/v1/distillations/:id`), as plain
+escaped text. They are never interleaved as speech.
+
+### Source anchors (`src/reader/anchors.ts`)
+
+```ts
+interface SourceAnchor {
+  blockId: string;      // m.<id> | d.<id>
+  partIndex?: number;   // omitted = whole block
+  start: number;        // offsets into the part's *displayed text*
+  end: number;
+  contentHash: string;  // part hash (or whole-block hash)
+}
+```
+
+Anchors are **logical**, not DOM positions: offsets index the `text` of the
+sanitised render (`RenderedHtml.text === element.textContent`), so they
+survive virtualisation (the element need not be mounted), re-rendering and
+streaming. Wire form (`encodeAnchor` / `decodeAnchor`):
+`<mapping>~<blockId>~<partIndex|''>~<start>~<end>~<hash>` — URL-safe without
+percent-encoding, bounded (`MAX_ANCHOR_OFFSET`), strictly validated;
+anything malformed decodes to `null`.
+
+`resolveAnchor(decoded, block, displayedText)` answers honestly:
+
+| Result | Meaning |
+|---|---|
+| `ok` + `quote` | same block, same part, same content hash, span inside the text |
+| `changed` (`hash`) | the passage's source text differs from when the link was made |
+| `changed` (`range`) | hash matches but the span runs past the text (a forged or truncated link) |
+| `changed` (`mapping`) | the link was made with an older offset mapping version |
+| `missing` (`block` / `part`) | the block or part is not in the loaded history |
+
+There is **no** text-similarity fallback: a changed source is reported as
+changed, never silently re-anchored. `contentHash` is `cyrb53` in base-36
+(`src/lib/hash.ts`) — fast, deterministic, pinned by tests; it detects
+edits, it is not a security primitive.
+
+**Standard text fragments.** `textFragmentFor(quote)` produces the
+[WICG scroll-to-text](https://wicg.github.io/scroll-to-text-fragment/)
+fragment directive (`:~:text=textStart[,textEnd]`, both terms
+percent-encoded including the directive's own `-` and `,` delimiters;
+quotes longer than `TEXT_FRAGMENT_BUDGET` = 96 characters become a
+whole-word `textStart,textEnd` range) so a copied passage link also works as
+a plain text fragment in browsers that implement it (Chromium, Safari 16.1+,
+Firefox 131+ — <https://caniuse.com/url-scroll-to-text-fragment>). It is a
+*hint*, not the anchor: a text fragment has no block identity or revision
+(a repeated phrase matches its first occurrence; an edited passage silently
+matches nothing), the browser strips the directive before scripts see the
+URL (`location.hash` never contains it), and it is applied only on a full
+page load. `?a=` therefore stays the authoritative, verified anchor; the
+directive is appended to the copied link (UI-06b's `deepLinkFor`) and
+never read back.
+
+### Safe rendering (`src/lib/safe-html.ts`)
+
+The single boundary between transcript text and the DOM; `RichText` in
+`components/reader/SessionBlock.tsx` is the only `innerHTML` sink in the app
+and accepts only a `RenderedHtml` from this module.
+
+Pipeline: strip bidi controls (U+202A–U+202E, U+2066–U+2069) → `marked`
+(GFM; raw HTML **escaped** and shown as text; images rendered as
+`[image: alt]` + an ordinary link, never fetched; checkboxes as text) →
+`highlight.js` for fences whose info string resolves to a registered grammar
+(bash, css, diff, go, javascript, json, markdown, python, rust, shell, sql,
+typescript, xml, yaml + common aliases; unknown languages are escaped) →
+`DOMPurify` with an explicit allowlist (`p br hr strong em del code pre
+blockquote ul ol li h1–h6 a span table thead tbody tr th td`; attributes
+`href title class start align`; `class` values restricted to `hljs*`, highlight.js sub-scopes (`function_`, `class_`),
+`language-*`, `md-image`, `md-checkbox`) → link policy: only `http:`,
+`https:` and `mailto:` keep their `href`, and get `rel="noopener
+noreferrer"`, `target="_blank"` and a `data-external` marker (CSS draws the
+↗ indicator). Everything else (`javascript:`, `data:`, `vbscript:`,
+relative, fragment) becomes inert text.
+
+Parts over `MAX_MARKDOWN_CHARS` (200 000) skip Markdown and render as
+escaped plain text (`plain: true`); tool output and reasoning always render
+plain. All three libraries are regex/DOM based — no `eval`, no `Function` —
+so the gateway's CSP (`script-src 'self'`) is unchanged.
+
+`src/reader/render.ts` caches rendered output per `blockId#partIndex#hash`
+in an LRU of `RENDER_CACHE_LIMIT` (2000) entries; a content change is a
+different key, so stale HTML is never served for edited text.
+
+**Bundle impact.** The engines initialise lazily and every screen that
+renders blocks is loaded with `lazy()`, so they never enter the product
+entry. UI-06a left `index-*.js` at 386.00 kB / 121.88 kB gzip (CSS
++2.73 kB / +0.70 kB gzip for the Markdown/code/highlight styles); statically
+linking the engines into the entry measured +144 kB / +47.6 kB gzip (marked
+≈ 44 kB, dompurify ≈ 133 kB, highlight.js core + 14 grammars ≈ 117 kB of
+source). UI-06b ships the reader as its own chunk — `Session-*.js`
+195.55 kB / 64.27 kB gzip (engines + `@tanstack/solid-virtual` +
+`virtual-core` ≈ 22 kB minified + the reader) — and the entry **shrinks**
+to 325.68 kB / 104.15 kB gzip: the dev-only compatibility smoke used to be
+a static import in `app.tsx`, which kept its modules in the entry's graph
+and, once the reader chunk shared `virtual-core` with it, would have hoisted
+the virtualiser into the entry (+22 kB). Both dev-only routes are now
+`lazy()` and production builds emit neither chunk.
+
+### Reader route, paging and virtualisation (UI-06b)
+
+`routes/Session.tsx` owns `/ui/projects/:projectId/sessions/:sessionId`
+(the path UI-04/05 link to) and renders `components/reader/SessionView.tsx`
+over `createSessionReader()` from `src/state/sessions.ts`.
+
+**Server paging (opt-in).** `GET /api/v1/sessions/:id?path=…` is unchanged
+for existing callers. With `page=cursor` (`limit` 1–1000, default 100) or a
+`cursor=` token the gateway answers `{ messages, distillations, next_cursor,
+message_count }` (`packages/gateway/src/api-lists.ts`,
+`handleShowSessionCursor`; core `listSessionMessagesPage`): the first page
+is the **newest** `limit` messages, each following page the older ones,
+every page in chronological order. Ordering is a stable keyset on
+`(created_at, id)` (`created_at < ? OR (created_at = ? AND id < ?)`), so
+equal timestamps neither skip nor repeat across pages. Cursors are opaque,
+versioned, and bound to the project + session they were issued for — a
+cursor replayed against another session is a 400, never someone else's
+history. `message_count` is the count at query time; `next_cursor: null`
+marks the start of captured history. Contract: `src/contracts/session.ts`
+`sessionPage`; fixture `test/fixtures/session-page.json`; gateway tests in
+`packages/gateway/test/api-session-paging.test.ts`.
+
+**Reader state.** `createSessionReader()` reuses the session detail loader
+(cached-first, `messageBlocks` collection, partial/stale semantics) for the
+first page and keeps older pages in a per-session prepend list; `hasOlder`
+is `null` until a non-stale server response says otherwise, so the view
+never claims "start of captured history" from the cache alone. Session
+changes abort in-flight page requests and reset paging.
+
+**Rows.** `src/reader/rows.ts` builds one `ReaderRow` per block
+(`key = block.id`); distillations with a known `createdAt` slot into the
+chronological position of the messages they summarise, those without a
+timestamp stay at the end — no time is invented to place them.
+
+**Virtualisation.** `SessionView` uses `@tanstack/solid-virtual@3.13.38`
+(`createVirtualizer`, `estimateSize` 120 px, `overscan` 6, `getItemKey` =
+row key) with owned dynamic measurement (`measureElement` on each mounted
+row, so expanding a tool part or loading Markdown re-measures). Loading
+older history prepends rows and restores the scroll offset by the
+virtualiser's total-size delta, so the passage under the reader's eye does
+not move. Focus is logical (`focusKey`): arrow keys move it across rows
+that may not be mounted; the DOM focus lands when the virtualiser mounts
+the row.
+
+**Selection and deep links.** `src/reader/selection.ts` reads the DOM
+`Selection` into a `SelectionReading`: a `part` reading (block, part,
+start/end into the displayed text, quote) when the range lies inside one
+`[data-block][data-part]` element, `ambiguous` when it spans parts or
+blocks or falls outside — the reader shows a hint instead of guessing.
+A reading becomes a `SourceAnchor` published as `?a=<encoded>` on the
+route; reload decodes it, finds the row, scrolls it into view and highlights
+the passage by wrapping text nodes in `<mark data-passage-mark>` (DOM
+operations, never HTML strings). Resolution states surface as banners:
+`changed` ("Source changed since this link was made", the passage is not
+highlighted), `missing` (older pages are searched up to
+`DEEP_LINK_SEARCH_PAGES` = 10, then "not found in the loaded history" /
+"not in this session's captured history"), malformed ("passage reference is
+not understood"). A resolved selection is re-verified whenever the loaded
+history changes: a text change becomes `changed`; the block dropping out
+of the window (the server's first page replacing a wider cached window)
+resumes the bounded older-history search for the URL's anchor instead of
+declaring it missing. Selecting a passage
+opens the passage panel: the quote, **Copy with source** (quote + block
+origin/time — `time unknown` stays literal — + deep link) and **Copy link**
+are live; `Save note`, `Ask agent`, `Explore separately`, `Start with
+selected context`, `Share finding` render disabled with the visible
+"not available yet" label (`FutureAction`). The copied link is
+`deepLinkFor(base, anchor, quote)`: `?a=` plus the standard `#:~:text=`
+directive for the quote (see [Source anchors](#source-anchors-srcreaderanchorsts)),
+so it also scrolls to the passage as a plain text fragment where the browser
+supports that; the reader itself only ever reads `?a=`.
+
+**Coverage line.** See [Coverage declaration](#coverage-declaration-ui-06c).
+
+### Coverage declaration (UI-06c)
+
+`src/reader/coverage.ts` `coverageDeclaration({ loaded, total, hasOlder,
+cachedWindow })` turns what the server and cache *reported* into the
+header's declaration (`data-testid="reader-coverage"`,
+`data-coverage="captured" | "partial"`, `data-coverage-reason`):
+
+| Situation | Kind | Detail | `reason` |
+|---|---|---|---|
+| window served from a partial cache | partial | `N of M captured messages, from the cached window` / `N messages from the cached window; completeness unknown` | `cached-window` |
+| server said older pages exist | partial | `N of M captured messages loaded` / `N messages loaded; older history not loaded` | `older` |
+| total or `hasOlder` still unknown | partial | `N messages loaded; completeness unknown` | `unknown-total` |
+| server total known, fewer loaded | partial | `N of M captured messages loaded` | `count` |
+| everything the server counted is loaded | **captured** | `N messages, complete as captured` | `null` |
+
+Unknown is never promoted to complete: the cache alone (`hasOlder === null`)
+and a missing `message_count` are both partial. Every declaration also
+states `Native transcript not yet available` (`NATIVE_TRANSCRIPT_LABEL`):
+the harness's own transcript is a distinct source no adapter exposes, so it
+is declared absent rather than left implied by "captured". The search
+summary repeats the detail (`Searched the loaded history only · …`) when
+the view is partial.
+
+### In-session search (UI-06c)
+
+`src/reader/search.ts` scans the **logical** rows (`ReaderRow[]`), not the
+DOM, so hits in rows the virtualiser has not mounted are found. Matching is
+a case-insensitive literal (`escapeRegExp` → `RegExp(…, "giu")`, so no
+user-controlled regex), minimum 2 characters (`MIN_QUERY_LENGTH`), over
+the **displayed** text of each part (`displayedText`, the same coordinates
+source anchors use — a hit in a code fence or tool output is what the
+reader sees, not the raw Markdown). Distillation rows are skipped:
+compressed context is not session speech. `searchRows(rows, matcher,
+from, budget)` scans `[from, from + budget)` and returns `next`, and
+`SessionView` drives it in time slices (`SEARCH_DEBOUNCE_MS` 150,
+`SEARCH_SLICE_MS` 12 per step, 40 rows per `searchRows` call, `setTimeout
+0` between steps) so a 10k-block scan never blocks a frame; the summary
+shows `n matches so far · scanning i of N blocks` while it runs. Rows
+changing (older page, live stream) re-scan the active query — throttled,
+not debounced, so a stream that changes rows every frame cannot postpone it
+forever — and the finished hit list stays on screen until the new one
+completes; the current hit is re-found by `(blockId, partIndex, start)`.
+Enter / Shift+Enter step through hits (`search-next` / `search-prev`); the
+current hit is scrolled to and marked with `mark.passage-search`,
+independent of the source highlight (`applyHighlights` applies both spans;
+navigating search does not erase the selection). **Select** turns the
+current hit into a real selection — `anchorFor(block, part, start, end)`,
+the passage panel and the `?a=` deep link — so a finding can be linked or
+copied with source like any pointer selection.
+
+### Busy-session fixture (UI-06c, plan §16.1)
+
+`/ui/fixture?view=busy` (dev-only route, `routes/BusyFixture.tsx`; not in
+the production bundle) mounts the real `SessionView` over
+`src/fixture/busy-session.ts` with no backend:
+
+- `generateBusySession({ blocks = 10_000, seed = 7 })` — `mulberry32`
+  PRNG, so the same seed gives byte-identical history; ids
+  `busy-000000 … busy-009999` (`busyMessageId`), strictly increasing
+  `created_at`. Mix (10k, seed 7): one system prompt, Lore-injected
+  `## Project knowledge` blocks (every 97th), prose with inline Markdown,
+  fenced code, tool calls with tool output (some long), reasoning parts
+  (10k, seed 7: 7,203 text, 1,215 code, 1,477 tool, 104 Lore, 1 system)
+  and one distillation per 500 blocks (19). ~7.0 M characters, generated
+  in **46 ms** (Chromium, `generateMs` in the report). `?blocks=` and `?seed=` override; `blocks`
+  is clamped to `BUSY_MAX_BLOCKS` = 100 000 and anything not a positive
+  number falls back to the default.
+- `BusyStreamEngine` — `BUSY_STREAMS` = 4 lanes, `tick()` every 20 ms
+  (`BUSY_DELTAS_PER_SECOND` = 50 per lane) emits one `replace` event per
+  lane carrying a 6–42 char text delta (`BUSY_DELTA_MIN/MAX_CHARS`);
+  lanes walk text → tool running → tool done → (approval requested →
+  approved) → complete → new turn (`append`). Tool status transitions
+  *replace* the same block, never add a second. `burst(n)` ticks until at
+  least `n` events exist; `snapshot()` / `expected()` give the server's
+  view for reconciliation and verification; `mutateMessage` edits one
+  block in place (the source-changed scenario).
+- Client merge: events are **coalesced per message id** (newest wins,
+  `append` sticky) and applied once per animation frame (`applyEvents`),
+  so the pending queue is bounded by the number of live messages, not by
+  the event rate; `received` counts wire events, `applied` the coalesced
+  ones. `reconcile(prev, snapshot)` merges by id and re-sorts on
+  `(created_at, id)`.
+
+Controls and what they prove: **Start/Stop** (4 × 50 deltas/s),
+**Burst 1,000**, **Disconnect** (live events lost on the wire, reader
+shows `Cached`), **Reconnect** (fresh snapshot converges in one reconcile)
+vs **Reconnect stale** (snapshot taken *at* disconnect: messages that
+started and finished offline are missing and never re-appear in the delta
+stream — the reader stays `stale` and **Verify** reports `n missing` until
+**Refetch**), **Hide tab 2 s** (plus a real `visibilitychange` listener:
+no frames are applied while hidden, the coalesced queue stays bounded by
+live messages, replay on return), **Fail cache writes** (the simulated
+IndexedDB write-through rejects; counted and logged, reader untouched),
+**Edit linked block** (mutates the block the current `?a=` link points at
+→ honest `Source changed` state, highlight and panel removed, URL kept),
+**Verify** (`verifyAgainst`: duplicates / missing / mismatched / extra /
+ordering against the engine's expected state) and **Metrics** (JSON
+report, `busy-report-json`).
+
+`src/fixture/busy-metrics.ts` records input→next-paint (`PerformanceObserver`
+`event`, 16 ms `durationThreshold`, `duration` is bucketed to 8 ms), frame
+intervals (rAF loop), long tasks (`longtask`; buffered entries such as
+generation and first render are replayed on the first `start()` only),
+apply time / queue high-water, delta sizes and `performance.memory`
+(Chromium only, coarse unless `--enable-precise-memory-info`). Samples are
+bounded (newest 5 000); totals and maxima cover every sample.
+
+**Measured budgets** (headless Chromium 153 via Playwright 1.63, 1280×800
+and Pixel 7 emulation, `pnpm --filter @loreai/ui test:e2e` `busy-report`
+attachment; scroll runs from a throw-away script wheeling through the
+list for 6 s). The fixture is a dev-only route, so every number is from the
+Vite dev build (unminified, Solid dev mode) — a ceiling for the production
+bundle, not a measurement of it:
+
+| Scenario | input→paint p95 | frame p95 / max | long tasks (count / total / max) | apply p95 | queue high-water | mounted rows |
+|---|---|---|---|---|---|---|
+| 10k blocks, burst 1,000 + 3 s streaming, desktop | 16 ms | 16.8 / 16.8 ms | 2 / 266 ms / 191 ms | 2.8 ms | 48 | 8 |
+| same, mobile | 16 ms | 16.7 / 16.8 ms | 2 / 234 ms / 179 ms | 2.8 ms | 48 | 7 |
+| 10k blocks, wheel scroll, idle, desktop | 16 ms | 16.7 / 16.8 ms | 2 / 248 ms / 188 ms | – | 4 | 15 |
+| 10k blocks, wheel scroll while streaming, desktop | 32 ms | 16.7 / 16.8 ms | 2 / 248 ms / 188 ms | 2.6 ms | 8 | 14 |
+| 10k blocks, wheel scroll, idle, mobile | 16 ms | 16.8 / 16.8 ms | 2 / 227 ms / 171 ms | – | 4 | 14 |
+| 10k blocks, wheel scroll while streaming, mobile | 16 ms | 16.7 / 16.8 ms | 2 / 227 ms / 171 ms | 2.3 ms | 8 | 14 |
+
+The two long tasks in every row are buffered entries from before
+`start()` — the one-off generation + first mount of 10k blocks (≤ 191 ms);
+the count does not grow while streaming, bursting or scrolling. Frames sit
+on the 60 Hz vsync (16.7 ms) with no dropped frame (max 16.8 ms); the one
+32 ms input→paint bucket is a single wheel event landing on a frame that
+also applied a stream batch. Heap: `usedJSHeapSize` 38–97 MiB depending on
+run (coarse); the disposal check uses CDP `Runtime.getHeapUsage` after a
+forced GC: three mount → stream → unmount cycles of a 3k-block fixture end
+within 25 % of the first sample (a leaked session would add far more).
+Asserted in `e2e/busy-fixture.spec.ts`: mounted rows < 60, queue high-water
+< 400 with ≥ 1,000 events received, `Verify` ok after burst / stream /
+reconnect / hidden tab / cache failure (structural, machine-independent).
+The wall-clock budget (longest task < 250 ms) is asserted only with
+`LORE_E2E_STRICT_BUDGET=1` on an otherwise idle machine — with four
+Playwright workers sharing the CPU one run showed a 277 ms mount and three
+extra long tasks during the burst — and the default run only rejects
+pathologies (> 2 s). The table above
+comes from strict solo runs; the `busy-report` attachment of every run
+carries the numbers for that run.
+
+**Bundle (production, `pnpm --filter @loreai/ui build`).** `Session-*.js`
+203.09 kB / 66.74 kB gzip (was 195.55 / 64.27 in UI-06b: +7.5 kB raw /
++2.5 kB gzip for search, coverage and the dual highlight), entry
+`index-*.js` 325.66 kB / 104.14 kB gzip (unchanged), CSS 41.50 kB / 8.94 kB
+gzip. The fixture, generator, engine and metrics are only reachable from
+the dev-only route and are not emitted in production builds.
+
+### Tests (UI-06c)
+
+`test/reader-coverage-search.test.ts` (every coverage branch incl. cache
+→ server → older-page ordering and "unknown never becomes complete";
+search: literal escaping, case folding, min length, displayed-text
+coordinates, distillation skip, slicing with `next`, hits on unmounted
+rows), `test/busy-session.test.ts` (determinism per seed, mixed kinds,
+10k in bounded time, PRNG; engine lane count, delta sizes, transition
+sequence, tool transitions replace not add, 1,000-event burst with no
+lost / duplicated / reordered text, coalescing ≡ applying every event,
+prefix-preserving appends; disconnect: fresh snapshot converges, stale
+snapshot leaves gaps live deltas cannot fill and refetch fills them in
+order, reconcile never duplicates; `mutateMessage`; `verifyAgainst`;
+query-parameter clamping), `test/busy-metrics.test.ts` (percentile,
+bounded samples with full totals, idempotent start / stop, buffered
+replay once, frame gaps), `test/reader-selection.test.tsx` (independent
+source + search highlights), `test/session-view.test.tsx` (coverage
+declaration states, search over unmounted rows and select-hit → anchor,
+live edit of the linked block → honest source-changed state, linked block
+leaving the window → search resumes / honest not-found).
+
+Playwright (`e2e/reader.spec.ts`, against the built gateway seeded by
+`e2e/seed.mjs` — 230 messages + one gen-0 distillation — desktop + mobile
+projects): load older history twice → `history-start` + coverage
+`captured` / `complete as captured`; select → link → reload → same
+highlight (UX-01); changed source → honest state (UX-02); search over
+unmounted history → select as anchor; keyboard rows; distillation labelled
+compressed context, placed after its sources, never a search hit, details
+loaded on demand. `e2e/busy-fixture.spec.ts` (Vite dev
+server, desktop + mobile): virtualisation bounds; selection, focus and
+link survive burst + streaming and reload; disconnect → stale → refetch;
+hidden tab + failing cache writes; edit linked block; search across
+unmounted rows → anchor; disposal (heap after three mount / unmount
+cycles).
+
+Known notice: during the busy-fixture specs the Vite dev overlay logs
+`ResizeObserver loop completed with undelivered notifications` a few
+times. It is Chrome reporting that a resize-observer delivery changed the
+size of an observed element, so delivery finished on the next frame; it
+does not throw into app code or fail a test (the production bundle has no
+overlay, so the reader specs surface nothing either way). `SessionView`'s own observer
+(list height) defers its work to `requestAnimationFrame`; the remaining
+source is most likely the virtualizer's per-row `measureElement` observer
+re-laying out rows while streaming rows grow — not proven, tracked as an
+open item.
+
+### Tests (UI-06b)
+
+`test/reader-state.test.ts` (newest-first page, prepend, cursor
+termination, no paging before the first response, session switch aborts,
+older-page failure, cache partial/complete semantics),
+`test/reader-selection.test.tsx` (row building and unknown-time order,
+logical selection with inline markup, cross-part/outside/collapsed
+ambiguity, DOM-safe highlight apply/clear, invalid ranges, source-reference
+text, deep-link round trip), `test/session-view.test.tsx` (deep-link
+highlight, changed / out-of-range / malformed / missing source, older-page
+search, pointer selection → anchor, copy with source / copy link, copy
+failure, disabled future actions, cross-passage hint, coverage line,
+load-older + prepended rows, unknown completeness, keyboard focus + Enter,
+distillation rendering), `test/contracts.test.ts` (`sessionPage` fixture),
+`packages/gateway/test/api-session-paging.test.ts` (legacy shape untouched,
+cursor shape, page order, equal-timestamp tie-break, limit clamping and
+400s, malformed / cross-project / cross-session cursors, unknown session).
+
+### Tests (UI-06a)
+
+`test/reader-blocks.test.ts` (ids, parts, envelopes, metadata, origins,
+unknown time, overlap de-duplication, distillation ordering, real fixture),
+`test/reader-anchors.test.ts` (round-trip, URL safety, hostile decode
+battery, ok / changed / missing resolution, no re-anchoring),
+`test/safe-html.test.ts` (27-payload hostile battery — `<script>`, `onerror`,
+`javascript:`/`data:`/`vbscript:` links, `srcdoc`, SVG/MathML, `<base>`,
+`<meta>`, forms, `target=_top`, code-fence info-string injection, comments,
+bidi overrides, 200 kB and 2000-item blocks — plus link policy, image
+policy, class allowlist, text/DOM parity, cache keying and LRU eviction),
+`test/session-block.test.tsx` (roles, badges, time unknown, Lore/system
+labels, expandable tool/reasoning parts, distillation labelling).
 
 ## Baseline (before / after UI-02)
 
@@ -515,7 +964,7 @@ and the smoke page; the fixture and shell rows land in UI-02.
 | Knowledge evidence and trust | `KnowledgeDocument` | session-level evidence loader, `StateCard`, router `<A>` | UI-05 |
 | Cursor-paged sessions | `SessionList` | router `<A>`, `StateCard` | UI-04 |
 | Scoped recall output | `SearchResults` | Kobalte `Select`, `TextField`, `Button` | UI-04 |
-| Session reader placeholder | `SessionPlaceholder` | `StateCard`, router links | UI-04 |
+| Session reader | `Session` / `SessionView` | `SessionBlock`, `@tanstack/solid-virtual` | UI-06 |
 | Shared loading/error/locked states | `ErrorState` | `StateCard`, retry/first-page actions | UI-04 |
 | Long lists | — | `@tanstack/solid-virtual` | UI-04 / UI-06 |
 | Local cache, drafts | — | `idb` | UI-03 |
@@ -594,9 +1043,11 @@ packages/ui/
   src/components/shell/   Shell, AppBar, Nav, SearchEntry
   src/components/shell/Logo.tsx  theme-aware Lore logo (copied website SVGs in src/assets/logo)
   src/components/lore/    document primitives (Document.tsx), KnowledgeDocument, Panes, StateCard, FutureAction, Avatar
+  src/components/reader/  SessionBlock.tsx — message / part / distillation rendering (the only innerHTML sink)
+  src/reader/             blocks.ts (block model), anchors.ts (source anchors), render.ts (per-part LRU), specimen.ts (dev fixture data)
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
-  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts
+  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts, hash.ts, safe-html.ts (Markdown/code sanitising boundary)
   src/contracts/          ArkType response contracts (relative imports only) + ContractError
   src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
   src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status

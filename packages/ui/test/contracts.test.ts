@@ -26,6 +26,7 @@ import {
   safeParseContract,
   sessionDetail,
   sessionList,
+  sessionPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -50,6 +51,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "recall.json": { route: "/recall", schema: recallResponse },
   "sessions-list.json": { route: "/projects/p/sessions", schema: sessionList },
   "session-detail.json": { route: "/sessions/s", schema: sessionDetail },
+  "session-page.json": {
+    route: "/sessions/s?page=cursor",
+    schema: sessionPage,
+  },
   "distillations-list.json": {
     route: "/projects/p/distillations",
     schema: distillationList,

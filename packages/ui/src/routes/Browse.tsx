@@ -14,7 +14,6 @@ import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { SearchResults } from "~/components/lore/SearchResults";
 import { SessionList } from "~/components/lore/SessionList";
-import { SessionPlaceholder } from "~/components/lore/SessionPlaceholder";
 import { errorStateFor } from "~/components/lore/ErrorState";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
 import { StateCard } from "~/components/lore/StateCard";
@@ -110,20 +109,17 @@ export const Browse: Component<{
     | "knowledge-table"
     | "entry"
     | "sessions"
-    | "session"
     | "search";
 }> = (props) => {
   const raw = useParams<{
     projectId?: string;
     knowledgeId?: string;
-    sessionId?: string;
   }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const ws = useWorkspace();
   const projectId = () => decodeParam(raw.projectId);
   const knowledgeId = () => decodeParam(raw.knowledgeId);
-  const sessionId = () => decodeParam(raw.sessionId);
   const project = createMemo(() => ws.projectById(projectId()));
   const query = createMemo(() =>
     parseKnowledgeQuery(searchParams as Record<string, string | undefined>),
@@ -332,13 +328,6 @@ export const Browse: Component<{
         ) : (
           <StateCard kind="error" title="Project not found or inaccessible" />
         );
-      case "session":
-        const sid = sessionId();
-        return id && sid ? (
-          <SessionPlaceholder projectId={id} sessionId={sid} />
-        ) : (
-          <StateCard kind="error" title="Session not found" />
-        );
       case "search":
         return (
           <Show
@@ -364,7 +353,6 @@ export const Browse: Component<{
     switch (props.view) {
       case "entry":
         return { href: knowledgeListHref(id, query()), label: label() };
-      case "session":
       case "search":
       case "sessions":
       case "knowledge-table":
