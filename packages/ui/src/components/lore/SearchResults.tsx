@@ -1,10 +1,21 @@
 import type { Component } from "solid-js";
-import { For, Match, Show, Switch, createMemo } from "solid-js";
+import { Match, Switch, createMemo, createSignal } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { ProjectSummary, RecallScope } from "~/contracts";
-import { parseRecallMarkdown, recallInline } from "~/lib/recall-text";
+import { parseRecallMarkdown } from "~/lib/recall-text";
 import { StateCard } from "./StateCard";
+import { errorStateFor } from "./ErrorState";
+import { Button } from "../ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import { TextField, TextFieldInput } from "../ui/text-field";
 import { useWorkspace } from "~/routes/workspace";
+import { searchHref } from "~/routes/Browse";
 
 export const SearchResults: Component<{
   project: ProjectSummary;
@@ -13,6 +24,7 @@ export const SearchResults: Component<{
 }> = (props) => {
   const ws = useWorkspace();
   const navigate = useNavigate();
+  const [scope, setScope] = createSignal<RecallScope>(props.scope);
   const search = ws.state.recall.search(() =>
     props.q ? { project: props.project, q: props.q, scope: props.scope } : null,
   );
@@ -32,31 +44,34 @@ export const SearchResults: Component<{
           const rawQ = data.get("q");
           const rawScope = data.get("scope");
           const q = typeof rawQ === "string" ? rawQ : "";
-          const scope = typeof rawScope === "string" ? rawScope : "all";
+          const selectedScope = typeof rawScope === "string" ? rawScope : "all";
           navigate(
-            `/projects/${encodeURIComponent(props.project.id)}/search?q=${encodeURIComponent(q)}&scope=${encodeURIComponent(scope)}`,
+            searchHref(props.project.id, q, selectedScope as RecallScope),
           );
         }}
       >
-        <input
-          name="q"
-          value={props.q}
-          aria-label="Search query"
-          class="min-w-0 flex-1 rounded-md border border-line bg-bg px-3 py-2 text-sm"
-        />
-        <select
+        <TextField class="min-w-0 flex-1">
+          <TextFieldInput name="q" value={props.q} aria-label="Search query" />
+        </TextField>
+        <Select
           name="scope"
-          value={props.scope}
-          class="rounded-md border border-line bg-bg px-2 text-sm"
+          value={scope()}
+          onChange={setScope}
+          options={["all", "session", "project", "knowledge"]}
+          itemComponent={(item) => (
+            <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
+          )}
         >
-          <option>all</option>
-          <option>session</option>
-          <option>project</option>
-          <option>knowledge</option>
-        </select>
-        <button class="rounded-md bg-inverse px-3 py-2 text-xs text-inverse-text">
+          <SelectTrigger aria-label="Search scope" class="h-10 w-28">
+            <SelectValue<string>>
+              {(state) => state.selectedOption()}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent />
+        </Select>
+        <Button type="submit" size="sm">
           Search
-        </button>
+        </Button>
       </form>
       <p class="mb-4 text-xs text-muted">
         Search results are the recall output an agent would receive; query
@@ -73,12 +88,13 @@ export const SearchResults: Component<{
           <StateCard kind="loading" title="Searching memory" />
         </Match>
         <Match when={search.loader.error() && !search.loader.data()}>
-          <StateCard kind="error" title="Search unavailable" />
+          {errorStateFor(search.loader.error(), "Search", search.loader.reload)}
         </Match>
         <Match
-          when={search.loader
-            .data()
-            ?.result.includes("No results found for this query.")}
+          when={
+            search.loader.data()?.result.trim() ===
+            "No results found for this query."
+          }
         >
           <StateCard kind="empty" title="No results" />
         </Match>
@@ -103,7 +119,7 @@ export const SearchResults: Component<{
                       : "my-2"
                   }
                 >
-                  {recallInline(node.text).map((part) =>
+                  {node.parts.map((part) =>
                     part.linkId ? (
                       <A
                         class="text-accent underline"

@@ -1,6 +1,6 @@
-import type { Component, JSX } from "solid-js";
+import type { Component } from "solid-js";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
-import { A, useLocation, useParams, useSearchParams } from "@solidjs/router";
+import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type { KnowledgeQuery, ProjectSummary, RecallScope } from "~/contracts";
 import {
@@ -8,7 +8,6 @@ import {
   knowledgeQueryToSearch,
   parseKnowledgeQuery,
 } from "~/contracts";
-import { isApiError } from "~/lib/api";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
@@ -16,7 +15,7 @@ import { ProjectPage } from "~/components/lore/ProjectPage";
 import { SearchResults } from "~/components/lore/SearchResults";
 import { SessionList } from "~/components/lore/SessionList";
 import { SessionPlaceholder } from "~/components/lore/SessionPlaceholder";
-import { StaleBadge } from "~/components/lore/StaleBadge";
+import { errorStateFor } from "~/components/lore/ErrorState";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
 import { StateCard } from "~/components/lore/StateCard";
 import { Nav } from "~/components/shell/Nav";
@@ -53,38 +52,6 @@ function decodeParam(segment: string | undefined) {
   } catch {
     return segment;
   }
-}
-
-function errorState(
-  error: unknown,
-  what: string,
-  retry: () => void,
-): JSX.Element {
-  if (isApiError(error) && error.kind === "unauthorized")
-    return (
-      <StateCard kind="locked" title={`${what} hidden by the gateway`}>
-        Only the machine running the gateway can access this view.
-      </StateCard>
-    );
-  if (isApiError(error) && error.kind === "not_found")
-    return (
-      <StateCard kind="empty" title={`${what} not found`}>
-        Pick another entry from the list.
-      </StateCard>
-    );
-  return (
-    <StateCard
-      kind="error"
-      title={`${what} unavailable`}
-      action={
-        <button class="text-xs text-accent underline" onClick={retry}>
-          Retry
-        </button>
-      }
-    >
-      {isApiError(error) ? error.message : String(error)}
-    </StateCard>
-  );
 }
 
 const WelcomeDetail: Component<{
@@ -136,14 +103,23 @@ const WelcomeDetail: Component<{
   </div>
 );
 
-export const Browse: Component = () => {
+export const Browse: Component<{
+  view:
+    | "welcome"
+    | "project"
+    | "knowledge-table"
+    | "entry"
+    | "sessions"
+    | "session"
+    | "search";
+}> = (props) => {
   const raw = useParams<{
     projectId?: string;
     knowledgeId?: string;
     sessionId?: string;
   }>();
   const [searchParams] = useSearchParams();
-  const location = useLocation();
+  const navigate = useNavigate();
   const ws = useWorkspace();
   const projectId = () => decodeParam(raw.projectId);
   const knowledgeId = () => decodeParam(raw.knowledgeId);
@@ -152,15 +128,16 @@ export const Browse: Component = () => {
   const query = createMemo(() =>
     parseKnowledgeQuery(searchParams as Record<string, string | undefined>),
   );
-  const pageSource = createMemo(() =>
-    projectId() ? { projectId: projectId()!, query: query() } : null,
-  );
-  const knowledgePage = ws.state.knowledge.page(pageSource);
   const entry = ws.state.knowledge.entry(() => knowledgeId() ?? null);
   const activeProjectId = createMemo(
     () => projectId() ?? entry.loader.data()?.project_id ?? null,
   );
-  const knowledgeList = ws.state.knowledge.list(activeProjectId);
+  const pageSource = createMemo(() =>
+    activeProjectId()
+      ? { projectId: activeProjectId()!, query: query() }
+      : null,
+  );
+  const knowledgePage = ws.state.knowledge.page(pageSource);
   const cursor = () =>
     typeof searchParams.cursor === "string" ? searchParams.cursor : null;
   const searchQ = () =>
@@ -178,11 +155,7 @@ export const Browse: Component = () => {
   const label = () =>
     projectForEntry()?.name || projectForEntry()?.path || "Project";
   const mobilePane = (): MobilePane =>
-    knowledgeId() || sessionId() || searchQ()
-      ? "detail"
-      : projectId()
-        ? "list"
-        : "nav";
+    props.view === "welcome" ? "nav" : "detail";
   const nav = () => (
     <Nav
       projects={ws.projects.data()}
@@ -199,7 +172,7 @@ export const Browse: Component = () => {
   const list = () => {
     const id = activeProjectId();
     if (!id) return undefined;
-    const items = () => knowledgeList.loader.data();
+    const items = () => knowledgePage.loader.data()?.items;
     return (
       <div data-testid="knowledge-list">
         <PaneHead
@@ -222,25 +195,28 @@ export const Browse: Component = () => {
             </A>
           }
         />
-        <Show when={knowledgeList.loader.stale()}>
-          <StaleBadge status={knowledgeList.status()} />
+        <Show when={knowledgePage.loader.stale()}>
+          <div class="px-4 py-2 text-xs text-muted">
+            Showing cached knowledge while refreshing.
+          </div>
         </Show>
         <Switch>
-          <Match when={knowledgeList.loader.error() && !items()}>
-            {errorState(
-              knowledgeList.loader.error(),
+          <Match when={knowledgePage.loader.error() && !items()}>
+            {errorStateFor(
+              knowledgePage.loader.error(),
               "Knowledge",
-              knowledgeList.loader.reload,
+              knowledgePage.loader.reload,
+              {
+                firstPage: () =>
+                  navigate(knowledgeListHref(id, DEFAULT_KNOWLEDGE_QUERY)),
+              },
             )}
           </Match>
           <Match when={!items()}>
             <StateCard kind="loading" title="Loading knowledge" />
           </Match>
           <Match when={items()?.length === 0}>
-            <StateCard
-              kind="empty"
-              title="No knowledge extracted yet · No knowledge yet"
-            />
+            <StateCard kind="empty" title="No knowledge extracted yet" />
           </Match>
           <Match when={items()}>
             <For each={items()}>
@@ -285,7 +261,7 @@ export const Browse: Component = () => {
         <Switch>
           <Match when={entry.loader.error() && !entry.loader.data()}>
             <div class="p-5">
-              {errorState(
+              {errorStateFor(
                 entry.loader.error(),
                 "Knowledge entry",
                 entry.loader.reload,
@@ -302,39 +278,71 @@ export const Browse: Component = () => {
           </Match>
         </Switch>
       );
-    if (id && location.pathname.endsWith("/knowledge"))
+    if (props.view === "knowledge-table" && id)
       return (
-        <KnowledgeTable projectId={id} query={query()} page={knowledgePage} />
+        <KnowledgeTable
+          projectId={id}
+          query={query()}
+          selectedId={knowledgeId()}
+          page={knowledgePage}
+        />
       );
-    if (id && location.pathname.endsWith("/sessions"))
+    if (props.view === "sessions" && id)
       return (
         <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
       );
-    if (id)
+    if (props.view === "project" && id)
       return (
         <Show
           when={project()}
-          fallback={<StateCard kind="loading" title="Loading project" />}
+          fallback={
+            <Show
+              when={ws.projects.loading()}
+              fallback={
+                ws.projects.error() ? (
+                  errorStateFor(
+                    ws.projects.error(),
+                    "Projects",
+                    ws.projects.reload,
+                  )
+                ) : (
+                  <StateCard
+                    kind="error"
+                    title="Project not found or inaccessible"
+                  />
+                )
+              }
+            >
+              <StateCard kind="loading" title="Loading project" />
+            </Show>
+          }
         >
           {(value) => <ProjectPage project={value()} />}
         </Show>
       );
     return <WelcomeDetail projects={ws.projects.data()} />;
   };
+  const listView = createMemo(list);
+  const detailView = createMemo(detail);
   const back = () => {
     const id = projectId();
     if (!id) return undefined;
-    if (knowledgeId())
+    if (props.view === "entry")
       return { href: knowledgeListHref(id, query()), label: label() };
-    if (sessionId() || searchQ() || location.pathname.endsWith("/sessions"))
+    if (
+      props.view === "session" ||
+      props.view === "search" ||
+      props.view === "sessions" ||
+      props.view === "knowledge-table"
+    )
       return { href: projectHref(id), label: label() };
     return { href: "/", label: "Projects" };
   };
   return (
     <Shell
       nav={nav}
-      list={list()}
-      detail={detail()}
+      list={props.view === "entry" ? listView() : undefined}
+      detail={detailView()}
       mobilePane={mobilePane()}
       back={back()}
       mobileTitle={knowledgeId() ? entry.loader.data()?.title : label()}

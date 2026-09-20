@@ -157,10 +157,9 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
       setLoading(true);
       try {
         const next = await tracked(() =>
-          client.listProjectKnowledgePage(
-            projectId,
-            value()?.nextCursor ?? null,
-          ),
+          client.listProjectKnowledgePage(projectId, {
+            cursor: value()?.nextCursor ?? null,
+          }),
         );
         setValue((previous) =>
           mergeCursorPage(previous, next, (entry) => entry.id),

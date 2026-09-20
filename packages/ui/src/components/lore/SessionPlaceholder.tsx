@@ -1,6 +1,6 @@
 import type { Component } from "solid-js";
 import { A } from "@solidjs/router";
-import { sessionHref, sessionsHref } from "~/routes/Browse";
+import { sessionsHref } from "~/routes/Browse";
 import { StateCard } from "./StateCard";
 
 export const SessionPlaceholder: Component<{

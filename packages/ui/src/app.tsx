@@ -35,21 +35,29 @@ const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
   : [];
 
 export const routes: RouteDefinition[] = [
+  { path: "/", component: () => <Browse view="welcome" /> },
   {
-    // One route definition so the shell instance (and its loaded lists)
-    // survives moving between project, list and entry URLs.
-    path: [
-      "/",
-      "/projects/:projectId",
-      "/projects/:projectId/knowledge",
-      "/projects/:projectId/knowledge/:knowledgeId",
-      "/projects/:projectId/sessions",
-      "/projects/:projectId/sessions/:sessionId",
-      "/projects/:projectId/search",
-      "/knowledge/:knowledgeId",
-    ],
-    component: Browse,
+    path: "/projects/:projectId/knowledge/:knowledgeId",
+    component: () => <Browse view="entry" />,
   },
+  { path: "/knowledge/:knowledgeId", component: () => <Browse view="entry" /> },
+  {
+    path: "/projects/:projectId/knowledge",
+    component: () => <Browse view="knowledge-table" />,
+  },
+  {
+    path: "/projects/:projectId/sessions/:sessionId",
+    component: () => <Browse view="session" />,
+  },
+  {
+    path: "/projects/:projectId/sessions",
+    component: () => <Browse view="sessions" />,
+  },
+  {
+    path: "/projects/:projectId/search",
+    component: () => <Browse view="search" />,
+  },
+  { path: "/projects/:projectId", component: () => <Browse view="project" /> },
   ...devOnlyRoutes,
   { path: "*", component: NotFound },
 ];

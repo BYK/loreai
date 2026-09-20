@@ -1,12 +1,12 @@
 export type RecallNode =
   | { kind: "heading"; level: 2 | 3 | 4; text: string }
-  | { kind: "item" | "paragraph"; text: string; linkId?: string }
+  | { kind: "item" | "paragraph"; text: string; parts: InlinePart[] }
   | { kind: "separator" };
 
-function inline(
-  text: string,
-): { text: string; bold?: boolean; linkId?: string }[] {
-  const parts: { text: string; bold?: boolean; linkId?: string }[] = [];
+export type InlinePart = { text: string; bold?: boolean; linkId?: string };
+
+function inline(text: string): InlinePart[] {
+  const parts: InlinePart[] = [];
   const re = /\*\*([^*]+)\*\*|\(k:([^)]+)\)/g;
   let index = 0;
   for (const match of text.matchAll(re)) {
@@ -39,11 +39,7 @@ export function parseRecallMarkdown(text: string): RecallNode[] {
       {
         kind: item ? "item" : "paragraph",
         text: line.replace(/^- /, ""),
-        ...Object.fromEntries(
-          inline(line.replace(/^- /, ""))
-            .filter((p) => p.linkId)
-            .map((p) => ["linkId", p.linkId]),
-        ),
+        parts: inline(line.replace(/^- /, "")),
       },
     ];
   });

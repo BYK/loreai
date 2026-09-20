@@ -175,18 +175,11 @@ export function createSessionsState({
         const value = source();
         if (!value) throw new Error("Session query changed");
         return tracked(async () => {
-          if (typeof client.listProjectSessionsPage === "function") {
-            return client.listProjectSessionsPage(
-              value.projectId,
-              { cursor: value.cursor, limit: 50 },
-              signal,
-            );
-          }
-          const items =
-            typeof client.listProjectSessions === "function"
-              ? await client.listProjectSessions(value.projectId, signal)
-              : [];
-          return { items, next_cursor: null };
+          return client.listProjectSessionsPage(
+            value.projectId,
+            { cursor: value.cursor, limit: 50 },
+            signal,
+          );
         });
       },
       {
@@ -194,13 +187,9 @@ export function createSessionsState({
           const projectId = key.slice(0, key.indexOf("/"));
           for (const session of value.items) {
             store.reconcileOne(session);
-            await repos.sessions.put(
-              session,
-              `${projectId}/${session.session_id}`,
-              {
-                keepScope: true,
-              },
-            );
+            await repos.sessions.put(session, projectId, {
+              keepScope: true,
+            });
           }
         },
       },

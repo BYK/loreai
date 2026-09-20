@@ -189,31 +189,26 @@ export function createApiClient(options: ApiClientOptions = {}) {
      */
     listProjectKnowledgePage(
       projectId: string,
-      opts:
-        | {
-            cursor?: string | null;
-            limit?: number;
-            q?: string;
-            category?: KnowledgeCategory;
-            scope?: KnowledgeScope;
-            sort?: KnowledgeSort;
-          }
-        | string
-        | null = {},
+      opts: {
+        cursor?: string | null;
+        limit?: number;
+        q?: string;
+        category?: KnowledgeCategory;
+        scope?: KnowledgeScope;
+        sort?: KnowledgeSort;
+      } = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<KnowledgeEntry>> {
-      const options =
-        typeof opts === "string" || opts === null ? { cursor: opts } : opts;
-      const params = new URLSearchParams({ page: "cursor" });
-      if (options.cursor) params.set("cursor", options.cursor);
-      if (options.limit !== undefined)
-        params.set("limit", String(options.limit));
-      if (options.q) params.set("q", options.q);
-      if (options.category) params.set("category", options.category);
-      if (options.scope) params.set("scope", options.scope);
-      if (options.sort) params.set("sort", options.sort);
+      const params = [`page=cursor`];
+      if (opts.cursor) params.push(`cursor=${encodeURIComponent(opts.cursor)}`);
+      if (opts.limit !== undefined) params.push(`limit=${opts.limit}`);
+      if (opts.q) params.push(`q=${encodeURIComponent(opts.q)}`);
+      if (opts.category)
+        params.push(`category=${encodeURIComponent(opts.category)}`);
+      if (opts.scope) params.push(`scope=${encodeURIComponent(opts.scope)}`);
+      if (opts.sort) params.push(`sort=${encodeURIComponent(opts.sort)}`);
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/knowledge?${params.toString().replaceAll("+", "%20")}`,
+        `/projects/${encodeURIComponent(projectId)}/knowledge?${params.join("&")}`,
         cursorPage(knowledgeEntry),
         signal,
       );
@@ -251,11 +246,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
       opts: { cursor?: string | null; limit?: number } = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<SessionSummary>> {
-      const params = new URLSearchParams({ page: "cursor" });
-      if (opts.cursor) params.set("cursor", opts.cursor);
-      if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+      const params = ["page=cursor"];
+      if (opts.cursor) params.push(`cursor=${encodeURIComponent(opts.cursor)}`);
+      if (opts.limit !== undefined) params.push(`limit=${opts.limit}`);
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/sessions?${params.toString().replaceAll("+", "%20")}`,
+        `/projects/${encodeURIComponent(projectId)}/sessions?${params.join("&")}`,
         cursorPage(sessionSummary),
         signal,
       );
@@ -270,21 +265,20 @@ export function createApiClient(options: ApiClientOptions = {}) {
       },
       signal?: AbortSignal,
     ): Promise<RecallResponse> {
-      const params = new URLSearchParams({
-        q: opts.q,
-        scope: opts.scope,
-        expand: "false",
-        limit: String(Math.max(1, Math.min(50, opts.limit ?? 20))),
-      });
+      const params = [
+        `q=${encodeURIComponent(opts.q)}`,
+        `scope=${encodeURIComponent(opts.scope)}`,
+        "expand=false",
+        `limit=${Math.max(1, Math.min(50, opts.limit ?? 20))}`,
+      ];
       if (opts.project.git_remote)
-        params.set("git_remote", opts.project.git_remote);
-      else params.set("path", opts.project.path);
-      if (opts.session) params.set("session", opts.session);
-      return getJson(
-        `/recall?${params.toString().replaceAll("+", "%20")}`,
-        recallResponse,
-        signal,
-      );
+        params.push(
+          `git_remote=${encodeURIComponent(opts.project.git_remote)}`,
+        );
+      else params.push(`path=${encodeURIComponent(opts.project.path)}`);
+      if (opts.session)
+        params.push(`session=${encodeURIComponent(opts.session)}`);
+      return getJson(`/recall?${params.join("&")}`, recallResponse, signal);
     },
     /**
      * `GET /sessions/:id` resolves its project from `?git_remote`/`?path`

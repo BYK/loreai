@@ -1,10 +1,11 @@
 import type { Component } from "solid-js";
-import { For, Match, Show, Switch } from "solid-js";
+import { Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { SessionSummary } from "~/contracts";
 import { formatWhen } from "~/lib/format";
 import { sessionHref, sessionsHref } from "~/routes/Browse";
 import { StateCard } from "./StateCard";
+import { errorStateFor } from "./ErrorState";
 
 export const SessionList: Component<{
   projectId: string;
@@ -16,6 +17,7 @@ export const SessionList: Component<{
         | undefined;
       loading: () => boolean;
       error: () => unknown;
+      reload: () => void;
     };
     status: () => unknown;
   };
@@ -30,7 +32,11 @@ export const SessionList: Component<{
           <StateCard kind="loading" title="Loading sessions" />
         </Match>
         <Match when={props.page.loader.error() && !data()}>
-          <StateCard kind="error" title="Sessions unavailable" />
+          {errorStateFor(
+            props.page.loader.error(),
+            "Sessions",
+            props.page.loader.reload,
+          )}
         </Match>
         <Match when={data()?.items.length === 0}>
           <StateCard kind="empty" title="No captured sessions">

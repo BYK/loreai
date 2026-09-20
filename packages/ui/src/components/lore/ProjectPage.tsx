@@ -3,8 +3,7 @@ import { For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
 import type { ProjectSummary } from "~/contracts";
-import { formatWhen, pluralize } from "~/lib/format";
-import { isApiError } from "~/lib/api";
+import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
 import {
   projectHref,
@@ -17,6 +16,15 @@ import { DocHeader } from "./Document";
 import { ListRow } from "./Panes";
 import { StateCard } from "./StateCard";
 import { createLoader } from "~/lib/loader";
+import { Button } from "../ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
+import { TextField, TextFieldInput } from "../ui/text-field";
 
 export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
   const ws = useWorkspace();
@@ -188,28 +196,32 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
             navigate(searchHref(props.project.id, q, scope));
           }}
         >
-          <input
-            name="q"
-            aria-label="Search project memory"
-            class="min-w-0 flex-1 rounded-md border border-line bg-bg px-3 py-2 text-sm"
-            placeholder="Search this project"
-          />
-          <select
+          <TextField class="min-w-0 flex-1">
+            <TextFieldInput
+              name="q"
+              aria-label="Search project memory"
+              placeholder="Search this project"
+            />
+          </TextField>
+          <Select
             name="scope"
-            aria-label="Search scope"
-            class="rounded-md border border-line bg-bg px-2 text-sm"
+            value="all"
+            onChange={() => undefined}
+            options={["all", "session", "project", "knowledge"]}
+            itemComponent={(item) => (
+              <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
+            )}
           >
-            <option value="all">all</option>
-            <option value="session">session</option>
-            <option value="project">project</option>
-            <option value="knowledge">knowledge</option>
-          </select>
-          <button
-            class="rounded-md bg-inverse px-3 py-2 text-xs text-inverse-text"
-            type="submit"
-          >
+            <SelectTrigger aria-label="Search scope" class="h-10 w-28">
+              <SelectValue<string>>
+                {(state) => state.selectedOption()}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent />
+          </Select>
+          <Button type="submit" size="sm">
             Search
-          </button>
+          </Button>
         </form>
       </section>
     </div>
