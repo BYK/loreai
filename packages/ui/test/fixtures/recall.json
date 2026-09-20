@@ -1,0 +1,6 @@
+{
+  "query": "SQLite",
+  "scope": "all",
+  "projectPath": "/tmp/<project-0>",
+  "result": "## Recall Results\n\nFound 1 results, showing top 1 (score range: 0.017–0.017).\n\n### Strong Matches\n\n#### Knowledge\n- **Contracts are validated at the edge** (0m ago): Every /api/v1 response is parsed by the UI contracts before it reaches a view.\n\n---\n*1 of 1 results shown.*"
+}

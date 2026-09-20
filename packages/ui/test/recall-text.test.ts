@@ -6,7 +6,7 @@ describe("recall markdown rendering", () => {
   it("parses headings, separators, bullets and paragraphs without HTML parsing", () => {
     expect(parseRecallMarkdown("## **Heading**\n- body\n---")).toEqual([
       { kind: "heading", level: 2, text: "**Heading**" },
-      { kind: "item", text: "body" },
+      { kind: "item", text: "body", parts: [{ text: "body" }] },
       { kind: "separator" },
     ]);
   });
