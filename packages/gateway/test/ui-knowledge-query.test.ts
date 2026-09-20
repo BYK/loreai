@@ -38,7 +38,7 @@ describe("UI knowledge query contract", () => {
         cursor: "next page",
       }),
     ).toBe(
-      "?q=wal%20mode&category=gotcha&scope=project&sort=created_desc&cursor=next%20page",
+      "?q=wal+mode&category=gotcha&scope=project&sort=created_desc&cursor=next+page",
     );
   });
 
@@ -46,6 +46,8 @@ describe("UI knowledge query contract", () => {
     expect(isDefaultKnowledgeQuery(DEFAULT_KNOWLEDGE_QUERY)).toBe(true);
     const query = { ...DEFAULT_KNOWLEDGE_QUERY, cursor: "next" };
     expect(isDefaultKnowledgeQuery(query)).toBe(false);
-    expect(knowledgeQueryKey("p/1", query)).toBe("p/1?cursor=next");
+    expect(knowledgeQueryKey("p/1", query)).toBe(
+      "projectId=p%2F1&q=&category=&scope=&sort=updated_desc&cursor=next",
+    );
   });
 });
