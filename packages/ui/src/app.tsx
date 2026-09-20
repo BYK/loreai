@@ -73,25 +73,31 @@ const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
   : [];
 
 export const routes: RouteDefinition[] = [
+  { path: "/", component: () => <Browse view="welcome" /> },
   {
-    // One route definition so the shell instance (and its loaded lists)
-    // survives moving between project, list and entry URLs.
-    path: [
-      "/",
-      "/projects/:projectId",
-      "/projects/:projectId/knowledge/:knowledgeId",
-      "/knowledge/:knowledgeId",
-    ],
-    component: Browse,
+    path: "/projects/:projectId/knowledge/:knowledgeId",
+    component: () => <Browse view="entry" />,
+  },
+  { path: "/knowledge/:knowledgeId", component: () => <Browse view="entry" /> },
+  {
+    path: "/projects/:projectId/knowledge",
+    component: () => <Browse view="knowledge-table" />,
   },
   {
-    // Session reader (UI-06). Lazy: the rendering engines (Markdown,
-    // highlighter, sanitiser) and the virtualiser form their own chunk.
     path: "/projects/:projectId/sessions/:sessionId",
     component: lazy(() =>
       import("./routes/Session").then((m) => ({ default: m.Session })),
     ),
   },
+  {
+    path: "/projects/:projectId/sessions",
+    component: () => <Browse view="sessions" />,
+  },
+  {
+    path: "/projects/:projectId/search",
+    component: () => <Browse view="search" />,
+  },
+  { path: "/projects/:projectId", component: () => <Browse view="project" /> },
   ...devOnlyRoutes,
   { path: "*", component: NotFound },
 ];

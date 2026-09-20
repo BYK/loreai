@@ -1,5 +1,6 @@
 import type { Component } from "solid-js";
 import { For, Show } from "solid-js";
+import { A } from "@solidjs/router";
 
 import { Badge } from "~/components/ui/badge";
 import {
@@ -9,6 +10,7 @@ import {
   initials,
 } from "~/lib/format";
 import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
+import { sessionHref } from "~/routes/Browse";
 
 import { DocHeader, ScopeLabel, type Participant } from "./Document";
 import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
@@ -114,13 +116,29 @@ export const KnowledgeDocument: Component<{
           >
             {(session) => (
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-muted">Distilled from session</span>
-                <code class="rounded-sm bg-chrome px-1.5 py-0.5 font-mono text-[11px]">
-                  {session()}
-                </code>
-                <span class="text-muted">
-                  · session reader arrives in UI-05
-                </span>
+                <Show
+                  when={props.project?.id ?? props.entry.project_id}
+                  fallback={
+                    <>
+                      <code class="rounded-sm bg-chrome px-1.5 py-0.5 font-mono text-[11px]">
+                        {session()}
+                      </code>
+                      <span class="text-muted">
+                        · exact message not recorded
+                      </span>
+                    </>
+                  }
+                >
+                  {(projectId) => (
+                    <A
+                      class="text-accent underline"
+                      href={sessionHref(projectId(), session())}
+                      aria-label="Distilled from session"
+                    >
+                      {session()}
+                    </A>
+                  )}
+                </Show>
               </div>
             )}
           </Show>

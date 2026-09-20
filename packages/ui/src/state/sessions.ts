@@ -21,6 +21,7 @@ import { createLoader, type CachedResult, type Loader } from "~/lib/loader";
 
 import { createEntityStore } from "./entity-store";
 import { statusOf, type KeyStatus } from "./status";
+import type { CursorPage } from "~/contracts";
 
 export interface SessionsDeps {
   client: ApiClient;
@@ -69,13 +70,14 @@ export function createSessionsState({
   const store = createEntityStore<SessionSummary>((s) => s.session_id);
 
   function sessionKeyOf(projectId: string, sessionId: string) {
-    return `${projectId}/${sessionId}`;
+    return new URLSearchParams({ projectId, sessionId }).toString();
   }
 
   function splitKey(key: string): { pid: string; sid: string; path: string } {
-    const sep = key.indexOf("/");
-    const pid = key.slice(0, sep);
-    const sid = key.slice(sep + 1);
+    const params = new URLSearchParams(key);
+    const pid = params.get("projectId");
+    const sid = params.get("sessionId");
+    if (!pid || !sid) throw new Error("Invalid session loader key");
     const path = projectPathOf?.(pid);
     if (path === undefined) throw new Error(`No path for project ${pid}`);
     return { pid, sid, path };
@@ -239,6 +241,52 @@ export function createSessionsState({
     return { loader, status: statusOf(loader) };
   }
 
+  function page(
+    source: Accessor<{
+      projectId: string;
+      cursor: string | null;
+    } | null>,
+  ): {
+    loader: Loader<CursorPage<SessionSummary>>;
+    status: Accessor<KeyStatus>;
+  } {
+    const loader = createLoader(
+      () => {
+        const value = source();
+        return value
+          ? new URLSearchParams({
+              projectId: value.projectId,
+              cursor: value.cursor ?? "",
+            }).toString()
+          : null;
+      },
+      (_, signal) => {
+        const value = source();
+        if (!value) throw new Error("Session query changed");
+        return tracked(async () => {
+          return client.listProjectSessionsPage(
+            value.projectId,
+            { cursor: value.cursor, limit: 50 },
+            signal,
+          );
+        });
+      },
+      {
+        async onServer(key, value) {
+          const projectId = new URLSearchParams(key).get("projectId");
+          if (!projectId) throw new Error("Invalid session page loader key");
+          for (const session of value.items) {
+            store.reconcileOne(session);
+            await repos.sessions.put(session, projectId, {
+              keepScope: true,
+            });
+          }
+        },
+      },
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
   /**
    * The paged reader shares the detail cache: it starts from the newest
    * `pageSize` messages (or whatever the cache holds) and `loadOlder()`
@@ -378,5 +426,5 @@ export function createSessionsState({
     };
   }
 
-  return { list, detail, reader, store };
+  return { list, detail, page, reader, store };
 }

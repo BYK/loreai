@@ -518,15 +518,6 @@ export const Fixture: Component = () => {
           focus() || blocksView() || busyView() ? undefined : <ThreadList />
         }
         mobilePane="detail"
-        mobileTitle={
-          focus()
-            ? "Discussion"
-            : blocksView()
-              ? "Session blocks"
-              : busyView()
-                ? "Busy session"
-                : "Storage architecture"
-        }
         back={
           focus()
             ? { href: "/fixture", label: "Source" }

@@ -25,8 +25,10 @@ test.describe("real data browsing", () => {
     await project.click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+$/);
 
+    await page.getByRole("link", { name: /Browse knowledge/ }).click();
+    await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/knowledge$/);
     const rows = page.getByTestId("knowledge-row");
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(9);
     await rows.filter({ hasText: "Keep SQLite as the only store" }).click();
 
     const doc = page.getByTestId("knowledge-document");
@@ -91,11 +93,15 @@ test.describe("real data browsing", () => {
     );
   });
 
-  test("search entry is a UI-04 placeholder", async ({ page }) => {
+  test("search entry asks for a project on the workspace home", async ({
+    page,
+  }) => {
     await page.goto("/ui");
-    await page.getByTestId("search-entry").click();
+    await page
+      .locator('form:has([data-testid="search-entry"])')
+      .evaluate((form) => (form as HTMLFormElement).requestSubmit());
     await expect(page.getByRole("dialog")).toContainText(
-      "Search arrives in UI-04",
+      "Pick a project first — recall is scoped to a project",
     );
   });
 

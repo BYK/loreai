@@ -65,6 +65,27 @@ async function failure(promise: Promise<unknown>): Promise<ApiError> {
 }
 
 describe("api client: happy path", () => {
+  it("recalls with expansion disabled and project identity", async () => {
+    const { client, calls } = clientFor(() =>
+      json({
+        query: "sqlite",
+        scope: "knowledge",
+        projectPath: "/p",
+        result: "## Results",
+      }),
+    );
+    await client.recall({
+      q: "sqlite",
+      project: { path: "/p", git_remote: null },
+      scope: "knowledge",
+      limit: 100,
+      session: "s 1",
+    });
+    expect(calls[0]).toBe(
+      "/api/v1/recall?q=sqlite&scope=knowledge&expand=false&limit=50&path=%2Fp&session=s+1",
+    );
+  });
+
   it("lists projects from /api/v1/projects and validates the rows", async () => {
     const { client, calls } = clientFor(() => json([PROJECT]));
     const projects = await client.listProjects();
@@ -142,6 +163,16 @@ describe("api client: error classification", () => {
     expect((await failure(client.listProjects())).kind).toBe("unreachable");
   });
 
+  it.each([502, 503, 504])(
+    "classifies proxy status %s as `unreachable`",
+    async (status) => {
+      const { client } = clientFor(() => new Response(null, { status }));
+      const error = await failure(client.listProjects());
+      expect(error.kind).toBe("unreachable");
+      expect(error.status).toBe(status);
+    },
+  );
+
   it.each([401, 403])("classifies %s as `unauthorized`", async (status) => {
     const { client } = clientFor(() => new Response(null, { status }));
     const error = await failure(client.listProjects());
@@ -185,13 +216,15 @@ describe("api client: error classification", () => {
   it("requests the cursor page with ?page=cursor and ?cursor=…", async () => {
     const page = { items: [ENTRY], next_cursor: null };
     const { client, calls } = clientFor(() => json(page));
-    const first = await client.listProjectKnowledgePage("p 1", null);
+    const first = await client.listProjectKnowledgePage("p 1", {});
     expect(calls).toEqual(["/api/v1/projects/p%201/knowledge?page=cursor"]);
     expect(first.items).toHaveLength(1);
     expect(first.next_cursor).toBeNull();
 
-    await client.listProjectKnowledgePage("p1", "tok en");
-    expect(calls[1]).toBe("/api/v1/projects/p1/knowledge?cursor=tok%20en");
+    await client.listProjectKnowledgePage("p1", { cursor: "tok en" });
+    expect(calls[1]).toBe(
+      "/api/v1/projects/p1/knowledge?page=cursor&cursor=tok+en",
+    );
   });
 
   it("requests knowledge versions with include_deleted", async () => {

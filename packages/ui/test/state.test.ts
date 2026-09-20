@@ -3,7 +3,7 @@
  * merging, entity-store identity — with a controllable mocked client and a
  * fake-indexeddb cache.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot, createSignal } from "solid-js";
 import { IDBFactory } from "./idb-globals";
 
@@ -30,6 +30,7 @@ import { createAppState } from "~/state";
 import { createProjectsState } from "~/state/projects";
 import { createKnowledgeState } from "~/state/knowledge";
 import { createSessionsState } from "~/state/sessions";
+import { createRecallState } from "~/state/recall";
 
 const PROJECTS: ProjectSummary[] = [
   {
@@ -304,8 +305,11 @@ describe("knowledge state", () => {
     let call = 0;
     const seen: (string | null)[] = [];
     const client = {
-      listProjectKnowledgePage: (_p: string, cursor: string | null) => {
-        seen.push(cursor);
+      listProjectKnowledgePage: (
+        _p: string,
+        opts: { cursor?: string | null },
+      ) => {
+        seen.push(opts.cursor ?? null);
         return Promise.resolve(pages[call++]!);
       },
     } as unknown as ApiClient;
@@ -600,7 +604,7 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const messageBlocks = createMessageBlocksRepo(db);
-    const key = "p1/s1";
+    const key = "projectId=p1&sessionId=s1";
     // 250 messages = a full block of 200 plus a tail of 50.
     await messageBlocks.putMany(
       [block(key, 0, 0, 200), block(key, 1, 200, 50)],
@@ -641,7 +645,7 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const messageBlocks = createMessageBlocksRepo(db);
-    const key = "p1/s1";
+    const key = "projectId=p1&sessionId=s1";
     // The server answered with zero messages: no blocks, but the
     // collections row records `count: 0`.
     await messageBlocks.setCollection(key, {
@@ -686,7 +690,7 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const messageBlocks = createMessageBlocksRepo(db);
-    const key = "p1/s1";
+    const key = "projectId=p1&sessionId=s1";
     // Legacy write: blocks present, no collections record at all.
     await messageBlocks.putMany([block(key, 0, 0, 10)], key, {
       replaceScope: true,
@@ -760,6 +764,128 @@ describe("entity store", () => {
       expect(store.statusOf("p1").partial).toBe(false);
       dispose();
     });
+  });
+});
+
+describe("paged sessions and recall state", () => {
+  it("sessions.page passes project id and cursor to the server", async () => {
+    const seen: unknown[] = [];
+    const client = {
+      listProjectSessionsPage: async (
+        projectId: string,
+        opts: { cursor: string | null; limit: number },
+      ) => {
+        seen.push([projectId, opts]);
+        return { items: [], next_cursor: null };
+      },
+    } as unknown as ApiClient;
+    const state = createSessionsState({
+      client,
+      repos: {
+        sessions: createSessionsRepo(null),
+        messageBlocks: createMessageBlocksRepo(null),
+      },
+      tracked,
+    });
+    const page = state.page(() => ({ projectId: "p1", cursor: "next" }));
+    await flush();
+    expect(seen).toEqual([["p1", { cursor: "next", limit: 50 }]]);
+    expect(page.loader.data()?.items).toEqual([]);
+  });
+
+  it("recall.search forwards the project query and scope", async () => {
+    const seen: unknown[] = [];
+    const client = {
+      recall: async (opts: unknown) => {
+        seen.push(opts);
+        return {
+          query: "SQLite",
+          scope: "project",
+          projectPath: "/tmp/project",
+          result: "No results found for this query.",
+        };
+      },
+    } as unknown as ApiClient;
+    const state = createRecallState({ client, tracked });
+    const project = PROJECTS[0]!;
+    const search = state.search(() => ({
+      project,
+      q: "SQLite",
+      scope: "project",
+    }));
+    await flush();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(
+      expect.objectContaining({ q: "SQLite", scope: "project", project }),
+    );
+    expect(search.loader.data()?.result).toBe(
+      "No results found for this query.",
+    );
+  });
+
+  it("recall.search remains idle when the query is absent", async () => {
+    const recall = vi.fn();
+    const state = createRecallState({
+      client: { recall } as unknown as ApiClient,
+      tracked,
+    });
+    const search = state.search(() => null);
+    await flush();
+    expect(recall).not.toHaveBeenCalled();
+    expect(search.loader.data()).toBeUndefined();
+  });
+
+  it("refetches when slash-containing recall key components change", async () => {
+    const recall = vi.fn(async () => ({
+      query: "result",
+      scope: "project" as const,
+      projectPath: "/tmp/project",
+      result: "No results found for this query.",
+    }));
+    const state = createRecallState({
+      client: { recall } as unknown as ApiClient,
+      tracked,
+    });
+    const [source, setSource] = createSignal({
+      project: { ...PROJECTS[0]!, id: "p" },
+      q: "one/two",
+      scope: "project" as const,
+    });
+    createRoot(() => state.search(source));
+
+    await flush();
+    expect(recall).toHaveBeenCalledTimes(1);
+
+    setSource({
+      project: { ...PROJECTS[0]!, id: "p/one" },
+      q: "two",
+      scope: "project",
+    });
+    await flush();
+    expect(recall).toHaveBeenCalledTimes(2);
+  });
+
+  it("non-default paged queries do not read the knowledge list cache", async () => {
+    const read = vi.fn();
+    const repo = createKnowledgeRepo(null);
+    (repo as unknown as { getScope: typeof read }).getScope = read;
+    const client = {
+      listProjectKnowledgePage: async () => ({ items: [], next_cursor: null }),
+    } as unknown as ApiClient;
+    const state = createKnowledgeState({ client, repo, tracked });
+    const page = state.page(() => ({
+      projectId: "p1",
+      query: {
+        q: "SQLite",
+        category: null,
+        scope: null,
+        sort: "updated_desc",
+        cursor: null,
+      },
+    }));
+    await flush();
+    expect(page.loader.data()?.items).toEqual([]);
+    expect(read).not.toHaveBeenCalled();
   });
 });
 

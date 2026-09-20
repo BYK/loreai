@@ -57,27 +57,18 @@ export const ThemeToggle: Component<{ class?: string }> = (props) => {
 export const AppBar: Component<{
   /** Mobile-only: rendered left of the logo (a back link). */
   leading?: JSX.Element;
-  /** Mobile-only: replaces the logo with the current pane title. */
-  mobileTitle?: string;
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
+  searchProjectId?: string;
 }> = (props) => (
   <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
     <Show when={props.leading}>
       <span class="lg:hidden">{props.leading}</span>
     </Show>
-    <A
-      href="/"
-      aria-label="Lore.AI — home"
-      class="lg:min-w-[150px]"
-      classList={{ "hidden sm:block": Boolean(props.mobileTitle) }}
-    >
-      <Logo />
+    <A href="/" aria-label="Lore.AI — home" class="shrink-0 lg:min-w-[150px]">
+      <Logo wordmark="sm" />
     </A>
-    <Show when={props.mobileTitle}>
-      <b class="truncate text-[17px] sm:hidden">{props.mobileTitle}</b>
-    </Show>
-    <SearchEntry />
+    <SearchEntry searchProjectId={props.searchProjectId} />
     <div class="ml-auto flex items-center gap-2 sm:gap-4">
       <small class="hidden text-[13px] text-muted md:inline">
         Local workspace

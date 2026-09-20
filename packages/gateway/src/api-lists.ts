@@ -75,7 +75,7 @@ function errorResponse(
   return jsonResponse({ type: "error", error: { type, message } }, status);
 }
 
-class BadRequest extends Error {
+export class BadRequest extends Error {
   constructor(
     readonly errorType: string,
     message: string,

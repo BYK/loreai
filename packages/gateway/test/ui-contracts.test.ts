@@ -25,6 +25,7 @@ import {
   knowledgeList,
   knowledgeVersionHistory,
   projectList,
+  recallResponse,
   isApiError,
   isContractError,
   parseContract,
@@ -281,6 +282,17 @@ describe("ui contracts against the real gateway", () => {
       `/projects/${SEEDED.projectId}/knowledge`,
       `/api/v1/projects/${SEEDED.projectId}/knowledge`,
       knowledgeList,
+    );
+  });
+
+  it("GET /recall", async () => {
+    await contractRoute(
+      "recall.json",
+      "/recall",
+      `/api/v1/recall?q=SQLite&path=${encodeURIComponent(
+        SEEDED.projectPath,
+      )}&expand=false`,
+      recallResponse,
     );
   });
 

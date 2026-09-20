@@ -35,12 +35,14 @@ import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
 import { handleDedupApply, handleDedupPreview } from "./dedup-api";
 import {
+  BadRequest,
   handleListKnowledgeCursor,
   handleListKnowledgeFiltered,
   handleListSessionsCursor,
   handleKnowledgeVersions,
   handleShowSessionCursor,
 } from "./api-lists";
+import { parseBooleanParam } from "./query-bool";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -485,11 +487,16 @@ async function handleRecall(
     recallLimit: limit,
   };
 
+  // The UI passes expand=false so read-only browsing never constructs an LLM
+  // client or makes an LLM call; CLI/agent recall keeps the true default.
+  const expand = parseBooleanParam(url, "expand", true);
   let llm: LLMClient | undefined;
-  try {
-    llm = getAPILLMClient(config);
-  } catch {
-    // No LLM available — proceed without query expansion
+  if (expand) {
+    try {
+      llm = getAPILLMClient(config);
+    } catch {
+      // No LLM available — proceed without query expansion
+    }
   }
 
   const result = await runRecall({
@@ -932,7 +939,14 @@ export async function handleAPIRequest(
 
     // GET /api/v1/recall
     if (pathname === "/api/v1/recall") {
-      return await handleRecall(url, config);
+      try {
+        return await handleRecall(url, config);
+      } catch (error) {
+        if (error instanceof BadRequest) {
+          return errorResponse(400, error.errorType, error.message);
+        }
+        throw error;
+      }
     }
 
     // GET /api/v1/import/history

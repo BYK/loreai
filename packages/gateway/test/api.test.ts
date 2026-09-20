@@ -431,6 +431,46 @@ describe("GET /api/v1/recall", () => {
     expect(data.query).toBe("REST API");
     expect(typeof data.result).toBe("string");
   });
+
+  it.each(["false", "0", "no"])(
+    "returns an unexpanded response without an LLM for expand=%s",
+    async (expand) => {
+      const { projectPath } = await seedProject();
+      const path = `/api/v1/recall?q=test&path=${encodeURIComponent(
+        projectPath,
+      )}&expand=${expand}`;
+      const res = await api(path);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        query: string;
+        scope: string;
+        projectPath: string;
+        result: string;
+      };
+      expect(body).toEqual(
+        expect.objectContaining({
+          query: "test",
+          scope: "all",
+          projectPath,
+        }),
+      );
+      expect(typeof body.result).toBe("string");
+    },
+  );
+
+  it("returns 400 for an invalid expand value", async () => {
+    const { projectPath } = await seedProject();
+    const res = await api(
+      `/api/v1/recall?q=test&path=${encodeURIComponent(
+        projectPath,
+      )}&expand=garbage`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      "Invalid expand: garbage (expected a boolean)",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

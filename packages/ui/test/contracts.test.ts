@@ -22,6 +22,7 @@ import {
   knowledgeVersionHistory,
   parseContract,
   projectList,
+  recallResponse,
   safeParseContract,
   sessionDetail,
   sessionList,
@@ -47,6 +48,7 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
     schema: knowledgeList,
   },
   "knowledge-entry.json": { route: "/knowledge/k", schema: knowledgeEntry },
+  "recall.json": { route: "/recall", schema: recallResponse },
   "sessions-list.json": { route: "/projects/p/sessions", schema: sessionList },
   "session-detail.json": { route: "/sessions/s", schema: sessionDetail },
   "session-page.json": {
@@ -237,6 +239,16 @@ describe("contract violations", () => {
     const parsed = safeParseContract("/x", apiErrorBody, {
       type: "error",
       error: { type: "not_found", message: "Knowledge entry not found: x" },
+    });
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("recallResponse preserves the recall response shape", () => {
+    const parsed = safeParseContract("/recall", recallResponse, {
+      query: "SQLite",
+      scope: "all",
+      projectPath: "/tmp/project",
+      result: "## Recall Results",
     });
     expect(parsed.ok).toBe(true);
   });

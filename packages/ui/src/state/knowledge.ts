@@ -1,4 +1,4 @@
-import type { Accessor } from "solid-js";
+import { createMemo, type Accessor } from "solid-js";
 import { createSignal } from "solid-js";
 
 import type { KnowledgeEntry } from "~/contracts";
@@ -7,7 +7,13 @@ import type { Repository } from "~/db";
 import { createLoader, type Loader } from "~/lib/loader";
 
 import { createEntityStore } from "./entity-store";
+import type { CursorPage, KnowledgeQuery } from "~/contracts";
 import { mergeCursorPage, type MergedPage } from "./pages";
+import {
+  isDefaultKnowledgeQuery,
+  KNOWLEDGE_PAGE_SIZE,
+  knowledgeQueryKey,
+} from "~/contracts";
 import { statusOf, type KeyStatus } from "./status";
 
 export interface KnowledgeDeps {
@@ -66,31 +72,98 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
    * `partial` stays true until the gateway reports `next_cursor === null`.
    * Not wired into Browse yet — unit-tested only.
    */
+  function page(
+    source: Accessor<{
+      projectId: string;
+      query: KnowledgeQuery;
+    } | null>,
+  ): {
+    loader: Loader<CursorPage<KnowledgeEntry>>;
+    status: Accessor<KeyStatus>;
+  } {
+    const keyed = createMemo(() => {
+      const value = source();
+      return value
+        ? { ...value, key: knowledgeQueryKey(value.projectId, value.query) }
+        : null;
+    });
+    const loader = createLoader(
+      () => keyed()?.key ?? null,
+      (key, signal) => {
+        const value = keyed();
+        if (!value || value.key !== key)
+          throw new Error("Knowledge query changed");
+        return tracked(() =>
+          client.listProjectKnowledgePage(
+            value.projectId,
+            {
+              limit: KNOWLEDGE_PAGE_SIZE,
+              q: value.query.q || undefined,
+              category: value.query.category ?? undefined,
+              scope: value.query.scope ?? undefined,
+              sort: value.query.sort,
+              cursor: value.query.cursor,
+            },
+            signal,
+          ),
+        );
+      },
+      {
+        async cached() {
+          const value = keyed();
+          if (!value || !isDefaultKnowledgeQuery(value.query)) return undefined;
+          const [rows, collection] = await Promise.all([
+            repo.getScope(value.projectId),
+            repo.collection(value.projectId),
+          ]);
+          if (!collection) return undefined;
+          const items = [...rows].sort(
+            (a, b) =>
+              (b.updated_at ?? 0) - (a.updated_at ?? 0) ||
+              b.id.localeCompare(a.id),
+          );
+          return {
+            value: {
+              items: items.slice(0, KNOWLEDGE_PAGE_SIZE),
+              next_cursor: null,
+            },
+            partial: true,
+          };
+        },
+        async onServer(_, value) {
+          for (const item of value.items) {
+            store.reconcileOne(item);
+            await repo.put(item, item.project_id ?? "global", {
+              keepScope: true,
+            });
+          }
+        },
+      },
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
   function listPaged(projectId: string): {
     page: Accessor<MergedPage<KnowledgeEntry> | undefined>;
     status: Accessor<KeyStatus>;
-    loadMore(): Promise<void>;
+    loadMore: () => Promise<void>;
     loading: Accessor<boolean>;
   } {
-    const [page, setPage] = createSignal<MergedPage<KnowledgeEntry>>();
+    const [value, setValue] = createSignal<MergedPage<KnowledgeEntry>>();
     const [loading, setLoading] = createSignal(false);
-    const [error, setError] = createSignal<unknown>(undefined);
-    const status: Accessor<KeyStatus> = () => ({
-      loading: loading(),
-      stale: false,
-      partial: page()?.complete === false,
-      error: error(),
-      source: "server" as const,
-    });
+    const [error, setError] = createSignal<unknown>();
     const loadMore = async () => {
-      const cursor = page()?.nextCursor ?? null;
-      if (page() && cursor === null) return;
+      if (value()?.complete) return;
       setLoading(true);
       try {
         const next = await tracked(() =>
-          client.listProjectKnowledgePage(projectId, cursor),
+          client.listProjectKnowledgePage(projectId, {
+            cursor: value()?.nextCursor ?? null,
+          }),
         );
-        setPage((prev) => mergeCursorPage(prev, next, (k) => k.id));
+        setValue((previous) =>
+          mergeCursorPage(previous, next, (entry) => entry.id),
+        );
         setError(undefined);
       } catch (reason) {
         setError(reason);
@@ -99,7 +172,18 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
         setLoading(false);
       }
     };
-    return { page, status, loadMore, loading };
+    return {
+      page: value,
+      loadMore,
+      loading,
+      status: () => ({
+        loading: loading(),
+        stale: false,
+        partial: value()?.complete === false,
+        error: error(),
+        source: "server" as const,
+      }),
+    };
   }
 
   function entry(id: Accessor<string | null>): {
@@ -124,6 +208,7 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
 
   return {
     list,
+    page,
     listPaged,
     entry,
     select: (id: string) => store.select(id),

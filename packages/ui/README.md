@@ -13,8 +13,12 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | Route | What |
 |---|---|
 | `/ui` | Workspace: project navigation + "choose a project" document |
-| `/ui/projects/:projectId` | Knowledge list for a project (list pane) |
+| `/ui/projects/:projectId` | Project identity, health, recent sessions and knowledge list |
+| `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
+| `/ui/projects/:projectId/sessions` | Cursor-paged sessions for a project |
+| `/ui/projects/:projectId/sessions/:sessionId` | UI-06 session reader |
+| `/ui/projects/:projectId/search` | Scoped recall results with expansion disabled |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the UI-06a block model and renderer |
 | `/ui/_compat` | **Dev/test only** — UI-01 compatibility smoke page |
@@ -56,7 +60,7 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
-| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokens → HTML, raw HTML escaped; only used inside `src/lib/safe-html.ts` (UI-06a) |
+| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokenization for safe HTML and lazy inert recall parsing; `src/lib/safe-html.ts` remains the only `innerHTML` boundary (UI-04/UI-06a) |
 | HTML sanitiser | `dompurify` | 3.4.15 | 2026-09-06 | explicit tag/attribute allowlist + link policy hook; only used inside `src/lib/safe-html.ts` |
 | Code highlighting | `highlight.js` | 11.12.0 | 2026-08-12 | `lib/core` + 14 registered grammars, no auto-detect; regex-based, no `eval`, so `script-src 'self'` holds |
 | Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
@@ -402,11 +406,11 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a) and [Tests (UI-06b)](#tests-ui-06b)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a) and [Tests (UI-06b)](#tests-ui-06b)) | root `pnpm test`, regular CI job |
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — Playwright (`e2e/`), desktop + mobile Chromium, against the **built** gateway (`e2e/gateway.mjs` seeds a temp DB through `@loreai/core` and runs `packages/gateway/dist/bin.cjs`). `fixture.spec.ts` covers a dev-only screen, so its `dev-*` projects run against a Vite dev server (`LORE_E2E_DEV_PORT`, default 5174) proxying `/api` to that same seeded gateway. Requires `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle` and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (UI-06)
 
@@ -913,6 +917,15 @@ predates the move from an embedded module to staged files, which took
   control. Response types are re-declared as contracts in `src/contracts/`.
   (The Playwright *seed* script under `e2e/` is Node-only tooling and does
   load `@loreai/core`; it is not part of the bundle.)
+- Knowledge filtering, sorting and cursor pagination are server-only. The
+  default first page may render an IndexedDB response as stale and partial
+  while the server replacement is loading; non-default query pages bypass the
+  cache. A Previous action is shown only after a previous cursor has been
+  observed in the current browser session.
+- Recall requests use `expand=false`, so searching memory never constructs or
+  runs a model. Recall Markdown is tokenized lazily with `marked` into inert
+  Solid nodes, and loader/query keys use canonical `URLSearchParams` strings
+  so slash-containing IDs, queries, and cursors remain collision-free.
 
 ## UX → component mapping
 
@@ -939,6 +952,12 @@ and the smoke page; the fixture and shell rows land in UI-02.
 | Mobile navigation | `Shell` (`mobilePane`, back link, nav drawer) | Kobalte `Dialog` as a left sheet | UI-02 |
 | Future actions (Save note, Ask agent, Explore separately, Start with selected context, Share finding) | `FutureAction` | `Button disabled` + "not available yet" | UI-02 (disabled) |
 | Tables with sorting (sessions, knowledge) | — | `@tanstack/solid-table` | UI-04 |
+| Project identity, health and recent sessions | `ProjectPage` | `DocHeader`, `Button`, Kobalte `Select` | UI-04 |
+| Server-filtered knowledge table | `KnowledgeTable` | TanStack Solid Table v9, Kobalte `Select`, `TextField` | UI-04 |
+| Cursor-paged sessions | `SessionList` | router `<A>`, `StateCard` | UI-04 |
+| Scoped recall output | `SearchResults` | Kobalte `Select`, `TextField`, `Button` | UI-04 |
+| Session reader | `Session` / `SessionView` | `SessionBlock`, `@tanstack/solid-virtual` | UI-06 |
+| Shared loading/error/locked states | `ErrorState` | `StateCard`, retry/first-page actions | UI-04 |
 | Long lists | — | `@tanstack/solid-virtual` | UI-04 / UI-06 |
 | Local cache, drafts | — | `idb` | UI-03 |
 | Charts (cost / compression / latency) | `PlotContainer` (Solid owns the container, Plot owns descendants) | `@observablehq/plot` | UI-05 (lazy) |

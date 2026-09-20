@@ -85,10 +85,16 @@ const ENTRIES: KnowledgeEntry[] = [
 
 type Overrides = Partial<{ [K in keyof ApiClient]: ApiClient[K] }>;
 
-function fakeClient(
-  overrides: Overrides = {},
-): ApiClient & { calls: string[] } {
+function fakeClient(overrides: Overrides = {}): ApiClient & {
+  calls: string[];
+  pageOpts: Array<{ projectId: string; opts: { cursor?: string | null } }>;
+} {
   const calls: string[] = [];
+  const pageOpts: Array<{
+    projectId: string;
+    opts: { cursor?: string | null };
+  }> = [];
+  let client!: ApiClient;
   const base = {
     async listProjects() {
       calls.push("projects");
@@ -102,6 +108,25 @@ function fakeClient(
         "not_found",
         `/projects/${projectId}/knowledge`,
         "Project not found",
+        404,
+      );
+    },
+    async listProjectKnowledgePage(
+      projectId: string,
+      opts: { cursor?: string | null },
+    ) {
+      pageOpts.push({ projectId, opts });
+      const items = await client.listProjectKnowledge(projectId);
+      return { items, next_cursor: null };
+    },
+    async listProjectSessionsPage() {
+      return { items: [], next_cursor: null };
+    },
+    async getProjectSharing() {
+      throw new ApiError(
+        "not_found",
+        "/projects/sharing",
+        "Sharing is not configured",
         404,
       );
     },
@@ -119,8 +144,8 @@ function fakeClient(
       return entry;
     },
   };
-  const client = Object.assign(base, overrides) as ApiClient;
-  return Object.assign(client, { calls });
+  client = Object.assign(base, overrides) as ApiClient;
+  return Object.assign(client, { calls, pageOpts });
 }
 
 function mount(path: string, client: ApiClient, db?: Promise<LoreUiDb | null>) {
@@ -223,14 +248,18 @@ describe("shell: project navigation and real-data path", () => {
     fireEvent.click(lore!);
 
     await waitFor(() => expect(history.get()).toBe("/projects/p-lore"));
+    fireEvent.click(
+      await screen.findByRole("link", { name: /Browse knowledge/ }),
+    );
+    await waitFor(() =>
+      expect(history.get()).toBe("/projects/p-lore/knowledge"),
+    );
     const rows = await screen.findAllByTestId("knowledge-row");
     expect(rows[0]).toHaveTextContent("Keep SQLite");
     expect(rows[1]).toHaveTextContent("WAL recovery");
-    expect(pane("list")).toHaveTextContent("2 entries");
-    expect(screen.getByText("Select an entry")).toBeInTheDocument();
     expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
       "data-mobile-pane",
-      "list",
+      "detail",
     );
 
     fireEvent.click(rows[1]!);
@@ -248,21 +277,36 @@ describe("shell: project navigation and real-data path", () => {
     expect(
       within(doc).getByText("No source session recorded."),
     ).toBeInTheDocument();
-    expect(rows[1]).toHaveAttribute("aria-current", "page");
-    expect(rows[0]).not.toHaveAttribute("aria-current");
+    const selectedRows = await screen.findAllByTestId("knowledge-row");
+    expect(selectedRows[1]).toHaveAttribute("aria-current", "page");
+    expect(selectedRows[0]).not.toHaveAttribute("aria-current");
     expect(document.querySelector("[data-mobile-pane]")).toHaveAttribute(
       "data-mobile-pane",
       "detail",
     );
     expect(screen.getByTestId("mobile-back")).toHaveAttribute(
       "href",
-      "/projects/p-lore",
+      "/projects/p-lore/knowledge",
     );
-    expect(client.calls).toEqual([
-      "projects",
-      "knowledge:p-lore",
-      "entry:k-wal",
-    ]);
+    expect(client.calls[0]).toBe("projects");
+    expect(client.calls).toContain("entry:k-wal");
+    expect(client.pageOpts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          projectId: "p-lore",
+          opts: expect.objectContaining({ cursor: null }),
+        }),
+      ]),
+    );
+  });
+
+  it("keeps knowledge q filters on the table route", async () => {
+    mount("/projects/p-lore/knowledge?q=Keep", fakeClient());
+    expect(await screen.findAllByTestId("knowledge-row")).toHaveLength(2);
+    expect(
+      screen.getByRole("textbox", { name: "Knowledge search" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Recall Results")).toBeNull();
   });
 
   it("renders a deep link straight to an entry (reload of a nested route)", async () => {
@@ -295,6 +339,17 @@ describe("shell: project navigation and real-data path", () => {
       "entry:k-wal",
       "knowledge:p-lore",
     ]);
+    expect(client.pageOpts).toContainEqual({
+      projectId: "p-lore",
+      opts: {
+        cursor: null,
+        limit: 50,
+        q: undefined,
+        category: undefined,
+        scope: undefined,
+        sort: "updated_desc",
+      },
+    });
   });
 
   it("decodes percent-encoded ids from the URL exactly once", async () => {
@@ -335,6 +390,17 @@ describe("shell: project navigation and real-data path", () => {
       "Keep SQLite",
     );
     expect(client.calls).toEqual(["entry:k/1%2", "knowledge:team/lore v2"]);
+    expect(client.pageOpts).toContainEqual({
+      projectId: "team/lore v2",
+      opts: {
+        cursor: null,
+        limit: 50,
+        q: undefined,
+        category: undefined,
+        scope: undefined,
+        sort: "updated_desc",
+      },
+    });
     expect(pane("list")).toHaveTextContent("Knowledge · lore");
     const [row] = await screen.findAllByTestId("knowledge-row");
     expect(row).toHaveAttribute("aria-current", "page");
@@ -381,10 +447,62 @@ describe("shell: project navigation and real-data path", () => {
 });
 
 describe("shell: empty, error, not-found and locked states", () => {
+  it("settles an unknown search project after projects load", async () => {
+    mount("/projects/nope/search?q=x", fakeClient());
+    expect(
+      await screen.findByText("Project not found or inaccessible"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps an unknown search project loading until projects resolve", async () => {
+    let release: (projects: ProjectSummary[]) => void = () => {};
+    const client = fakeClient({
+      async listProjects() {
+        return new Promise<ProjectSummary[]>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    mount("/projects/nope/search?q=x", client);
+    expect(screen.getByText("Loading project")).toBeInTheDocument();
+
+    release(PROJECTS);
+    expect(
+      await screen.findByText("Project not found or inaccessible"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not load knowledge pages while browsing sessions", async () => {
+    let knowledgePageCalls = 0;
+    const client = fakeClient({
+      async listProjectKnowledgePage() {
+        knowledgePageCalls++;
+        return { items: [], next_cursor: null };
+      },
+    });
+    mount("/projects/p-lore/sessions?cursor=abc", client);
+    expect(await screen.findByText("No captured sessions")).toBeInTheDocument();
+    expect(knowledgePageCalls).toBe(0);
+  });
+
+  it("does not load session pages while browsing knowledge", async () => {
+    let sessionPageCalls = 0;
+    const client = fakeClient({
+      async listProjectSessionsPage() {
+        sessionPageCalls++;
+        return { items: [], next_cursor: null };
+      },
+    });
+    mount("/projects/p-lore/knowledge?cursor=abc", client);
+    expect(await screen.findByText("Keep SQLite")).toBeInTheDocument();
+    expect(sessionPageCalls).toBe(0);
+  });
+
   it("shows an empty state for a project without knowledge", async () => {
-    mount("/projects/p-empty", fakeClient());
-    expect(await screen.findByText("No knowledge yet")).toBeInTheDocument();
-    expect(pane("list")).toHaveTextContent("0 entries");
+    mount("/projects/p-empty/knowledge", fakeClient());
+    expect(
+      await screen.findByText("No knowledge extracted yet"),
+    ).toBeInTheDocument();
   });
 
   it("shows not-found for an unknown entry without breaking the connection status", async () => {
@@ -425,7 +543,7 @@ describe("shell: empty, error, not-found and locked states", () => {
         return ENTRIES;
       },
     });
-    mount("/projects/p-lore", client);
+    mount("/projects/p-lore/knowledge", client);
     await screen.findAllByTestId("nav-project");
     await waitFor(() => expect(attempts).toBe(1));
     const status = screen.getByTestId("connection-status");
@@ -457,31 +575,56 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(status).toHaveAttribute("data-connection", "reachable");
   });
 
+  it("renders proxy 503 responses as gateway unreachable", async () => {
+    const client = fakeClient({
+      async listProjectKnowledgePage() {
+        throw new ApiError(
+          "unreachable",
+          "/projects/p-lore/knowledge",
+          "Gateway responded 503",
+          503,
+        );
+      },
+    });
+    mount("/projects/p-lore/knowledge", client);
+    expect(await screen.findByText("Gateway unreachable")).toBeInTheDocument();
+    expect(screen.getByText(/lore start/)).toBeInTheDocument();
+    expect(screen.getByTestId("connection-status")).toHaveAttribute(
+      "data-connection",
+      "unreachable",
+    );
+  });
+
   it("clears the error card while a retry is in flight instead of keeping the stale error", async () => {
     let attempts = 0;
-    let release: (entries: KnowledgeEntry[]) => void = () => {};
+    let release: (page: {
+      items: KnowledgeEntry[];
+      next_cursor: null;
+    }) => void = () => {};
     const client = fakeClient({
-      async listProjectKnowledge() {
+      async listProjectKnowledgePage() {
         attempts++;
         if (attempts === 1) {
           throw new ApiError("http", "/projects/p-lore/knowledge", "boom", 500);
         }
-        return new Promise<KnowledgeEntry[]>((resolve) => {
-          release = resolve;
-        });
+        return new Promise<{ items: KnowledgeEntry[]; next_cursor: null }>(
+          (resolve) => {
+            release = resolve;
+          },
+        );
       },
     });
-    mount("/projects/p-lore", client);
+    mount("/projects/p-lore/knowledge", client);
     await screen.findByText("Knowledge unavailable");
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
       expect(screen.queryByText("Knowledge unavailable")).toBeNull(),
     );
-    expect(screen.getByText("Loading knowledge…")).toBeInTheDocument();
+    expect(screen.getByText("Loading knowledge")).toBeInTheDocument();
     expect(attempts).toBe(2);
 
-    release(ENTRIES);
+    release({ items: ENTRIES, next_cursor: null });
     await screen.findByText("Keep SQLite");
     expect(screen.queryByText("Loading knowledge…")).toBeNull();
     expect(screen.queryByText("Knowledge unavailable")).toBeNull();
@@ -492,7 +635,7 @@ describe("shell: empty, error, not-found and locked states", () => {
       async listProjects() {
         throw new ApiError("unauthorized", "/projects", "hidden", 404);
       },
-      async listProjectKnowledge() {
+      async listProjectKnowledgePage() {
         throw new ApiError(
           "unauthorized",
           "/projects/p-lore/knowledge",
@@ -501,7 +644,7 @@ describe("shell: empty, error, not-found and locked states", () => {
         );
       },
     });
-    mount("/projects/p-lore", client);
+    mount("/projects/p-lore/knowledge", client);
     const status = await screen.findByTestId("connection-status");
     await waitFor(() =>
       expect(status).toHaveAttribute("data-connection", "unauthorized"),
@@ -531,11 +674,11 @@ describe("shell: search entry, theme and fixture", () => {
     await component.preload();
   });
 
-  it("explains that search arrives in UI-04 instead of accepting a query", async () => {
+  it("asks for a project before accepting a search query", async () => {
     mount("/", fakeClient());
     fireEvent.click(screen.getByTestId("search-entry"));
     expect(await screen.findByRole("dialog")).toHaveTextContent(
-      "Search arrives in UI-04",
+      "Pick a project first — recall is scoped to a project",
     );
     expect(screen.queryByRole("searchbox")).toBeNull();
   });
@@ -612,7 +755,10 @@ describe("shell: search entry, theme and fixture", () => {
     mount("/", fakeClient());
     const logo = screen.getByTestId("logo");
     const img = logo.querySelector("img");
+    const wordmark = logo.querySelector(".font-serif");
     expect(img).not.toBeNull();
+    expect(logo).toBeVisible();
+    expect(wordmark).toHaveClass("hidden", "sm:inline");
     expect(logo).toHaveAttribute("data-logo-theme", "light");
     expect(img?.getAttribute("src")).toMatch(/loreai\.svg/);
     // The wordmark stays a real link target for assistive tech.
@@ -747,10 +893,11 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
     const db = await seededDb();
     const client = fakeClient({
       listProjects: () => new Promise<ProjectSummary[]>(() => {}),
-      listProjectKnowledge: () => new Promise<KnowledgeEntry[]>(() => {}),
+      listProjectKnowledgePage: () =>
+        new Promise<{ items: KnowledgeEntry[]; next_cursor: null }>(() => {}),
       getKnowledge: () => new Promise<KnowledgeEntry>(() => {}),
     });
-    mount("/projects/p-lore", client, Promise.resolve(db));
+    mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
     const rows = await screen.findAllByTestId("knowledge-row");
     expect(rows[0]).toHaveTextContent("Keep SQLite");
     const badges = await screen.findAllByTestId("stale-indicator");
@@ -760,16 +907,24 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
 
   it("replaces the cached value and drops the badge when the server answers", async () => {
     const db = await seededDb();
-    let release: (e: KnowledgeEntry[]) => void = () => {};
-    const server = new Promise<KnowledgeEntry[]>((r) => {
-      release = r;
-    });
+    let release: (page: {
+      items: KnowledgeEntry[];
+      next_cursor: null;
+    }) => void = () => {};
+    const server = new Promise<{ items: KnowledgeEntry[]; next_cursor: null }>(
+      (r) => {
+        release = r;
+      },
+    );
     const client = fakeClient({
-      listProjectKnowledge: () => server,
+      listProjectKnowledgePage: () => server,
     });
-    mount("/projects/p-lore", client, Promise.resolve(db));
+    mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
     await screen.findAllByTestId("stale-indicator");
-    release([{ ...ENTRIES[0]!, title: "Keep SQLite (v2)" }]);
+    release({
+      items: [{ ...ENTRIES[0]!, title: "Keep SQLite (v2)" }],
+      next_cursor: null,
+    });
     await screen.findByText("Keep SQLite (v2)");
     await waitFor(() =>
       expect(screen.queryByTestId("stale-indicator")).toBeNull(),
@@ -779,14 +934,14 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
   it("keeps cached rows and shows 'Cached · gateway unavailable' when the server rejects", async () => {
     const db = await seededDb();
     const client = fakeClient({
-      listProjectKnowledge: () => {
+      listProjectKnowledgePage: () => {
         throw new ApiError("unreachable", "/projects/p-lore/knowledge", "down");
       },
       getKnowledge: () => {
         throw new ApiError("unreachable", "/knowledge/k-sqlite", "down");
       },
     });
-    mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(db));
+    mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
     // The title appears in the list row and the open document.
     await screen.findAllByText("Keep SQLite");
     const badges = await screen.findAllByTestId("stale-indicator");

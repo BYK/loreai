@@ -35,7 +35,10 @@ const entries = [
     category: "decision",
     title: "Keep SQLite as the only store",
     content:
-      "Portability is a requirement: a single-file SQLite database with WAL mode and FTS5 stays the authoritative store.\n\nNo remote cache service; the browser UI is a read projection.",
+      "Portability is a requirement: a single-file SQLite database with WAL mode and FTS5 stays the authoritative store.\n\nNo remote cache service; the browser UI is a read projection.\n\n" +
+      "SQLite remains the authoritative store for deterministic local-first memory. ".repeat(
+        220,
+      ),
     confidence: 0.92,
   },
   {
@@ -53,10 +56,83 @@ const entries = [
     confidence: 0.7,
     crossProject: true,
   },
+  {
+    category: "pattern",
+    title: "Validate contracts at the edge",
+    content: "Parse every gateway response before it reaches a view.",
+    confidence: 0.86,
+  },
+  {
+    category: "preference",
+    title: "Prefer explicit route state",
+    content: "Keep filters and cursors in the URL so views survive reloads.",
+    confidence: 0.78,
+  },
+  {
+    category: "decision",
+    title: "Use cursor pagination",
+    content:
+      "Large project collections use opaque cursors rather than offsets.",
+    confidence: 0.82,
+  },
+  {
+    category: "gotcha",
+    title: "Do not filter cached pages in the browser",
+    content:
+      "Filtered and sorted pages are authoritative only when returned by the server.",
+    confidence: 0.88,
+  },
+  {
+    category: "architecture",
+    title: "Keep the gateway as data authority",
+    content:
+      "The browser cache is a stale read projection and never a write source.",
+    confidence: 0.84,
+  },
+  {
+    category: "pattern",
+    title: "Encode query pieces explicitly",
+    content:
+      "URL query values use deterministic percent encoding for stable requests.",
+    confidence: 0.74,
+  },
 ];
 
 for (const entry of entries) {
   core.ltm.create({ ...entry, projectPath: lore, scope: "project" });
+}
+for (const session of [
+  {
+    id: "e2e-session-sqlite",
+    created: 1_700_000_000_000,
+    text: "We chose SQLite as the only store for the Lore project.",
+  },
+  {
+    id: "e2e-session-routing",
+    created: 1_700_000_100_000,
+    text: "The browser UI preserves explicit route state across reloads.",
+  },
+]) {
+  core.temporal.store({
+    projectPath: lore,
+    info: {
+      id: `${session.id}-message`,
+      sessionID: session.id,
+      role: "user",
+      time: { created: session.created },
+      agent: "e2e",
+      model: { providerID: "e2e", modelID: "seed" },
+    },
+    parts: [
+      {
+        id: `${session.id}-part`,
+        sessionID: session.id,
+        messageID: `${session.id}-message`,
+        type: "text",
+        text: session.text,
+      },
+    ],
+  });
 }
 core.ltm.create({
   projectPath: scratch,

@@ -27,9 +27,11 @@ import {
   knowledgeVersionHistory,
   parseContract,
   projectList,
+  recallResponse,
   safeParseContract,
   sessionDetail,
   sessionList,
+  sessionSummary,
   sessionPage,
   sharingStatus,
   syncStatus,
@@ -41,6 +43,11 @@ import {
   type KnowledgeEntry,
   type KnowledgeVersionHistory,
   type ProjectSummary,
+  type RecallResponse,
+  type RecallScope,
+  type KnowledgeCategory,
+  type KnowledgeScope,
+  type KnowledgeSort,
   type SessionDetail,
   type SessionPage,
   type SessionSummary,
@@ -59,6 +66,19 @@ export {
 } from "~/contracts";
 
 export const API_BASE = "/api/v1";
+
+export function query(
+  params: Record<string, string | number | boolean | null | undefined>,
+): string {
+  const values = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== null && value !== undefined) {
+      values.set(key, String(value));
+    }
+  }
+  const encoded = values.toString();
+  return encoded ? `?${encoded}` : "";
+}
 
 /** True for any abort rejection (`DOMException`, `Error`, or a custom `abort(reason)`). */
 export function isAbortError(error: unknown): boolean {
@@ -125,6 +145,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
       );
     }
 
+    if (res.status === 502 || res.status === 503 || res.status === 504) {
+      const message = await readErrorMessage(res);
+      throw new ApiError(
+        "unreachable",
+        path,
+        message ?? `Gateway responded ${res.status}`,
+        res.status,
+      );
+    }
+
     if (!res.ok) {
       const message = await readErrorMessage(res);
       if (res.status === 404) {
@@ -184,14 +214,26 @@ export function createApiClient(options: ApiClientOptions = {}) {
      */
     listProjectKnowledgePage(
       projectId: string,
-      cursor: string | null,
+      opts: {
+        cursor?: string | null;
+        limit?: number;
+        q?: string;
+        category?: KnowledgeCategory;
+        scope?: KnowledgeScope;
+        sort?: KnowledgeSort;
+      } = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<KnowledgeEntry>> {
-      const query = cursor
-        ? `?cursor=${encodeURIComponent(cursor)}`
-        : "?page=cursor";
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/knowledge${query}`,
+        `/projects/${encodeURIComponent(projectId)}/knowledge${query({
+          page: "cursor",
+          cursor: opts.cursor,
+          limit: opts.limit,
+          q: opts.q,
+          category: opts.category,
+          scope: opts.scope,
+          sort: opts.sort,
+        })}`,
         cursorPage(knowledgeEntry),
         signal,
       );
@@ -207,9 +249,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
       id: string,
       opts: { includeDeleted?: boolean; signal?: AbortSignal } = {},
     ): Promise<KnowledgeVersionHistory> {
-      const query = opts.includeDeleted ? "?include_deleted=true" : "";
       return getJson(
-        `/knowledge/${encodeURIComponent(id)}/versions${query}`,
+        `/knowledge/${encodeURIComponent(id)}/versions${query({
+          include_deleted: opts.includeDeleted || null,
+        })}`,
         knowledgeVersionHistory,
         opts.signal,
       );
@@ -224,6 +267,45 @@ export function createApiClient(options: ApiClientOptions = {}) {
         signal,
       );
     },
+    listProjectSessionsPage(
+      projectId: string,
+      opts: { cursor?: string | null; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<CursorPage<SessionSummary>> {
+      return getJson(
+        `/projects/${encodeURIComponent(projectId)}/sessions${query({
+          page: "cursor",
+          cursor: opts.cursor,
+          limit: opts.limit,
+        })}`,
+        cursorPage(sessionSummary),
+        signal,
+      );
+    },
+    recall(
+      opts: {
+        q: string;
+        project: { git_remote: string | null; path: string };
+        scope: RecallScope;
+        limit?: number;
+        session?: string;
+      },
+      signal?: AbortSignal,
+    ): Promise<RecallResponse> {
+      return getJson(
+        `/recall${query({
+          q: opts.q,
+          scope: opts.scope,
+          expand: false,
+          limit: Math.max(1, Math.min(50, opts.limit ?? 20)),
+          git_remote: opts.project.git_remote,
+          path: opts.project.git_remote ? null : opts.project.path,
+          session: opts.session,
+        })}`,
+        recallResponse,
+        signal,
+      );
+    },
     /**
      * `GET /sessions/:id` resolves its project from `?git_remote`/`?path`
      * only (no project-id query key — see `resolveProject` in the gateway),
@@ -235,7 +317,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<SessionDetail> {
       return getJson(
-        `/sessions/${encodeURIComponent(sessionId)}?path=${encodeURIComponent(projectPath)}`,
+        `/sessions/${encodeURIComponent(sessionId)}${query({ path: projectPath })}`,
         sessionDetail,
         signal,
       );
@@ -252,11 +334,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
       limit: number,
       signal?: AbortSignal,
     ): Promise<SessionPage> {
-      const query = cursor
-        ? `&cursor=${encodeURIComponent(cursor)}`
-        : `&page=cursor&limit=${encodeURIComponent(String(limit))}`;
       return getJson(
-        `/sessions/${encodeURIComponent(sessionId)}?path=${encodeURIComponent(projectPath)}${query}`,
+        `/sessions/${encodeURIComponent(sessionId)}${query({
+          path: projectPath,
+          page: cursor ? null : "cursor",
+          limit: cursor ? null : limit,
+          cursor,
+        })}`,
         sessionPage,
         signal,
       );

@@ -19,7 +19,7 @@ export interface ShellProps {
   mobilePane: MobilePane;
   /** Narrow-screen back link, shown in the app bar. */
   back?: { href: string; label: string };
-  mobileTitle?: string;
+  searchProjectId?: string;
   /** Banner rendered above the layout (e.g. the fixture's non-production label). */
   banner?: JSX.Element;
 }
@@ -48,7 +48,6 @@ export const Shell: Component<ShellProps> = (props) => {
     >
       {banner()}
       <AppBar
-        mobileTitle={props.mobileTitle}
         leading={
           <Show when={props.back}>
             {(back) => (
@@ -63,6 +62,7 @@ export const Shell: Component<ShellProps> = (props) => {
           </Show>
         }
         onOpenNav={() => setNavOpen(true)}
+        searchProjectId={props.searchProjectId}
       />
 
       <div
