@@ -45,11 +45,7 @@ import { responseAgainstAbort } from "./abort-race";
 import {
   constantTimeTokenMatches,
   hasRawConflictingProviderAuth,
-  hiddenManagementResponse,
   isDataPlanePath,
-  isLoopbackAddress,
-  isManagementPath,
-  managementCorsOrigin,
   singleRawHeaderValue,
 } from "./management-access";
 
