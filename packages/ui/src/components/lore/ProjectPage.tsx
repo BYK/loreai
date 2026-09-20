@@ -124,24 +124,27 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       </section>
       <section class="border-b border-line py-5">
         <div class="eyebrow mb-2">Sharing</div>
-        <Show
-          when={sharingState.data()}
-          fallback={
+        <Switch>
+          <Match when={sharingState.loading() && !sharingState.data()}>
+            <StateCard kind="loading" title="Loading sharing status" compact />
+          </Match>
+          <Match when={sharingState.data()}>
+            {(status) => (
+              <div class="text-sm">
+                {humanizeState(status().state)} ·{" "}
+                {status().team?.name ?? "No team"} · policy:{" "}
+                {status().policy.effective}
+              </div>
+            )}
+          </Match>
+          <Match when={sharingState.error()}>
             <StateCard
               kind="empty"
               title="Sharing status not available"
               compact
             />
-          }
-        >
-          {(status) => (
-            <div class="text-sm">
-              {humanizeState(status().state)} ·{" "}
-              {status().team?.name ?? "No team"} · policy:{" "}
-              {status().policy.effective}
-            </div>
-          )}
-        </Show>
+          </Match>
+        </Switch>
       </section>
       <section class="border-b border-line py-5">
         <div class="mb-3 flex items-center justify-between">

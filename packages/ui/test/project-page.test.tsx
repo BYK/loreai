@@ -124,6 +124,48 @@ describe("ProjectPage", () => {
     expect(screen.queryByText("Select an entry to inspect it.")).toBeNull();
   });
 
+  it("shows sharing loading state while the request is pending", () => {
+    let resolveSharing:
+      | ((
+          value: Awaited<
+            ReturnType<NonNullable<ApiClient["getProjectSharing"]>>
+          >,
+        ) => void)
+      | undefined;
+    const pending = {
+      ...client,
+      getProjectSharing: () =>
+        new Promise((resolve) => {
+          resolveSharing = resolve;
+        }),
+    } as unknown as ApiClient;
+    render(() => (
+      <MemoryRouter>
+        <Route
+          path="*"
+          component={() => (
+            <WorkspaceProvider client={pending} db={Promise.resolve(null)}>
+              <ProjectPage project={project} />
+            </WorkspaceProvider>
+          )}
+        />
+      </MemoryRouter>
+    ));
+    expect(screen.getByText("Loading sharing status")).toBeInTheDocument();
+    expect(screen.queryByText("Sharing status not available")).toBeNull();
+    resolveSharing?.({
+      linked: false,
+      team: null,
+      policy: {
+        effective: "manual",
+        project_override: null,
+        team_default: null,
+      },
+      state: "not_linked",
+      detail: null,
+    });
+  });
+
   it("shows recent sessions navigation", () => {
     render(() => (
       <MemoryRouter>
@@ -190,7 +232,7 @@ describe("ProjectPage", () => {
     );
   });
 
-  it("shows no sharing fallback when sharing is unavailable", () => {
+  it("shows no sharing fallback when sharing is unavailable", async () => {
     const unavailable = {
       ...client,
       getProjectSharing: async () => {
@@ -210,7 +252,7 @@ describe("ProjectPage", () => {
       </MemoryRouter>
     ));
     expect(
-      screen.getByText("Sharing status not available"),
+      await screen.findByText("Sharing status not available"),
     ).toBeInTheDocument();
   });
 });
