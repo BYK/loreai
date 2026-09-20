@@ -1,0 +1,128 @@
+import type { Component } from "solid-js";
+import { For, Match, Show, Switch, createMemo } from "solid-js";
+import { A, useNavigate } from "@solidjs/router";
+import type { ProjectSummary, RecallScope } from "~/contracts";
+import { parseRecallMarkdown, recallInline } from "~/lib/recall-text";
+import { StateCard } from "./StateCard";
+import { useWorkspace } from "~/routes/workspace";
+
+export const SearchResults: Component<{
+  project: ProjectSummary;
+  q: string;
+  scope: RecallScope;
+}> = (props) => {
+  const ws = useWorkspace();
+  const navigate = useNavigate();
+  const search = ws.state.recall.search(() =>
+    props.q ? { project: props.project, q: props.q, scope: props.scope } : null,
+  );
+  const nodes = createMemo(() =>
+    search.loader.data()
+      ? parseRecallMarkdown(search.loader.data()!.result)
+      : [],
+  );
+  return (
+    <div class="p-5 sm:p-7.5">
+      <form
+        role="search"
+        class="mb-5 flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const data = new FormData(e.currentTarget);
+          const rawQ = data.get("q");
+          const rawScope = data.get("scope");
+          const q = typeof rawQ === "string" ? rawQ : "";
+          const scope = typeof rawScope === "string" ? rawScope : "all";
+          navigate(
+            `/projects/${encodeURIComponent(props.project.id)}/search?q=${encodeURIComponent(q)}&scope=${encodeURIComponent(scope)}`,
+          );
+        }}
+      >
+        <input
+          name="q"
+          value={props.q}
+          aria-label="Search query"
+          class="min-w-0 flex-1 rounded-md border border-line bg-bg px-3 py-2 text-sm"
+        />
+        <select
+          name="scope"
+          value={props.scope}
+          class="rounded-md border border-line bg-bg px-2 text-sm"
+        >
+          <option>all</option>
+          <option>session</option>
+          <option>project</option>
+          <option>knowledge</option>
+        </select>
+        <button class="rounded-md bg-inverse px-3 py-2 text-xs text-inverse-text">
+          Search
+        </button>
+      </form>
+      <p class="mb-4 text-xs text-muted">
+        Search results are the recall output an agent would receive; query
+        expansion is disabled so no model is called.
+      </p>
+      <Switch>
+        <Match when={!props.q}>
+          <StateCard
+            kind="empty"
+            title="Type a query to search this project's memory"
+          />
+        </Match>
+        <Match when={search.loader.loading() && !search.loader.data()}>
+          <StateCard kind="loading" title="Searching memory" />
+        </Match>
+        <Match when={search.loader.error() && !search.loader.data()}>
+          <StateCard kind="error" title="Search unavailable" />
+        </Match>
+        <Match
+          when={search.loader
+            .data()
+            ?.result.includes("No results found for this query.")}
+        >
+          <StateCard kind="empty" title="No results" />
+        </Match>
+        <Match when={search.loader.data()}>
+          <div>
+            {nodes().map((node) =>
+              node.kind === "heading" ? (
+                node.level === 2 ? (
+                  <h2 class="mb-3 text-xl font-semibold">{node.text}</h2>
+                ) : node.level === 3 ? (
+                  <h3 class="mb-2 mt-4 font-semibold">{node.text}</h3>
+                ) : (
+                  <h4 class="mb-2 mt-3 text-sm font-semibold">{node.text}</h4>
+                )
+              ) : node.kind === "separator" ? (
+                <hr class="my-4 border-line" />
+              ) : (
+                <p
+                  class={
+                    node.kind === "item"
+                      ? "my-1 pl-4 before:mr-2 before:content-['•']"
+                      : "my-2"
+                  }
+                >
+                  {recallInline(node.text).map((part) =>
+                    part.linkId ? (
+                      <A
+                        class="text-accent underline"
+                        href={`/knowledge/${encodeURIComponent(part.linkId)}`}
+                      >
+                        {part.text}
+                      </A>
+                    ) : part.bold ? (
+                      <strong>{part.text}</strong>
+                    ) : (
+                      part.text
+                    ),
+                  )}
+                </p>
+              ),
+            )}
+          </div>
+        </Match>
+      </Switch>
+    </div>
+  );
+};

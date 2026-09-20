@@ -41,7 +41,11 @@ export const routes: RouteDefinition[] = [
     path: [
       "/",
       "/projects/:projectId",
+      "/projects/:projectId/knowledge",
       "/projects/:projectId/knowledge/:knowledgeId",
+      "/projects/:projectId/sessions",
+      "/projects/:projectId/sessions/:sessionId",
+      "/projects/:projectId/search",
       "/knowledge/:knowledgeId",
     ],
     component: Browse,

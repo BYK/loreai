@@ -9,6 +9,7 @@ import {
   initials,
 } from "~/lib/format";
 import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
+import { sessionHref } from "~/routes/Browse";
 
 import { DocHeader, ScopeLabel, type Participant } from "./Document";
 import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
@@ -114,13 +115,16 @@ export const KnowledgeDocument: Component<{
           >
             {(session) => (
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-muted">Distilled from session</span>
+                <a
+                  class="text-accent underline"
+                  href={sessionHref(props.entry.project_id!, session())}
+                >
+                  Distilled from session
+                </a>
                 <code class="rounded-sm bg-chrome px-1.5 py-0.5 font-mono text-[11px]">
                   {session()}
                 </code>
-                <span class="text-muted">
-                  · session reader arrives in UI-05
-                </span>
+                <span class="text-muted">· exact message not recorded</span>
               </div>
             )}
           </Show>

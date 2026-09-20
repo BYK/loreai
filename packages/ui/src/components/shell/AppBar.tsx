@@ -61,6 +61,7 @@ export const AppBar: Component<{
   mobileTitle?: string;
   /** Mobile-only: opens the navigation pane. */
   onOpenNav?: () => void;
+  searchProjectId?: string;
 }> = (props) => (
   <header class="flex h-[62px] items-center gap-4 border-b border-line bg-surface px-4 sm:gap-7 sm:px-6">
     <Show when={props.leading}>
@@ -77,7 +78,7 @@ export const AppBar: Component<{
     <Show when={props.mobileTitle}>
       <b class="truncate text-[17px] sm:hidden">{props.mobileTitle}</b>
     </Show>
-    <SearchEntry />
+    <SearchEntry searchProjectId={props.searchProjectId} />
     <div class="ml-auto flex items-center gap-2 sm:gap-4">
       <small class="hidden text-[13px] text-muted md:inline">
         Local workspace
