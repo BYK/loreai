@@ -26,6 +26,7 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { embedding, log } from "@loreai/core";
 import { extraHeadersForUpstream, type GatewayConfig } from "./config";
 import { workerHealthSummary } from "./worker-health";
+import { VERSION } from "./cli/version";
 import type { GatewayRequest } from "./translate/types";
 import { applyUpstreamExtraHeaders } from "./translate/types";
 import { copyProviderAuthHeaders, hasConflictingAuthHeaders } from "./auth";
@@ -71,20 +72,6 @@ import {
   withoutCors,
   withoutGatewayAccessHeader,
 } from "./management-access";
-
-// ---------------------------------------------------------------------------
-// Version — best-effort from package.json, falls back gracefully
-// ---------------------------------------------------------------------------
-
-let version = "unknown";
-try {
-  // Bare require() is statically resolved by esbuild at CJS bundle time and
-  // provided by tsx/bun in the ESM source — same pattern as cli/version.ts.
-  const pkg = require("../package.json") as { version?: string };
-  if (pkg.version) version = pkg.version;
-} catch {
-  // Not critical — health endpoint will report "unknown"
-}
 
 // ---------------------------------------------------------------------------
 // Hono environment
@@ -163,9 +150,10 @@ export async function handleForegroundBodyRoute(
  *
  * Clients like Codex (OpenAI Responses API) optimistically try to open a
  * WebSocket to the endpoint (e.g. `ws://host/v1/responses`) before falling
- * back to HTTP. The lore gateway is a translating HTTP proxy — it buffers and
- * transforms full request/response bodies and forwards them over HTTP to the
- * upstream — so it does not (and cannot meaningfully) speak WebSocket here.
+ * back to HTTP. The gateway currently speaks HTTP only: the translating
+ * pipeline works on HTTP request/response bodies and forwards them over HTTP
+ * to the upstream. WebSocket transport for Codex-style clients is tracked in
+ * https://github.com/BYK/loreai/issues/1770.
  *
  * A WS upgrade arrives as a GET with `Upgrade: websocket` + `Connection`
  * containing `upgrade` (per RFC 6455). We detect it explicitly so we can
@@ -305,7 +293,7 @@ function handleHealth(): Response {
   const worker = workerHealthSummary();
   return jsonResponse({
     status: "ok",
-    version,
+    version: VERSION,
     embeddings: {
       available: embeddings.available,
       state: embeddings.state,
