@@ -82,7 +82,7 @@ describe("api client: happy path", () => {
       session: "s 1",
     });
     expect(calls[0]).toBe(
-      "/api/v1/recall?q=sqlite&scope=knowledge&expand=false&limit=50&path=%2Fp&session=s%201",
+      "/api/v1/recall?q=sqlite&scope=knowledge&expand=false&limit=50&path=%2Fp&session=s+1",
     );
   });
 
@@ -223,7 +223,7 @@ describe("api client: error classification", () => {
 
     await client.listProjectKnowledgePage("p1", { cursor: "tok en" });
     expect(calls[1]).toBe(
-      "/api/v1/projects/p1/knowledge?page=cursor&cursor=tok%20en",
+      "/api/v1/projects/p1/knowledge?page=cursor&cursor=tok+en",
     );
   });
 

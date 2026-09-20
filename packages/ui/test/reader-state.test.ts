@@ -177,7 +177,7 @@ describe("session reader: shared cache", () => {
     await flush();
     await reader.loadOlder();
     await flush();
-    const collection = await repo.collection("p1/s1");
+    const collection = await repo.collection("projectId=p1&sessionId=s1");
     expect(collection).toMatchObject({
       complete: false,
       count: 7,
@@ -224,7 +224,7 @@ describe("session reader: shared cache", () => {
     await flush();
     await reader.loadOlder();
     await flush();
-    expect(await repo.collection("p1/s1")).toMatchObject({
+    expect(await repo.collection("projectId=p1&sessionId=s1")).toMatchObject({
       complete: true,
       count: 4,
       nextCursor: null,

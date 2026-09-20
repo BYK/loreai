@@ -70,13 +70,14 @@ export function createSessionsState({
   const store = createEntityStore<SessionSummary>((s) => s.session_id);
 
   function sessionKeyOf(projectId: string, sessionId: string) {
-    return `${encodeURIComponent(projectId)}/${sessionId}`;
+    return new URLSearchParams({ projectId, sessionId }).toString();
   }
 
   function splitKey(key: string): { pid: string; sid: string; path: string } {
-    const sep = key.indexOf("/");
-    const pid = decodeURIComponent(key.slice(0, sep));
-    const sid = key.slice(sep + 1);
+    const params = new URLSearchParams(key);
+    const pid = params.get("projectId");
+    const sid = params.get("sessionId");
+    if (!pid || !sid) throw new Error("Invalid session loader key");
     const path = projectPathOf?.(pid);
     if (path === undefined) throw new Error(`No path for project ${pid}`);
     return { pid, sid, path };
@@ -253,7 +254,10 @@ export function createSessionsState({
       () => {
         const value = source();
         return value
-          ? `${encodeURIComponent(value.projectId)}/${encodeURIComponent(value.cursor ?? "")}`
+          ? new URLSearchParams({
+              projectId: value.projectId,
+              cursor: value.cursor ?? "",
+            }).toString()
           : null;
       },
       (_, signal) => {
@@ -269,7 +273,8 @@ export function createSessionsState({
       },
       {
         async onServer(key, value) {
-          const projectId = decodeURIComponent(key.slice(0, key.indexOf("/")));
+          const projectId = new URLSearchParams(key).get("projectId");
+          if (!projectId) throw new Error("Invalid session page loader key");
           for (const session of value.items) {
             store.reconcileOne(session);
             await repos.sessions.put(session, projectId, {

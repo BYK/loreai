@@ -67,6 +67,19 @@ export {
 
 export const API_BASE = "/api/v1";
 
+export function query(
+  params: Record<string, string | number | boolean | null | undefined>,
+): string {
+  const values = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== null && value !== undefined) {
+      values.set(key, String(value));
+    }
+  }
+  const encoded = values.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
 /** True for any abort rejection (`DOMException`, `Error`, or a custom `abort(reason)`). */
 export function isAbortError(error: unknown): boolean {
   return (
@@ -211,16 +224,16 @@ export function createApiClient(options: ApiClientOptions = {}) {
       } = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<KnowledgeEntry>> {
-      const params = [`page=cursor`];
-      if (opts.cursor) params.push(`cursor=${encodeURIComponent(opts.cursor)}`);
-      if (opts.limit !== undefined) params.push(`limit=${opts.limit}`);
-      if (opts.q) params.push(`q=${encodeURIComponent(opts.q)}`);
-      if (opts.category)
-        params.push(`category=${encodeURIComponent(opts.category)}`);
-      if (opts.scope) params.push(`scope=${encodeURIComponent(opts.scope)}`);
-      if (opts.sort) params.push(`sort=${encodeURIComponent(opts.sort)}`);
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/knowledge?${params.join("&")}`,
+        `/projects/${encodeURIComponent(projectId)}/knowledge${query({
+          page: "cursor",
+          cursor: opts.cursor,
+          limit: opts.limit,
+          q: opts.q,
+          category: opts.category,
+          scope: opts.scope,
+          sort: opts.sort,
+        })}`,
         cursorPage(knowledgeEntry),
         signal,
       );
@@ -236,9 +249,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
       id: string,
       opts: { includeDeleted?: boolean; signal?: AbortSignal } = {},
     ): Promise<KnowledgeVersionHistory> {
-      const query = opts.includeDeleted ? "?include_deleted=true" : "";
       return getJson(
-        `/knowledge/${encodeURIComponent(id)}/versions${query}`,
+        `/knowledge/${encodeURIComponent(id)}/versions${query({
+          include_deleted: opts.includeDeleted || null,
+        })}`,
         knowledgeVersionHistory,
         opts.signal,
       );
@@ -258,11 +272,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
       opts: { cursor?: string | null; limit?: number } = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<SessionSummary>> {
-      const params = ["page=cursor"];
-      if (opts.cursor) params.push(`cursor=${encodeURIComponent(opts.cursor)}`);
-      if (opts.limit !== undefined) params.push(`limit=${opts.limit}`);
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/sessions?${params.join("&")}`,
+        `/projects/${encodeURIComponent(projectId)}/sessions${query({
+          page: "cursor",
+          cursor: opts.cursor,
+          limit: opts.limit,
+        })}`,
         cursorPage(sessionSummary),
         signal,
       );
@@ -277,20 +292,19 @@ export function createApiClient(options: ApiClientOptions = {}) {
       },
       signal?: AbortSignal,
     ): Promise<RecallResponse> {
-      const params = [
-        `q=${encodeURIComponent(opts.q)}`,
-        `scope=${encodeURIComponent(opts.scope)}`,
-        "expand=false",
-        `limit=${Math.max(1, Math.min(50, opts.limit ?? 20))}`,
-      ];
-      if (opts.project.git_remote)
-        params.push(
-          `git_remote=${encodeURIComponent(opts.project.git_remote)}`,
-        );
-      else params.push(`path=${encodeURIComponent(opts.project.path)}`);
-      if (opts.session)
-        params.push(`session=${encodeURIComponent(opts.session)}`);
-      return getJson(`/recall?${params.join("&")}`, recallResponse, signal);
+      return getJson(
+        `/recall${query({
+          q: opts.q,
+          scope: opts.scope,
+          expand: false,
+          limit: Math.max(1, Math.min(50, opts.limit ?? 20)),
+          git_remote: opts.project.git_remote,
+          path: opts.project.git_remote ? null : opts.project.path,
+          session: opts.session,
+        })}`,
+        recallResponse,
+        signal,
+      );
     },
     /**
      * `GET /sessions/:id` resolves its project from `?git_remote`/`?path`
@@ -303,7 +317,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<SessionDetail> {
       return getJson(
-        `/sessions/${encodeURIComponent(sessionId)}?path=${encodeURIComponent(projectPath)}`,
+        `/sessions/${encodeURIComponent(sessionId)}${query({ path: projectPath })}`,
         sessionDetail,
         signal,
       );
@@ -320,11 +334,13 @@ export function createApiClient(options: ApiClientOptions = {}) {
       limit: number,
       signal?: AbortSignal,
     ): Promise<SessionPage> {
-      const query = cursor
-        ? `&cursor=${encodeURIComponent(cursor)}`
-        : `&page=cursor&limit=${encodeURIComponent(String(limit))}`;
       return getJson(
-        `/sessions/${encodeURIComponent(sessionId)}?path=${encodeURIComponent(projectPath)}${query}`,
+        `/sessions/${encodeURIComponent(sessionId)}${query({
+          path: projectPath,
+          page: cursor ? null : "cursor",
+          limit: cursor ? null : limit,
+          cursor,
+        })}`,
         sessionPage,
         signal,
       );

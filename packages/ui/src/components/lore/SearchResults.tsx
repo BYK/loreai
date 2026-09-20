@@ -4,11 +4,11 @@ import {
   Switch,
   createEffect,
   createMemo,
+  createResource,
   createSignal,
 } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { ProjectSummary, RecallScope } from "~/contracts";
-import { parseRecallMarkdown } from "~/lib/recall-text";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
 import { Button } from "../ui/button";
@@ -32,12 +32,13 @@ export const SearchResults: Component<{
   const navigate = useNavigate();
   const [scope, setScope] = createSignal<RecallScope>(props.scope);
   createEffect(() => setScope(props.scope));
+  const [recallText] = createResource(() => import("~/lib/recall-text"));
   const search = ws.state.recall.search(() =>
     props.q ? { project: props.project, q: props.q, scope: props.scope } : null,
   );
   const nodes = createMemo(() =>
-    search.loader.data()
-      ? parseRecallMarkdown(search.loader.data()!.result)
+    search.loader.data() && recallText()
+      ? recallText()!.parseRecallMarkdown(search.loader.data()!.result)
       : [],
   );
   return (

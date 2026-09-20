@@ -604,7 +604,7 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const messageBlocks = createMessageBlocksRepo(db);
-    const key = "p1/s1";
+    const key = "projectId=p1&sessionId=s1";
     // 250 messages = a full block of 200 plus a tail of 50.
     await messageBlocks.putMany(
       [block(key, 0, 0, 200), block(key, 1, 200, 50)],
@@ -645,7 +645,7 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const messageBlocks = createMessageBlocksRepo(db);
-    const key = "p1/s1";
+    const key = "projectId=p1&sessionId=s1";
     // The server answered with zero messages: no blocks, but the
     // collections row records `count: 0`.
     await messageBlocks.setCollection(key, {
@@ -690,7 +690,7 @@ describe("sessions state: detail waits for the project path", () => {
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const messageBlocks = createMessageBlocksRepo(db);
-    const key = "p1/s1";
+    const key = "projectId=p1&sessionId=s1";
     // Legacy write: blocks present, no collections record at all.
     await messageBlocks.putMany([block(key, 0, 0, 10)], key, {
       replaceScope: true,
