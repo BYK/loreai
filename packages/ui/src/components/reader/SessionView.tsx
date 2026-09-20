@@ -19,6 +19,10 @@
  *    slices — mounted or not — and walks hits with a distinct mark; the
  *    coverage declaration states what the view holds (captured / partial /
  *    native transcript not available) from what the server reported.
+ *  - Whole-session search (#1857) asks the server which *messages* match
+ *    beyond the loaded window, then pages older history until one is loaded
+ *    and lets the browser-side scan place the highlight — the server never
+ *    guesses displayed-text coordinates.
  */
 import type { Component, JSX } from "solid-js";
 import {
@@ -47,6 +51,7 @@ import { Button } from "~/components/ui/button";
 import type {
   DistillationDetail,
   DistillationSummary,
+  SessionSearchPage,
   TemporalMessage,
 } from "~/contracts";
 import { cn } from "~/lib/utils";
@@ -66,6 +71,7 @@ import {
   type MessageBlock,
   type ReaderBlock,
   buildBlocks,
+  messageBlockId,
   originLabel,
 } from "~/reader/blocks";
 import {
@@ -75,6 +81,15 @@ import {
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows } from "~/reader/rows";
 import { type SearchHit, queryMatcher, searchRows } from "~/reader/search";
+import {
+  type WholeSearchState,
+  WHOLE_IDLE,
+  WHOLE_LOAD_PAGES,
+  WHOLE_SEARCH_PAGE,
+  nextOlderHit,
+  searchWholeSession,
+  wholeSearchSummary,
+} from "~/reader/whole-search";
 import {
   anchorForReading,
   deepLinkFor,
@@ -113,6 +128,15 @@ export interface SessionViewProps {
   loadingOlder?: boolean;
   olderError?: unknown;
   onLoadOlder?: () => Promise<void>;
+  /**
+   * Server-side finder for the whole session (`GET /sessions/:id/search`);
+   * absent when the owner cannot reach it (e.g. a cached-only view).
+   */
+  onSearchWhole?: (
+    query: string,
+    cursor: string | null,
+    signal?: AbortSignal,
+  ) => Promise<SessionSearchPage>;
   status?: KeyStatus;
   /** Raw `?a=` value. */
   anchorParam: string | null;

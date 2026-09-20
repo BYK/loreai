@@ -33,6 +33,7 @@ import {
   sessionDetail,
   sessionList,
   sessionPage,
+  sessionSearchPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -374,6 +375,15 @@ describe("ui contracts against the real gateway", () => {
       `/sessions/${SEEDED.sessionId}?page=cursor`,
       `/api/v1/sessions/${SEEDED.sessionId}?path=${encodeURIComponent(SEEDED.projectPath)}&page=cursor&limit=1`,
       sessionPage,
+    );
+  });
+
+  it("GET /sessions/:id/search?path=…&q=…", async () => {
+    await contractRoute(
+      "session-search.json",
+      `/sessions/${SEEDED.sessionId}/search`,
+      `/api/v1/sessions/${SEEDED.sessionId}/search?path=${encodeURIComponent(SEEDED.projectPath)}&q=body&limit=1`,
+      sessionSearchPage,
     );
   });
 

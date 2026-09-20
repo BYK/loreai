@@ -46,6 +46,9 @@ export type {
   SessionKeyset,
   MessageKeyset,
   SessionPage,
+  SessionSearchHit,
+  SessionSearchMode,
+  SessionSearchPage,
   KnowledgeVersionDetail,
   KnowledgeVersionHistory,
 } from "./list-query";

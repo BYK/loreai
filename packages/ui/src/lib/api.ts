@@ -33,6 +33,7 @@ import {
   sessionList,
   sessionSummary,
   sessionPage,
+  sessionSearchPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -50,6 +51,7 @@ import {
   type KnowledgeSort,
   type SessionDetail,
   type SessionPage,
+  type SessionSearchPage,
   type SessionSummary,
   type SharingStatus,
   type SyncStatus,
@@ -342,6 +344,34 @@ export function createApiClient(options: ApiClientOptions = {}) {
           cursor,
         })}`,
         sessionPage,
+        signal,
+      );
+    },
+
+    /**
+     * `GET /sessions/:id/search?q=` — ids of the messages whose stored text
+     * matches `q`, newest first across pages (`cursor === null` is the first
+     * page; each `next_cursor` fetches older hits). The server only knows
+     * message ids and raw text; the reader maps a hit onto rendered blocks
+     * and computes displayed-text offsets itself.
+     */
+    searchSession(
+      projectPath: string,
+      sessionId: string,
+      q: string,
+      cursor: string | null,
+      limit: number,
+      signal?: AbortSignal,
+    ): Promise<SessionSearchPage> {
+      const params = new URLSearchParams({
+        path: projectPath,
+        q,
+        limit: String(limit),
+      });
+      if (cursor !== null) params.set("cursor", cursor);
+      return getJson(
+        `/sessions/${encodeURIComponent(sessionId)}/search?${params.toString()}`,
+        sessionSearchPage,
         signal,
       );
     },
