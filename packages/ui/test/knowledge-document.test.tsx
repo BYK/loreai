@@ -106,7 +106,7 @@ function renderDocument(
                 source_session: "s-1",
               }
             }
-            project={overrides.project ?? project}
+            project={"project" in overrides ? overrides.project : project}
             versions={
               overrides.versions ??
               loader({
@@ -181,7 +181,7 @@ describe("KnowledgeDocument", () => {
               c_norm: 0.5,
               archived: true,
               created_at: 1,
-              call_type: "retained summary text",
+              call_type: "observer",
             },
           ],
         },
@@ -197,7 +197,43 @@ describe("KnowledgeDocument", () => {
     renderDocument({
       evidence: loader(evidence as unknown as EvidenceResult),
     });
-    expect(screen.getByText(text)).toBeInTheDocument();
+    if (_label === "summary-only") {
+      expect(screen.getByText(/Original messages expired/)).toBeInTheDocument();
+      expect(screen.getByText(/1 distillation, gen 0/)).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Summary text is available in the UI-06 session reader.",
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("observer")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByText(text)).toBeInTheDocument();
+    }
+  });
+
+  it("labels linked source sessions when the exact message is unavailable", () => {
+    renderDocument();
+    expect(
+      screen.getByText("· exact message not recorded"),
+    ).toBeInTheDocument();
+  });
+
+  it("labels unlinked source sessions when the project is unavailable", () => {
+    renderDocument({
+      project: undefined,
+      entry: {
+        ...entry("Ada"),
+        project_id: null,
+        source_session: "s-1",
+      },
+    });
+    expect(screen.getAllByText("s-1").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("· exact message not recorded"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "Distilled from session" }),
+    ).toBeNull();
   });
 
   it("renders a missing source without a link", () => {

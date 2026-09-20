@@ -8,7 +8,9 @@ import {
   formatFullDate,
   formatWhen,
   initials,
+  pluralize,
 } from "~/lib/format";
+import { sessionHref } from "~/routes/Browse";
 import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
 import type { EvidenceResult } from "~/state/sessions";
 import type { Loader } from "~/lib/loader";
@@ -24,10 +26,6 @@ function paragraphs(content: string): string[] {
     .split(/\n{2,}/)
     .map((p) => p.trim())
     .filter(Boolean);
-}
-
-function sessionHref(projectId: string, sessionId: string): string {
-  return `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`;
 }
 
 export function authorOf(entry: KnowledgeEntry): Participant {
@@ -147,13 +145,18 @@ export const KnowledgeDocument: Component<{
                       }
                     >
                       {(projectId) => (
-                        <A
-                          class="text-accent underline"
-                          href={sessionHref(projectId(), session())}
-                          aria-label="Distilled from session"
-                        >
-                          {session()}
-                        </A>
+                        <>
+                          <A
+                            class="text-accent underline"
+                            href={sessionHref(projectId(), session())}
+                            aria-label="Distilled from session"
+                          >
+                            {session()}
+                          </A>
+                          <span class="text-muted">
+                            · exact message not recorded
+                          </span>
+                        </>
                       )}
                     </Show>
                   </div>
@@ -194,18 +197,25 @@ export const KnowledgeDocument: Component<{
                                 Source session available
                               </Match>
                               <Match when={value().state === "summary_only"}>
-                                <div>
-                                  Original messages expired · retained summary
-                                  only
-                                </div>
                                 <For each={value().detail?.distillations ?? []}>
                                   {(distillation) => (
-                                    <div class="mt-1 whitespace-pre-wrap">
-                                      {distillation.call_type ??
-                                        `Distillation ${distillation.id}`}
+                                    <div class="mt-1">
+                                      Original messages expired · retained
+                                      summary only —{" "}
+                                      {pluralize(
+                                        value().detail?.distillations.length ??
+                                          0,
+                                        "distillation",
+                                      )}
+                                      , gen {distillation.generation},{" "}
+                                      {formatWhen(distillation.created_at)}
                                     </div>
                                   )}
                                 </For>
+                                <div class="mt-1 text-muted">
+                                  Summary text is available in the UI-06 session
+                                  reader.
+                                </div>
                               </Match>
                               <Match when={value().state === "unavailable"}>
                                 Source session no longer available
@@ -276,6 +286,21 @@ export const KnowledgeDocument: Component<{
             />
             <Meta label="Created by" value={props.entry.created_by} />
             <Meta label="Updated by" value={props.entry.updated_by} />
+            <Meta
+              label="Created"
+              value={formatFullDate(props.entry.created_at)}
+            />
+            <Meta
+              label="Updated"
+              value={formatFullDate(props.entry.updated_at)}
+            />
+            <Meta label="Promotion" value={props.entry.promotion_status} />
+            <Show when={props.entry.last_reinforced_at}>
+              <Meta
+                label="Last reinforced"
+                value={formatFullDate(props.entry.last_reinforced_at)}
+              />
+            </Show>
             <Show when={props.versions?.data()}>
               {(history) => {
                 const head = () =>
@@ -317,25 +342,6 @@ export const KnowledgeDocument: Component<{
             </Show>
           </dl>
         </details>
-
-        <dl class="mt-5 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
-          <Meta label="Logical id" value={props.entry.id} />
-          <Meta
-            label="Created"
-            value={formatFullDate(props.entry.created_at)}
-          />
-          <Meta
-            label="Updated"
-            value={formatFullDate(props.entry.updated_at)}
-          />
-          <Meta label="Promotion" value={props.entry.promotion_status} />
-          <Show when={props.entry.last_reinforced_at}>
-            <Meta
-              label="Last reinforced"
-              value={formatFullDate(props.entry.last_reinforced_at)}
-            />
-          </Show>
-        </dl>
 
         <div class="mt-7 border-t border-dashed border-line pt-5">
           <div class="eyebrow mb-1">Actions</div>

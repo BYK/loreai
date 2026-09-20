@@ -5,6 +5,7 @@ import { A } from "@solidjs/router";
 import type { KnowledgeVersionHistory } from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import { formatConfidence, formatFullDate, formatWhen } from "~/lib/format";
+import { sessionHref } from "~/routes/Browse";
 
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
@@ -54,6 +55,11 @@ export const VersionHistory: Component<{
                       <span class="text-xs text-muted">
                         {formatFullDate(version.created_at)}
                       </span>
+                      <Show when={version.source_refs.worker_model_id}>
+                        <span class="text-xs text-muted">
+                          · {version.source_refs.worker_model_id}
+                        </span>
+                      </Show>
                     </div>
                   </summary>
                   <div class="mt-3 space-y-2 border-t border-line pt-3 text-xs">
@@ -81,7 +87,7 @@ export const VersionHistory: Component<{
                             {(projectId) => (
                               <A
                                 class="text-accent underline"
-                                href={`/projects/${encodeURIComponent(projectId())}/sessions/${encodeURIComponent(sessionId())}`}
+                                href={sessionHref(projectId(), sessionId())}
                               >
                                 {sessionId()}
                               </A>
