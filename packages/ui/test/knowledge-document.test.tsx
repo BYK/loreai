@@ -214,11 +214,8 @@ describe("KnowledgeDocument", () => {
       expect(screen.getByText(/gen 0/)).toBeInTheDocument();
       expect(screen.getByText(/gen 1/)).toBeInTheDocument();
       expect(screen.getAllByText(/2 distillations/)).toHaveLength(1);
-      expect(
-        screen.getByText(
-          "Summary text is available in the UI-06 session reader.",
-        ),
-      ).toBeInTheDocument();
+      const readerLink = screen.getByRole("link", { name: "session reader." });
+      expect(readerLink).toHaveAttribute("href", "/projects/p/sessions/s-1");
       expect(screen.queryByText("observer")).not.toBeInTheDocument();
     } else {
       expect(screen.getByText(text)).toBeInTheDocument();

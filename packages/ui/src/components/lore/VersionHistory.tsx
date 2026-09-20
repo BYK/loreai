@@ -4,7 +4,12 @@ import { A } from "@solidjs/router";
 
 import type { KnowledgeVersionHistory } from "~/contracts";
 import type { Loader } from "~/lib/loader";
-import { formatConfidence, formatFullDate, formatWhen } from "~/lib/format";
+import {
+  formatConfidence,
+  formatFullDate,
+  formatWhen,
+  recordedWriter,
+} from "~/lib/format";
 import { sessionHref } from "~/routes/Browse";
 
 import { errorStateFor } from "./ErrorState";
@@ -55,9 +60,9 @@ export const VersionHistory: Component<{
                       <span class="text-xs text-muted">
                         {formatFullDate(version.created_at)}
                       </span>
-                      <Show when={version.source_refs.worker_model_id}>
+                      <Show when={recordedWriter(version)}>
                         <span class="text-xs text-muted">
-                          · {version.source_refs.worker_model_id}
+                          · {recordedWriter(version)}
                         </span>
                       </Show>
                     </div>

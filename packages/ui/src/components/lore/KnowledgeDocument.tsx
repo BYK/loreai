@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { For, Match, Show, Switch } from "solid-js";
+import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { A } from "@solidjs/router";
 
 import { Badge } from "~/components/ui/badge";
@@ -9,6 +9,7 @@ import {
   formatWhen,
   initials,
   pluralize,
+  recordedWriter as recordedWriterOf,
 } from "~/lib/format";
 import { sessionHref } from "~/routes/Browse";
 import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
@@ -65,8 +66,18 @@ export const KnowledgeDocument: Component<{
 }> = (props) => {
   const isCrossProject = () =>
     props.entry.cross_project === true || props.entry.cross_project === 1;
+  const sourceSession = () => props.entry.source_session;
   const currentVersion = () =>
     props.versions?.data()?.versions.find((version) => version.is_current);
+  const projectId = () =>
+    props.project?.id ?? props.entry.project_id ?? undefined;
+  const recordedWriter = createMemo(() => {
+    const version = currentVersion();
+    return recordedWriterOf({
+      updated_by: props.entry.updated_by,
+      source_refs: version?.source_refs,
+    });
+  });
   return (
     <article
       data-testid="knowledge-document"
@@ -124,7 +135,7 @@ export const KnowledgeDocument: Component<{
             <div>
               <div class="font-semibold">Source</div>
               <Show
-                when={props.entry.source_session}
+                when={sourceSession()}
                 fallback={
                   <span class="text-muted">No source session recorded.</span>
                 }
@@ -132,7 +143,7 @@ export const KnowledgeDocument: Component<{
                 {(session) => (
                   <div class="flex flex-wrap items-center gap-2">
                     <Show
-                      when={props.project?.id ?? props.entry.project_id}
+                      when={projectId()}
                       fallback={
                         <>
                           <code class="rounded-sm bg-chrome px-1.5 py-0.5 font-mono text-[11px]">
@@ -162,7 +173,7 @@ export const KnowledgeDocument: Component<{
                   </div>
                 )}
               </Show>
-              <Show when={props.entry.source_session}>
+              <Show when={sourceSession()}>
                 <Show when={props.evidence}>
                   {(evidence) => (
                     <Show
@@ -214,8 +225,26 @@ export const KnowledgeDocument: Component<{
                                   )}
                                 </For>
                                 <div class="mt-1 text-muted">
-                                  Summary text is available in the UI-06 session
-                                  reader.
+                                  Summary text is in the{" "}
+                                  <Show
+                                    when={projectId()}
+                                    fallback=" session reader."
+                                  >
+                                    {(id) => (
+                                      <>
+                                        {" "}
+                                        <A
+                                          class="text-accent underline"
+                                          href={sessionHref(
+                                            id(),
+                                            sourceSession() ?? "",
+                                          )}
+                                        >
+                                          session reader.
+                                        </A>
+                                      </>
+                                    )}
+                                  </Show>
                                 </div>
                               </Match>
                               <Match when={value().state === "unavailable"}>
@@ -238,17 +267,9 @@ export const KnowledgeDocument: Component<{
               <div>
                 <span class="font-semibold">Last change</span>{" "}
                 {formatWhen(props.entry.updated_at ?? props.entry.created_at)}
-                <Show
-                  when={
-                    props.entry.updated_by ??
-                    currentVersion()?.source_refs.updated_by ??
-                    currentVersion()?.source_refs.worker_model_id
-                  }
-                >
+                <Show when={recordedWriter()}>
                   {" · "}
-                  {props.entry.updated_by ??
-                    currentVersion()?.source_refs.updated_by ??
-                    currentVersion()?.source_refs.worker_model_id}
+                  {recordedWriter()}
                 </Show>
               </div>
               <div>
