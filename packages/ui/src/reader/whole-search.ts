@@ -53,13 +53,16 @@ export function compareHitsNewestFirst(
   return a.message_id < b.message_id ? 1 : a.message_id > b.message_id ? -1 : 0;
 }
 
-/** Server hits whose message is not in `loadedBlockIds`, newest first. */
+/** Whether the reader currently holds the block with this id. */
+export type IsLoaded = (blockId: string) => boolean;
+
+/** Server hits whose message is not loaded, newest first. */
 export function olderServerHits(
   hits: readonly SessionSearchHit[],
-  loadedBlockIds: ReadonlySet<string>,
+  isLoaded: IsLoaded,
 ): SessionSearchHit[] {
   return hits
-    .filter((hit) => !loadedBlockIds.has(messageBlockId(hit.message_id)))
+    .filter((hit) => !isLoaded(messageBlockId(hit.message_id)))
     .sort(compareHitsNewestFirst);
 }
 
@@ -72,7 +75,7 @@ export function olderServerHits(
 export async function searchWholeSession(
   query: string,
   fetchPage: (cursor: string | null) => Promise<SessionSearchPage>,
-  loadedBlockIds: ReadonlySet<string>,
+  isLoaded: IsLoaded,
   options: { maxPages?: number } = {},
 ): Promise<WholeSearchResult> {
   const maxPages = options.maxPages ?? WHOLE_SEARCH_MAX_PAGES;
@@ -94,7 +97,7 @@ export async function searchWholeSession(
     result.mode = page.mode;
     result.terms = page.terms;
     result.examined += page.hits.length;
-    result.older.push(...olderServerHits(page.hits, loadedBlockIds));
+    result.older.push(...olderServerHits(page.hits, isLoaded));
     cursor = page.next_cursor;
     if (cursor === null || page.hits.length === 0) {
       result.complete = true;
@@ -113,36 +116,64 @@ export async function searchWholeSession(
  */
 export function nextOlderHit(
   result: WholeSearchResult,
-  loadedBlockIds: ReadonlySet<string>,
+  isLoaded: IsLoaded,
 ): SessionSearchHit | null {
   return (
-    result.older.find(
-      (hit) => !loadedBlockIds.has(messageBlockId(hit.message_id)),
-    ) ?? null
+    result.older.find((hit) => !isLoaded(messageBlockId(hit.message_id))) ??
+    null
   );
 }
 
 /** Older hits still outside the loaded window. */
 export function remainingOlderHits(
   result: WholeSearchResult,
-  loadedBlockIds: ReadonlySet<string>,
+  isLoaded: IsLoaded,
 ): number {
   let n = 0;
   for (const hit of result.older) {
-    if (!loadedBlockIds.has(messageBlockId(hit.message_id))) n++;
+    if (!isLoaded(messageBlockId(hit.message_id))) n++;
   }
   return n;
+}
+
+/**
+ * Bringing one server hit onto the screen: older pages are loaded until its
+ * message is in the window, then the browser-side scan must find the query
+ * in the displayed text. Each way that can end is said plainly.
+ */
+export type ReachState =
+  | { kind: "loading"; messageId: string; pages: number }
+  /** Paged `WHOLE_LOAD_PAGES` times and the message is still older. */
+  | { kind: "exhausted"; messageId: string; pages: number }
+  /** The server counted the message but no older page can be loaded. */
+  | { kind: "unreachable"; messageId: string }
+  /** The message is loaded but its displayed text has no literal match. */
+  | { kind: "inexact"; messageId: string; mode: SessionSearchPage["mode"] };
+
+export function reachLabel(state: ReachState): string {
+  switch (state.kind) {
+    case "loading":
+      return `Loading older history to reach the match · page ${state.pages} of ${WHOLE_LOAD_PAGES}`;
+    case "exhausted":
+      return `The match is further back than ${WHOLE_LOAD_PAGES} pages of older history · load more to keep going`;
+    case "unreachable":
+      return "The server counted a match that older history cannot reach from here · reload to refresh the view";
+    case "inexact":
+      return state.mode === "terms"
+        ? "Matching message loaded · its words appear separately, so there is no single passage to highlight"
+        : "Matching message loaded · the stored text matches but the displayed text does not contain it literally";
+  }
 }
 
 /** One-line description of a finished whole-session search. */
 export function wholeSearchSummary(
   result: WholeSearchResult,
-  loadedBlockIds: ReadonlySet<string>,
+  isLoaded: IsLoaded,
 ): string {
   const n = result.total;
   const messages = `${n.toLocaleString()} matching ${n === 1 ? "message" : "messages"} in the whole session`;
   const how = result.mode === "terms" ? " (all words, any order)" : "";
-  const older = remainingOlderHits(result, loadedBlockIds);
+  const older = remainingOlderHits(result, isLoaded);
   if (n === 0) return "No matches in the whole session";
   if (older === 0) {
     return result.complete

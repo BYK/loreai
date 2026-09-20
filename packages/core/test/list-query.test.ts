@@ -587,7 +587,7 @@ describe("sessionSearchTerms", () => {
       "not",
     ]);
     expect(sessionSearchTerms("  \t\n")).toEqual([]);
-    expect(sessionSearchTerms("*** \"\" ---")).toEqual([]);
+    expect(sessionSearchTerms('*** "" ---')).toEqual([]);
     expect(sessionSearchTerms("café Ünïcode 日本語")).toEqual([
       "café",
       "ünïcode",
@@ -659,16 +659,17 @@ describe("searchSessionMessagesPage", () => {
         },
       ],
     });
-    const stored = new Map(
-      temporal.bySession(project, "s").map((m) => [m.source_id, m.id]),
-    );
+    // stored row id → the source message id the seed used above.
+    const stored = new Map<string, string>();
+    for (const m of temporal.bySession(project, "s")) {
+      if (m.source_id) stored.set(m.id, m.source_id);
+    }
     return { project, stored };
   }
-  const sources = (
-    items: { id: string }[],
-    stored: Map<string | null, string>,
-  ) =>
-    items.map((h) => [...stored.entries()].find(([, id]) => id === h.id)?.[0]);
+  const sources = (items: { id: string }[], stored: Map<string, string>) =>
+    items.map((h) => stored.get(h.id));
+  const sorted = (xs: (string | undefined)[]) =>
+    [...xs].sort((a, b) => (a ?? "").localeCompare(b ?? ""));
 
   test("a literal phrase with a short token and a stop word finds exactly its message, scoped to the session", () => {
     const { project, stored } = seedSearch("phrase");
@@ -680,10 +681,10 @@ describe("searchSessionMessagesPage", () => {
     expect(page.mode).toBe("phrase");
     expect(page.total).toBe(1);
     expect(sources(page.items, stored)).toEqual(["k3"]);
-    expect(page.items[0]!.role).toBe("user");
-    expect(page.items[0]!.created_at).toBe(3000);
-    expect(page.items[0]!.snippet).toContain("needle-3");
-    expect(typeof page.items[0]!.rank).toBe("number");
+    expect(page.items[0].role).toBe("user");
+    expect(page.items[0].created_at).toBe(3000);
+    expect(page.items[0].snippet).toContain("needle-3");
+    expect(typeof page.items[0].rank).toBe("number");
     expect(page.next).toBeNull();
 
     const stop = searchSessionMessagesPage(project, "s", {
@@ -691,20 +692,22 @@ describe("searchSessionMessagesPage", () => {
       limit: 10,
     });
     expect(stop.mode).toBe("phrase");
-    expect(sources(stop.items, stored).sort()).toEqual(["k4", "k5", "k6"]);
+    expect(sorted(sources(stop.items, stored))).toEqual(["k4", "k5", "k6"]);
   });
 
   test("phrase order, prefix on the last term only, case/separator-insensitive", () => {
     const { project, stored } = seedSearch("prefix");
     // "sqlite stays" is a phrase in k3, k4; "stays sqlite" is not.
     expect(
-      sources(
-        searchSessionMessagesPage(project, "s", {
-          query: "SQLITE  stays",
-          limit: 10,
-        }).items,
-        stored,
-      ).sort(),
+      sorted(
+        sources(
+          searchSessionMessagesPage(project, "s", {
+            query: "SQLITE  stays",
+            limit: 10,
+          }).items,
+          stored,
+        ),
+      ),
     ).toEqual(["k3", "k4"]);
     // Last term is a prefix: "sqlite sta" → same two; "sql stays" is not.
     expect(
@@ -719,7 +722,7 @@ describe("searchSessionMessagesPage", () => {
     });
     // No phrase → falls back to every term anywhere ("sql"* matches sqlite).
     expect(notPrefix.mode).toBe("terms");
-    expect(sources(notPrefix.items, stored).sort()).toEqual(["k3", "k4"]);
+    expect(sorted(sources(notPrefix.items, stored))).toEqual(["k3", "k4"]);
   });
 
   test("falls back to all-terms-anywhere only for multi-term queries, and says so", () => {
@@ -730,7 +733,7 @@ describe("searchSessionMessagesPage", () => {
     });
     expect(p.mode).toBe("terms");
     expect(p.total).toBe(3);
-    expect(sources(p.items, stored).sort()).toEqual(["k4", "k5", "k6"]);
+    expect(sorted(sources(p.items, stored))).toEqual(["k4", "k5", "k6"]);
 
     const none = searchSessionMessagesPage(project, "s", {
       query: "zzzz",
@@ -776,7 +779,10 @@ describe("searchSessionMessagesPage", () => {
     expect(or.total).toBe(0);
     // Operator-only input is unsearchable, not an error.
     expect(
-      searchSessionMessagesPage(project, "s", { query: '* " ( ) -', limit: 10 }),
+      searchSessionMessagesPage(project, "s", {
+        query: '* " ( ) -',
+        limit: 10,
+      }),
     ).toEqual({ terms: [], mode: "phrase", items: [], next: null, total: 0 });
     // "near" as a word.
     expect(
@@ -799,7 +805,7 @@ describe("searchSessionMessagesPage", () => {
           mode,
         });
         expect(p.total).toBe(6);
-        out.push(sources(p.items, stored) as string[]);
+        out.push(sources(p.items, stored).map((src) => src ?? "?"));
         if (!p.next) break;
         before = p.next;
       }
@@ -809,17 +815,18 @@ describe("searchSessionMessagesPage", () => {
     expect(pages.flat()).toHaveLength(6);
     expect(new Set(pages.flat()).size).toBe(6);
     expect(pages[0]).toHaveLength(2);
-    expect(pages[0]![1]).toBe("k6");
+    expect(pages[0][1]).toBe("k6");
     // Chronological within each page: created_at never decreases.
     for (const page of pages) {
-      const ts = page.map((src) =>
-        temporal.bySession(project, "s").find((m) => m.source_id === src)!
-          .created_at,
+      const ts = page.map(
+        (src) =>
+          temporal.bySession(project, "s").find((m) => m.source_id === src)!
+            .created_at,
       );
       expect(ts).toEqual([...ts].sort((a, b) => a - b));
     }
     // The oldest is served last.
-    expect(pages[pages.length - 1]![0]).toBe("k1");
+    expect(pages.at(-1)?.[0]).toBe("k1");
     // A pinned mode is honoured even where the first page would pick phrase.
     const pinned = searchSessionMessagesPage(project, "s", {
       query: "needle 6",

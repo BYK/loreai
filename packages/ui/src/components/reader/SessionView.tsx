@@ -82,11 +82,13 @@ import { displayedText } from "~/reader/render";
 import { buildRows, indexRows } from "~/reader/rows";
 import { type SearchHit, queryMatcher, searchRows } from "~/reader/search";
 import {
+  type ReachState,
   type WholeSearchState,
   WHOLE_IDLE,
   WHOLE_LOAD_PAGES,
   WHOLE_SEARCH_PAGE,
   nextOlderHit,
+  reachLabel,
   searchWholeSession,
   wholeSearchSummary,
 } from "~/reader/whole-search";
@@ -135,6 +137,7 @@ export interface SessionViewProps {
   onSearchWhole?: (
     query: string,
     cursor: string | null,
+    limit: number,
     signal?: AbortSignal,
   ) => Promise<SessionSearchPage>;
   status?: KeyStatus;
@@ -827,6 +830,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     scanGeneration++;
     batch(() => {
       setQuery("");
+      resetWhole();
       setSearch(SEARCH_IDLE);
       setHitIndex(-1);
       setSearchHit(null);
@@ -848,6 +852,123 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       quote: text.slice(hit.start, hit.end),
     });
   }
+
+  // -- whole-session search (#1857) ----------------------------------------
+  // The server says which messages match; a hit becomes a highlight only
+  // once its message is loaded and the browser-side scan above finds the
+  // query in the displayed text.
+  const [whole, setWhole] = createSignal<WholeSearchState>(WHOLE_IDLE);
+  const [reach, setReach] = createSignal<ReachState | null>(null);
+  let wholeController: AbortController | null = null;
+  const isLoaded = (blockId: string) => blocks().byId.has(blockId);
+  const wholeAvailable = () =>
+    props.onSearchWhole !== undefined &&
+    queryMatcher(query()) !== null &&
+    coverage().kind !== "captured";
+
+  function resetWhole() {
+    wholeController?.abort();
+    wholeController = null;
+    batch(() => {
+      setWhole(WHOLE_IDLE);
+      setReach(null);
+    });
+  }
+  onCleanup(resetWhole);
+  // The server answer is for one query; typing invalidates it.
+  createEffect(on(query, resetWhole, { defer: true }));
+
+  async function searchWhole() {
+    const q = untrack(query);
+    const fetch = props.onSearchWhole;
+    if (!fetch || queryMatcher(q) === null) return;
+    wholeController?.abort();
+    const c = new AbortController();
+    wholeController = c;
+    batch(() => {
+      setWhole({ kind: "searching", query: q });
+      setReach(null);
+    });
+    try {
+      const result = await searchWholeSession(
+        q,
+        (cursor) => fetch(q, cursor, WHOLE_SEARCH_PAGE, c.signal),
+        (id) => untrack(() => isLoaded(id)),
+      );
+      if (c.signal.aborted) return;
+      setWhole({ kind: "done", result });
+    } catch (err) {
+      if (c.signal.aborted) return;
+      setWhole({ kind: "error", query: q, message: errorMessage(err) });
+    } finally {
+      if (wholeController === c) wholeController = null;
+    }
+  }
+
+  const olderHit = () => {
+    const state = whole();
+    return state.kind === "done" ? nextOlderHit(state.result, isLoaded) : null;
+  };
+
+  /** Page older history until the newest unloaded server hit is in the window. */
+  function reachOlderHit() {
+    const hit = olderHit();
+    if (!hit || reach()?.kind === "loading") return;
+    setReach({ kind: "loading", messageId: hit.message_id, pages: 0 });
+  }
+
+  createEffect(() => {
+    const state = reach();
+    if (state?.kind !== "loading") return;
+    const blockId = messageBlockId(state.messageId);
+    if (!isLoaded(blockId)) {
+      const busy = props.loadingOlder || olderInFlight();
+      if (busy || props.hasOlder === null) return; // wait for the page
+      if (props.hasOlder === false || props.olderError || !props.onLoadOlder) {
+        setReach({ kind: "unreachable", messageId: state.messageId });
+        return;
+      }
+      if (state.pages >= WHOLE_LOAD_PAGES) {
+        setReach({ ...state, kind: "exhausted" });
+        return;
+      }
+      setReach({ ...state, pages: state.pages + 1 });
+      void loadOlder();
+      return;
+    }
+    // Loaded: wait until the browser-side scan has covered the new rows, then
+    // step to the hit in that block — or say that there is none to show.
+    const scan = search();
+    const q = untrack(query);
+    if (scan.query !== q || !scan.done || scan.total !== rows().length) return;
+    const index = scan.hits.findIndex((h) => h.blockId === blockId);
+    if (index >= 0) {
+      setReach(null);
+      goToHit(index);
+      return;
+    }
+    const w = untrack(whole);
+    setReach({
+      kind: "inexact",
+      messageId: state.messageId,
+      mode: w.kind === "done" ? w.result.mode : "phrase",
+    });
+    scrollToBlock(blockId);
+  });
+
+  const wholeLine = (): string | null => {
+    const state = whole();
+    switch (state.kind) {
+      case "idle":
+        return null;
+      case "searching":
+        return "Searching the whole session…";
+      case "error":
+        return `Whole-session search unavailable · ${state.message}`;
+      case "done":
+        return wholeSearchSummary(state.result, isLoaded);
+    }
+  };
 
   const searchSummary = () => {
     const state = search();
@@ -1084,11 +1205,66 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                     </span>
                     <Show when={search().done && coverage().kind === "partial"}>
                       <span
-                        class="basis-full text-muted"
+                        class="flex basis-full flex-wrap items-center gap-2 text-muted"
                         data-testid="search-coverage"
                       >
-                        Searched the loaded history only · {coverage().detail}
+                        <span>
+                          Searched the loaded history only · {coverage().detail}
+                        </span>
+                        <Show
+                          when={
+                            wholeAvailable() &&
+                            (whole().kind === "idle" ||
+                              whole().kind === "error")
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="text-xs text-accent underline"
+                            data-testid="search-whole"
+                            onClick={() => void searchWhole()}
+                          >
+                            {whole().kind === "error"
+                              ? "Retry whole-session search"
+                              : "Search the whole session"}
+                          </button>
+                        </Show>
                       </span>
+                    </Show>
+                    <Show when={wholeLine()}>
+                      {(line) => (
+                        <span
+                          class="flex basis-full flex-wrap items-center gap-2 text-muted"
+                          data-testid="search-whole-summary"
+                          data-whole-state={whole().kind}
+                          role="status"
+                          aria-live="polite"
+                        >
+                          <span>{line()}</span>
+                          <Show
+                            when={olderHit() && reach()?.kind !== "loading"}
+                          >
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              data-testid="search-whole-next"
+                              onClick={reachOlderHit}
+                            >
+                              {reach()?.kind === "exhausted"
+                                ? "Keep loading"
+                                : "Go to the newest older match"}
+                            </Button>
+                          </Show>
+                          <Show when={reach()}>
+                            {(state) => (
+                              <span data-testid="search-reach">
+                                {reachLabel(state())}
+                              </span>
+                            )}
+                          </Show>
+                        </span>
+                      )}
                     </Show>
                   </>
                 )}

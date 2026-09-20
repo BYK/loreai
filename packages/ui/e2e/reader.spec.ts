@@ -264,6 +264,62 @@ test.describe("session reader", () => {
     );
   });
 
+  test("whole-session search reaches a hit two older pages back, highlights it and its link survives reload", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openReader(page);
+    // Message 8 is on the oldest page; "needle-8 and" is a literal nothing on
+    // the loaded page contains (needle-18x carries a different digit run).
+    const query = "needle-8 and";
+    await page.getByTestId("search-input").fill(query);
+    await expect(page.getByTestId("search-summary")).toContainText(
+      "No matches in loaded history",
+    );
+    await expect(page.locator("mark.passage-search")).toHaveCount(0);
+
+    await page.getByTestId("search-whole").click();
+    const whole = page.getByTestId("search-whole-summary");
+    await expect(whole).toHaveAttribute("data-whole-state", "done");
+    await expect(whole).toContainText(
+      "1 matching message in the whole session · 1 in older history",
+    );
+    // Still nothing on screen: a server hit is not a highlight until loaded.
+    await expect(page.locator("mark.passage-search")).toHaveCount(0);
+
+    await page.getByTestId("search-whole-next").click();
+    await expect(page.getByTestId("search-summary")).toContainText(
+      "1 of 1 in loaded history",
+    );
+    const hit = page.locator("mark.passage-search");
+    await expect(hit).toHaveText(query);
+    await expect(rowWith(page, "needle-8 and")).toBeVisible();
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "230 messages, complete as captured",
+    );
+    await expect(whole).toContainText("nothing more in older history");
+    await expect(page.getByTestId("search-whole-next")).toHaveCount(0);
+    await expect(page.getByTestId("search-reach")).toHaveCount(0);
+
+    // The hit becomes an addressable passage like any other selection.
+    await page.getByTestId("search-select").click();
+    await expect(page.getByTestId("selection-quote")).toContainText(query);
+    await page.getByTestId("copy-with-source").click();
+    await expect(page.getByTestId("copy-with-source")).toContainText("Copied");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    const copiedLink = copied.trim().split("\n").at(-1)!;
+
+    // A fresh document (not a same-page fragment hop): the passage is three
+    // pages back, so the reader pages through the real API again.
+    await page.goto("about:blank");
+    await page.goto(copiedLink);
+    const marks = page.locator("mark.passage-target");
+    await expect(marks.first()).toBeVisible();
+    expect((await marks.allTextContents()).join("")).toBe(query);
+    await expect(page.getByTestId("link-state")).toHaveCount(0);
+  });
+
   test("keyboard: rows are focusable and Enter selects a whole block", async ({
     page,
   }) => {

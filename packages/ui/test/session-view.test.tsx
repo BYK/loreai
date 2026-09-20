@@ -16,13 +16,14 @@ import {
   SEARCH_DEBOUNCE_MS,
   SessionView,
 } from "~/components/reader/SessionView";
-import type { TemporalMessage } from "~/contracts";
+import type { SessionSearchPage, TemporalMessage } from "~/contracts";
 import { anchorFor, blockAnchor, encodeAnchor } from "~/reader/anchors";
 import { buildBlocks, messageBlock } from "~/reader/blocks";
 import { buildRows } from "~/reader/rows";
 import { queryMatcher, searchRows } from "~/reader/search";
 import { NATIVE_TRANSCRIPT_LABEL } from "~/reader/coverage";
 import { HIGHLIGHT_ATTR } from "~/reader/selection";
+import { WHOLE_LOAD_PAGES } from "~/reader/whole-search";
 import {
   READER_SPECIMEN,
   READER_SPECIMEN_DISTILLATION,
@@ -907,5 +908,211 @@ describe("SessionView: in-session search", () => {
     expect(screen.getByTestId("search-summary")).toHaveTextContent(
       "No matches in loaded history",
     );
+  });
+});
+
+describe("SessionView: whole-session search", () => {
+  /**
+   * A 3-page history: the loaded window holds `old-20..old-59`; each
+   * `onLoadOlder` prepends 20 more. Message `old-3` is the only one with the
+   * needle, so the loaded-window scan finds nothing until two pages arrive.
+   */
+  function pagedHistory(needleContent = "the portability needle sits here") {
+    const all = older(60).map((m, i) => ({
+      ...m,
+      content: i === 3 ? needleContent : `row ${i} says nothing of interest`,
+    }));
+    const [from, setFrom] = createSignal(40);
+    const messages = () => all.slice(from());
+    const hasOlder = () => from() > 0;
+    const loadOlder = vi.fn(async () => {
+      await tick(1);
+      setFrom((n) => Math.max(0, n - 20));
+    });
+    const server = (hits: Array<(typeof all)[number]>) =>
+      vi.fn(
+        async (
+          _q: string,
+          _cursor: string | null,
+          _limit: number,
+          _signal?: AbortSignal,
+        ): Promise<SessionSearchPage> =>
+          ({
+            hits: hits.map((m) => ({
+              message_id: m.id,
+              created_at: m.created_at,
+              role: m.role,
+              snippet: m.content,
+              rank: -1,
+            })),
+            terms: ["portability"],
+            mode: "phrase",
+            total: hits.length,
+            next_cursor: null,
+          }) satisfies SessionSearchPage,
+      );
+    return { all, messages, hasOlder, loadOlder, server, from };
+  }
+
+  function mountPaged(
+    h: ReturnType<typeof pagedHistory>,
+    onSearchWhole: Parameters<typeof SessionView>[0]["onSearchWhole"],
+  ) {
+    return mount({
+      get messages() {
+        return h.messages();
+      },
+      get hasOlder() {
+        return h.hasOlder();
+      },
+      messageCount: h.all.length,
+      onLoadOlder: h.loadOlder,
+      onSearchWhole,
+    });
+  }
+
+  async function typeAndSearchWhole(query: string) {
+    fireEvent.input(screen.getByTestId("search-input"), {
+      target: { value: query },
+    });
+    await settleSearch();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "No matches in loaded history",
+    );
+    fireEvent.click(screen.getByTestId("search-whole"));
+    await tick(6);
+  }
+
+  it("pages older history to the server's hit and highlights it only once its text is on screen", async () => {
+    const h = pagedHistory();
+    const onSearchWhole = h.server([h.all[3]!]);
+    mountPaged(h, onSearchWhole);
+    await tick();
+    await typeAndSearchWhole("portability");
+    expect(onSearchWhole).toHaveBeenCalledTimes(1);
+    expect(onSearchWhole.mock.calls[0]![0]).toBe("portability");
+    const summary = screen.getByTestId("search-whole-summary");
+    expect(summary).toHaveTextContent(
+      "1 matching message in the whole session · 1 in older history",
+    );
+    // Nothing is highlighted yet: the message is not loaded.
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(0);
+
+    fireEvent.click(screen.getByTestId("search-whole-next"));
+    for (let i = 0; i < 6 && h.from() > 0; i++) await settleSearch();
+    await settleSearch();
+    expect(h.loadOlder).toHaveBeenCalledTimes(2);
+    expect(h.from()).toBe(0);
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "1 of 1 in loaded history",
+    );
+    const marks = document.querySelectorAll("mark.passage-search");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.closest("[data-row-key]")).toHaveAttribute(
+      "data-row-key",
+      "m.old-3",
+    );
+    expect(screen.queryByTestId("search-reach")).toBeNull();
+    expect(screen.queryByTestId("search-whole-next")).toBeNull();
+    expect(summary).toHaveTextContent("nothing more in older history");
+  });
+
+  it("says plainly when the loaded message's displayed text has no literal match", async () => {
+    // The server matched on stored text; on screen the words are apart.
+    const h = pagedHistory("portability, then much later the needle");
+    mountPaged(h, h.server([h.all[3]!]));
+    await tick();
+    await typeAndSearchWhole("portability needle");
+    fireEvent.click(screen.getByTestId("search-whole-next"));
+    for (let i = 0; i < 6 && h.from() > 0; i++) await settleSearch();
+    await settleSearch();
+    expect(screen.getByTestId("search-reach")).toHaveTextContent(
+      "Matching message loaded · the stored text matches but the displayed text does not contain it literally",
+    );
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(0);
+    expect(screen.queryByTestId("search-whole-next")).toBeNull();
+  });
+
+  it("reports the server's failure instead of pretending the session was searched", async () => {
+    const h = pagedHistory();
+    const onSearchWhole = vi.fn(async () => {
+      throw new Error("temporal_fts unavailable");
+    });
+    mountPaged(h, onSearchWhole);
+    await tick();
+    await typeAndSearchWhole("portability");
+    expect(screen.getByTestId("search-whole-summary")).toHaveTextContent(
+      "Whole-session search unavailable · temporal_fts unavailable",
+    );
+    expect(screen.getByTestId("search-whole-summary")).toHaveAttribute(
+      "data-whole-state",
+      "error",
+    );
+    expect(screen.getByTestId("search-coverage")).toHaveTextContent(
+      "Searched the loaded history only",
+    );
+    // The loaded-window result stands and the server can be asked again.
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "No matches in loaded history",
+    );
+    expect(screen.getByTestId("search-whole")).toHaveTextContent(
+      "Retry whole-session search",
+    );
+    fireEvent.click(screen.getByTestId("search-whole"));
+    await tick(6);
+    expect(onSearchWhole).toHaveBeenCalledTimes(2);
+  });
+
+  it("forgets the server answer as soon as the query changes", async () => {
+    const h = pagedHistory();
+    mountPaged(h, h.server([h.all[3]!]));
+    await tick();
+    await typeAndSearchWhole("portability");
+    expect(screen.getByTestId("search-whole-summary")).toBeInTheDocument();
+    fireEvent.input(screen.getByTestId("search-input"), {
+      target: { value: "portabilit" },
+    });
+    await settleSearch();
+    expect(screen.queryByTestId("search-whole-summary")).toBeNull();
+    expect(screen.getByTestId("search-whole")).toBeInTheDocument();
+    expect(h.loadOlder).not.toHaveBeenCalled();
+  });
+
+  it("gives up after the page bound and offers to keep loading rather than looping", async () => {
+    const h = pagedHistory();
+    // The server names a message the paging never delivers.
+    const ghost = { ...h.all[3]!, id: "ghost", content: "portability" };
+    const noProgress = vi.fn(async () => {
+      await tick(1);
+    });
+    mount({
+      messages: h.all.slice(40),
+      hasOlder: true,
+      messageCount: h.all.length + 1,
+      onLoadOlder: noProgress,
+      onSearchWhole: h.server([ghost]),
+    });
+    await tick();
+    await typeAndSearchWhole("portability");
+    fireEvent.click(screen.getByTestId("search-whole-next"));
+    for (let i = 0; i < WHOLE_LOAD_PAGES + 2; i++) await tick(4);
+    expect(noProgress).toHaveBeenCalledTimes(WHOLE_LOAD_PAGES);
+    expect(screen.getByTestId("search-reach")).toHaveTextContent(
+      `further back than ${WHOLE_LOAD_PAGES} pages`,
+    );
+    expect(screen.getByTestId("search-whole-next")).toHaveTextContent(
+      "Keep loading",
+    );
+  });
+
+  it("offers no whole-session search when the loaded window is the whole captured history", async () => {
+    mount({ hasOlder: false });
+    await tick();
+    fireEvent.input(screen.getByTestId("search-input"), {
+      target: { value: "zzz-not-here" },
+    });
+    await settleSearch();
+    expect(screen.queryByTestId("search-coverage")).toBeNull();
+    expect(screen.queryByTestId("search-whole")).toBeNull();
   });
 });

@@ -680,6 +680,100 @@ current hit into a real selection — `anchorFor(block, part, start, end)`,
 the passage panel and the `?a=` deep link — so a finding can be linked or
 copied with source like any pointer selection.
 
+The loaded-window scan is honest about its reach: while the view is
+partial the summary says `Searched the loaded history only · …` and the
+reader offers **Search the whole session** (below).
+
+### Whole-session search (#1857)
+
+Two search entry points exist on purpose and answer different questions:
+
+| | Loaded-window search (UI-06c) | Whole-session search (#1857) | Project recall (UI-04) |
+|---|---|---|---|
+| Where it runs | browser, `src/reader/search.ts` | gateway, `GET /api/v1/sessions/:id/search` | gateway, `GET /api/v1/recall` |
+| Over what | displayed text of the **loaded** blocks | stored text of **every** message in one session (`temporal_fts`) | fused knowledge / distillations / messages across a scope |
+| Answers | exact displayed-text spans (highlightable, anchorable) | which `message_id`s match, how many, newest first | ranked Markdown for agents and the project page |
+| Coverage claim | `loaded history only` when partial | the whole captured session | project / session scope |
+
+**Route (opt-in, new).** `GET /api/v1/sessions/:id/search?path=…&q=<text>&limit=&cursor=`
+(`packages/gateway/src/api-lists.ts` `handleSearchSession`; core
+`searchSessionMessagesPage`). It resolves the project exactly like
+`GET /sessions/:id` (`?path=` / `?git_remote=`) and sits behind the same
+management access checks; the legacy session route is untouched. The
+answer is
+
+```ts
+{
+  hits: [{ message_id, created_at, role, snippet, rank }], // chronological within the page
+  terms: string[],            // what was actually matched (unicode61 tokens, lower-cased)
+  mode: "phrase" | "terms",   // the literal phrase, or every term anywhere (fallback)
+  total: number,              // matching messages in the session at query time
+  next_cursor: string | null  // next OLDER page of hits
+}
+```
+
+`q` is required (empty → 400), at most 512 characters; `limit` 1–1000
+(default 100, anything else 400). User input is tokenised the way the FTS
+index is and quoted, so `"`, `*`, `NEAR`, parentheses and `-` are literal
+characters, never FTS5 syntax. The first page picks the mode — the phrase
+when any message contains it, otherwise (multi-term queries only) every
+term anywhere — and later pages pin it through the cursor, so a write
+between pages cannot switch semantics half-way. Cursors are the paging
+route's keyset (`created_at`, `id`, newest first), versioned and bound to
+the project, session **and** mode; a tampered or foreign cursor is a 400.
+`snippet` is FTS5's excerpt of the **stored** text (raw Markdown, part
+separators turned into spaces) — a hint for lists, never a coordinate: the
+server does not know displayed-text offsets. Contract:
+`src/contracts/session.ts` `sessionSearchPage`; fixture
+`test/fixtures/session-search.json`; gateway tests
+`packages/gateway/test/api-session-search.test.ts` (syntax injection,
+isolation across projects and sessions, cursor tampering, bounds, legacy
+route unchanged).
+
+**Reader (`src/reader/whole-search.ts`, `SessionView`).** The route only
+names messages; a hit becomes a highlight through the existing path:
+
+1. **Search the whole session** (`search-whole`, shown only when the view
+   is partial and the owner passed `onSearchWhole`) pulls server pages of
+   `WHOLE_SEARCH_PAGE` = 200 hits, newest first, until a hit outside the
+   loaded window is known, the server runs out, or
+   `WHOLE_SEARCH_MAX_PAGES` = 5 pages were read (`searchWholeSession`).
+   Hits already loaded are not reported twice — the browser-side scan
+   found them. The summary (`search-whole-summary`) states the count,
+   the mode (`(all words, any order)` for the fallback) and what is still
+   older: `N matching messages in the whole session · k in older history`,
+   `… · nothing more in older history`, or, when the page bound stopped
+   the walk, `… · the newest n checked, none in older history yet`
+   (`wholeSearchSummary`).
+2. **Go to the newest older match** (`search-whole-next`) loads older
+   pages through the reader's own `loadOlder` until the hit's block
+   (`messageBlockId(message_id)`) is in the window — at most
+   `WHOLE_LOAD_PAGES` = 10 pages per click (`Keep loading` continues) —
+   then waits for the loaded-window scan to cover the new rows and steps
+   to the hit in that block with the ordinary `goToHit`, so the highlight
+   is `mark.passage-search` on displayed text and **Select** makes it a
+   source anchor / deep link like any other hit.
+3. Every other outcome is said, not smoothed over (`search-reach`,
+   `reachLabel`): the match is further back than the page bound; the
+   server counted a message that no older page delivers (stale view →
+   reload); the message is loaded but its displayed text has no literal
+   match — the words matched apart (`terms` mode) or only in stored text
+   (raw Markdown / tool output the renderer shows differently) — in which
+   case the block is scrolled to and nothing is highlighted. A failing
+   route (`FTS` unavailable, offline) shows
+   `Whole-session search unavailable · <reason>`, the loaded-window
+   result stands and the link becomes `Retry whole-session search`.
+   Typing invalidates the server answer immediately
+   (`WHOLE_IDLE`), and in-flight requests are aborted.
+
+Browser find still sees only the ~8 mounted rows; the loaded-window scan
+sees the loaded blocks; whole-session search sees the captured session.
+Each label says which.
+
+Bundle: `Session-*.js` 208.52 kB / 68.46 kB gzip (+5.4 kB raw / +1.7 kB
+gzip over UI-06c for the contract, the page walk and the reach states);
+entry and CSS unchanged.
+
 ### Busy-session fixture (UI-06c, plan §16.1)
 
 `/ui/fixture?view=busy` (dev-only route, `routes/BusyFixture.tsx`; not in
@@ -799,14 +893,22 @@ replay once, frame gaps), `test/reader-selection.test.tsx` (independent
 source + search highlights), `test/session-view.test.tsx` (coverage
 declaration states, search over unmounted rows and select-hit → anchor,
 live edit of the linked block → honest source-changed state, linked block
-leaving the window → search resumes / honest not-found).
+leaving the window → search resumes / honest not-found; whole-session
+search: page to the server's hit and highlight only once loaded, inexact
+displayed text, route failure, query change forgets the answer, page
+bound → `Keep loading`, no offer when the window is complete),
+`test/reader-whole-search.test.ts` (newest-first ordering with keyset
+tie-break, page walk stops at the first unloaded hit / server end / page
+bound / empty page, next-hit choice, every summary and reach label).
 
 Playwright (`e2e/reader.spec.ts`, against the built gateway seeded by
 `e2e/seed.mjs` — 230 messages + one gen-0 distillation — desktop + mobile
 projects): load older history twice → `history-start` + coverage
 `captured` / `complete as captured`; select → link → reload → same
 highlight (UX-01); changed source → honest state (UX-02); search over
-unmounted history → select as anchor; keyboard rows; distillation labelled
+unmounted history → select as anchor; whole-session search for text
+three pages back → loads to it, highlights it, select → copy link →
+fresh load shows the same passage; keyboard rows; distillation labelled
 compressed context, placed after its sources, never a search hit, details
 loaded on demand. `e2e/busy-fixture.spec.ts` (Vite dev
 server, desktop + mobile): virtualisation bounds; selection, focus and

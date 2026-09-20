@@ -8,9 +8,7 @@
       "rank": -0.000001
     }
   ],
-  "terms": [
-    "body"
-  ],
+  "terms": ["body"],
   "mode": "phrase",
   "total": 2,
   "next_cursor": "<cursor>"

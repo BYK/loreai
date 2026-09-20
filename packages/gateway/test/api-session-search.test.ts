@@ -148,7 +148,10 @@ async function seed(tag: string) {
     if (m.source_id) byId.set(m.id, m.source_id);
   }
   const src = (hits: Hit[]) => hits.map((h) => byId.get(h.message_id));
+  const sorted = (xs: (string | undefined)[]) =>
+    [...xs].sort((a, b) => (a ?? "").localeCompare(b ?? ""));
   return {
+    sorted,
     projectPath,
     projectId,
     src,
@@ -172,7 +175,7 @@ describe("GET /api/v1/sessions/:id/search", () => {
     expect(body.total).toBe(1);
     expect(body.next_cursor).toBeNull();
     expect(a.src(body.hits)).toEqual(["m3"]);
-    const hit = body.hits[0]!;
+    const hit = body.hits[0];
     expect(Object.keys(hit).sort()).toEqual(
       ["created_at", "message_id", "rank", "role", "snippet"].sort(),
     );
@@ -184,31 +187,43 @@ describe("GET /api/v1/sessions/:id/search", () => {
     // address the block.
     const { temporal } = await import("@loreai/core");
     expect(
-      temporal.bySession(a.projectPath, "s1").some((m) => m.id === hit.message_id),
+      temporal
+        .bySession(a.projectPath, "s1")
+        .some((m) => m.id === hit.message_id),
     ).toBe(true);
     // The other project's own s1 only sees its own message.
-    const other = (await (await api(`${b.base}&q=needle-3`)).json()) as SearchPage;
+    const other = (await (
+      await api(`${b.base}&q=needle-3`)
+    ).json()) as SearchPage;
     expect(other.total).toBe(1);
-    expect(other.hits[0]!.message_id).not.toBe(hit.message_id);
+    expect(other.hits[0].message_id).not.toBe(hit.message_id);
   });
 
   it("keeps stop words and short tokens literal, and joins multi-part content", async () => {
-    const { base, src } = await seed("literal");
-    const stop = (await (await api(`${base}&q=the+store`)).json()) as SearchPage;
+    const { base, src, sorted } = await seed("literal");
+    const stop = (await (
+      await api(`${base}&q=the+store`)
+    ).json()) as SearchPage;
     expect(stop.mode).toBe("phrase");
-    expect(src(stop.hits).sort()).toEqual(["m2", "m6", "m7"]);
-    const parts = (await (await api(`${base}&q=several+parts`)).json()) as SearchPage;
+    expect(sorted(src(stop.hits))).toEqual(["m2", "m6", "m7"]);
+    const parts = (await (
+      await api(`${base}&q=several+parts`)
+    ).json()) as SearchPage;
     expect(src(parts.hits)).toEqual(["m6"]);
-    expect(parts.hits[0]!.snippet).not.toContain("\u001f");
-    expect(parts.hits[0]!.snippet).toContain("several parts");
+    expect(parts.hits[0].snippet).not.toContain("\u001f");
+    expect(parts.hits[0].snippet).toContain("several parts");
   });
 
   it("falls back to every-term-anywhere when the phrase is absent, and says so", async () => {
-    const { base, src } = await seed("terms");
-    const body = (await (await api(`${base}&q=store+needle`)).json()) as SearchPage;
+    const { base, src, sorted } = await seed("terms");
+    const body = (await (
+      await api(`${base}&q=store+needle`)
+    ).json()) as SearchPage;
     expect(body.mode).toBe("terms");
-    expect(src(body.hits).sort()).toEqual(["m2", "m6", "m7"]);
-    const none = (await (await api(`${base}&q=needle+zzzz`)).json()) as SearchPage;
+    expect(sorted(src(body.hits))).toEqual(["m2", "m6", "m7"]);
+    const none = (await (
+      await api(`${base}&q=needle+zzzz`)
+    ).json()) as SearchPage;
     expect(none).toEqual({
       hits: [],
       terms: ["needle", "zzzz"],

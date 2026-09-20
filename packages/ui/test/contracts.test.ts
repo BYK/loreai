@@ -27,6 +27,7 @@ import {
   sessionDetail,
   sessionList,
   sessionPage,
+  sessionSearchPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -54,6 +55,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "session-page.json": {
     route: "/sessions/s?page=cursor",
     schema: sessionPage,
+  },
+  "session-search.json": {
+    route: "/sessions/s/search?q=",
+    schema: sessionSearchPage,
   },
   "distillations-list.json": {
     route: "/projects/p/distillations",
