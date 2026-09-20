@@ -8,6 +8,7 @@ import { createComputed, createRoot, createSignal } from "solid-js";
 import { IDBFactory } from "./idb-globals";
 
 import type { ApiClient } from "~/lib/api";
+import { ApiError } from "~/lib/api";
 import {
   closeLoreDb,
   createKnowledgeRepo,
@@ -886,6 +887,84 @@ describe("paged sessions and recall state", () => {
     await flush();
     expect(page.loader.data()?.items).toEqual([]);
     expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe("knowledge versions and source evidence", () => {
+  it("loads versions from the server without touching the cache", async () => {
+    const read = vi.fn();
+    const repo = createKnowledgeRepo(null);
+    (repo as unknown as { getScope: typeof read }).getScope = read;
+    const client = {
+      listKnowledgeVersions: async (id: string) => ({
+        id,
+        current_version_id: "v1",
+        versions: [],
+      }),
+    } as unknown as ApiClient;
+    const state = createKnowledgeState({ client, repo, tracked });
+    const versions = state.versions(() => "k1");
+    await flush();
+    expect(versions.loader.data()?.id).toBe("k1");
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["available", { messages: [{ id: "m1" }], distillations: [] }, "available"],
+    [
+      "summary_only",
+      { messages: [], distillations: [{ id: "d1" }] },
+      "summary_only",
+    ],
+    ["unavailable", { messages: [], distillations: [] }, "unavailable"],
+  ] as const)(
+    "derives %s evidence state from the session response",
+    async (_label, detail, expected) => {
+      const client = {
+        getSession: async () => detail,
+      } as unknown as ApiClient;
+      const state = createRoot(() =>
+        createSessionsState({
+          client,
+          repos: {
+            sessions: createSessionsRepo(null),
+            messageBlocks: createMessageBlocksRepo(null),
+          },
+          projectPathOf: () => undefined,
+          tracked,
+        }),
+      );
+      const evidence = state.evidence(() => ({
+        projectPath: "/tmp/project",
+        sessionId: "s1",
+      }));
+      await flush();
+      expect(evidence.loader.data()?.state).toBe(expected);
+    },
+  );
+
+  it("turns a missing source session into unavailable evidence", async () => {
+    const client = {
+      getSession: async () => {
+        throw new ApiError("not_found", "/sessions/s1", "gone", 404);
+      },
+    } as unknown as ApiClient;
+    const state = createSessionsState({
+      client,
+      repos: {
+        sessions: createSessionsRepo(null),
+        messageBlocks: createMessageBlocksRepo(null),
+      },
+      projectPathOf: () => undefined,
+      tracked,
+    });
+    const evidence = state.evidence(() => ({
+      projectPath: "/tmp/project",
+      sessionId: "s1",
+    }));
+    await flush();
+    expect(evidence.loader.data()?.state).toBe("unavailable");
+    expect(evidence.loader.error()).toBeUndefined();
   });
 });
 
