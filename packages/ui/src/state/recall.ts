@@ -23,7 +23,11 @@ export function createRecallState({
       () => {
         const value = source();
         return value
-          ? `${encodeURIComponent(value.project.id)}/${encodeURIComponent(value.q)}/${encodeURIComponent(value.scope)}`
+          ? new URLSearchParams({
+              projectId: value.project.id,
+              q: value.q,
+              scope: value.scope,
+            }).toString()
           : null;
       },
       (_, signal) => {

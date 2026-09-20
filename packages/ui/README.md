@@ -60,7 +60,7 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
 | Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
-| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokens → HTML, raw HTML escaped; only used inside `src/lib/safe-html.ts` (UI-06a) |
+| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokenization for safe HTML and lazy inert recall parsing; `src/lib/safe-html.ts` remains the only `innerHTML` boundary (UI-04/UI-06a) |
 | HTML sanitiser | `dompurify` | 3.4.15 | 2026-09-06 | explicit tag/attribute allowlist + link policy hook; only used inside `src/lib/safe-html.ts` |
 | Code highlighting | `highlight.js` | 11.12.0 | 2026-08-12 | `lib/core` + 14 registered grammars, no auto-detect; regex-based, no `eval`, so `script-src 'self'` holds |
 | Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
@@ -923,7 +923,9 @@ predates the move from an embedded module to staged files, which took
   cache. A Previous action is shown only after a previous cursor has been
   observed in the current browser session.
 - Recall requests use `expand=false`, so searching memory never constructs or
-  runs a model.
+  runs a model. Recall Markdown is tokenized lazily with `marked` into inert
+  Solid nodes, and loader/query keys use canonical `URLSearchParams` strings
+  so slash-containing IDs, queries, and cursors remain collision-free.
 
 ### Provenance
 

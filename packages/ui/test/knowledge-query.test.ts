@@ -53,7 +53,7 @@ describe("knowledge query URL state", () => {
         q: "wal mode",
         sort: "title_asc",
       }),
-    ).toBe("?q=wal%20mode&sort=title_asc");
+    ).toBe("?q=wal+mode&sort=title_asc");
   });
 
   it("serializes every query field in a stable order", () => {
@@ -66,7 +66,7 @@ describe("knowledge query URL state", () => {
         cursor: "next page",
       }),
     ).toBe(
-      "?q=wal%20mode&category=gotcha&scope=project&sort=created_desc&cursor=next%20page",
+      "?q=wal+mode&category=gotcha&scope=project&sort=created_desc&cursor=next+page",
     );
   });
 
@@ -81,12 +81,14 @@ describe("knowledge query URL state", () => {
   });
 
   it("includes the project in keyed loader identity", () => {
-    expect(knowledgeQueryKey("p/1", DEFAULT_KNOWLEDGE_QUERY)).toBe("p/1");
+    expect(knowledgeQueryKey("p/1", DEFAULT_KNOWLEDGE_QUERY)).toBe(
+      "projectId=p%2F1&q=&category=&scope=&sort=updated_desc&cursor=",
+    );
     expect(
       knowledgeQueryKey("p/1", {
         ...DEFAULT_KNOWLEDGE_QUERY,
         cursor: "next",
       }),
-    ).toBe("p/1?cursor=next");
+    ).toBe("projectId=p%2F1&q=&category=&scope=&sort=updated_desc&cursor=next");
   });
 });

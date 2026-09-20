@@ -55,15 +55,14 @@ export function parseKnowledgeQuery(
 }
 
 export function knowledgeQueryToSearch(query: KnowledgeQuery): string {
-  const fields: string[] = [];
-  if (query.q) fields.push(`q=${encodeURIComponent(query.q)}`);
-  if (query.category)
-    fields.push(`category=${encodeURIComponent(query.category)}`);
-  if (query.scope) fields.push(`scope=${encodeURIComponent(query.scope)}`);
-  if (query.sort !== "updated_desc")
-    fields.push(`sort=${encodeURIComponent(query.sort)}`);
-  if (query.cursor) fields.push(`cursor=${encodeURIComponent(query.cursor)}`);
-  return fields.length ? `?${fields.join("&")}` : "";
+  const params = new URLSearchParams();
+  if (query.q) params.set("q", query.q);
+  if (query.category) params.set("category", query.category);
+  if (query.scope) params.set("scope", query.scope);
+  if (query.sort !== "updated_desc") params.set("sort", query.sort);
+  if (query.cursor) params.set("cursor", query.cursor);
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
 export function isDefaultKnowledgeQuery(query: KnowledgeQuery): boolean {
@@ -80,5 +79,13 @@ export function knowledgeQueryKey(
   projectId: string,
   query: KnowledgeQuery,
 ): string {
-  return `${projectId}${knowledgeQueryToSearch(query)}`;
+  const params = new URLSearchParams({
+    projectId,
+    q: query.q,
+    category: query.category ?? "",
+    scope: query.scope ?? "",
+    sort: query.sort,
+    cursor: query.cursor ?? "",
+  });
+  return params.toString();
 }
