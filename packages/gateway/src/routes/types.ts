@@ -51,7 +51,9 @@ export interface GatewayAppOptions {
  *   token enforced in remote/hosted mode, conflicting provider auth rejected.
  * - `null`: neither (health, process control) — no plane-specific policy.
  */
-export type RoutePlane = "management" | "data" | null;
+export const MANAGEMENT_PLANE = "management";
+export const DATA_PLANE = "data";
+export type RoutePlane = typeof MANAGEMENT_PLANE | typeof DATA_PLANE | null;
 
 export interface RouteModule {
   /** Stable identifier, used in registry tests and diagnostics. */

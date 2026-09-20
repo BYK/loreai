@@ -44,13 +44,15 @@ import {
   withoutGatewayAccessHeader,
 } from "./management-access";
 import { classifyPath, ROUTE_MODULES } from "./routes/registry";
-import type {
-  GatewayAppOptions,
-  GatewayContext,
-  GatewayEnv,
-  GatewayMiddleware,
-  RouteContext,
-  RouteHandler,
+import {
+  DATA_PLANE,
+  MANAGEMENT_PLANE,
+  type GatewayAppOptions,
+  type GatewayContext,
+  type GatewayEnv,
+  type GatewayMiddleware,
+  type RouteContext,
+  type RouteHandler,
 } from "./routes/types";
 
 export type {
@@ -150,7 +152,7 @@ function debugLog(config: GatewayConfig, message: string): void {
  */
 function managementAccess(config: GatewayConfig): GatewayMiddleware {
   return async (c, next) => {
-    const managementPath = classifyPath(c.req.path) === "management";
+    const managementPath = classifyPath(c.req.path) === MANAGEMENT_PLANE;
     c.set("request", c.req.raw);
     c.set("managementPath", managementPath);
     c.set("allowedManagementOrigin", null);
@@ -189,7 +191,7 @@ function managementAccess(config: GatewayConfig): GatewayMiddleware {
  */
 function dataPlaneAccess(config: GatewayConfig): GatewayMiddleware {
   return async (c, next) => {
-    if (classifyPath(c.req.path) !== "data") return next();
+    if (classifyPath(c.req.path) !== DATA_PLANE) return next();
     const req = c.req.raw;
     if (req.headers.has("origin")) return browserOriginDeniedResponse();
 

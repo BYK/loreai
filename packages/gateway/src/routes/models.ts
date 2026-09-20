@@ -10,7 +10,7 @@ import {
   headersToRecord,
   withoutCors,
 } from "../management-access";
-import type { RouteModule } from "./types";
+import { DATA_PLANE, type RouteModule } from "./types";
 
 // NOTE: This endpoint only supports the Anthropic upstream. OpenAI clients
 // calling GET /v1/models will have their request forwarded to Anthropic,
@@ -66,7 +66,7 @@ export async function handleModelsPassthrough(
 
 export const modelsRoutes: RouteModule = {
   name: "models",
-  plane: "data",
+  plane: DATA_PLANE,
   paths: ["/v1/models"],
   register(app, ctx) {
     app.get(

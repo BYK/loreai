@@ -4,7 +4,7 @@ import type { GatewayRequest } from "../translate/types";
 import { parseAnthropicRequest } from "../translate/anthropic";
 import { decodeRequestBody } from "../http-body";
 import { headersToRecord } from "../management-access";
-import type { RouteModule } from "./types";
+import { DATA_PLANE, type RouteModule } from "./types";
 import { invalidJsonBody, parseFailure, runPipeline } from "./shared";
 
 export async function handleAnthropicMessages(
@@ -30,7 +30,7 @@ export async function handleAnthropicMessages(
 
 export const anthropicRoutes: RouteModule = {
   name: "anthropic",
-  plane: "data",
+  plane: DATA_PLANE,
   paths: ["/v1/messages"],
   register(app, ctx) {
     app.post("/v1/messages", ctx.foreground(handleAnthropicMessages));

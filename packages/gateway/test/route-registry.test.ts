@@ -16,6 +16,7 @@ import {
   ROUTE_MODULES,
   routeModuleFor,
 } from "../src/routes/registry";
+import { DATA_PLANE, MANAGEMENT_PLANE } from "../src/routes/types";
 
 function makeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -75,13 +76,13 @@ const NEITHER_PATHS = [
 
 describe("classifyPath parity with the hand-written matcher", () => {
   test.each(DATA_PLANE_PATHS)("%s is data plane", (p) => {
-    expect(classifyPath(p)).toBe("data");
+    expect(classifyPath(p)).toBe(DATA_PLANE);
     expect(isDataPlanePath(p)).toBe(true);
     expect(isManagementPath(p)).toBe(false);
   });
 
   test.each(MANAGEMENT_PATHS)("%s is management", (p) => {
-    expect(classifyPath(p)).toBe("management");
+    expect(classifyPath(p)).toBe(MANAGEMENT_PLANE);
     expect(isManagementPath(p)).toBe(true);
     expect(isDataPlanePath(p)).toBe(false);
   });
@@ -94,6 +95,22 @@ describe("classifyPath parity with the hand-written matcher", () => {
 });
 
 describe("registry invariants", () => {
+  test("indexed lookup agrees with a linear scan of the declarations", () => {
+    const probes = [
+      ...DATA_PLANE_PATHS,
+      ...MANAGEMENT_PATHS,
+      ...NEITHER_PATHS,
+      "/api//x",
+      "/ui/../api",
+      "/v1/models/gemini:generateContent",
+    ];
+    for (const p of probes) {
+      expect(routeModuleFor(p)?.name, p).toBe(
+        ROUTE_MODULES.find((m) => moduleOwnsPath(m, p))?.name,
+      );
+    }
+  });
+
   test("module names are unique", () => {
     const names = ROUTE_MODULES.map((m) => m.name);
     expect(new Set(names).size).toBe(names.length);

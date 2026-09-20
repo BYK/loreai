@@ -12,11 +12,11 @@ import {
   proxyBedrockRuntimeRequest,
 } from "../translate/bedrock-runtime";
 import { withoutCors } from "../management-access";
-import type { RouteModule } from "./types";
+import { DATA_PLANE, type RouteModule } from "./types";
 
 export const bedrockRoutes: RouteModule = {
   name: "bedrock",
-  plane: "data",
+  plane: DATA_PLANE,
   patterns: [BEDROCK_RUNTIME_PATH_RE],
   register(app, ctx) {
     app.post("*", async (c, next) => {

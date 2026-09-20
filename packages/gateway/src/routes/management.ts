@@ -8,11 +8,15 @@
  * never loads the management code or the embedded UI assets.
  */
 import { withManagementCors } from "../management-access";
-import type { GatewayContext, RouteModule } from "./types";
+import {
+  MANAGEMENT_PLANE,
+  type GatewayContext,
+  type RouteModule,
+} from "./types";
 
 export const managementRoutes: RouteModule = {
   name: "management",
-  plane: "management",
+  plane: MANAGEMENT_PLANE,
   paths: ["/"],
   prefixes: ["/api", "/ui"],
   register(app, ctx) {

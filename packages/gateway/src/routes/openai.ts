@@ -19,7 +19,7 @@ import {
   headersToRecord,
   withoutCors,
 } from "../management-access";
-import type { RouteModule } from "./types";
+import { DATA_PLANE, type RouteModule } from "./types";
 import { invalidJsonBody, parseFailure, runPipeline } from "./shared";
 
 export async function handleOpenAIChatCompletions(
@@ -99,7 +99,7 @@ export async function handleOpenAICodexResponses(
 
 export const openaiRoutes: RouteModule = {
   name: "openai",
-  plane: "data",
+  plane: DATA_PLANE,
   paths: [
     "/v1/chat/completions",
     "/chat/completions",

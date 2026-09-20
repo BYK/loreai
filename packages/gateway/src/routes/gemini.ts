@@ -4,7 +4,7 @@ import type { GatewayRequest } from "../translate/types";
 import { parseGeminiRequest } from "../translate/gemini";
 import { decodeRequestBody } from "../http-body";
 import { headersToRecord } from "../management-access";
-import type { RouteModule } from "./types";
+import { DATA_PLANE, type RouteModule } from "./types";
 import { invalidJsonBody, parseFailure, runPipeline } from "./shared";
 
 /**
@@ -53,7 +53,7 @@ export async function handleGeminiGenerateContent(
 
 export const geminiRoutes: RouteModule = {
   name: "gemini",
-  plane: "data",
+  plane: DATA_PLANE,
   patterns: [GEMINI_PATH_RE],
   register(app, ctx) {
     // The path has an arbitrary version prefix and a `:verb` suffix that Hono
