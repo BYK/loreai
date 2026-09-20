@@ -11,12 +11,13 @@
  *   bun packages/core/eval/run.ts --summarize results/latest.jsonl
  *   bun packages/core/eval/run.ts --output results/eval-2025-05-16.jsonl
  */
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { EvalConfig, EvalResult, Dimension, BaselineMode } from "./types";
 import { ALL_DIMENSIONS } from "./types";
-import { runEval, printSummary } from "./harness";
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -92,7 +93,10 @@ if (args.summarize) {
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l));
 
-  printSummary(results);
+  await withOwnedDatabaseRoot(async () => {
+    const { printSummary } = await import("./harness");
+    printSummary(results);
+  });
   process.exit(0);
 }
 
@@ -122,7 +126,7 @@ function parseGateway(raw: string): { host: string; port: number } | undefined {
 const outputPath =
   args.output ||
   resolve(
-    import.meta.dir,
+    import.meta.dirname,
     "results",
     `eval-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-")}.jsonl`,
   );
@@ -167,9 +171,56 @@ console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");
 
-const results = await runEval(config);
-console.log("");
-printSummary(results);
+async function withOwnedDatabaseRoot(run: () => Promise<void>): Promise<void> {
+  const runRoot = await mkdtemp(join(tmpdir(), "lore-eval-run-"));
+  const createdRoot = await lstat(runRoot, { bigint: true });
+  const rootIdentity = Object.freeze({
+    dev: createdRoot.dev,
+    ino: createdRoot.ino,
+  });
+  const databaseRoot = join(runRoot, "database");
+  await mkdir(databaseRoot);
+  const previousEnvironment = Object.freeze({
+    LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
+    LORE_DB_PATH: process.env.LORE_DB_PATH,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+  });
+  process.env.LORE_TEST_DB_ROOT = databaseRoot;
+  process.env.LORE_DB_PATH = join(databaseRoot, "test.db");
+  process.env.XDG_DATA_HOME = join(databaseRoot, "xdg");
 
-console.log(`\nResults written to: ${config.outputPath}`);
-console.log(`Total questions: ${results.length}`);
+  try {
+    await run();
+  } finally {
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    const currentRoot = await lstat(runRoot, { bigint: true }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      },
+    );
+    if (
+      currentRoot?.isDirectory() &&
+      currentRoot.dev === rootIdentity.dev &&
+      currentRoot.ino === rootIdentity.ino
+    ) {
+      await rm(runRoot, { recursive: true });
+    }
+  }
+}
+
+await withOwnedDatabaseRoot(async () => {
+  const { printSummary, runEval } = await import("./harness");
+  const results = await runEval(config);
+  console.log("");
+  printSummary(results);
+
+  console.log(`\nResults written to: ${config.outputPath}`);
+  console.log(`Total questions: ${results.length}`);
+});

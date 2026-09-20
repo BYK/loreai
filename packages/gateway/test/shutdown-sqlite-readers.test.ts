@@ -24,9 +24,8 @@
  *   - After SIGTERM, reopening the DB passes `PRAGMA integrity_check` and
  *     preserves accepted writes (the headline regression that #1599 fixes).
  */
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { rmSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -35,6 +34,7 @@ import {
   embedding,
   temporalEmbeddingQueue,
 } from "@loreai/core";
+import { createTestDatabaseDirectory } from "../../core/test/helpers/test-db-path";
 
 const tempDirs: string[] = [];
 // Snapshot the process-start LORE_DB_PATH so the integrity_check test can
@@ -46,7 +46,7 @@ const tempDirs: string[] = [];
 let originalLoreDbPath: string | undefined;
 
 function tempDbDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "lore-shutdown-1599-"));
+  const dir = createTestDatabaseDirectory("shutdown-1599");
   tempDirs.push(dir);
   return dir;
 }

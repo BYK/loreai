@@ -73,6 +73,9 @@ export async function connectGateway(
   config: EvalConfig,
 ): Promise<GatewayHandle> {
   if (config.mode === "fixture") {
+    const { installOfflineModelsDevDispatcher } =
+      await import("../../gateway/test/helpers/models-dev-dispatcher");
+    await installOfflineModelsDevDispatcher();
     return startFixtureGateway();
   }
 
@@ -171,7 +174,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
       });
     },
     async teardown() {
-      harness.teardown();
+      await harness.teardown();
     },
   };
 }
@@ -187,7 +190,12 @@ async function startLiveGateway(): Promise<GatewayHandle> {
   const { unlinkSync, existsSync } = await import("node:fs");
 
   // Create an isolated temp DB
-  const dbPath = `/tmp/lore-eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  const testDatabaseRoot = process.env.LORE_TEST_DB_ROOT;
+  if (!testDatabaseRoot) throw new Error("LORE_TEST_DB_ROOT is not set");
+  const dbPath = join(
+    testDatabaseRoot,
+    `eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+  );
   process.env.LORE_DB_PATH = dbPath;
 
   // Random port
@@ -234,7 +242,7 @@ async function startLiveGateway(): Promise<GatewayHandle> {
       });
     },
     async teardown() {
-      server.stop();
+      await server.stop();
       closeDB();
       await resetPipelineState();
       // Clean up DB files
@@ -1073,10 +1081,11 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
   const llm =
     config.mode === "live" ? createEvalLLMClient(resolveBackend()) : undefined;
 
-  const gateway = await connectGateway(config);
   const allResults: EvalResult[] = [];
+  let gateway: GatewayHandle | undefined;
 
   try {
+    gateway = await connectGateway(config);
     // Import scenario modules for selected dimensions, filtered by --scenarios
     let scenarioModules = await loadScenarios(config.dimensions);
     if (config.scenarios?.length) {
@@ -1105,7 +1114,7 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
       );
     }
   } finally {
-    if (gateway.teardown) await gateway.teardown();
+    if (gateway?.teardown) await gateway.teardown();
   }
 
   return allResults;

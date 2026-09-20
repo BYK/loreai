@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
 import { Readable } from "node:stream";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 function sseChunk(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`;
@@ -153,7 +154,7 @@ afterEach(async () => {
 
 describe("Anthropic client + OpenAI upstream (streaming re-emission, #1052)", () => {
   test("re-emits a buffered OpenAI upstream as an Anthropic SSE stream (not JSON)", async () => {
-    const dbPath = `/tmp/lore-anthropic-openai-stream-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("anthropic-openai-stream");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";

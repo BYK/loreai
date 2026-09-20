@@ -16,9 +16,9 @@ import {
   vi,
 } from "vitest";
 import { config } from "../src/config";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { createTestDatabaseDirectory } from "./helpers/test-db-path";
 import {
   close,
   db,
@@ -2171,7 +2171,7 @@ describeVec("temporal re-chunk durable admission", () => {
     const token = _saveAndClearProvider();
     _restoreProvider({ provider: { maxBatchSize: 8, embed: vi.fn() } });
     const originalPath = process.env.LORE_DB_PATH;
-    const directory = mkdtempSync(join(tmpdir(), "lore-rechunk-close-"));
+    const directory = createTestDatabaseDirectory("rechunk-close");
     const successorPath = join(directory, "successor.db");
     let checks = 0;
     try {
@@ -2204,7 +2204,7 @@ describeVec("temporal re-chunk durable admission", () => {
     insertContent("m1");
     insertContent("m2");
     const originalPath = process.env.LORE_DB_PATH;
-    const directory = mkdtempSync(join(tmpdir(), "lore-rechunk-close-"));
+    const directory = createTestDatabaseDirectory("rechunk-close");
     const successorPath = join(directory, "successor.db");
     let checks = 0;
     try {

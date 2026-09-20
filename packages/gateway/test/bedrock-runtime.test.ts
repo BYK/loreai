@@ -23,6 +23,7 @@ import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import { close as closeDB } from "@loreai/core";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 function localRequest(
   baseURL: string,
@@ -485,7 +486,7 @@ afterEach(async () => {
 
 describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", () => {
   test("forwards a non-streaming converse request to bedrock-runtime.<region>.amazonaws.com", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";
@@ -609,7 +610,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
   });
 
   test("forwards a modelId with version-suffix colon (e2e regression for #1575 follow-up)", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-colon-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime-colon");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";
@@ -714,7 +715,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
   });
 
   test("streams a converse-stream response (AWS event-stream passthrough)", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-stream-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime-stream");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "eu-west-1";
@@ -787,7 +788,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
   });
 
   test("a non-matching path still 404s (does not over-match)", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-nomatch-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime-nomatch");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";

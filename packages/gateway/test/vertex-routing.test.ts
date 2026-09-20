@@ -17,6 +17,7 @@
 import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 /** A non-streaming Anthropic message response (Vertex returns native shape). */
 function vertexJSONResponse(): Response {
@@ -43,7 +44,7 @@ afterEach(async () => {
 
 describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
   test("routes to Vertex over the rawPredict path with a transformed body", async () => {
-    const dbPath = `/tmp/lore-vertex-route-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("vertex-route");
     process.env.LORE_DB_PATH = dbPath;
     // Port 0 = OS-assigned ephemeral port (avoids EADDRINUSE flake, #931).
     process.env.LORE_LISTEN_PORT = "0";

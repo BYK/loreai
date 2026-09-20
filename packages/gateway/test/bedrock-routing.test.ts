@@ -17,6 +17,7 @@
 import { describe, test, expect, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 /** A non-streaming Anthropic message response (mantle returns native shape). */
 function mantleJSONResponse(): Response {
@@ -43,7 +44,7 @@ afterEach(async () => {
 
 describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
   test("routes to mantle over the Anthropic protocol with a remapped model id", async () => {
-    const dbPath = `/tmp/lore-bedrock-route-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-route");
     process.env.LORE_DB_PATH = dbPath;
     // Port 0 = OS-assigned ephemeral port; server.port returns the actual
     // bound port. Avoids EADDRINUSE flakes from random-port collisions (#931).

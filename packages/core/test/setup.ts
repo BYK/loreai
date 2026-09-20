@@ -1,100 +1,78 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { lstatSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { afterAll, afterEach } from "vitest";
+import { afterAll, afterEach, beforeEach, inject, vi } from "vitest";
 import { close, invalidateProjectIdCache } from "../src/db";
 import { silenceStderr } from "../src/log";
 
-// Create an isolated temporary database for the entire test run.
-// This prevents test fixtures from leaking into the live lore DB
-// at ~/.local/share/lore/lore.db.
-const tmp = mkdtempSync(join(tmpdir(), "lore-test-"));
-process.env.LORE_DB_PATH = join(tmp, "test.db");
+vi.mock("../../gateway/src/fetch", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("../../gateway/src/fetch")>();
+  const { offlineModelsDevResponse } =
+    await import("../../gateway/test/helpers/models-dev-dispatcher");
 
-// ---------------------------------------------------------------------------
-// Block live network to models.dev during tests.
-//
-// `fetchModelData()` (gateway/src/worker-model.ts) hits
-// https://models.dev/api.json to pull pricing/limits, and the gateway
-// pre-warms it on startup (pipeline.ts). Any test that starts a real gateway
-// — or any test running while another file's pipeline pre-warm fires — would
-// otherwise make a live HTTP call. That made the suite depend on a 3rd-party
-// API being up: it flaked when models.dev returned 500 / timed out, and it
-// polluted worker-model.test.ts's fetch-mock assertions across files.
-//
-// We install a baseline `globalThis.fetch` that intercepts ONLY the models.dev
-// endpoint (returning canned, realistic data) and delegates everything else to
-// the real implementation. Tests that override `globalThis.fetch` still work:
-// they replace the global, and when they restore the captured `originalFetch`
-// in afterEach they restore THIS guard, so post-test async pre-warms stay
-// offline too. Mirrors the SENTRY_ENABLED=0 "no background fetch leaks into
-// tests" precedent in vitest.config.ts.
-const MODELS_DEV_API = "https://models.dev/api.json";
-const CANNED_MODELS_DEV = {
-  anthropic: {
-    models: {
-      "claude-opus-4-6": {
-        id: "claude-opus-4-6",
-        cost: { input: 5, output: 25, cache_read: 0.5 },
-        limit: { context: 1_000_000, output: 128_000 },
-      },
-      "claude-sonnet-4-20250514": {
-        id: "claude-sonnet-4-20250514",
-        cost: { input: 3, output: 15, cache_read: 0.3 },
-        limit: { context: 1_000_000, output: 64_000 },
-      },
-      "claude-haiku-4-5": {
-        id: "claude-haiku-4-5",
-        cost: { input: 1, output: 5, cache_read: 0.1 },
-        limit: { context: 200_000, output: 64_000 },
-      },
+  return {
+    ...original,
+    async upstreamFetch(input: RequestInfo | URL, init?: RequestInit) {
+      return (
+        offlineModelsDevResponse(input, init) ??
+        original.upstreamFetch(input, init)
+      );
     },
-  },
-  openai: {
-    models: {
-      "gpt-5.4-mini": {
-        id: "gpt-5.4-mini",
-        cost: { input: 0.75, output: 4.5, cache_read: 0.19 },
-        limit: { context: 400_000, output: 100_000 },
-      },
-    },
-  },
-};
+  };
+});
 
-const realFetch = globalThis.fetch;
-globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  const url =
-    typeof input === "string"
-      ? input
-      : input instanceof URL
-        ? input.href
-        : input.url;
-  if (url === MODELS_DEV_API) {
-    return Promise.resolve(
-      new Response(JSON.stringify(CANNED_MODELS_DEV), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-  }
-  return realFetch(input, init);
-};
+// Reserve a unique path beneath the run-owned root without creating its
+// directory. A wholly skipped file therefore leaves no per-file residue.
+const runRoot = inject("loreTestRoot");
+const createdRunRoot = lstatSync(runRoot, { bigint: true });
+const runRootIdentity = Object.freeze({
+  dev: createdRunRoot.dev,
+  ino: createdRunRoot.ino,
+});
+const tmp = join(runRoot, randomUUID());
+const testDatabasePath = join(tmp, "test.db");
+const testDataHome = join(tmp, "xdg");
+process.env.LORE_TEST_DB_ROOT = tmp;
+process.env.LORE_DB_PATH = testDatabasePath;
+process.env.XDG_DATA_HOME = testDataHome;
 
 // The Pi/OpenCode plugins flip `log.silenceStderr()` when they activate inside
 // their TUI host. A force-active plugin test (LORE_*_FORCE_ACTIVE=1) would
 // otherwise leave stderr silenced for the rest of the fork — hiding logs from,
 // or vacuating "no output" assertions in, unrelated test files that share it.
-// Reset after every test so silenced state never crosses a test boundary.
-afterEach(() => {
+// Reset on both sides of every test. The entry reset repairs state changed by a
+// file-local teardown that runs after this setup hook under list ordering; the
+// exit reset protects the ordinary stack-ordered path.
+const resetIsolationState = () => {
+  process.env.NODE_ENV = "test";
+  process.env.LORE_TEST_DB_ROOT = tmp;
+  process.env.LORE_DB_PATH = testDatabasePath;
+  process.env.XDG_DATA_HOME = testDataHome;
   silenceStderr(false);
-  // The whole run shares one temp DB (single db() instance), so the per-
+  // The whole file shares one temp DB (single db() instance), so the per-
   // connection project path→id memo persists across tests. Clear it after each
   // test to make isolation explicit — a settled/alias mapping cached by one
   // test must never be served to another test that reuses the same path.
   invalidateProjectIdCache();
-});
+};
+beforeEach(resetIsolationState);
+afterEach(resetIsolationState);
 
 afterAll(() => {
   close();
+  try {
+    const currentRunRoot = lstatSync(runRoot, { bigint: true });
+    if (
+      !currentRunRoot.isDirectory() ||
+      currentRunRoot.dev !== runRootIdentity.dev ||
+      currentRunRoot.ino !== runRootIdentity.ino
+    ) {
+      return;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
   rmSync(tmp, { recursive: true, force: true });
 });

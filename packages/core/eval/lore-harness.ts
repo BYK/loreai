@@ -8,6 +8,7 @@
  * distilled context.
  */
 import { createHarness } from "vitest-evals";
+import { join } from "node:path";
 import type { ScenarioDefinition } from "./types";
 import type { GatewayHandle } from "./harness";
 import { QA_SYSTEM } from "./baselines";
@@ -64,7 +65,12 @@ const STANDARD_TOOLS = [
 export async function startGateway(): Promise<GatewayHandle> {
   const { unlinkSync, existsSync } = await import("node:fs");
 
-  const dbPath = `/tmp/lore-eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  const testDatabaseRoot = process.env.LORE_TEST_DB_ROOT;
+  if (!testDatabaseRoot) throw new Error("LORE_TEST_DB_ROOT is not set");
+  const dbPath = join(
+    testDatabaseRoot,
+    `eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+  );
   process.env.LORE_DB_PATH = dbPath;
 
   const port = 20000 + Math.floor(Math.random() * 30000);
@@ -103,7 +109,7 @@ export async function startGateway(): Promise<GatewayHandle> {
       });
     },
     async teardown() {
-      server.stop();
+      await server.stop();
       closeDB();
       await resetPipelineState();
       for (const suffix of ["", "-shm", "-wal"]) {

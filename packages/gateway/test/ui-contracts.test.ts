@@ -39,6 +39,7 @@ import {
   syncStatus,
   teamList,
 } from "../../ui/src/contracts";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 /** `/api/v1/...` built with the same URL builder the SPA client uses. */
 const v1 = (...args: Parameters<typeof apiPath>) =>
@@ -62,7 +63,7 @@ const SEEDED = {
 };
 
 beforeAll(async () => {
-  dbPath = `/tmp/lore-ui-contracts-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  dbPath = createTestDatabasePath("ui-contracts");
   process.env.LORE_DB_PATH = dbPath;
   process.env.LORE_LISTEN_PORT = "0";
   process.env.LORE_DEBUG = "false";
