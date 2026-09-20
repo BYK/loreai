@@ -790,7 +790,10 @@ describe("shell: search entry, theme and fixture", () => {
     mount("/", fakeClient());
     const logo = screen.getByTestId("logo");
     const img = logo.querySelector("img");
+    const wordmark = logo.querySelector(".font-serif");
     expect(img).not.toBeNull();
+    expect(logo).toBeVisible();
+    expect(wordmark).toHaveClass("hidden", "sm:inline");
     expect(logo).toHaveAttribute("data-logo-theme", "light");
     expect(img?.getAttribute("src")).toMatch(/loreai\.svg/);
     // The wordmark stays a real link target for assistive tech.
