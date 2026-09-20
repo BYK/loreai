@@ -329,17 +329,6 @@ describeVec("vec0Rebuild", () => {
     expect(staging.length).toBe(0);
   });
 
-  test("vec0Rebuild throws when row count diverges (paranoia guard)", () => {
-    // This test would require mocking sqlite-vec's INSERT to drop a row,
-    // which is impractical in a unit test. The guard exists for the
-    // catastrophic case (a bug in the staging flow); we verify its presence
-    // by reading the source rather than triggering it.
-    // A real divergence would indicate either a sqlite-vec bug or a
-    // misconfigured staging table — both deserve a thrown error, not silent
-    // data loss.
-    expect(true).toBe(true);
-  });
-
   test("rebuilds a legacy 1024-slot temporal table to compact 64-slot chunks", () => {
     if (!isVecAvailable()) return;
 

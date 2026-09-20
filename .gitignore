@@ -66,3 +66,4 @@ __pycache__/
 opencode.json
 packages/ui/e2e-results/
 packages/ui/playwright-report/
+.vitest-reports/

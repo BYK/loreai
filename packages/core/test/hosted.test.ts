@@ -8,6 +8,7 @@ import {
   _resetHostedModeForTest,
 } from "../src/hosted";
 import { getGitRemote, clearGitRemoteCache } from "../src/git";
+import { db } from "../src/db";
 import { load } from "../src/config";
 import {
   loreFileExists,
@@ -24,6 +25,13 @@ const TMP = join(
   fileURLToPath(new URL(".", import.meta.url)),
   "__tmp_hosted__",
 );
+
+function knowledgeCount(): number {
+  const row = db().prepare("SELECT count(*) AS n FROM knowledge").get() as {
+    n: number;
+  };
+  return row.n;
+}
 
 beforeEach(() => {
   _resetHostedModeForTest();
@@ -142,11 +150,15 @@ describe("agents-file in hosted mode", () => {
   });
 
   test("importLoreFile is a no-op", () => {
-    writeFileSync(join(TMP, ".lore.md"), "# test content", "utf8");
+    writeFileSync(
+      join(TMP, ".lore.md"),
+      "## Long-term Knowledge\n\n### Decision\n\n* **Hosted entry**: must not be imported.\n",
+      "utf8",
+    );
 
     enableHostedMode();
-    // Should not throw and should not import anything
-    importLoreFile(TMP);
+    expect(() => importLoreFile(TMP)).not.toThrow();
+    expect(knowledgeCount()).toBe(0);
   });
 
   test("shouldImport returns false", () => {
@@ -162,7 +174,8 @@ describe("agents-file in hosted mode", () => {
     writeFileSync(filePath, "# Agents\nSome content", "utf8");
 
     enableHostedMode();
-    importFromFile({ projectPath: TMP, filePath });
+    expect(() => importFromFile({ projectPath: TMP, filePath })).not.toThrow();
+    expect(knowledgeCount()).toBe(0);
   });
 
   test("exportToFile is a no-op (does not write)", () => {

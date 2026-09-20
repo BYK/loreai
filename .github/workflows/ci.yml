@@ -157,19 +157,137 @@ jobs:
       - name: Test verified bootstrap and shared installation runtime
         run: pnpm exec vitest run packages/gateway/test/install-bootstrap.test.ts packages/gateway/test/install-download.test.ts --maxWorkers=2
 
-  test:
+  # ---------------------------------------------------------------------------
+  # Vitest suite, sharded across parallel runners.
+  #
+  # The suite is ~500 files / ~11k tests and was the single longest CI step
+  # (~15 min). Each shard runs a hash-partitioned subset with the blob
+  # reporter and raw V8 coverage; the `coverage` job merges the blobs into
+  # one report for Codecov. Vitest sharding is by file-path hash, so a shard's
+  # membership is stable across runs regardless of ordering.
+  # ---------------------------------------------------------------------------
+  unit-test:
+    name: Unit tests (shard ${{ matrix.shard }}/4)
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    # Override the workflow-default permissions (contents: read, packages: write)
-    # to also grant what the Codecov upload step needs to post PR comments and
-    # commit statuses. A job-level block REPLACES the default, so the inherited
-    # perms are re-listed here.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+
+      # Build all packages so tests can resolve workspace dependencies.
+      - run: pnpm run build
+
+      # Restore the vendored embedding model so tests use a local model
+      # instead of downloading from HuggingFace Hub (avoids transient 429s).
+      # Same cache key as test / binary-smoke-native / build-nightly-binaries.
+      - name: Restore vendor staging
+        id: vendor-cache
+        uses: actions/cache@v5
+        with:
+          path: .vendor-build
+          key: vendor-${{ hashFiles('packages/core/package.json', 'packages/gateway/script/vendor-embeddings.ts', 'packages/gateway/script/vendor-paths.ts', 'packages/gateway/script/vendor-sqlite-vec.ts') }}
+
+      - name: Populate vendor staging (cache miss)
+        if: steps.vendor-cache.outputs.cache-hit != 'true'
+        run: pnpm tsx packages/gateway/script/vendor-embeddings.ts
+
+      # The gateway CJS bundle is exercised by bundle-exports / cli-bundle-smoke
+      # tests; `pnpm test` normally builds it via the root `pretest` hook, which
+      # does not run for a direct `vitest` invocation.
+      - name: Build gateway bundle
+        run: pnpm --filter @loreai/gateway run bundle
+
+      - name: Test (shard ${{ matrix.shard }}/4)
+        run: >-
+          pnpm exec vitest run
+          --shard=${{ matrix.shard }}/4
+          --reporter=blob --reporter=default
+          --coverage.enabled --coverage.reporter=json
+        env:
+          # Silence the ~85-line "ExperimentalWarning: SQLite is an experimental
+          # feature" noise from node:sqlite — emitted once per worker fork.
+          # Doesn't suppress real test failures.
+          NODE_NO_WARNINGS: 1
+          # Point the local embedding provider at the vendored model cache root
+          # (transformers.js resolves <root>/<modelId>/...). Keeps the test run
+          # off HuggingFace Hub. See packages/core/src/embedding-vendor.ts.
+          LORE_LOCAL_MODEL_PATH: ${{ github.workspace }}/.vendor-build/.model-cache
+
+      - name: Upload shard report
+        if: '!cancelled()'
+        uses: actions/upload-artifact@v7
+        with:
+          name: vitest-blob-${{ matrix.shard }}
+          path: .vitest-reports/
+          retention-days: 1
+          if-no-files-found: error
+
+  # Merge the shard blobs into a single coverage report and upload to Codecov.
+  coverage:
+    name: Coverage report
+    needs: [changes, unit-test]
+    if: needs.changes.outputs.code == 'true' && !cancelled()
+    runs-on: ubuntu-24.04
+    # Codecov upload needs to post PR comments and commit statuses.
     permissions:
       contents: read
       pull-requests: write
       statuses: write
       actions: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v7
+        with:
+          pattern: vitest-blob-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      # Produces ./coverage/lcov.info from the per-shard raw coverage data.
+      # Fails if a shard blob is missing, so a crashed shard cannot yield a
+      # silently partial coverage number.
+      - name: Merge shard reports
+        run: |
+          ls -la .vitest-reports
+          test "$(ls .vitest-reports/blob-*.json | wc -l)" -eq 4
+          pnpm exec vitest run --merge-reports --coverage.enabled --coverage.reporter=text-summary --coverage.reporter=lcov
+
+      # Uses Sentry's fork with the standard GITHUB_TOKEN (no CODECOV_TOKEN
+      # secret needed). `informational-patch` is true on push events so the 80%
+      # patch gate only BLOCKS on pull requests; on main/release pushes it
+      # reports without failing. Patch target (80%) and project-informational
+      # status are configured in codecov.yml.
+      - name: Coverage Report
+        uses: getsentry/codecov-action@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: ./coverage/lcov.info
+          informational-patch: ${{ github.event_name == 'push' }}
+
+  # ---------------------------------------------------------------------------
+  # Static checks, UI unit tests, bundle + standalone-binary smoke tests, and
+  # the nightly-version / staging artifacts downstream jobs depend on. The
+  # Vitest suite itself runs in the sharded `unit-test` job above.
+  # ---------------------------------------------------------------------------
+  test:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
     outputs:
       nightly-version: ${{ steps.nightly.outputs.version }}
     steps:
@@ -185,18 +303,10 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Build all packages so tests can resolve workspace dependencies
       - run: pnpm run build
 
-      # Note: the @loreai/gateway bundle is built by the root `pretest`
-      # hook that runs before `pnpm test` (see package.json). No pre-test
-      # bundle step needed here. The later "Build npm bundle" step (with
-      # SENTRY_AUTH_TOKEN) rebuilds the bundle for sourcemap upload and
-      # binary smoke tests.
-
-      # Restore the vendored embedding model so tests use a local model
-      # instead of downloading from HuggingFace Hub (avoids transient 429s).
-      # Same cache key as binary-smoke-native / build-nightly-binaries.
+      # Restore the vendored embedding model for the standalone binary build.
+      # Same cache key as unit-test / binary-smoke-native / build-nightly-binaries.
       - name: Restore vendor staging
         id: vendor-cache
         uses: actions/cache@v5
@@ -217,35 +327,10 @@ jobs:
       - name: Format check
         run: pnpm run format:check
 
-      - name: Test
-        # Runs the gateway bundle (needed by tests) then `vitest run --coverage`.
-        # `--coverage` is baked into the script rather than forwarded via
-        # `pnpm test -- --coverage`, because pnpm does NOT forward args past the
-        # `test` lifecycle script — the flag was silently dropped. Produces
-        # ./coverage/lcov.info for the Codecov upload below.
-        run: pnpm run test:coverage
+      - name: UI unit tests
+        run: pnpm --filter @loreai/ui test
         env:
-          # Silence the ~85-line "ExperimentalWarning: SQLite is an experimental
-          # feature" noise from node:sqlite — emitted once per worker fork in
-          # vitest's threads pool. Doesn't suppress real test failures.
           NODE_NO_WARNINGS: 1
-          # Point the local embedding provider at the vendored model cache root
-          # (transformers.js resolves <root>/<modelId>/...). Keeps the test run
-          # off HuggingFace Hub. See packages/core/src/embedding-vendor.ts.
-          LORE_LOCAL_MODEL_PATH: ${{ github.workspace }}/.vendor-build/.model-cache
-
-      # Upload coverage to Codecov. Uses Sentry's fork with the standard
-      # GITHUB_TOKEN (no CODECOV_TOKEN secret needed). `informational-patch` is
-      # true on push events so the 80% patch gate only BLOCKS on pull requests;
-      # on main/release pushes it reports without failing. Patch target (80%)
-      # and project-informational status are configured in codecov.yml.
-      - name: Coverage Report
-        if: '!cancelled()'
-        uses: getsentry/codecov-action@main
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          files: ./coverage/lcov.info
-          informational-patch: ${{ github.event_name == 'push' }}
 
       # Compute nightly version once, pass as job output to downstream jobs.
       # Only on main pushes — PRs and release branches don't get nightly versions.
@@ -871,7 +956,7 @@ jobs:
 
   build-nightly-binaries:
     name: Build Nightly Binaries
-    needs: [changes, test]
+    needs: [changes, test, unit-test]
     # Only on main pushes (not PRs, not release branches)
     if: >-
       needs.changes.outputs.code == 'true' &&
@@ -955,7 +1040,7 @@ jobs:
 
   build-nightly-darwin:
     name: Build Nightly Darwin
-    needs: [changes, test]
+    needs: [changes, test, unit-test]
     if: >-
       needs.changes.outputs.code == 'true' &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -1059,7 +1144,7 @@ jobs:
 
   generate-patches:
     name: Generate Delta Patches
-    needs: [changes, test, build-nightly-binaries, build-nightly-darwin]
+    needs: [changes, test, unit-test, build-nightly-binaries, build-nightly-darwin]
     outputs:
       from-version: ${{ steps.delta.outputs.from-version }}
     if: >-
@@ -1120,7 +1205,7 @@ jobs:
 
   publish-nightly:
     name: Publish Nightly to GHCR
-    needs: [changes, test, build-nightly-binaries, build-nightly-darwin, generate-patches]
+    needs: [changes, test, unit-test, build-nightly-binaries, build-nightly-darwin, generate-patches]
     # Serialize the rolling-tag read/compare/write window across nightly
     # workflows. The action also refuses to move it backwards by version.
     concurrency:
@@ -1193,7 +1278,7 @@ jobs:
 
   generate-release-patches:
     name: Generate Release Patches
-    needs: [changes, test]
+    needs: [changes, test, unit-test]
     # Only on release branches, not PRs or main
     if: >-
       needs.changes.outputs.code == 'true' &&
@@ -1272,8 +1357,11 @@ jobs:
         run: |
           docker pull postgres:16-alpine
           docker pull postgrest/postgrest:v12.2.3
+      # Every *.integration.test.ts suite is Docker-gated (LORE_INTEGRATION) and
+      # skipped in the regular unit-test shards; this is the only place they run.
       - name: Run sync integration tests
-        run: pnpm exec vitest run packages/gateway/test/sync-security.integration.test.ts packages/gateway/test/sync-engine.integration.test.ts packages/gateway/test/team.integration.test.ts packages/gateway/test/sync-orgs.integration.test.ts
+        # Vitest positional args are path filters, not globs: matches all 15 suites.
+        run: pnpm exec vitest run .integration.test.ts
         env:
           LORE_INTEGRATION: '1'
           NODE_NO_WARNINGS: '1'
@@ -1344,7 +1432,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, install-script-bash-compat, install-script-portability, sync-integration, hermes-test, hermes-real-abc]
+    needs: [changes, test, unit-test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, install-script-bash-compat, install-script-portability, sync-integration, hermes-test, hermes-real-abc]
     runs-on: ubuntu-24.04
     steps:
       - name: Check CI result
@@ -1361,6 +1449,10 @@ jobs:
           if [ "${{ needs.changes.outputs.code }}" == "true" ]; then
             if [ "${{ needs.test.result }}" != "success" ]; then
               echo "::error::test job did not succeed (result: ${{ needs.test.result }})"
+              exit 1
+            fi
+            if [ "${{ needs.unit-test.result }}" != "success" ]; then
+              echo "::error::unit-test job did not succeed (result: ${{ needs.unit-test.result }})"
               exit 1
             fi
             result="${{ needs.binary-smoke-native.result }}"

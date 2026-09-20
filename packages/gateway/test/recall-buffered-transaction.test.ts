@@ -14,6 +14,7 @@ import {
   streamingPostResponsePendingForTest,
 } from "../src/pipeline";
 import type { GatewayRequest } from "../src/translate/types";
+import * as coreConfig from "../../core/src/config";
 import { parseAnthropicResponseJSON } from "../src/translate/anthropic";
 import {
   _resetForTest as resetWorkerHealth,
@@ -26,6 +27,21 @@ import {
   recallAnchorContext,
   MAX_RECALL_STORE_ENTRIES,
 } from "../src/recall";
+
+// These tests assert on recall/buffered-transaction behaviour, never on
+// vectors; skip the ONNX embedding provider so stored messages bypass the
+// embedding worker (cuts ~40% of the file's wall time).
+vi.mock("../../core/src/config", async (importOriginal) => {
+  const mod = await importOriginal<typeof coreConfig>();
+  return {
+    ...mod,
+    config: () => {
+      const c = mod.config();
+      c.search.embeddings.enabled = false;
+      return c;
+    },
+  };
+});
 
 afterEach(async () => {
   setUpstreamInterceptor(undefined);
