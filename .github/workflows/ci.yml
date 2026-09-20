@@ -230,6 +230,9 @@ jobs:
           path: .vitest-reports/
           retention-days: 1
           if-no-files-found: error
+          # .vitest-reports is a dotted dir; upload-artifact skips hidden paths
+          # unless include-hidden-files is set.
+          include-hidden-files: true
 
   # Merge the shard blobs into a single coverage report and upload to Codecov.
   coverage:
