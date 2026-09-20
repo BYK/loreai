@@ -282,6 +282,15 @@ describe("shell: project navigation and real-data path", () => {
     );
   });
 
+  it("keeps knowledge q filters on the table route", async () => {
+    mount("/projects/p-lore/knowledge?q=Keep", fakeClient());
+    expect(await screen.findAllByTestId("knowledge-row")).toHaveLength(2);
+    expect(
+      screen.getByRole("textbox", { name: "Knowledge search" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Recall Results")).toBeNull();
+  });
+
   it("renders a deep link straight to an entry (reload of a nested route)", async () => {
     const client = fakeClient();
     mount("/projects/p-lore/knowledge/k-sqlite", client);

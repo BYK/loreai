@@ -22,13 +22,24 @@ test.describe("knowledge table routes", () => {
     await page.getByRole("button", { name: "category" }).click();
     await page.getByRole("option", { name: "gotcha" }).click();
     await page.getByRole("button", { name: /Sort/ }).click();
-    await page.getByRole("option", { name: "title_asc" }).click();
+    await page.getByRole("option", { name: "Title A–Z" }).click();
     await expect(page).toHaveURL(
       /category=gotcha.*sort=title_asc|sort=title_asc.*category=gotcha/,
     );
     const url = page.url();
     await page.reload();
     await expect(page).toHaveURL(url);
+  });
+
+  test("knowledge q filters stay on the table view", async ({ page }) => {
+    const projectId = await loreProjectId(page);
+    await page.goto(`/ui/projects/${projectId}/knowledge`);
+    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    await search.fill("SQLite");
+    await search.press("Enter");
+    await expect(page).toHaveURL(/\/knowledge\?q=SQLite/);
+    await expect(search).toBeVisible();
+    await expect(page.getByText(/Recall Results/)).toHaveCount(0);
   });
 
   test("mobile row navigation preserves the table query", async ({ page }) => {

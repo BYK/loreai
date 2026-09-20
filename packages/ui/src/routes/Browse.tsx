@@ -239,104 +239,129 @@ export const Browse: Component<{
   };
   const detail = () => {
     const id = projectId();
-    if (sessionId() && id)
-      return <SessionPlaceholder projectId={id} sessionId={sessionId()!} />;
-    if (searchQ() && id)
-      return (
-        <Show
-          when={project()}
-          fallback={<StateCard kind="loading" title="Loading project" />}
-        >
-          {(value) => (
-            <SearchResults
-              project={value()}
-              q={searchQ()!}
-              scope={searchScope() as RecallScope}
-            />
-          )}
-        </Show>
-      );
-    if (knowledgeId())
-      return (
-        <Switch>
-          <Match when={entry.loader.error() && !entry.loader.data()}>
-            <div class="p-5">
-              {errorStateFor(
-                entry.loader.error(),
-                "Knowledge entry",
-                entry.loader.reload,
-              )}
-            </div>
-          </Match>
-          <Match when={entry.loader.loading() && !entry.loader.data()}>
-            <StateCard kind="loading" title="Loading entry" />
-          </Match>
-          <Match when={entry.loader.data()}>
-            {(value) => (
-              <KnowledgeDocument entry={value()} project={projectForEntry()} />
-            )}
-          </Match>
-        </Switch>
-      );
-    if (props.view === "knowledge-table" && id)
-      return (
-        <KnowledgeTable
-          projectId={id}
-          query={query()}
-          selectedId={knowledgeId()}
-          page={knowledgePage}
-        />
-      );
-    if (props.view === "sessions" && id)
-      return (
-        <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
-      );
-    if (props.view === "project" && id)
-      return (
-        <Show
-          when={project()}
-          fallback={
-            <Show
-              when={ws.projects.loading()}
-              fallback={
-                ws.projects.error() ? (
-                  errorStateFor(
-                    ws.projects.error(),
-                    "Projects",
-                    ws.projects.reload,
+    switch (props.view) {
+      case "welcome":
+        return <WelcomeDetail projects={ws.projects.data()} />;
+      case "project":
+        if (!id)
+          return (
+            <StateCard kind="error" title="Project not found or inaccessible" />
+          );
+        return (
+          <Show
+            when={project()}
+            fallback={
+              <Show
+                when={ws.projects.loading()}
+                fallback={
+                  ws.projects.error() ? (
+                    errorStateFor(
+                      ws.projects.error(),
+                      "Projects",
+                      ws.projects.reload,
+                    )
+                  ) : (
+                    <StateCard
+                      kind="error"
+                      title="Project not found or inaccessible"
+                    />
                   )
-                ) : (
-                  <StateCard
-                    kind="error"
-                    title="Project not found or inaccessible"
-                  />
-                )
-              }
-            >
-              <StateCard kind="loading" title="Loading project" />
-            </Show>
-          }
-        >
-          {(value) => <ProjectPage project={value()} />}
-        </Show>
-      );
-    return <WelcomeDetail projects={ws.projects.data()} />;
+                }
+              >
+                <StateCard kind="loading" title="Loading project" />
+              </Show>
+            }
+          >
+            {(value) => <ProjectPage project={value()} />}
+          </Show>
+        );
+      case "knowledge-table":
+        return id ? (
+          <KnowledgeTable
+            projectId={id}
+            query={query()}
+            selectedId={knowledgeId()}
+            page={knowledgePage}
+          />
+        ) : (
+          <StateCard kind="error" title="Project not found or inaccessible" />
+        );
+      case "entry":
+        if (!knowledgeId()) {
+          return <StateCard kind="error" title="Knowledge entry not found" />;
+        }
+        return (
+          <Switch>
+            <Match when={entry.loader.error() && !entry.loader.data()}>
+              <div class="p-5">
+                {errorStateFor(
+                  entry.loader.error(),
+                  "Knowledge entry",
+                  entry.loader.reload,
+                )}
+              </div>
+            </Match>
+            <Match when={entry.loader.loading() && !entry.loader.data()}>
+              <StateCard kind="loading" title="Loading entry" />
+            </Match>
+            <Match when={entry.loader.data()}>
+              {(value) => (
+                <KnowledgeDocument
+                  entry={value()}
+                  project={projectForEntry()}
+                />
+              )}
+            </Match>
+          </Switch>
+        );
+      case "sessions":
+        return id ? (
+          <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
+        ) : (
+          <StateCard kind="error" title="Project not found or inaccessible" />
+        );
+      case "session":
+        const sid = sessionId();
+        return id && sid ? (
+          <SessionPlaceholder projectId={id} sessionId={sid} />
+        ) : (
+          <StateCard kind="error" title="Session not found" />
+        );
+      case "search":
+        return (
+          <Show
+            when={project()}
+            fallback={<StateCard kind="loading" title="Loading project" />}
+          >
+            {(value) => (
+              <SearchResults
+                project={value()}
+                q={searchQ() ?? ""}
+                scope={searchScope() as RecallScope}
+              />
+            )}
+          </Show>
+        );
+    }
   };
   const listView = createMemo(list);
   const detailView = createMemo(detail);
   const back = () => {
     const id = projectId();
     if (!id) return undefined;
-    if (props.view === "entry")
-      return { href: knowledgeListHref(id, query()), label: label() };
-    if (
-      props.view === "session" ||
-      props.view === "search" ||
-      props.view === "sessions" ||
-      props.view === "knowledge-table"
-    )
-      return { href: projectHref(id), label: label() };
-    return { href: "/", label: "Projects" };
+    switch (props.view) {
+      case "entry":
+        return { href: knowledgeListHref(id, query()), label: label() };
+      case "session":
+      case "search":
+      case "sessions":
+      case "knowledge-table":
+        return { href: projectHref(id), label: label() };
+      case "project":
+        return { href: "/", label: "Projects" };
+      default:
+        return undefined;
+    }
   };
   return (
     <Shell
@@ -345,7 +370,9 @@ export const Browse: Component<{
       detail={detailView()}
       mobilePane={mobilePane()}
       back={back()}
-      mobileTitle={knowledgeId() ? entry.loader.data()?.title : label()}
+      mobileTitle={
+        props.view === "entry" ? entry.loader.data()?.title : label()
+      }
       searchProjectId={projectId()}
     />
   );
