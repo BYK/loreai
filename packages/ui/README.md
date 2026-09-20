@@ -770,8 +770,8 @@ comes from strict solo runs; the `busy-report` attachment of every run
 carries the numbers for that run.
 
 **Bundle (production, `pnpm --filter @loreai/ui build`).** `Session-*.js`
-202.87 kB / 66.69 kB gzip (was 195.55 / 64.27 in UI-06b: +7.3 kB raw /
-+2.4 kB gzip for search, coverage and the dual highlight), entry
+203.09 kB / 66.74 kB gzip (was 195.55 / 64.27 in UI-06b: +7.5 kB raw /
++2.5 kB gzip for search, coverage and the dual highlight), entry
 `index-*.js` 325.66 kB / 104.14 kB gzip (unchanged), CSS 41.50 kB / 8.94 kB
 gzip. The fixture, generator, engine and metrics are only reachable from
 the dev-only route and are not emitted in production builds.
