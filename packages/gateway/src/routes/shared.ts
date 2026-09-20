@@ -3,7 +3,11 @@ import { log } from "@loreai/core";
 import type { GatewayConfig } from "../config";
 import type { GatewayRequest } from "../translate/types";
 import { handleRequest } from "../pipeline";
-import { errorResponse, withoutCors } from "../management-access";
+import {
+  closingErrorResponse,
+  errorResponse,
+  withoutCors,
+} from "../management-access";
 
 export function invalidJsonBody(): Response {
   return errorResponse(400, "invalid_request_error", "Invalid JSON body");
@@ -12,6 +16,14 @@ export function invalidJsonBody(): Response {
 export function parseFailure(e: unknown): Response {
   const msg = e instanceof Error ? e.message : "Failed to parse request";
   return errorResponse(400, "invalid_request_error", msg);
+}
+
+export function invalidStreamedBody(e?: unknown): Response {
+  return closingErrorResponse(
+    400,
+    "invalid_request_error",
+    e instanceof Error ? e.message : "Invalid JSON body",
+  );
 }
 
 /**

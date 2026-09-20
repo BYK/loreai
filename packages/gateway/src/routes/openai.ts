@@ -7,38 +7,30 @@
  */
 import type { GatewayConfig } from "../config";
 import type { GatewayRequest } from "../translate/types";
-import { parseOpenAIRequest } from "../translate/openai";
+import { parseOpenAIRequestChunks } from "../translate/openai";
 import {
   parseOpenAICodexRequestChunks,
   parseOpenAIResponsesRequestChunks,
 } from "../translate/openai-responses";
 import { handleResponsesCompactEndpoint } from "../pipeline";
-import { decodeRequestBody, decodedRequestChunks } from "../http-body";
-import {
-  closingErrorResponse,
-  headersToRecord,
-  withoutCors,
-} from "../management-access";
+import { decodedRequestChunks } from "../http-body";
+import { headersToRecord, withoutCors } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
-import { invalidJsonBody, parseFailure, runPipeline } from "./shared";
+import { invalidStreamedBody, runPipeline } from "./shared";
 
 export async function handleOpenAIChatCompletions(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
-  let body: unknown;
-  try {
-    body = JSON.parse(await decodeRequestBody(req));
-  } catch {
-    return invalidJsonBody();
-  }
-
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = parseOpenAIRequest(body, headersToRecord(req.headers));
+    gatewayReq = await parseOpenAIRequestChunks(
+      decodedRequestChunks(req, req.signal),
+      headersToRecord(req.headers),
+    );
     gatewayReq.signal = req.signal;
-  } catch (e) {
-    return parseFailure(e);
+  } catch {
+    return invalidStreamedBody();
   }
   return runPipeline(gatewayReq, config);
 }
@@ -48,14 +40,6 @@ export async function handleOpenAIChatCompletions(
  * Closing the connection cancels Node's request body once the fixed 400 is
  * delivered.
  */
-function invalidStreamedBody(): Response {
-  return closingErrorResponse(
-    400,
-    "invalid_request_error",
-    "Invalid JSON body",
-  );
-}
-
 export async function handleOpenAIResponses(
   req: Request,
   config: GatewayConfig,

@@ -1,11 +1,11 @@
 /** Google Gemini protocol — `POST .../models/{model}:generateContent`. */
 import type { GatewayConfig } from "../config";
 import type { GatewayRequest } from "../translate/types";
-import { parseGeminiRequest } from "../translate/gemini";
-import { decodeRequestBody } from "../http-body";
+import { parseGeminiRequestChunks } from "../translate/gemini";
+import { decodedRequestChunks } from "../http-body";
 import { headersToRecord } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
-import { invalidJsonBody, parseFailure, runPipeline } from "./shared";
+import { invalidStreamedBody, runPipeline } from "./shared";
 
 /**
  * Matches a native Gemini `generateContent` endpoint path, capturing the model
@@ -23,13 +23,6 @@ export async function handleGeminiGenerateContent(
   model: string,
   stream: boolean,
 ): Promise<Response> {
-  let body: unknown;
-  try {
-    body = JSON.parse(await decodeRequestBody(req));
-  } catch {
-    return invalidJsonBody();
-  }
-
   // headersToRecord lowercases every key (Web Headers API), so `x-goog-api-key`
   // is the only case that can be present here.
   const headers = headersToRecord(req.headers);
@@ -43,10 +36,15 @@ export async function handleGeminiGenerateContent(
 
   let gatewayReq: GatewayRequest;
   try {
-    gatewayReq = parseGeminiRequest(body, headers, model, stream);
+    gatewayReq = await parseGeminiRequestChunks(
+      decodedRequestChunks(req, req.signal),
+      headers,
+      model,
+      stream,
+    );
     gatewayReq.signal = req.signal;
-  } catch (e) {
-    return parseFailure(e);
+  } catch {
+    return invalidStreamedBody();
   }
   return runPipeline(gatewayReq, config);
 }
