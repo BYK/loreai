@@ -11,7 +11,6 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { GATEWAY_AUTH_HEADER } from "@loreai/core";
 import { PROVIDER_AUTH_HEADER_NAMES } from "./auth";
-import { BEDROCK_RUNTIME_PATH_RE } from "./translate/bedrock-runtime";
 
 // ---------------------------------------------------------------------------
 // Browser-origin policy
@@ -115,45 +114,6 @@ export function closingErrorResponse(
   const response = errorResponse(status, type, message);
   response.headers.set("connection", "close");
   return response;
-}
-
-// ---------------------------------------------------------------------------
-// Path classification
-// ---------------------------------------------------------------------------
-
-/**
- * Matches a native Gemini `generateContent` endpoint path, capturing the model
- * id and the verb. Version-prefix-agnostic (`/v1beta/models/...`,
- * `/v1/models/...`, or bare `/models/...`) so both the Gemini CLI
- * (`GOOGLE_GEMINI_BASE_URL` → `/v1beta/...`) and `@ai-sdk/google` (baseURL
- * pinned to `${gateway}/v1` → `/v1/...`) are matched.
- */
-export const GEMINI_PATH_RE =
-  /\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
-
-export function isManagementPath(pathname: string): boolean {
-  return (
-    pathname === "/" ||
-    pathname === "/api" ||
-    pathname.startsWith("/api/") ||
-    pathname === "/ui" ||
-    pathname.startsWith("/ui/")
-  );
-}
-
-export function isDataPlanePath(pathname: string): boolean {
-  return (
-    pathname === "/v1/messages" ||
-    pathname === "/v1/chat/completions" ||
-    pathname === "/chat/completions" ||
-    pathname === "/v1/responses" ||
-    pathname === "/v1/codex/responses" ||
-    pathname === "/v1/responses/compact" ||
-    pathname === "/v1/compact" ||
-    pathname === "/v1/models" ||
-    GEMINI_PATH_RE.test(pathname) ||
-    BEDROCK_RUNTIME_PATH_RE.test(pathname)
-  );
 }
 
 // ---------------------------------------------------------------------------
