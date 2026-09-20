@@ -44,6 +44,15 @@ export interface PassageHighlight {
   end: number;
 }
 
+export function samePassage(a: PassageHighlight, b: PassageHighlight): boolean {
+  return (
+    a.blockId === b.blockId &&
+    a.partIndex === b.partIndex &&
+    a.start === b.start &&
+    a.end === b.end
+  );
+}
+
 export interface HighlightController {
   highlight: Accessor<PassageHighlight | null>;
   /** The current in-session search hit; marked independently of the passage. */

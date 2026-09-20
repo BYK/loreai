@@ -88,6 +88,7 @@ import {
   HighlightContext,
   MessageBlockView,
   type PassageHighlight,
+  samePassage,
 } from "./SessionBlock";
 
 /** Older pages searched automatically for a deep-linked block. */
@@ -392,8 +393,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   const [linkState, setLinkState] = createSignal<LinkState>({ kind: "none" });
   const [olderInFlight, setOlderInFlight] = createSignal(false);
   let scrollTarget: string | null = null;
-  let scrolledBlock: string | null = null;
-  let pendingMarkScroll = false;
+  /** The exact passage whose `<mark>` should be scrolled into view once applied. */
+  let pendingMark: PassageHighlight | null = null;
 
   const scrollToBlock = (blockId: string) => {
     const index = rowIndexOf(blockId);
@@ -476,9 +477,15 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
     if (block && scrollTarget === block.id) {
       scrollTarget = null;
-      scrolledBlock = block.id;
-      pendingMarkScroll =
-        resolution.status === "ok" && decoded.anchor.partIndex !== undefined;
+      pendingMark =
+        resolution.status === "ok" && decoded.anchor.partIndex !== undefined
+          ? {
+              blockId: block.id,
+              partIndex: decoded.anchor.partIndex,
+              start: decoded.anchor.start,
+              end: decoded.anchor.end,
+            }
+          : null;
       queueMicrotask(() => scrollToBlock(block.id));
     }
   });
@@ -762,17 +769,17 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   function goToHit(index: number) {
     const hit = search().hits[index];
     if (!hit) return;
+    const target: PassageHighlight = {
+      blockId: hit.blockId,
+      partIndex: hit.partIndex,
+      start: hit.start,
+      end: hit.end,
+    };
+    pendingMark = target;
     batch(() => {
       setHitIndex(index);
-      setSearchHit({
-        blockId: hit.blockId,
-        partIndex: hit.partIndex,
-        start: hit.start,
-        end: hit.end,
-      });
+      setSearchHit(target);
     });
-    scrolledBlock = hit.blockId;
-    pendingMarkScroll = true;
     scrollToBlock(hit.blockId);
   }
 
@@ -881,10 +888,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         highlight,
         searchHit,
         onApplied: (mark, h) => {
-          // A deep link or search hit scrolls to its passage once the mark
-          // exists.
-          if (pendingMarkScroll && h.blockId === scrolledBlock) {
-            pendingMarkScroll = false;
+          // A deep link or search hit scrolls to its passage once its own mark
+          // exists; a selection mark on the same block must not consume it.
+          if (pendingMark && samePassage(h, pendingMark)) {
+            pendingMark = null;
             mark.scrollIntoView?.({ block: "center" });
           }
         },

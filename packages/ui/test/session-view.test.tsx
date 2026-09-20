@@ -794,6 +794,64 @@ describe("SessionView: in-session search", () => {
     expect(screen.getByTestId("selection-panel")).toBeInTheDocument();
   });
 
+  it("scrolls to the search hit's own mark, not to a selection on the same block", async () => {
+    const block = messageBlock(SPECIMEN[2]!); // "Should we replace the SQLite…"
+    const part = block.parts[0]!;
+    const start = part.text.indexOf("Portability");
+    // jsdom has no scrollIntoView; record which element the reader targets.
+    const scrolled: HTMLElement[] = [];
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement) {
+        scrolled.push(this);
+      },
+    });
+    try {
+      mount({
+        anchorParam: encodeAnchor(anchorFor(block, part, start, start + 11)),
+      });
+      await tick();
+      expect(document.querySelector("mark.passage-target")?.textContent).toBe(
+        "Portability",
+      );
+      scrolled.length = 0;
+
+      fireEvent.input(screen.getByTestId("search-input"), {
+        target: { value: "SQLite" },
+      });
+      await settleSearch();
+      // Step until the hit lands on the selected block.
+      for (let i = 0; i < 10; i++) {
+        fireEvent.click(screen.getByTestId("search-next"));
+        await tick();
+        const mark = document.querySelector<HTMLElement>("mark.passage-search");
+        if (
+          mark?.closest("[data-block]")?.getAttribute("data-block") === block.id
+        )
+          break;
+      }
+      const hitMark = document.querySelector<HTMLElement>(
+        "mark.passage-search",
+      );
+      expect(hitMark?.closest("[data-block]")?.getAttribute("data-block")).toBe(
+        block.id,
+      );
+      // Both marks are on this block; only the search hit's mark was scrolled to.
+      expect(document.querySelector("mark.passage-target")?.textContent).toBe(
+        "Portability",
+      );
+      const last = scrolled.at(-1);
+      expect(last?.classList.contains("passage-search")).toBe(true);
+      expect(last?.textContent).toBe("SQLite");
+      expect(
+        scrolled.some((el) => el.classList.contains("passage-target")),
+      ).toBe(false);
+    } finally {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+        .scrollIntoView;
+    }
+  });
+
   it("says when only the loaded part of a longer history was searched and re-scans after older rows arrive", async () => {
     const [msgs, setMsgs] = createSignal(SPECIMEN);
     const [hasOlder, setHasOlder] = createSignal<boolean | null>(true);
