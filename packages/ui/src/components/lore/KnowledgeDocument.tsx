@@ -197,17 +197,18 @@ export const KnowledgeDocument: Component<{
                                 Source session available
                               </Match>
                               <Match when={value().state === "summary_only"}>
+                                <div class="mt-1">
+                                  Original messages expired · retained summary
+                                  only —{" "}
+                                  {pluralize(
+                                    value().detail?.distillations.length ?? 0,
+                                    "distillation",
+                                  )}
+                                </div>
                                 <For each={value().detail?.distillations ?? []}>
                                   {(distillation) => (
-                                    <div class="mt-1">
-                                      Original messages expired · retained
-                                      summary only —{" "}
-                                      {pluralize(
-                                        value().detail?.distillations.length ??
-                                          0,
-                                        "distillation",
-                                      )}
-                                      , gen {distillation.generation},{" "}
+                                    <div class="mt-1 text-muted">
+                                      gen {distillation.generation},{" "}
                                       {formatWhen(distillation.created_at)}
                                     </div>
                                   )}

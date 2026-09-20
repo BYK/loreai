@@ -183,6 +183,17 @@ describe("KnowledgeDocument", () => {
               created_at: 1,
               call_type: "observer",
             },
+            {
+              id: "d2",
+              session_id: "s-1",
+              generation: 1,
+              token_count: 3,
+              r_compression: 0.4,
+              c_norm: 0.6,
+              archived: true,
+              created_at: 2,
+              call_type: "reflector",
+            },
           ],
         },
       },
@@ -199,7 +210,10 @@ describe("KnowledgeDocument", () => {
     });
     if (_label === "summary-only") {
       expect(screen.getByText(/Original messages expired/)).toBeInTheDocument();
-      expect(screen.getByText(/1 distillation, gen 0/)).toBeInTheDocument();
+      expect(screen.getByText(/2 distillations/)).toBeInTheDocument();
+      expect(screen.getByText(/gen 0/)).toBeInTheDocument();
+      expect(screen.getByText(/gen 1/)).toBeInTheDocument();
+      expect(screen.getAllByText(/2 distillations/)).toHaveLength(1);
       expect(
         screen.getByText(
           "Summary text is available in the UI-06 session reader.",
