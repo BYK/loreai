@@ -19,6 +19,7 @@ import { ftsQuery, EMPTY_QUERY } from "./search";
 import { sql, type SqlFragment } from "./sql";
 import { currentTenantId } from "./tenant";
 import type { SessionSummary } from "./data";
+import type { TemporalMessage } from "./temporal";
 
 // ---------------------------------------------------------------------------
 // Knowledge
@@ -303,6 +304,68 @@ export function listSessionsPage(
       hasMore && last
         ? { last_message_at: last.last_message_at, session_id: last.session_id }
         : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Session messages (history reader, #1801)
+// ---------------------------------------------------------------------------
+
+/** Position of the oldest message of the previous page. */
+export type MessageKeyset = { created_at: number; id: string };
+
+export type SessionMessagePage = {
+  /** Chronological (`created_at ASC, id ASC`) within the page. */
+  items: TemporalMessage[];
+  /** Keyset to fetch the next *older* page, or null when the page reached the
+   *  session's first message. */
+  next: MessageKeyset | null;
+  /** Messages in the session at query time, so a reader can say how much of
+   *  the captured history it has loaded. */
+  total: number;
+};
+
+/**
+ * Keyset-paginated tail of a session's messages: the first page is the
+ * newest `limit` messages, each later page (`before`) the `limit` messages
+ * older than the previous page's oldest. Pages are returned in chronological
+ * order so a reader prepends them as they arrive. The total order is
+ * `created_at, id`, which the legacy `temporal.bySession()` (`created_at`
+ * only) is consistent with except among equal timestamps.
+ */
+export function listSessionMessagesPage(
+  projectPath: string,
+  sessionId: string,
+  options: { limit: number; before?: MessageKeyset },
+): SessionMessagePage {
+  const pid = ensureProject(projectPath);
+  const limit = Math.max(1, Math.floor(options.limit));
+  const before = options.before
+    ? sql`AND (created_at < ${options.before.created_at} OR (created_at = ${options.before.created_at} AND id < ${options.before.id}))`
+    : sql.empty;
+  const rows = sql.all<TemporalMessage>(
+    db(),
+    sql`SELECT * FROM temporal_messages
+       WHERE project_id = ${pid} AND session_id = ${sessionId} ${before}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ${limit + 1}`,
+  );
+  const total =
+    sql.get<{ n: number }>(
+      db(),
+      sql`SELECT COUNT(*) AS n FROM temporal_messages WHERE project_id = ${pid} AND session_id = ${sessionId}`,
+    )?.n ?? 0;
+
+  const hasMore = rows.length > limit;
+  const newestFirst = hasMore ? rows.slice(0, limit) : rows;
+  const oldest = newestFirst[newestFirst.length - 1];
+  return {
+    items: newestFirst.reverse(),
+    next:
+      hasMore && oldest
+        ? { created_at: oldest.created_at, id: oldest.id }
+        : null,
+    total,
   };
 }
 

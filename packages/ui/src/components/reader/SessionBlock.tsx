@@ -5,8 +5,15 @@
  * part carries `data-block` / `data-part` so the reader (UI-06b) can map a
  * DOM selection back to a logical source anchor.
  */
-import type { Component, JSX } from "solid-js";
-import { For, Show, createMemo } from "solid-js";
+import type { Accessor, Component, JSX } from "solid-js";
+import {
+  For,
+  Show,
+  createContext,
+  createEffect,
+  createMemo,
+  useContext,
+} from "solid-js";
 
 import { Avatar } from "~/components/lore/Avatar";
 import { Badge } from "~/components/ui/badge";
@@ -21,8 +28,32 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { renderPart } from "~/reader/render";
+import { applyHighlight, clearHighlight } from "~/reader/selection";
 
 export const TIME_UNKNOWN = "time unknown";
+
+/** A displayed-text span of one part the reader wants marked. */
+export interface PassageHighlight {
+  blockId: string;
+  partIndex: number;
+  start: number;
+  end: number;
+}
+
+export interface HighlightController {
+  highlight: Accessor<PassageHighlight | null>;
+  /** Called with the first `<mark>` each time a highlight is (re)applied. */
+  onApplied?: (mark: HTMLElement, highlight: PassageHighlight) => void;
+}
+
+/**
+ * The reader provides the current passage highlight; `RichText` applies it
+ * to whichever mounted part it addresses. Logical (block/part/offsets), so a
+ * virtualised row that unmounts and remounts re-applies it on its own.
+ */
+export const HighlightContext = createContext<HighlightController>({
+  highlight: () => null,
+});
 
 /** Relative time with the full date as a tooltip; honest when unknown. */
 export const BlockTime: Component<{ at: number | null; class?: string }> = (
@@ -55,18 +86,36 @@ export const RichText: Component<{
   block: string;
   part: number;
   class?: string;
-}> = (props) => (
-  <div
-    class={cn(
-      "rich-text",
-      props.rendered.plain && "rich-text-plain",
-      props.class,
-    )}
-    data-block={props.block}
-    data-part={props.part}
-    innerHTML={props.rendered.html}
-  />
-);
+}> = (props) => {
+  const controller = useContext(HighlightContext);
+  let el: HTMLDivElement | undefined;
+  createEffect(() => {
+    // Re-run when the HTML is replaced (Solid resets innerHTML first) or
+    // the highlight moves.
+    void props.rendered.html;
+    const h = controller.highlight();
+    if (!el) return;
+    if (!h || h.blockId !== props.block || h.partIndex !== props.part) {
+      clearHighlight(el);
+      return;
+    }
+    const mark = applyHighlight(el, h.start, h.end);
+    if (mark) controller.onApplied?.(mark, h);
+  });
+  return (
+    <div
+      ref={(node) => (el = node)}
+      class={cn(
+        "rich-text",
+        props.rendered.plain && "rich-text-plain",
+        props.class,
+      )}
+      data-block={props.block}
+      data-part={props.part}
+      innerHTML={props.rendered.html}
+    />
+  );
+};
 
 const ORIGIN_AVATAR: Record<
   MessageBlock["origin"],
@@ -141,6 +190,14 @@ export const PartView: Component<{
 }> = (props) => {
   const rendered = createMemo(() => renderPart(props.block, props.part));
   const lines = () => props.part.text.split("\n").length;
+  const controller = useContext(HighlightContext);
+  // A highlighted tool/reasoning part must be visible to be highlighted.
+  const highlighted = () => {
+    const h = controller.highlight();
+    return (
+      !!h && h.blockId === props.block.id && h.partIndex === props.part.index
+    );
+  };
   return (
     <Show
       when={props.part.kind !== "text"}
@@ -154,7 +211,7 @@ export const PartView: Component<{
     >
       <details
         class="my-2.5 rounded-md border border-line bg-bg text-[13px] open:bg-surface"
-        open={props.open}
+        open={props.open || highlighted()}
         data-part-kind={props.part.kind}
       >
         <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2">

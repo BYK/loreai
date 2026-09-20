@@ -402,7 +402,7 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts` (typed client: validation, error classification, abort), `test/contracts.test.ts` (fixture round-trips + violation battery), `test/db.test.ts` (IndexedDB layer on fake-indexeddb: upgrade, recovery, TTL/LRU), `test/state.test.ts` (cached-first loader, cursor merging, store identity), `test/shell.test.tsx` (shell, real-data routes, cached-first rendering), `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a) and [Tests (UI-06b)](#tests-ui-06b)) | root `pnpm test`, regular CI job |
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
@@ -412,9 +412,10 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 The session reader is a **document**, not a chat feed: history is a list of
 addressable blocks the reader can select, link to and (in P3/P4) annotate or
-continue from. UI-06a (#1801, #1508) ships the model and rendering; the
-virtualised route, selection and deep links follow in UI-06b; the busy
-fixture, in-session search and coverage labels in UI-06c.
+continue from. UI-06a (#1801, #1508) ships the model and rendering; UI-06b
+the virtualised route (`/ui/projects/:id/sessions/:sid`), server paging,
+selection and deep links; the busy fixture, in-session search and coverage
+labels follow in UI-06c.
 
 ### Block model (`src/reader/blocks.ts`)
 
@@ -535,14 +536,112 @@ so the gateway's CSP (`script-src 'self'`) is unchanged.
 in an LRU of `RENDER_CACHE_LIMIT` (2000) entries; a content change is a
 different key, so stale HTML is never served for edited text.
 
-**Bundle impact.** The engines initialise lazily and the only screen that
-renders blocks so far is the dev-only fixture (loaded with `lazy()`), so the
-shipped product entry is unchanged by UI-06a: `index-*.js` 386.00 kB /
-121.88 kB gzip before and after; CSS +2.73 kB (+0.70 kB gzip) for the
-Markdown/code/highlight styles. Statically linking the engines into the
-entry measured +144 kB / +47.6 kB gzip (marked ≈ 44 kB, dompurify ≈ 133 kB,
-highlight.js core + 14 grammars ≈ 117 kB of source); UI-06b loads the
-reader route as its own chunk and records the real chunk size.
+**Bundle impact.** The engines initialise lazily and every screen that
+renders blocks is loaded with `lazy()`, so they never enter the product
+entry. UI-06a left `index-*.js` at 386.00 kB / 121.88 kB gzip (CSS
++2.73 kB / +0.70 kB gzip for the Markdown/code/highlight styles); statically
+linking the engines into the entry measured +144 kB / +47.6 kB gzip (marked
+≈ 44 kB, dompurify ≈ 133 kB, highlight.js core + 14 grammars ≈ 117 kB of
+source). UI-06b ships the reader as its own chunk — `Session-*.js`
+195.55 kB / 64.27 kB gzip (engines + `@tanstack/solid-virtual` +
+`virtual-core` ≈ 22 kB minified + the reader) — and the entry **shrinks**
+to 325.68 kB / 104.15 kB gzip: the dev-only compatibility smoke used to be
+a static import in `app.tsx`, which kept its modules in the entry's graph
+and, once the reader chunk shared `virtual-core` with it, would have hoisted
+the virtualiser into the entry (+22 kB). Both dev-only routes are now
+`lazy()` and production builds emit neither chunk.
+
+### Reader route, paging and virtualisation (UI-06b)
+
+`routes/Session.tsx` owns `/ui/projects/:projectId/sessions/:sessionId`
+(the path UI-04/05 link to) and renders `components/reader/SessionView.tsx`
+over `createSessionReader()` from `src/state/sessions.ts`.
+
+**Server paging (opt-in).** `GET /api/v1/sessions/:id?path=…` is unchanged
+for existing callers. With `page=cursor` (`limit` 1–1000, default 100) or a
+`cursor=` token the gateway answers `{ messages, distillations, next_cursor,
+message_count }` (`packages/gateway/src/api-lists.ts`,
+`handleShowSessionCursor`; core `listSessionMessagesPage`): the first page
+is the **newest** `limit` messages, each following page the older ones,
+every page in chronological order. Ordering is a stable keyset on
+`(created_at, id)` (`created_at < ? OR (created_at = ? AND id < ?)`), so
+equal timestamps neither skip nor repeat across pages. Cursors are opaque,
+versioned, and bound to the project + session they were issued for — a
+cursor replayed against another session is a 400, never someone else's
+history. `message_count` is the count at query time; `next_cursor: null`
+marks the start of captured history. Contract: `src/contracts/session.ts`
+`sessionPage`; fixture `test/fixtures/session-page.json`; gateway tests in
+`packages/gateway/test/api-session-paging.test.ts`.
+
+**Reader state.** `createSessionReader()` reuses the session detail loader
+(cached-first, `messageBlocks` collection, partial/stale semantics) for the
+first page and keeps older pages in a per-session prepend list; `hasOlder`
+is `null` until a non-stale server response says otherwise, so the view
+never claims "start of captured history" from the cache alone. Session
+changes abort in-flight page requests and reset paging.
+
+**Rows.** `src/reader/rows.ts` builds one `ReaderRow` per block
+(`key = block.id`); distillations with a known `createdAt` slot into the
+chronological position of the messages they summarise, those without a
+timestamp stay at the end — no time is invented to place them.
+
+**Virtualisation.** `SessionView` uses `@tanstack/solid-virtual@3.13.38`
+(`createVirtualizer`, `estimateSize` 120 px, `overscan` 6, `getItemKey` =
+row key) with owned dynamic measurement (`measureElement` on each mounted
+row, so expanding a tool part or loading Markdown re-measures). Loading
+older history prepends rows and restores the scroll offset by the
+virtualiser's total-size delta, so the passage under the reader's eye does
+not move. Focus is logical (`focusKey`): arrow keys move it across rows
+that may not be mounted; the DOM focus lands when the virtualiser mounts
+the row.
+
+**Selection and deep links.** `src/reader/selection.ts` reads the DOM
+`Selection` into a `SelectionReading`: a `part` reading (block, part,
+start/end into the displayed text, quote) when the range lies inside one
+`[data-block][data-part]` element, `ambiguous` when it spans parts or
+blocks or falls outside — the reader shows a hint instead of guessing.
+A reading becomes a `SourceAnchor` published as `?a=<encoded>` on the
+route; reload decodes it, finds the row, scrolls it into view and highlights
+the passage by wrapping text nodes in `<mark data-passage-mark>` (DOM
+operations, never HTML strings). Resolution states surface as banners:
+`changed` ("Source changed since this link was made", the passage is not
+highlighted), `missing` (older pages are searched up to
+`DEEP_LINK_SEARCH_PAGES` = 10, then "not found in the loaded history" /
+"not in this session's captured history"), malformed ("passage reference is
+not understood"). Selecting a passage
+opens the passage panel: the quote, **Copy with source** (quote + block
+origin/time — `time unknown` stays literal — + deep link) and **Copy link**
+are live; `Save note`, `Ask agent`, `Explore separately`, `Start with
+selected context`, `Share finding` render disabled with the visible
+"not available yet" label (`FutureAction`). The copied link is
+`deepLinkFor(base, anchor, quote)`: `?a=` plus the standard `#:~:text=`
+directive for the quote (see [Source anchors](#source-anchors-srcreaderanchorsts)),
+so it also scrolls to the passage as a plain text fragment where the browser
+supports that; the reader itself only ever reads `?a=`.
+
+**Coverage line.** The header states `N of M captured messages loaded`
+(server count known), `M messages` when everything is loaded, or `N
+messages loaded` when the count is unknown; a `partial` cache shows the
+partial indicator until the server answers. The three-way
+captured/partial/native-transcript declaration is UI-06c.
+
+### Tests (UI-06b)
+
+`test/reader-state.test.ts` (newest-first page, prepend, cursor
+termination, no paging before the first response, session switch aborts,
+older-page failure, cache partial/complete semantics),
+`test/reader-selection.test.tsx` (row building and unknown-time order,
+logical selection with inline markup, cross-part/outside/collapsed
+ambiguity, DOM-safe highlight apply/clear, invalid ranges, source-reference
+text, deep-link round trip), `test/session-view.test.tsx` (deep-link
+highlight, changed / out-of-range / malformed / missing source, older-page
+search, pointer selection → anchor, copy with source / copy link, copy
+failure, disabled future actions, cross-passage hint, coverage line,
+load-older + prepended rows, unknown completeness, keyboard focus + Enter,
+distillation rendering), `test/contracts.test.ts` (`sessionPage` fixture),
+`packages/gateway/test/api-session-paging.test.ts` (legacy shape untouched,
+cursor shape, page order, equal-timestamp tie-break, limit clamping and
+400s, malformed / cross-project / cross-session cursors, unknown session).
 
 ### Tests (UI-06a)
 
