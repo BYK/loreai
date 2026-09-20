@@ -305,12 +305,19 @@ export function createSessionsState({
   } {
     const keyed = createMemo(() => {
       const value = source();
-      return value ? `${value.projectPath}\u0000${value.sessionId}` : null;
+      return value
+        ? new URLSearchParams({
+            projectPath: value.projectPath,
+            sessionId: value.sessionId,
+          }).toString()
+        : null;
     });
     const loader = createLoader(keyed, async (key, signal) => {
-      const separator = key.indexOf("\u0000");
-      const projectPath = key.slice(0, separator);
-      const sessionId = key.slice(separator + 1);
+      const params = new URLSearchParams(key);
+      const projectPath = params.get("projectPath");
+      const sessionId = params.get("sessionId");
+      if (!projectPath || !sessionId)
+        throw new Error("Invalid evidence loader key");
       let session: SessionDetail;
       try {
         session = await tracked(() =>
