@@ -236,3 +236,191 @@
     -webkit-box-decoration-break: clone;
   }
 }
+
+/* Session reader (UI-06): sanitised Markdown / code / tool output produced by
+   src/lib/safe-html.ts. Containers isolate bidi direction so RTL text in a
+   transcript cannot reorder the chrome around it. */
+@layer components {
+  .rich-text {
+    unicode-bidi: isolate;
+    overflow-wrap: anywhere;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .rich-text > :first-child {
+    margin-top: 0;
+  }
+  .rich-text > :last-child {
+    margin-bottom: 0;
+  }
+  .rich-text p,
+  .rich-text ul,
+  .rich-text ol,
+  .rich-text blockquote,
+  .rich-text table {
+    margin: 0.5em 0;
+  }
+  .rich-text ul,
+  .rich-text ol {
+    padding-left: 1.5em;
+  }
+  .rich-text li + li {
+    margin-top: 0.2em;
+  }
+  .rich-text h1,
+  .rich-text h2,
+  .rich-text h3,
+  .rich-text h4,
+  .rich-text h5,
+  .rich-text h6 {
+    margin: 1em 0 0.4em;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--heading);
+  }
+  .rich-text h1 {
+    font-size: 1.25em;
+  }
+  .rich-text h2 {
+    font-size: 1.15em;
+  }
+  .rich-text h3,
+  .rich-text h4,
+  .rich-text h5,
+  .rich-text h6 {
+    font-size: 1em;
+  }
+  .rich-text blockquote {
+    border-left: 3px solid var(--quote-edge);
+    padding: 0.25em 0.9em;
+    color: var(--muted);
+  }
+  .rich-text hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: 1em 0;
+  }
+  .rich-text code {
+    font-family: var(--font-mono);
+    font-size: 0.875em;
+    background: var(--chrome);
+    border-radius: 3px;
+    padding: 0.1em 0.35em;
+  }
+  .rich-text pre {
+    margin: 0.6em 0;
+    padding: 0.7em 0.9em;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--chrome);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    tab-size: 2;
+  }
+  .rich-text pre code {
+    background: none;
+    padding: 0;
+    font-size: inherit;
+    border-radius: 0;
+  }
+  .rich-text-plain pre,
+  .rich-text pre.plain {
+    white-space: pre-wrap;
+  }
+  details > .rich-text pre {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  .rich-text table {
+    border-collapse: collapse;
+    font-size: 0.9em;
+  }
+  .rich-text th,
+  .rich-text td {
+    border: 1px solid var(--line);
+    padding: 0.3em 0.6em;
+    text-align: left;
+  }
+  .rich-text th {
+    background: var(--chrome);
+  }
+  .rich-text a[data-external] {
+    text-decoration: underline;
+    text-decoration-color: var(--thread);
+    text-underline-offset: 2px;
+  }
+  .rich-text a[data-external]::after {
+    content: " ↗";
+    font-size: 0.8em;
+    color: var(--muted);
+  }
+  .rich-text .md-image {
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  /* Lore-injected and system-prompt blocks are visibly different from
+     participants' speech (#1508): a dashed rail in the accent colour. */
+  .reader-block-lore,
+  .reader-block-system {
+    border-left: 3px dashed var(--thread);
+    padding-left: 12px;
+  }
+
+  /* highlight.js token colours from the brand palette (light + dark). No
+     external theme sheet: the tokens track the website's palette. */
+  .hljs {
+    color: var(--text);
+  }
+  .hljs-comment,
+  .hljs-quote,
+  .hljs-meta {
+    color: var(--muted);
+    font-style: italic;
+  }
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-built_in,
+  .hljs-doctag,
+  .hljs-section,
+  .hljs-name {
+    color: var(--emphasis);
+    font-weight: 600;
+  }
+  .hljs-string,
+  .hljs-attr,
+  .hljs-template-tag,
+  .hljs-regexp,
+  .hljs-addition {
+    color: var(--accent);
+  }
+  .hljs-number,
+  .hljs-literal,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-link {
+    color: var(--gold);
+  }
+  .hljs-title,
+  .hljs-title.function_,
+  .hljs-title.class_,
+  .hljs-type,
+  .hljs-variable,
+  .hljs-template-variable,
+  .hljs-params {
+    color: var(--heading);
+  }
+  .hljs-deletion {
+    color: var(--danger);
+  }
+  .hljs-emphasis {
+    font-style: italic;
+  }
+  .hljs-strong {
+    font-weight: 700;
+  }
+}

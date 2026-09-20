@@ -1,9 +1,9 @@
 import type { Component, ParentProps } from "solid-js";
+import { lazy } from "solid-js";
 import { A, type RouteDefinition, Router } from "@solidjs/router";
 
 import { compatRoutes } from "./compat/CompatSmoke";
 import { Browse } from "./routes/Browse";
-import { Fixture } from "./routes/Fixture";
 import { WorkspaceProvider } from "./routes/workspace";
 import type { ApiClient } from "./lib/api";
 import type { LoreUiDb } from "./db";
@@ -31,7 +31,17 @@ const NotFound: Component = () => (
  * and the unit/e2e suites still mount them.
  */
 const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
-  ? [{ path: "/fixture", component: Fixture }, compatRoutes]
+  ? [
+      {
+        path: "/fixture",
+        // Lazy so the specimen's rendering engines (Markdown, highlighter,
+        // sanitiser) form their own chunk and stay out of the product entry.
+        component: lazy(() =>
+          import("./routes/Fixture").then((m) => ({ default: m.Fixture })),
+        ),
+      },
+      compatRoutes,
+    ]
   : [];
 
 export const routes: RouteDefinition[] = [
