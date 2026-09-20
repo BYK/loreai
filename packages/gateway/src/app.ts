@@ -185,6 +185,13 @@ function rejectWebSocketUpgrade(pathname: string): Response {
   return resp;
 }
 
+/**
+ * Bearer check for the owner-only `/_lore/control` route. `lore stop` and the
+ * `lore start` probes (`cli/start.ts`) send `Authorization: Bearer <token>`
+ * with the per-process control token from the run record to read the PID and
+ * request shutdown. A mismatch is answered with the same 404 as an absent
+ * route so the endpoint is invisible without the token.
+ */
 function controlTokenMatches(req: Request, token: string): boolean {
   const authorization = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${token}`;
