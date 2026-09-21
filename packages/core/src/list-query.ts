@@ -345,27 +345,39 @@ export function listSessionMessagesPage(
     : sql.empty;
   const rows = sql.all<TemporalMessage>(
     db(),
-    sql`SELECT * FROM temporal_messages
-       WHERE project_id = ${pid} AND session_id = ${sessionId} ${before}
-       ORDER BY created_at DESC, id DESC
-       LIMIT ${limit + 1}`,
+    sql`SELECT * FROM (
+         SELECT * FROM temporal_messages
+         WHERE project_id = ${pid} AND session_id = ${sessionId} ${before}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ${limit + 1})
+       ORDER BY created_at ASC, id ASC`,
   );
   const total =
     sql.get<{ n: number }>(
       db(),
       sql`SELECT COUNT(*) AS n FROM temporal_messages WHERE project_id = ${pid} AND session_id = ${sessionId}`,
     )?.n ?? 0;
+  return { ...olderPage(rows, limit), total };
+}
 
+/**
+ * Splits a chronological `LIMIT limit + 1` fetch of the newest rows before a
+ * keyset into the page and the keyset of its oldest row. The probe row, when
+ * present, is the first (oldest) one and only proves that older rows exist.
+ */
+function olderPage<T extends MessageKeyset>(
+  rows: T[],
+  limit: number,
+): { items: T[]; next: MessageKeyset | null } {
   const hasMore = rows.length > limit;
-  const newestFirst = hasMore ? rows.slice(0, limit) : rows;
-  const oldest = newestFirst[newestFirst.length - 1];
+  const items = hasMore ? rows.slice(1) : rows;
+  const oldest = items[0];
   return {
-    items: newestFirst.reverse(),
+    items,
     next:
       hasMore && oldest
         ? { created_at: oldest.created_at, id: oldest.id }
         : null,
-    total,
   };
 }
 
@@ -388,8 +400,8 @@ export function sessionSearchTerms(raw: string): string[] {
     .slice(0, 32);
 }
 
-/** How the hits were matched: the terms as one adjacent phrase (last term a
- *  prefix), or every term anywhere in the message (each a prefix). */
+/** How the hits were matched: the terms as one adjacent phrase, or every
+ *  term anywhere in the message. Either way only the last term is a prefix. */
 export type SessionSearchMode = "phrase" | "terms";
 
 export type SessionSearchHit = {
@@ -423,9 +435,16 @@ function phraseMatch(terms: readonly string[]): string {
   return `${ftsQuoted(terms.join(" "))}*`;
 }
 
-/** `"a"* "b"* "c"*` — every term (as a prefix) anywhere in the message. */
+/**
+ * `"a" "b" "c"*` — every term anywhere in the message, only the last one a
+ * prefix (like the phrase form, and like a finder matching what was typed so
+ * far). A short inner token such as the `5` of `needle-5 config` therefore
+ * has to appear as that token, not as the start of every `5…` number.
+ */
 function termsMatch(terms: readonly string[]): string {
-  return terms.map((t) => `${ftsQuoted(t)}*`).join(" ");
+  return terms
+    .map((t, i) => (i === terms.length - 1 ? `${ftsQuoted(t)}*` : ftsQuoted(t)))
+    .join(" ");
 }
 
 /**
@@ -483,29 +502,18 @@ export function searchSessionMessagesPage(
     : sql.empty;
   const rows = sql.all<SessionSearchHit>(
     db(),
-    sql`SELECT m.id, m.created_at, m.role,
-              replace(snippet(temporal_fts, 0, '', '', '…', 16), char(31), ' ') AS snippet,
-              f.rank AS rank
-       FROM temporal_fts f
-       CROSS JOIN temporal_messages m ON m.rowid = f.rowid
-       WHERE f.content MATCH ${match} AND m.project_id = ${pid} AND m.session_id = ${sessionId} ${before}
-       ORDER BY m.created_at DESC, m.id DESC
-       LIMIT ${limit + 1}`,
+    sql`SELECT * FROM (
+         SELECT m.id, m.created_at, m.role,
+                replace(snippet(temporal_fts, 0, '', '', '…', 16), char(31), ' ') AS snippet,
+                f.rank AS rank
+         FROM temporal_fts f
+         CROSS JOIN temporal_messages m ON m.rowid = f.rowid
+         WHERE f.content MATCH ${match} AND m.project_id = ${pid} AND m.session_id = ${sessionId} ${before}
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ${limit + 1})
+       ORDER BY created_at ASC, id ASC`,
   );
-
-  const hasMore = rows.length > limit;
-  const newestFirst = hasMore ? rows.slice(0, limit) : rows;
-  const oldest = newestFirst[newestFirst.length - 1];
-  return {
-    terms,
-    mode,
-    items: newestFirst.reverse(),
-    next:
-      hasMore && oldest
-        ? { created_at: oldest.created_at, id: oldest.id }
-        : null,
-    total,
-  };
+  return { terms, mode, ...olderPage(rows, limit), total };
 }
 
 // ---------------------------------------------------------------------------

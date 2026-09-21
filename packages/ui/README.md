@@ -3,8 +3,8 @@
 Solid single-page app served by the gateway at `/ui`. It is a **read
 projection** of the gateway's `/api/v1` surface: the gateway's SQLite store is
 the only authority for projects, knowledge and sessions; the browser never owns
-data in this slice and never talks to a provider. UI-01 (#1796) adds this
-package as a compatibility smoke project plus documentation; UI-02 (#1797) adds
+data in this slice and never talks to a provider. #1796 adds this
+package as a compatibility smoke project plus documentation; #1797 adds
 the shell, gateway static serving and removes the legacy server-rendered
 dashboard.
 
@@ -17,11 +17,11 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/projects/:projectId/sessions` | Cursor-paged sessions for a project |
-| `/ui/projects/:projectId/sessions/:sessionId` | UI-06 session reader |
+| `/ui/projects/:projectId/sessions/:sessionId` | #1801 session reader |
 | `/ui/projects/:projectId/search` | Scoped recall results with expansion disabled |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
-| `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the UI-06a block model and renderer |
-| `/ui/_compat` | **Dev/test only** — UI-01 compatibility smoke page |
+| `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
+| `/ui/_compat` | **Dev/test only** — #1796 compatibility smoke page |
 
 Dev/test-only routes are mounted when `import.meta.env.DEV` is set (Vite dev
 server, Vitest); production builds drop them and their chunks from the route
@@ -53,22 +53,22 @@ it was pinned (publish dates from `npm view <pkg> time`, checked 2026-09-18).
 | Table | `@tanstack/solid-table` | 9.2.4 | 2026-08-28 | v9 API (`createTable`, `tableFeatures`) |
 | Virtual rows | `@tanstack/solid-virtual` | 3.13.38 | 2026-09-07 | |
 | CSS | `tailwindcss` / `@tailwindcss/vite` | 4.3.3 | 2026-07-16 | CSS-first config, no `tailwind.config.js` |
-| Local cache | `idb` | 8.0.3 | 2025-05-07 | `src/db/` repositories and migrations (UI-03) |
-| Response validation | `arktype` | 2.2.3 | 2026-07-07 | jitless (CSP); see [Schema library](#schema-library-ui-03-decision); replaces `zod` 4.5.4 from UI-02 |
+| Local cache | `idb` | 8.0.3 | 2025-05-07 | `src/db/` repositories and migrations (#1798) |
+| Response validation | `arktype` | 2.2.3 | 2026-07-07 | jitless (CSP); see [Schema library](#schema-library-1798-decision); replaces `zod` 4.5.4 from #1797 |
 | Relative timestamps | `date-fns` | 4.4.0 | 2026-05-29 | `formatRelative` in `src/lib/format.ts`; en-US locale until UI has a locale setting |
 | IndexedDB in tests | `fake-indexeddb` | 6.2.5 | 2025-11-07 | dev only; see [Tests](#tests) |
 | Class helpers | `class-variance-authority` 0.7.1, `clsx` 2.1.1, `tailwind-merge` 3.6.0 | | 2024-11-26 / 2024-04-23 / 2026-05-10 | used by the copied Solid UI components |
 | Unit tests | `@solidjs/testing-library` 0.8.10, `@testing-library/jest-dom` 7.0.1, `jsdom` 30.0.1 | | 2024-09-25 / 2026-08-09 / 2026-07-29 | run by Vitest |
-| Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (UI-02) |
-| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokenization for safe HTML and lazy inert recall parsing; `src/lib/safe-html.ts` remains the only `innerHTML` boundary (UI-04/UI-06a) |
+| Browser tests | `@playwright/test` | 1.63.0 | 2026-09-04 | separate CI workflow only (#1797) |
+| Markdown | `marked` | 18.0.12 | 2026-09-07 | GFM tokenization for safe HTML and lazy inert recall parsing; `src/lib/safe-html.ts` remains the only `innerHTML` boundary (#1799/#1843) |
 | HTML sanitiser | `dompurify` | 3.4.15 | 2026-09-06 | explicit tag/attribute allowlist + link policy hook; only used inside `src/lib/safe-html.ts` |
 | Code highlighting | `highlight.js` | 11.12.0 | 2026-08-12 | `lib/core` + 14 registered grammars, no auto-detect; regex-based, no `eval`, so `script-src 'self'` holds |
-| Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (UI-05) behind an owned container wrapper |
+| Charts (not installed yet) | `@observablehq/plot` | 0.6.17 | 2026-04-06 | framework-agnostic DOM library, no Solid peer; added by the first slice that charts (#1800) behind an owned container wrapper |
 
-### Schema library (UI-03 decision)
+### Schema library (#1798 decision)
 
-UI-02 shipped its three response schemas with `zod` 4.5.4 (classic API). Before
-growing that to the ~15 contracts UI-03 needs, the owner asked for a measured
+#1797 shipped its three response schemas with `zod` 4.5.4 (classic API). Before
+growing that to the ~15 contracts #1798 needs, the owner asked for a measured
 choice between Zod v4, Valibot, TypeBox and ArkType, **decided on runtime
 performance and memory footprint first**, bundle size second. The benchmark
 lives in [`bench/`](bench/) (`npm install`, then `npm run bench`,
@@ -282,7 +282,7 @@ mixed: the copied components were ported to Tailwind 4 (renamed utilities,
 animation classes dropped, `@custom-variant dark`, `@theme inline` token
 mapping). The full list of edits is in `src/components/ui/ATTRIBUTION.md`.
 
-## Compatibility smoke (UI-01)
+## Compatibility smoke (#1796)
 
 `src/compat/CompatSmoke.tsx`, mounted at `/ui/_compat` in the Vite dev server
 only (`import.meta.env.DEV`; production builds drop the route and its code)
@@ -318,7 +318,7 @@ pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm test && pnp
 ### Development workflow
 
 Production never runs a frontend dev server: the gateway serves `packages/ui/dist`
-(UI-02). For development:
+(#1797). For development:
 
 1. Start a gateway locally: `pnpm --filter @loreai/gateway run bundle && node
    packages/gateway/dist/bin.cjs start --local` (default `127.0.0.1:3207`).
@@ -406,19 +406,19 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (UI-06a)](#tests-ui-06a) and [Tests (UI-06b)](#tests-ui-06b)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
 | Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
-## Session reader (UI-06)
+## Session reader (#1801)
 
 The session reader is a **document**, not a chat feed: history is a list of
 addressable blocks the reader can select, link to and (in P3/P4) annotate or
-continue from. UI-06a (#1801, #1508) ships the model and rendering; UI-06b
+continue from. #1843 (closing #1508 within #1801) ships the model and rendering; #1846
 the virtualised route (`/ui/projects/:id/sessions/:sid`), server paging,
-selection and deep links; UI-06c the coverage declaration, in-session
+selection and deep links; #1849 the coverage declaration, in-session
 search over the logical history and the deterministic busy-session fixture
 with its measured budgets.
 
@@ -508,7 +508,7 @@ Firefox 131+ — <https://caniuse.com/url-scroll-to-text-fragment>). It is a
 matches nothing), the browser strips the directive before scripts see the
 URL (`location.hash` never contains it), and it is applied only on a full
 page load. `?a=` therefore stays the authoritative, verified anchor; the
-directive is appended to the copied link (UI-06b's `deepLinkFor`) and
+directive is appended to the copied link (#1846's `deepLinkFor`) and
 never read back.
 
 ### Safe rendering (`src/lib/safe-html.ts`)
@@ -543,11 +543,11 @@ different key, so stale HTML is never served for edited text.
 
 **Bundle impact.** The engines initialise lazily and every screen that
 renders blocks is loaded with `lazy()`, so they never enter the product
-entry. UI-06a left `index-*.js` at 386.00 kB / 121.88 kB gzip (CSS
+entry. #1843 left `index-*.js` at 386.00 kB / 121.88 kB gzip (CSS
 +2.73 kB / +0.70 kB gzip for the Markdown/code/highlight styles); statically
 linking the engines into the entry measured +144 kB / +47.6 kB gzip (marked
 ≈ 44 kB, dompurify ≈ 133 kB, highlight.js core + 14 grammars ≈ 117 kB of
-source). UI-06b ships the reader as its own chunk — `Session-*.js`
+source). #1846 ships the reader as its own chunk — `Session-*.js`
 195.55 kB / 64.27 kB gzip (engines + `@tanstack/solid-virtual` +
 `virtual-core` ≈ 22 kB minified + the reader) — and the entry **shrinks**
 to 325.68 kB / 104.15 kB gzip: the dev-only compatibility smoke used to be
@@ -556,10 +556,10 @@ and, once the reader chunk shared `virtual-core` with it, would have hoisted
 the virtualiser into the entry (+22 kB). Both dev-only routes are now
 `lazy()` and production builds emit neither chunk.
 
-### Reader route, paging and virtualisation (UI-06b)
+### Reader route, paging and virtualisation (#1846)
 
 `routes/Session.tsx` owns `/ui/projects/:projectId/sessions/:sessionId`
-(the path UI-04/05 link to) and renders `components/reader/SessionView.tsx`
+(the path #1799/#1800 link to) and renders `components/reader/SessionView.tsx`
 over `createSessionReader()` from `src/state/sessions.ts`.
 
 **Server paging (opt-in).** `GET /api/v1/sessions/:id?path=…` is unchanged
@@ -630,7 +630,7 @@ supports that; the reader itself only ever reads `?a=`.
 
 **Coverage line.** See [Coverage declaration](#coverage-declaration-ui-06c).
 
-### Coverage declaration (UI-06c)
+### Coverage declaration (#1849)
 
 `src/reader/coverage.ts` `coverageDeclaration({ loaded, total, hasOlder,
 cachedWindow })` turns what the server and cache *reported* into the
@@ -653,7 +653,7 @@ is declared absent rather than left implied by "captured". The search
 summary repeats the detail (`Searched the loaded history only · …`) when
 the view is partial.
 
-### In-session search (UI-06c)
+### In-session search (#1849)
 
 `src/reader/search.ts` scans the **logical** rows (`ReaderRow[]`), not the
 DOM, so hits in rows the virtualiser has not mounted are found. Matching is
@@ -688,7 +688,7 @@ reader offers **Search the whole session** (below).
 
 Two search entry points exist on purpose and answer different questions:
 
-| | Loaded-window search (UI-06c) | Whole-session search (#1857) | Project recall (UI-04) |
+| | Loaded-window search (#1849) | Whole-session search (#1857) | Project recall (#1799) |
 |---|---|---|---|
 | Where it runs | browser, `src/reader/search.ts` | gateway, `GET /api/v1/sessions/:id/search` | gateway, `GET /api/v1/recall` |
 | Over what | displayed text of the **loaded** blocks | stored text of **every** message in one session (`temporal_fts`) | fused knowledge / distillations / messages across a scope |
@@ -715,7 +715,10 @@ answer is
 `q` is required (empty → 400), at most 512 characters; `limit` 1–1000
 (default 100, anything else 400). User input is tokenised the way the FTS
 index is and quoted, so `"`, `*`, `NEAR`, parentheses and `-` are literal
-characters, never FTS5 syntax. The first page picks the mode — the phrase
+characters, never FTS5 syntax. Only the last term is a prefix (a finder
+matches what has been typed so far), in both modes: `needle-5` finds
+`needle-5…` but never `needle-1`, and the `5` of `5 shop` has to be the
+token `5`, not every `50`. The first page picks the mode — the phrase
 when any message contains it, otherwise (multi-term queries only) every
 term anywhere — and later pages pin it through the cursor, so a write
 between pages cannot switch semantics half-way. Cursors are the paging
@@ -771,10 +774,10 @@ sees the loaded blocks; whole-session search sees the captured session.
 Each label says which.
 
 Bundle: `Session-*.js` 208.52 kB / 68.46 kB gzip (+5.4 kB raw / +1.7 kB
-gzip over UI-06c for the contract, the page walk and the reach states);
+gzip over #1849 for the contract, the page walk and the reach states);
 entry and CSS unchanged.
 
-### Busy-session fixture (UI-06c, plan §16.1)
+### Busy-session fixture (#1849, plan §16.1)
 
 `/ui/fixture?view=busy` (dev-only route, `routes/BusyFixture.tsx`; not in
 the production bundle) mounts the real `SessionView` over
@@ -868,13 +871,13 @@ comes from strict solo runs; the `busy-report` attachment of every run
 carries the numbers for that run.
 
 **Bundle (production, `pnpm --filter @loreai/ui build`).** `Session-*.js`
-203.09 kB / 66.74 kB gzip (was 195.55 / 64.27 in UI-06b: +7.5 kB raw /
+203.09 kB / 66.74 kB gzip (was 195.55 / 64.27 in #1846: +7.5 kB raw /
 +2.5 kB gzip for search, coverage and the dual highlight), entry
 `index-*.js` 325.66 kB / 104.14 kB gzip (unchanged), CSS 41.50 kB / 8.94 kB
 gzip. The fixture, generator, engine and metrics are only reachable from
 the dev-only route and are not emitted in production builds.
 
-### Tests (UI-06c)
+### Tests (#1849)
 
 `test/reader-coverage-search.test.ts` (every coverage branch incl. cache
 → server → older-page ordering and "unknown never becomes complete";
@@ -928,7 +931,7 @@ source is most likely the virtualizer's per-row `measureElement` observer
 re-laying out rows while streaming rows grow — not proven, tracked as an
 open item.
 
-### Tests (UI-06b)
+### Tests (#1846)
 
 `test/reader-state.test.ts` (newest-first page, prepend, cursor
 termination, no paging before the first response, session switch aborts,
@@ -946,7 +949,7 @@ distillation rendering), `test/contracts.test.ts` (`sessionPage` fixture),
 cursor shape, page order, equal-timestamp tie-break, limit clamping and
 400s, malformed / cross-project / cross-session cursors, unknown session).
 
-### Tests (UI-06a)
+### Tests (#1843)
 
 `test/reader-blocks.test.ts` (ids, parts, envelopes, metadata, origins,
 unknown time, overlap de-duplication, distillation ordering, real fixture),
@@ -960,12 +963,12 @@ policy, class allowlist, text/DOM parity, cache keying and LRU eviction),
 `test/session-block.test.tsx` (roles, badges, time unknown, Lore/system
 labels, expandable tool/reasoning parts, distillation labelling).
 
-## Baseline (before / after UI-02)
+## Baseline (before / after #1797)
 
 From the [baseline posted on #1796](https://github.com/BYK/loreai/issues/1796#issuecomment-5736848368), `node scripts/ui-baseline.mjs
 --runs 5 --requests 40` on the same VM (Xeon 8559C ×8, Node v24.19.0), p50s:
 
-| Metric | clean `main` (`a4e6af5b`) | after UI-02 |
+| Metric | clean `main` (`a4e6af5b`) | after #1797 |
 |---|---|---|
 | Gateway bundle `dist/index.cjs` | 17,565,653 B | 18,125,556 B (+3.2 %, incl. self-hosted fonts + logos) |
 | Startup → `200 /health` | 1297 ms | 1144 ms |
@@ -1031,38 +1034,38 @@ predates the move from an embedded module to staged files, which took
 
 ## UX → component mapping
 
-From the design fixture (v2.2) to Solid components. UI-01 ships the primitives
-and the smoke page; the fixture and shell rows land in UI-02.
+From the design fixture (v2.2) to Solid components. #1796 ships the primitives
+and the smoke page; the fixture and shell rows land in #1797.
 
 | Fixture element / §0 primitive | Component | Primitive / lib | Slice |
 |---|---|---|---|
-| Pane chrome (nav / list / detail), responsive collapse | `Shell` (`components/shell`), `PaneHead` | CSS grid + Tailwind `md`/`lg` breakpoints; one pane below `md`, nav drawer (`Dialog`) below `lg` | UI-02 |
-| Project rows, knowledge rows | `Nav` items, `ListRow` | `<A>` (router, `aria-current`), `Badge` | UI-02 |
-| Global search entry (placeholder) | `SearchEntry` | button + `Dialog` (Kobalte) explaining UI-04; icon-only below `md` | UI-02 (real in UI-04) |
-| Connection status (checking / reachable / unreachable / unauthorized) | `ConnectionStatus` | `lib/connection.ts` store fed by the API client | UI-02 |
-| Dark / light | `ThemeToggle` | `lib/theme.ts`: `.dark` on `<html>`, `color-scheme`, `localStorage` `lore.ui.theme`, follows the OS until toggled | UI-02 |
-| Document-first detail, eyebrow labels | `KnowledgeDocument`, `DocHeader`, `Crumb`, `Tabs` | `.eyebrow`, `Badge` | UI-02 |
-| Source block (message + tool blocks) | `Message`, `ToolBlock` | plain Solid, `Badge` | UI-02 (fixture only) |
-| Anchor (stable passage id, `#anchor` in URL) | `Passage` (`id` prop) | `id` attribute + `SourceLink href="#…"` | UI-02 (fixture only) |
-| Selection (selected passage), source links | `Passage selected`, `SourceLink`, `Quote` | `.passage-target`, `<A>` | UI-02 (fixture only) |
-| Discussion indicator (collapsed), inline discussion (expanded replies) | `Passage marker`, `InlineDiscussion`, `Reply`, `Draft` | plain Solid | UI-02 (fixture only) |
-| Focused discussion with source quote | `FocusSide` (`/ui/fixture?view=focus`) | side pane ≥ `lg`, full pane below; `Quote` + back-to-source link | UI-02 (fixture only) |
-| Action menu (per passage / per finding) | `FutureActionRow` | `Button` group (all disabled) | UI-02 (fixture only, all disabled) |
-| Coverage label (which sources a finding rests on) | `DocHeader trailing` ("Native transcript · linked") | text | UI-02 (fixture only) |
-| Draft / saved / sent / unknown states, participant & scope labels | `NoteStateBadge`, `AuthorLine`, `ScopeLabel`, `Avatar` | `Badge` variants | UI-02 (fixture; `AuthorLine`/`ScopeLabel` also on real documents) |
-| Empty / error / locked states | `StateCard kind="empty" \| "error" \| "locked"` | plain Solid, `role="alert"` for error/locked | UI-02 |
-| Mobile navigation | `Shell` (`mobilePane`, back link, nav drawer) | Kobalte `Dialog` as a left sheet | UI-02 |
-| Future actions (Save note, Ask agent, Explore separately, Start with selected context, Share finding) | `FutureAction` | `Button disabled` + "not available yet" | UI-02 (disabled) |
-| Tables with sorting (sessions, knowledge) | — | `@tanstack/solid-table` | UI-04 |
-| Project identity, health and recent sessions | `ProjectPage` | `DocHeader`, `Button`, Kobalte `Select` | UI-04 |
-| Server-filtered knowledge table | `KnowledgeTable` | TanStack Solid Table v9, Kobalte `Select`, `TextField` | UI-04 |
-| Cursor-paged sessions | `SessionList` | router `<A>`, `StateCard` | UI-04 |
-| Scoped recall output | `SearchResults` | Kobalte `Select`, `TextField`, `Button` | UI-04 |
-| Session reader | `Session` / `SessionView` | `SessionBlock`, `@tanstack/solid-virtual` | UI-06 |
-| Shared loading/error/locked states | `ErrorState` | `StateCard`, retry/first-page actions | UI-04 |
-| Long lists | — | `@tanstack/solid-virtual` | UI-04 / UI-06 |
-| Local cache, drafts | — | `idb` | UI-03 |
-| Charts (cost / compression / latency) | `PlotContainer` (Solid owns the container, Plot owns descendants) | `@observablehq/plot` | UI-05 (lazy) |
+| Pane chrome (nav / list / detail), responsive collapse | `Shell` (`components/shell`), `PaneHead` | CSS grid + Tailwind `md`/`lg` breakpoints; one pane below `md`, nav drawer (`Dialog`) below `lg` | #1797 |
+| Project rows, knowledge rows | `Nav` items, `ListRow` | `<A>` (router, `aria-current`), `Badge` | #1797 |
+| Global search entry (placeholder) | `SearchEntry` | button + `Dialog` (Kobalte) explaining #1799; icon-only below `md` | #1797 (real in #1799) |
+| Connection status (checking / reachable / unreachable / unauthorized) | `ConnectionStatus` | `lib/connection.ts` store fed by the API client | #1797 |
+| Dark / light | `ThemeToggle` | `lib/theme.ts`: `.dark` on `<html>`, `color-scheme`, `localStorage` `lore.ui.theme`, follows the OS until toggled | #1797 |
+| Document-first detail, eyebrow labels | `KnowledgeDocument`, `DocHeader`, `Crumb`, `Tabs` | `.eyebrow`, `Badge` | #1797 |
+| Source block (message + tool blocks) | `Message`, `ToolBlock` | plain Solid, `Badge` | #1797 (fixture only) |
+| Anchor (stable passage id, `#anchor` in URL) | `Passage` (`id` prop) | `id` attribute + `SourceLink href="#…"` | #1797 (fixture only) |
+| Selection (selected passage), source links | `Passage selected`, `SourceLink`, `Quote` | `.passage-target`, `<A>` | #1797 (fixture only) |
+| Discussion indicator (collapsed), inline discussion (expanded replies) | `Passage marker`, `InlineDiscussion`, `Reply`, `Draft` | plain Solid | #1797 (fixture only) |
+| Focused discussion with source quote | `FocusSide` (`/ui/fixture?view=focus`) | side pane ≥ `lg`, full pane below; `Quote` + back-to-source link | #1797 (fixture only) |
+| Action menu (per passage / per finding) | `FutureActionRow` | `Button` group (all disabled) | #1797 (fixture only, all disabled) |
+| Coverage label (which sources a finding rests on) | `DocHeader trailing` ("Native transcript · linked") | text | #1797 (fixture only) |
+| Draft / saved / sent / unknown states, participant & scope labels | `NoteStateBadge`, `AuthorLine`, `ScopeLabel`, `Avatar` | `Badge` variants | #1797 (fixture; `AuthorLine`/`ScopeLabel` also on real documents) |
+| Empty / error / locked states | `StateCard kind="empty" \| "error" \| "locked"` | plain Solid, `role="alert"` for error/locked | #1797 |
+| Mobile navigation | `Shell` (`mobilePane`, back link, nav drawer) | Kobalte `Dialog` as a left sheet | #1797 |
+| Future actions (Save note, Ask agent, Explore separately, Start with selected context, Share finding) | `FutureAction` | `Button disabled` + "not available yet" | #1797 (disabled) |
+| Tables with sorting (sessions, knowledge) | — | `@tanstack/solid-table` | #1799 |
+| Project identity, health and recent sessions | `ProjectPage` | `DocHeader`, `Button`, Kobalte `Select` | #1799 |
+| Server-filtered knowledge table | `KnowledgeTable` | TanStack Solid Table v9, Kobalte `Select`, `TextField` | #1799 |
+| Cursor-paged sessions | `SessionList` | router `<A>`, `StateCard` | #1799 |
+| Scoped recall output | `SearchResults` | Kobalte `Select`, `TextField`, `Button` | #1799 |
+| Session reader | `Session` / `SessionView` | `SessionBlock`, `@tanstack/solid-virtual` | #1801 |
+| Shared loading/error/locked states | `ErrorState` | `StateCard`, retry/first-page actions | #1799 |
+| Long lists | — | `@tanstack/solid-virtual` | #1799 / #1801 |
+| Local cache, drafts | — | `idb` | #1798 |
+| Charts (cost / compression / latency) | `PlotContainer` (Solid owns the container, Plot owns descendants) | `@observablehq/plot` | #1800 (lazy) |
 
 ## Design tokens: website → UI mapping
 

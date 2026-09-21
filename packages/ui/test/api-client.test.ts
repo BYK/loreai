@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { apiPath, query } from "~/contracts";
 import {
   ApiError,
   createApiClient,
@@ -8,6 +9,26 @@ import {
   isContractError,
 } from "~/lib/api";
 import { createConnectionStore } from "~/lib/connection";
+
+describe("apiPath / query", () => {
+  it("encodes each segment as one path component and drops unset params", () => {
+    expect(apiPath(["sessions", "a/b c?d", "search"])).toBe(
+      "/sessions/a%2Fb%20c%3Fd/search",
+    );
+    expect(
+      apiPath(["recall"], {
+        q: "a&b=c",
+        path: "/home/x y",
+        limit: 1,
+        expand: false,
+        cursor: null,
+        page: undefined,
+      }),
+    ).toBe("/recall?q=a%26b%3Dc&path=%2Fhome%2Fx+y&limit=1&expand=false");
+    expect(query({})).toBe("");
+    expect(query({ a: null })).toBe("");
+  });
+});
 
 const PROJECT = {
   id: "p1",

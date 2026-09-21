@@ -36,6 +36,31 @@
     // disables for ~zero real bug-catching. Kept visible as advisory.
     "typescript/no-non-null-assertion": "warn"
   },
+  "overrides": [
+    {
+      // Request URLs to the management API are built by `apiPath()` /
+      // `query()` (packages/ui/src/contracts/url.ts) — the SPA client and the
+      // gateway's UI-contract test never hand-encode a segment or query
+      // string, so both sides encode the same way by construction.
+      "files": [
+        "packages/ui/src/lib/**",
+        "packages/gateway/test/ui-contracts.test.ts"
+      ],
+      "rules": {
+        "no-restricted-globals": [
+          "error",
+          {
+            "name": "encodeURIComponent",
+            "message": "Build request paths with apiPath() from ~/contracts (packages/ui/src/contracts/url.ts)."
+          },
+          {
+            "name": "URLSearchParams",
+            "message": "Build query strings with apiPath() / query() from ~/contracts (packages/ui/src/contracts/url.ts)."
+          }
+        ]
+      }
+    }
+  ],
   "ignorePatterns": [
     "**/dist",
     "**/dist-bin",

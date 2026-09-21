@@ -18,6 +18,7 @@ import {
 import {
   accountStatus,
   apiErrorBody,
+  apiPath,
   cursorPage,
   distillationDetail,
   distillationList,
@@ -38,6 +39,10 @@ import {
   syncStatus,
   teamList,
 } from "../../ui/src/contracts";
+
+/** `/api/v1/...` built with the same URL builder the SPA client uses. */
+const v1 = (...args: Parameters<typeof apiPath>) =>
+  `/api/v1${apiPath(...args)}`;
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup (mirrors api.test.ts)
@@ -281,7 +286,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "knowledge-list.json",
       `/projects/${SEEDED.projectId}/knowledge`,
-      `/api/v1/projects/${SEEDED.projectId}/knowledge`,
+      v1(["projects", SEEDED.projectId, "knowledge"]),
       knowledgeList,
     );
   });
@@ -290,9 +295,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "recall.json",
       "/recall",
-      `/api/v1/recall?q=SQLite&path=${encodeURIComponent(
-        SEEDED.projectPath,
-      )}&expand=false`,
+      v1(["recall"], { q: "SQLite", path: SEEDED.projectPath, expand: false }),
       recallResponse,
     );
   });
@@ -301,13 +304,16 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "knowledge-entry.json",
       `/knowledge/${SEEDED.knowledgeId}`,
-      `/api/v1/knowledge/${SEEDED.knowledgeId}`,
+      v1(["knowledge", SEEDED.knowledgeId]),
       knowledgeEntry,
     );
   });
 
   it("GET cursor knowledge page", async () => {
-    const path = `/api/v1/projects/${SEEDED.projectId}/knowledge?page=cursor&limit=1`;
+    const path = v1(["projects", SEEDED.projectId, "knowledge"], {
+      page: "cursor",
+      limit: 1,
+    });
     await contractRoute(
       "cursor/knowledge-page.json",
       `/projects/${SEEDED.projectId}/knowledge`,
@@ -321,7 +327,10 @@ describe("ui contracts against the real gateway", () => {
   });
 
   it("GET last cursor knowledge page", async () => {
-    const firstPath = `/api/v1/projects/${SEEDED.projectId}/knowledge?page=cursor&limit=1`;
+    const firstPath = v1(["projects", SEEDED.projectId, "knowledge"], {
+      page: "cursor",
+      limit: 1,
+    });
     const first = (await (await api(firstPath)).json()) as {
       next_cursor: string | null;
     };
@@ -329,7 +338,10 @@ describe("ui contracts against the real gateway", () => {
     expect(token).toEqual(expect.any(String));
     if (typeof token !== "string")
       throw new Error("cursor page did not continue");
-    const path = `/api/v1/projects/${SEEDED.projectId}/knowledge?cursor=${encodeURIComponent(token)}&limit=1`;
+    const path = v1(["projects", SEEDED.projectId, "knowledge"], {
+      cursor: token,
+      limit: 1,
+    });
     await contractRoute(
       "cursor/knowledge-page-last.json",
       `/projects/${SEEDED.projectId}/knowledge`,
@@ -346,7 +358,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "cursor/knowledge-versions.json",
       `/knowledge/${SEEDED.knowledgeId}/versions`,
-      `/api/v1/knowledge/${SEEDED.knowledgeId}/versions`,
+      v1(["knowledge", SEEDED.knowledgeId, "versions"]),
       knowledgeVersionHistory,
     );
   });
@@ -355,7 +367,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "sessions-list.json",
       `/projects/${SEEDED.projectId}/sessions`,
-      `/api/v1/projects/${SEEDED.projectId}/sessions`,
+      v1(["projects", SEEDED.projectId, "sessions"]),
       sessionList,
     );
   });
@@ -364,7 +376,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "session-detail.json",
       `/sessions/${SEEDED.sessionId}`,
-      `/api/v1/sessions/${SEEDED.sessionId}?path=${encodeURIComponent(SEEDED.projectPath)}`,
+      v1(["sessions", SEEDED.sessionId], { path: SEEDED.projectPath }),
       sessionDetail,
     );
   });
@@ -373,7 +385,11 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "session-page.json",
       `/sessions/${SEEDED.sessionId}?page=cursor`,
-      `/api/v1/sessions/${SEEDED.sessionId}?path=${encodeURIComponent(SEEDED.projectPath)}&page=cursor&limit=1`,
+      v1(["sessions", SEEDED.sessionId], {
+        path: SEEDED.projectPath,
+        page: "cursor",
+        limit: 1,
+      }),
       sessionPage,
     );
   });
@@ -382,7 +398,11 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "session-search.json",
       `/sessions/${SEEDED.sessionId}/search`,
-      `/api/v1/sessions/${SEEDED.sessionId}/search?path=${encodeURIComponent(SEEDED.projectPath)}&q=body&limit=1`,
+      v1(["sessions", SEEDED.sessionId, "search"], {
+        path: SEEDED.projectPath,
+        q: "body",
+        limit: 1,
+      }),
       sessionSearchPage,
     );
   });
@@ -391,7 +411,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "distillations-list.json",
       `/projects/${SEEDED.projectId}/distillations`,
-      `/api/v1/projects/${SEEDED.projectId}/distillations`,
+      v1(["projects", SEEDED.projectId, "distillations"]),
       distillationList,
     );
   });
@@ -431,7 +451,7 @@ describe("ui contracts against the real gateway", () => {
     await contractRoute(
       "folk-sharing.json",
       `/projects/${SEEDED.projectId}/sharing`,
-      `/api/v1/projects/${SEEDED.projectId}/sharing`,
+      v1(["projects", SEEDED.projectId, "sharing"]),
       sharingStatus,
     );
   });

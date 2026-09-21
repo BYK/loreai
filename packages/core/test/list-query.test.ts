@@ -613,6 +613,7 @@ describe("searchSessionMessagesPage", () => {
       ["k2", 2000, "second, needle-2; portability is a requirement"],
       ["k4", 3000, "another tie at 3000: needle-4, sqlite stays the store"],
       ["k6", 6000, "needle-6 has \u001fmultiple\u001f parts and the store"],
+      ["k7", 7000, "fifty is 50; the shop closes"],
     ];
     for (const [id, t, text] of texts) {
       temporal.store({
@@ -717,12 +718,46 @@ describe("searchSessionMessagesPage", () => {
       }).total,
     ).toBe(2);
     const notPrefix = searchSessionMessagesPage(project, "s", {
+      query: "stays sql",
+      limit: 10,
+    });
+    // No phrase → falls back to every term anywhere, still with only the
+    // last term a prefix ("sql"* matches sqlite).
+    expect(notPrefix.mode).toBe("terms");
+    expect(sorted(sources(notPrefix.items, stored))).toEqual(["k3", "k4"]);
+    const innerNotPrefix = searchSessionMessagesPage(project, "s", {
       query: "sql stays",
       limit: 10,
     });
-    // No phrase → falls back to every term anywhere ("sql"* matches sqlite).
-    expect(notPrefix.mode).toBe("terms");
-    expect(sorted(sources(notPrefix.items, stored))).toEqual(["k3", "k4"]);
+    expect(innerNotPrefix.mode).toBe("terms");
+    expect(innerNotPrefix.total).toBe(0);
+  });
+
+  test("a short token is a whole token unless it is the last term (`5` is not every `50`)", () => {
+    const { project, stored } = seedSearch("short");
+    // As the last term `5`* is a prefix, like a finder matching what was
+    // typed so far: k7 ("50").
+    const trailing = searchSessionMessagesPage(project, "s", {
+      query: "shop 5",
+      limit: 10,
+    });
+    expect(trailing.mode).toBe("terms");
+    expect(sources(trailing.items, stored)).toEqual(["k7"]);
+    // As an inner term `5` must be the token `5`; `50` does not count.
+    const inner = searchSessionMessagesPage(project, "s", {
+      query: "5 shop",
+      limit: 10,
+    });
+    expect(inner.mode).toBe("terms");
+    expect(inner.total).toBe(0);
+    // In a phrase it is adjacency that bounds it: only needle-5, never
+    // needle-1 … needle-6 or the 50.
+    const phrase = searchSessionMessagesPage(project, "s", {
+      query: "needle-5",
+      limit: 10,
+    });
+    expect(phrase.mode).toBe("phrase");
+    expect(sources(phrase.items, stored)).toEqual(["k5"]);
   });
 
   test("falls back to all-terms-anywhere only for multi-term queries, and says so", () => {
