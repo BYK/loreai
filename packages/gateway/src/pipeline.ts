@@ -650,6 +650,48 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
         block.text.startsWith(CONTEXT_WARNING_MARKER)
       ) {
         msg.content.splice(i, 1);
+        const provenanceIndex = msg.provenancePositions?.[i];
+        const provenanceBlock =
+          provenanceIndex === undefined
+            ? undefined
+            : msg.provenanceContent?.[provenanceIndex];
+        const isMatchingProvenance =
+          provenanceBlock?.type === "text" &&
+          provenanceBlock.text.startsWith(CONTEXT_WARNING_MARKER);
+        const rawContent =
+          provenanceBlock?.type === "opaque" &&
+          provenanceBlock.raw.type === "message" &&
+          Array.isArray(provenanceBlock.raw.content)
+            ? provenanceBlock.raw.content
+            : undefined;
+        const rawHasWarning = rawContent?.some(
+          (part) =>
+            part &&
+            typeof part === "object" &&
+            !Array.isArray(part) &&
+            (part as Record<string, unknown>).type === "output_text" &&
+            typeof (part as Record<string, unknown>).text === "string" &&
+            ((part as Record<string, unknown>).text as string).startsWith(
+              CONTEXT_WARNING_MARKER,
+            ),
+        );
+        if (
+          isMatchingProvenance ||
+          (provenanceBlock?.type === "opaque" && rawHasWarning)
+        ) {
+          msg.provenanceContent?.splice(provenanceIndex!, 1);
+          if (msg.provenancePositions) {
+            msg.provenancePositions = msg.provenancePositions
+              .filter((_position, visibleIndex) => visibleIndex !== i)
+              .map((position) =>
+                position > provenanceIndex! ? position - 1 : position,
+              );
+          }
+          if (msg.provenanceContent?.length === 0) {
+            delete msg.provenanceContent;
+            delete msg.provenancePositions;
+          }
+        }
       }
       break; // only check the first non-thinking block
     }
