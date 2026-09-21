@@ -324,7 +324,9 @@ beforeAll(async () => {
     format: "esm",
     target: "node22",
     platform: "node",
-    conditions: ["node"],
+    // "development" mirrors the vitest/`--conditions=development` resolution
+    // the tsx spawn had: @loreai/core resolves to src, never a stale dist.
+    conditions: ["development", "node"],
     external: [
       "node:*",
       "onnxruntime-node",
@@ -336,6 +338,11 @@ beforeAll(async () => {
     ],
     outdir: sigkillBundleDir,
     outExtension: { ".js": ".mjs" },
+    // CJS deps bundled into ESM emit `require` calls that need a real
+    // createRequire shim.
+    banner: {
+      js: 'import { createRequire as __sigkillCreateRequire } from "node:module"; const require = __sigkillCreateRequire(import.meta.url);',
+    },
     logLevel: "silent",
   });
 });
