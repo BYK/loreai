@@ -73,6 +73,7 @@ import {
   calibrate,
   getLastTransformedCount,
   getLastTransformEstimate,
+  getLastTransformLayer,
   onIdleResume,
   getCacheStrategy,
   strategyWantsWarming,
@@ -17492,6 +17493,11 @@ async function handleConversationTurn(
     req.signal,
   );
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  // The previous transform layer is the compaction boundary for request-only
+  // Responses provenance. A stable layer may add a distilled prefix or use a
+  // source-window checkpoint, but surviving source messages still need their
+  // encrypted reasoning replayed in the original positions.
+  const previousTransformLayer = getLastTransformLayer(sessionID);
   let result;
   try {
     result = transform({
@@ -17821,11 +17827,7 @@ async function handleConversationTurn(
   const transformedMessages = loreMessagesToGateway(
     result.messages,
     provenanceByMessageId,
-    !sourceWindow &&
-      result.messages.length === loreMessages.length &&
-      result.messages.every(
-        (message, index) => message.info.id === loreMessages[index]?.info.id,
-      ),
+    shouldPreserveResponsesProvenance(previousTransformLayer, result.layer),
   );
   removeOrphanedToolResults(transformedMessages);
 
@@ -19239,6 +19241,27 @@ async function handleConversationTurn(
     );
   }
   return finishWithRecall(captured.response);
+}
+
+/**
+ * Decide whether request-only Responses provenance may cross this transform.
+ *
+ * Encrypted reasoning is deliberately not part of Lore messages, temporal
+ * storage, or embeddings. It is replayed only while the gradient layer is
+ * stable; a layer transition is a compaction boundary and intentionally drops
+ * the old wire provenance. Unknown previous state fails open because there is
+ * no evidence of a transition, while emergency Layer 4 never replays it.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function shouldPreserveResponsesProvenance(
+  previousLayer: number | null,
+  currentLayer: number,
+): boolean {
+  return (
+    currentLayer < 4 &&
+    (previousLayer === null || previousLayer === currentLayer)
+  );
 }
 
 // ---------------------------------------------------------------------------
