@@ -438,6 +438,70 @@ describe("resolveToolResults", () => {
     expect(messages[0]?.hiddenInputTokens).toBeGreaterThan(1_000);
   });
 
+  test("replays Gemini thought provenance only on a stable layer", () => {
+    const parsed = parseGeminiRequest(
+      {
+        contents: [
+          {
+            role: "model",
+            parts: [
+              {
+                text: "private summary",
+                thought: true,
+                thoughtSignature: "sig",
+              },
+              { text: "visible answer" },
+            ],
+          },
+        ],
+      },
+      {},
+      "gemini-test",
+      false,
+    );
+    const original = parsed.messages[0];
+    if (!original) throw new Error("missing parsed Gemini message");
+    const lore = gatewayMessagesToLore(parsed.messages, "sess-gemini-thinking");
+    const provenance = new Map([
+      [
+        lore[0]!.info.id,
+        {
+          content: original.content,
+          provenanceContent: original.provenanceContent,
+          provenancePositions: original.provenancePositions,
+        },
+      ],
+    ]);
+
+    const stable = loreMessagesToGateway(lore, provenance, true);
+    expect(stable[0]?.provenanceContent).toEqual(original.provenanceContent);
+    expect(
+      (
+        buildGeminiUpstreamRequest(
+          { ...parsed, messages: stable },
+          "https://generativelanguage.googleapis.com",
+        ).body as { contents: Array<{ parts: unknown[] }> }
+      ).contents[0]?.parts,
+    ).toEqual([
+      {
+        text: "private summary",
+        thought: true,
+        thoughtSignature: "sig",
+      },
+      { text: "visible answer" },
+    ]);
+
+    const boundary = loreMessagesToGateway(lore, provenance, false);
+    expect(
+      (
+        buildGeminiUpstreamRequest(
+          { ...parsed, messages: boundary },
+          "https://generativelanguage.googleapis.com",
+        ).body as { contents: Array<{ parts: unknown[] }> }
+      ).contents[0]?.parts,
+    ).toEqual([{ text: "visible answer" }]);
+  });
+
   test("preserves distinct Gemini call id and name through Lore and egress", () => {
     const parsed = parseGeminiRequest(
       {
