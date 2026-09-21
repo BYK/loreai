@@ -187,18 +187,14 @@ export const KnowledgeDocument: Component<{
                           when={evidence().data()}
                           fallback={
                             <Show
-                              when={evidence().loading()}
-                              fallback={
-                                <Show when={evidence().error()}>
-                                  {errorStateFor(
-                                    evidence().error(),
-                                    "Source session",
-                                    evidence().reload,
-                                  )}
-                                </Show>
-                              }
+                              when={evidence().error()}
+                              fallback="Checking source…"
                             >
-                              Checking source…
+                              {errorStateFor(
+                                evidence().error(),
+                                "Source session",
+                                evidence().reload,
+                              )}
                             </Show>
                           }
                         >

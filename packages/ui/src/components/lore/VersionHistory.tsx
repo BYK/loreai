@@ -36,7 +36,7 @@ export const VersionHistory: Component<{
             )}
           </div>
         </Match>
-        <Match when={props.loader.loading() && !props.loader.data()}>
+        <Match when={!props.loader.data()}>
           <StateCard kind="loading" title="Loading version history" />
         </Match>
         <Match when={props.loader.data()}>

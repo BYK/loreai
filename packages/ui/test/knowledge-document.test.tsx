@@ -247,6 +247,28 @@ describe("KnowledgeDocument", () => {
     ).toBeNull();
   });
 
+  it("shows pending states before the loaders' effects mark them loading", () => {
+    // createLoader flips `loading` inside a createEffect, so on the very first
+    // render data, error and loading are all falsy — never render blank there.
+    renderDocument({
+      evidence: loader<EvidenceResult>(undefined),
+      versions: loader<KnowledgeVersionHistory>(undefined),
+    });
+    expect(screen.getByText("Checking source…")).toBeInTheDocument();
+    expect(screen.getByText("Loading version history")).toBeInTheDocument();
+  });
+
+  it("shows the evidence error instead of a pending state", () => {
+    renderDocument({
+      evidence: loader<EvidenceResult>(
+        undefined,
+        new ApiError("http", "/sessions/s-1", "evidence failed", 500),
+      ),
+    });
+    expect(screen.queryByText("Checking source…")).toBeNull();
+    expect(screen.getByText("Source session unavailable")).toBeInTheDocument();
+  });
+
   it("renders a missing source without a link", () => {
     const noSource = entry("Ada");
     noSource.source_session = null;
