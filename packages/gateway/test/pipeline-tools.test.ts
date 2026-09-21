@@ -16,8 +16,19 @@ import {
   stripContextWarnings,
 } from "../src/pipeline";
 import { buildOpenAIResponsesUpstreamRequest } from "../src/translate/openai-responses";
-import { gatewayMessagesToLore, resolveToolResults } from "../src/temporal-adapter";
-import { transform, setModelLimits, calibrate, db, ensureProject } from "@loreai/core";
+import { buildAnthropicRequest } from "../src/translate/anthropic";
+import { buildGeminiUpstreamRequest } from "../src/translate/gemini";
+import {
+  gatewayMessagesToLore,
+  resolveToolResults,
+} from "../src/temporal-adapter";
+import {
+  transform,
+  setModelLimits,
+  calibrate,
+  db,
+  ensureProject,
+} from "@loreai/core";
 import type {
   LoreMessageWithParts,
   LoreUserMessage,
@@ -26,7 +37,10 @@ import type {
   LoreTextPart,
   LoreToolPart,
 } from "@loreai/core";
-import type { GatewayContentBlock, GatewayMessage } from "../src/translate/types";
+import type {
+  GatewayContentBlock,
+  GatewayMessage,
+} from "../src/translate/types";
 
 // Minimal view of an OpenAI upstream message used in assertions below.
 type OpenAIUpstreamMessage = {
@@ -39,7 +53,11 @@ type OpenAIUpstreamMessage = {
 // Fixture helpers
 // ---------------------------------------------------------------------------
 
-function makeUserMsg(id: string, parts: LorePart[], sessionID = "test-sess"): LoreMessageWithParts {
+function makeUserMsg(
+  id: string,
+  parts: LorePart[],
+  sessionID = "test-sess",
+): LoreMessageWithParts {
   const info: LoreUserMessage = {
     id,
     sessionID,
@@ -77,7 +95,11 @@ function makeAssistantMsg(
   return { info, parts };
 }
 
-function textPart(text: string, messageID = "msg", sessionID = "test-sess"): LoreTextPart {
+function textPart(
+  text: string,
+  messageID = "msg",
+  sessionID = "test-sess",
+): LoreTextPart {
   return {
     id: `text-${Math.random().toString(36).slice(2)}`,
     sessionID,
@@ -189,13 +211,19 @@ describe("Responses encrypted reasoning provenance", () => {
       makeUserMsg("prefix-user", [textPart("memory")]),
       makeAssistantMsg("prefix-assistant", [textPart("memory")]),
     ];
-    return loreMessagesToGateway([...prefix, ...source], provenance, allowProvenance);
+    return loreMessagesToGateway(
+      [...prefix, ...source],
+      provenance,
+      allowProvenance,
+    );
   }
 
   test("keeps encrypted reasoning in place on a stable compressed layer", () => {
     const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(1, 1));
     const answer = rendered.find((message) =>
-      message.content.some((block) => block.type === "text" && block.text === "answer"),
+      message.content.some(
+        (block) => block.type === "text" && block.text === "answer",
+      ),
     );
 
     expect(answer?.provenanceContent).toEqual([
@@ -250,7 +278,9 @@ describe("Responses encrypted reasoning provenance", () => {
   test("drops request-only provenance at a layer transition", () => {
     const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(0, 1));
     const answer = rendered.find((message) =>
-      message.content.some((block) => block.type === "text" && block.text === "answer"),
+      message.content.some(
+        (block) => block.type === "text" && block.text === "answer",
+      ),
     );
 
     expect(answer?.provenanceContent).toBeUndefined();
@@ -266,9 +296,13 @@ describe("Responses encrypted reasoning provenance", () => {
     expect(canReplayRequestProvenance("anthropic", "vertex")).toBe(true);
     expect(canReplayRequestProvenance("vertex", "anthropic")).toBe(true);
     expect(canReplayRequestProvenance("gemini", "gemini")).toBe(true);
-    expect(canReplayRequestProvenance("openai-responses", "openai-responses")).toBe(true);
+    expect(
+      canReplayRequestProvenance("openai-responses", "openai-responses"),
+    ).toBe(true);
     expect(canReplayRequestProvenance("gemini", "anthropic")).toBe(false);
-    expect(canReplayRequestProvenance("openai-responses", "anthropic")).toBe(false);
+    expect(canReplayRequestProvenance("openai-responses", "anthropic")).toBe(
+      false,
+    );
   });
 });
 
@@ -352,7 +386,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
       makeUserMsg("u1", [textPart("list files")]),
       makeAssistantMsg("a1", [
         textPart("I'll list the files."),
-        completedToolPart("bash", "toolu_1", { command: "ls" }, "file1.ts\nfile2.ts"),
+        completedToolPart(
+          "bash",
+          "toolu_1",
+          { command: "ls" },
+          "file1.ts\nfile2.ts",
+        ),
       ]),
       makeUserMsg("u2", [textPart("[tool results provided]")]),
     ];
@@ -387,7 +426,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
       content: GatewayContentBlock[];
     };
     expect(toolResult.toolUseId).toBe("toolu_1");
-    expect(toolResult.content).toEqual([{ type: "text", text: "file1.ts\nfile2.ts" }]);
+    expect(toolResult.content).toEqual([
+      { type: "text", text: "file1.ts\nfile2.ts" },
+    ]);
     expect(result[2]?.content[1]?.type).toBe("text");
   });
 
@@ -395,7 +436,12 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     const messages: LoreMessageWithParts[] = [
       makeUserMsg("u1", [textPart("run something")]),
       makeAssistantMsg("a1", [
-        errorToolPart("bash", "toolu_err", { command: "fail" }, "command not found"),
+        errorToolPart(
+          "bash",
+          "toolu_err",
+          { command: "fail" },
+          "command not found",
+        ),
       ]),
       makeUserMsg("u2", [textPart("[tool results provided]")]),
     ];
@@ -413,7 +459,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     };
     expect(toolResult.type).toBe("tool_result");
     expect(toolResult.toolUseId).toBe("toolu_err");
-    expect(toolResult.content).toEqual([{ type: "text", text: "command not found" }]);
+    expect(toolResult.content).toEqual([
+      { type: "text", text: "command not found" },
+    ]);
     expect(toolResult.isError).toBe(true);
   });
 
@@ -456,7 +504,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
   test("pending tool part emits tool_use but no tool_result", () => {
     const messages: LoreMessageWithParts[] = [
       makeUserMsg("u1", [textPart("do it")]),
-      makeAssistantMsg("a1", [pendingToolPart("bash", "toolu_pending", { command: "echo" })]),
+      makeAssistantMsg("a1", [
+        pendingToolPart("bash", "toolu_pending", { command: "echo" }),
+      ]),
       makeUserMsg("u2", [textPart("interrupted")]),
     ];
 
@@ -491,7 +541,9 @@ describe("loreMessagesToGateway — tool_result reconstruction", () => {
     };
     const messages: LoreMessageWithParts[] = [
       makeUserMsg("u1", [textPart("start")]),
-      makeAssistantMsg("a1", [completedToolPart("bash", "toolu_fallback", {}, "output")]),
+      makeAssistantMsg("a1", [
+        completedToolPart("bash", "toolu_fallback", {}, "output"),
+      ]),
       makeUserMsg("u2", [resultPart]),
     ];
 
@@ -571,7 +623,9 @@ describe("removeOrphanedToolResults", () => {
     }> = [
       {
         role: "assistant",
-        content: [{ type: "tool_use", id: "toolu_ok", name: "bash", input: {} }],
+        content: [
+          { type: "tool_use", id: "toolu_ok", name: "bash", input: {} },
+        ],
       },
       {
         role: "user",
@@ -599,7 +653,9 @@ describe("removeOrphanedToolResults", () => {
     }> = [
       {
         role: "assistant",
-        content: [{ type: "tool_use", id: "toolu_match", name: "bash", input: {} }],
+        content: [
+          { type: "tool_use", id: "toolu_match", name: "bash", input: {} },
+        ],
       },
       {
         role: "user",
@@ -623,7 +679,9 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[1]?.content).toHaveLength(2);
     expect(messages[1]?.content[0]?.type).toBe("tool_result");
-    expect((messages[1].content[0] as { toolUseId: string }).toolUseId).toBe("toolu_match");
+    expect((messages[1].content[0] as { toolUseId: string }).toolUseId).toBe(
+      "toolu_match",
+    );
     expect(messages[1]?.content[1]?.type).toBe("text");
   });
 
@@ -657,7 +715,9 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[1]?.content).toHaveLength(1);
     expect(messages[1]?.content[0]?.type).toBe("text");
-    expect((messages[1].content[0] as { text: string }).text).toBe("[tool results provided]");
+    expect((messages[1].content[0] as { text: string }).text).toBe(
+      "[tool results provided]",
+    );
   });
 
   test("user message at index 0 (no preceding assistant) gets orphaned tool_result stripped", () => {
@@ -681,7 +741,9 @@ describe("removeOrphanedToolResults", () => {
 
     expect(messages[0]?.content).toHaveLength(1);
     expect(messages[0]?.content[0]?.type).toBe("text");
-    expect((messages[0].content[0] as { text: string }).text).toBe("[tool results provided]");
+    expect((messages[0].content[0] as { text: string }).text).toBe(
+      "[tool results provided]",
+    );
   });
 
   test("no-op when there are no tool_result blocks at all", () => {
@@ -702,6 +764,80 @@ describe("removeOrphanedToolResults", () => {
     const before = JSON.stringify(messages);
     removeOrphanedToolResults(messages);
     expect(JSON.stringify(messages)).toBe(before);
+  });
+
+  test("clears request provenance when orphan cleanup changes tool content", () => {
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_orphan",
+        status: "completed",
+        summary: [],
+        encrypted_content: "ciphertext",
+      },
+    };
+    const toolUse: GatewayContentBlock = {
+      type: "tool_use",
+      id: "toolu_orphan",
+      name: "read",
+      input: { path: "missing" },
+    };
+    const messages: GatewayMessage[] = [
+      {
+        role: "assistant",
+        content: [toolUse],
+        provenanceContent: [reasoning, toolUse],
+        provenancePositions: [1],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "[assistant response]" },
+    ]);
+    expect(messages[0]?.provenanceContent).toBeUndefined();
+    expect(messages[0]?.provenancePositions).toBeUndefined();
+
+    const request = {
+      protocol: "openai-responses" as const,
+      model: "gpt-5",
+      system: "",
+      messages,
+      tools: [],
+      stream: false,
+      maxTokens: 1024,
+      metadata: {},
+      rawHeaders: {},
+    };
+    const responsesInput = (
+      buildOpenAIResponsesUpstreamRequest(request, "https://api.openai.com")
+        .body as { input: unknown[] }
+    ).input;
+    expect(JSON.stringify(responsesInput)).not.toContain("encrypted_content");
+    expect(JSON.stringify(responsesInput)).not.toContain("toolu_orphan");
+
+    const anthropicBody = buildAnthropicRequest(request).body as {
+      messages: Array<{ content: unknown }>;
+    };
+    expect(JSON.stringify(anthropicBody.messages)).not.toContain(
+      "encrypted_content",
+    );
+    expect(JSON.stringify(anthropicBody.messages)).not.toContain(
+      "toolu_orphan",
+    );
+
+    const geminiBody = buildGeminiUpstreamRequest(
+      request,
+      "https://example.test",
+    ).body as { contents: unknown[] };
+    expect(JSON.stringify(geminiBody.contents)).not.toContain(
+      "encrypted_content",
+    );
+    expect(JSON.stringify(geminiBody.contents)).not.toContain("toolu_orphan");
   });
 });
 
@@ -738,7 +874,9 @@ describe("end-to-end: gradient eviction doesn't produce orphaned tool_result", (
               .filter((b) => b.type === "tool_use")
               .map((b) => (b as { id: string }).id),
           );
-          expect(toolUseIds.has((block as { toolUseId: string }).toolUseId)).toBe(true);
+          expect(
+            toolUseIds.has((block as { toolUseId: string }).toolUseId),
+          ).toBe(true);
         }
       }
     }
@@ -815,7 +953,8 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
     },
   ]);
 
-  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as {
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+    .body as {
     messages: OpenAIUpstreamMessage[];
   };
   const toolMsg = body.messages.find((m) => m.role === "tool");
@@ -839,7 +978,8 @@ test("BUG-006: mixed text + tool_result in same message emits both", () => {
     },
   ]);
 
-  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as {
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+    .body as {
     messages: OpenAIUpstreamMessage[];
   };
   // Should have system + tool + user messages
@@ -875,7 +1015,8 @@ test("BUG-006: multiple tool_results in one message are all preserved", () => {
     },
   ]);
 
-  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com").body as {
+  const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
+    .body as {
     messages: OpenAIUpstreamMessage[];
   };
   const toolMsgs = body.messages.filter((m) => m.role === "tool");
@@ -1003,7 +1144,9 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
     if (!assistant) throw new Error("expected assistant message");
     // toolu_001 kept (has matching result), toolu_002 removed
     expect(assistant.content).toHaveLength(2); // text + toolu_001
-    const toolUseBlocks = assistant.content.filter((b) => b.type === "tool_use");
+    const toolUseBlocks = assistant.content.filter(
+      (b) => b.type === "tool_use",
+    );
     expect(toolUseBlocks).toHaveLength(1);
     expect((toolUseBlocks[0] as { id: string }).id).toBe("toolu_001");
   });
@@ -1019,7 +1162,9 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
       },
       {
         role: "assistant",
-        content: [{ type: "tool_use", id: "toolu_001", name: "read", input: {} }],
+        content: [
+          { type: "tool_use", id: "toolu_001", name: "read", input: {} },
+        ],
       },
       {
         role: "user",
@@ -1053,7 +1198,9 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
       },
       {
         role: "assistant",
-        content: [{ type: "tool_use", id: "toolu_001", name: "read", input: {} }],
+        content: [
+          { type: "tool_use", id: "toolu_001", name: "read", input: {} },
+        ],
       },
       // No following user message at all
     ];
@@ -1063,7 +1210,9 @@ describe("removeOrphanedToolResults — tool_use→tool_result (pass 2, #424)", 
     // The assistant message should have a placeholder instead of being empty
     expect(messages[1]?.content).toHaveLength(1);
     expect(messages[1]?.content[0]?.type).toBe("text");
-    expect((messages[1].content[0] as { text: string }).text).toBe("[assistant response]");
+    expect((messages[1].content[0] as { text: string }).text).toBe(
+      "[assistant response]",
+    );
   });
 });
 
@@ -1128,7 +1277,9 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
       // User asks to do something (~300 tokens)
       gatewayMessages.push({
         role: "user",
-        content: [{ type: "text", text: `Implement feature ${i}: ${"x".repeat(900)}` }],
+        content: [
+          { type: "text", text: `Implement feature ${i}: ${"x".repeat(900)}` },
+        ],
       });
 
       // Assistant calls a tool (~700 tokens: text + tool input)
@@ -1212,7 +1363,9 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
 
     // A. No back-to-back same-role messages
     for (let i = 1; i < transformedMessages.length; i++) {
-      expect(transformedMessages[i].role).not.toBe(transformedMessages[i - 1].role);
+      expect(transformedMessages[i].role).not.toBe(
+        transformedMessages[i - 1].role,
+      );
     }
 
     // B. First message must be user
@@ -1261,7 +1414,9 @@ describe("end-to-end: inflated eval tool_use/tool_result through full pipeline (
       expect(prev.role).toBe("assistant");
 
       const toolUseIdSet = new Set(
-        prev.content.filter((b) => b.type === "tool_use").map((b) => (b as { id: string }).id),
+        prev.content
+          .filter((b) => b.type === "tool_use")
+          .map((b) => (b as { id: string }).id),
       );
 
       for (const id of toolResultIds) {
