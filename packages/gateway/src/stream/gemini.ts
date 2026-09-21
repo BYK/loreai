@@ -262,7 +262,7 @@ export async function accumulateGeminiSSEStream(
           if (previous?.type === "text") {
             previous.text += block.text;
             if (previous.raw !== undefined || block.raw !== undefined) {
-              const mergedRaw = {
+              const mergedRaw: Record<string, unknown> = {
                 ...previous.raw,
                 ...block.raw,
                 text: previous.text,
