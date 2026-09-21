@@ -53,7 +53,7 @@ function positiveInt(name, fallback) {
   return value;
 }
 function round(value) {
-  return Math.round(value * 100) / 100;
+  return Math.round(value * 10) / 10;
 }
 function percentile(sorted, p) {
   if (sorted.length === 0) return null;
@@ -523,17 +523,43 @@ function walkFiles(dir, prefix = "") {
 }
 function bundleSizes(root) {
   const uiDir = join(root, "packages", "gateway", "dist", "ui");
-  const assets = walkFiles(uiDir).map(([path, relativePath]) => {
-    const data = readFileSync(path);
-    return {
-      path: relativePath,
-      raw: data.length,
-      gzip: zlib.gzipSync(data, { level: 9 }).length,
-      brotli: zlib.brotliCompressSync(data, {
-        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
-      }).length,
-    };
-  });
+  const assets = walkFiles(uiDir)
+    .filter(
+      ([, relativePath]) =>
+        !relativePath.endsWith(".br") && !relativePath.endsWith(".gz"),
+    )
+    .map(([path, relativePath]) => {
+      const data = readFileSync(path);
+      const compressedSize = (suffix, compress) => {
+        const siblingPath = `${path}${suffix}`;
+        if (existsSync(siblingPath)) {
+          return {
+            bytes: statSync(siblingPath).size,
+            source: "sibling",
+          };
+        }
+        return {
+          bytes: compress(data).length,
+          source: "script",
+        };
+      };
+      const gzip = compressedSize(".gz", (value) =>
+        zlib.gzipSync(value, { level: 9 }),
+      );
+      const brotli = compressedSize(".br", (value) =>
+        zlib.brotliCompressSync(value, {
+          params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+        }),
+      );
+      return {
+        path: relativePath,
+        raw: data.length,
+        gzip: gzip.bytes,
+        gzipSource: gzip.source,
+        brotli: brotli.bytes,
+        brotliSource: brotli.source,
+      };
+    });
   const total = assets.reduce(
     (sum, asset) => ({
       raw: sum.raw + asset.raw,
@@ -573,6 +599,15 @@ function environment(root) {
     date: new Date().toISOString(),
     argv: process.argv,
   };
+}
+function deltaPercent(current, baseline) {
+  if (baseline == null || baseline === 0) return null;
+  return ((current - baseline) / baseline) * 100;
+}
+function formatDelta(current, baseline) {
+  const delta = deltaPercent(current, baseline);
+  if (delta == null) return "—";
+  return `${delta >= 0 ? "+" : ""}${round(delta)}%`;
 }
 function shellQuote(value) {
   return /^[A-Za-z0-9_./:=+-]+$/.test(value)
@@ -684,11 +719,13 @@ async function measureGateway(
 async function baselineMeasurement(sha, runs, requests, upstreamUrl) {
   const worktree = join(tmpdir(), `lore-baseline-${sha}`);
   let buildError = null;
+  let worktreeSha = "unknown";
   try {
     execFileSync("git", ["worktree", "add", worktree, sha], {
       cwd: repoRoot,
       stdio: "inherit",
     });
+    worktreeSha = gitSha(worktree);
     try {
       execFileSync("pnpm", ["install", "--frozen-lockfile"], {
         cwd: worktree,
@@ -703,9 +740,12 @@ async function baselineMeasurement(sha, runs, requests, upstreamUrl) {
     } catch (error) {
       buildError = String(error);
     }
-    if (buildError) return { sha, buildError, measurement: null };
+    if (buildError) {
+      return { sha, worktreeSha, buildError, measurement: null };
+    }
     return {
       sha,
+      worktreeSha,
       buildError: null,
       measurement: await measureGateway(worktree, runs, requests, upstreamUrl, {
         render: false,
@@ -714,7 +754,12 @@ async function baselineMeasurement(sha, runs, requests, upstreamUrl) {
       }),
     };
   } catch (error) {
-    return { sha, buildError: buildError ?? String(error), measurement: null };
+    return {
+      sha,
+      worktreeSha,
+      buildError: buildError ?? String(error),
+      measurement: null,
+    };
   } finally {
     try {
       execFileSync("git", ["worktree", "remove", "--force", worktree], {
@@ -730,47 +775,71 @@ async function baselineMeasurement(sha, runs, requests, upstreamUrl) {
 function formatBytes(bytes) {
   return `${bytes.toLocaleString("en-US")} B`;
 }
+function formatCompressedBytes(bytes, source) {
+  return `${formatBytes(bytes)}${source === "script" ? "*" : ""}`;
+}
 function formatMaybe(value, suffix = " ms") {
   return value == null ? "—" : `${value}${suffix}`;
+}
+function formatNumber(value) {
+  return value == null ? "—" : String(round(value));
 }
 function markdown(result) {
   const current = result.current;
   const baseline = result.baseline?.measurement;
   const command = result.environment.argv.map(shellQuote).join(" ");
+  const hasBaselineUi = Boolean(baseline?.latency?.["GET /ui/"]);
+  const baselineWorktree = result.baseline
+    ? `; baseline worktree SHA ${result.baseline.worktreeSha ?? "unknown"}`
+    : "";
   const lines = [
     "<!-- p1-measurements:start -->",
     "### UI-07 P1 measurements",
     "",
     `Command: \`${command}\``,
     "",
-    `Machine: ${result.environment.cpuModel} × ${result.environment.cpuCount}; ${(result.environment.totalMemoryBytes / 1024 ** 3).toFixed(1)} GiB; Node ${result.environment.node}; ${result.environment.platform} ${result.environment.osRelease} ${result.environment.arch}.`,
+    `Machine: ${result.environment.cpuModel} × ${result.environment.cpuCount}; ${(result.environment.totalMemoryBytes / 1024 ** 3).toFixed(1)} GiB; Node ${result.environment.node}; ${result.environment.platform} ${result.environment.osRelease} ${result.environment.arch}${baselineWorktree}.`,
     "",
     `Git SHA: \`${result.environment.gitSha}\`; measured ${result.environment.date}.`,
     "",
+    ...(result.baseline
+      ? [
+          `Baseline SHA: \`${result.baseline.sha}\` (worktree \`${result.baseline.worktreeSha ?? "unknown"}\`).`,
+          "",
+          ...(hasBaselineUi
+            ? []
+            : [
+                `Baseline note: commit \`${result.baseline.sha}\` predates the current \`/ui\` surface, so UI-specific baseline rows are \`—\`.`,
+                "",
+              ]),
+        ]
+      : []),
     ...(result.baseline?.buildError
       ? [
           `Baseline \`${result.baseline.sha}\` build skipped: ${result.baseline.buildError}.`,
           "",
         ]
       : []),
-    "| Metric | Current | Baseline |",
-    "|---|---:|---:|",
-    `| Startup → first 200 \`/health\` (median of ${current.runs.length} runs) | p50 ${current.startupMs.p50} ms | ${baseline ? `p50 ${baseline.startupMs.p50} ms` : "—"} |`,
-    `| RSS after start | p50 ${current.rssAfterStartMb.p50} MB | ${baseline ? `p50 ${baseline.rssAfterStartMb.p50} MB` : "—"} |`,
-    `| RSS after serving UI | p50 ${current.rssAfterUiMb.p50} MB | ${baseline?.rssAfterUiMb ? `p50 ${baseline.rssAfterUiMb.p50} MB` : "—"} |`,
+    "| Metric | Current | Baseline | vs baseline (%) |",
+    "|---|---:|---:|---:|",
+    `| Startup → first 200 \`/health\` (median of ${current.runs.length} runs) | p50 ${current.startupMs.p50} ms | ${baseline ? `p50 ${baseline.startupMs.p50} ms` : "—"} | ${formatDelta(current.startupMs.p50, baseline?.startupMs.p50)} |`,
+    `| RSS after start | p50 ${current.rssAfterStartMb.p50} MB | ${baseline ? `p50 ${baseline.rssAfterStartMb.p50} MB` : "—"} | ${formatDelta(current.rssAfterStartMb.p50, baseline?.rssAfterStartMb.p50)} |`,
+    `| RSS after serving UI | p50 ${current.rssAfterUiMb.p50} MB | ${baseline?.rssAfterUiMb ? `p50 ${baseline.rssAfterUiMb.p50} MB` : "—"} | ${formatDelta(current.rssAfterUiMb.p50, baseline?.rssAfterUiMb?.p50)} |`,
     "",
     `Latency summaries use ${result.requests} warmed requests per endpoint; each value is the median of per-run percentiles.`,
     "",
-    "| Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 |",
-    "|---|---:|---:|",
+    "| Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 | vs baseline p50 (%) | vs baseline p95 (%) |",
+    "|---|---:|---:|---:|---:|",
   ];
   for (const name of Object.keys(current.latency)) {
     const values = (data) => {
       const value = data?.[name];
       return value ? `${value.p50} / ${value.p95} / ${value.p99} ms` : "—";
     };
+    const baselineValues = baseline?.latency?.[name];
+    const currentValues = current.latency[name];
     lines.push(
-      `| \`${name}\` | ${values(current.latency)} | ${values(baseline?.latency)} |`,
+      `| \`${name}\` | ${values(current.latency)} | ${values(baseline?.latency)} | ${formatDelta(currentValues.p50, baselineValues?.p50)} | ${formatDelta(currentValues.p95, baselineValues?.p95)} |`,
     );
   }
   lines.push(
@@ -780,12 +849,18 @@ function markdown(result) {
   );
   for (const asset of current.bundle.assets) {
     lines.push(
-      `| \`${asset.path}\` | ${formatBytes(asset.raw)} | ${formatBytes(asset.gzip)} | ${formatBytes(asset.brotli)} |`,
+      `| \`${asset.path}\` | ${formatBytes(asset.raw)} | ${formatCompressedBytes(asset.gzip, asset.gzipSource)} | ${formatCompressedBytes(asset.brotli, asset.brotliSource)} |`,
     );
   }
   lines.push(
     `| **Total staged UI** | **${formatBytes(current.bundle.total.raw)}** | **${formatBytes(current.bundle.total.gzip)}** | **${formatBytes(current.bundle.total.brotli)}** |`,
     `| \`dist/index.cjs\` | ${formatBytes(current.bundle.gatewayIndexCjs)} | — | — |`,
+    ...(current.bundle.assets.some(
+      (asset) =>
+        asset.gzipSource === "script" || asset.brotliSource === "script",
+    )
+      ? ["", "* no precompressed sibling; compressed by the script"]
+      : []),
     "",
     "| First render (5 fresh contexts) | Median |",
     "|---|---:|",
@@ -803,7 +878,7 @@ function markdown(result) {
   for (const scroll of result.scroll) {
     const fixture = scroll.busyReport.frames ?? {};
     lines.push(
-      `| ${scroll.name} | ${scroll.frameIntervals.p50} / ${scroll.frameIntervals.p95} / ${scroll.frameIntervals.max} ms | ${scroll.frameIntervals.over50Ms} | ${scroll.longTasks.count} / ${scroll.longTasks.totalMs} / ${scroll.longTasks.maxMs} ms | ${fixture.p95 ?? "—"} / ${fixture.max ?? "—"} ms |`,
+      `| ${scroll.name} | ${scroll.frameIntervals.p50} / ${scroll.frameIntervals.p95} / ${scroll.frameIntervals.max} ms | ${scroll.frameIntervals.over50Ms} | ${scroll.longTasks.count} / ${scroll.longTasks.totalMs} / ${scroll.longTasks.maxMs} ms | ${formatNumber(fixture.p95)} / ${formatNumber(fixture.max)} ms |`,
     );
   }
   lines.push("<!-- p1-measurements:end -->");
