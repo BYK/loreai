@@ -42,6 +42,22 @@ import type {
   GatewayContentBlock,
   GatewayMessage,
 } from "../src/translate/types";
+import type * as coreConfig from "../../core/src/config";
+
+// These tests assert on cache-stability of the system prefix, never on
+// vectors; skip the ONNX embedding provider so stored messages bypass the
+// embedding worker (the raw-window test alone spent ~40s in real inference).
+vi.mock("../../core/src/config", async (importOriginal) => {
+  const mod = await importOriginal<typeof coreConfig>();
+  return {
+    ...mod,
+    config: () => {
+      const c = mod.config();
+      c.search.embeddings.enabled = false;
+      return c;
+    },
+  };
+});
 
 function makeBody(
   userMessage: string,

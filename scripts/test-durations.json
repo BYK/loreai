@@ -216,7 +216,7 @@
   "packages/gateway/test/cache-bust-metric.test.ts": 4,
   "packages/gateway/test/cache-bust-oracle.e2e.test.ts": 21952,
   "packages/gateway/test/cache-segment-digest.test.ts": 7,
-  "packages/gateway/test/cache-stability.e2e.test.ts": 233615,
+  "packages/gateway/test/cache-stability.e2e.test.ts": 70950,
   "packages/gateway/test/cache-warmer.test.ts": 6304,
   "packages/gateway/test/cch.test.ts": 58,
   "packages/gateway/test/claude-usage-headers.test.ts": 7789,
@@ -363,11 +363,14 @@
   "packages/gateway/test/readpath-capture.test.ts": 16,
   "packages/gateway/test/recall-already-in-ltm.test.ts": 7,
   "packages/gateway/test/recall-budget.test.ts": 11,
-  "packages/gateway/test/recall-buffered-transaction.test.ts": 155034,
+  "packages/gateway/test/recall-buffered-transaction-native.test.ts": 54120,
+  "packages/gateway/test/recall-buffered-transaction-validation.test.ts": 31350,
+  "packages/gateway/test/recall-buffered-transaction.test.ts": 49830,
   "packages/gateway/test/recall-codex-stream.test.ts": 9444,
   "packages/gateway/test/recall-diagnostics.test.ts": 5,
   "packages/gateway/test/recall-exhaustion.test.ts": 15839,
   "packages/gateway/test/recall-marker-split.e2e.test.ts": 14526,
+  "packages/gateway/test/recall-marker.property.test.ts": 3200,
   "packages/gateway/test/recall-openai-stream.test.ts": 5036,
   "packages/gateway/test/recall-stream.test.ts": 15,
   "packages/gateway/test/recall.test.ts": 10181,
@@ -496,6 +499,5 @@
   "packages/pi/test/internal.test.ts": 1082,
   "packages/pi/test/no-tui-output.test.ts": 77,
   "packages/pi/test/real-runtime.e2e.test.ts": 2,
-  "packages/pi/test/tui-silence.test.ts": 2,
-  "packages/gateway/test/recall-marker.property.test.ts": 3200
+  "packages/pi/test/tui-silence.test.ts": 2
 }
