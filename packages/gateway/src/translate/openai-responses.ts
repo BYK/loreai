@@ -1102,6 +1102,7 @@ function emitRawResponsesOutputItemLifecycle(
       "shell_call",
       "mcp_call",
       "custom_tool_call",
+      "apply_patch_call",
     ].includes(itemType)
   ) {
     addedItem.status = "in_progress";
