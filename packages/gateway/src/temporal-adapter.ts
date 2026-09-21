@@ -234,7 +234,17 @@ export function gatewayMessagesToLore(
 
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
-    const id = deterministicID(sessionID, m.role, startIndex + i, m.content);
+    // Provider-native thinking blocks are request-only provenance. Keep this
+    // defensive filter here as the final storage boundary so a provider parser
+    // or a response path can never turn encrypted/native reasoning into Lore
+    // parts, temporal text, embeddings, or distillation input.
+    const visibleContent = m.content.filter((block) => block.type !== "thinking");
+    const id = deterministicID(
+      sessionID,
+      m.role,
+      startIndex + i,
+      visibleContent,
+    );
     // The old adapter hashed the index within the array passed to this call.
     // Keep that exact invocation-relative index: full request histories use
     // absolute indexes (startIndex=0); narrow request slices supply legacyStartIndex.
@@ -243,9 +253,9 @@ export function gatewayMessagesToLore(
     const legacySourceID = legacyDeterministicID(
       m.role,
       legacyStartIndex + i,
-      m.content,
+      visibleContent,
     );
-    const parts: LorePart[] = m.content.map((block, pi) =>
+    const parts: LorePart[] = visibleContent.map((block, pi) =>
       contentBlockToPart(block, sessionID, id, pi),
     );
     const hiddenInputTokens = m.provenanceContent
@@ -257,7 +267,7 @@ export function gatewayMessagesToLore(
               coreEstimateTokens(provenanceJson) -
                 coreEstimateTokens(visibleJson),
             ))
-        )(JSON.stringify(m.content), JSON.stringify(m.provenanceContent))
+        )(JSON.stringify(visibleContent), JSON.stringify(m.provenanceContent))
       : 0;
 
     if (m.role === "user") {
