@@ -9,10 +9,13 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import {
   canReplayRequestProvenance,
+  CONTEXT_WARNING_MARKER,
   loreMessagesToGateway,
   removeOrphanedToolResults,
   shouldPreserveResponsesProvenance,
+  stripContextWarnings,
 } from "../src/pipeline";
+import { buildOpenAIResponsesUpstreamRequest } from "../src/translate/openai-responses";
 import { gatewayMessagesToLore, resolveToolResults } from "../src/temporal-adapter";
 import { transform, setModelLimits, calibrate, db, ensureProject } from "@loreai/core";
 import type {
@@ -266,6 +269,76 @@ describe("Responses encrypted reasoning provenance", () => {
     expect(canReplayRequestProvenance("openai-responses", "openai-responses")).toBe(true);
     expect(canReplayRequestProvenance("gemini", "anthropic")).toBe(false);
     expect(canReplayRequestProvenance("openai-responses", "anthropic")).toBe(false);
+  });
+});
+
+describe("Responses context-warning cleanup", () => {
+  test("removes the raw warning item without dropping encrypted reasoning", () => {
+    const warning = `${CONTEXT_WARNING_MARKER} workers are degraded\n\n---\n\n`;
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_stable",
+        status: "completed",
+        summary: [],
+        encrypted_content: "ciphertext",
+      },
+    };
+    const warningItem: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: warning, annotations: [] }],
+      },
+    };
+    const answerItem: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      },
+    };
+    const message: GatewayMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: warning },
+        { type: "text", text: "answer" },
+      ],
+      provenanceContent: [reasoning, warningItem, answerItem],
+      provenancePositions: [1, 2],
+    };
+
+    stripContextWarnings([message]);
+
+    expect(message.content).toEqual([{ type: "text", text: "answer" }]);
+    expect(message.provenanceContent).toEqual([reasoning, answerItem]);
+    expect(message.provenancePositions).toEqual([1]);
+
+    const built = buildOpenAIResponsesUpstreamRequest(
+      {
+        protocol: "openai-responses",
+        model: "gpt-5",
+        system: "",
+        messages: [message],
+        tools: [],
+        stream: false,
+        maxTokens: 1024,
+        metadata: {},
+        rawHeaders: {},
+      },
+      "https://api.openai.com",
+    );
+    const input = (built.body as { input: unknown[] }).input;
+    expect(JSON.stringify(input)).not.toContain(CONTEXT_WARNING_MARKER);
+    expect(input).toEqual([reasoning.raw, answerItem.raw]);
   });
 });
 
