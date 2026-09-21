@@ -676,17 +676,18 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
             ),
         );
         if (
-          isMatchingProvenance ||
-          (provenanceBlock?.type === "opaque" && rawHasWarning)
+          provenanceIndex !== undefined &&
+          msg.provenanceContent &&
+          msg.provenancePositions &&
+          (isMatchingProvenance ||
+            (provenanceBlock?.type === "opaque" && rawHasWarning))
         ) {
-          msg.provenanceContent?.splice(provenanceIndex!, 1);
-          if (msg.provenancePositions) {
-            msg.provenancePositions = msg.provenancePositions
-              .filter((_position, visibleIndex) => visibleIndex !== i)
-              .map((position) =>
-                position > provenanceIndex! ? position - 1 : position,
-              );
-          }
+          msg.provenanceContent.splice(provenanceIndex, 1);
+          msg.provenancePositions = msg.provenancePositions
+            .filter((_position, visibleIndex) => visibleIndex !== i)
+            .map((position) =>
+              position > provenanceIndex ? position - 1 : position,
+            );
           if (msg.provenanceContent?.length === 0) {
             delete msg.provenanceContent;
             delete msg.provenancePositions;
