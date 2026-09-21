@@ -1395,6 +1395,12 @@ describe("Pipeline — streaming responses", () => {
       );
     });
 
+    // Fake setTimeout from the start so the response stream's
+    // KEEPALIVE_INACTIVITY_MS (30s) tick — the tick that releases the span
+    // after a pre-terminal client cancel — can be advanced instead of
+    // waited on. Keep Date/setImmediate/nextTick real so the stream
+    // plumbing and vi.waitFor keep working.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const response = await handleRequest(
         makeResponsesRequest({
@@ -1404,9 +1410,15 @@ describe("Pipeline — streaming responses", () => {
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
-      await reader?.read();
+      // The upstream stream emits nothing, so the first chunk only
+      // arrives at the (faked) 30s keepalive tick — drive it manually.
+      const firstRead = reader?.read();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await firstRead;
       await upstreamStarted;
       await reader?.cancel("client disconnected");
+      await vi.advanceTimersByTimeAsync(30_000);
+      vi.useRealTimers();
       await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
 
       expect(setStatus).toHaveBeenCalledWith({
@@ -1415,6 +1427,7 @@ describe("Pipeline — streaming responses", () => {
       });
       expect(upstreamCancellations).toBe(1);
     } finally {
+      vi.useRealTimers();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
