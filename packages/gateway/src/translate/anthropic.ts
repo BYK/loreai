@@ -15,15 +15,9 @@ import type {
 import { forwardClientHeaders, ZERO_USAGE } from "./types";
 import { asString } from "@loreai/core";
 import { extractAuth, authHeaders } from "../auth";
-import {
-  normalizeAnthropicStopReason,
-  toAnthropicStopReason,
-} from "../anthropic-protocol";
+import { normalizeAnthropicStopReason, toAnthropicStopReason } from "../anthropic-protocol";
 import { validateAnthropicUsage } from "../usage-validation";
-import {
-  parseStreamedRequest,
-  type StreamedItemsBuilder,
-} from "./streaming-request";
+import { parseStreamedRequest, type StreamedItemsBuilder } from "./streaming-request";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -36,14 +30,7 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // ---------------------------------------------------------------------------
 
 /** Top-level body fields that are extracted into `GatewayRequest` fields. */
-const KNOWN_BODY_FIELDS = new Set([
-  "model",
-  "system",
-  "messages",
-  "tools",
-  "max_tokens",
-  "stream",
-]);
+const KNOWN_BODY_FIELDS = new Set(["model", "system", "messages", "tools", "max_tokens", "stream"]);
 
 // ---------------------------------------------------------------------------
 // Helpers — content block translation
@@ -63,9 +50,7 @@ function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
       return {
         type: "thinking",
         thinking: asString(block.thinking),
-        ...(block.signature != null
-          ? { signature: asString(block.signature) }
-          : undefined),
+        ...(block.signature != null ? { signature: asString(block.signature) } : undefined),
       };
 
     case "tool_use":
@@ -85,9 +70,7 @@ function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
       if (typeof block.content === "string") {
         content = [{ type: "text", text: block.content }];
       } else if (Array.isArray(block.content)) {
-        content = (block.content as Array<Record<string, unknown>>).map(
-          toGatewayBlock,
-        );
+        content = (block.content as Array<Record<string, unknown>>).map(toGatewayBlock);
       } else {
         content = [];
       }
@@ -136,10 +119,7 @@ function normalizeMessageContent(content: unknown): {
   let hasRequestOnlyProvenance = false;
 
   for (const rawBlock of content as Array<Record<string, unknown>>) {
-    if (
-      rawBlock.type === "thinking" ||
-      rawBlock.type === "redacted_thinking"
-    ) {
+    if (rawBlock.type === "thinking" || rawBlock.type === "redacted_thinking") {
       hasRequestOnlyProvenance = true;
       provenance.push({ type: "opaque", raw: rawBlock });
       continue;
@@ -153,15 +133,11 @@ function normalizeMessageContent(content: unknown): {
 
   return {
     content: visible,
-    ...(hasRequestOnlyProvenance
-      ? { provenanceContent: provenance, provenancePositions }
-      : {}),
+    ...(hasRequestOnlyProvenance ? { provenanceContent: provenance, provenancePositions } : {}),
   };
 }
 
-export function createAnthropicMessagesBuilder(): StreamedItemsBuilder<
-  GatewayMessage[]
-> {
+export function createAnthropicMessagesBuilder(): StreamedItemsBuilder<GatewayMessage[]> {
   const messages: GatewayMessage[] = [];
   return {
     add(item) {
@@ -215,9 +191,7 @@ function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
       return {
         type: "thinking",
         thinking: block.thinking,
-        ...(block.signature != null
-          ? { signature: block.signature }
-          : undefined),
+        ...(block.signature != null ? { signature: block.signature } : undefined),
       };
 
     case "tool_use":
@@ -269,12 +243,10 @@ export function parseAnthropicRequest(
 
   // --- Messages ---
   const rawMessages = Array.isArray(raw.messages) ? raw.messages : [];
-  const messages: GatewayMessage[] = rawMessages.map(
-    (msg: Record<string, unknown>) => ({
-      role: msg.role === "assistant" ? "assistant" : "user",
-      ...normalizeMessageContent(msg.content),
-    }),
-  );
+  const messages: GatewayMessage[] = rawMessages.map((msg: Record<string, unknown>) => ({
+    role: msg.role === "assistant" ? "assistant" : "user",
+    ...normalizeMessageContent(msg.content),
+  }));
 
   // --- Tools ---
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
@@ -484,9 +456,7 @@ export function buildAnthropicRequest(
       // doesn't need its own breakpoint — one on system[1] is sufficient.
       // Context-bound LTM rides the durable prompt-delta channel (no
       // system[2] block) — see pipeline.ts `buildKnowledgeDeltaMessage`.
-      const blocks: Record<string, unknown>[] = [
-        { type: "text", text: req.system },
-      ];
+      const blocks: Record<string, unknown>[] = [{ type: "text", text: req.system }];
 
       if (stableLtm) {
         // Stable LTM gets a cache breakpoint — preferences are pinned by
@@ -499,17 +469,13 @@ export function buildAnthropicRequest(
           type: "text",
           text: stableLtm,
           cache_control:
-            systemTTL === "1h"
-              ? { type: "ephemeral", ttl: "1h" }
-              : { type: "ephemeral" },
+            systemTTL === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" },
         });
       } else {
         // No stable LTM — fall back to putting the cache breakpoint on
         // the host prompt itself using the caller's requested TTL.
         const cacheControl: Record<string, string> =
-          systemTTL === "1h"
-            ? { type: "ephemeral", ttl: "1h" }
-            : { type: "ephemeral" };
+          systemTTL === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
         blocks[0].cache_control = cacheControl;
       }
 
@@ -545,32 +511,22 @@ export function buildAnthropicRequest(
       const prefixMsg = messages[prefixLen - 1];
       const prefixBlock = [...(prefixMsg?.content ?? [])]
         .reverse()
-        .find(
-          (block) =>
-            block.type !== "thinking" && block.type !== "redacted_thinking",
-        );
+        .find((block) => block.type !== "thinking" && block.type !== "redacted_thinking");
       if (prefixBlock) {
         prefixBlock.cache_control =
-          cache.systemTTL === "1h"
-            ? { type: "ephemeral", ttl: "1h" }
-            : { type: "ephemeral" };
+          cache.systemTTL === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
       }
     }
 
     const lastMsg = messages[messages.length - 1];
     const lastBlock = [...(lastMsg?.content ?? [])]
       .reverse()
-      .find(
-        (block) =>
-          block.type !== "thinking" && block.type !== "redacted_thinking",
-      );
+      .find((block) => block.type !== "thinking" && block.type !== "redacted_thinking");
     if (lastBlock) {
       // Use configured TTL: "1h" for extended cache tier (2× write cost but
       // 12× longer eviction window), bare ephemeral (5m) otherwise.
       lastBlock.cache_control =
-        cache.conversationTTL === "1h"
-          ? { type: "ephemeral", ttl: "1h" }
-          : { type: "ephemeral" };
+        cache.conversationTTL === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
     }
   }
 
@@ -593,9 +549,7 @@ export function buildAnthropicRequest(
       const lastTool = tools[tools.length - 1];
       if (lastTool) {
         (lastTool as Record<string, unknown>).cache_control =
-          cache.systemTTL === "1h"
-            ? { type: "ephemeral", ttl: "1h" }
-            : { type: "ephemeral" };
+          cache.systemTTL === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
       }
     }
 
@@ -625,9 +579,7 @@ export function buildAnthropicRequest(
  * pipeline returns Anthropic-format JSON that needs to be translated to
  * another protocol (OpenAI Chat Completions, OpenAI Responses API).
  */
-export function parseAnthropicResponseJSON(
-  json: Record<string, unknown>,
-): GatewayResponse {
+export function parseAnthropicResponseJSON(json: Record<string, unknown>): GatewayResponse {
   const content: GatewayContentBlock[] = [];
   const toolIdentities = new Set<string>();
   const rawContent = json.content as Array<Record<string, unknown>> | undefined;
@@ -641,9 +593,7 @@ export function parseAnthropicResponseJSON(
           content.push({
             type: "thinking",
             thinking: asString(block.thinking),
-            ...(block.signature
-              ? { signature: asString(block.signature) }
-              : undefined),
+            ...(block.signature ? { signature: asString(block.signature) } : undefined),
           });
           break;
         case "redacted_thinking":
@@ -691,18 +641,12 @@ export function parseAnthropicResponseJSON(
     id: asString(json.id),
     model: asString(json.model),
     content,
-    stopReason: normalizeAnthropicStopReason(
-      String((json.stop_reason as string) ?? "end_turn"),
-    ),
+    stopReason: normalizeAnthropicStopReason(String((json.stop_reason as string) ?? "end_turn")),
     usage: {
       inputTokens: (usage?.input_tokens as number | undefined) ?? 0,
       outputTokens: (usage?.output_tokens as number | undefined) ?? 0,
-      cacheReadInputTokens: usage?.cache_read_input_tokens as
-        | number
-        | undefined,
-      cacheCreationInputTokens: usage?.cache_creation_input_tokens as
-        | number
-        | undefined,
+      cacheReadInputTokens: usage?.cache_read_input_tokens as number | undefined,
+      cacheCreationInputTokens: usage?.cache_creation_input_tokens as number | undefined,
     },
   };
 }
@@ -713,9 +657,7 @@ export function parseAnthropicResponseJSON(
  * Produces the standard Anthropic `/v1/messages` response shape with
  * `type: "message"`, `role: "assistant"`, content blocks, and usage.
  */
-export function buildAnthropicNonStreamResponse(
-  resp: GatewayResponse,
-): unknown {
+export function buildAnthropicNonStreamResponse(resp: GatewayResponse): unknown {
   const u = resp.usage ?? ZERO_USAGE;
   const usage: Record<string, number> = {
     input_tokens: u.inputTokens,
