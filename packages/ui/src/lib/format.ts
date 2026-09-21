@@ -42,6 +42,20 @@ export function pluralize(count: number, singular: string, plural?: string) {
   return `${count} ${count === 1 ? singular : (plural ?? `${singular}s`)}`;
 }
 
+export function recordedWriter(value: {
+  updated_by?: string | null;
+  source_refs?: {
+    updated_by?: string | null;
+    worker_model_id?: string | null;
+  } | null;
+}): string | null | undefined {
+  return (
+    value.updated_by ??
+    value.source_refs?.updated_by ??
+    value.source_refs?.worker_model_id
+  );
+}
+
 /** Two-letter avatar initials from a display name or id. */
 export function initials(name: string): string {
   const [first, second] = name

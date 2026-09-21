@@ -143,6 +143,41 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
       }
       return entry;
     },
+    async listKnowledgeVersions(id: string) {
+      return {
+        id,
+        current_version_id: `${id}-v1`,
+        versions: [
+          {
+            version_id: `${id}-v1`,
+            version: 1,
+            created_at: Date.UTC(2026, 8, 2, 10),
+            superseded_at: null,
+            is_current: true,
+            is_deleted: false,
+            title: ENTRIES.find((entry) => entry.id === id)?.title ?? "Entry",
+            content: "Version content",
+            category:
+              ENTRIES.find((entry) => entry.id === id)?.category ?? "decision",
+            confidence: 0.9,
+            scope: "project",
+            cross_project: false,
+            source_refs: {
+              session_id: null,
+              entry_id: id,
+              user_id: null,
+              created_by: null,
+              updated_by: null,
+              worker_provider_id: null,
+              worker_model_id: null,
+            },
+          },
+        ],
+      };
+    },
+    async getSession() {
+      return { messages: [], distillations: [] };
+    },
   };
   client = Object.assign(base, overrides) as ApiClient;
   return Object.assign(client, { calls, pageOpts });
