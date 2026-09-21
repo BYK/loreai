@@ -599,7 +599,32 @@ function injectContextWarning(
     type: "text" as const,
     text,
   });
-  return { ...resp, content };
+
+  // Buffered Responses egress rebuilds from raw output items so encrypted
+  // reasoning stays byte-identical. Carry this gateway-owned warning into that
+  // same item list; otherwise the raw branch would silently discard it.
+  const rawOutputItems = resp.rawOutputItems
+    ? [...resp.rawOutputItems]
+    : undefined;
+  if (rawOutputItems) {
+    let rawInsertIdx = 0;
+    while (rawOutputItems[rawInsertIdx]?.type === "reasoning") {
+      rawInsertIdx++;
+    }
+    rawOutputItems.splice(rawInsertIdx, 0, {
+      type: "message",
+      id: `msg_${resp.id}_lore_context_warning`,
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text, annotations: [] }],
+    });
+  }
+
+  return {
+    ...resp,
+    content,
+    ...(rawOutputItems ? { rawOutputItems } : {}),
+  };
 }
 
 /**
@@ -2724,10 +2749,6 @@ export function coalesceAdjacentAssistants(
       // injectContextWarning insertion rule. `last` is the earlier message and
       // never itself leads with reasoning (it is the synthetic delta payload),
       // so only `m`'s leading run needs to be protected.
-      let lead = 0;
-      while (lead < m.content.length && isReasoningBlock(m.content[lead])) {
-        lead++;
-      }
       merged[merged.length - 1] = mergeAdjacentAssistantMessages(last, m);
     } else {
       merged.push(m);
