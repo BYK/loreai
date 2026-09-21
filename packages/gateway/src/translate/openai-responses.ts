@@ -987,7 +987,46 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
       let outputIndex = 0;
 
-      // Process content blocks
+      // Rebuild native Responses output items when the accumulator has
+      // them. This includes opaque reasoning items with encrypted_content;
+      // reducing them to GatewayResponse.content would silently drop the
+      // provider's continuation state from buffered client streams.
+      if (resp.rawOutputItems) {
+        for (const item of resp.rawOutputItems) {
+          const addedItem = { ...item };
+          if (
+            [
+              "message",
+              "function_call",
+              "reasoning",
+              "web_search_call",
+              "file_search_call",
+              "tool_search_call",
+              "computer_call",
+              "computer_tool_call",
+              "code_interpreter_call",
+              "image_generation_call",
+              "local_shell_call",
+              "shell_call",
+              "mcp_call",
+              "custom_tool_call",
+            ].includes(String(item.type))
+          ) {
+            addedItem.status = "in_progress";
+          }
+          emit("response.output_item.added", {
+            type: "response.output_item.added",
+            output_index: outputIndex,
+            item: addedItem,
+          });
+          emit("response.output_item.done", {
+            type: "response.output_item.done",
+            output_index: outputIndex,
+            item,
+          });
+          outputIndex++;
+        }
+      } else {
       for (const block of resp.content) {
         if (block.type === "text") {
           const itemId = `msg_${respId}_${outputIndex}`;
@@ -1123,6 +1162,7 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
           outputIndex++;
         }
       }
+      }
 
       const status = mapStopReasonToStatus(resp.stopReason);
       const terminalEvent =
@@ -1138,32 +1178,38 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
           ...(status === "incomplete"
             ? { incomplete_details: incompleteDetails(resp.stopReason) }
             : {}),
-          output: resp.content
-            .map((block, i) => {
-              if (block.type === "text") {
-                return {
-                  type: "message",
-                  id: `msg_${respId}_${i}`,
-                  role: "assistant",
-                  status: "completed",
-                  content: [
-                    { type: "output_text", text: block.text, annotations: [] },
-                  ],
-                };
-              }
-              if (block.type === "tool_use") {
-                return {
-                  type: "function_call",
-                  id: `fc_${block.id}`,
-                  call_id: block.id,
-                  name: block.name,
-                  arguments: JSON.stringify(block.input),
-                  status: "completed",
-                };
-              }
-              return null;
-            })
-            .filter(Boolean),
+          output:
+            resp.rawOutputItems ??
+            resp.content
+              .map((block, i) => {
+                if (block.type === "text") {
+                  return {
+                    type: "message",
+                    id: `msg_${respId}_${i}`,
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      {
+                        type: "output_text",
+                        text: block.text,
+                        annotations: [],
+                      },
+                    ],
+                  };
+                }
+                if (block.type === "tool_use") {
+                  return {
+                    type: "function_call",
+                    id: `fc_${block.id}`,
+                    call_id: block.id,
+                    name: block.name,
+                    arguments: JSON.stringify(block.input),
+                    status: "completed",
+                  };
+                }
+                return null;
+              })
+              .filter(Boolean),
           usage: responsesUsage(usage),
         },
       });
