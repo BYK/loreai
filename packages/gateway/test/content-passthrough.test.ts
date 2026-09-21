@@ -11,16 +11,10 @@
  * tool on a PNG returned "Tool ran without output or errors").
  */
 import { describe, expect, test } from "vitest";
-import {
-  parseAnthropicRequest,
-  buildAnthropicRequest,
-} from "../src/translate/anthropic";
+import { parseAnthropicRequest, buildAnthropicRequest } from "../src/translate/anthropic";
 import { parseOpenAIRequest } from "../src/translate/openai";
 import { parseOpenAIResponsesRequest } from "../src/translate/openai-responses";
-import {
-  gatewayMessagesToLore,
-  resolveToolResults,
-} from "../src/temporal-adapter";
+import { gatewayMessagesToLore, resolveToolResults } from "../src/temporal-adapter";
 import { loreMessagesToGateway } from "../src/pipeline";
 import { blocksToText } from "../src/translate/types";
 import type { GatewayContentBlock } from "../src/translate/types";
@@ -63,10 +57,7 @@ describe("Anthropic lossless content passthrough", () => {
       messages: [
         {
           role: "user",
-          content: [
-            { type: "text", text: "What's in this image?" },
-            IMAGE_BLOCK,
-          ],
+          content: [{ type: "text", text: "What's in this image?" }, IMAGE_BLOCK],
         },
       ],
     };
@@ -86,9 +77,7 @@ describe("Anthropic lossless content passthrough", () => {
     const builtMessages = (built as Record<string, unknown>).messages as Array<
       Record<string, unknown>
     >;
-    const builtContent = builtMessages[0].content as Array<
-      Record<string, unknown>
-    >;
+    const builtContent = builtMessages[0].content as Array<Record<string, unknown>>;
     expect(builtContent).toHaveLength(2);
     expect(builtContent[0]).toEqual({
       type: "text",
@@ -147,9 +136,7 @@ describe("Anthropic lossless content passthrough", () => {
     const builtMessages = (built as Record<string, unknown>).messages as Array<
       Record<string, unknown>
     >;
-    const builtToolResult = (
-      builtMessages[1].content as Array<Record<string, unknown>>
-    )[0];
+    const builtToolResult = (builtMessages[1].content as Array<Record<string, unknown>>)[0];
     expect(builtToolResult.type).toBe("tool_result");
     expect(builtToolResult.content).toEqual([IMAGE_BLOCK]);
   });
@@ -176,10 +163,7 @@ describe("Anthropic lossless content passthrough", () => {
             {
               type: "tool_result",
               tool_use_id: "toolu_123",
-              content: [
-                { type: "text", text: "File metadata: 1024x768" },
-                IMAGE_BLOCK,
-              ],
+              content: [{ type: "text", text: "File metadata: 1024x768" }, IMAGE_BLOCK],
             },
           ],
         },
@@ -198,9 +182,7 @@ describe("Anthropic lossless content passthrough", () => {
     const builtMessages = (built as Record<string, unknown>).messages as Array<
       Record<string, unknown>
     >;
-    const builtToolResult = (
-      builtMessages[1].content as Array<Record<string, unknown>>
-    )[0];
+    const builtToolResult = (builtMessages[1].content as Array<Record<string, unknown>>)[0];
     expect(builtToolResult.content).toEqual([
       { type: "text", text: "File metadata: 1024x768" },
       IMAGE_BLOCK,
@@ -246,9 +228,7 @@ describe("Anthropic lossless content passthrough", () => {
     const builtMessages = (built as Record<string, unknown>).messages as Array<
       Record<string, unknown>
     >;
-    const builtToolResult = (
-      builtMessages[1].content as Array<Record<string, unknown>>
-    )[0];
+    const builtToolResult = (builtMessages[1].content as Array<Record<string, unknown>>)[0];
     expect(builtToolResult.content).toEqual([]);
   });
 
@@ -292,9 +272,7 @@ describe("Anthropic lossless content passthrough", () => {
     const builtMessages = (built as Record<string, unknown>).messages as Array<
       Record<string, unknown>
     >;
-    const builtToolResult = (
-      builtMessages[1].content as Array<Record<string, unknown>>
-    )[0];
+    const builtToolResult = (builtMessages[1].content as Array<Record<string, unknown>>)[0];
     expect(builtToolResult.content).toEqual([IMAGE_BLOCK, AUDIO_BLOCK]);
   });
 
@@ -305,10 +283,7 @@ describe("Anthropic lossless content passthrough", () => {
       messages: [
         {
           role: "user",
-          content: [
-            { type: "text", text: "Render this" },
-            UNKNOWN_FUTURE_BLOCK,
-          ],
+          content: [{ type: "text", text: "Render this" }, UNKNOWN_FUTURE_BLOCK],
         },
       ],
     };
@@ -324,9 +299,7 @@ describe("Anthropic lossless content passthrough", () => {
     const builtMessages = (built as Record<string, unknown>).messages as Array<
       Record<string, unknown>
     >;
-    const builtContent = builtMessages[0].content as Array<
-      Record<string, unknown>
-    >;
+    const builtContent = builtMessages[0].content as Array<Record<string, unknown>>;
     expect(builtContent[1]).toEqual(UNKNOWN_FUTURE_BLOCK);
   });
 });
@@ -388,10 +361,7 @@ describe("Provider thinking provenance", () => {
     });
 
     const built = buildAnthropicRequest(request);
-    expect(
-      (built.body as { messages: Array<{ content: unknown }> }).messages[0]
-        ?.content,
-    ).toEqual([
+    expect((built.body as { messages: Array<{ content: unknown }> }).messages[0]?.content).toEqual([
       thinking,
       { type: "text", text: "visible answer" },
       {
@@ -426,16 +396,14 @@ describe("Provider thinking provenance", () => {
       {},
     );
 
-    expect(request.messages[0]?.content).toEqual([
-      { type: "text", text: "visible" },
-    ]);
+    expect(request.messages[0]?.content).toEqual([{ type: "text", text: "visible" }]);
     expect(request.messages[0]?.provenanceContent).toEqual([
       { type: "opaque", raw: redacted },
       { type: "text", text: "visible" },
     ]);
     expect(
-      (buildAnthropicRequest(request).body as { messages: Array<{ content: unknown }> })
-        .messages[0]?.content,
+      (buildAnthropicRequest(request).body as { messages: Array<{ content: unknown }> }).messages[0]
+        ?.content,
     ).toEqual([redacted, { type: "text", text: "visible" }]);
 
     const lore = gatewayMessagesToLore(request.messages, "redacted-thinking-session");
@@ -481,10 +449,7 @@ describe("OpenAI Chat lossless content passthrough", () => {
       messages: [
         {
           role: "user",
-          content: [
-            { type: "text", text: "What's in this image?" },
-            imageUrlBlock,
-          ],
+          content: [{ type: "text", text: "What's in this image?" }, imageUrlBlock],
         },
       ],
     };
@@ -547,10 +512,7 @@ describe("OpenAI Responses lossless content passthrough", () => {
         {
           type: "message",
           role: "user",
-          content: [
-            { type: "input_text", text: "Describe this" },
-            inputImagePart,
-          ],
+          content: [{ type: "input_text", text: "Describe this" }, inputImagePart],
         },
       ],
     };
@@ -589,9 +551,7 @@ describe("Full pipeline round-trip (gateway → Lore → gateway)", () => {
           {
             type: "tool_result" as const,
             toolUseId: "toolu_read_abc",
-            content: [
-              { type: "opaque" as const, raw: IMAGE_BLOCK },
-            ] as GatewayContentBlock[],
+            content: [{ type: "opaque" as const, raw: IMAGE_BLOCK }] as GatewayContentBlock[],
           },
         ],
       },
@@ -608,9 +568,7 @@ describe("Full pipeline round-trip (gateway → Lore → gateway)", () => {
     expect(roundTripped[0].content[0].type).toBe("tool_use");
 
     // The user message should have tool_result with the image preserved
-    const toolResult = roundTripped[1].content.find(
-      (b) => b.type === "tool_result",
-    );
+    const toolResult = roundTripped[1].content.find((b) => b.type === "tool_result");
     expect(toolResult).toBeDefined();
     if (toolResult?.type === "tool_result") {
       expect(toolResult.content).toHaveLength(1);
@@ -668,22 +626,11 @@ describe("deterministicID collision guard", () => {
         },
       },
     ];
-    const msg3Content: GatewayContentBlock[] = [
-      { type: "text", text: "See this" },
-    ];
+    const msg3Content: GatewayContentBlock[] = [{ type: "text", text: "See this" }];
 
-    const lore1 = gatewayMessagesToLore(
-      [{ role: "user", content: msg1Content }],
-      "s",
-    );
-    const lore2 = gatewayMessagesToLore(
-      [{ role: "user", content: msg2Content }],
-      "s",
-    );
-    const lore3 = gatewayMessagesToLore(
-      [{ role: "user", content: msg3Content }],
-      "s",
-    );
+    const lore1 = gatewayMessagesToLore([{ role: "user", content: msg1Content }], "s");
+    const lore2 = gatewayMessagesToLore([{ role: "user", content: msg2Content }], "s");
+    const lore3 = gatewayMessagesToLore([{ role: "user", content: msg3Content }], "s");
 
     // All three should have distinct IDs
     const ids = new Set([lore1[0].info.id, lore2[0].info.id, lore3[0].info.id]);
@@ -705,9 +652,7 @@ describe("blocksToText", () => {
   });
 
   test("opaque image block produces a placeholder", () => {
-    const blocks: GatewayContentBlock[] = [
-      { type: "opaque", raw: IMAGE_BLOCK },
-    ];
+    const blocks: GatewayContentBlock[] = [{ type: "opaque", raw: IMAGE_BLOCK }];
     const text = blocksToText(blocks);
     expect(text).toContain("[image");
     expect(text).toContain("image/png");
@@ -744,9 +689,7 @@ describe("blocksToText", () => {
   });
 
   test("audio block placeholder includes type", () => {
-    const blocks: GatewayContentBlock[] = [
-      { type: "opaque", raw: AUDIO_BLOCK },
-    ];
+    const blocks: GatewayContentBlock[] = [{ type: "opaque", raw: AUDIO_BLOCK }];
     const text = blocksToText(blocks);
     expect(text).toContain("[input_audio");
   });
