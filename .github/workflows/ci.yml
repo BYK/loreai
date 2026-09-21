@@ -301,8 +301,9 @@ jobs:
           informational-patch: ${{ github.event_name == 'push' }}
 
       # Rebuild the shard manifest from this run's real timings. Never fails
-      # the build; when the diff grows, download `test-durations` and commit
-      # scripts/test-durations.json to rebalance.
+      # the build; when the diff grows, run `pnpm test:shards:fetch` to
+      # download `test-durations` and commit scripts/test-durations.json to
+      # rebalance.
       - name: Download shard timings
         uses: actions/download-artifact@v7
         with:

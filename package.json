@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
-  "description": "Monorepo root for Lore — three-tier memory architecture",
+  "description": "Monorepo root for Lore \u2014 three-tier memory architecture",
   "main": "./packages/opencode/src/index.ts",
   "exports": {
     ".": "./packages/opencode/src/index.ts"
@@ -53,6 +53,8 @@
     "test": "vitest run && pnpm --filter @loreai/ui test",
     "pretest": "pnpm --filter @loreai/gateway run bundle",
     "test:coverage": "pnpm --filter @loreai/gateway run bundle && vitest run --coverage && pnpm --filter @loreai/ui test",
+    "test:shard": "tsx scripts/test-shards.ts run --shard",
+    "test:shards:fetch": "tsx scripts/test-shards.ts fetch",
     "build": "pnpm -r run build",
     "site:dev": "pnpm --filter '@loreai/website' dev",
     "site:build": "pnpm --filter '@loreai/website' build",

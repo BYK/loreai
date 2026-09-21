@@ -21,9 +21,25 @@
  *
  *   tsx scripts/test-shards.ts summary [--shards 4]
  *       Print the estimated per-shard totals for the current manifest.
+ *
+ *   tsx scripts/test-shards.ts run --shard 2/4 [-- <extra vitest args>]
+ *       Compute the plan like `plan`, then run `vitest run` on exactly
+ *       that shard's files (extra args are passed through to vitest).
+ *
+ *   tsx scripts/test-shards.ts fetch [--branch main]
+ *       Download the newest `test-durations` CI artifact for the given
+ *       branch into scripts/test-durations.json (requires the `gh` CLI),
+ *       then print the rebalanced shard summary.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -143,6 +159,89 @@ function fmt(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function runShard(shardSpec: string | undefined, extra: string[]): void {
+  const { index, count } = parseShard(shardSpec);
+  const { assignment } = pack(listTestFiles(), readManifest(), count);
+  const files = assignment[index - 1];
+  if (!files.length) {
+    console.error(`test-shards: shard ${index}/${count} plan is empty`);
+    process.exit(1);
+  }
+  const result = spawnSync(
+    "pnpm",
+    ["exec", "vitest", "run", ...files, ...extra],
+    {
+      stdio: "inherit",
+      cwd: rootDir,
+      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+    },
+  );
+  process.exit(result.status ?? 1);
+}
+
+interface GhArtifact {
+  name: string;
+  expired: boolean;
+  created_at: string;
+  workflow_run: {
+    id: number;
+    head_branch: string;
+    head_sha: string;
+  };
+}
+
+function gh(args: string[]): string {
+  const result = spawnSync("gh", args, {
+    cwd: rootDir,
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) {
+    console.error(result.stderr || String(result.error));
+    console.error("hint: install GitHub CLI and run: gh auth login");
+    process.exit(1);
+  }
+  return result.stdout;
+}
+
+function fetchDurations(branch: string): void {
+  const out = gh([
+    "api",
+    "repos/{owner}/{repo}/actions/artifacts?name=test-durations&per_page=30",
+  ]);
+  const artifacts = (JSON.parse(out) as { artifacts: GhArtifact[] }).artifacts;
+  const artifact = artifacts.find(
+    (a) => !a.expired && a.workflow_run.head_branch === branch,
+  );
+  if (!artifact) {
+    console.error(
+      `no test-durations artifact found for branch ${branch} in the last 30`,
+    );
+    process.exit(1);
+  }
+  const dir = mkdtempSync(join(tmpdir(), "test-durations-"));
+  try {
+    gh([
+      "run",
+      "download",
+      String(artifact.workflow_run.id),
+      "--name",
+      "test-durations",
+      "--dir",
+      dir,
+    ]);
+    copyFileSync(join(dir, "test-durations.json"), manifestPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  console.log(
+    `updated ${relative(rootDir, manifestPath)} from run ${artifact.workflow_run.id} ` +
+      `(${artifact.workflow_run.head_sha.slice(0, 7)}, ${artifact.created_at})`,
+  );
+  const { totals, unknown } = pack(listTestFiles(), readManifest(), 4);
+  totals.forEach((t, i) => console.log(`shard ${i + 1}/4: ${fmt(t)}`));
+  if (unknown.length) console.log(`${unknown.length} file(s) not in manifest`);
+}
+
 function main(argv: string[]): void {
   const [cmd, ...args] = argv;
   switch (cmd) {
@@ -167,6 +266,16 @@ function main(argv: string[]): void {
     case "record":
       record(args);
       return;
+    case "run": {
+      const extra = args.includes("--")
+        ? args.slice(args.indexOf("--") + 1)
+        : [];
+      runShard(flag(args, "--shard"), extra);
+      return;
+    }
+    case "fetch":
+      fetchDurations(flag(args, "--branch") ?? "main");
+      return;
     case "summary": {
       const count = Number(flag(args, "--shards") ?? 4);
       const { totals, unknown } = pack(listTestFiles(), readManifest(), count);
@@ -179,7 +288,7 @@ function main(argv: string[]): void {
     }
     default:
       console.error(
-        "usage: test-shards.ts plan --shard N/M | record <json...> | summary [--shards N]",
+        "usage: test-shards.ts plan --shard N/M | record <json...> | summary [--shards N] | run --shard N/M [-- <vitest args>] | fetch [--branch B]",
       );
       process.exit(2);
   }
