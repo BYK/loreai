@@ -73,7 +73,6 @@ import {
   calibrate,
   getLastTransformedCount,
   getLastTransformEstimate,
-  getLastTransformLayer,
   onIdleResume,
   getCacheStrategy,
   strategyWantsWarming,
@@ -17493,11 +17492,11 @@ async function handleConversationTurn(
     req.signal,
   );
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  // The previous transform layer is the compaction boundary for request-only
-  // Responses provenance. A stable layer may add a distilled prefix or use a
-  // source-window checkpoint, but surviving source messages still need their
-  // encrypted reasoning replayed in the original positions.
-  const previousTransformLayer = getLastTransformLayer(sessionID);
+  // transform() updates core's attempted layer before dispatch. Use the
+  // last layer whose request was accepted upstream instead: a synthetic
+  // response or failed request must not consume a compaction boundary.
+  const previousTransformLayer =
+    sessionState.lastAcceptedProvenanceLayer ?? null;
   let result;
   try {
     result = transform({
@@ -18318,6 +18317,11 @@ async function handleConversationTurn(
     endGenAiSpan();
     return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
   }
+
+  // The upstream accepted this transformed request. Commit the provenance
+  // boundary only now; transform() itself is speculative and can be followed
+  // by a synthetic response, transport error, or non-2xx response.
+  sessionState.lastAcceptedProvenanceLayer = result.layer;
 
   // Run the recall-interception loop over an already-accumulated
   // (internal Anthropic-format) GatewayResponse and return the client HTTP
