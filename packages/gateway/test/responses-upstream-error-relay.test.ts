@@ -225,10 +225,24 @@ describe("Responses upstream error relay", () => {
     expect(
       getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
     ).toBe(0);
+    const session = getActiveSessions().get(internalSessionID);
+    expect(session?.projectPathProvisional).toBe(true);
+    if (!session) throw new Error("synthetic test session not found");
+    // The accepted baseline deliberately uses a non-probe tool. Re-arm the
+    // normal synthetic branch so the next real request exercises its short-circuit.
+    session.syntheticResolveState = "none";
     setForceMinLayer(1, internalSessionID);
 
     const synthetic = requestWithTools([
-      { name: "read", description: "Read a file", inputSchema: {} },
+      {
+        name: "read",
+        description: "Read a file",
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      },
     ]);
     synthetic.rawHeaders["x-lore-session-id"] = sessionID;
     synthetic.rawHeaders["x-lore-project"] = "";
