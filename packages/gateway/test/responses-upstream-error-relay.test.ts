@@ -1,6 +1,3 @@
-npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
-No config found, using defaults. Please add a config file or try `oxfmt --init` if needed.
-Finished in 28ms on 1 files using 8 threads.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setForceMinLayer } from "@loreai/core";
 import type { GatewayRequest, GatewayResponse } from "../src/translate/types";
