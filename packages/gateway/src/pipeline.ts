@@ -19638,12 +19638,13 @@ export function loreMessagesToGateway(
  * introduces orphaned references, this catches them before they reach the API.
  */
 /** @internal Exported for tests. */
-export function removeOrphanedToolResults(
-  messages: Array<{
-    role: "user" | "assistant";
-    content: GatewayContentBlock[];
-  }>,
-): void {
+function clearGatewayMessageProvenance(message: GatewayMessage): void {
+  delete message.provenanceContent;
+  delete message.provenancePositions;
+}
+
+/** @internal Exported for tests. */
+export function removeOrphanedToolResults(messages: GatewayMessage[]): void {
   // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -19665,6 +19666,11 @@ export function removeOrphanedToolResults(
       (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
     );
     if (msg.content.length < before) {
+      // Provenance is serialized in preference to visible content by every
+      // same-family request builder. Once cleanup changes the visible tool
+      // sequence, retaining the old provider-native sequence could resurrect
+      // an orphaned tool call (and its encrypted reasoning) on the wire.
+      clearGatewayMessageProvenance(msg);
       log.warn(
         `removed ${before - msg.content.length} orphaned tool_result block(s) from message ${i}`,
       );
@@ -19702,6 +19708,7 @@ export function removeOrphanedToolResults(
       (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
     );
     if (msg.content.length < before) {
+      clearGatewayMessageProvenance(msg);
       log.warn(
         `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
       );
