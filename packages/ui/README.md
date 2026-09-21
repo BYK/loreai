@@ -691,7 +691,7 @@ reader offers **Search the whole session** (below).
 
 Two search entry points exist on purpose and answer different questions:
 
-| | Loaded-window search (#1849) | Whole-session search (#1857) | Project recall (#1799) |
+| | Loaded-window search (#1849) | Whole-session search (#1857) | Project recall (#1799, scoped in #1844) |
 |---|---|---|---|
 | Where it runs | browser, `src/reader/search.ts` | gateway, `GET /api/v1/sessions/:id/search` | gateway, `GET /api/v1/recall` |
 | Over what | displayed text of the **loaded** blocks | stored text of **every** message in one session (`temporal_fts`) | fused knowledge / distillations / messages across a scope |
