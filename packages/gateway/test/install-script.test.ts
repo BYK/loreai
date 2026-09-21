@@ -15,7 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   acquireLifecycleLock,
   createUninstallTombstone,
@@ -27,7 +27,9 @@ import { standaloneInstallProvenance } from "../src/cli/uninstall";
 const installer = resolve(import.meta.dirname, "./fixtures/install-v1.sh");
 const temporaryDirectories: string[] = [];
 
-afterEach(() => {
+// afterAll, not afterEach: the concurrent suite runs tests in parallel and a
+// per-test sweep would delete a still-running sibling's tmp dir mid-test.
+afterAll(() => {
   for (const path of temporaryDirectories.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -185,7 +187,7 @@ function processStartTicks(pid = process.pid): string {
   );
 }
 
-describe("hosted installer", () => {
+describe.concurrent("hosted installer", () => {
   it("passes Bash syntax validation", () => {
     const syntax = spawnSync("bash", ["-n", installer], {
       encoding: "utf8",
@@ -571,73 +573,6 @@ describe("hosted installer", () => {
     expect(existsSync(join(home, ".local", "bin", "lore"))).toBe(true);
   });
 
-  it("recovers a SIGKILL between lock mkdir and owner publication", async () => {
-    const { home, env } = fixture();
-    const fakeBin = env.PATH?.split(":")[0];
-    if (!fakeBin) throw new Error("fixture PATH is missing");
-    const stateDir = join(home, ".lore");
-    const lock = join(stateDir, "lifecycle.lock");
-    writeExecutable(
-      join(fakeBin, "mkdir"),
-      [
-        "#!/bin/sh",
-        "set -eu",
-        'last=""',
-        'for arg in "$@"; do last=$arg; done',
-        'if [ "$last" = "$LORE_TEST_LOCK_PATH" ] && [ "${LORE_TEST_KILL_AFTER_MKDIR:-}" = 1 ]; then',
-        '  "$LORE_TEST_REAL_MKDIR" "$@"',
-        '  kill -KILL "$LORE_TEST_INSTALLER_PID"',
-        "  exit 0",
-        "fi",
-        'exec "$LORE_TEST_REAL_MKDIR" "$@"',
-        "",
-      ].join("\n"),
-    );
-    env.LORE_TEST_REAL_MKDIR = realCommand("mkdir");
-    env.LORE_TEST_LOCK_PATH = lock;
-    env.LORE_TEST_KILL_AFTER_MKDIR = "1";
-
-    const killed = spawn(
-      "bash",
-      [
-        "-c",
-        'export LORE_TEST_INSTALLER_PID=$$; exec bash "$1" --no-modify-path',
-        "bash",
-        installer,
-      ],
-      { cwd: home, env, stdio: ["ignore", "ignore", "pipe"] },
-    );
-    await expect(
-      new Promise<NodeJS.Signals | null>((resolveExit, rejectExit) => {
-        killed.once("error", rejectExit);
-        killed.once("exit", (_code, signal) => resolveExit(signal));
-      }),
-    ).resolves.toBe("SIGKILL");
-
-    expect(existsSync(lock)).toBe(true);
-    expect(existsSync(join(lock, "owner.json"))).toBe(false);
-    const initClaims = readdirSync(stateDir).filter((entry) =>
-      entry.startsWith(".lifecycle.lock.init."),
-    );
-    expect(initClaims).toHaveLength(1);
-    const token = initClaims[0]?.slice(".lifecycle.lock.init.".length);
-    if (!token) throw new Error("initialization claim token is missing");
-    const expired = new Date(Date.now() - 60_000);
-    utimesSync(lock, expired, expired);
-
-    const install = runInstaller(
-      home,
-      { ...env, LORE_TEST_KILL_AFTER_MKDIR: "" },
-      "--no-modify-path",
-    );
-
-    expect(install.status, install.stderr).toBe(0);
-    expect(existsSync(join(home, ".local", "bin", "lore"))).toBe(true);
-    expect(
-      existsSync(join(stateDir, `.lifecycle.lock.claim.init.${token}`)),
-    ).toBe(true);
-  });
-
   it.skipIf(process.platform !== "linux")(
     "reclaims a live PID whose process generation was reused",
     () => {
@@ -666,67 +601,6 @@ describe("hosted installer", () => {
 
       expect(install.status, install.stderr).toBe(0);
       expect(existsSync(join(home, ".local", "bin", "lore"))).toBe(true);
-    },
-  );
-
-  it.skipIf(process.platform !== "linux")(
-    "reclaims an installer SIGKILLed after owner publication",
-    async () => {
-      const { home, env } = fixture();
-      const fakeBin = env.PATH?.split(":")[0];
-      if (!fakeBin) throw new Error("fixture PATH is missing");
-      const capturedOwner = join(dirname(home), "killed-owner.json");
-      writeExecutable(
-        join(fakeBin, "curl"),
-        [
-          "#!/bin/sh",
-          "set -eu",
-          'cp "$HOME/.lore/lifecycle.lock/owner.json" "$LORE_TEST_OWNER_CAPTURE"',
-          'if [ "${LORE_TEST_KILL_AFTER_OWNER:-}" = 1 ]; then kill -KILL "$LORE_TEST_INSTALLER_PID"; fi',
-          'case "$*" in',
-          '  *api.github.com*/releases/tags/*) cat "$LORE_TEST_RELEASE_METADATA" ;;',
-          '  *lore-checksums.txt*) cat "$LORE_TEST_CHECKSUMS" ;;',
-          '  *.gz*) cat "$LORE_TEST_ARCHIVE" ;;',
-          "  *) exit 1 ;;",
-          "esac",
-          "",
-        ].join("\n"),
-      );
-      env.LORE_TEST_OWNER_CAPTURE = capturedOwner;
-      env.LORE_TEST_KILL_AFTER_OWNER = "1";
-
-      const killed = spawn(
-        "bash",
-        [
-          "-c",
-          'export LORE_TEST_INSTALLER_PID=$$; exec bash "$1" --no-modify-path',
-          "bash",
-          installer,
-        ],
-        { cwd: home, env, stdio: ["ignore", "ignore", "pipe"] },
-      );
-      await expect(
-        new Promise<NodeJS.Signals | null>((resolveExit, rejectExit) => {
-          killed.once("error", rejectExit);
-          killed.once("exit", (_code, signal) => resolveExit(signal));
-        }),
-      ).resolves.toBe("SIGKILL");
-      const deadOwner = JSON.parse(readFileSync(capturedOwner, "utf8")) as {
-        token: string;
-      };
-
-      const install = runInstaller(
-        home,
-        { ...env, LORE_TEST_KILL_AFTER_OWNER: "" },
-        "--no-modify-path",
-      );
-
-      expect(install.status, install.stderr).toBe(0);
-      expect(
-        existsSync(
-          join(home, ".lore", `.lifecycle.lock.claim.${deadOwner.token}`),
-        ),
-      ).toBe(true);
     },
   );
 
@@ -842,78 +716,6 @@ describe("hosted installer", () => {
       "# original profile\n",
     );
   });
-
-  it.skipIf(process.platform !== "linux")(
-    "recovers a profile in a fresh process after SIGKILL immediately after its claim move",
-    async () => {
-      const { home, env } = fixture();
-      const fakeBin = env.PATH?.split(":")[0];
-      if (!fakeBin) throw new Error("fixture PATH is missing");
-      const profile = join(home, ".bashrc");
-      writeFileSync(profile, "# original profile\nexport KEEP_ME=1\n");
-      writeExecutable(
-        join(fakeBin, "mv"),
-        [
-          "#!/bin/sh",
-          "set -eu",
-          'previous=""',
-          'current=""',
-          'for arg in "$@"; do previous=$current; current=$arg; done',
-          '"$LORE_TEST_REAL_MV" "$@"',
-          'case "$current" in',
-          '  "$LORE_TEST_PROFILE".lore-original.*)',
-          '    if [ "${LORE_TEST_KILL_AFTER_PROFILE_CLAIM:-}" = 1 ]; then',
-          '      kill -KILL "$LORE_TEST_INSTALLER_PID"',
-          "    fi",
-          "    ;;",
-          "esac",
-          "",
-        ].join("\n"),
-      );
-      env.LORE_TEST_REAL_MV = realCommand("mv");
-      env.LORE_TEST_PROFILE = profile;
-      env.LORE_TEST_KILL_AFTER_PROFILE_CLAIM = "1";
-
-      const killed = spawn(
-        "bash",
-        [
-          "-c",
-          'export LORE_TEST_INSTALLER_PID=$$; exec bash "$1"',
-          "bash",
-          installer,
-        ],
-        { cwd: home, env, stdio: ["ignore", "ignore", "pipe"] },
-      );
-      await expect(
-        new Promise<NodeJS.Signals | null>((resolveExit, rejectExit) => {
-          killed.once("error", rejectExit);
-          killed.once("exit", (_code, signal) => resolveExit(signal));
-        }),
-      ).resolves.toBe("SIGKILL");
-
-      expect(existsSync(profile)).toBe(false);
-      expect(
-        readdirSync(home).filter((name) =>
-          name.startsWith(".bashrc.lore-original."),
-        ),
-      ).toHaveLength(1);
-
-      const recovered = runInstaller(home, {
-        ...env,
-        LORE_TEST_KILL_AFTER_PROFILE_CLAIM: "",
-      });
-
-      expect(recovered.status, recovered.stderr).toBe(0);
-      const contents = readFileSync(profile, "utf8");
-      expect(contents).toContain("export KEEP_ME=1");
-      expect(contents.match(/# Added by lore installer/g)).toHaveLength(1);
-      expect(
-        readdirSync(home).filter((name) =>
-          name.startsWith(".bashrc.lore-original."),
-        ),
-      ).toHaveLength(0);
-    },
-  );
 
   it("fails closed without publishing a profile when recovery claims are ambiguous", () => {
     const { home, env } = fixture();
@@ -1130,4 +932,211 @@ describe("hosted installer", () => {
       `export PATH='${pathInstallDir}':"$PATH"`,
     );
   });
+});
+
+// The kill-window PATH shims (mkdir/mv that SIGKILL the installer at a
+// precise filesystem interleave) assume an otherwise-idle machine: under
+// concurrency a sibling test's subprocess can sit between the shim's check
+// and the kill, shifting the crash point. Keep them sequential; every other
+// test is fully isolated via per-test mkdtemp dirs + per-spawn env.
+describe("hosted installer SIGKILL kill windows", () => {
+  it("recovers a SIGKILL between lock mkdir and owner publication", async () => {
+    const { home, env } = fixture();
+    const fakeBin = env.PATH?.split(":")[0];
+    if (!fakeBin) throw new Error("fixture PATH is missing");
+    const stateDir = join(home, ".lore");
+    const lock = join(stateDir, "lifecycle.lock");
+    writeExecutable(
+      join(fakeBin, "mkdir"),
+      [
+        "#!/bin/sh",
+        "set -eu",
+        'last=""',
+        'for arg in "$@"; do last=$arg; done',
+        'if [ "$last" = "$LORE_TEST_LOCK_PATH" ] && [ "${LORE_TEST_KILL_AFTER_MKDIR:-}" = 1 ]; then',
+        '  "$LORE_TEST_REAL_MKDIR" "$@"',
+        '  kill -KILL "$LORE_TEST_INSTALLER_PID"',
+        "  exit 0",
+        "fi",
+        'exec "$LORE_TEST_REAL_MKDIR" "$@"',
+        "",
+      ].join("\n"),
+    );
+    env.LORE_TEST_REAL_MKDIR = realCommand("mkdir");
+    env.LORE_TEST_LOCK_PATH = lock;
+    env.LORE_TEST_KILL_AFTER_MKDIR = "1";
+
+    const killed = spawn(
+      "bash",
+      [
+        "-c",
+        'export LORE_TEST_INSTALLER_PID=$$; exec bash "$1" --no-modify-path',
+        "bash",
+        installer,
+      ],
+      { cwd: home, env, stdio: ["ignore", "ignore", "pipe"] },
+    );
+    await expect(
+      new Promise<NodeJS.Signals | null>((resolveExit, rejectExit) => {
+        killed.once("error", rejectExit);
+        killed.once("exit", (_code, signal) => resolveExit(signal));
+      }),
+    ).resolves.toBe("SIGKILL");
+
+    expect(existsSync(lock)).toBe(true);
+    expect(existsSync(join(lock, "owner.json"))).toBe(false);
+    const initClaims = readdirSync(stateDir).filter((entry) =>
+      entry.startsWith(".lifecycle.lock.init."),
+    );
+    expect(initClaims).toHaveLength(1);
+    const token = initClaims[0]?.slice(".lifecycle.lock.init.".length);
+    if (!token) throw new Error("initialization claim token is missing");
+    const expired = new Date(Date.now() - 60_000);
+    utimesSync(lock, expired, expired);
+
+    const install = runInstaller(
+      home,
+      { ...env, LORE_TEST_KILL_AFTER_MKDIR: "" },
+      "--no-modify-path",
+    );
+
+    expect(install.status, install.stderr).toBe(0);
+    expect(existsSync(join(home, ".local", "bin", "lore"))).toBe(true);
+    expect(
+      existsSync(join(stateDir, `.lifecycle.lock.claim.init.${token}`)),
+    ).toBe(true);
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "reclaims an installer SIGKILLed after owner publication",
+    async () => {
+      const { home, env } = fixture();
+      const fakeBin = env.PATH?.split(":")[0];
+      if (!fakeBin) throw new Error("fixture PATH is missing");
+      const capturedOwner = join(dirname(home), "killed-owner.json");
+      writeExecutable(
+        join(fakeBin, "curl"),
+        [
+          "#!/bin/sh",
+          "set -eu",
+          'cp "$HOME/.lore/lifecycle.lock/owner.json" "$LORE_TEST_OWNER_CAPTURE"',
+          'if [ "${LORE_TEST_KILL_AFTER_OWNER:-}" = 1 ]; then kill -KILL "$LORE_TEST_INSTALLER_PID"; fi',
+          'case "$*" in',
+          '  *api.github.com*/releases/tags/*) cat "$LORE_TEST_RELEASE_METADATA" ;;',
+          '  *lore-checksums.txt*) cat "$LORE_TEST_CHECKSUMS" ;;',
+          '  *.gz*) cat "$LORE_TEST_ARCHIVE" ;;',
+          "  *) exit 1 ;;",
+          "esac",
+          "",
+        ].join("\n"),
+      );
+      env.LORE_TEST_OWNER_CAPTURE = capturedOwner;
+      env.LORE_TEST_KILL_AFTER_OWNER = "1";
+
+      const killed = spawn(
+        "bash",
+        [
+          "-c",
+          'export LORE_TEST_INSTALLER_PID=$$; exec bash "$1" --no-modify-path',
+          "bash",
+          installer,
+        ],
+        { cwd: home, env, stdio: ["ignore", "ignore", "pipe"] },
+      );
+      await expect(
+        new Promise<NodeJS.Signals | null>((resolveExit, rejectExit) => {
+          killed.once("error", rejectExit);
+          killed.once("exit", (_code, signal) => resolveExit(signal));
+        }),
+      ).resolves.toBe("SIGKILL");
+      const deadOwner = JSON.parse(readFileSync(capturedOwner, "utf8")) as {
+        token: string;
+      };
+
+      const install = runInstaller(
+        home,
+        { ...env, LORE_TEST_KILL_AFTER_OWNER: "" },
+        "--no-modify-path",
+      );
+
+      expect(install.status, install.stderr).toBe(0);
+      expect(
+        existsSync(
+          join(home, ".lore", `.lifecycle.lock.claim.${deadOwner.token}`),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "recovers a profile in a fresh process after SIGKILL immediately after its claim move",
+    async () => {
+      const { home, env } = fixture();
+      const fakeBin = env.PATH?.split(":")[0];
+      if (!fakeBin) throw new Error("fixture PATH is missing");
+      const profile = join(home, ".bashrc");
+      writeFileSync(profile, "# original profile\nexport KEEP_ME=1\n");
+      writeExecutable(
+        join(fakeBin, "mv"),
+        [
+          "#!/bin/sh",
+          "set -eu",
+          'previous=""',
+          'current=""',
+          'for arg in "$@"; do previous=$current; current=$arg; done',
+          '"$LORE_TEST_REAL_MV" "$@"',
+          'case "$current" in',
+          '  "$LORE_TEST_PROFILE".lore-original.*)',
+          '    if [ "${LORE_TEST_KILL_AFTER_PROFILE_CLAIM:-}" = 1 ]; then',
+          '      kill -KILL "$LORE_TEST_INSTALLER_PID"',
+          "    fi",
+          "    ;;",
+          "esac",
+          "",
+        ].join("\n"),
+      );
+      env.LORE_TEST_REAL_MV = realCommand("mv");
+      env.LORE_TEST_PROFILE = profile;
+      env.LORE_TEST_KILL_AFTER_PROFILE_CLAIM = "1";
+
+      const killed = spawn(
+        "bash",
+        [
+          "-c",
+          'export LORE_TEST_INSTALLER_PID=$$; exec bash "$1"',
+          "bash",
+          installer,
+        ],
+        { cwd: home, env, stdio: ["ignore", "ignore", "pipe"] },
+      );
+      await expect(
+        new Promise<NodeJS.Signals | null>((resolveExit, rejectExit) => {
+          killed.once("error", rejectExit);
+          killed.once("exit", (_code, signal) => resolveExit(signal));
+        }),
+      ).resolves.toBe("SIGKILL");
+
+      expect(existsSync(profile)).toBe(false);
+      expect(
+        readdirSync(home).filter((name) =>
+          name.startsWith(".bashrc.lore-original."),
+        ),
+      ).toHaveLength(1);
+
+      const recovered = runInstaller(home, {
+        ...env,
+        LORE_TEST_KILL_AFTER_PROFILE_CLAIM: "",
+      });
+
+      expect(recovered.status, recovered.stderr).toBe(0);
+      const contents = readFileSync(profile, "utf8");
+      expect(contents).toContain("export KEEP_ME=1");
+      expect(contents.match(/# Added by lore installer/g)).toHaveLength(1);
+      expect(
+        readdirSync(home).filter((name) =>
+          name.startsWith(".bashrc.lore-original."),
+        ),
+      ).toHaveLength(0);
+    },
+  );
 });

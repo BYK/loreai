@@ -352,9 +352,12 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
       "delete from public.scope_keys where scope_id=$1 and member_user_id=$2",
       [scope, invitee],
     );
-    // Pull so B's scope_members row is in A's local mirror (A never wiped → still holds DEK@0).
-    const { pullOnce } = await import("../src/sync");
+    // Refresh the registry mirror so B's scope_members row is in A's local mirror (A never wiped →
+    // still holds DEK@0). Registry tables are snapshot-replaced by refreshRegistryMirror, not
+    // keyset-pulled by pullOnce (#1294).
+    const { pullOnce, refreshRegistryMirror } = await import("../src/sync");
     await pullOnce(aClient);
+    await refreshRegistryMirror(aClient);
 
     // The reconcile finds B (a member with a published key but no wrap) and wraps the DEK to them.
     const { wrapped } = await reconcileScopeWraps(aClient);

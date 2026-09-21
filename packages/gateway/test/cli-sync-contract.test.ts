@@ -37,16 +37,10 @@ describe("Phase 3D.3b — typed lore sync", () => {
     expect(LEGACY_ROUTES.has("sync")).toBe(false);
   });
 
-  // M4 attempt: pin the actual binding in app.ts (catches typos like
-  // `sync: synCommand` that pass the STRICLI_ROUTES assertion).
-  // Stricli's RouteMap wraps the children-routes object via a
-  // closure / prototype lookup rather than an own property, so direct
-  // property access (`routes.sync`) returns undefined. Skip this
-  // assertion — the integration test below (forwarding positional
-  // subcommand to legacy handler) catches the binding at runtime by
-  // asserting `syncImpl` was called, which is only possible if the
-  // route is correctly wired.
-  test.skip("app.routes.sync is wired to syncCommand (skip: Stricli RouteMap is opaque)", async () => {});
+  // The `sync -> syncCommand` binding in app.ts is not pinned statically
+  // (Stricli's RouteMap is opaque); the runtime test below (forwarding a
+  // positional subcommand to the legacy handler) covers it by asserting
+  // `syncImpl` was called.
 
   test("sync declares a positional schema (one optional positional)", async () => {
     const { buildApplication, buildRouteMap, run } =
