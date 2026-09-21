@@ -136,7 +136,10 @@ function normalizeMessageContent(content: unknown): {
   let hasRequestOnlyProvenance = false;
 
   for (const rawBlock of content as Array<Record<string, unknown>>) {
-    if (rawBlock.type === "thinking") {
+    if (
+      rawBlock.type === "thinking" ||
+      rawBlock.type === "redacted_thinking"
+    ) {
       hasRequestOnlyProvenance = true;
       provenance.push({ type: "opaque", raw: rawBlock });
       continue;
@@ -542,7 +545,10 @@ export function buildAnthropicRequest(
       const prefixMsg = messages[prefixLen - 1];
       const prefixBlock = [...(prefixMsg?.content ?? [])]
         .reverse()
-        .find((block) => block.type !== "thinking");
+        .find(
+          (block) =>
+            block.type !== "thinking" && block.type !== "redacted_thinking",
+        );
       if (prefixBlock) {
         prefixBlock.cache_control =
           cache.systemTTL === "1h"
@@ -554,7 +560,10 @@ export function buildAnthropicRequest(
     const lastMsg = messages[messages.length - 1];
     const lastBlock = [...(lastMsg?.content ?? [])]
       .reverse()
-      .find((block) => block.type !== "thinking");
+      .find(
+          (block) =>
+            block.type !== "thinking" && block.type !== "redacted_thinking",
+        );
     if (lastBlock) {
       // Use configured TTL: "1h" for extended cache tier (2× write cost but
       // 12× longer eviction window), bare ephemeral (5m) otherwise.
@@ -636,6 +645,9 @@ export function parseAnthropicResponseJSON(
               ? { signature: asString(block.signature) }
               : undefined),
           });
+          break;
+        case "redacted_thinking":
+          content.push({ type: "opaque", raw: block, requestOnly: true });
           break;
         case "tool_use": {
           const id = asString(block.id);
