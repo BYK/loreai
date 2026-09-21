@@ -667,6 +667,38 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
   });
 
+  test("does not treat empty text or thinking deltas as semantic content", async () => {
+    let semanticContentCalls = 0;
+    const resp = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [{ content: { parts: [{ text: "" }] } }],
+        },
+        {
+          candidates: [{ content: { parts: [{ text: "", thought: true }] } }],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ functionCall: { name: "lookup", args: {} } }],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { onSemanticContent: () => semanticContentCalls++ },
+    );
+
+    expect(semanticContentCalls).toBe(1);
+    expect(resp.content).toEqual([
+      { type: "text", text: "" },
+      { type: "thinking", thinking: "" },
+      { type: "tool_use", id: "lookup", name: "lookup", input: {} },
+    ]);
+  });
+
   test("thoughtsTokenCount folded into outputTokens", async () => {
     const res = sse([
       {
