@@ -10,6 +10,7 @@
  */
 import { describe, test, expect } from "vitest";
 import { coalesceAdjacentAssistants } from "../src/pipeline";
+import { buildAnthropicRequest, parseAnthropicRequest } from "../src/translate/anthropic";
 import type { GatewayMessage } from "../src/translate/types";
 
 const asst = (content: GatewayMessage["content"]): GatewayMessage => ({
@@ -66,6 +67,63 @@ describe("coalesceAdjacentAssistants", () => {
       "opaque",
       "text",
       "tool_use",
+    ]);
+  });
+
+  test("preserves parsed redacted reasoning through Anthropic serialization", () => {
+    const parsed = parseAnthropicRequest(
+      {
+        model: "claude-test",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "redacted_thinking", data: "ciphertext" },
+              {
+                type: "tool_use",
+                id: "tool-1",
+                name: "read",
+                input: {},
+              },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const merged = coalesceAdjacentAssistants([
+      asst([{ type: "text", text: "memory delta" }]),
+      parsed.messages[0],
+    ]);
+
+    expect(merged[0].provenancePositions).toEqual([1, 2]);
+    const built = buildAnthropicRequest(
+      {
+        protocol: "anthropic",
+        model: "claude-test",
+        system: "",
+        messages: merged,
+        tools: [],
+        stream: false,
+        maxTokens: 1024,
+        metadata: {},
+        rawHeaders: {},
+      },
+      {},
+    );
+    const body = built.body as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+    expect(body.messages[0]?.content).toEqual([
+      { type: "redacted_thinking", data: "ciphertext" },
+      { type: "text", text: "memory delta" },
+      {
+        type: "tool_use",
+        id: "tool-1",
+        name: "read",
+        input: {},
+      },
     ]);
   });
 
