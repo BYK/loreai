@@ -29,6 +29,10 @@ import {
   resolveVertexProject,
 } from "../src/vertex-auth";
 import { createForegroundAbortScope } from "../src/pipeline";
+import {
+  buildAnthropicRequest,
+  parseAnthropicRequest,
+} from "../src/translate/anthropic";
 
 describe("toVertexModelId", () => {
   test("passes through short ids that Vertex uses verbatim", () => {
@@ -594,6 +598,47 @@ describe("buildVertexUpstream — conversation transport rewrite", () => {
     expect("model" in body).toBe(false);
     expect("stream" in body).toBe(false);
     expect(body.max_tokens).toBe(1024);
+  });
+
+  test("preserves Anthropic thinking provenance through the Vertex body rewrite", () => {
+    const request = parseAnthropicRequest(
+      {
+        model: "claude-opus-4-5",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: "private",
+                signature: "vertex-signature",
+              },
+              { type: "text", text: "visible" },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const anthropic = buildAnthropicRequest(request);
+    const { body } = buildVertexUpstream({
+      ...baseOpts(),
+      anthropicHeaders: anthropic.headers,
+      anthropicBody: anthropic.body as Record<string, unknown>,
+      effectiveUpstreamBase: "https://aiplatform.googleapis.com",
+    });
+
+    expect(
+      (body.messages as Array<{ content: unknown }>)[0]?.content,
+    ).toEqual([
+      {
+        type: "thinking",
+        thinking: "private",
+        signature: "vertex-signature",
+      },
+      { type: "text", text: "visible" },
+    ]);
   });
 
   test("honors an X-Lore-Upstream-URL regional override for the URL region", () => {
