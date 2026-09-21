@@ -1,5 +1,6 @@
 import { describe, test, expect } from "vitest";
 import { computeMaxTokens, requestHasThinking } from "../src/pipeline";
+import { parseAnthropicRequest } from "../src/translate/anthropic";
 import { isClaudeCodeClient } from "../src/session";
 import { hasBillingHeader } from "../src/cch";
 import type { GatewayMessage } from "../src/translate/types";
@@ -389,20 +390,43 @@ describe("requestHasThinking", () => {
     expect(requestHasThinking(messages)).toBe(true);
   });
 
-  test("true for an assistant redacted_thinking (opaque) block", () => {
-    // Anthropic returns redacted_thinking when reasoning is safety-flagged;
-    // toGatewayBlock carries it as an opaque passthrough. It still means the
-    // model is reasoning, so a redacted-only turn must be detected.
-    const messages: GatewayMessage[] = [
+  test("parsed redacted reasoning preserves adaptive thinking headroom", () => {
+    const request = parseAnthropicRequest(
       {
-        role: "assistant",
-        content: [
-          { type: "opaque", raw: { type: "redacted_thinking", data: "…" } },
-          { type: "text", text: "answer" },
+        model: "claude-test",
+        max_tokens: 4096,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "redacted_thinking", data: "ciphertext" },
+              { type: "text", text: "answer" },
+            ],
+          },
         ],
       },
-    ];
-    expect(requestHasThinking(messages)).toBe(true);
+      {},
+    );
+
+    expect(request.messages[0]?.content).toEqual([
+      { type: "text", text: "answer" },
+    ]);
+    expect(request.messages[0]?.provenanceContent).toEqual([
+      { type: "opaque", raw: { type: "redacted_thinking", data: "ciphertext" } },
+      { type: "text", text: "answer" },
+    ]);
+    expect(requestHasThinking(request.messages)).toBe(true);
+    expect(
+      computeMaxTokens(
+        128_000,
+        200_000,
+        200,
+        "tool_use",
+        50_000,
+        undefined,
+        requestHasThinking(request.messages),
+      ),
+    ).toBe(32_000);
   });
 
   test("false for an unrelated opaque block (e.g. an image)", () => {
