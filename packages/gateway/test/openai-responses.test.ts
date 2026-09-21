@@ -1470,9 +1470,7 @@ describe("buildOpenAIResponsesResponse", () => {
             id: "msg_raw",
             role: "assistant",
             status: "completed",
-            content: [
-              { type: "output_text", text: "Done", annotations: [] },
-            ],
+            content: [{ type: "output_text", text: "Done", annotations: [] }],
           },
           {
             type: "function_call",
