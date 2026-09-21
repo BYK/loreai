@@ -138,7 +138,7 @@ function normalizeMessageContent(content: unknown): {
   for (const rawBlock of content as Array<Record<string, unknown>>) {
     if (rawBlock.type === "thinking" || rawBlock.type === "redacted_thinking") {
       hasRequestOnlyProvenance = true;
-      provenance.push({ type: "opaque", raw: rawBlock });
+      provenance.push({ type: "opaque", raw: rawBlock, requestOnly: true });
       continue;
     }
 
