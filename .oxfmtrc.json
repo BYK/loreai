@@ -25,6 +25,7 @@
     "**/eval/data",
     "**/eval/fixtures",
     "**/eval/results",
+    "**/test/fixtures",
     "**/*.md",
     "**/*.mdx",
     "**/*.markdown",
