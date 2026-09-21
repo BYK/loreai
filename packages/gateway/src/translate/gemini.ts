@@ -181,11 +181,7 @@ export function geminiPartToBlock(
         ...(signature !== undefined ? { signature } : {}),
       };
     }
-    return {
-      type: "text",
-      text: part.text,
-      ...(signature !== undefined ? { raw: part } : {}),
-    };
+    return { type: "text", text: part.text };
   }
   if (part.functionCall && typeof part.functionCall === "object") {
     const fc = part.functionCall as {
@@ -199,7 +195,6 @@ export function geminiPartToBlock(
       id: asString(fc.id) || name,
       name,
       input: fc.args ?? {},
-      ...(signature !== undefined ? { raw: part } : {}),
     };
   }
   if (part.functionResponse && typeof part.functionResponse === "object") {
@@ -629,7 +624,13 @@ export function parseGeminiResponseJSON(
     if (block.type === "tool_use") {
       hasToolCall = true;
     }
-    blocks.push(block);
+    const signature = geminiPartThoughtSignature(p);
+    blocks.push(
+      signature !== undefined &&
+        (block.type === "text" || block.type === "tool_use")
+        ? { ...block, raw: p }
+        : block,
+    );
   }
 
   // Prompt-level block: Gemini returns NO candidates plus
