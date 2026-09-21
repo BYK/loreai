@@ -213,9 +213,7 @@ describe("Responses encrypted reasoning provenance", () => {
   }
 
   test("keeps encrypted reasoning in place on a stable compressed layer", () => {
-    const rendered = renderWithPrefix(
-      shouldPreserveResponsesProvenance(1, 1),
-    );
+    const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(1, 1));
     const answer = rendered.find((message) =>
       message.content.some(
         (block) => block.type === "text" && block.text === "answer",
@@ -239,9 +237,7 @@ describe("Responses encrypted reasoning provenance", () => {
   });
 
   test("drops request-only provenance at a layer transition", () => {
-    const rendered = renderWithPrefix(
-      shouldPreserveResponsesProvenance(0, 1),
-    );
+    const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(0, 1));
     const answer = rendered.find((message) =>
       message.content.some(
         (block) => block.type === "text" && block.text === "answer",
