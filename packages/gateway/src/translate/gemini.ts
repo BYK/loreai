@@ -404,6 +404,11 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       ];
     }
     case "opaque":
+      // Request-only provider-native blocks are continuation metadata for the
+      // protocol that produced them, not Gemini content. In particular,
+      // Anthropic redacted_thinking is opaque encrypted data and cannot be
+      // serialized as a Gemini Part without corrupting the response shape.
+      if (block.requestOnly || block.raw.type === "redacted_thinking") return [];
       return [block.raw];
   }
 }
