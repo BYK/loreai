@@ -147,6 +147,39 @@ describe("coalesceAdjacentAssistants", () => {
     ]);
   });
 
+  test("offsets synthesized earlier positions after later provenance reasoning", () => {
+    const laterReasoning: GatewayMessage["content"][number] = {
+      type: "opaque",
+      raw: { type: "redacted_thinking", data: "ciphertext" },
+    };
+    const laterTool: GatewayMessage["content"][number] = {
+      type: "tool_use",
+      id: "t2",
+      name: "write",
+      input: {},
+    };
+    const merged = coalesceAdjacentAssistants([
+      asst([{ type: "text", text: "injected" }]),
+      {
+        role: "assistant",
+        content: [laterTool],
+        provenanceContent: [laterReasoning, laterTool],
+        provenancePositions: [1],
+      },
+    ]);
+
+    expect(merged[0].content).toEqual([
+      { type: "text", text: "injected" },
+      laterTool,
+    ]);
+    expect(merged[0].provenanceContent).toEqual([
+      laterReasoning,
+      { type: "text", text: "injected" },
+      laterTool,
+    ]);
+    expect(merged[0].provenancePositions).toEqual([1, 2]);
+  });
+
   test("does not merge across a user boundary", () => {
     const merged = coalesceAdjacentAssistants([
       asst([{ type: "text", text: "a" }]),
