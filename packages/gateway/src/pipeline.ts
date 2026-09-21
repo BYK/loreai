@@ -19368,13 +19368,10 @@ export function loreMessagesToGateway(
           });
           break;
         case "reasoning":
-          content.push({
-            type: "thinking",
-            thinking: (part as { text: string }).text ?? "",
-            ...((part as { signature?: string }).signature != null
-              ? { signature: (part as { signature?: string }).signature }
-              : undefined),
-          });
+          // Native/encrypted reasoning is request-only provenance. Older
+          // temporal rows may still contain a reasoning part from before that
+          // boundary existed; never promote it back into visible request
+          // content on replay.
           break;
         case "tool": {
           const toolPart = part as {
