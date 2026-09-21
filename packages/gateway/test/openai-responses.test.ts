@@ -1460,6 +1460,43 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(text).toContain('"output":[{"type":"reasoning"');
   });
 
+  test("streaming: rebuilds delta lifecycles for raw visible output items", async () => {
+    const response = buildOpenAIResponsesResponse(
+      {
+        ...baseResponse,
+        rawOutputItems: [
+          {
+            type: "message",
+            id: "msg_raw",
+            role: "assistant",
+            status: "completed",
+            content: [
+              { type: "output_text", text: "Done", annotations: [] },
+            ],
+          },
+          {
+            type: "function_call",
+            id: "fc_raw",
+            call_id: "call_raw",
+            name: "search",
+            arguments: '{"query":"cats"}',
+            status: "completed",
+          },
+        ],
+      },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.output_text.delta");
+    expect(text).toContain('"delta":"Done"');
+    expect(text).toContain("event: response.output_text.done");
+    expect(text).toContain("event: response.content_part.done");
+    expect(text).toContain("event: response.function_call_arguments.delta");
+    expect(text).toContain('"delta":"{\\\"query\\\":\\\"cats\\\"}"');
+    expect(text).toContain("event: response.function_call_arguments.done");
+  });
+
   test("non-streaming: max_tokens maps to incomplete status", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,
