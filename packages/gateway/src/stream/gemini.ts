@@ -14,7 +14,11 @@
  *      paths behave for recall-awareness (true token streaming is preserved only
  *      on the native Anthropic→Anthropic path).
  */
-import type { GatewayContentBlock, GatewayResponse, GatewayUsage } from "../translate/types";
+import type {
+  GatewayContentBlock,
+  GatewayResponse,
+  GatewayUsage,
+} from "../translate/types";
 import { ZERO_USAGE } from "../translate/types";
 import {
   buildGeminiResponseBody,
@@ -70,7 +74,9 @@ export async function accumulateGeminiSSEStream(
       inactivityMs: opts.inactivityMs,
       requireEventTerminator: opts.strict,
       fatalUtf8: opts.strict,
-      maxFrames: opts.strict ? (opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES) : opts.maxFrames,
+      maxFrames: opts.strict
+        ? (opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES)
+        : opts.maxFrames,
       maxTotalBytes: opts.strict ? 4 * 1024 * 1024 : undefined,
     })) {
       if (!data || data === "[DONE]") continue;
@@ -91,15 +97,22 @@ export async function accumulateGeminiSSEStream(
         const malformed = (): never => {
           throw new Error("malformed Gemini stream event");
         };
-        if (parsed.candidates !== undefined && !Array.isArray(parsed.candidates)) {
+        if (
+          parsed.candidates !== undefined &&
+          !Array.isArray(parsed.candidates)
+        ) {
           malformed();
         }
         if (Array.isArray(parsed.candidates)) {
-          for (const [candidatePosition, candidate] of parsed.candidates.entries()) {
+          for (const [
+            candidatePosition,
+            candidate,
+          ] of parsed.candidates.entries()) {
             if (!isRecord(candidate)) malformed();
             if (
               candidate.index !== undefined &&
-              (!Number.isSafeInteger(candidate.index) || (candidate.index as number) < 0)
+              (!Number.isSafeInteger(candidate.index) ||
+                (candidate.index as number) < 0)
             ) {
               malformed();
             }
@@ -112,12 +125,15 @@ export async function accumulateGeminiSSEStream(
             }
             if (
               candidate.tokenCount !== undefined &&
-              (!Number.isSafeInteger(candidate.tokenCount) || (candidate.tokenCount as number) < 0)
+              (!Number.isSafeInteger(candidate.tokenCount) ||
+                (candidate.tokenCount as number) < 0)
             ) {
               malformed();
             }
             const candidateIndex =
-              typeof candidate.index === "number" ? candidate.index : candidatePosition;
+              typeof candidate.index === "number"
+                ? candidate.index
+                : candidatePosition;
             let toolIdentities = toolIdentitiesByCandidate.get(candidateIndex);
             if (!toolIdentities) {
               toolIdentities = new Set<string>();
@@ -142,13 +158,17 @@ export async function accumulateGeminiSSEStream(
               if (part.text !== undefined && typeof part.text !== "string") {
                 malformed();
               }
-              if (part.thought !== undefined && typeof part.thought !== "boolean") {
+              if (
+                part.thought !== undefined &&
+                typeof part.thought !== "boolean"
+              ) {
                 malformed();
               }
               if (
                 (part.thoughtSignature !== undefined &&
                   typeof part.thoughtSignature !== "string") ||
-                (part.thought_signature !== undefined && typeof part.thought_signature !== "string")
+                (part.thought_signature !== undefined &&
+                  typeof part.thought_signature !== "string")
               ) {
                 malformed();
               }
@@ -161,10 +181,16 @@ export async function accumulateGeminiSSEStream(
             }
           }
         }
-        validateGeminiUsageMetadata(parsed.usageMetadata, "malformed Gemini stream event");
+        validateGeminiUsageMetadata(
+          parsed.usageMetadata,
+          "malformed Gemini stream event",
+        );
         if (parsed.promptFeedback !== undefined) {
           if (!isRecord(parsed.promptFeedback)) malformed();
-          const promptFeedback = parsed.promptFeedback as Record<string, unknown>;
+          const promptFeedback = parsed.promptFeedback as Record<
+            string,
+            unknown
+          >;
           if (
             promptFeedback.blockReason !== undefined &&
             typeof promptFeedback.blockReason !== "string"
@@ -176,18 +202,28 @@ export async function accumulateGeminiSSEStream(
 
       if (
         opts.strict &&
-        ((parsed.modelVersion !== undefined && typeof parsed.modelVersion !== "string") ||
-          (model && typeof parsed.modelVersion === "string" && parsed.modelVersion !== model) ||
-          (parsed.responseId !== undefined && typeof parsed.responseId !== "string") ||
-          (responseId && typeof parsed.responseId === "string" && parsed.responseId !== responseId))
+        ((parsed.modelVersion !== undefined &&
+          typeof parsed.modelVersion !== "string") ||
+          (model &&
+            typeof parsed.modelVersion === "string" &&
+            parsed.modelVersion !== model) ||
+          (parsed.responseId !== undefined &&
+            typeof parsed.responseId !== "string") ||
+          (responseId &&
+            typeof parsed.responseId === "string" &&
+            parsed.responseId !== responseId))
       ) {
         throw new Error("malformed Gemini stream event");
       }
       if (typeof parsed.modelVersion === "string") model = parsed.modelVersion;
       if (typeof parsed.responseId === "string") responseId = parsed.responseId;
 
-      const candidates = Array.isArray(parsed.candidates) ? parsed.candidates : [];
-      const promptFeedback = isRecord(parsed.promptFeedback) ? parsed.promptFeedback : undefined;
+      const candidates = Array.isArray(parsed.candidates)
+        ? parsed.candidates
+        : [];
+      const promptFeedback = isRecord(parsed.promptFeedback)
+        ? parsed.promptFeedback
+        : undefined;
       if (
         candidates.length === 0 &&
         typeof promptFeedback?.blockReason === "string" &&
@@ -197,7 +233,9 @@ export async function accumulateGeminiSSEStream(
       }
       const first = isRecord(candidates[0]) ? candidates[0] : {};
       const content = isRecord(first.content) ? first.content : {};
-      const parts = Array.isArray(content.parts) ? (content.parts as GeminiPart[]) : [];
+      const parts = Array.isArray(content.parts)
+        ? (content.parts as GeminiPart[])
+        : [];
       for (const p of parts) {
         const parsedBlock = geminiPartToBlock(p);
         if (!parsedBlock) continue;
@@ -207,7 +245,11 @@ export async function accumulateGeminiSSEStream(
           (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
             ? { ...parsedBlock, raw: p }
             : parsedBlock;
-        if (block.type === "text" || block.type === "thinking" || block.type === "tool_use") {
+        if (
+          block.type === "text" ||
+          block.type === "thinking" ||
+          block.type === "tool_use"
+        ) {
           opts.onSemanticContent?.();
         }
 
@@ -266,7 +308,10 @@ export async function accumulateGeminiSSEStream(
       // legal usage-only frame after that terminal, so stopAtTerminal
       // intentionally cancels transport tail instead of waiting indefinitely.
       // Last non-null usage before/on that frame wins.
-      const um = validateGeminiUsageMetadata(parsed.usageMetadata, "malformed Gemini stream event");
+      const um = validateGeminiUsageMetadata(
+        parsed.usageMetadata,
+        "malformed Gemini stream event",
+      );
       if (um) usage = geminiUsageFromMetadata(um);
       await opts.onValidatedEvent?.(event, data);
       if (
@@ -315,7 +360,8 @@ export function translateAnthropicStreamToGemini(
   let pumpStarted = false;
   let settled = false;
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
-  const cleanup = (): void => opts.signal?.removeEventListener("abort", onAbort);
+  const cleanup = (): void =>
+    opts.signal?.removeEventListener("abort", onAbort);
   const onAbort = (): void => {
     if (settled) return;
     settled = true;
@@ -355,7 +401,9 @@ export function translateAnthropicStreamToGemini(
             });
             if (settled) return;
             const body = buildGeminiResponseBody(resp);
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(body)}\n\n`));
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(body)}\n\n`),
+            );
             settled = true;
             cleanup();
             controller.close();
