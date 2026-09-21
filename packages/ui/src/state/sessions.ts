@@ -17,6 +17,7 @@ import type {
   TemporalMessage,
 } from "~/contracts";
 import type { ApiClient } from "~/lib/api";
+import { isApiError } from "~/lib/api";
 import { MESSAGE_BLOCK_SIZE, type MessageBlock, type Repository } from "~/db";
 import { createLoader, type CachedResult, type Loader } from "~/lib/loader";
 
@@ -36,6 +37,13 @@ export interface SessionsDeps {
    */
   projectPathOf?: (projectId: string) => string | undefined;
   tracked: <T>(read: () => Promise<T>) => Promise<T>;
+}
+
+export type EvidenceState = "available" | "summary_only" | "unavailable";
+
+export interface EvidenceResult {
+  state: EvidenceState;
+  detail?: SessionDetail;
 }
 
 /** Default page size of the paged reader (`GET /sessions/:id?page=cursor`). */
@@ -71,7 +79,6 @@ export interface SessionReader {
     signal?: AbortSignal,
   ) => Promise<SessionSearchPage>;
 }
-
 export function createSessionsState({
   client,
   repos,
@@ -298,6 +305,49 @@ export function createSessionsState({
     return { loader, status: statusOf(loader) };
   }
 
+  function evidence(
+    source: Accessor<{
+      projectPath: string;
+      sessionId: string;
+    } | null>,
+  ): {
+    loader: Loader<EvidenceResult>;
+    status: Accessor<KeyStatus>;
+  } {
+    const keyed = createMemo(() => {
+      const value = source();
+      return value
+        ? new URLSearchParams({
+            projectPath: value.projectPath,
+            sessionId: value.sessionId,
+          }).toString()
+        : null;
+    });
+    const loader = createLoader(keyed, async (key, signal) => {
+      const params = new URLSearchParams(key);
+      const projectPath = params.get("projectPath");
+      const sessionId = params.get("sessionId");
+      if (!projectPath || !sessionId)
+        throw new Error("Invalid evidence loader key");
+      let session: SessionDetail;
+      try {
+        session = await tracked(() =>
+          client.getSession(projectPath, sessionId, signal),
+        );
+      } catch (error) {
+        if (isApiError(error) && error.kind === "not_found")
+          return { state: "unavailable" as const };
+        throw error;
+      }
+      if (session.messages.length > 0)
+        return { state: "available" as const, detail: session };
+      if (session.distillations.length > 0)
+        return { state: "summary_only" as const, detail: session };
+      return { state: "unavailable" as const, detail: session };
+    });
+    return { loader, status: statusOf(loader) };
+  }
+
   /**
    * The paged reader shares the detail cache: it starts from the newest
    * `pageSize` messages (or whatever the cache holds) and `loadOlder()`
@@ -454,5 +504,5 @@ export function createSessionsState({
     };
   }
 
-  return { list, detail, page, reader, store };
+  return { list, detail, page, evidence, reader, store };
 }

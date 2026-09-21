@@ -40,6 +40,7 @@ const entries = [
         220,
       ),
     confidence: 0.92,
+    session: "e2e-session-sqlite",
   },
   {
     category: "gotcha",
@@ -96,11 +97,34 @@ const entries = [
       "URL query values use deterministic percent encoding for stable requests.",
     confidence: 0.74,
   },
+  {
+    category: "gotcha",
+    title: "Expired source sessions remain identifiable",
+    content:
+      "When the source session expires, keep the session identifier and retained state without redirecting elsewhere.",
+    confidence: 0.77,
+    session: "e2e-session-expired",
+  },
+  {
+    category: "pattern",
+    title: "SQLite backups stay deterministic",
+    content:
+      "SQLite backup files remain deterministic when the local store is copied with WAL checkpoints. ".repeat(
+        180,
+      ),
+    confidence: 0.75,
+  },
 ];
 
+let firstKnowledgeId;
 for (const entry of entries) {
-  core.ltm.create({ ...entry, projectPath: lore, scope: "project" });
+  const id = core.ltm.create({ ...entry, projectPath: lore, scope: "project" });
+  if (!firstKnowledgeId) firstKnowledgeId = id;
 }
+core.ltm.appendVersion(firstKnowledgeId, {
+  content:
+    "SQLite remains the authoritative local store, with WAL mode and FTS5 for deterministic recall.",
+});
 for (const session of [
   {
     id: "e2e-session-sqlite",

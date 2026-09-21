@@ -28,7 +28,7 @@ test.describe("real data browsing", () => {
     await page.getByRole("link", { name: /Browse knowledge/ }).click();
     await expect(page).toHaveURL(/\/ui\/projects\/[^/]+\/knowledge$/);
     const rows = page.getByTestId("knowledge-row");
-    await expect(rows).toHaveCount(9);
+    await expect(rows).toHaveCount(11);
     await rows.filter({ hasText: "Keep SQLite as the only store" }).click();
 
     const doc = page.getByTestId("knowledge-document");

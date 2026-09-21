@@ -406,11 +406,11 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -1035,6 +1035,14 @@ predates the move from an embedded module to staged files, which took
   Solid nodes, and loader/query keys use canonical `URLSearchParams` strings
   so slash-containing IDs, queries, and cursors remain collision-free.
 
+### Provenance
+
+Knowledge provenance is session-level: a document links to the recorded source
+session, not to an inferred message or a similar session. When original
+messages expire, the detail page retains the session identifier and reports
+the retained summary or unavailable state; it never redirects to another
+source.
+
 ## UX → component mapping
 
 From the design fixture (v2.2) to Solid components. #1796 ships the primitives
@@ -1062,13 +1070,15 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Tables with sorting (sessions, knowledge) | — | `@tanstack/solid-table` | #1799 |
 | Project identity, health and recent sessions | `ProjectPage` | `DocHeader`, `Button`, Kobalte `Select` | #1799 |
 | Server-filtered knowledge table | `KnowledgeTable` | TanStack Solid Table v9, Kobalte `Select`, `TextField` | #1799 |
+| Knowledge version history | `VersionHistory` | server-only versions loader, expandable text-only rows | #1800 |
+| Knowledge evidence and trust | `KnowledgeDocument` | session-level evidence loader, `StateCard`, router `<A>` | #1800 |
 | Cursor-paged sessions | `SessionList` | router `<A>`, `StateCard` | #1799 |
 | Scoped recall output | `SearchResults` | Kobalte `Select`, `TextField`, `Button` | #1799 |
 | Session reader | `Session` / `SessionView` | `SessionBlock`, `@tanstack/solid-virtual` | #1801 |
 | Shared loading/error/locked states | `ErrorState` | `StateCard`, retry/first-page actions | #1799 |
 | Long lists | — | `@tanstack/solid-virtual` | #1799 / #1801 |
 | Local cache, drafts | — | `idb` | #1798 |
-| Charts (cost / compression / latency) | `PlotContainer` (Solid owns the container, Plot owns descendants) | `@observablehq/plot` | #1800 (lazy) |
+| Charts (cost / compression / latency) | — | not shipped; optional Plot work deferred | #1800 |
 
 ## Design tokens: website → UI mapping
 

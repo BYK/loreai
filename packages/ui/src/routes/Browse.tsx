@@ -149,6 +149,16 @@ export const Browse: Component<{
   const projectForEntry = createMemo(
     () => project() ?? ws.projectById(entry.loader.data()?.project_id),
   );
+  const versions = ws.state.knowledge.versions(
+    () => knowledgeId() ?? entry.loader.data()?.id ?? null,
+  );
+  const evidence = ws.state.sessions.evidence(() => {
+    const sourceSession = entry.loader.data()?.source_session;
+    const sourceProject = projectForEntry();
+    return sourceSession && sourceProject
+      ? { projectPath: sourceProject.path, sessionId: sourceSession }
+      : null;
+  });
   const label = () =>
     projectForEntry()?.name || projectForEntry()?.path || "Project";
   const mobilePane = (): MobilePane =>
@@ -288,6 +298,8 @@ export const Browse: Component<{
                 <KnowledgeDocument
                   entry={value()}
                   project={projectForEntry()}
+                  versions={versions.loader}
+                  evidence={evidence.loader}
                 />
               )}
             </Match>
