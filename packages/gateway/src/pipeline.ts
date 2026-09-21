@@ -2623,6 +2623,72 @@ export function captureToolPairing400(input: {
  *
  * @internal Exported for tests.
  */
+function mergeAdjacentAssistantMessages(
+  earlier: GatewayMessage,
+  later: GatewayMessage,
+): GatewayMessage {
+  let visibleLead = 0;
+  while (
+    visibleLead < later.content.length &&
+    isReasoningBlock(later.content[visibleLead])
+  ) {
+    visibleLead++;
+  }
+
+  const content = [
+    ...later.content.slice(0, visibleLead),
+    ...earlier.content,
+    ...later.content.slice(visibleLead),
+  ];
+
+  const hasProvenance =
+    earlier.provenanceContent !== undefined ||
+    later.provenanceContent !== undefined;
+  if (!hasProvenance) return { role: "assistant", content };
+
+  const earlierProvenance = [
+    ...(earlier.provenanceContent ?? earlier.content),
+  ];
+  const laterProvenance = [...(later.provenanceContent ?? later.content)];
+  const earlierPositions =
+    earlier.provenancePositions ??
+    earlier.content.map((_block, index) => index);
+  const laterPositions =
+    later.provenancePositions ?? later.content.map((_block, index) => index);
+
+  let provenanceInsertAt = 0;
+  while (
+    provenanceInsertAt < laterProvenance.length &&
+    isReasoningBlock(laterProvenance[provenanceInsertAt])
+  ) {
+    provenanceInsertAt++;
+  }
+
+  const provenanceContent = [
+    ...laterProvenance.slice(0, provenanceInsertAt),
+    ...earlierProvenance,
+    ...laterProvenance.slice(provenanceInsertAt),
+  ];
+  const provenancePositions = [
+    ...laterPositions.slice(0, visibleLead),
+    ...earlierPositions.map(
+      (position) => provenanceInsertAt + position,
+    ),
+    ...laterPositions.slice(visibleLead).map((position) =>
+      position >= provenanceInsertAt
+        ? position + earlierProvenance.length
+        : position,
+    ),
+  ];
+
+  return {
+    role: "assistant",
+    content,
+    provenanceContent,
+    provenancePositions,
+  };
+}
+
 export function coalesceAdjacentAssistants(
   messages: GatewayMessage[],
 ): GatewayMessage[] {
@@ -2662,14 +2728,7 @@ export function coalesceAdjacentAssistants(
       while (lead < m.content.length && isReasoningBlock(m.content[lead])) {
         lead++;
       }
-      merged[merged.length - 1] = {
-        role: "assistant",
-        content: [
-          ...m.content.slice(0, lead),
-          ...last.content,
-          ...m.content.slice(lead),
-        ],
-      };
+      merged[merged.length - 1] = mergeAdjacentAssistantMessages(last, m);
     } else {
       merged.push(m);
     }
@@ -2685,7 +2744,11 @@ export function coalesceAdjacentAssistants(
 function isReasoningBlock(block: GatewayContentBlock): boolean {
   return (
     block.type === "thinking" ||
-    (block.type === "opaque" && block.raw.type === "redacted_thinking")
+    (block.type === "opaque" &&
+      (block.raw.type === "thinking" ||
+        block.raw.type === "redacted_thinking" ||
+        block.raw.type === "reasoning" ||
+        block.raw.thought === true))
   );
 }
 
@@ -3944,9 +4007,19 @@ export function requestHasThinking(messages: GatewayMessage[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    for (const block of msg.content) {
+    const blocks = [
+      ...msg.content,
+      ...(msg.provenanceContent ?? []),
+    ];
+    for (const block of blocks) {
       if (block.type === "thinking") return true;
-      if (block.type === "opaque" && block.raw.type === "redacted_thinking") {
+      if (block.type !== "opaque") continue;
+      if (
+        block.raw.type === "thinking" ||
+        block.raw.type === "redacted_thinking" ||
+        block.raw.type === "reasoning" ||
+        block.raw.thought === true
+      ) {
         return true;
       }
     }
