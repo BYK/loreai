@@ -41,8 +41,11 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
   test("mobile navigation traps focus and Escape returns it to the opener", async ({
     page,
   }) => {
-    await page.setViewportSize({ width: 393, height: 852 });
     await page.goto("/ui");
+    test.skip(
+      !(await page.getByTestId("open-nav").isVisible()),
+      "mobile navigation is only rendered in the mobile project",
+    );
     const opener = page.getByTestId("open-nav");
     await opener.focus();
     await opener.press("Enter");
@@ -51,14 +54,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     await expect.poll(() => focusName(page)).not.toBe("open-nav");
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
-    const returnedToOpener = await opener.evaluate(
-      (element) => document.activeElement === element,
-    );
-    if (!returnedToOpener) {
-      console.warn(
-        "a11y finding: mobile navigation closes without restoring focus to open-nav",
-      );
-    }
+    await expect(opener).toBeFocused();
   });
 
   test("knowledge rows support arrow navigation and Enter", async ({
@@ -106,16 +102,17 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         )
         .not.toBe("none/none");
       const row = page.locator("[data-row-key]").first();
+      await page.keyboard.press("Tab");
       await row.focus();
       const rowRing = await row.evaluate((el) => {
         const style = getComputedStyle(el);
-        return `${style.outlineStyle}/${style.boxShadow}`;
+        return {
+          visible: el.matches(":focus-visible"),
+          ring: `${style.outlineStyle}/${style.boxShadow}`,
+        };
       });
-      if (rowRing === "none/none") {
-        console.warn(
-          "a11y finding: session reader row has no visible focus ring",
-        );
-      }
+      expect(rowRing.visible).toBe(true);
+      expect(rowRing.ring).not.toBe("none/none");
     });
   }
 });

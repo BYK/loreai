@@ -276,6 +276,20 @@ describe("shell: project navigation and real-data path", () => {
     );
   });
 
+  it("returns focus to the navigation opener when the drawer closes", async () => {
+    const client = fakeClient();
+    mount("/", client);
+    const opener = await screen.findByTestId("open-nav");
+    opener.focus();
+    fireEvent.click(opener);
+    await screen.findByTestId("nav-drawer");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it("navigates project → knowledge list → entry document with stable ids in the URL", async () => {
     const client = fakeClient();
     const { history } = mount("/", client);

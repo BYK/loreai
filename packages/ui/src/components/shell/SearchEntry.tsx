@@ -1,5 +1,5 @@
 import type { Component } from "solid-js";
-import { createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import {
   Dialog,
@@ -10,13 +10,44 @@ import {
 } from "~/components/ui/dialog";
 import { searchHref } from "~/routes/Browse";
 import { cn } from "~/lib/utils";
+import { useWorkspace } from "~/routes/workspace";
 
 export const SearchEntry: Component<{
   class?: string;
   searchProjectId?: string;
 }> = (props) => {
   const [open, setOpen] = createSignal(false);
+  const [query, setQuery] = createSignal("");
+  const [results, setResults] = createSignal<
+    Array<{ projectName: string; result: string }>
+  >([]);
+  const workspace = useWorkspace();
   const navigate = useNavigate();
+  let searchGeneration = 0;
+  createEffect(() => {
+    const q = query().trim();
+    const projects = workspace.projects.data();
+    if (props.searchProjectId || !open() || !q || !projects) {
+      setResults([]);
+      return;
+    }
+    const generation = ++searchGeneration;
+    void Promise.all(
+      projects.map(async (project) => ({
+        projectName: project.name || project.path,
+        result: (await workspace.client.recall({ q, project, scope: "all" }))
+          .result,
+      })),
+    ).then((next) => {
+      if (generation === searchGeneration)
+        setResults(
+          next.filter(
+            ({ result }) =>
+              !result.startsWith("No results found for this query."),
+          ),
+        );
+    });
+  });
   return (
     <>
       <form
@@ -61,6 +92,30 @@ export const SearchEntry: Component<{
               Pick a project first — recall is scoped to a project.
             </DialogDescription>
           </DialogHeader>
+          <input
+            aria-label="Search query"
+            value={query()}
+            onInput={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search all projects"
+            class="h-9 rounded-md border border-line bg-bg px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <Show when={query().trim() && results().length > 0}>
+            <div class="space-y-2" data-testid="workspace-search-results">
+              <For each={results()}>
+                {(result) => (
+                  <div
+                    class="rounded-md border border-line p-2 text-sm"
+                    data-testid="workspace-search-result"
+                  >
+                    <div class="font-semibold">{result.projectName}</div>
+                    <div class="whitespace-pre-wrap text-xs text-muted">
+                      {result.result}
+                    </div>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
         </DialogContent>
       </Dialog>
     </>

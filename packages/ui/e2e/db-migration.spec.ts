@@ -242,10 +242,6 @@ test.describe("IndexedDB cache migrations and recovery", () => {
     page,
   }) => {
     await page.goto("/ui");
-    const projects = await (await page.request.get("/api/v1/projects")).json();
-    const project = projects.find(
-      (item: { name: string }) => item.name === "lore",
-    );
     await expect(page.getByTestId("connection-status")).toBeVisible();
     await page.evaluate(async () => {
       const req = indexedDB.deleteDatabase("lore-ui");
@@ -254,12 +250,32 @@ test.describe("IndexedDB cache migrations and recovery", () => {
         req.onerror = () => reject(req.error);
       });
     });
-    await page.goto(`/ui/projects/${project.id}`);
+    const navProject = page
+      .getByTestId("nav-project")
+      .filter({ hasText: "lore" });
+    if (await navProject.isVisible()) {
+      await navProject.click();
+    } else {
+      await page.getByTestId("open-nav").click();
+      await page
+        .getByTestId("nav-drawer")
+        .getByTestId("nav-project")
+        .filter({
+          hasText: "lore",
+        })
+        .click();
+    }
     await expect(page.getByTestId("health")).toContainText("knowledge");
     await expect(
       page.getByText(/Project not found or inaccessible|Something went wrong/),
     ).toHaveCount(0);
     await page.reload();
+    await expect
+      .poll(async () => {
+        const databases = await page.evaluate(() => indexedDB.databases());
+        return databases.find((db) => db.name === "lore-ui")?.version;
+      })
+      .toBe(2);
     expect((await openInfo(page)).version).toBe(2);
   });
 });
