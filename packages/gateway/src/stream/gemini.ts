@@ -251,19 +251,22 @@ export async function accumulateGeminiSSEStream(
         // part are adjacent in Gemini streams, so coalesce only with the
         // immediately preceding block of the same kind; never move thinking
         // across visible text or tool calls.
-        if (
-          (block.type === "text" || block.type === "thinking") &&
-          (contentBlocks.at(-1)?.type === block.type)
-        ) {
+        if (block.type === "text") {
           const previous = contentBlocks.at(-1);
-          if (previous?.type === block.type) {
+          if (previous?.type === "text") {
             previous.text += block.text;
-            if (
-              block.type === "thinking" &&
-              block.signature !== undefined
-            ) {
+          } else {
+            contentBlocks.push(block);
+          }
+        } else if (block.type === "thinking") {
+          const previous = contentBlocks.at(-1);
+          if (previous?.type === "thinking") {
+            previous.thinking += block.thinking;
+            if (block.signature !== undefined) {
               previous.signature = block.signature;
             }
+          } else {
+            contentBlocks.push(block);
           }
         } else {
           contentBlocks.push(block);
