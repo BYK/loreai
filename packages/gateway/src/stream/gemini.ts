@@ -20,12 +20,14 @@ import type {
   GatewayUsage,
 } from "../translate/types";
 import { ZERO_USAGE } from "../translate/types";
-import { asString } from "@loreai/core";
 import {
   buildGeminiResponseBody,
   geminiUsageFromMetadata,
   mapGeminiFinishReason,
   validateGeminiFunctionCallIdentity,
+  geminiPartToBlock,
+  geminiPartThoughtSignature,
+  type GeminiPart,
 } from "../translate/gemini";
 import {
   DEFAULT_MAX_SSE_FRAMES,
@@ -34,8 +36,6 @@ import {
   cancelAndReleaseReader,
 } from "./anthropic";
 import { isRecord, validateGeminiUsageMetadata } from "../usage-validation";
-
-type GeminiPart = Record<string, unknown>;
 
 /**
  * Accumulate an upstream Gemini SSE (`?alt=sse`) response into a
@@ -59,9 +59,7 @@ export async function accumulateGeminiSSEStream(
     throw new Error("Upstream response has no body");
   }
 
-  let textContent = "";
-  let thinkingContent = "";
-  const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
+  const contentBlocks: GatewayContentBlock[] = [];
   let finishReason: unknown;
   let model = "";
   let responseId = "";
@@ -166,6 +164,14 @@ export async function accumulateGeminiSSEStream(
               ) {
                 malformed();
               }
+              if (
+                (part.thoughtSignature !== undefined &&
+                  typeof part.thoughtSignature !== "string") ||
+                (part.thought_signature !== undefined &&
+                  typeof part.thought_signature !== "string")
+              ) {
+                malformed();
+              }
               if (part.functionCall === undefined) continue;
               validateGeminiFunctionCallIdentity(
                 part.functionCall,
@@ -231,25 +237,36 @@ export async function accumulateGeminiSSEStream(
         ? (content.parts as GeminiPart[])
         : [];
       for (const p of parts) {
-        if (typeof p.text === "string") {
-          if (p.text) opts.onSemanticContent?.();
-          // Keep reasoning-summary parts (`thought: true`) out of the visible
-          // answer text — accumulate them into a separate thinking block.
-          if (p.thought === true) thinkingContent += p.text;
-          else textContent += p.text;
-        } else if (p.functionCall && typeof p.functionCall === "object") {
+        const block = geminiPartToBlock(p);
+        if (!block) continue;
+        if (
+          block.type === "text" ||
+          block.type === "thinking" ||
+          block.type === "tool_use"
+        ) {
           opts.onSemanticContent?.();
-          const fc = p.functionCall as {
-            id?: unknown;
-            name?: unknown;
-            args?: unknown;
-          };
-          const name = asString(fc.name);
-          toolUses.push({
-            id: asString(fc.id) || name,
-            name,
-            input: fc.args ?? {},
-          });
+        }
+
+        // Preserve the provider's part order. Text/thinking deltas for the same
+        // part are adjacent in Gemini streams, so coalesce only with the
+        // immediately preceding block of the same kind; never move thinking
+        // across visible text or tool calls.
+        if (
+          (block.type === "text" || block.type === "thinking") &&
+          (contentBlocks.at(-1)?.type === block.type)
+        ) {
+          const previous = contentBlocks.at(-1);
+          if (previous?.type === block.type) {
+            previous.text += block.text;
+            if (
+              block.type === "thinking" &&
+              block.signature !== undefined
+            ) {
+              previous.signature = block.signature;
+            }
+          }
+        } else {
+          contentBlocks.push(block);
         }
       }
       if (first.finishReason != null) finishReason = first.finishReason;
@@ -283,24 +300,14 @@ export async function accumulateGeminiSSEStream(
     throw new Error("missing Gemini finishReason terminal");
   }
 
-  const blocks: GatewayContentBlock[] = [];
-  if (thinkingContent)
-    blocks.push({ type: "thinking", thinking: thinkingContent });
-  if (textContent) blocks.push({ type: "text", text: textContent });
-  for (const tu of toolUses) {
-    blocks.push({
-      type: "tool_use",
-      id: tu.id,
-      name: tu.name,
-      input: tu.input,
-    });
-  }
-
+  const hasToolCall = contentBlocks.some(
+    (block) => block.type === "tool_use",
+  );
   return {
     id: responseId,
     model,
-    content: blocks,
-    stopReason: mapGeminiFinishReason(finishReason, toolUses.length > 0),
+    content: contentBlocks,
+    stopReason: mapGeminiFinishReason(finishReason, hasToolCall),
     usage,
   };
 }
