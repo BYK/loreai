@@ -454,6 +454,61 @@ describe("accumulateGeminiSSEStream", () => {
     expect(resp.usage?.cacheReadInputTokens).toBe(6);
   });
 
+  test("preserves thought signatures and native part order", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "rea",
+                    thought: true,
+                    thoughtSignature: "signature-1",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "son",
+                    thought: true,
+                    thoughtSignature: "signature-2",
+                  },
+                  { text: "visible answer" },
+                ],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 1,
+            candidatesTokenCount: 1,
+            totalTokenCount: 2,
+          },
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "reason",
+        signature: "signature-2",
+      },
+      { type: "text", text: "visible answer" },
+    ]);
+  });
+
   test("thought deltas stay out of visible text (separate thinking block)", async () => {
     const res = sse([
       {
