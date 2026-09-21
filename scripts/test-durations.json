@@ -496,5 +496,6 @@
   "packages/pi/test/internal.test.ts": 1082,
   "packages/pi/test/no-tui-output.test.ts": 77,
   "packages/pi/test/real-runtime.e2e.test.ts": 2,
-  "packages/pi/test/tui-silence.test.ts": 2
+  "packages/pi/test/tui-silence.test.ts": 2,
+  "packages/gateway/test/recall-marker.property.test.ts": 3200
 }
