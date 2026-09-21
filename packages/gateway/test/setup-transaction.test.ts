@@ -1,5 +1,7 @@
 import {
+  afterAll,
   afterEach,
+  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -7,6 +9,7 @@ import {
   vi,
   type MockInstance,
 } from "vitest";
+import { build } from "esbuild";
 import {
   existsSync,
   lstatSync,
@@ -301,14 +304,51 @@ function failClaudeSetup(message: string): void {
   });
 }
 
+// The SIGKILL children used to be spawned as `node --import tsx <child>.ts`,
+// which made every kill point pay tsx's full source-load of the gateway
+// (~5s per spawn, several spawns per test). Bundle each child once per file
+// instead; the spawn keeps the same process semantics (separate HOME/DB, real
+// SIGKILL) and the same 90s hang guard.
+let sigkillBundleDir: string;
+
+beforeAll(async () => {
+  // Bundled inside the package so external native deps (sqlite-vec,
+  // onnxruntime-node) resolve through the repo's node_modules.
+  sigkillBundleDir = mkdtempSync(join(import.meta.dirname, ".sigkill-bundle-"));
+  await build({
+    entryPoints: [
+      join(import.meta.dirname, "setup-sigkill-child.ts"),
+      join(import.meta.dirname, "setup-external-sigkill-child.ts"),
+    ],
+    bundle: true,
+    format: "esm",
+    target: "node22",
+    platform: "node",
+    conditions: ["node"],
+    external: [
+      "node:*",
+      "onnxruntime-node",
+      "sharp",
+      "sqlite-vec",
+      // UMD package — bundling into ESM leaves an unsupported dynamic
+      // require; keep it resolved from node_modules.
+      "jsonc-parser",
+    ],
+    outdir: sigkillBundleDir,
+    outExtension: { ".js": ".mjs" },
+    logLevel: "silent",
+  });
+});
+
+afterAll(() => {
+  rmSync(sigkillBundleDir, { recursive: true, force: true });
+});
+
 function runSigkillChild(operation: "setup" | "undo", commit: number): void {
   const child = spawnSync(
     process.execPath,
     [
-      "--conditions=development",
-      "--import",
-      "tsx",
-      join(import.meta.dirname, "setup-sigkill-child.ts"),
+      join(sigkillBundleDir, "setup-sigkill-child.mjs"),
       "claude-code",
       operation,
       String(commit),
@@ -338,13 +378,7 @@ function runExternalEffectSigkillChild(
 ): void {
   const child = spawnSync(
     process.execPath,
-    [
-      "--conditions=development",
-      "--import",
-      "tsx",
-      join(import.meta.dirname, "setup-external-sigkill-child.ts"),
-      phase,
-    ],
+    [join(sigkillBundleDir, "setup-external-sigkill-child.mjs"), phase],
     {
       env: {
         ...process.env,
