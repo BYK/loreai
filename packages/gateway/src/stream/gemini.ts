@@ -254,7 +254,7 @@ export async function accumulateGeminiSSEStream(
           parsedBlock.type === "thinking"
             ? { type: "thinking" as const, thinking: parsedBlock.thinking }
             : parsedBlock;
-        const block =
+        const block: GatewayContentBlock =
           acceptedSignature !== undefined &&
           (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
             ? { ...parsedBlock, raw: p }
