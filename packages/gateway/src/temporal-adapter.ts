@@ -239,7 +239,9 @@ export function gatewayMessagesToLore(
     // or a response path can never turn encrypted/native reasoning into Lore
     // parts, temporal text, embeddings, or distillation input.
     const visibleContent = m.content.filter(
-      (block) => !(block.type === "thinking" || block.requestOnly === true),
+      (block) =>
+        block.type !== "thinking" &&
+        !(block.type === "opaque" && block.requestOnly === true),
     );
     const id = deterministicID(
       sessionID,
