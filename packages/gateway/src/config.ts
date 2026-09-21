@@ -91,6 +91,12 @@ export interface GatewayConfig {
   sessionEvictionTimeoutSeconds: number;
   /** Whether to log requests. Default: false. Env: LORE_DEBUG */
   debug: boolean;
+  /**
+   * Allow fixed provider-frame validation rules in internal error logs.
+   * Enabled by default; set LORE_EXPOSE_PROVIDER_DIAGNOSTICS to false or 0
+   * to disable. Never includes provider content.
+   */
+  exposeProviderDiagnostics: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
   /**
@@ -275,6 +281,9 @@ export function loadConfig(): GatewayConfig {
       1800,
     ),
     debug: isTruthy(env.LORE_DEBUG),
+    exposeProviderDiagnostics:
+      env.LORE_EXPOSE_PROVIDER_DIAGNOSTICS?.trim().toLowerCase() !== "false" &&
+      env.LORE_EXPOSE_PROVIDER_DIAGNOSTICS?.trim() !== "0",
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,

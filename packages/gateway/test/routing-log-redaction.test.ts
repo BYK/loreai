@@ -198,6 +198,59 @@ describe("routing log credential redaction", () => {
     expect(output).not.toContain("PRIVATE_FOREGROUND_REASON_MARKER");
   });
 
+  it.each([
+    {
+      exposed: false,
+      expected: "pipeline request failed: malformed OpenAI stream event",
+    },
+    {
+      exposed: true,
+      expected:
+        "pipeline request failed: malformed OpenAI stream event (rule=invalid-json)",
+    },
+  ])(
+    "logs only the categorical OpenAI validation rule unless opted out",
+    async ({ exposed, expected }) => {
+      const messages: string[] = [];
+      log.registerSink({
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: (message) => messages.push(message),
+        captureException: vi.fn(),
+      });
+      setUpstreamInterceptor(
+        async () =>
+          new Response("data: {not-json}\n\n", {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      const config = loadConfig();
+      config.exposeProviderDiagnostics = exposed;
+
+      const response = await handleRequest(
+        {
+          protocol: "openai",
+          model: "gpt-test",
+          system: "You are a coding assistant.",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "hello" }] },
+          ],
+          tools: [],
+          stream: true,
+          maxTokens: 64,
+          metadata: {},
+          rawHeaders: { "x-lore-agent": "coder" },
+        },
+        config,
+      );
+
+      expect(response.status).toBe(502);
+      expect(messages).toContain(expected);
+      expect(messages.join("\n")).not.toContain("not-json");
+    },
+  );
+
   it("logs a fixed transport failure without exposing upstream content", async () => {
     const messages: string[] = [];
     log.registerSink({

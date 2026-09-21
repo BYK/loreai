@@ -218,6 +218,7 @@ import {
 } from "./stream/openai-responses";
 import {
   accumulateOpenAISSEStream,
+  OpenAIStreamValidationError,
   translateAnthropicStreamToOpenAI,
 } from "./stream/openai";
 import {
@@ -20199,16 +20200,19 @@ async function handleRequestInner(
       // Only log fixed internal failures. Arbitrary parser/fetch messages can
       // contain upstream response content, which must never reach the log.
       const detail =
-        err instanceof Error &&
-        [
-          "fetch failed",
-          "malformed OpenAI stream event",
-          "missing OpenAI finish_reason terminal",
-          "missing OpenAI [DONE] terminal",
-          "Upstream response has no body",
-        ].includes(err.message)
-          ? `: ${err.message}`
-          : "";
+        err instanceof OpenAIStreamValidationError
+          ? config.exposeProviderDiagnostics
+            ? `: ${err.message} (rule=${err.rule})`
+            : `: ${err.message}`
+          : err instanceof Error &&
+              [
+                "fetch failed",
+                "missing OpenAI finish_reason terminal",
+                "missing OpenAI [DONE] terminal",
+                "Upstream response has no body",
+              ].includes(err.message)
+            ? `: ${err.message}`
+            : "";
       log.error(`pipeline request failed${detail}`);
     }
     return errorResponse(502, "Gateway request failed");
