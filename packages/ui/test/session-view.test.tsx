@@ -917,10 +917,14 @@ describe("SessionView: whole-session search", () => {
    * `onLoadOlder` prepends 20 more. Message `old-3` is the only one with the
    * needle, so the loaded-window scan finds nothing until two pages arrive.
    */
-  function pagedHistory(needleContent = "the portability needle sits here") {
+  function pagedHistory(
+    needleContent = "the portability needle sits here",
+    needleAt = 3,
+  ) {
     const all = older(60).map((m, i) => ({
       ...m,
-      content: i === 3 ? needleContent : `row ${i} says nothing of interest`,
+      content:
+        i === needleAt ? needleContent : `row ${i} says nothing of interest`,
     }));
     const [from, setFrom] = createSignal(40);
     const messages = () => all.slice(from());
@@ -951,7 +955,7 @@ describe("SessionView: whole-session search", () => {
             next_cursor: null,
           }) satisfies SessionSearchPage,
       );
-    return { all, messages, hasOlder, loadOlder, server, from };
+    return { all, messages, hasOlder, loadOlder, server, from, setFrom };
   }
 
   function mountPaged(
@@ -1015,6 +1019,44 @@ describe("SessionView: whole-session search", () => {
     expect(screen.queryByTestId("search-reach")).toBeNull();
     expect(screen.queryByTestId("search-whole-next")).toBeNull();
     expect(summary).toHaveTextContent("nothing more in older history");
+  });
+
+  it("keeps the reached hit in view when the older page's promise settles after the scroll to it", async () => {
+    // The real store applies the page, then awaits a cache write before its
+    // promise settles; the scroll to the hit happens in between.
+    const h = pagedHistory("the portability needle sits here", 8);
+    let settled = 0;
+    h.loadOlder.mockImplementation(async () => {
+      h.setFrom((n) => Math.max(0, n - 20));
+      await new Promise((r) => setTimeout(r, SEARCH_DEBOUNCE_MS * 4));
+      settled++;
+    });
+    mountPaged(h, h.server([h.all[8]!]));
+    await tick();
+    await typeAndSearchWhole("portability");
+    fireEvent.click(screen.getByTestId("search-whole-next"));
+    for (
+      let i = 0;
+      i < 10 && document.querySelectorAll("mark.passage-search").length === 0;
+      i++
+    ) {
+      await settleSearch();
+    }
+    const scroll = screen.getByTestId("session-scroll");
+    const marks = document.querySelectorAll("mark.passage-search");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.closest("[data-row-key]")).toHaveAttribute(
+      "data-row-key",
+      "m.old-8",
+    );
+    const top = scroll.scrollTop;
+    expect(top).toBeGreaterThan(0);
+    // The late settlement of the last page must not move the viewport.
+    for (let i = 0; i < 10 && settled < 2; i++) await settleSearch();
+    expect(settled).toBe(2);
+    expect(h.loadOlder).toHaveBeenCalledTimes(2);
+    expect(scroll.scrollTop).toBe(top);
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(1);
   });
 
   it("says plainly when the loaded message's displayed text has no literal match", async () => {

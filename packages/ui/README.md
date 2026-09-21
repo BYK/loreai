@@ -596,7 +596,10 @@ row key) with owned dynamic measurement (`measureElement` on each mounted
 row, so expanding a tool part or loading Markdown re-measures). Loading
 older history prepends rows and restores the scroll offset by the
 virtualiser's total-size delta, so the passage under the reader's eye does
-not move. Focus is logical (`focusKey`): arrow keys move it across rows
+not move; the restore runs when the rows land (the store's promise settles
+only after its cache write, by which time a search hit or deep link may own
+the scroll), and yields to a deep link that found its block in that page.
+Focus is logical (`focusKey`): arrow keys move it across rows
 that may not be mounted; the DOM focus lands when the virtualiser mounts
 the row.
 

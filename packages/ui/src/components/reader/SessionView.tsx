@@ -558,6 +558,19 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   );
 
   // -- older history -------------------------------------------------------
+  /**
+   * Viewport to restore once the requested older page lands. The owner's
+   * promise may settle well after it applied the page (it writes the cache
+   * first), so the compensation keys off the rows, not the promise: by the
+   * time it settles, a search hit or deep link may already own the scroll.
+   */
+  let prepend: {
+    top: number;
+    total: number;
+    firstKey: string | undefined;
+    forLink: string | null;
+  } | null = null;
+
   async function loadOlder() {
     if (
       !props.onLoadOlder ||
@@ -567,30 +580,42 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     ) {
       return;
     }
-    const before = {
+    prepend = {
       top: scrollEl.scrollTop,
       total: virtualizer.getTotalSize(),
-      count: rows().length,
-      forLink: scrollTarget !== null,
+      firstKey: rows()[0]?.key,
+      forLink: scrollTarget,
     };
     setOlderInFlight(true);
     try {
       await props.onLoadOlder();
     } catch {
-      return; // the owner reports the failure through `olderError`
+      // the owner reports the failure through `olderError`
     } finally {
+      prepend = null;
       setOlderInFlight(false);
     }
-    const added = rows().length - before.count;
-    if (added <= 0) return;
-    // A deep link that found its block in this page owns the scroll position.
-    if (before.forLink && scrollTarget === null) return;
-    // The prepended rows are unmeasured, so they enter at the estimate; the
-    // first-measure compensation in the virtualizer corrects the rest as
-    // they scroll into view.
-    const delta = virtualizer.getTotalSize() - before.total;
-    if (delta > 0) scrollEl.scrollTop = before.top + delta;
   }
+
+  createEffect(
+    on(
+      rows,
+      (current) => {
+        const before = prepend;
+        // Only a prepend moves the first row; anything else keeps waiting.
+        if (!before || !scrollEl || current[0]?.key === before.firstKey) return;
+        prepend = null;
+        // A deep link that found its block in this page owns the scroll position.
+        if (before.forLink !== null && rowIndexOf(before.forLink) >= 0) return;
+        // The prepended rows are unmeasured, so they enter at the estimate; the
+        // first-measure compensation in the virtualizer corrects the rest as
+        // they scroll into view.
+        const delta = virtualizer.getTotalSize() - before.total;
+        if (delta > 0) scrollEl.scrollTop = before.top + delta;
+      },
+      { defer: true },
+    ),
+  );
 
   // -- focus ---------------------------------------------------------------
   const [focusKey, setFocusKey] = createSignal<string | null>(null);

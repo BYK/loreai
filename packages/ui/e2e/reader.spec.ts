@@ -294,6 +294,7 @@ test.describe("session reader", () => {
     );
     const hit = page.locator("mark.passage-search");
     await expect(hit).toHaveText(query);
+    await expect(hit).toBeInViewport();
     await expect(rowWith(page, "needle-8 and")).toBeVisible();
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "230 messages, complete as captured",
