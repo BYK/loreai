@@ -29,10 +29,7 @@ import {
   resolveVertexProject,
 } from "../src/vertex-auth";
 import { createForegroundAbortScope } from "../src/pipeline";
-import {
-  buildAnthropicRequest,
-  parseAnthropicRequest,
-} from "../src/translate/anthropic";
+import { buildAnthropicRequest, parseAnthropicRequest } from "../src/translate/anthropic";
 
 describe("toVertexModelId", () => {
   test("passes through short ids that Vertex uses verbatim", () => {
@@ -42,27 +39,17 @@ describe("toVertexModelId", () => {
   });
 
   test("maps short ids that Vertex pins to a dated id", () => {
-    expect(toVertexModelId("claude-haiku-4-5")).toBe(
-      "claude-haiku-4-5@20251001",
-    );
-    expect(toVertexModelId("claude-sonnet-4-5")).toBe(
-      "claude-sonnet-4-5@20250929",
-    );
+    expect(toVertexModelId("claude-haiku-4-5")).toBe("claude-haiku-4-5@20251001");
+    expect(toVertexModelId("claude-sonnet-4-5")).toBe("claude-sonnet-4-5@20250929");
   });
 
   test("converts an Anthropic dash-date id to Vertex @-date form", () => {
-    expect(toVertexModelId("claude-3-5-haiku-20241022")).toBe(
-      "claude-3-5-haiku@20241022",
-    );
-    expect(toVertexModelId("claude-opus-4-1-20250805")).toBe(
-      "claude-opus-4-1@20250805",
-    );
+    expect(toVertexModelId("claude-3-5-haiku-20241022")).toBe("claude-3-5-haiku@20241022");
+    expect(toVertexModelId("claude-opus-4-1-20250805")).toBe("claude-opus-4-1@20250805");
   });
 
   test("leaves an already-Vertex-dated id unchanged (idempotent)", () => {
-    expect(toVertexModelId("claude-sonnet-4-5@20250929")).toBe(
-      "claude-sonnet-4-5@20250929",
-    );
+    expect(toVertexModelId("claude-sonnet-4-5@20250929")).toBe("claude-sonnet-4-5@20250929");
     expect(toVertexModelId(toVertexModelId("claude-sonnet-4-5"))).toBe(
       "claude-sonnet-4-5@20250929",
     );
@@ -80,12 +67,7 @@ describe("vertexRawPredictUrl", () => {
     // host — NOT `global-aiplatform.googleapis.com` (which resolves but 404s on
     // the rawPredict path, verified live). The path still carries
     // `locations/global`. Regression guard for that live-confirmed bug.
-    const url = vertexRawPredictUrl(
-      "global",
-      "my-proj",
-      "claude-opus-4-8",
-      true,
-    );
+    const url = vertexRawPredictUrl("global", "my-proj", "claude-opus-4-8", true);
     expect(url).toBe(
       "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/anthropic/models/claude-opus-4-8:streamRawPredict",
     );
@@ -101,12 +83,7 @@ describe("vertexRawPredictUrl", () => {
   test("keeps a literal @ in a dated model id (no %40 encoding)", () => {
     // Vertex (and Google's SDK) expect the unencoded "@" in the path; "%40"
     // risks a 404. Guard against a regression back to encodeURIComponent's "%40".
-    const url = vertexRawPredictUrl(
-      "global",
-      "p",
-      "claude-haiku-4-5@20251001",
-      false,
-    );
+    const url = vertexRawPredictUrl("global", "p", "claude-haiku-4-5@20251001", false);
     expect(url).toContain("models/claude-haiku-4-5@20251001:rawPredict");
     expect(url).not.toContain("%40");
   });
@@ -128,9 +105,7 @@ describe("toVertexBody", () => {
   });
 
   test("preserves system + tools + cache_control verbatim", () => {
-    const system = [
-      { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
-    ];
+    const system = [{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }];
     const tools = [{ name: "t", input_schema: { type: "object" } }];
     const out = toVertexBody({ model: "m", system, tools });
     expect(out.system).toEqual(system);
@@ -156,19 +131,13 @@ describe("vertexHost", () => {
 
 describe("vertexRegionFromUrl / isVertexHost", () => {
   test("extracts the region from base URL or bare host", () => {
-    expect(
-      vertexRegionFromUrl("https://us-east1-aiplatform.googleapis.com"),
-    ).toBe("us-east1");
+    expect(vertexRegionFromUrl("https://us-east1-aiplatform.googleapis.com")).toBe("us-east1");
     // The bare host is the global endpoint.
-    expect(vertexRegionFromUrl("https://aiplatform.googleapis.com")).toBe(
-      "global",
-    );
+    expect(vertexRegionFromUrl("https://aiplatform.googleapis.com")).toBe("global");
     expect(vertexRegionFromUrl("aiplatform.googleapis.com")).toBe("global");
     // Legacy global-aiplatform host still parses to "global" so a manually
     // configured upstream self-heals to the bare host on the next rebuild.
-    expect(vertexRegionFromUrl("global-aiplatform.googleapis.com")).toBe(
-      "global",
-    );
+    expect(vertexRegionFromUrl("global-aiplatform.googleapis.com")).toBe("global");
     expect(
       vertexRegionFromUrl(
         "https://global-aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/claude-opus-4-8:rawPredict",
@@ -180,9 +149,7 @@ describe("vertexRegionFromUrl / isVertexHost", () => {
     expect(vertexRegionFromUrl("https://api.anthropic.com")).toBeNull();
     expect(isVertexHost("https://api.anthropic.com")).toBe(false);
     // Spoof: aiplatform as a subdomain of an attacker host.
-    expect(
-      isVertexHost("https://global-aiplatform.googleapis.com.evil.com"),
-    ).toBe(false);
+    expect(isVertexHost("https://global-aiplatform.googleapis.com.evil.com")).toBe(false);
     expect(isVertexHost("")).toBe(false);
   });
 });
@@ -257,9 +224,7 @@ describe("resolveWorkerProtocol — ChatGPT backend (openai → openai-codex-res
     "https://chatgpt.com/v1",
     "https://proxy.internal/v1?next=/backend-api",
   ])("rejects non-backend paths: %s", (url) => {
-    expect(
-      resolveWorkerProtocol("openai", undefined, "gpt-5.6-terra", url),
-    ).toBe("openai");
+    expect(resolveWorkerProtocol("openai", undefined, "gpt-5.6-terra", url)).toBe("openai");
   });
 
   test("recognizes backend-api as a complete nested path segment", () => {
@@ -278,12 +243,7 @@ describe("resolveWorkerProtocol — ChatGPT backend (openai → openai-codex-res
     // the legacy Chat Completions path is correct here. The guard must NOT
     // misroute api.openai.com sessions.
     expect(
-      resolveWorkerProtocol(
-        "openai",
-        undefined,
-        "gpt-5.6-terra",
-        "https://api.openai.com/v1",
-      ),
+      resolveWorkerProtocol("openai", undefined, "gpt-5.6-terra", "https://api.openai.com/v1"),
     ).toBe("openai");
   });
 
@@ -292,12 +252,7 @@ describe("resolveWorkerProtocol — ChatGPT backend (openai → openai-codex-res
     // when the URL is NOT the ChatGPT backend — covers aggregator sessions
     // that mount the codex provider over a custom endpoint.
     expect(
-      resolveWorkerProtocol(
-        "openai-codex",
-        undefined,
-        "gpt-5.6-terra",
-        "https://example.com",
-      ),
+      resolveWorkerProtocol("openai-codex", undefined, "gpt-5.6-terra", "https://example.com"),
     ).toBe("openai-codex-responses");
   });
 
@@ -327,13 +282,7 @@ describe("resolveProfile — vertex warming", () => {
   const vertexBase = "https://aiplatform.googleapis.com";
 
   test("warms a vertex session (provider id + host)", () => {
-    const profile = resolveProfile(
-      "claude-opus-4-8",
-      "vertex",
-      "5m",
-      vertexBase,
-      "google-vertex",
-    );
+    const profile = resolveProfile("claude-opus-4-8", "vertex", "5m", vertexBase, "google-vertex");
     expect(profile).not.toBeNull();
     expect(profile?.authMode).toBe("vertex");
     // upstreamUrl is the region base — executeWarmup rebuilds the rawPredict URL.
@@ -365,13 +314,7 @@ describe("resolveProfile — vertex warming", () => {
   test("warmup body strips stream/model and keeps anthropic_version", () => {
     // Regression: prepareAnthropicWarmupBody re-adds `stream:false`, which
     // Vertex rejects. The vertex profile must re-strip it (and `model`).
-    const profile = resolveProfile(
-      "claude-opus-4-8",
-      "vertex",
-      "5m",
-      vertexBase,
-      "google-vertex",
-    );
+    const profile = resolveProfile("claude-opus-4-8", "vertex", "5m", vertexBase, "google-vertex");
     expect(profile).not.toBeNull();
     // A stored Vertex body (as lastRequestBody would hold) carrying a stray
     // stream/model — the warmup transform must remove both.
@@ -380,9 +323,7 @@ describe("resolveProfile — vertex warming", () => {
       model: "claude-opus-4-8",
       stream: true,
       max_tokens: 1024,
-      system: [
-        { type: "text", text: "s", cache_control: { type: "ephemeral" } },
-      ],
+      system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }],
       messages: [{ role: "user", content: "hi" }],
     });
     const warmup = JSON.parse(profile?.prepareWarmupBody(stored) ?? "{}");
@@ -395,13 +336,7 @@ describe("resolveProfile — vertex warming", () => {
     // Vertex Claude uses Anthropic prompt caching, so it is exposed to the same
     // large-prefix TTL-race partial as the first-party path — the size-aware
     // margin must apply here too (computeWarmupMargin).
-    const flat = resolveProfile(
-      "claude-opus-4-8",
-      "vertex",
-      "5m",
-      vertexBase,
-      "google-vertex",
-    );
+    const flat = resolveProfile("claude-opus-4-8", "vertex", "5m", vertexBase, "google-vertex");
     const scaled = resolveProfile(
       "claude-opus-4-8",
       "vertex",
@@ -477,11 +412,9 @@ describe("vertex-auth — ADC token seam", () => {
     });
     const controller = new AbortController();
     controller.abort(new DOMException("already aborted", "AbortError"));
-    await expect(getVertexAccessToken(controller.signal)).rejects.toMatchObject(
-      {
-        name: "AbortError",
-      },
-    );
+    await expect(getVertexAccessToken(controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
     expect(calls).toBe(0);
   });
 
@@ -491,11 +424,9 @@ describe("vertex-auth — ADC token seam", () => {
       controller.abort(new DOMException("raced abort", "AbortError"));
       return Promise.reject(new Error("provider rejected after abort"));
     });
-    await expect(getVertexAccessToken(controller.signal)).rejects.toMatchObject(
-      {
-        name: "AbortError",
-      },
-    );
+    await expect(getVertexAccessToken(controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
     await Promise.resolve();
   });
 
@@ -542,8 +473,7 @@ describe("buildVertexUpstream — conversation transport rewrite", () => {
       "content-type": "application/json",
       "x-api-key": "sk-ant-client-key",
       "anthropic-version": "2023-06-01",
-      "anthropic-beta":
-        "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11",
+      "anthropic-beta": "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11",
       "user-agent": "claude-cli/2.0",
     } as Record<string, string>,
     anthropicBody: {
@@ -629,9 +559,7 @@ describe("buildVertexUpstream — conversation transport rewrite", () => {
       effectiveUpstreamBase: "https://aiplatform.googleapis.com",
     });
 
-    expect(
-      (body.messages as Array<{ content: unknown }>)[0]?.content,
-    ).toEqual([
+    expect((body.messages as Array<{ content: unknown }>)[0]?.content).toEqual([
       {
         type: "thinking",
         thinking: "private",
