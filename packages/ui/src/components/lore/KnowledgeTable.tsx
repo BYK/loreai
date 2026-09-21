@@ -250,7 +250,13 @@ export const KnowledgeTable: Component<{
                         ].includes(id);
                         return (
                           <th
-                            class="px-2 py-2 font-semibold"
+                            class={`px-2 py-2 font-semibold ${
+                              id === "scope" ||
+                              id === "confidence" ||
+                              id === "updated"
+                                ? "hidden sm:table-cell"
+                                : ""
+                            }`}
                             aria-sort={sortable ? ariaSort(id) : undefined}
                           >
                             {sortable ? (
@@ -325,13 +331,23 @@ export const KnowledgeTable: Component<{
                   >
                     <For each={row.getAllCells()}>
                       {(cell) => (
-                        <td class="truncate px-2 py-2">
+                        <td
+                          class={`px-2 py-2 ${
+                            cell.column.id === "title" ? "max-w-0" : ""
+                          } ${
+                            cell.column.id === "scope" ||
+                            cell.column.id === "confidence" ||
+                            cell.column.id === "updated"
+                              ? "hidden sm:table-cell"
+                              : ""
+                          }`}
+                        >
                           {cell.column.id === "title" ? (
                             <>
-                              <span class="font-semibold">
+                              <span class="block truncate font-semibold">
                                 {row.original.title}
                               </span>
-                              <div class="font-normal text-muted">
+                              <div class="block truncate font-normal text-muted">
                                 {previewOf(row.original.content)}
                               </div>
                             </>
