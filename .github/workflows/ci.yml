@@ -161,10 +161,12 @@ jobs:
   # Vitest suite, sharded across parallel runners.
   #
   # The suite is ~500 files / ~11k tests and was the single longest CI step
-  # (~15 min). Each shard runs a hash-partitioned subset with the blob
-  # reporter and raw V8 coverage; the `coverage` job merges the blobs into
-  # one report for Codecov. Vitest sharding is by file-path hash, so a shard's
-  # membership is stable across runs regardless of ordering.
+  # (~15 min). Shard membership comes from scripts/test-shards.ts, which packs
+  # files by their last measured duration (scripts/test-durations.json) so
+  # the shards finish together; Vitest's own --shard hashes by path and left
+  # one shard ~3x longer than another. Each shard emits a blob report + raw V8
+  # coverage (merged by `coverage` below) and a JSON report whose per-file
+  # timings `coverage` folds back into a fresh manifest artifact.
   # ---------------------------------------------------------------------------
   unit-test:
     name: Unit tests (shard ${{ matrix.shard }}/4)
@@ -206,11 +208,17 @@ jobs:
       - name: Build gateway bundle
         run: pnpm --filter @loreai/gateway run bundle
 
+      - name: Plan shard ${{ matrix.shard }}/4
+        run: pnpm exec tsx scripts/test-shards.ts plan --shard ${{ matrix.shard }}/4 > .shard-files
+
+      # Positional args are path filters; `plan` emits repo-relative paths, which
+      # match exactly one file each (verified: the 4 shards partition `vitest list`).
       - name: Test (shard ${{ matrix.shard }}/4)
         run: >-
-          pnpm exec vitest run
-          --shard=${{ matrix.shard }}/4
-          --reporter=blob --reporter=default
+          xargs -a .shard-files pnpm exec vitest run
+          --reporter=blob --outputFile.blob=.vitest-reports/blob-${{ matrix.shard }}-4.json
+          --reporter=json --outputFile.json=.vitest-durations/shard-${{ matrix.shard }}.json
+          --reporter=default
           --coverage.enabled --coverage.reporter=json
         env:
           # Silence the ~85-line "ExperimentalWarning: SQLite is an experimental
@@ -232,6 +240,16 @@ jobs:
           if-no-files-found: error
           # .vitest-reports is a dotted dir; upload-artifact skips hidden paths
           # unless include-hidden-files is set.
+          include-hidden-files: true
+
+      - name: Upload shard timings
+        if: '!cancelled()'
+        uses: actions/upload-artifact@v7
+        with:
+          name: vitest-durations-${{ matrix.shard }}
+          path: .vitest-durations/
+          retention-days: 1
+          if-no-files-found: error
           include-hidden-files: true
 
   # Merge the shard blobs into a single coverage report and upload to Codecov.
@@ -281,6 +299,37 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: ./coverage/lcov.info
           informational-patch: ${{ github.event_name == 'push' }}
+
+      # Rebuild the shard manifest from this run's real timings. Never fails
+      # the build; when the diff grows, download `test-durations` and commit
+      # scripts/test-durations.json to rebalance.
+      - name: Download shard timings
+        uses: actions/download-artifact@v7
+        with:
+          pattern: vitest-durations-*
+          path: .vitest-durations
+          merge-multiple: true
+
+      - name: Refresh shard manifest
+        run: |
+          pnpm exec tsx scripts/test-shards.ts record .vitest-durations/shard-*.json
+          {
+            echo '### Shard balance (from this run)'
+            echo '```'
+            pnpm exec tsx scripts/test-shards.ts summary
+            echo
+            git diff --stat -- scripts/test-durations.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          NODE_NO_WARNINGS: 1
+
+      - name: Upload refreshed manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-durations
+          path: scripts/test-durations.json
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # Static checks, UI unit tests, bundle + standalone-binary smoke tests, and

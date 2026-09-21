@@ -68,3 +68,5 @@ packages/ui/e2e-results/
 packages/ui/playwright-report/
 .vitest-reports/
 packages/gateway/test/.sigkill-bundle-*/
+.vitest-durations/
+.shard-files
