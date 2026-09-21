@@ -220,11 +220,27 @@ export async function accumulateGeminiSSEStream(
           if (previous?.type === "text") {
             previous.text += block.text;
             if (previous.raw !== undefined || block.raw !== undefined) {
-              previous.raw = {
+              const mergedRaw = {
                 ...previous.raw,
                 ...block.raw,
                 text: previous.text,
               };
+              if (block.raw) {
+                const hasCamelSignature = Object.hasOwn(
+                  block.raw,
+                  "thoughtSignature",
+                );
+                const hasSnakeSignature = Object.hasOwn(
+                  block.raw,
+                  "thought_signature",
+                );
+                if (hasCamelSignature && !hasSnakeSignature) {
+                  delete mergedRaw.thought_signature;
+                } else if (hasSnakeSignature && !hasCamelSignature) {
+                  delete mergedRaw.thoughtSignature;
+                }
+              }
+              previous.raw = mergedRaw;
             }
           } else {
             contentBlocks.push(block);
