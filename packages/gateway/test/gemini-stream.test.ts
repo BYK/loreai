@@ -548,6 +548,57 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
   });
 
+  test.each([
+    [
+      "camel-to-snake",
+      { thoughtSignature: "signature-1" },
+      { thought_signature: "signature-2" },
+      { text: "Hello", thought_signature: "signature-2" },
+    ],
+    [
+      "snake-to-camel",
+      { thought_signature: "signature-1" },
+      { thoughtSignature: "signature-2" },
+      { text: "Hello", thoughtSignature: "signature-2" },
+    ],
+  ])(
+    "canonicalizes signed text aliases during %s merges",
+    async (_name, firstSignature, secondSignature, expectedRaw) => {
+      const response = await accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: "Hel", ...firstSignature }],
+                },
+              },
+            ],
+          },
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: "lo", ...secondSignature }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        ]),
+        { strict: true },
+      );
+
+      expect(response.content).toEqual([
+        {
+          type: "text",
+          text: "Hello",
+          raw: expectedRaw,
+        },
+      ]);
+    },
+  );
+
   test("thought deltas stay out of visible text (separate thinking block)", async () => {
     const res = sse([
       {
