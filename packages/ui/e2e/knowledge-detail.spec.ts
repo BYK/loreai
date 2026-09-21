@@ -19,6 +19,10 @@ async function projectAndEntry(page: Page) {
       (item: { title: string }) =>
         item.title === "Expired source sessions remain identifiable",
     ),
+    summary: knowledge.find(
+      (item: { title: string }) =>
+        item.title === "Retained summaries stay readable",
+    ),
   };
 }
 
@@ -61,6 +65,18 @@ test.describe("knowledge detail provenance and history", () => {
       page.getByText("Source session no longer available"),
     ).toBeVisible();
     await expect(page.getByText("e2e-session-expired").first()).toBeVisible();
+  });
+
+  test("opens retained summary text for expired evidence", async ({ page }) => {
+    const { project, summary } = await projectAndEntry(page);
+    await page.goto(`/ui/projects/${project.id}/knowledge/${summary.id}`);
+    await expect(page.getByText("retained summary only")).toBeVisible();
+    await page.getByText("Show retained summary").click();
+    await expect(
+      page.getByText(
+        "Retained summary for the expired session: the team chose WAL mode.",
+      ),
+    ).toBeVisible();
   });
 
   test.describe("mobile", () => {

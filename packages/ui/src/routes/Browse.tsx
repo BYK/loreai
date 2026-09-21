@@ -300,6 +300,9 @@ export const Browse: Component<{
                   project={projectForEntry()}
                   versions={versions.loader}
                   evidence={evidence.loader}
+                  loadDistillation={(id) =>
+                    ws.tracked(() => ws.client.getDistillation(id))
+                  }
                 />
               )}
             </Match>
