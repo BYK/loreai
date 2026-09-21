@@ -312,12 +312,18 @@ test.describe("session reader", () => {
     const copiedLink = copied.trim().split("\n").at(-1)!;
 
     // A fresh document (not a same-page fragment hop): the passage is three
-    // pages back, so the reader pages through the real API again.
+    // pages back, so the reader pages through the real API again. The cached
+    // window may show the passage first ("completeness unknown"); the server's
+    // newest page then restarts the window and the link search re-pages to it.
     await page.goto("about:blank");
     await page.goto(copiedLink);
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "230 messages, complete as captured",
+    );
+    await expect(page.getByTestId("stale-indicator")).toHaveCount(0);
     const marks = page.locator("mark.passage-target");
-    await expect(marks.first()).toBeVisible();
-    expect((await marks.allTextContents()).join("")).toBe(query);
+    await expect(marks).toHaveText([query]);
+    // Viewport position after reload is #1863 (mobile lands under the panel).
     await expect(page.getByTestId("link-state")).toHaveCount(0);
   });
 
