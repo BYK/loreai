@@ -45,6 +45,12 @@ export type GatewayToolUseBlock = {
   id: string;
   name: string;
   input: unknown;
+  /**
+   * Provider-native tool-call part retained for response egress when it carries
+   * opaque reasoning/signature metadata (for example Gemini thoughtSignature).
+   * Request replay uses GatewayMessage.provenanceContent instead.
+   */
+  raw?: Record<string, unknown>;
 };
 
 export type GatewayToolResultBlock = {
@@ -183,9 +189,10 @@ export type GatewayMessage = {
   role: "user" | "assistant";
   content: GatewayContentBlock[];
   /**
-   * Request-only content used to fingerprint recall-anchor provenance. It may
-   * include Responses wire items (notably encrypted reasoning) that must bind a
-   * replay anchor but must never enter normal content or temporal storage.
+   * Request-only provider-native content used to fingerprint recall-anchor
+   * provenance. It may include encrypted reasoning/thinking/signature blocks
+   * that must bind a replay anchor but must never enter normal content or
+   * temporal storage.
    */
   provenanceContent?: GatewayContentBlock[];
   /** Index of each visible `content` block inside `provenanceContent`. */
