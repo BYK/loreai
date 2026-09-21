@@ -236,15 +236,31 @@ export async function accumulateGeminiSSEStream(
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
+      const frameFinishReason = first.finishReason;
+      const frameIsTerminal =
+        typeof frameFinishReason === "string" &&
+        frameFinishReason !== "" &&
+        frameFinishReason !== "FINISH_REASON_UNSPECIFIED";
       for (const p of parts) {
         const parsedBlock = geminiPartToBlock(p);
         if (!parsedBlock) continue;
         const signature = geminiPartThoughtSignature(p);
+        // Gemini thought signatures belong to the completed thought/tool
+        // part. A malformed or future stream may expose one before the
+        // terminal candidate frame; do not let that premature metadata bind
+        // the accumulated block as if it were final.
+        const acceptedSignature = frameIsTerminal ? signature : undefined;
+        const blockWithoutSignature =
+          parsedBlock.type === "thinking"
+            ? { type: "thinking" as const, thinking: parsedBlock.thinking }
+            : parsedBlock;
         const block =
-          signature !== undefined &&
+          acceptedSignature !== undefined &&
           (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
             ? { ...parsedBlock, raw: p }
-            : parsedBlock;
+            : signature !== undefined && !frameIsTerminal
+              ? blockWithoutSignature
+              : parsedBlock;
         if (
           block.type === "text" ||
           block.type === "thinking" ||
