@@ -2671,9 +2671,7 @@ function mergeAdjacentAssistantMessages(
     later.provenanceContent !== undefined;
   if (!hasProvenance) return { role: "assistant", content };
 
-  const earlierProvenance = [
-    ...(earlier.provenanceContent ?? earlier.content),
-  ];
+  const earlierProvenance = [...(earlier.provenanceContent ?? earlier.content)];
   const laterProvenance = [...(later.provenanceContent ?? later.content)];
   const earlierPositions =
     earlier.provenancePositions ??
@@ -2696,14 +2694,14 @@ function mergeAdjacentAssistantMessages(
   ];
   const provenancePositions = [
     ...laterPositions.slice(0, visibleLead),
-    ...earlierPositions.map(
-      (position) => provenanceInsertAt + position,
-    ),
-    ...laterPositions.slice(visibleLead).map((position) =>
-      position >= provenanceInsertAt
-        ? position + earlierProvenance.length
-        : position,
-    ),
+    ...earlierPositions.map((position) => provenanceInsertAt + position),
+    ...laterPositions
+      .slice(visibleLead)
+      .map((position) =>
+        position >= provenanceInsertAt
+          ? position + earlierProvenance.length
+          : position,
+      ),
   ];
 
   return {
@@ -4028,10 +4026,7 @@ export function requestHasThinking(messages: GatewayMessage[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    const blocks = [
-      ...msg.content,
-      ...(msg.provenanceContent ?? []),
-    ];
+    const blocks = [...msg.content, ...(msg.provenanceContent ?? [])];
     for (const block of blocks) {
       if (block.type === "thinking") return true;
       if (block.type !== "opaque") continue;
@@ -10276,10116 +10271,4151 @@ export function streamResponsesRecallAware(
           id: item.id,
           call_id: item.callId,
           name: item.name,
-          arguments: item.args,
-          status: typeof raw?.status === "string" ? raw.status : "completed",
-        });
-      }
-    }
-    return finalOutput;
-  }
-
-  let resumeDemand: (() => void) | undefined;
-  const cleanupAbort = (): void =>
-    signal.removeEventListener("abort", onStreamAbort);
-  const onStreamAbort = (): void => {
-    recallDiagnostics.finish("aborted");
-    resumeDemand?.();
-    resumeDemand = undefined;
-    if (keepaliveTimer) clearTimeout(keepaliveTimer);
-    keepaliveTimer = null;
-    if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
-    else
-      void currentPrincipalResponse.body?.cancel(signal.reason).catch(() => {});
-  };
-  signal.addEventListener("abort", onStreamAbort, { once: true });
-  if (signal.aborted) onStreamAbort();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      void (async () => {
-        const waitForDemand = async (): Promise<void> => {
-          while (
-            !cancelled &&
-            !signal.aborted &&
-            (controller.desiredSize ?? 1) <= 0
-          ) {
-            await new Promise<void>((resolve) => {
-              resumeDemand = resolve;
-            });
-          }
-          signal.throwIfAborted();
-        };
-        let principalEventEmitted = false;
-        let ordinaryToolEmitted = false;
-        const safeEnqueue = async (
-          chunk: Uint8Array,
-          afterEnqueue?: () => void,
-        ): Promise<boolean> => {
-          if (cancelled) return false;
-          await waitForDemand();
-          if (cancelled) return false;
-          try {
-            controller.enqueue(sequenceChunk(chunk));
-          } catch {
-            cancelled = true;
-            return false;
-          }
-          afterEnqueue?.();
-          return true;
-        };
-        const enqueuePrincipal = async (
-          chunk: Uint8Array,
-          emitsOrdinaryTool = false,
-          afterEnqueue?: () => void,
-        ): Promise<boolean> =>
-          safeEnqueue(chunk, () => {
-            principalEventEmitted = true;
-            if (emitsOrdinaryTool) ordinaryToolEmitted = true;
-            afterEnqueue?.();
-          });
-        const safeClose = (): void => {
-          cleanupAbort();
-          if (cancelled) return;
-          try {
-            controller.close();
-          } catch {
-            // Already closed/cancelled
-          }
-        };
-        const safeError = (error: unknown): void => {
-          cleanupAbort();
-          if (cancelled) return;
-          try {
-            controller.error(error);
-          } catch {
-            // Already closed/cancelled.
-          }
-        };
-
-        const resetKeepalive = (): void => {
-          if (keepaliveTimer) clearTimeout(keepaliveTimer);
-          keepaliveTimer = setTimeout(function tick() {
-            if (cancelled || signal.aborted) return;
-            if ((controller.desiredSize ?? 1) > 0) {
-              void safeEnqueue(keepaliveComment);
-            }
-            if (!signal.aborted) {
-              keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
-            }
-          }, KEEPALIVE_INACTIVITY_MS);
-        };
-        const clearKeepalive = (): void => {
-          if (keepaliveTimer) clearTimeout(keepaliveTimer);
-          keepaliveTimer = null;
-        };
-        let principalReader: ReadableStreamDefaultReader<Uint8Array> | null =
-          null;
-        let principalTransportRetries = 0;
-        let principalRetrySucceededReported = false;
-        let principalReadFinished = false;
-        let continuationAttempted = false;
-        let continuationFailureCategory:
-          | RecallContinuationFailureCategory
-          | undefined;
-        let continuationFailureReported = false;
-        let recallDetected = false;
-        type PrincipalFailureCategory =
-          | "principal_transport"
-          | "principal_resource_limit"
-          | "principal_protocol"
-          | "principal_missing_terminal"
-          | "principal_unexpected";
-        let principalFailureCategory: PrincipalFailureCategory =
-          "principal_unexpected";
-        const classifyPrincipalFailure = (
-          error: unknown,
-        ): PrincipalFailureCategory => {
-          if (error instanceof SSEStreamTransportError) {
-            return "principal_transport";
-          }
-          if (error instanceof SSEStreamLimitError) {
-            return "principal_resource_limit";
-          }
-          return principalFailureCategory;
-        };
-        const principalTransportStage = () =>
-          ordinaryToolEmitted
-            ? ("post_tool" as const)
-            : principalEventEmitted
-              ? ("post_output" as const)
-              : ("pre_output" as const);
-        const reportContinuationFailure = (
-          category: RecallContinuationFailureCategory,
-        ): void => {
-          if (continuationFailureReported) return;
-          continuationFailureReported = true;
-          reportRecallContinuationFailure(category);
-        };
-        // Recall items are gateway-internal and must stay hidden on every exit,
-        // including failures raised before marker replacement.
-        const recallIndices = new Set<number>();
-        const unresolvedToolIndices = new Set<number>();
-        const referenceIndices = new Map<number, ReferenceLifecycle>();
-
-        const retainedStateBaseline = retainedStateBytes;
-        const hiddenRecallBaseline = hiddenRecallBytes;
-        const runPrincipalAttempt = async (): Promise<void> => {
-          principalReadFinished = false;
-          if (!currentPrincipalResponse.body) {
-            throw new Error("Upstream response has no body");
-          }
-          const reader = currentPrincipalResponse.body.getReader();
-          principalReader = reader;
-          activeReader = reader;
-
-          // --- Recall interception state ---
-          // `output_index` values whose item is a suppressed `recall` function_call.
-          const parsedRecallInputs = new Map<number, RecallArguments>();
-          // Ordered list of parsed recall invocations: { outputIndex, block }.
-          const pendingRecalls: PendingResponsesRecall[] = [];
-          const completedRecallIndices = new Set<number>();
-          // Whether any NON-recall function_call appeared (mixed-tools case).
-          let otherToolSeen = false;
-          const unresolvedToolBytes = new Map<number, number>();
-          const deferredEvents: Array<{
-            chunk: Uint8Array;
-            candidateIndex?: number;
-          }> = [];
-          let deferredBytes = 0;
-          const discardDeferredCandidate = (outputIndex: number): void => {
-            for (let index = deferredEvents.length - 1; index >= 0; index--) {
-              if (deferredEvents[index].candidateIndex === outputIndex) {
-                deferredEvents.splice(index, 1);
-              }
-            }
-          };
-          const promoteDeferredCandidate = (outputIndex: number): void => {
-            hiddenRecallBytes += unresolvedToolBytes.get(outputIndex) ?? 0;
-            unresolvedToolBytes.delete(outputIndex);
-            if (hiddenRecallBytes > maxHiddenRecallBytes) {
-              throw new SSEStreamLimitError(
-                "recall stream exceeded deferred event limit",
-              );
-            }
-          };
-
-          resetKeepalive();
-          for await (const { event, data } of parseSSEStream(reader, {
-            maxFrames: maxSSEFrames,
-            inactivityMs: sseInactivityMs,
-            signal,
-            frameCounter,
-          })) {
-            resetKeepalive(); // upstream alive — reset inactivity timer
-
-            if (!data || data === "[DONE]") continue;
-            streamBytes += encoder.encode(
-              formatResponsesEvent(event, data),
-            ).byteLength;
-            if (streamBytes > maxStreamBytes) {
-              throw new SSEStreamLimitError(
-                "Responses stream exceeded byte limit",
-              );
-            }
-
-            principalFailureCategory = "principal_protocol";
-            let parsed: Record<string, unknown>;
-            try {
-              parsed = JSON.parse(data) as Record<string, unknown>;
-            } catch {
-              if (event.startsWith("response.")) {
-                throw new Error(`malformed JSON in Responses event ${event}`);
-              }
-              // Non-JSON keepalive/comment event — forward as-is.
-              if (event !== "message") {
-                const chunk = encoder.encode(formatResponsesEvent(event, data));
-                if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
-                  deferredBytes += chunk.byteLength;
-                  if (deferredBytes > maxDeferredBytes) {
-                    throw new SSEStreamLimitError(
-                      "recall stream exceeded deferred event limit",
-                    );
-                  }
-                  deferredEvents.push({ chunk });
-                } else {
-                  await enqueuePrincipal(chunk, otherToolSeen);
-                }
-              }
-              continue;
-            }
-            if (parsed.type !== event) {
-              throw new Error(`Responses payload type does not match ${event}`);
-            }
-            if (
-              (event === "response.output_item.added" ||
-                event === "response.output_item.done") &&
-              (parsed.item as Record<string, unknown> | undefined)?.type ===
-                "function_call" &&
-              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
-            ) {
-              recallDetected = true;
-            }
-            const normalizationState = normalizeCodexEvent(
-              state,
-              event,
-              parsed,
-            );
-            validateResponseLifecycle(state, event, parsed);
-            seedImplicitCodexItem(state, normalizationState, event, parsed);
-
-            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
-              continue;
-            }
-
-            const outputIndex = outputIndexForEvent(
-              event,
-              parsed,
-              state,
-              (index, item) => {
-                if (
-                  item.type !== "function_call" ||
-                  item.name !== RECALL_TOOL_NAME
-                ) {
-                  return;
-                }
-                recallDetected = true;
-                recallIndices.add(index);
-              },
-            );
-            if (outputIndex !== undefined) {
-              retainedStateBytes += encoder.encode(data).byteLength;
-              if (retainedStateBytes > maxRetainedStateBytes) {
-                throw new SSEStreamLimitError(
-                  "Responses retained state exceeded byte limit",
-                );
-              }
-              const implicitItem = state.rawItems.get(outputIndex);
-              if (
-                opts.validation === "codex" &&
-                event !== "response.output_item.added" &&
-                event !== "response.output_item.done" &&
-                implicitItem?.type === "function_call" &&
-                implicitItem.name === ""
-              ) {
-                unresolvedToolIndices.add(outputIndex);
-              }
-            }
-
-            let resolvingRecallTool = false;
-            let resolvingVisibleTool = false;
-            // Detect recall and unresolved sparse function-call identities.
-            if (
-              (event === "response.output_item.added" ||
-                event === "response.output_item.done") &&
-              outputIndex !== undefined
-            ) {
-              const item = parsed.item as Record<string, unknown> | undefined;
-              const isRecallCall =
-                item?.type === "function_call" && item?.name === "recall";
-              if (isRecallCall) {
-                recallDetected = true;
-                recallIndices.add(outputIndex);
-                resolvingRecallTool = true;
-              } else if (item?.type === "function_call") {
-                if (
-                  event === "response.output_item.added" &&
-                  opts.validation === "codex" &&
-                  item.name === ""
-                ) {
-                  unresolvedToolIndices.add(outputIndex);
-                } else {
-                  resolvingVisibleTool = true;
-                }
-              }
-            }
-
-            // Always accumulate into the internal state for postResponse.
-            applyResponsesEvent(state, event, parsed);
-            if (
-              event === "response.output_item.done" &&
-              outputIndex !== undefined
-            ) {
-              preserveStreamedReasoning(state, outputIndex);
-            }
-
-            let resolvedVisibleTool = false;
-            if (outputIndex !== undefined && resolvingRecallTool) {
-              discardDeferredCandidate(outputIndex);
-              promoteDeferredCandidate(outputIndex);
-              unresolvedToolIndices.delete(outputIndex);
-            } else if (outputIndex !== undefined && resolvingVisibleTool) {
-              resolvedVisibleTool = unresolvedToolIndices.delete(outputIndex);
-              unresolvedToolBytes.delete(outputIndex);
-              otherToolSeen = true;
-            }
-
-            if (
-              resolvedVisibleTool &&
-              recallIndices.size === 0 &&
-              unresolvedToolIndices.size === 0
-            ) {
-              for (const deferred of deferredEvents) {
-                if (!(await enqueuePrincipal(deferred.chunk, true))) break;
-              }
-              deferredEvents.length = 0;
-              deferredBytes = 0;
-            }
-
-            const isRecallEvent =
-              outputIndex !== undefined && recallIndices.has(outputIndex);
-            const isUnresolvedToolEvent =
-              outputIndex !== undefined &&
-              unresolvedToolIndices.has(outputIndex);
-
-            // Suppress all events belonging to a recall item, but still count
-            // them so malformed argument streams cannot grow without bound.
-            if (
-              (isRecallEvent || isUnresolvedToolEvent) &&
-              outputIndex !== undefined
-            ) {
-              const hiddenChunk = encoder.encode(
-                formatResponsesEvent(event, data),
-              );
-              const hiddenBytes = hiddenChunk.byteLength;
-              deferredBytes += hiddenBytes;
-              if (isRecallEvent) {
-                hiddenRecallBytes += hiddenBytes;
-              } else {
-                unresolvedToolBytes.set(
-                  outputIndex,
-                  (unresolvedToolBytes.get(outputIndex) ?? 0) + hiddenBytes,
-                );
-              }
-              if (
-                deferredBytes > maxDeferredBytes ||
-                hiddenRecallBytes > maxHiddenRecallBytes
-              ) {
-                throw new SSEStreamLimitError(
-                  "recall stream exceeded deferred event limit",
-                );
-              }
-              if (
-                event === "response.function_call_arguments.done" &&
-                isRecallEvent
-              ) {
-                parsedRecallInputs.set(
-                  outputIndex,
-                  parseRecallArguments(parsed.arguments),
-                );
-              }
-              if (isUnresolvedToolEvent && !isRecallEvent) {
-                deferredEvents.push({
-                  chunk: hiddenChunk,
-                  candidateIndex: outputIndex,
-                });
-              }
-              if (event === "response.output_item.done") {
-                if (isRecallEvent) {
-                  collectCompletedRecall(
-                    state,
-                    outputIndex,
-                    parsedRecallInputs,
-                    pendingRecalls,
-                    completedRecallIndices,
-                  );
-                }
-              }
-              // Don't forward recall-item events to the client.
-              continue;
-            }
-
-            // Terminal events: handle recall interception before forwarding.
-            if (
-              event === "response.completed" ||
-              event === "response.done" ||
-              event === "response.incomplete" ||
-              event === "response.failed"
-            ) {
-              principalReadFinished = true;
-              const terminalParsed = stripHiddenReferenceOutput(parsed);
-              const terminalResponse = terminalParsed.response as
-                | Record<string, unknown>
-                | undefined;
-              if (
-                Array.isArray(terminalResponse?.output) &&
-                terminalResponse.output.some(
-                  (item) =>
-                    item !== null &&
-                    typeof item === "object" &&
-                    !Array.isArray(item) &&
-                    (item as Record<string, unknown>).type ===
-                      "function_call" &&
-                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
-                )
-              ) {
-                recallDetected = true;
-              }
-              if (opts.validation === "codex") {
-                assertTerminalOutputMatches(
-                  state,
-                  terminalParsed,
-                  (outputIndex, item) => {
-                    if (
-                      item.type !== "function_call" ||
-                      item.name !== RECALL_TOOL_NAME ||
-                      (!recallIndices.has(outputIndex) &&
-                        !unresolvedToolIndices.has(outputIndex))
-                    ) {
-                      return;
-                    }
-                    recallDetected = true;
-                    recallIndices.add(outputIndex);
-                    unresolvedToolIndices.delete(outputIndex);
-                    discardDeferredCandidate(outputIndex);
-                    promoteDeferredCandidate(outputIndex);
-                  },
-                  (outputIndex, item) => {
-                    if (item.type !== "function_call") return;
-                    if (item.name === RECALL_TOOL_NAME) {
-                      collectCompletedRecall(
-                        state,
-                        outputIndex,
-                        parsedRecallInputs,
-                        pendingRecalls,
-                        completedRecallIndices,
-                      );
-                    } else {
-                      unresolvedToolIndices.delete(outputIndex);
-                      unresolvedToolBytes.delete(outputIndex);
-                      otherToolSeen = true;
-                    }
-                  },
-                );
-                assertOutputLifecyclesComplete(state);
-              } else {
-                assertOutputLifecyclesComplete(state);
-                assertTerminalOutputMatches(state, terminalParsed);
-              }
-              assertReferenceLifecyclesComplete(referenceIndices);
-              assertRecallItemsCompleted(
-                state,
-                pendingRecalls.map((recall) => recall.outputIndex),
-              );
-              if (
-                principalTransportRetries > 0 &&
-                !principalRetrySucceededReported
-              ) {
-                principalRetrySucceededReported = true;
-                reportPrincipalTransportFailure({
-                  kind: "read",
-                  stage: "pre_output",
-                  outcome: "retry_succeeded",
-                });
-              }
-              if (pendingRecalls.length === 0) {
-                if (unresolvedToolIndices.size > 0) {
-                  throw new Error(
-                    "Responses terminal left sparse function identity unresolved",
-                  );
-                }
-                if (recallIndices.size > 0) {
-                  throw new Error(
-                    "recall stream ended before function arguments completed",
-                  );
-                }
-                for (const deferred of deferredEvents) {
-                  if (!(await enqueuePrincipal(deferred.chunk, otherToolSeen)))
-                    break;
-                }
-                deferredEvents.length = 0;
-                deferredBytes = 0;
-                // No recall — forward the terminal event verbatim.
-                const finalResponse = finalizeResponsesAcc(state);
-                if (
-                  !(await enqueuePrincipal(
-                    encoder.encode(
-                      formatResponsesEvent(
-                        event,
-                        terminalParsed === parsed
-                          ? data
-                          : JSON.stringify(terminalParsed),
-                      ),
-                    ),
-                    otherToolSeen,
-                    () => {
-                      terminalDelivered = true;
-                      finish(
-                        finalResponse,
-                        state.terminalEvent === "response.completed",
-                      );
-                    },
-                  ))
-                )
-                  break;
-                cancelAndReleaseReader(reader, signal.reason);
-                principalReader = null;
-                clearKeepalive();
-                safeClose();
-                return;
-              }
-              if (state.terminalEvent === "response.failed") {
-                throw new Error("recall principal returned response.failed");
-              }
-              if (state.terminalEvent === "response.incomplete") {
-                throw new Error(
-                  "incomplete recall principal cannot execute recall",
-                );
-              }
-
-              // Recall was detected. Drive the recall loop.
-              if (pendingRecalls.length > 1) {
-                throw new RecallContinuationFailure("parallel_recall");
-              }
-              const anchorTexts: string[] = [];
-              transactionBaseline = {
-                ...state,
-                usage: { ...state.usage },
-                items: new Map(state.items),
-                rawItems: new Map(state.rawItems),
-              };
-              transactionProviderUsage = { ...ZERO_USAGE };
-              // The principal Responses stream is part of the same request
-              // budget. Count it once before its first recall is admitted;
-              // continuation streams are accounted for after each follow-up.
-              recallBudget.recordUsage(state.usage);
-              const pendingCommits: Array<() => void> = [];
-              const transactionalEvents: Uint8Array[] = [];
-              let transactionalBytes = 0;
-              const reserveTransactionalBytes = (chunk: Uint8Array): void => {
-                transactionalBytes += chunk.byteLength;
-                if (transactionalBytes > maxTransactionalBytes) {
-                  throw new RecallContinuationFailure("resource_limit");
-                }
-              };
-              const queueTransactional = (chunk: Uint8Array): void => {
-                reserveTransactionalBytes(chunk);
-                transactionalEvents.push(chunk);
-              };
-              for (const recall of pendingRecalls) {
-                const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
-                reserveSyntheticIdentity(syntheticId);
-                const recallAcc = finalizeResponsesAcc(state);
-                const contentPosition = recallAcc.content.findIndex(
-                  (block) =>
-                    block.type === "tool_use" && block.id === recall.toolUseId,
-                );
-                if (contentPosition < 0) {
-                  throw new RecallContinuationFailure("missing_recall_block");
-                }
-                let executed: Awaited<ReturnType<typeof settleRecall>>;
-                try {
-                  executed = await settleRecall({
-                    query: recall.query,
-                    scope: recall.scope,
-                    id: recall.id,
-                    ids: recall.ids,
-                    detailOffset: recall.detailOffset,
-                    detailLimit: recall.detailLimit,
-                    outputIndex: recall.outputIndex,
-                    toolUseId: recall.toolUseId,
-                    contentPosition,
-                    acc: recallAcc,
-                    signal,
-                  });
-                } catch (error) {
-                  if (signal.aborted) throw error;
-                  if (error instanceof RecallContinuationFailure) throw error;
-                  throw new RecallContinuationFailure("recall_execution");
-                }
-                anchorTexts.push(executed.anchorText);
-                if (executed.commit) pendingCommits.push(executed.commit);
-                if (executed.rollback) {
-                  transactionRollbacks.push(executed.rollback);
-                }
-                const anchorChunk = encoder.encode(
-                  emitTextItem(
-                    recall.outputIndex,
-                    executed.anchorText,
-                    syntheticId,
-                  ),
-                );
-                if (otherToolSeen) {
-                  state.items.set(recall.outputIndex, {
-                    type: "text",
-                    id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
-                    text: executed.anchorText,
-                  });
-                  queueTransactional(anchorChunk);
-                  for (const deferred of deferredEvents) {
-                    queueTransactional(deferred.chunk);
-                  }
-                } else {
-                  queueTransactional(anchorChunk);
-                  for (const deferred of deferredEvents) {
-                    queueTransactional(deferred.chunk);
-                  }
-                }
-                deferredEvents.length = 0;
-                deferredBytes = 0;
-
-                if (
-                  !otherToolSeen &&
-                  recall === pendingRecalls[pendingRecalls.length - 1]
-                ) {
-                  // Recall-only: run the streaming follow-up and pipe the
-                  // continuation inline before the final completion.
-                  try {
-                    continuationAttempted = true;
-                    continuationFailureCategory = "follow_up_setup";
-                    signal.throwIfAborted();
-                    let follow = await settleFollowUp({
-                      finalRecallRound: recallBudget.mustFinalizeNext(),
-                      anchorText: executed.anchorText,
-                      resultText: executed.resultText,
-                      acc: recallAcc,
-                      toolUseId: recall.toolUseId,
-                      contentPosition,
-                      signal,
-                    });
-                    let recallContinuationTransportRetries = 0;
-                    let continuationFollowUpInput: Parameters<
-                      typeof opts.runFollowUp
-                    >[0] = {
-                      finalRecallRound: recallBudget.mustFinalizeNext(),
-                      anchorText: executed.anchorText,
-                      resultText: executed.resultText,
-                      acc: recallAcc,
-                      toolUseId: recall.toolUseId,
-                      contentPosition,
-                      signal,
-                    };
-                    let continuationRetryBaseline = {
-                      transactionalEvents: transactionalEvents.length,
-                      transactionalBytes,
-                      retainedStateBytes,
-                      hiddenRecallBytes,
-                      outputIdentities: new Set(outputIdentities),
-                      referenceIdentities: new Set(referenceIdentities),
-                    };
-                    continuationFailureCategory = "follow_up_protocol";
-                    for (;;) {
-                      activeReader = follow.reader;
-                      let retryFollowUp = false;
-                      const contState = makeResponsesAccState();
-                      const contRecallIndices = new Set<number>();
-                      const contReferenceIndices = new Map<
-                        number,
-                        ReferenceLifecycle
-                      >();
-                      const contRecallInputs = new Map<
-                        number,
-                        RecallArguments
-                      >();
-                      const contPending: PendingResponsesRecall[] = [];
-                      const contCompletedRecallIndices = new Set<number>();
-                      const contUnresolvedToolIndices = new Set<number>();
-                      const contUnresolvedToolBytes = new Map<number, number>();
-                      const heldContinuationEvents: Array<{
-                        chunk: Uint8Array;
-                        candidateIndex?: number;
-                        transactional: boolean;
-                      }> = [];
-                      let deferredContinuationBytes = 0;
-                      const holdContinuation = (
-                        chunk: Uint8Array,
-                        candidateIndex?: number,
-                      ): void => {
-                        const transactional = candidateIndex === undefined;
-                        if (transactional) reserveTransactionalBytes(chunk);
-                        else {
-                          deferredContinuationBytes += chunk.byteLength;
-                          if (deferredContinuationBytes > maxDeferredBytes) {
-                            throw new RecallContinuationFailure(
-                              "resource_limit",
-                            );
-                          }
-                        }
-                        heldContinuationEvents.push({
-                          chunk,
-                          transactional,
-                          ...(candidateIndex !== undefined
-                            ? { candidateIndex }
-                            : {}),
-                        });
-                      };
-                      const discardContinuationCandidate = (
-                        outputIndex: number,
-                      ): void => {
-                        for (
-                          let index = heldContinuationEvents.length - 1;
-                          index >= 0;
-                          index--
-                        ) {
-                          if (
-                            heldContinuationEvents[index].candidateIndex ===
-                            outputIndex
-                          ) {
-                            if (!heldContinuationEvents[index].transactional) {
-                              deferredContinuationBytes -=
-                                heldContinuationEvents[index].chunk.byteLength;
-                            }
-                            heldContinuationEvents.splice(index, 1);
-                          }
-                        }
-                      };
-                      const promoteVisibleContinuationCandidate = (
-                        outputIndex: number,
-                      ): void => {
-                        for (const held of heldContinuationEvents) {
-                          if (held.candidateIndex !== outputIndex) continue;
-                          deferredContinuationBytes -= held.chunk.byteLength;
-                          reserveTransactionalBytes(held.chunk);
-                          held.transactional = true;
-                        }
-                      };
-                      const flushHeldContinuation = (): void => {
-                        for (const held of heldContinuationEvents) {
-                          if (held.transactional) {
-                            transactionalEvents.push(held.chunk);
-                          } else {
-                            queueTransactional(held.chunk);
-                          }
-                        }
-                        heldContinuationEvents.length = 0;
-                        deferredContinuationBytes = 0;
-                      };
-                      let continuationRecallBytes = 0;
-                      const promoteContinuationCandidate = (
-                        outputIndex: number,
-                      ): void => {
-                        const bytes =
-                          contUnresolvedToolBytes.get(outputIndex) ?? 0;
-                        contUnresolvedToolBytes.delete(outputIndex);
-                        continuationRecallBytes += bytes;
-                        hiddenRecallBytes += bytes;
-                        if (
-                          continuationRecallBytes > maxDeferredBytes ||
-                          hiddenRecallBytes > maxHiddenRecallBytes
-                        ) {
-                          throw new RecallContinuationFailure("resource_limit");
-                        }
-                      };
-                      let contOtherTool = false;
-                      let continuationCompleted = false;
-                      let continuationFailed = false;
-                      const contIndex = shiftedOutputIndex(
-                        Math.max(
-                          -1,
-                          ...state.rawItems.keys(),
-                          ...state.items.keys(),
-                        ),
-                        1,
-                      );
-                      try {
-                        for await (const {
-                          event: ce,
-                          data: cd,
-                        } of parseSSEStream(follow.reader, {
-                          maxFrames: maxSSEFrames,
-                          inactivityMs: sseInactivityMs,
-                          signal,
-                          frameCounter,
-                        })) {
-                          if (cancelled) break;
-                          if (!cd || cd === "[DONE]") continue;
-                          streamBytes += encoder.encode(
-                            formatResponsesEvent(ce, cd),
-                          ).byteLength;
-                          if (streamBytes > maxStreamBytes) {
-                            throw new RecallContinuationFailure(
-                              "resource_limit",
-                            );
-                          }
-                          let cparsed: Record<string, unknown>;
-                          try {
-                            cparsed = JSON.parse(cd) as Record<string, unknown>;
-                          } catch {
-                            if (ce.startsWith("response.")) {
-                              throw new Error(
-                                `malformed JSON in Responses event ${ce}`,
-                              );
-                            }
-                            if (ce !== "message") {
-                              const chunk = encoder.encode(
-                                formatResponsesEvent(ce, cd),
-                              );
-                              if (
-                                contRecallIndices.size > 0 ||
-                                contUnresolvedToolIndices.size > 0
-                              ) {
-                                holdContinuation(chunk);
-                              } else {
-                                queueTransactional(chunk);
-                              }
-                            }
-                            continue;
-                          }
-                          if (cparsed.type !== ce) {
-                            throw new Error(
-                              `Responses payload type does not match ${ce}`,
-                            );
-                          }
-                          const contNormalizationState = normalizeCodexEvent(
-                            contState,
-                            ce,
-                            cparsed,
-                          );
-                          validateResponseLifecycle(contState, ce, cparsed);
-                          if (
-                            consumeReferenceEvent(
-                              contState,
-                              contReferenceIndices,
-                              ce,
-                              cparsed,
-                              contIndex,
-                            )
-                          ) {
-                            continue;
-                          }
-                          if (
-                            Number.isSafeInteger(cparsed.output_index) &&
-                            (cparsed.output_index as number) >= 0 &&
-                            (cparsed.output_index as number) < maxSparseIndex
-                          ) {
-                            boundedContinuationOutputIndex(
-                              cparsed.output_index as number,
-                              contIndex,
-                            );
-                          }
-                          seedImplicitCodexItem(
-                            contState,
-                            contNormalizationState,
-                            ce,
-                            cparsed,
-                          );
-                          const ci = outputIndexForEvent(
-                            ce,
-                            cparsed,
-                            contState,
-                          );
-                          if (ci !== undefined) {
-                            retainedStateBytes += encoder.encode(cd).byteLength;
-                            if (retainedStateBytes > maxRetainedStateBytes) {
-                              throw new RecallContinuationFailure(
-                                "resource_limit",
-                              );
-                            }
-                            const implicitItem = contState.rawItems.get(ci);
-                            if (
-                              opts.validation === "codex" &&
-                              ce !== "response.output_item.added" &&
-                              ce !== "response.output_item.done" &&
-                              implicitItem?.type === "function_call" &&
-                              implicitItem.name === ""
-                            ) {
-                              contUnresolvedToolIndices.add(ci);
-                            }
-                          }
-                          let resolvingRecallTool = false;
-                          let resolvingVisibleTool = false;
-                          if (
-                            (ce === "response.output_item.added" ||
-                              ce === "response.output_item.done") &&
-                            ci !== undefined
-                          ) {
-                            const item = cparsed.item as
-                              | Record<string, unknown>
-                              | undefined;
-                            if (
-                              item?.type === "function_call" &&
-                              item.name === RECALL_TOOL_NAME
-                            ) {
-                              contRecallIndices.add(ci);
-                              resolvingRecallTool = true;
-                            } else if (item?.type === "function_call") {
-                              if (
-                                ce === "response.output_item.added" &&
-                                opts.validation === "codex" &&
-                                item.name === ""
-                              ) {
-                                contUnresolvedToolIndices.add(ci);
-                              } else {
-                                resolvingVisibleTool = true;
-                              }
-                            }
-                          }
-                          applyResponsesEvent(contState, ce, cparsed);
-                          if (
-                            ce === "response.output_item.done" &&
-                            ci !== undefined
-                          ) {
-                            preserveStreamedReasoning(contState, ci);
-                          }
-                          let resolvedVisibleTool = false;
-                          if (ci !== undefined && resolvingRecallTool) {
-                            discardContinuationCandidate(ci);
-                            promoteContinuationCandidate(ci);
-                            contUnresolvedToolIndices.delete(ci);
-                          } else if (ci !== undefined && resolvingVisibleTool) {
-                            promoteVisibleContinuationCandidate(ci);
-                            resolvedVisibleTool =
-                              contUnresolvedToolIndices.delete(ci);
-                            contUnresolvedToolBytes.delete(ci);
-                            contOtherTool = true;
-                          }
-                          if (
-                            resolvedVisibleTool &&
-                            contRecallIndices.size === 0 &&
-                            contUnresolvedToolIndices.size === 0
-                          ) {
-                            flushHeldContinuation();
-                          }
-                          const isContRecall =
-                            ci !== undefined && contRecallIndices.has(ci);
-                          const isContUnresolvedTool =
-                            ci !== undefined &&
-                            contUnresolvedToolIndices.has(ci);
-                          if (
-                            (isContRecall || isContUnresolvedTool) &&
-                            ci !== undefined
-                          ) {
-                            const hiddenChunk = encoder.encode(
-                              formatResponsesEvent(
-                                ce,
-                                JSON.stringify({
-                                  ...cparsed,
-                                  output_index: shiftedOutputIndex(
-                                    ci,
-                                    contIndex,
-                                  ),
-                                }),
-                              ),
-                            );
-                            const hiddenBytes = hiddenChunk.byteLength;
-                            if (isContRecall) {
-                              continuationRecallBytes += hiddenBytes;
-                              hiddenRecallBytes += hiddenBytes;
-                            } else {
-                              contUnresolvedToolBytes.set(
-                                ci,
-                                (contUnresolvedToolBytes.get(ci) ?? 0) +
-                                  hiddenBytes,
-                              );
-                            }
-                            if (
-                              continuationRecallBytes > maxDeferredBytes ||
-                              hiddenRecallBytes > maxHiddenRecallBytes
-                            ) {
-                              throw new RecallContinuationFailure(
-                                "resource_limit",
-                              );
-                            }
-                            if (
-                              ce === "response.function_call_arguments.done" &&
-                              isContRecall
-                            ) {
-                              contRecallInputs.set(
-                                ci,
-                                parseRecallArguments(cparsed.arguments),
-                              );
-                            }
-                            if (isContUnresolvedTool && !isContRecall) {
-                              holdContinuation(hiddenChunk, ci);
-                            }
-                            if (ce === "response.output_item.done") {
-                              if (isContRecall) {
-                                collectCompletedRecall(
-                                  contState,
-                                  ci,
-                                  contRecallInputs,
-                                  contPending,
-                                  contCompletedRecallIndices,
-                                );
-                              }
-                            }
-                            continue;
-                          }
-                          if (
-                            ce === "response.completed" ||
-                            ce === "response.done" ||
-                            ce === "response.incomplete" ||
-                            ce === "response.failed"
-                          ) {
-                            const terminalParsed =
-                              stripHiddenReferenceOutput(cparsed);
-                            const incompleteRecallIndices = new Set(
-                              [...contRecallIndices].filter(
-                                (outputIndex) =>
-                                  !contCompletedRecallIndices.has(outputIndex),
-                              ),
-                            );
-                            if (opts.validation === "codex") {
-                              assertTerminalOutputMatches(
-                                contState,
-                                terminalParsed,
-                                (outputIndex, item) => {
-                                  if (
-                                    item.type !== "function_call" ||
-                                    item.name !== RECALL_TOOL_NAME
-                                  ) {
-                                    return;
-                                  }
-                                  contRecallIndices.add(outputIndex);
-                                  contUnresolvedToolIndices.delete(outputIndex);
-                                  discardContinuationCandidate(outputIndex);
-                                  promoteContinuationCandidate(outputIndex);
-                                },
-                                (outputIndex, item) => {
-                                  if (item.type !== "function_call") return;
-                                  if (item.name === RECALL_TOOL_NAME) {
-                                    collectCompletedRecall(
-                                      contState,
-                                      outputIndex,
-                                      contRecallInputs,
-                                      contPending,
-                                      contCompletedRecallIndices,
-                                    );
-                                  } else {
-                                    contUnresolvedToolIndices.delete(
-                                      outputIndex,
-                                    );
-                                    contUnresolvedToolBytes.delete(outputIndex);
-                                    contOtherTool = true;
-                                  }
-                                },
-                              );
-                              assertOutputLifecyclesComplete(
-                                contState,
-                                incompleteRecallIndices,
-                              );
-                            } else {
-                              assertOutputLifecyclesComplete(
-                                contState,
-                                incompleteRecallIndices,
-                              );
-                              assertTerminalOutputMatches(
-                                contState,
-                                terminalParsed,
-                              );
-                            }
-                            assertReferenceLifecyclesComplete(
-                              contReferenceIndices,
-                            );
-                            assertRecallItemsCompleted(
-                              contState,
-                              contPending.map((recall) => recall.outputIndex),
-                            );
-                            if (contUnresolvedToolIndices.size > 0) {
-                              throw new Error(
-                                "Responses continuation left sparse function identity unresolved",
-                              );
-                            }
-                            if (contRecallIndices.size === 0) {
-                              flushHeldContinuation();
-                            }
-                            continuationCompleted =
-                              contState.terminalEvent !== undefined;
-                            continuationFailed =
-                              contState.terminalEvent === "response.failed";
-                            break;
-                          }
-                          if (
-                            ce === "response.created" ||
-                            ce === "response.in_progress"
-                          ) {
-                            continue;
-                          }
-                          if (ci !== undefined) {
-                            const shiftedIndex = shiftedOutputIndex(
-                              ci,
-                              contIndex,
-                            );
-                            const projected = projectReasoningEvent(
-                              ce,
-                              cparsed,
-                              shiftedIndex,
-                            );
-                            const shifted = encoder.encode(
-                              formatResponsesEvent(
-                                ce,
-                                JSON.stringify(
-                                  projected ?? {
-                                    ...cparsed,
-                                    output_index: shiftedIndex,
-                                  },
-                                ),
-                              ),
-                            );
-                            if (
-                              contRecallIndices.size > 0 ||
-                              contUnresolvedToolIndices.size > 0
-                            ) {
-                              holdContinuation(shifted);
-                            } else queueTransactional(shifted);
-                          } else if (ce !== "message") {
-                            const chunk = encoder.encode(
-                              formatResponsesEvent(ce, cd),
-                            );
-                            if (
-                              contRecallIndices.size > 0 ||
-                              contUnresolvedToolIndices.size > 0
-                            ) {
-                              holdContinuation(chunk);
-                            } else queueTransactional(chunk);
-                          }
-                        }
-                      } catch (error) {
-                        if (
-                          error instanceof SSEStreamLimitError ||
-                          frameCounter.count > maxSSEFrames ||
-                          (error instanceof Error &&
-                            /^SSE stream exceeded \d+ frame limit$/.test(
-                              error.message,
-                            ))
-                        ) {
-                          throw new RecallContinuationFailure("resource_limit");
-                        }
-                        if (
-                          error instanceof SSEStreamTransportError &&
-                          !continuationFollowUpInput.finalRecallRound &&
-                          recallContinuationTransportRetries <
-                            maxRecallContinuationTransportRetries
-                        ) {
-                          recallContinuationTransportRetries++;
-                          transactionalEvents.length =
-                            continuationRetryBaseline.transactionalEvents;
-                          transactionalBytes =
-                            continuationRetryBaseline.transactionalBytes;
-                          retainedStateBytes =
-                            continuationRetryBaseline.retainedStateBytes;
-                          hiddenRecallBytes =
-                            continuationRetryBaseline.hiddenRecallBytes;
-                          outputIdentities.clear();
-                          for (const identity of continuationRetryBaseline.outputIdentities) {
-                            outputIdentities.add(identity);
-                          }
-                          referenceIdentities.clear();
-                          for (const identity of continuationRetryBaseline.referenceIdentities) {
-                            referenceIdentities.add(identity);
-                          }
-                          log.warn(
-                            `retrying recall continuation after ${error.kind} transport failure${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
-                          );
-                          retryFollowUp = true;
-                        } else {
-                          if (error instanceof SSEStreamTransportError) {
-                            continuationFailureCategory = "follow_up_transport";
-                          }
-                          throw error instanceof RecallContinuationFailure
-                            ? error
-                            : new RecallContinuationFailure(
-                                continuationFailureCategory ?? "unexpected",
-                              );
-                        }
-                      } finally {
-                        cancelAndReleaseReader(follow.reader, signal.reason);
-                      }
-                      if (retryFollowUp) {
-                        continuationFailureCategory = "follow_up_setup";
-                        follow = await settleFollowUp(
-                          continuationFollowUpInput,
-                        );
-                        continuationFailureCategory = "follow_up_protocol";
-                        continue;
-                      }
-                      const mergeContinuation = (): void => {
-                        // Every continuation identity is admitted through the
-                        // request-wide identity indexes before it reaches this
-                        // transactional merge. Re-scanning both maps here
-                        // creates a quadratic cross-product without adding a
-                        // second invariant.
-                        for (const [idx, item] of contState.items) {
-                          state.items.set(
-                            shiftedOutputIndex(idx, contIndex),
-                            item,
-                          );
-                        }
-                        for (const [idx, item] of contState.rawItems) {
-                          state.rawItems.set(
-                            shiftedOutputIndex(idx, contIndex),
-                            item,
-                          );
-                        }
-                        mergeUsage(state.usage, contState.usage);
-                      };
-                      assertUsageMergeable(
-                        transactionProviderUsage,
-                        contState.usage,
-                      );
-                      mergeUsage(transactionProviderUsage, contState.usage);
-                      recallBudget.recordUsage(contState.usage);
-                      if (
-                        continuationFailed ||
-                        (continuationFollowUpInput.finalRecallRound &&
-                          contState.terminalEvent === "response.incomplete")
-                      ) {
-                        throw new RecallContinuationFailure("follow_up_failed");
-                      }
-                      if (
-                        !continuationCompleted ||
-                        contState.rawItems.size === 0
-                      ) {
-                        throw new RecallContinuationFailure(
-                          "follow_up_missing_output",
-                        );
-                      }
-                      if (
-                        continuationFollowUpInput.finalRecallRound &&
-                        contPending.length === 0 &&
-                        !isUsableRecallContinuation(
-                          finalizeResponsesAcc(contState),
-                        )
-                      ) {
-                        throw new RecallContinuationFailure(
-                          "follow_up_missing_output",
-                        );
-                      }
-                      if (contRecallIndices.size !== contPending.length) {
-                        throw new RecallContinuationFailure(
-                          "follow_up_incomplete_arguments",
-                        );
-                      }
-                      if (contPending.length > 1) {
-                        throw new RecallContinuationFailure("parallel_recall");
-                      }
-                      if (
-                        contState.terminalEvent === "response.incomplete" &&
-                        contPending.length > 0
-                      ) {
-                        throw new RecallContinuationFailure(
-                          "nested_recall_incomplete",
-                        );
-                      }
-                      assertUsageMergeable(state.usage, contState.usage);
-                      let nextRecall:
-                        | ((typeof contPending)[number] & {
-                            contentPosition: number;
-                          })
-                        | undefined;
-                      let nextExecuted:
-                        | {
-                            anchorText: string;
-                            resultText: string;
-                            commit?: () => void;
-                            rollback?: () => void;
-                          }
-                        | undefined;
-                      let nextAcc: GatewayResponse | undefined;
-                      if (contPending.length === 1) {
-                        if (continuationFollowUpInput.finalRecallRound) {
-                          throw new RecallContinuationFailure(
-                            "depth_exhausted",
-                          );
-                        } else {
-                          nextAcc = finalizeResponsesAcc(contState);
-                          const pendingNextRecall = contPending[0];
-                          const contentPosition = nextAcc.content.findIndex(
-                            (block) =>
-                              block.type === "tool_use" &&
-                              block.id === pendingNextRecall.toolUseId,
-                          );
-                          if (contentPosition < 0) {
-                            throw new RecallContinuationFailure(
-                              "missing_recall_block",
-                            );
-                          }
-                          nextRecall = {
-                            ...pendingNextRecall,
-                            contentPosition,
-                          };
-                          const shiftedRecallIndex = shiftedOutputIndex(
-                            nextRecall.outputIndex,
-                            contIndex,
-                          );
-                          const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
-                          reserveSyntheticIdentity(nextSyntheticId);
-                          continuationFailureCategory =
-                            "nested_recall_execution";
-                          try {
-                            nextExecuted = await settleRecall({
-                              ...nextRecall,
-                              acc: nextAcc,
-                              signal,
-                            });
-                          } catch (error) {
-                            if (signal.aborted) throw error;
-                            if (error instanceof RecallContinuationFailure)
-                              throw error;
-                            throw new RecallContinuationFailure(
-                              "nested_recall_execution",
-                            );
-                          }
-                          continuationFailureCategory = "follow_up_protocol";
-                          if (nextExecuted.commit) {
-                            pendingCommits.push(nextExecuted.commit);
-                          }
-                          if (nextExecuted.rollback) {
-                            transactionRollbacks.push(nextExecuted.rollback);
-                          }
-                          const nextRecallIndex = nextRecall.outputIndex;
-                          contState.items.set(nextRecallIndex, {
-                            type: "text",
-                            id: nextSyntheticId,
-                            text: nextExecuted.anchorText,
-                          });
-                          queueTransactional(
-                            encoder.encode(
-                              emitTextItem(
-                                shiftedRecallIndex,
-                                nextExecuted.anchorText,
-                              ),
-                            ),
-                          );
-                        }
-                      }
-                      flushHeldContinuation();
-                      for (const index of contRecallIndices) {
-                        recallIndices.add(shiftedOutputIndex(index, contIndex));
-                      }
-                      mergeContinuation();
-                      if (continuationFollowUpInput.finalRecallRound)
-                        log.info("recall final continuation: completed");
-                      if (!nextRecall || !nextExecuted || contOtherTool) {
-                        state.stopReason = contState.stopReason;
-                        state.terminalEvent = contState.terminalEvent;
-                        state.terminalResponse = contState.terminalResponse;
-                        break;
-                      }
-                      follow.commit?.();
-                      continuationFollowUpInput = {
-                        finalRecallRound: recallBudget.mustFinalizeNext(),
-                        anchorText: nextExecuted.anchorText,
-                        resultText: nextExecuted.resultText,
-                        acc: nextAcc ?? finalizeResponsesAcc(contState),
-                        toolUseId: nextRecall.toolUseId,
-                        contentPosition: nextRecall.contentPosition,
-                        signal,
-                      };
-                      continuationRetryBaseline = {
-                        transactionalEvents: transactionalEvents.length,
-                        transactionalBytes,
-                        retainedStateBytes,
-                        hiddenRecallBytes,
-                        outputIdentities: new Set(outputIdentities),
-                        referenceIdentities: new Set(referenceIdentities),
-                      };
-                      continuationFailureCategory = "follow_up_setup";
-                      follow = await settleFollowUp(continuationFollowUpInput);
-                      continuationFailureCategory = "follow_up_protocol";
-                      recallContinuationTransportRetries = 0;
-                    }
-                    state.items.set(recall.outputIndex, {
-                      type: "text",
-                      id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
-                      text: executed.anchorText,
-                    });
-                  } catch (err) {
-                    const category =
-                      err instanceof RecallContinuationFailure
-                        ? err.category
-                        : (continuationFailureCategory ?? "unexpected");
-                    log.error(
-                      `recall follow-up stream failed category=${category}${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
-                    );
-                    if (
-                      err instanceof RecallContinuationFailure ||
-                      signal.aborted
-                    ) {
-                      throw err;
-                    }
-                    throw new RecallContinuationFailure(category);
-                  }
-                }
-              }
-
-              // Rebuild the terminal response.completed reflecting only the
-              // continuation (recall-only) or the client-owned tools (mixed).
-              const finalResp = finalizeResponsesAcc(state);
-              let anchorIndex = 0;
-              const visibleResp = {
-                ...finalResp,
-                content: finalResp.content.map((block) => {
-                  if (block.type !== "tool_use" || block.name !== "recall") {
-                    return block;
-                  }
-                  return {
-                    type: "text" as const,
-                    text: anchorTexts[anchorIndex++] ?? "",
-                  };
-                }),
-                rawOutputItems: buildOutputItems(),
-              };
-              if (continuationAttempted) {
-                continuationFailureCategory = "delivery";
-              }
-              clearKeepalive();
-              for (const chunk of transactionalEvents) {
-                if (!(await safeEnqueue(chunk))) {
-                  throw new Error(
-                    "client disconnected while delivering recall continuation",
-                  );
-                }
-              }
-              if (
-                !(await safeEnqueue(
-                  encoder.encode(buildTerminal(visibleResp)),
-                  () => {
-                    terminalDelivered = true;
-                    const successful =
-                      state.terminalEvent === "response.completed";
-                    let transactionSettled = false;
-                    const transaction = {
-                      commit: () => {
-                        if (transactionSettled) return;
-                        try {
-                          for (const commit of pendingCommits) commit();
-                          transactionSettled = true;
-                          pendingCommits.length = 0;
-                          transactionRollbacks.length = 0;
-                          transactionBaseline = undefined;
-                        } catch (error) {
-                          pendingCommits.length = 0;
-                          transaction.rollback();
-                          throw error;
-                        }
-                      },
-                      rollback: () => {
-                        if (transactionSettled) return;
-                        transactionSettled = true;
-                        pendingCommits.length = 0;
-                        rollbackTransaction();
-                      },
-                    };
-                    deferredTransaction = transaction;
-                    if (successful) opts.onTransactionReady?.(transaction);
-                    if (!finish(visibleResp, successful)) {
-                      transaction.rollback();
-                      throw new Error(
-                        "recall onComplete failed after delivery",
-                      );
-                    }
-                    if (successful) {
-                      if (!opts.onTransactionReady) transaction.commit();
-                    } else {
-                      transaction.rollback();
-                    }
-                  },
-                ))
-              ) {
-                throw new Error(
-                  "client disconnected while delivering recall terminal",
-                );
-              }
-              if (cancelled) throw signal.reason;
-              cancelAndReleaseReader(reader, signal.reason);
-              principalReader = null;
-              safeClose();
-              return;
-            }
-
-            // Non-terminal, non-recall event: project reviewed reasoning
-            // schemas and forward all other validated events unchanged.
-            const projected = projectReasoningEvent(event, parsed);
-            const chunk = encoder.encode(
-              formatResponsesEvent(
-                event,
-                projected === undefined ? data : JSON.stringify(projected),
-              ),
-            );
-            if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
-              deferredBytes += chunk.byteLength;
-              if (deferredBytes > maxDeferredBytes) {
-                throw new SSEStreamLimitError(
-                  "recall stream exceeded deferred event limit",
-                );
-              }
-              deferredEvents.push({ chunk });
-            } else if (!(await enqueuePrincipal(chunk, otherToolSeen))) {
-              break;
-            }
-          }
-
-          principalFailureCategory = "principal_missing_terminal";
-          throw new Error(
-            "upstream Responses stream ended without a terminal event",
-          );
-        };
-
-        try {
-          for (;;) {
-            try {
-              await runPrincipalAttempt();
-              break;
-            } catch (error) {
-              const isPrincipalTransportFailure =
-                error instanceof SSEStreamTransportError &&
-                !principalReadFinished &&
-                !continuationAttempted;
-              const shouldRetryPrincipal =
-                isPrincipalTransportFailure &&
-                error.kind === "read" &&
-                !principalEventEmitted &&
-                !ordinaryToolEmitted &&
-                !signal.aborted &&
-                opts.retryPrincipal !== undefined &&
-                principalTransportRetries < maxPrincipalTransportRetries;
-              if (isPrincipalTransportFailure) {
-                reportPrincipalTransportFailure({
-                  kind: error.kind,
-                  stage: principalTransportStage(),
-                  outcome: shouldRetryPrincipal
-                    ? "retry"
-                    : principalEventEmitted
-                      ? "continue"
-                      : principalTransportRetries > 0
-                        ? "retry_exhausted"
-                        : "failed",
-                });
-              }
-              if (!shouldRetryPrincipal) throw error;
-
-              principalTransportRetries++;
-              if (principalReader) {
-                cancelAndReleaseReader(principalReader, signal.reason);
-              }
-              principalReader = null;
-              activeReader = null;
-              clearKeepalive();
-              log.warn(
-                "retrying principal Responses stream after read transport failure",
-              );
-
-              const retryPrincipal = opts.retryPrincipal;
-              if (!retryPrincipal) throw error;
-
-              let retryResponse: Response | undefined;
-              try {
-                retryResponse = await retryPrincipal({
-                  attempt: principalTransportRetries,
-                  signal,
-                });
-                signal.throwIfAborted();
-                if (!retryResponse.ok || !retryResponse.body) {
-                  void retryResponse.body?.cancel().catch(() => {});
-                  throw new Error("principal retry did not return a stream");
-                }
-              } catch {
-                if (signal.aborted) {
-                  void retryResponse?.body
-                    ?.cancel(signal.reason)
-                    .catch(() => {});
-                  throw signal.reason;
-                }
-                reportPrincipalTransportFailure({
-                  kind: error.kind,
-                  stage: "pre_output",
-                  outcome: "retry_exhausted",
-                });
-                throw error;
-              }
-
-              currentPrincipalResponse = retryResponse;
-              state = makeResponsesAccState();
-              syntheticIdentities.clear();
-              referenceIdentities.clear();
-              outputIdentities.clear();
-              recallIndices.clear();
-              unresolvedToolIndices.clear();
-              referenceIndices.clear();
-              recallDetected = false;
-              principalFailureCategory = "principal_unexpected";
-              retainedStateBytes = retainedStateBaseline;
-              hiddenRecallBytes = hiddenRecallBaseline;
-              continue;
-            }
-          }
-        } catch (err) {
-          rollbackTransaction();
-          if (principalReader) {
-            cancelAndReleaseReader(principalReader, signal.reason);
-          }
-          principalReader = null;
-          clearKeepalive();
-          if (opts.signal?.aborted && !cancelled) {
-            safeError(opts.signal.reason);
-            return;
-          }
-          if (terminalDelivered) {
-            if (continuationAttempted && !signal.aborted) {
-              reportContinuationFailure(
-                err instanceof RecallContinuationFailure
-                  ? err.category
-                  : (continuationFailureCategory ?? "unexpected"),
-              );
-            }
-            safeClose();
-            return;
-          }
-          const isAbort =
-            err instanceof DOMException && err.name === "AbortError";
-          if (isAbort) {
-            log.info("openai-responses recall-aware stream aborted");
-            if (cancelled || signal.aborted) {
-              if (opts.signal?.aborted && !cancelled) {
-                safeError(opts.signal.reason);
-              } else {
-                safeClose();
-              }
-              return;
-            }
-          } else {
-            const category =
-              err instanceof RecallContinuationFailure
-                ? err.category
-                : continuationAttempted
-                  ? (continuationFailureCategory ?? "unexpected")
-                  : classifyPrincipalFailure(err);
-            log.error(
-              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}`,
-            );
-          }
-          if (!signal.aborted) {
-            if (err instanceof RecallContinuationFailure) {
-              reportContinuationFailure(err.category);
-            } else if (continuationAttempted) {
-              reportContinuationFailure(
-                continuationFailureCategory ?? "unexpected",
-              );
-            }
-          }
-          const principalTransportFailure =
-            err instanceof SSEStreamTransportError && !continuationAttempted;
-          const continueAfterPrincipalTransport =
-            principalTransportFailure && principalEventEmitted;
-          const recallFailure =
-            !principalTransportFailure &&
-            (recallDetected ||
-              continuationAttempted ||
-              err instanceof RecallContinuationFailure);
-          const failedResponse = finalizeResponsesAcc(state);
-          try {
-            assertUsageMergeable(
-              failedResponse.usage ?? ZERO_USAGE,
-              transactionProviderUsage,
-            );
-            failedResponse.usage ??= { ...ZERO_USAGE };
-            mergeUsage(failedResponse.usage, transactionProviderUsage);
-          } catch (usageError) {
-            log.error(
-              "failed to merge recall continuation usage for accounting:",
-              usageError,
-            );
-          }
-          transactionProviderUsage = { ...ZERO_USAGE };
-          const hiddenOutputIndices = new Set([
-            ...recallIndices,
-            ...unresolvedToolIndices,
-          ]);
-          const hiddenOutputIdentities = new Set<string>();
-          for (const outputIndex of hiddenOutputIndices) {
-            const item = state.items.get(outputIndex);
-            const raw = state.rawItems.get(outputIndex);
-            for (const identity of [
-              item?.id,
-              item?.type === "tool_use" ? item.callId : undefined,
-              raw?.id,
-              raw?.call_id,
-            ]) {
-              if (typeof identity === "string" && identity) {
-                hiddenOutputIdentities.add(identity);
-              }
-            }
-          }
-          failedResponse.content = failedResponse.content.filter(
-            (block) =>
-              (block.type !== "tool_use" ||
-                (block.name !== RECALL_TOOL_NAME &&
-                  !hiddenOutputIdentities.has(block.id))) &&
-              (block.type !== "text" || !parseRecallAnchor(block.text)),
-          );
-          failedResponse.rawOutputItems = failedResponse.rawOutputItems?.filter(
-            (item) =>
-              item.type !== "function_call" ||
-              (item.name !== RECALL_TOOL_NAME &&
-                ![item.id, item.call_id].some(
-                  (identity) =>
-                    typeof identity === "string" &&
-                    hiddenOutputIdentities.has(identity),
-                )),
-          );
-          await safeEnqueue(
-            encoder.encode(
-              formatResponsesEvent(
-                continueAfterPrincipalTransport
-                  ? "response.incomplete"
-                  : "response.failed",
-                JSON.stringify({
-                  type: continueAfterPrincipalTransport
-                    ? "response.incomplete"
-                    : "response.failed",
-                  response: {
-                    id: state.id || "resp_error",
-                    object: "response",
-                    created_at: Math.floor(Date.now() / 1000),
-                    model: state.model,
-                    status: continueAfterPrincipalTransport
-                      ? "incomplete"
-                      : "failed",
-                    output: buildOutputItems(hiddenOutputIndices),
-                    usage: null,
-                    ...(continueAfterPrincipalTransport
-                      ? {
-                          incomplete_details: {
-                            reason: PRINCIPAL_TRANSPORT_INCOMPLETE_REASON,
-                          },
-                        }
-                      : {}),
-                    error: {
-                      type: "server_error",
-                      code: "server_error",
-                      message: recallFailure
-                        ? "Lore could not continue the response after recall"
-                        : "Gateway request failed",
-                    },
-                  },
-                }),
-              ),
-            ),
-            () => finish(failedResponse, false),
-          );
-          safeClose();
-        }
-      })().catch((error) => {
-        cleanupAbort();
-        if (keepaliveTimer) clearTimeout(keepaliveTimer);
-        keepaliveTimer = null;
-        try {
-          controller.error(error);
-        } catch {
-          // Already closed/cancelled.
-        }
-      });
-    },
-
-    pull() {
-      resumeDemand?.();
-      resumeDemand = undefined;
-    },
-    cancel() {
-      recallDiagnostics.finish("aborted");
-      resumeDemand?.();
-      resumeDemand = undefined;
-      cancelled = true;
-      cleanupAbort();
-      if (deferredTransaction) deferredTransaction.rollback();
-      else rollbackTransaction();
-      abortController.abort(
-        new DOMException("Responses client disconnected", "AbortError"),
-      );
-      if (keepaliveTimer) clearTimeout(keepaliveTimer);
-      if (activeReader) cancelAndReleaseReader(activeReader, signal.reason);
-      else
-        void currentPrincipalResponse.body
-          ?.cancel(signal.reason)
-          .catch(() => {});
-    },
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    },
-  });
-}
-
-/**
- * Accumulate a non-streaming upstream response into a GatewayResponse.
- *
- * Dispatches to the correct parser based on the upstream wire protocol:
- *  - "anthropic": Anthropic Messages API format
- *  - "openai": OpenAI Chat Completions API format
- *  - "openai-responses": OpenAI Responses API format
- */
-const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
-const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
-const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
-// A gateway-owned reason stays distinct from provider token-limit reasons and
-// maps to OpenCode's retryable `unknown` finish, preserving its agent loop.
-const PRINCIPAL_TRANSPORT_INCOMPLETE_REASON = "gateway_transport";
-const FOREGROUND_ERROR_BODY_TIMEOUT_MS = 10_000;
-const MAX_RELAY_RETRY_AFTER_MS = 300_000;
-let foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
-
-/** Test-only override for a bounded upstream error-body read. */
-export function setForegroundErrorBodyTimeoutForTest(timeoutMs?: number): void {
-  foregroundErrorBodyTimeoutMs = timeoutMs ?? FOREGROUND_ERROR_BODY_TIMEOUT_MS;
-}
-
-function boundedRetryAfter(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const seconds = Number(trimmed);
-  if (Number.isFinite(seconds) && seconds >= 0) {
-    return String(
-      Math.min(Math.ceil(seconds), Math.ceil(MAX_RELAY_RETRY_AFTER_MS / 1_000)),
-    );
-  }
-  const timestamp = Date.parse(trimmed);
-  if (Number.isNaN(timestamp)) return undefined;
-  return String(
-    Math.min(
-      Math.max(0, Math.ceil((timestamp - Date.now()) / 1_000)),
-      Math.ceil(MAX_RELAY_RETRY_AFTER_MS / 1_000),
-    ),
-  );
-}
-
-function boundedRetryAfterMs(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const milliseconds = Number(trimmed);
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) return undefined;
-  return String(Math.min(Math.ceil(milliseconds), MAX_RELAY_RETRY_AFTER_MS));
-}
-
-function sanitizedUpstreamErrorResponse(response: Response): Response {
-  const headers = new Headers({ "content-type": "application/json" });
-  copyUsageLimitHeaders(response.headers, headers);
-  const retryAfter = response.headers.get("retry-after");
-  const retryAfterMs = response.headers.get("retry-after-ms");
-  const boundedRetryAfterValue = retryAfter
-    ? boundedRetryAfter(retryAfter)
-    : undefined;
-  const boundedRetryAfterMsValue = retryAfterMs
-    ? boundedRetryAfterMs(retryAfterMs)
-    : undefined;
-  if (boundedRetryAfterValue) {
-    headers.set("retry-after", boundedRetryAfterValue);
-  }
-  if (boundedRetryAfterMsValue) {
-    headers.set("retry-after-ms", boundedRetryAfterMsValue);
-  }
-  return new Response(
-    JSON.stringify({
-      type: "error",
-      error: { type: "server_error", message: "Gateway request failed" },
-    }),
-    { status: response.status, headers },
-  );
-}
-
-export async function readForegroundBody(
-  response: Response,
-  diagnostic: boolean,
-  onTruncated?: () => void,
-  signal?: AbortSignal,
-): Promise<string> {
-  const limit = diagnostic
-    ? MAX_FOREGROUND_ERROR_BYTES
-    : MAX_FOREGROUND_RESPONSE_BYTES;
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    for (;;) {
-      const { done, value } = await readStreamChunk(reader, { signal });
-      if (done) break;
-      if (!value) continue;
-      const remaining = limit - bytes;
-      if (value.byteLength >= remaining) {
-        if (!diagnostic) {
-          if (value.byteLength > remaining) {
-            throw new Error(`foreground response exceeded ${limit} byte limit`);
-          }
-        } else {
-          // Reaching the cap is conservatively treated as truncation: proving
-          // exact EOF would require one more read, which may stall forever.
-          onTruncated?.();
-          if (remaining > 0) chunks.push(value.subarray(0, remaining));
-          bytes += Math.max(0, remaining);
-          break;
-        }
-      }
-      chunks.push(value);
-      bytes += value.byteLength;
-    }
-    const body = Buffer.concat(chunks);
-    if (diagnostic) return new TextDecoder().decode(body);
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(body);
-    } catch {
-      throw new Error("malformed upstream response UTF-8");
-    }
-  } finally {
-    cancelAndReleaseReader(reader);
-  }
-}
-
-async function preserveUpstreamErrorResponse(
-  response: Response,
-  signal?: AbortSignal,
-): Promise<Response> {
-  let truncated = false;
-  const body = await readForegroundBody(
-    response,
-    true,
-    () => {
-      truncated = true;
-    },
-    signal,
-  );
-  const headers = new Headers(response.headers);
-  // The retained body may be shorter than the provider's original payload.
-  for (const name of [
-    "connection",
-    "content-encoding",
-    "content-length",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "set-cookie",
-    "set-cookie2",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-  ]) {
-    headers.delete(name);
-  }
-  if (truncated) headers.set("x-lore-body-truncated", "true");
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
-/** Parsed usage from a buffered response that lacks a valid completion. */
-class NonStreamCompletionError extends Error {
-  constructor(readonly response: GatewayResponse) {
-    super("upstream response did not complete");
-    this.name = "NonStreamCompletionError";
-  }
-}
-
-export async function accumulateNonStreamResponse(
-  upstreamResponse: Response,
-  protocol:
-    | "anthropic"
-    | "openai"
-    | "openai-responses"
-    | "vertex"
-    | "gemini" = "anthropic",
-  codex = false,
-  signal?: AbortSignal,
-  requireValidCompletion = false,
-): Promise<GatewayResponse> {
-  // Some providers (the ChatGPT/Copilot/Codex backend, DeepSeek) return an SSE
-  // stream even when stream: false was sent — sometimes WITHOUT the
-  // text/event-stream content-type. Sniff the body: if it's SSE, run it through
-  // the protocol's stream accumulator (merges EVERY chunk, so a multi-chunk
-  // stream is reconstructed faithfully — taking only the last data: line would
-  // drop all but the final delta, and JSON.parse-ing the body would throw on
-  // "data: {...}" / "event: ..." text — LOREAI-GATEWAY-38 / -1P). Otherwise
-  // parse the single JSON body.
-  const contentType = upstreamResponse.headers.get("content-type") ?? "";
-  const body = await readForegroundBody(
-    upstreamResponse,
-    false,
-    undefined,
-    signal,
-  );
-  if (looksLikeSSE(contentType, body)) {
-    const sse = new Response(body, {
-      headers: { "content-type": "text/event-stream" },
-    });
-    switch (protocol) {
-      case "openai":
-        return accumulateOpenAISSEStream(sse, {
-          signal,
-          strict: true,
-          stopAtTerminal: true,
-          consumeUntilDone: true,
-        });
-      case "openai-responses":
-        return accumulateResponsesSSEStream(sse, {
-          signal,
-          validation: codex ? "codex" : "public",
-          stopAtTerminal: true,
-          requireCompletedTerminal: true,
-        });
-      case "gemini":
-        return accumulateGeminiSSEStream(sse, {
-          signal,
-          strict: true,
-          stopAtTerminal: true,
-        });
-      default:
-        // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
-        return accumulateSSEResponse(sse, {
-          signal,
-          strict: true,
-          stopAtTerminal: true,
-        });
-    }
-  }
-
-  const json = JSON.parse(body) as Record<string, unknown>;
-  const parseResponse =
-    protocol === "openai-responses"
-      ? accumulateResponsesNonStreamJSON
-      : protocol === "openai"
-        ? accumulateOpenAINonStreamJSON
-        : protocol === "gemini"
-          ? parseGeminiResponseJSON
-          : accumulateAnthropicNonStreamJSON;
-  let response: GatewayResponse | undefined;
-  try {
-    if (protocol === "openai-responses") {
-      const parsed = parseResponsesNonStreamEnvelope(json);
-      response = parsed.response;
-      if (parsed.status !== "completed")
-        throw new ResponsesTerminalError(response, parsed.status);
-    } else {
-      response = parseResponse(json);
-      if (requireValidCompletion)
-        assertValidNonStreamCompletion(json, protocol);
-    }
-    return response;
-  } catch (error) {
-    if (!requireValidCompletion || error instanceof ResponsesTerminalError)
-      throw error;
-    // Content parsing can fail before usage validation. Reuse the same parser
-    // on usage fields alone, retaining its numeric and cache consistency checks.
-    // Invalid usage still throws; the projection is never returned as success.
-    response ??= parseResponse({
-      usage: json.usage,
-      usageMetadata: json.usageMetadata,
-    });
-    throw new NonStreamCompletionError(response);
-  }
-}
-
-function parseResponsesNonStreamEnvelope(json: Record<string, unknown>): {
-  response: GatewayResponse;
-  status: string;
-} {
-  const response = accumulateResponsesNonStreamJSON(json);
-  const status = typeof json.status === "string" ? json.status : "unknown";
-  if (status === "completed" || status === "incomplete") {
-    assertValidNonStreamCompletion(json, "openai-responses");
-  }
-  return { response, status };
-}
-
-async function preserveIncompleteResponsesTerminal(
-  operation: Promise<GatewayResponse>,
-): Promise<GatewayResponse> {
-  try {
-    return await operation;
-  } catch (error) {
-    if (
-      error instanceof ResponsesTerminalError &&
-      error.status === "incomplete"
-    ) {
-      return error.response;
-    }
-    throw error;
-  }
-}
-
-function assertValidNonStreamCompletion(
-  json: Record<string, unknown>,
-  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
-): void {
-  if (json.error !== undefined && json.error !== null) {
-    throw new Error("upstream response contained an error");
-  }
-
-  if (protocol === "openai") {
-    const choices = json.choices;
-    const first = Array.isArray(choices) ? choices[0] : undefined;
-    if (
-      !first ||
-      typeof first !== "object" ||
-      Array.isArray(first) ||
-      !(first as Record<string, unknown>).message ||
-      typeof (first as Record<string, unknown>).finish_reason !== "string"
-    ) {
-      throw new Error("upstream OpenAI request did not complete");
-    }
-    return;
-  }
-
-  if (protocol === "openai-responses") {
-    const status = json.status;
-    if (
-      (status !== "completed" && status !== "incomplete") ||
-      typeof json.id !== "string" ||
-      typeof json.model !== "string" ||
-      !Array.isArray(json.output) ||
-      !json.usage ||
-      typeof json.usage !== "object" ||
-      Array.isArray(json.usage)
-    ) {
-      throw new Error("upstream Responses request did not complete");
-    }
-    const seenIdentities = new Set<string>();
-    for (const rawItem of json.output) {
-      if (!rawItem || typeof rawItem !== "object" || Array.isArray(rawItem)) {
-        throw new Error("upstream Responses request did not complete");
-      }
-      const item = rawItem as Record<string, unknown>;
-      if (
-        typeof item.type !== "string" ||
-        !item.type ||
-        !isSupportedResponsesOutputItemType(item.type) ||
-        typeof item.id !== "string" ||
-        !item.id ||
-        seenIdentities.has(item.id)
-      ) {
-        throw new Error("upstream Responses request did not complete");
-      }
-      seenIdentities.add(item.id);
-      if (item.type === "message") {
-        const validItemStatus =
-          item.status === "completed" ||
-          (status === "incomplete" && item.status === "incomplete");
-        if (
-          item.role !== "assistant" ||
-          !validItemStatus ||
-          !Array.isArray(item.content)
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        for (const rawPart of item.content) {
-          if (
-            !rawPart ||
-            typeof rawPart !== "object" ||
-            Array.isArray(rawPart)
-          ) {
-            throw new Error("upstream Responses request did not complete");
-          }
-          const part = rawPart as Record<string, unknown>;
-          if (
-            (part.type === "output_text" && typeof part.text !== "string") ||
-            (part.type === "refusal" && typeof part.refusal !== "string") ||
-            (part.type !== "output_text" && part.type !== "refusal")
-          ) {
-            throw new Error("upstream Responses request did not complete");
-          }
-        }
-      } else if (item.type === "function_call") {
-        const validItemStatus =
-          item.status === "completed" ||
-          item.status === "failed" ||
-          (status === "incomplete" && item.status === "incomplete");
-        if (
-          typeof item.call_id !== "string" ||
-          !item.call_id ||
-          seenIdentities.has(item.call_id) ||
-          typeof item.name !== "string" ||
-          !item.name ||
-          typeof item.arguments !== "string" ||
-          !validItemStatus
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        seenIdentities.add(item.call_id);
-      } else if (item.type === "reasoning") {
-        const validItemStatus =
-          item.status === undefined ||
-          item.status === "completed" ||
-          (status === "incomplete" && item.status === "incomplete");
-        if (!validItemStatus) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        for (const [field, partType] of [
-          ["summary", "summary_text"],
-          ["content", "reasoning_text"],
-        ] as const) {
-          const parts = item[field];
-          if (parts === undefined) continue;
-          if (!Array.isArray(parts)) {
-            throw new Error("upstream Responses request did not complete");
-          }
-          for (const rawPart of parts) {
-            if (
-              !rawPart ||
-              typeof rawPart !== "object" ||
-              Array.isArray(rawPart) ||
-              (rawPart as Record<string, unknown>).type !== partType ||
-              typeof (rawPart as Record<string, unknown>).text !== "string"
-            ) {
-              throw new Error("upstream Responses request did not complete");
-            }
-          }
-        }
-        if (
-          item.encrypted_content !== undefined &&
-          item.encrypted_content !== null &&
-          typeof item.encrypted_content !== "string"
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-      } else if (item.type === "item_reference") {
-        // A standalone non-stream response has no streamed item lifecycle to
-        // resolve this reference against; accepting it would silently erase
-        // provider output during normalization.
-        throw new Error("upstream Responses request did not complete");
-      } else {
-        if (
-          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-      }
-    }
-    if (status === "incomplete") {
-      const details = json.incomplete_details;
-      if (
-        details !== undefined &&
-        details !== null &&
-        (typeof details !== "object" ||
-          Array.isArray(details) ||
-          typeof (details as Record<string, unknown>).reason !== "string")
-      ) {
-        throw new Error("upstream Responses request did not complete");
-      }
-      const reason =
-        details && typeof details === "object" && !Array.isArray(details)
-          ? (details as Record<string, unknown>).reason
-          : undefined;
-      if (
-        reason !== undefined &&
-        reason !== "max_output_tokens" &&
-        reason !== "content_filter"
-      ) {
-        throw new Error("upstream Responses request did not complete");
-      }
-    }
-    return;
-  }
-
-  if (protocol === "gemini") {
-    const candidates = json.candidates;
-    const first = Array.isArray(candidates) ? candidates[0] : undefined;
-    const promptFeedback = json.promptFeedback;
-    const blockReason =
-      promptFeedback &&
-      typeof promptFeedback === "object" &&
-      !Array.isArray(promptFeedback)
-        ? (promptFeedback as Record<string, unknown>).blockReason
-        : undefined;
-    if (
-      (!first ||
-        typeof first !== "object" ||
-        Array.isArray(first) ||
-        typeof (first as Record<string, unknown>).finishReason !== "string") &&
-      typeof blockReason !== "string"
-    ) {
-      throw new Error("upstream Gemini request did not complete");
-    }
-    return;
-  }
-
-  if (
-    json.type !== "message" ||
-    json.role !== "assistant" ||
-    typeof json.id !== "string" ||
-    typeof json.model !== "string" ||
-    !Array.isArray(json.content) ||
-    typeof json.stop_reason !== "string" ||
-    !json.usage ||
-    typeof json.usage !== "object" ||
-    Array.isArray(json.usage)
-  ) {
-    throw new Error("upstream Anthropic request did not complete");
-  }
-}
-
-// Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON
-const accumulateAnthropicNonStreamJSON = parseAnthropicResponseJSON;
-
-export function accumulateOpenAINonStreamJSON(
-  json: Record<string, unknown>,
-): GatewayResponse {
-  const content: GatewayContentBlock[] = [];
-  if (json.choices !== undefined && !Array.isArray(json.choices)) {
-    throw new Error("malformed OpenAI response choice");
-  }
-  const choices = json.choices as Array<Record<string, unknown>> | undefined;
-  const logicalChoiceIndices = new Set<number>();
-  for (let position = 0; position < (choices?.length ?? 0); position++) {
-    const choice = choices?.[position];
-    if (!choice || typeof choice !== "object" || Array.isArray(choice)) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    const logicalIndex =
-      choice.index === undefined ? position : (choice.index as number);
-    if (
-      !Number.isSafeInteger(logicalIndex) ||
-      logicalIndex < 0 ||
-      logicalChoiceIndices.has(logicalIndex)
-    ) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    logicalChoiceIndices.add(logicalIndex);
-  }
-  for (const choice of choices ?? []) {
-    const choiceToolIdentities = new Set<string>();
-    if (
-      !choice ||
-      typeof choice !== "object" ||
-      Array.isArray(choice) ||
-      (choice.index !== undefined &&
-        (!Number.isSafeInteger(choice.index) ||
-          (choice.index as number) < 0)) ||
-      (choice.finish_reason !== undefined &&
-        choice.finish_reason !== null &&
-        typeof choice.finish_reason !== "string") ||
-      !choice.message ||
-      typeof choice.message !== "object" ||
-      Array.isArray(choice.message)
-    ) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    const candidateMessage = choice.message as Record<string, unknown>;
-    if (
-      (candidateMessage.content !== undefined &&
-        candidateMessage.content !== null &&
-        typeof candidateMessage.content !== "string") ||
-      (candidateMessage.role !== undefined &&
-        typeof candidateMessage.role !== "string")
-    ) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    const candidateCalls = candidateMessage?.tool_calls;
-    if (candidateCalls === undefined) continue;
-    if (!Array.isArray(candidateCalls)) {
-      throw new Error("malformed OpenAI response tool identity");
-    }
-    for (const call of candidateCalls) {
-      if (!call || typeof call !== "object" || Array.isArray(call)) {
-        throw new Error("malformed OpenAI response choice");
-      }
-      const typedCall = call as Record<string, unknown>;
-      const fn = typedCall.function;
-      if (
-        !fn ||
-        typeof fn !== "object" ||
-        Array.isArray(fn) ||
-        typeof (fn as Record<string, unknown>).name !== "string" ||
-        typeof (fn as Record<string, unknown>).arguments !== "string"
-      ) {
-        throw new Error("malformed OpenAI response choice");
-      }
-      const id = asString(typedCall.id);
-      if (!id || choiceToolIdentities.has(id)) {
-        throw new Error("malformed OpenAI response tool identity");
-      }
-      choiceToolIdentities.add(id);
-    }
-  }
-  const firstChoice = choices?.[0];
-  const message = firstChoice?.message as Record<string, unknown> | undefined;
-
-  if (message) {
-    const textContent = message.content as string | undefined;
-    if (textContent) {
-      content.push({ type: "text", text: textContent });
-    }
-    const toolCalls = message.tool_calls as
-      | Array<Record<string, unknown>>
-      | undefined;
-    if (toolCalls) {
-      const toolIdentities = new Set<string>();
-      for (const tc of toolCalls) {
-        const fn = tc.function as Record<string, unknown> | undefined;
-        let input: unknown = {};
-        if (typeof fn?.arguments === "string") {
-          try {
-            input = JSON.parse(fn.arguments);
-          } catch {
-            input = fn.arguments;
-          }
-        }
-        const id = asString(tc.id);
-        if (!id || toolIdentities.has(id)) {
-          throw new Error("malformed OpenAI response tool identity");
-        }
-        toolIdentities.add(id);
-        content.push({
-          type: "tool_use",
-          id,
-          name: asString(fn?.name),
-          input,
-        });
-      }
-    }
-  }
-
-  // Map OpenAI finish_reason to gateway stop reason
-  const finishReason = firstChoice?.finish_reason as string | undefined;
-  let stopReason = "end_turn";
-  if (finishReason === "stop") stopReason = "end_turn";
-  else if (finishReason === "length") stopReason = "max_tokens";
-  else if (finishReason === "tool_calls") stopReason = "tool_use";
-
-  const usage = validateOpenAIUsage(
-    json.usage,
-    "malformed OpenAI response usage",
-  );
-  const promptTokensDetails = usage?.prompt_tokens_details as
-    | Record<string, number>
-    | undefined;
-
-  return {
-    id: asString(json.id),
-    model: asString(json.model),
-    content,
-    stopReason,
-    usage: {
-      // prompt_tokens is inclusive of cache reads/writes; convert to the
-      // gateway's disjoint convention so cache tokens aren't double-counted.
-      inputTokens: disjointOpenAIInputTokens(
-        usage?.prompt_tokens as number | undefined,
-        promptTokensDetails?.cached_tokens,
-        promptTokensDetails?.cache_write_tokens,
-      ),
-      outputTokens: (usage?.completion_tokens as number) ?? 0,
-      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
-      // OpenRouter reports cache-write tokens (Anthropic explicit caching) in
-      // prompt_tokens_details.cache_write_tokens. OpenAI proper doesn't report
-      // writes separately (leaves it undefined) — see the OpenRouter usage
-      // accounting docs. Left undefined when absent so it never masquerades
-      // as a real zero-write in analytics/cost tracking.
-      cacheCreationInputTokens: promptTokensDetails?.cache_write_tokens,
-    },
-  };
-}
-
-export function accumulateResponsesNonStreamJSON(
-  json: Record<string, unknown>,
-): GatewayResponse {
-  const content: GatewayContentBlock[] = [];
-  const output = json.output as Array<Record<string, unknown>> | undefined;
-  const replayableOutput = output?.filter(
-    (item) => item.type !== "item_reference",
-  );
-
-  if (replayableOutput) {
-    const identities = new Set<string>();
-    for (const item of replayableOutput) {
-      const itemId = asString(item.id);
-      if (!itemId || identities.has(itemId)) {
-        throw new Error("malformed Responses response item identity");
-      }
-      identities.add(itemId);
-      if (item.type === "message") {
-        const msgContent = item.content as
-          | Array<Record<string, unknown>>
-          | undefined;
-        if (msgContent) {
-          for (const part of msgContent) {
-            if (part.type === "output_text") {
-              content.push({ type: "text", text: asString(part.text) });
-            } else if (
-              part.type === "refusal" &&
-              typeof part.refusal === "string"
-            ) {
-              // Other client protocols emit normalized content. Keep the raw
-              // refusal too for lossless native Responses output and replay.
-              content.push({ type: "text", text: part.refusal });
-            }
-          }
-        }
-      } else if (item.type === "function_call") {
-        let input: unknown = {};
-        if (typeof item.arguments === "string") {
-          try {
-            input = JSON.parse(item.arguments);
-          } catch {
-            input = item.arguments;
-          }
-        }
-        const id = asString(item.call_id ?? item.id);
-        if (!id || identities.has(id)) {
-          throw new Error("malformed Responses response tool identity");
-        }
-        identities.add(id);
-        content.push({
-          type: "tool_use",
-          id,
-          name: asString(item.name),
-          input,
-        });
-      }
-    }
-  }
-
-  // Map Responses API status to gateway stop reason
-  const status = json.status as string | undefined;
-  let stopReason = "end_turn";
-  if (status === "incomplete") {
-    const details = json.incomplete_details;
-    const reason =
-      details && typeof details === "object" && !Array.isArray(details)
-        ? (details as Record<string, unknown>).reason
-        : undefined;
-    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
-  }
-  if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
-    stopReason = "tool_use";
-  }
-
-  const usage = validateResponsesUsage(
-    json.usage,
-    "malformed Responses response usage",
-  );
-  // Responses API reports cache details under `input_tokens_details`; fall back
-  // to `prompt_tokens_details` (Chat Completions shape) for resilience across
-  // OpenAI-compatible providers.
-  const inputTokensDetails = (usage?.input_tokens_details ??
-    usage?.prompt_tokens_details) as Record<string, number> | undefined;
-
-  return {
-    id: asString(json.id),
-    model: asString(json.model),
-    content,
-    rawOutputItems: replayableOutput,
-    stopReason,
-    usage: {
-      inputTokens: disjointOpenAIInputTokens(
-        usage?.input_tokens as number | undefined,
-        inputTokensDetails?.cached_tokens,
-        inputTokensDetails?.cache_write_tokens,
-      ),
-      outputTokens: (usage?.output_tokens as number) ?? 0,
-      cacheReadInputTokens: inputTokensDetails?.cached_tokens,
-      cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,
-    },
-  };
-}
-
-/** @internal Exported for end-to-end replay tests. */
-export function responsesProvenanceContent(
-  response: GatewayResponse,
-  replacements: ReadonlyMap<string, string> = new Map(),
-  stopBeforeToolUseId?: string,
-): GatewayContentBlock[] {
-  if (!response.rawOutputItems?.length) {
-    const content: GatewayContentBlock[] = [];
-    for (const block of response.content) {
-      if (block.type === "tool_use") {
-        if (block.id === stopBeforeToolUseId) break;
-        const replacement = replacements.get(block.id);
-        content.push(replacement ? { type: "text", text: replacement } : block);
-      } else {
-        content.push(block);
-      }
-    }
-    return content;
-  }
-
-  const content: GatewayContentBlock[] = [];
-  const textBlocks = response.content.filter(
-    (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
-      block.type === "text",
-  );
-  // Streaming refusals remain opaque; buffered refusals also have normalized
-  // text. Only the latter consume a text slot when replaying their raw part.
-  const opaqueMessageIds = new Set(
-    response.content.flatMap((block) =>
-      block.type === "opaque" &&
-      block.responsesItem === true &&
-      block.raw.type === "message" &&
-      typeof block.raw.id === "string"
-        ? [block.raw.id]
-        : [],
-    ),
-  );
-  let textIndex = 0;
-  for (const raw of response.rawOutputItems) {
-    if (raw.type === "item_reference") continue;
-    if (raw.type === "reasoning") {
-      content.push({ type: "opaque", raw, responsesItem: true });
-      continue;
-    }
-    if (raw.type === "message") {
-      const parts = Array.isArray(raw.content)
-        ? (raw.content as Array<Record<string, unknown>>)
-        : [];
-      for (const part of parts) {
-        content.push({
-          type: "opaque",
-          raw: { ...raw, content: [part] },
-          responsesItem: true,
-        });
-        if (
-          (part.type === "output_text" && typeof part.text === "string") ||
-          (part.type === "refusal" &&
-            typeof part.refusal === "string" &&
-            typeof raw.id === "string" &&
-            !opaqueMessageIds.has(raw.id))
-        ) {
-          textIndex++;
-        }
-      }
-      if (parts.length === 0 && textBlocks[textIndex]) {
-        content.push(textBlocks[textIndex++]);
-      }
-      continue;
-    }
-    if (raw.type === "function_call") {
-      const toolUseId = asString(raw.call_id ?? raw.id);
-      if (toolUseId === stopBeforeToolUseId) break;
-      const replacement = replacements.get(toolUseId);
-      if (replacement) {
-        content.push({ type: "text", text: replacement });
-        continue;
-      }
-      const block = response.content.find(
-        (candidate): candidate is GatewayToolUseBlock =>
-          candidate.type === "tool_use" && candidate.id === toolUseId,
-      );
-      if (block) content.push(block);
-      continue;
-    }
-    content.push({ type: "opaque", raw, responsesItem: true });
-  }
-  return content;
-}
-
-/** @internal Build the canonical anchor hash used by every Responses path. */
-export function responsesAnchorContext(
-  clientMessages: GatewayMessage[],
-  visibleContent: GatewayContentBlock[],
-  response: GatewayResponse,
-  stopBeforeToolUseId: string,
-): string {
-  return recallAnchorContext(clientMessages, clientMessages.length, [
-    ...visibleContent,
-    ...responsesProvenanceContent(response, new Map(), stopBeforeToolUseId),
-  ]);
-}
-
-/**
- * Convert a GatewayResponse to a non-streaming HTTP Response.
- * Scales usage fields to prevent client auto-compaction.
- */
-function nonStreamHttpResponse(
-  resp: GatewayResponse,
-  clientProtocol?: GatewayRequest["protocol"],
-  clientStream?: boolean,
-  extraHeaders?: Record<string, string>,
-  /** Whether the originating request opted into the 1M window via `context-1m`
-   *  beta. Defaults to `false` so the cap is clamped to the 200K-window value —
-   *  the safe, compaction-proof default for callers that don't thread it. */
-  longContext = false,
-): Response {
-  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
-  const usage = resp.usage ?? ZERO_USAGE;
-
-  // Scale usage so the client's token total stays below auto-compact threshold.
-  // postResponse() has already consumed the real values for calibration/bustRate.
-  // Cap is per-model AND per client-metered-window: a genuine 1M request (with
-  // the context-1m beta) isn't throttled to the 200K cap, but a 1M-capable model
-  // the client meters against 200K (no beta) IS clamped so it can't cross the
-  // client's ~167K auto-compact threshold (#910 regression; MiniMax-M3).
-  const scaledUsage = scaleUsageForClient(
-    {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_read_input_tokens: usage.cacheReadInputTokens,
-      cache_creation_input_tokens: usage.cacheCreationInputTokens,
-    },
-    maxReportedUsageForModelID(resp.model, longContext),
-  );
-  const scaledResp: GatewayResponse = {
-    ...resp,
-    usage: {
-      inputTokens: scaledUsage.input_tokens,
-      outputTokens: scaledUsage.output_tokens,
-      cacheReadInputTokens: scaledUsage.cache_read_input_tokens,
-      cacheCreationInputTokens: scaledUsage.cache_creation_input_tokens,
-    },
-  };
-
-  // Return the response in the client's native wire format so server handlers
-  // can pass through without re-translation. This prevents the class of bugs
-  // where the stream flag is forgotten during server-side format conversion.
-  let clientResp: Response;
-  if (clientProtocol === "openai") {
-    clientResp = buildOpenAIResponse(scaledResp, clientStream ?? false);
-  } else if (clientProtocol === "openai-responses") {
-    clientResp = buildOpenAIResponsesResponse(
-      scaledResp,
-      clientStream ?? false,
-    );
-  } else if (clientProtocol === "gemini") {
-    clientResp = buildGeminiResponse(scaledResp, clientStream ?? false);
-  } else if (clientStream) {
-    // Anthropic (or unspecified) client that requested `stream: true`. The
-    // upstream response was BUFFERED (non-Anthropic upstreams — OpenAI /
-    // Responses / Gemini — are accumulated, not streamed through), so we
-    // synthesize a complete Anthropic SSE stream from it. Returning the
-    // non-streaming JSON body below would leave the client's SDK waiting
-    // forever for an SSE stream it opened the request for — the github-copilot
-    // + Claude-model "response never reaches the UI" bug (#1052). The other
-    // client protocols already honor `clientStream` via their builders above.
-    clientResp = streamHttpResponse(scaledResp);
-  } else {
-    // Anthropic or unspecified — default non-streaming JSON format.
-    const body = buildAnthropicNonStreamResponse(scaledResp);
-    clientResp = new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  if (extraHeaders) {
-    for (const [k, v] of Object.entries(extraHeaders)) {
-      clientResp.headers.set(k, v);
-    }
-  }
-  return clientResp;
-}
-
-/**
- * Convert a GatewayResponse to a streaming SSE HTTP Response.
- */
-function streamHttpResponse(resp: GatewayResponse): Response {
-  // Synthesize a complete Anthropic SSE stream from the fully-accumulated
-  // response, preserving ALL blocks (text + tool_use + thinking + opaque). This
-  // is used both for synthetic responses (slash commands) and — critically —
-  // when re-emitting a BUFFERED non-Anthropic upstream (OpenAI/Responses/Gemini)
-  // to an Anthropic client that requested `stream: true`. A text-only synthesis
-  // would silently drop tool calls, breaking coding agents (#1052).
-  const sseBody = buildSSEResponse(resp);
-
-  return new Response(sseBody, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    },
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Post-response processing
-// ---------------------------------------------------------------------------
-
-/**
- * Analyze this turn's cache behavior and feed the result into BOTH the
- * telemetry sinks (span attributes, Sentry metric, durable bust counter) and
- * the consecutive-bust tracker (recordCacheUsage).
- *
- * Extracted from postResponse() as a testable seam (issue #928). The wire that
- * matters for correctness is: analyzeCacheTurn -> categorizeBust ->
- * recordCacheUsage(..., bustCause). Threading the categorized cause is what
- * lets recordCacheUsage exempt prefix-rewrite busts (caused by Lore's own
- * meta-distillation) from consecutiveBusts, the same way it exempts idle-resume
- * re-warms — neither is user-context growth. That wire was previously only
- * reachable through the full pipeline; this seam makes it directly unit-testable
- * (a turn that categorizes as prefix-rewrite must NOT increment the counter).
- *
- * Side effects (unchanged from the inlined version):
- *   - mutates sessionState.cacheAnalytics (via analyzeCacheTurn),
- *     sessionState.lastTurnWasIdle (consumed -> false) and
- *     sessionState.coldCacheWindow (rolling 20-turn cold-turn history),
- *   - enriches genAiSpan with cache-divergence attributes and ends it (the span
- *     is finalized here, before recordCacheUsage, exactly as in the original
- *     inlined block),
- *   - increments the per-session consecutive-bust counter in @loreai/core.
- *
- * @returns the categorized bust cause, or `undefined` when there is no request
- *          body to compare (the rare no-body path — the bust tracker then falls
- *          back to its legacy "count it" behavior).
- */
-export function recordCacheTurnUsage(
-  sessionState: SessionState,
-  usage: GatewayUsage,
-  model: string,
-  projectPath: string,
-  /** Serialized JSON body sent upstream — for cache prefix comparison. */
-  requestBody?: string,
-  /** Active gen_ai.chat span to enrich with divergence diagnostics. */
-  genAiSpan?: Sentry.Span,
-  endSpan?: () => void,
-): CacheBustCause | undefined {
-  // Capture the idle-resume flag up front: it is consumed (set false) inside
-  // the block below but is still needed afterwards by recordCacheUsage so a
-  // cold-cache re-warm is not counted as a consecutive bust.
-  const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
-  // bustCause is computed inside the requestBody block (so we know we have a
-  // body to analyze); left undefined when the body is missing so the
-  // recordCacheUsage call below falls through to the legacy "count it"
-  // behavior on the rare no-body path.
-  let bustCause: CacheBustCause | undefined;
-  if (requestBody) {
-    // Read the unified cache strategy so the cache-analytics warn path can
-    // skip the dramatic-drop alert for cool-* sessions (those strategies
-    // explicitly chose to let the prefix go cold; the alert is just noise).
-    // Result is `undefined` for non-confident strategies — analyzeCacheTurn
-    // falls back to the existing noisy behavior in that case (conservative).
-    const econResult = getCacheStrategy(sessionState.sessionID);
-    const cacheStrategy = econResult?.result.confident
-      ? econResult.result.strategy
-      : undefined;
-    const turnAnalysis = analyzeCacheTurn(
-      sessionState.cacheAnalytics,
-      requestBody,
-      usage,
-      sessionState.sessionID,
-      sessionState.messageCount,
-      cacheStrategy,
-    );
-    bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
-    if (genAiSpan) {
-      setCacheAnalyticsAttributes(
-        genAiSpan,
-        turnAnalysis,
-        bustCause,
-        turnAnalysis.prevSnippet,
-        turnAnalysis.currSnippet,
-      );
-    }
-    emitCacheBustMetric(
-      bustCause,
-      usage.cacheCreationInputTokens ?? 0,
-      model,
-      turnAnalysis.relocatable,
-      // Distinguish a free cold-boundary prefix-rewrite (rode along with an
-      // idle-resume write that was happening anyway) from an avoidable warm one
-      // (meta-distillation leaking onto a live cache) — see emitCacheBustMetric.
-      turnWasIdleResume,
-    );
-    // Persist a durable counter so the issue #791 "is system[0] dynamic
-    // content a material cache-bust cause?" gate survives gateway restarts
-    // (the in-memory analytics reset every restart). Passive telemetry only.
-    recordCacheBustObservation({
-      projectID: ensureProject(projectPath),
-      cause: bustCause,
-      relocatable: turnAnalysis.relocatable,
-      writeTokens: usage.cacheCreationInputTokens ?? 0,
-    });
-    sessionState.lastTurnWasIdle = false; // consumed
-
-    // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
-    const cacheRead = usage.cacheReadInputTokens ?? 0;
-    const cacheCreation = usage.cacheCreationInputTokens ?? 0;
-    const isColdTurn = cacheRead === 0 && cacheCreation > 0;
-    if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
-    sessionState.coldCacheWindow.push(isColdTurn);
-    if (sessionState.coldCacheWindow.length > 20) {
-      sessionState.coldCacheWindow.shift();
-    }
-  }
-
-  // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
-  // Ended here (before recordCacheUsage, matching the original inlined order)
-  // so the extraction is ordering-identical: recordCacheUsage is pure
-  // session-state bookkeeping that never touches the span, and ending the span
-  // first means a throw in recordCacheUsage can't leak an unfinished span.
-  if (genAiSpan) {
-    if (endSpan) endSpan();
-    else genAiSpan.end();
-  }
-
-  // --- Consecutive bust tracking for tier-based decisions ---
-  // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
-  // legitimately expired during the user's pause) is not counted as a
-  // consecutive bust — that produced false "unsustainable" warnings on bursty
-  // sessions whose turns are spaced beyond the conversation cache TTL.
-  // Also pass the categorized bust cause so prefix-rewrite busts (caused by
-  // Lore's own meta-distillation) are held the same way idle-resume busts
-  // are — these are not user-context growth.
-  recordCacheUsage(
-    usage.cacheCreationInputTokens ?? 0,
-    usage.cacheReadInputTokens ?? 0,
-    usage.inputTokens ?? 0,
-    sessionState.sessionID,
-    turnWasIdleResume,
-    bustCause,
-  );
-
-  return bustCause;
-}
-
-function accountConversationUsage(
-  usage: GatewayUsage,
-  model: string,
-  sessionID: string,
-  resolvedConversationTTL: "5m" | "1h" | undefined,
-): AnthropicUsage {
-  const usageForSentry: AnthropicUsage = {
-    input_tokens: usage.inputTokens,
-    output_tokens: usage.outputTokens,
-    cache_read_input_tokens: usage.cacheReadInputTokens,
-    cache_creation_input_tokens: usage.cacheCreationInputTokens,
-  };
-  setSentryCacheContext(usage);
-  emitCostMetric(
-    model,
-    usageForSentry,
-    "conversation",
-    resolvedConversationTTL,
-  );
-  recordConversationCost(
-    sessionID,
-    model,
-    usageForSentry,
-    resolvedConversationTTL,
-  );
-  return usageForSentry;
-}
-
-/**
- * Run after a successful response: calibrate, store temporal messages,
- * and schedule background work (distillation, curation).
- */
-function postResponseForTenant(
-  req: GatewayRequest,
-  resp: GatewayResponse,
-  sessionState: SessionState,
-  config: GatewayConfig,
-  temporalInput: TurnTemporalInput,
-  /** Serialized JSON body sent upstream — for cache prefix comparison. */
-  requestBody?: string,
-  /** Active gen_ai.chat span to finalize with usage attributes. */
-  genAiSpan?: Sentry.Span,
-  /** Storage policy captured when this turn resolved its session. */
-  suppressTemporalStorage = false,
-  endSpan?: () => void,
-): boolean {
-  postResponseStartObserver?.();
-  const { sessionID, projectPath } = sessionState;
-
-  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
-  const usage = resp.usage ?? ZERO_USAGE;
-
-  try {
-    confirmKnownSessionHeader(req, sessionState, config);
-
-    // --- Calibrate overhead from real token counts ---
-    const actualInput =
-      (usage.inputTokens ?? 0) +
-      (usage.cacheReadInputTokens ?? 0) +
-      (usage.cacheCreationInputTokens ?? 0);
-    calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
-
-    // --- Sentry cache context + cost metric ---
-    const usageForSentry = accountConversationUsage(
-      usage,
-      resp.model,
-      sessionID,
-      sessionState.resolvedConversationTTL,
-    );
-    if (genAiSpan) {
-      setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
-    }
-
-    // --- Cache analytics + bust cause telemetry + consecutive-bust tracking ---
-    // Extracted into recordCacheTurnUsage() so the analyze -> categorize ->
-    // recordCacheUsage wire (esp. threading the bust cause so prefix-rewrite
-    // busts are exempted from consecutiveBusts) is unit-testable without driving
-    // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
-    // own recordCacheUsage call) so the extraction is ordering-identical to the
-    // original inlined block. See issue #928.
-    if (suppressTemporalStorage) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-      sessionState.cacheAnalytics.lastNormalizedBody = null;
-      sessionState.cacheAnalytics.lastRequestBodyLength = 0;
-    }
-    recordCacheTurnUsage(
-      sessionState,
-      usage,
-      resp.model,
-      projectPath,
-      suppressTemporalStorage ? undefined : requestBody,
-      genAiSpan,
-      endSpan,
-    );
-    // Admin credentials are authorized at dispatch time and never retained in
-    // session snapshots. The idle warmer still receives gateway-global extras,
-    // so prevent it from replaying a cached body to a client-selected endpoint
-    // that is outside every configured trusted base.
-    if (
-      Object.keys(config.upstreamExtraHeaders).length > 0 &&
-      sessionState.lastUpstream &&
-      Object.keys(
-        extraHeadersForUpstream(config, sessionState.lastUpstream.url),
-      ).length === 0
-    ) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-    }
-
-    // Capture previous stop reason before it's overwritten below (line ~1667).
-    // Used to detect tool-use continuation turns for gap recording filtering.
-    const prevStopReason = sessionState.lastStopReason;
-
-    // --- Temporal storage & session-state updates ---
-    // Use the original user result snapshot captured before gradient. No
-    // historical conversion or tool resolution is needed after the response.
-
-    // Skip temporal storage in amnesia mode or when x-lore-no-store is set.
-    // The session still gets full Lore processing (LTM, recall, gradient)
-    // but doesn't write to memory. Amnesia is session-scoped (toggle via
-    // /lore:amnesia:on|off); no-store is per-request (header-based).
-    // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
-    // intentionally dropped — the seed row never exists, so the later
-    // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
-    const noStore = suppressTemporalStorage;
-
-    // Persist (and tool-trace) this turn's messages, batched into one savepoint.
-    // Extracted seam — see storeTurnTemporal (#1084).
-    storeTurnTemporal({
-      temporalInput,
-      assistantContentBlocks: resp.content,
-      usage,
-      model: resp.model,
-      projectPath,
-      sessionID,
-      noStore,
-    });
-
-    // Update session state (persisted in the batched save after messageCount update)
-    sessionState.turnsSinceCuration =
-      (sessionState.turnsSinceCuration ?? 0) + 1;
-
-    // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
-    const hasToolUse = resp.content.some((b) => b.type === "tool_use");
-    if (resp.stopReason === "end_turn" && !hasToolUse) {
-      sessionState.consecutiveTextOnlyTurns =
-        (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
-    } else {
-      sessionState.consecutiveTextOnlyTurns = 0;
-    }
-
-    // --- Output tracking for dynamic max_tokens sizing ---
-    sessionState.lastStopReason = resp.stopReason;
-    sessionState.lastInputTokens =
-      (usage.inputTokens ?? 0) +
-      (usage.cacheReadInputTokens ?? 0) +
-      (usage.cacheCreationInputTokens ?? 0);
-    const outputTokens = usage.outputTokens;
-    if (outputTokens > 0) {
-      const EMA_ALPHA = 0.3;
-      sessionState.outputTokensEMA =
-        sessionState.outputTokensEMA == null
-          ? outputTokens
-          : Math.round(
-              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
-                outputTokens * EMA_ALPHA,
-            );
-    }
-
-    // --- Cache warming: record inter-turn gap + track warmup hits ---
-    const now = Date.now();
-
-    sessionState.lastResponseTime = now;
-
-    // (A) Record inter-turn gap — only for genuine user-initiated turns.
-    // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
-    // sub-second gaps that represent automated round-trips, not human think
-    // time. Recording these would skew the survival model toward very short
-    // return times.
-    const isToolUseContinuation = prevStopReason === "tool_use";
-    if (!isToolUseContinuation) {
-      if (sessionState.lastUserTurnTime > 0) {
-        const gap = now - sessionState.lastUserTurnTime;
-        recordGap(getSessionHistogram(sessionState), gap);
-        recordGlobalGap(sessionState.projectPath, gap);
-      }
-      // Update baseline for next gap measurement — only after recording.
-      sessionState.lastUserTurnTime = now;
-    }
-
-    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
-    // A user returning after a warmup is a hit regardless of whether it's
-    // a tool-use continuation.
-    // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
-    // is attributed to a warmup hit, skip TTL savings to avoid double-counting
-    // the same cacheReadTokens in both buckets.
-    if (sessionState.lastRequestTime > 0) {
-      let warmupHitThisTurn = false;
-
-      // Track warmup hit: user returned after THIS session warmed the cache.
-      // creditWarmupHit consumes the warmup (clears lastWarmupAt + refresh
-      // tokens), guards against phantom savings (Bug A: only credits when this
-      // session paid for the warmup), and returns the pro-rata savings
-      // (Bug B: min(returning-turn cache read, prefix the warmup refreshed)).
-      if (sessionState.warmup?.lastWarmupAt) {
-        const ttlMs =
-          sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
-        const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
-        const outcome = creditWarmupHit(
-          sessionState.warmup,
-          sinceWarmup,
-          ttlMs,
-          usage.cacheReadInputTokens ?? 0,
-        );
-        if (outcome.hit) {
-          warmupHitThisTurn = true;
-          emitWarmupHitMetric(
-            sessionState.lastUpstream?.model ?? req.model,
-            sessionState.resolvedConversationTTL ?? "5m",
-          );
-          // Record counterfactual savings = the pro-rata credit
-          // min(returning-turn cache read, prefix the warmup refreshed) —
-          // without warming these reads would have been a full cache write.
-          if (outcome.creditedTokens > 0) {
-            recordWarmupHit(
-              sessionID,
-              req.model,
-              outcome.creditedTokens,
-              sessionState.resolvedConversationTTL ?? "5m",
-            );
-          }
-          log.info(
-            `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
-              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup ` +
-              `(credited=${outcome.creditedTokens} tokens)`,
-          );
-        }
-      }
-
-      // Track 1h TTL savings: if gap > 5m but we still got cache reads,
-      // the 1h TTL saved a full cache write. Skip if already counted as
-      // a warmup hit to avoid double-counting the same tokens.
-      if (!warmupHitThisTurn) {
-        const requestGap = now - sessionState.lastRequestTime;
-        if (requestGap > 300_000) {
-          const cacheRead = usage.cacheReadInputTokens ?? 0;
-          if (cacheRead > 0) {
-            recordTTLSavings(sessionID, req.model, cacheRead);
-          }
-        }
-      }
-    }
-    // Reset warming state if session was marked dead or had active warming.
-    // Dead flag is cleared so the next break gets a fresh ROI analysis.
-    // warmupCount is reset so the break-even cap starts from 0 on the next break.
-    if (sessionState.warmup) {
-      if (sessionState.warmup.disabled) {
-        sessionState.warmup.disabled = false;
-        log.info(
-          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
-        );
-      }
-      if (
-        sessionState.warmup.warmupCount > 0 &&
-        !sessionState.warmup.forceKeepWarm
-      ) {
-        sessionState.warmup.warmupCount = 0;
-      }
-    }
-
-    // --- Shadow context tracking for counterfactual compaction estimation ---
-    // Track how large the context *would* be without Lore's distillation
-    // compressing it. When the shadow counter crosses the auto-compact
-    // threshold, record a counterfactual compaction event.
-    updateShadowContext(
-      sessionID,
-      actualInput,
-      usage.outputTokens ?? 0,
-      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
-      req.model,
-      sessionState.resolvedConversationTTL,
-      requestEnablesLongContext(req),
-    );
-
-    // Mark session dirty for periodic flush (gradient + warming + costs).
-    // The 30s idle tick will persist state only for dirty sessions.
-    sessionState._dirty = true;
-
-    // --- Commit-triggered curation ---
-    // Git commits are natural task boundaries where decisions crystallize.
-    // When a commit is detected in tool outputs, force curation to trigger
-    // on this turn by bumping turnsSinceCuration to the threshold.
-    if (
-      loreConfig().knowledge.enabled &&
-      loreConfig().curator.onIdle &&
-      containsGitCommit(req)
-    ) {
-      const modelInputCost =
-        getModelEntrySync(
-          getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
-        ).cost?.input ?? 3;
-      const curationMultiplier =
-        modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
-      const effectiveAfterTurns =
-        loreConfig().curator.afterTurns * curationMultiplier;
-      if (sessionState.turnsSinceCuration < effectiveAfterTurns) {
-        log.info(
-          `commit detected in session ${sessionID.slice(0, 16)} — triggering curation`,
-        );
-        sessionState.turnsSinceCuration = effectiveAfterTurns;
-      }
-    }
-
-    // --- Schedule background work (fire-and-forget) ---
-    saveSessionTracking(sessionID, {
-      messageCount: sessionState.messageCount,
-      turnsSinceCuration: sessionState.turnsSinceCuration,
-      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
-      projectPath: sessionState.projectPath || null,
-      projectPathProvisional: sessionState.projectPathProvisional === true,
-      ...(sessionState.compactionAnomalyPending
-        ? { compactionAnomalyPending: true }
-        : {}),
-    });
-    if (!sessionState.headerSessionId) {
-      const result = learnHeaders(
-        sessionState.candidateHeaders,
-        req.rawHeaders,
-      );
-      sessionState.candidateHeaders = result.updatedCandidates;
-    }
-    if (!noStore) {
-      scheduleBackgroundWork(sessionState, config);
-    }
-    return true;
-  } catch (e) {
-    log.error("post-response processing failed:", e);
-    return false;
-  } finally {
-    endSpan?.();
-  }
-}
-
-/** Record validated provider usage without publishing successful-turn state. */
-function accountUnsuccessfulResponse(
-  resp: GatewayResponse,
-  sessionID: string,
-  resolvedConversationTTL: "5m" | "1h" | undefined,
-  genAiSpan: Sentry.Span | undefined,
-  endSpan: () => void,
-  markDirty?: () => void,
-): void {
-  const usage = resp.usage ?? ZERO_USAGE;
-  const hasUsage = Object.values(usage).some(
-    (tokens) => typeof tokens === "number" && tokens > 0,
-  );
-  try {
-    if (hasUsage) {
-      markDirty?.();
-      const usageForSentry = accountConversationUsage(
-        usage,
-        resp.model,
-        sessionID,
-        resolvedConversationTTL,
-      );
-      if (genAiSpan) {
-        setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
-      }
-    }
-  } finally {
-    genAiSpan?.setStatus({
-      code: 2,
-      message: "upstream response did not complete",
-    });
-    endSpan();
-  }
-}
-
-function conversationTTLForAccounting(
-  sessionID: string,
-): "5m" | "1h" | undefined {
-  const liveTTL = sessions.get(sessionID)?.resolvedConversationTTL;
-  if (liveTTL === "5m" || liveTTL === "1h") return liveTTL;
-  const persistedTTL = loadSessionTracking(sessionID)?.resolvedConversationTTL;
-  return persistedTTL === "5m" || persistedTTL === "1h"
-    ? persistedTTL
-    : undefined;
-}
-
-function postResponse(
-  req: GatewayRequest,
-  resp: GatewayResponse,
-  sessionState: SessionState,
-  config: GatewayConfig,
-  temporalInput: TurnTemporalInput,
-  requestBody?: string,
-  genAiSpan?: Sentry.Span,
-  suppressTemporalStorage = false,
-  endSpan?: () => void,
-): boolean {
-  return withTenant(sessionState.storageTenantId ?? "", () =>
-    postResponseForTenant(
-      req,
-      resp,
-      sessionState,
-      config,
-      temporalInput,
-      requestBody,
-      genAiSpan,
-      suppressTemporalStorage,
-      endSpan,
-    ),
-  );
-}
-
-/**
- * Schedule background distillation and curation (fire-and-forget).
- */
-/**
- * Full background chains, including post-completion state writes. Reset
- * awaits these alongside the limiter's drain before swapping the DB (#885).
- * Session ownership also covers global-queue wait time before a core limiter
- * is entered, so idle eviction cannot discard credentials under queued work.
- */
-const inFlightBackground = new Set<Promise<unknown>>();
-function trackBackground(p: Promise<unknown>, state?: SessionState): void {
-  if (state) state.backgroundWorkCount = (state.backgroundWorkCount ?? 0) + 1;
-  inFlightBackground.add(p);
-  const settled = () => {
-    inFlightBackground.delete(p);
-    if (state) state.backgroundWorkCount!--;
-  };
-  void p.then(settled, settled);
-}
-
-function scheduleBackgroundWorkForTenant(
-  sessionState: SessionState,
-  config: GatewayConfig,
-): void {
-  const { sessionID, projectPath } = sessionState;
-  const signal = AbortSignal.any([
-    pipelineGenerationAbort.signal,
-    sessionLifecycleSignal(sessionID),
-  ]);
-
-  // Skip background work when the session's auth credential is stale and no
-  // fresh fallback is available — worker LLM calls would just 401.
-  // Auth refreshes when the next client request arrives via setSessionAuth().
-  if (isAuthStale(sessionID) && !resolveAuth(sessionID)) return;
-
-  const llm = getLLMClient(config);
-  const cfg = loreConfig();
-  const model = getWorkerModel(sessionState.lastUpstream);
-  // Provider the worker will call — used to scope the circuit-breaker check so
-  // a 429 from a DIFFERENT provider doesn't pause this session's background
-  // work. Undefined when the worker model can't be resolved (→ global breaker).
-  const workerProviderID = model?.providerID;
-
-  // Provider-aware auth guard: if the resolved worker model's provider has no
-  // usable credential for this session, every background worker call to it just
-  // returns no-auth and degrades worker-health each tick. This mirrors the
-  // worker's own resolution (resolveAuth with the model's provider, incl. the
-  // cross-provider fail-closed). The provider-agnostic guard above misses this:
-  // a session can hold a credential under provider A while lastUpstream points
-  // at provider B (e.g. a turn declared x-lore-provider:anthropic but stored no
-  // anthropic key). Skip instead of flooding — getSessionAuth emits the
-  // store-key/lookup-key mismatch warning once, then we stay quiet, and work
-  // resumes automatically once a turn uses a provider we hold a credential for.
-  // Gates urgent distillation too: a no-auth call can never succeed. #894
-  // Exempt the dedicated-worker-key setup (LORE_WORKER_API_KEY): there the
-  // worker uses its own credential and bypasses resolveAuth (getWorkerAuth,
-  // ~1697), so a session-auth miss must NOT disable background work — that
-  // cross-provider config (e.g. MiniMax workers, Anthropic sessions) is exactly
-  // when model.providerID legitimately differs from the session's credential.
-  if (
-    !config.workerApiKey &&
-    model &&
-    !hasWorkerSessionAuth(
-      sessionID,
-      model.providerID,
-      matchingProviderSnapshot(sessionState, model.providerID)?.protocol,
-    )
-  )
-    return;
-
-  // When the OAuth account is near quota exhaustion, skip non-urgent
-  // background work to preserve remaining entitlement for user-facing turns.
-  // Urgent distillation is exempt (it unblocks the next user turn).
-  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
-
-  // Worker circuit breaker: when background workers have been failing for a
-  // sustained period, stop hammering the upstream every turn — allow only a
-  // periodic probe so a recovered upstream is detected without burning
-  // thousands of futile calls (Sentry: runaway lore-distill failure counts).
-  // Urgent distillation below is intentionally exempt — it unblocks the user.
-  // Also throttle sessions soft-paused by an upstream credit/billing state
-  // (HTTP 402) — retrying the failing provider every turn just wastes calls;
-  // a probe is allowed periodically (see isWorkerCreditPaused) to detect a
-  // credit top-up.
-  const workerThrottled =
-    !allowWorkerProbe(sessionID) || isWorkerCreditPaused(sessionID);
-
-  // Check if urgent distillation is needed (gradient flagged it OR a
-  // compaction anomaly was detected on the previous turn). Mark urgent: true
-  // so these bypass the batch queue — the gradient is in overflow (or the
-  // client just compacted) and needs the result before the next user turn.
-  // Note: urgent distillation is NOT gated by isBackgroundPaused() — a
-  // degraded/overflowing context window for up to 10 minutes (max breaker
-  // duration) is worse than one API call with its own tight retry budget
-  // (MAX_RETRIES_URGENT = 2, 1-4s backoff).
-  const urgentFromGradient = needsUrgentDistillation(sessionState.sessionID);
-  const urgentFromCompaction = sessionState.compactionAnomalyPending === true;
-  if (urgentFromCompaction) {
-    // Consume the one-shot flag immediately so the next non-compaction
-    // turn doesn't re-trigger urgent distillation. Persisted with the
-    // session-tracking save below.
-    sessionState.compactionAnomalyPending = false;
-    saveSessionTracking(sessionID, { compactionAnomalyPending: false });
-  }
-  if (urgentFromGradient || urgentFromCompaction) {
-    trackBackground(
-      withTenant(sessionState.storageTenantId ?? "", () =>
-        distillation
-          .run({
-            llm,
-            projectPath,
-            sessionID,
-            model,
-            force: true,
-            urgent: true,
-            callType: "direct",
-            signal,
-            workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-            // Never run meta-distillation while the conversation cache is warm.
-            // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
-            // synthetic distilled prefix at messages[0/1] on the next turn. That
-            // early-message rewrite is a real prompt-cache bust. Idle-time meta in
-            // idle.ts remains enabled because the cache is already cold there.
-            skipMeta: true,
-          })
-          .catch((e) => log.error("background distillation failed:", e)),
-      ),
-      sessionState,
-    );
-  } else if (
-    !isBackgroundPaused(workerProviderID) &&
-    !quotaPaused &&
-    !workerThrottled
-  ) {
-    // Incremental distillation and curation are non-urgent — skip when the
-    // circuit breaker is active to reduce API pressure. These are also gated
-    // by runBackground() which checks isBackgroundPaused(), but the early
-    // check here avoids unnecessary token counting and model lookups.
-    // Idle-time work in idle.ts also uses runBackground(), so under sustained
-    // rate pressure everything defers until the breaker naturally expires.
-    //
-    // Coalesce: if a distillation is already in-flight or queued for THIS
-    // session (distillLimiter is per-session p-limit(1)), skip scheduling
-    // another. The in-flight run will pick up the newly-arrived tokens on
-    // its next segment pass, and queuing duplicates just starves the global
-    // p-limit(2) background slot — distillations getting blocked behind
-    // each other in the global queue.
-    if (!distillLimiter.isBusy(sessionID)) {
-      const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
-      if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
-        log.info(
-          `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
-        );
-        trackBackground(
-          runBackground(
-            () =>
-              withTenant(sessionState.storageTenantId ?? "", () =>
-                distillation.run({
-                  llm,
-                  projectPath,
-                  sessionID,
-                  model,
-                  skipMeta: true,
-                  callType: batchQueueEnabled ? "batch" : "direct",
-                  workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-                  signal,
-                  // #627 Phase 1: stamp the session's gitHead on every distilled row.
-                  metadata: buildSessionMetadata(sessionState.gitHead),
-                }),
-              ),
-            `incremental-distill session=${sessionID.slice(0, 16)}`,
-            workerProviderID,
-          ).catch((e) => log.error("background distillation failed:", e)),
-          sessionState,
-        );
-      }
-    }
-  }
-
-  // Curation: run periodically when the knowledge system is enabled.
-  // Cost-aware frequency: on expensive models, curate less often to reduce
-  // the probability of LTM changes that bust the cache. Each LTM change
-  // that exceeds the diff pinning threshold invalidates tools + messages.
-  // Also gated by circuit breaker — curation is never urgent.
-  // Quota-paused accounts skip curation too (non-urgent background work).
-  // Worker-throttled sessions (sustained worker failure) skip it as well.
-  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
-    return;
-
-  const modelInputCost =
-    getModelEntrySync(
-      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
-    ).cost?.input ?? 3;
-  const curationMultiplier =
-    modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
-  const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
-
-  // Coalesce: skip scheduling curation when one is already scheduled, queued,
-  // or in-flight for THIS session. Without this, `turnsSinceCuration` stays
-  // at/above the threshold (it is only reset in the `.then()` after a run
-  // completes — see below), so every subsequent turn re-schedules curation,
-  // flooding the background queue with duplicates that are shed at queue-full.
-  //
-  // Two signals are required:
-  //  - `curationScheduled` (synchronous): set BEFORE runBackground() and
-  //    cleared in .finally(). `curatorLimiter` is only entered when the task
-  //    actually executes inside curator.run(), so under a saturated global
-  //    queue `isBusy` stays false between scheduling and execution — this flag
-  //    closes that window deterministically.
-  //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
-  //    idle-path curation (idle.ts) which doesn't set curationScheduled.
-  // Mirrors the incremental-distill guard above and the idle-path guard.
-  // In-flight (turn-based) curation is OFF by default: changing the knowledge
-  // base mid-conversation rewrites system[2] (context-bound LTM) and busts the
-  // prompt cache for the rest of a large session. Curation still runs on idle
-  // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
-  // keeps accumulating during the active conversation and fires on the next idle.
-  if (
-    shouldRunInFlightCuration({
-      knowledgeEnabled: cfg.knowledge.enabled,
-      inFlight: cfg.curator.inFlight,
-      turnsSinceCuration: sessionState.turnsSinceCuration,
-      effectiveAfterTurns,
-      curationScheduled: !!sessionState.curationScheduled,
-      curatorBusy: curatorLimiter.isBusy(sessionID),
-    })
-  ) {
-    sessionState.curationScheduled = true;
-    // Track the FULL chain (not just the limiter task) so resetPipelineState's
-    // drain also awaits the post-completion saveSessionTracking writes in the
-    // .then below — those run a few microtasks after the inner task settles and
-    // would otherwise escape the drain. (Latent today since in-flight curation
-    // is off by default, but keeps the leak closed if it's ever enabled.) #885
-    trackBackground(
-      runBackground(
-        () =>
-          withTenant(sessionState.storageTenantId ?? "", () =>
-            Sentry.startSpan(
-              {
-                name: "lore.curator",
-                op: "lore.curation",
-                attributes: { trigger: "in-flight" },
-              },
-              () =>
-                curator.run({
-                  llm,
-                  projectPath,
-                  sessionID,
-                  model,
-                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-                  signal,
-                  // #627 Phase 1: stamp the session's gitHead on curator entries.
-                  metadata: buildSessionMetadata(sessionState.gitHead),
-                }),
-            ),
-          ),
-        `in-flight-curation session=${sessionID.slice(0, 16)}`,
-        workerProviderID,
-      )
-        .then((result) => {
-          if (!result) return; // skipped by circuit breaker
-          signal.throwIfAborted();
-          sessionState.turnsSinceCuration = 0;
-          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
-          if (
-            result.created > 0 ||
-            result.updated > 0 ||
-            result.deleted > 0 ||
-            result.changedEntries?.length > 0
-          ) {
-            // Invalidate LTM cache only when curation actually changed entries
-            ltmSessionCache.delete(sessionID);
-            saveSessionTracking(sessionID, {
-              ltmCacheText: null,
-              ltmCacheTokens: null,
-            });
-            log.info(
-              `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
-            );
-            emitCurationMetrics({ ...result, trigger: "in-flight" });
-          }
-        })
-        .catch((e) => log.error("background curation failed:", e))
-        .finally(() => {
-          sessionState.curationScheduled = false;
-        }),
-      sessionState,
-    );
-  }
-}
-
-export function scheduleBackgroundWork(
-  sessionState: SessionState,
-  config: GatewayConfig,
-): void {
-  withTenant(sessionState.storageTenantId ?? "", () =>
-    scheduleBackgroundWorkForTenant(sessionState, config),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Compaction summary generation — shared by HTTP interception and /v1/compact
-// ---------------------------------------------------------------------------
-
-/**
- * Interval between keep-alive `ping` events sent on the compaction SSE stream
- * while the summary is being generated. Anthropic itself sends periodic pings
- * on long-running streams; this keeps the client connection from timing out
- * while we (possibly) distill the remainder under a rate limit.
- */
-const COMPACT_KEEPALIVE_PING_MS = 15_000;
-
-/**
- * Generate a compaction summary for a session, assembled deterministically
- * from Lore's own memory (distillations + long-term knowledge + the prior
- * summary). The only LLM work is urgently distilling any undistilled
- * remainder first; there is no dedicated "compaction" LLM call. Returns null
- * only when there is genuinely nothing to compact.
- *
- * This is the core logic shared by both:
- *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
- *  - `handleCompactEndpoint` (explicit POST /v1/compact from Pi plugin)
- */
-export async function generateCompactionSummary(opts: {
-  projectPath: string;
-  sessionID: string;
-  config: GatewayConfig;
-  previousSummary?: string;
-  sessionUpstream?: { providerID?: string; modelID?: string };
-  signal?: AbortSignal;
-  trackOperation?: (operation: Promise<unknown>) => void;
-}): Promise<string | null> {
-  const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
-    opts;
-  opts.signal?.throwIfAborted();
-
-  // 1. Bring distillations current. Compaction does NOT make a dedicated
-  //    "compaction" LLM call anymore — its only LLM work is distilling the
-  //    undistilled remainder. When everything is already distilled this is
-  //    skipped entirely (instant, zero-cost compaction). When not, we distill
-  //    urgently; the caller's keep-alive stream holds the client connection
-  //    open during any rate-limit wait. A distillation failure is non-fatal:
-  //    step 3 assembles from whatever distillations exist plus the raw tail.
-  if (temporal.undistilledCount(projectPath, sessionID) > 0) {
-    const llm = getLLMClient(config);
-    const model = getWorkerModel(sessionUpstream);
-    await promiseAgainstAbort(() => {
-      const operation = distillation.run({
-        llm,
-        projectPath,
-        sessionID,
-        model,
-        force: true,
-        urgent: true,
-        callType: "direct",
-        signal: opts.signal,
-        workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-        // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
-        // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
-        // the session by ID rather than threading state through the call.
-        metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
-      });
-      opts.trackOperation?.(operation);
-      return operation;
-    }, opts.signal);
-  }
-
-  // 2. Load distillation summaries + long-term knowledge.
-  const distillations = distillation.loadForSession(projectPath, sessionID);
-  const cfg = loreConfig();
-  const entries = cfg.knowledge.enabled
-    ? await promiseAgainstAbort(() => {
-        const operation = ltm.forProjectOffloaded(
-          projectPath,
-          cfg.crossProject,
-        );
-        opts.trackOperation?.(operation);
-        return operation;
-      }, opts.signal)
-    : [];
-  opts.signal?.throwIfAborted();
-  const knowledge = entries.length
-    ? formatKnowledge(
-        entries.map((e) => ({
-          id: e.id,
-          category: e.category,
-          title: e.title,
-          content: e.content,
-        })),
-      )
-    : "";
-
-  // 3. Assemble the compaction summary deterministically from Lore's memory —
-  //    no LLM. Include any still-undistilled messages verbatim so the recent
-  //    tail is never lost if distillation could not bring everything current.
-  //    Note: a concurrent client turn could store new temporal messages between
-  //    step 1 (distillation) and this read — those messages appear in both the
-  //    summary tail AND the next conversation turn. This is benign duplication,
-  //    not data loss, and the window is narrow (active concurrent turns only).
-  return assembleOfflineCompaction({
-    previousSummary,
-    distillations,
-    knowledge,
-    undistilled: temporal
-      .undistilled(projectPath, sessionID)
-      .map((m) => ({ role: m.role, content: m.content })),
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Case 1: Compaction interception
-// ---------------------------------------------------------------------------
-
-async function handleCompactionInner(
-  req: GatewayRequest,
-  config: GatewayConfig,
-  requestGeneration: number,
-  trackOperation: (operation: Promise<unknown>) => void,
-  claimSession: (sessionID: string) => Promise<void>,
-): Promise<Response> {
-  if (!req.rawHeaders["x-lore-project"]) {
-    const markerProject = extractProjectMarker(req.messages);
-    if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
-  }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
-  const credential = extractAuth(req.rawHeaders);
-  if (!credential) {
-    return errorResponse(401, "A provider credential is required");
-  }
-  const sessionState = resolveAuthenticatedDirectSession(
-    req,
-    pathResult.path,
-    config,
-    false,
-  );
-  if (
-    !sessionState ||
-    (!sessionState.lastUpstream &&
-      !streamingPostResponseFinalizers.has(sessionState.sessionID))
-  ) {
-    return errorResponse(404, "No authenticated session found");
-  }
-  if (
-    sessionState.projectPathProvisional === true ||
-    (pathResult.source !== "cwd" &&
-      sessionState.projectPath !== pathResult.path)
-  ) {
-    return errorResponse(
-      403,
-      "Project path does not match the authenticated session",
-    );
-  }
-  const sessionID = sessionState.sessionID;
-  const authorizedProjectPath = sessionState.projectPath;
-  await claimSession(sessionID);
-  if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
-    return errorResponse(404, "No authenticated session found");
-  }
-  await awaitStreamingPostResponse(sessionID, req.signal);
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  if (!confirmedIndexedIdentityResolvesTo(req, sessionID, config)) {
-    return errorResponse(404, "No authenticated session found");
-  }
-  if (!isConfidentlyBoundToProject(sessionState, authorizedProjectPath)) {
-    return errorResponse(
-      403,
-      "Project path does not match the authenticated session",
-    );
-  }
-  stripContextMarkers(req.messages);
-  const projectPath = sessionState.projectPath;
-  setSessionAuth(sessionID, credential, sessionState.lastUpstream?.providerID);
-  // NOTE: the project binding is NOT persisted here — compaction never changes
-  // the binding, and the preceding normal turn already persisted it. A restart
-  // between the last normal turn and a compaction-only turn rehydrates the
-  // binding from the prior save, which is always present (compaction requires
-  // accumulated context that implies at least one normal turn happened first).
-
-  // Initialize the project AFTER path correction so we never create a row for
-  // the gateway's cwd / an unattributed bucket from a path-less probe request.
-  await initIfNeeded(
-    projectPath,
-    config,
-    pathResult.gitRemote,
-    req.signal,
-    requestGeneration,
-  );
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-
-  setSentryLightContext({ model: req.model, projectPath });
-  log.info(`compaction intercepted for session ${sessionID.slice(0, 16)}`);
-
-  // Post-compaction the client sends an entirely different message set, so the
-  // cached pre-compaction warmup body is stale regardless of how this resolves.
-  sessionState.cacheAnalytics.lastRequestBody = null;
-
-  // Kick off summary generation: at most one LLM call (urgent distillation
-  // of the undistilled remainder, if any), then deterministic assembly from
-  // Lore's memory. Returns null only when there is genuinely nothing to
-  // compact (brand-new session, no history, no knowledge).
-  const summaryPromise = generateCompactionSummary({
-    projectPath,
-    sessionID,
-    config,
-    previousSummary: extractPreviousSummary(req),
-    sessionUpstream: sessionState.lastUpstream,
-    signal: req.signal,
-    trackOperation,
-  });
-  trackOperation(summaryPromise);
-
-  if (req.stream) {
-    // Open the SSE stream immediately and emit keep-alive `ping`s while the
-    // summary is computed (the remainder-distillation may ride out a 429), so
-    // the client connection never hits a read-timeout. The Response must be
-    // returned without awaiting so the pings flow to the client progressively.
-    //
-    // Null safety: assembleOfflineCompaction returns null only for a brand-new
-    // session with zero history — in that case an empty assistant turn is
-    // correct (there's nothing to compact, so "replacing context with nothing"
-    // is accurate). We log a warning for observability.
-    const loggedPromise = summaryPromise.then((s) => {
-      if (s == null) {
-        log.warn(
-          `compaction summary empty (streaming) for session ${sessionID.slice(0, 16)}`,
-        );
-      }
-      return s;
-    });
-    const id = `msg_lore_compact_${crypto.randomUUID().slice(0, 8)}`;
-    const anthropicSSE = buildKeepaliveCompactionStream(
-      id,
-      req.model,
-      loggedPromise,
-      COMPACT_KEEPALIVE_PING_MS,
-    );
-    // Always Anthropic SSE — wrap for OpenAI-protocol clients (their
-    // translators skip pings).
-    if (req.protocol === "openai") {
-      return translateAnthropicStreamToOpenAI(anthropicSSE, {
-        signal: req.signal,
-      });
-    }
-    if (req.protocol === "openai-responses") {
-      return translateAnthropicStreamToResponses(anthropicSSE, {
-        signal: req.signal,
-      });
-    }
-    if (req.protocol === "gemini") {
-      return translateAnthropicStreamToGemini(anthropicSSE, {
-        signal: req.signal,
-      });
-    }
-    return anthropicSSE;
-  }
-
-  // Non-streaming clients: await the summary and return JSON. Fall back to
-  // upstream passthrough only when there is genuinely nothing to compact.
-  const summary = await summaryPromise;
-  if (summary == null) {
-    log.warn(
-      `compaction summary empty for session ${sessionID.slice(0, 16)} — using authenticated upstream`,
-    );
-    const trustedUpstream = extractUpstreamUrlHeader({
-      "x-lore-upstream-url": sessionState.lastUpstream?.url ?? "",
-    });
-    if (!trustedUpstream) {
-      return errorResponse(502, "No trusted upstream destination");
-    }
-    const fallbackHeaders = { ...req.rawHeaders };
-    fallbackHeaders["x-lore-upstream-url"] = trustedUpstream;
-    if (sessionState.lastUpstream?.providerID) {
-      fallbackHeaders["x-lore-provider"] = sessionState.lastUpstream.providerID;
-    } else {
-      delete fallbackHeaders["x-lore-provider"];
-    }
-    return await handlePassthrough(
-      { ...req, rawHeaders: fallbackHeaders },
-      config,
-    );
-  }
-  const resp = buildCompactionResponse(sessionID, summary, req.model);
-  return nonStreamHttpResponse(
-    resp,
-    req.protocol,
-    req.stream,
-    undefined,
-    requestEnablesLongContext(req),
-  );
-}
-
-async function handleCompaction(
-  req: GatewayRequest,
-  config: GatewayConfig,
-  requestGeneration: number,
-  trackOperation: (operation: Promise<unknown>) => void,
-  claimSession: (sessionID: string) => Promise<void>,
-): Promise<Response> {
-  const abortScope = createForegroundAbortScope(req.signal);
-  try {
-    const run = (signal: AbortSignal) => {
-      if (
-        pipelineResetInProgress ||
-        requestGeneration !== streamingPostResponseGeneration
-      ) {
-        return Promise.resolve(
-          errorResponse(503, "Gateway pipeline generation changed"),
-        );
-      }
-      return handleCompactionInner(
-        { ...req, signal },
-        config,
-        requestGeneration,
-        trackOperation,
-        claimSession,
-      );
-    };
-    const response = await run(abortScope.signal);
-    return wrapBodyWithCleanup(
-      response,
-      abortScope.dispose,
-      abortScope.signal,
-      (reason) =>
-        abortScope.abort(
-          reason ?? new DOMException("response cancelled", "AbortError"),
-        ),
-    );
-  } catch (error) {
-    abortScope.dispose();
-    throw error;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Case 1b: Explicit compaction endpoint (POST /v1/compact)
-// ---------------------------------------------------------------------------
-
-function directCompactionFailureResponse(
-  route: string,
-  error: unknown,
-): Response {
-  log.error(`${route} error:`, error);
-  const unavailable =
-    error instanceof StreamingPostResponseWaitCapacityError ||
-    error instanceof PipelineCapacityError;
-  const aborted =
-    error instanceof DOMException &&
-    (error.name === "AbortError" || error.name === "TimeoutError");
-  return new Response(
-    JSON.stringify({
-      error: "compaction_failed",
-      message: unavailable
-        ? "Compaction temporarily unavailable"
-        : "Compaction failed",
-    }),
-    {
-      status: unavailable ? 503 : aborted ? 502 : 500,
-      headers: { "content-type": "application/json" },
-    },
-  );
-}
-
-function preflightDirectCompactionSession(
-  req: Request,
-  config: GatewayConfig,
-): Response | null {
-  const rawHeaders: Record<string, string> = {};
-  req.headers.forEach((value, key) => {
-    rawHeaders[key] = value;
-  });
-  if (hasConflictingAuthHeaders(rawHeaders)) {
-    return errorResponse(
-      400,
-      "Conflicting authentication headers: send either x-api-key or Authorization, not both",
-    );
-  }
-  if (!extractAuth(rawHeaders)) {
-    return new Response(
-      JSON.stringify({
-        error: "unauthorized",
-        message: "A provider credential is required",
-      }),
-      { status: 401, headers: { "content-type": "application/json" } },
-    );
-  }
-  const minimalReq: GatewayRequest = {
-    protocol: "anthropic",
-    system: "",
-    messages: [],
-    tools: [],
-    model: "",
-    maxTokens: 0,
-    stream: false,
-    metadata: {},
-    rawHeaders,
-  };
-  const sessionID = findIndexedKnownSessionID(minimalReq, config);
-  if (!sessionID || (loadSessionTracking(sessionID)?.messageCount ?? 0) === 0) {
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message: "No authenticated session found for the given headers",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-  return null;
-}
-
-function directRequestCredentialFingerprint(
-  req: Request,
-  config: GatewayConfig,
-): string {
-  const rawHeaders: Record<string, string> = {};
-  req.headers.forEach((value, key) => {
-    rawHeaders[key] = value;
-  });
-  return requestCredentialFingerprint(rawHeaders, config) ?? "";
-}
-
-/**
- * Cancel-when-fits decision for the explicit `/v1/compact` endpoint.
- *
- * Returns:
- *   { cancel: true, reason: string, mustCompact: false }   — caller should
- *       cancel the host agent's compaction and keep the raw context
- *   { cancel: false, reason: string, mustCompact: true  }  — caller should
- *       proceed to generate a Lore-aware summary
- *   { cancel: false, reason: string, mustCompact: false }  — caller cannot
- *       decide (no upstream on session, or tokens_before is unknown /
- *       missing); default to the existing summary path
- *
- * Pure: no I/O, no state mutation. Easy to unit-test in isolation.
- *
- * The "budget" is `model.context - model.output` (per models.dev). The
- * reasoning is documented at the call site in `handleCompactEndpoint`.
- */
-export type CompactCancelDecision =
-  | { cancel: true; mustCompact: false; reason: string }
-  | { cancel: false; mustCompact: true; reason: string }
-  | { cancel: false; mustCompact: false; reason: string };
-
-export function shouldCancelCompactionFromBudget(
-  tokensBefore: number | undefined,
-  upstream: { model?: string; providerID?: string } | undefined,
-): CompactCancelDecision {
-  // Caller didn't pass tokens_before → we can't decide; fall through to
-  // the existing summary path (preserves the pre-#961 contract).
-  if (typeof tokensBefore !== "number" || !Number.isFinite(tokensBefore)) {
-    return {
-      cancel: false,
-      mustCompact: false,
-      reason: "tokens_before is unknown (caller did not pass it)",
-    };
-  }
-  // tokens_before <= 0 is treated as "unknown" — defensible because every
-  // real session in flight has >0 tokens. Skipping the cancel path here
-  // matches the existing 0-value behavior in the gradient layer.
-  if (tokensBefore <= 0) {
-    return {
-      cancel: false,
-      mustCompact: false,
-      reason: `tokens_before=${tokensBefore} is non-positive; treating as unknown`,
-    };
-  }
-  // No upstream on session → no model spec to compute the budget from.
-  // Conservatively generate a summary rather than cancel.
-  if (!upstream?.model) {
-    return {
-      cancel: false,
-      mustCompact: false,
-      reason: "no upstream model on session; cannot compute budget",
-    };
-  }
-  const spec = getModelSpec(upstream.model, upstream.providerID);
-  const effectiveBudget = spec.context - spec.output;
-  if (tokensBefore <= effectiveBudget) {
-    return {
-      cancel: true,
-      mustCompact: false,
-      reason: `tokensBefore=${tokensBefore} <= budget=${effectiveBudget} (model=${spec.context} − output=${spec.output}); host should keep raw context`,
-    };
-  }
-  return {
-    cancel: false,
-    mustCompact: true,
-    reason: `tokensBefore=${tokensBefore} > budget=${effectiveBudget} (model=${spec.context} − output=${spec.output}); must compact`,
-  };
-}
-
-/**
- * Handle an explicit compaction summary request from a plugin (e.g. Pi).
- * Unlike `handleCompaction` which detects compaction from request patterns,
- * this endpoint accepts a direct JSON body with project path and optional
- * previous summary.
- *
- * The caller must include a session-identifying header (e.g. x-lore-session-id)
- * so the gateway can resolve the correct internal session.
- *
- * Body schema:
- *   project_path:     string   (required) — absolute project root
- *   previous_summary: string?  (optional) — last summary, for iterative update
- *   tokens_before:    number?  (optional) — caller's estimate of the session's
- *                     current pre-compaction token count. When provided, the
- *                     gateway compares it against the resolved model's
- *                     `context - output` budget; if it fits, the gateway
- *                     returns `{ cancel: true }` and does NOT generate a
- *                     summary. The caller (e.g. Pi) is expected to relay this
- *                     to the host's `session_before_compact` hook as
- *                     `{ cancel: true }`, which prevents the host from
- *                     compacting at all and keeps the raw context end-to-end.
- *                     This is the on-Pi analog of OpenCode's
- *                     `cfg.compaction = { auto: false, prune: false }` — the
- *                     gateway manages the window, not the host agent.
- */
-async function handleCompactEndpointInner(
-  req: Request,
-  config: GatewayConfig,
-  signal: AbortSignal,
-  requestGeneration: number,
-  trackOperation: (operation: Promise<unknown>) => void,
-  claimSession: (sessionID: string) => Promise<void>,
-  rawHeaders: Record<string, string>,
-): Promise<Response> {
-  if (hasConflictingAuthHeaders(rawHeaders)) {
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message:
-          "Conflicting authentication headers: send either x-api-key or Authorization, not both",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-  // Authenticate from headers before touching a potentially unbounded or
-  // stalled upload. This endpoint always requires a provider credential.
-  const credential = extractAuth(rawHeaders);
-  if (!credential) {
-    return new Response(
-      JSON.stringify({
-        error: "unauthorized",
-        message: "A provider credential is required",
-      }),
-      { status: 401, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  let body: {
-    project_path?: string;
-    previous_summary?: string;
-    tokens_before?: number;
-  };
-  try {
-    // Decode any Content-Encoding (e.g. zstd) before JSON-parsing.
-    body = JSON.parse(await decodeRequestBody(req, signal)) as typeof body;
-  } catch {
-    signal.throwIfAborted();
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message: "Invalid JSON body",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  const projectPath = body.project_path;
-  if (!projectPath || typeof projectPath !== "string") {
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message: "project_path is required",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  // Extract git remote from header if available (Pi plugin injects this).
-  const gitRemote = extractGitRemoteHeader(rawHeaders);
-
-  // Build a minimal GatewayRequest for session identification.
-  // Only rawHeaders and messages are used by identifySession().
-
-  const minimalReq: GatewayRequest = {
-    protocol: "anthropic",
-    system: "",
-    messages: [],
-    tools: [],
-    model: "",
-    maxTokens: 0,
-    stream: false,
-    metadata: {},
-    rawHeaders,
-    signal,
-  };
-
-  const state = resolveAuthenticatedDirectSession(
-    minimalReq,
-    projectPath,
-    config,
-  );
-  if (!state) {
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message:
-          "No active session found for the given headers. " +
-          "Ensure at least one conversation turn has been routed through the gateway.",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  if (!isConfidentlyBoundToProject(state, projectPath)) {
-    return new Response(
-      JSON.stringify({
-        error: "project_mismatch",
-        message: "project_path does not match the authenticated session",
-      }),
-      { status: 403, headers: { "content-type": "application/json" } },
-    );
-  }
-  const sessionID = state.sessionID;
-  await claimSession(sessionID);
-  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID, config)) {
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message: "No authenticated session found for the given headers",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-  await awaitStreamingPostResponse(sessionID, signal);
-  assertCurrentPipelineGeneration(signal, requestGeneration);
-  if (!confirmedIndexedIdentityResolvesTo(minimalReq, sessionID, config)) {
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message: "No authenticated session found for the given headers",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-  if (
-    state.projectPathProvisional === true ||
-    state.projectPath !== projectPath
-  ) {
-    return new Response(
-      JSON.stringify({
-        error: "project_mismatch",
-        message: "project_path does not match the authenticated session",
-      }),
-      { status: 403, headers: { "content-type": "application/json" } },
-    );
-  }
-  setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
-
-  await initIfNeeded(
-    state.projectPath,
-    config,
-    gitRemote,
-    signal,
-    requestGeneration,
-  );
-  assertCurrentPipelineGeneration(signal, requestGeneration);
-
-  // Cancel-when-fits policy. The gateway is the authoritative source for
-  // "does this session's raw context fit in the layer-0 budget?" — the plugin
-  // just relays. We resolve the session's lastUpstream to a real ModelSpec
-  // (per models.dev context/output limits) and compare tokensBefore to
-  // (context - output). If the caller's claim of "the session fits" is
-  // genuine, return { cancel: true } and skip the summary work entirely.
-  //
-  // Above-budget sessions still get the existing summary path. Below-budget
-  // sessions are canceled — the host agent keeps the raw context, and Lore
-  // continues to manage the window via distillation + recall on subsequent
-  // turns.
-  //
-  // This intentionally does NOT consult maxLayer0Tokens (the per-model cost
-  // cap from setModelLimits). That value is per-request and is not stored
-  // across turns, so reading it from the gradient module here would be
-  // racy/zero. The natural cancel threshold IS the model's real context
-  // window minus output reserve — anything that fits there is safe to
-  // keep raw; anything above it must be summarized (or the next LLM call
-  // will overflow). If we later want a tighter per-session cap, it's a
-  // single constant in one place to change.
-  const cancelDecision = shouldCancelCompactionFromBudget(
-    body.tokens_before,
-    state?.lastUpstream,
-  );
-  if (cancelDecision.cancel) {
-    log.info(`compact endpoint: cancel — ${cancelDecision.reason}`);
-    return new Response(JSON.stringify({ cancel: true }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  }
-  if (cancelDecision.mustCompact) {
-    log.info(`compact endpoint: must compact — ${cancelDecision.reason}`);
-  }
-
-  log.info(
-    `compact endpoint: generating summary for session ${sessionID.slice(0, 16)}`,
-  );
-
-  try {
-    const summary = await generateCompactionSummary({
-      projectPath,
-      sessionID,
-      config,
-      previousSummary:
-        typeof body.previous_summary === "string"
-          ? body.previous_summary
-          : undefined,
-      sessionUpstream: state?.lastUpstream,
-      signal,
-      trackOperation,
-    });
-    assertCurrentPipelineGeneration(signal, requestGeneration);
-
-    if (summary == null) {
-      log.warn(
-        `compact endpoint: summary generation failed for session ${sessionID.slice(0, 16)} — returning 502`,
-      );
-      return new Response(
-        JSON.stringify({
-          error: "compaction_failed",
-          message: "Summary generation failed (worker model unavailable)",
-        }),
-        { status: 502, headers: { "content-type": "application/json" } },
-      );
-    }
-
-    // Clear the cached warmup body — post-compaction the client will send
-    // entirely different messages, so the pre-compaction body is stale.
-    const sessionState = sessions.get(sessionID);
-    if (sessionState) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-    }
-
-    return new Response(JSON.stringify({ summary }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  } catch (err) {
-    log.error("compact endpoint error:", err);
-    return new Response(
-      JSON.stringify({
-        error: "compaction_failed",
-        message: "Compaction failed",
-      }),
-      { status: 500, headers: { "content-type": "application/json" } },
-    );
-  }
-}
-
-export async function handleCompactEndpoint(
-  req: Request,
-  config: GatewayConfig,
-): Promise<Response> {
-  const rawHeaders = requestHeaders(req.headers);
-  return withRequestStorageTenant(rawHeaders, config, async () => {
-    if (pipelineResetInProgress) {
-      return errorResponse(503, "Gateway pipeline is resetting");
-    }
-    const preflight = preflightDirectCompactionSession(req, config);
-    if (preflight) return preflight;
-    streamingPostResponsesAccepting = true;
-    const requestGeneration = streamingPostResponseGeneration;
-    const abortScope = createForegroundAbortScope(req.signal);
-    try {
-      const response = await runActivePipelineRequest(
-        abortScope.signal,
-        (signal, trackOperation, claimSession) =>
-          handleCompactEndpointInner(
-            req,
-            config,
-            signal,
-            requestGeneration,
-            trackOperation,
-            claimSession,
-            rawHeaders,
-          ),
-        undefined,
-        undefined,
-        directRequestCredentialFingerprint(req, config),
-      );
-      return wrapBodyWithCleanup(
-        response,
-        abortScope.dispose,
-        abortScope.signal,
-      );
-    } catch (error) {
-      abortScope.dispose();
-      return directCompactionFailureResponse("compact endpoint", error);
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Case 1c: Codex compaction endpoint (POST /v1/responses/compact)
-// ---------------------------------------------------------------------------
-
-/**
- * Handle a Codex-style compaction request at `/v1/responses/compact`.
- *
- * Codex sends compaction requests as a POST to `{base_url}/responses/compact`
- * with a body shaped like a Responses API request (`model`, `instructions`,
- * `input`, `tools`, etc.). The expected response is `{ output: ResponseItem[] }`.
- *
- * Strategy:
- *  1. Parse the request to identify the session (via headers).
- *  2. Try Lore's own compaction summary generation.
- *  3. On success: return a Responses-API-style compacted output.
- *  4. On failure: passthrough to the upstream OpenAI API.
- */
-async function handleResponsesCompactEndpointInner(
-  req: Request,
-  config: GatewayConfig,
-  signal: AbortSignal,
-  requestGeneration: number,
-  trackOperation: (operation: Promise<unknown>) => void,
-  claimSession: (sessionID: string) => Promise<void>,
-  rawHeaders: Record<string, string>,
-): Promise<Response> {
-  if (hasConflictingAuthHeaders(rawHeaders)) {
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message:
-          "Conflicting authentication headers: send either x-api-key or Authorization, not both",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-  const credential = extractAuth(rawHeaders);
-  if (!credential) {
-    return new Response(
-      JSON.stringify({
-        error: "unauthorized",
-        message: "A provider credential is required",
-      }),
-      { status: 401, headers: { "content-type": "application/json" } },
-    );
-  }
-  // Read the body as text so we can both parse it and replay it for passthrough.
-  // Decode any Content-Encoding (Codex sends zstd by default) first — otherwise
-  // the raw compressed bytes fail to JSON.parse and the passthrough replays
-  // undecodable bytes upstream.
-  let bodyText: string;
-  try {
-    bodyText = await decodeRequestBody(req, signal);
-  } catch {
-    signal.throwIfAborted();
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message: "Invalid JSON body",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-  let body: Record<string, unknown>;
-  try {
-    body = JSON.parse(bodyText) as Record<string, unknown>;
-  } catch {
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message: "Invalid JSON body",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  // Parse the body as a Responses API request to get messages for session
-  // fingerprinting. The compact request body has the same shape as a normal
-  // /v1/responses request (model, instructions, input, tools, etc.).
-  let gatewayReq: GatewayRequest;
-  try {
-    gatewayReq = parseOpenAIResponsesRequest(body, rawHeaders);
-    gatewayReq.signal = signal;
-  } catch {
-    return new Response(
-      JSON.stringify({
-        error: "invalid_request",
-        message: "Invalid Responses compaction body",
-      }),
-      { status: 400, headers: { "content-type": "application/json" } },
-    );
-  }
-
-  const pathResult = getProjectPath(gatewayReq.system, rawHeaders);
-  const gitRemote = extractGitRemoteHeader(rawHeaders);
-  const state = resolveAuthenticatedDirectSession(
-    gatewayReq,
-    pathResult.path,
-    config,
-  );
-  if (!state) {
-    if (!extractKnownSessionHeader(rawHeaders)) {
-      return await passthroughResponsesCompact(
-        bodyText,
-        rawHeaders,
-        config,
-        signal,
-        undefined,
-        gatewayReq,
-      );
-    }
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message: "No authenticated session found for the given headers",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-  if (!isConfidentlyBoundToProject(state, pathResult.path)) {
-    return new Response(
-      JSON.stringify({
-        error: "project_mismatch",
-        message: "project path does not match the authenticated session",
-      }),
-      { status: 403, headers: { "content-type": "application/json" } },
-    );
-  }
-  const sessionID = state.sessionID;
-  await claimSession(sessionID);
-  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID, config)) {
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message: "No authenticated session found for the given headers",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-  await awaitStreamingPostResponse(sessionID, signal);
-  assertCurrentPipelineGeneration(signal, requestGeneration);
-  if (!confirmedIndexedIdentityResolvesTo(gatewayReq, sessionID, config)) {
-    return new Response(
-      JSON.stringify({
-        error: "session_not_found",
-        message: "No authenticated session found for the given headers",
-      }),
-      { status: 404, headers: { "content-type": "application/json" } },
-    );
-  }
-  if (
-    state.projectPathProvisional === true ||
-    state.projectPath !== pathResult.path
-  ) {
-    return new Response(
-      JSON.stringify({
-        error: "project_mismatch",
-        message: "project path does not match the authenticated session",
-      }),
-      { status: 403, headers: { "content-type": "application/json" } },
-    );
-  }
-  setSessionAuth(sessionID, credential, state.lastUpstream?.providerID);
-
-  await initIfNeeded(
-    state.projectPath,
-    config,
-    gitRemote,
-    signal,
-    requestGeneration,
-  );
-  assertCurrentPipelineGeneration(signal, requestGeneration);
-
-  log.info(
-    `responses/compact: generating Lore summary for session ${sessionID.slice(0, 16)}`,
-  );
-
-  try {
-    const summary = await generateCompactionSummary({
-      projectPath: state.projectPath,
-      sessionID,
-      config,
-      sessionUpstream: state.lastUpstream,
-      signal,
-      trackOperation,
-    });
-    assertCurrentPipelineGeneration(signal, requestGeneration);
-
-    if (summary != null) {
-      state.cacheAnalytics.lastRequestBody = null;
-
-      // Return in Codex's expected format: { output: ResponseItem[] }
-      // Must include id, status, and annotations to match the
-      // CompactHistoryResponse { output: Vec<ResponseItem> } struct.
-      return new Response(
-        JSON.stringify({
-          output: [
-            {
-              type: "message",
-              id: `msg_lore_compact_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-              role: "assistant",
-              status: "completed",
-              content: [
-                { type: "output_text", text: summary, annotations: [] },
-              ],
-            },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-
-    log.warn(
-      `responses/compact: Lore summary generation failed for session ${sessionID.slice(0, 16)} — falling back to upstream`,
-    );
-  } catch (err) {
-    signal.throwIfAborted();
-    log.warn(
-      "responses/compact: Lore compaction error, falling back to upstream:",
-      err,
-    );
-  }
-
-  // Fallback only to the destination previously authenticated by a normal turn.
-  return await passthroughResponsesCompact(
-    bodyText,
-    rawHeaders,
-    config,
-    signal,
-    state.lastUpstream?.url || null,
-    gatewayReq,
-  );
-}
-
-export async function handleResponsesCompactEndpoint(
-  req: Request,
-  config: GatewayConfig,
-): Promise<Response> {
-  const rawHeaders = requestHeaders(req.headers);
-  return withRequestStorageTenant(rawHeaders, config, async () => {
-    if (pipelineResetInProgress) {
-      return errorResponse(503, "Gateway pipeline is resetting");
-    }
-    streamingPostResponsesAccepting = true;
-    const requestGeneration = streamingPostResponseGeneration;
-    const abortScope = createForegroundAbortScope(req.signal);
-    try {
-      const response = await runActivePipelineRequest(
-        abortScope.signal,
-        (signal, trackOperation, claimSession) =>
-          handleResponsesCompactEndpointInner(
-            req,
-            config,
-            signal,
-            requestGeneration,
-            trackOperation,
-            claimSession,
-            rawHeaders,
-          ),
-        undefined,
-        undefined,
-        directRequestCredentialFingerprint(req, config),
-      );
-      return wrapBodyWithCleanup(
-        response,
-        abortScope.dispose,
-        abortScope.signal,
-      );
-    } catch (error) {
-      abortScope.dispose();
-      return directCompactionFailureResponse(
-        "responses/compact endpoint",
-        error,
-      );
-    }
-  });
-}
-
-/**
- * Forward a compaction request to the upstream OpenAI API as-is.
- */
-export async function passthroughResponsesCompact(
-  bodyText: string,
-  rawHeaders: Record<string, string>,
-  config: GatewayConfig,
-  callerSignal?: AbortSignal,
-  trustedUpstreamBase?: string | null,
-  parsedRequest?: GatewayRequest,
-): Promise<Response> {
-  const abortScope = createForegroundAbortScope(callerSignal);
-  if (hasConflictingAuthHeaders(rawHeaders)) {
-    abortScope.dispose();
-    return errorResponse(
-      400,
-      "Conflicting authentication headers: send either x-api-key or Authorization, not both",
-    );
-  }
-
-  // Resolve with the same provider/header/model priority chain as a normal
-  // Responses request. If parsing failed, an explicit validated URL override is
-  // the only safe custom route; an explicit provider without a compatible URL
-  // fails closed because model routing is unavailable.
-  const trustedUpstream =
-    trustedUpstreamBase === undefined
-      ? undefined
-      : trustedUpstreamBase
-        ? extractUpstreamUrlHeader({
-            "x-lore-upstream-url": trustedUpstreamBase,
-          })
-        : undefined;
-  if (trustedUpstreamBase !== undefined && !trustedUpstream) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_failed",
-        message: "No trusted upstream destination",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  const headerUpstream =
-    trustedUpstreamBase === undefined
-      ? extractUpstreamUrlHeader(rawHeaders)
-      : undefined;
-  if (headerUpstream && !extractAuth(rawHeaders)) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message: "An explicit upstream URL requires client authentication",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  let route: ResolvedRequestUpstreamRoute | undefined;
-  if (parsedRequest && trustedUpstreamBase === undefined) {
-    try {
-      route = resolveRequestUpstreamRoute(parsedRequest, config);
-    } catch (error) {
-      abortScope.dispose();
-      return new Response(
-        JSON.stringify({
-          error: "compaction_routing_failed",
-          message:
-            error instanceof Error ? error.message : "Invalid compact route",
-        }),
-        { status: 502, headers: { "content-type": "application/json" } },
-      );
-    }
-  }
-  const fallbackProviderID = route
-    ? route.providerID
-    : extractProviderHeader(rawHeaders);
-  if (
-    trustedUpstreamBase === undefined &&
-    rawHeaders["x-lore-provider"] &&
-    !fallbackProviderID
-  ) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message: "Unsupported or invalid X-Lore-Provider",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  if (
-    trustedUpstreamBase === undefined &&
-    rawHeaders["x-lore-upstream-url"] &&
-    !headerUpstream
-  ) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message: "Invalid X-Lore-Upstream-URL",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  if (headerUpstream && !isCallerUpstreamAllowed(config, headerUpstream)) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message:
-          "X-Lore-Upstream-URL origin is not allowed by this remote gateway",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  const fallbackProviderRoute =
-    !route && fallbackProviderID
-      ? (resolveProviderRoute(fallbackProviderID) ??
-        lookupProviderRoute(fallbackProviderID, false))
-      : null;
-  if (
-    route?.providerID &&
-    !route.headerUpstream &&
-    (!route.providerRoute?.url ||
-      (route.providerRoute.protocol !== null &&
-        route.providerRoute.protocol !== "openai-responses"))
-  ) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message: `Cannot safely resolve a Responses compact endpoint for provider "${route.providerID}"`,
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  if (
-    !route &&
-    fallbackProviderID &&
-    !headerUpstream &&
-    (!fallbackProviderRoute?.url ||
-      (fallbackProviderRoute.protocol !== null &&
-        fallbackProviderRoute.protocol !== "openai-responses"))
-  ) {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message: `Cannot safely resolve a Responses compact endpoint for provider "${fallbackProviderID}"`,
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  const effectiveUpstreamBase =
-    trustedUpstream ??
-    route?.effectiveUpstreamBase ??
-    headerUpstream ??
-    fallbackProviderRoute?.url ??
-    config.upstreamOpenAI;
-  const effectiveProtocol = trustedUpstream
-    ? "openai-responses"
-    : (route?.effectiveProtocol ??
-      fallbackProviderRoute?.protocol ??
-      "openai-responses");
-  if (effectiveProtocol !== "openai-responses") {
-    abortScope.dispose();
-    return new Response(
-      JSON.stringify({
-        error: "compaction_routing_failed",
-        message:
-          "The resolved upstream does not support the OpenAI Responses compact protocol",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-  const upstreamPath = extractUpstreamPathHeader(rawHeaders);
-  const compactPath = upstreamPath?.endsWith("/responses/compact")
-    ? upstreamPath
-    : undefined;
-  const upstreamUrl = compactPath
-    ? new URL(compactPath, `${effectiveUpstreamBase.replace(/\/+$/, "")}/`).href
-    : fallbackProviderID === "openai-codex"
-      ? `${effectiveUpstreamBase}/codex/responses/compact`
-      : `${effectiveUpstreamBase}/v1/responses/compact`;
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-  };
-
-  // Preserve the one centrally-approved provider-auth scheme exactly.
-  Object.assign(headers, copyProviderAuthHeaders(rawHeaders));
-
-  // Forward OpenAI-specific headers
-  const openAiBeta = rawHeaders["openai-beta"];
-  if (openAiBeta) headers["openai-beta"] = openAiBeta;
-
-  // Re-compress with the client's original Content-Encoding (Codex sends zstd):
-  // `bodyText` was decoded on ingress, so replay it in the same wire encoding.
-  // This is a native passthrough — `/v1/responses/compact` in, the same OpenAI
-  // endpoint out, no gateway protocol translation — so it routes through the
-  // same `encodeUpstreamBodyForRoute` chokepoint (equal protocols => trusted)
-  // rather than the raw encoder, keeping that the single re-encode path (#1032).
-  const { body: passthroughBody, contentEncoding } = encodeUpstreamBodyForRoute(
-    bodyText,
-    rawHeaders["content-encoding"],
-    buildUpstreamRouteContext({
-      upstreamUrlHeader: headerUpstream,
-      providerHeader: fallbackProviderID,
-      ingressProtocol: "openai-responses",
-      effectiveProtocol,
-      ingressUpstreamBase: config.upstreamOpenAI,
-      effectiveUpstreamBase,
-    }),
-  );
-  if (contentEncoding) headers["content-encoding"] = contentEncoding;
-
-  // Apply user-supplied LORE_UPSTREAM_EXTRA_HEADERS as a final overlay so
-  // corporate proxies / LiteLLM team-routing tokens / Cloudflare AI Gateway
-  // / service-account scenarios work for compaction-passthrough calls too.
-  applyUpstreamExtraHeaders(
-    headers,
-    extraHeadersForUpstream(config, upstreamUrl),
-  );
-
-  try {
-    const upstream = await responseAgainstAbort(
-      () =>
-        upstreamFetch(upstreamUrl, {
-          method: "POST",
-          headers,
-          body: passthroughBody,
-          signal: abortScope.signal,
-        }),
-      abortScope.signal,
-    );
-    return wrapBodyWithCleanup(upstream, abortScope.dispose, abortScope.signal);
-  } catch (err) {
-    abortScope.dispose();
-    log.error("responses/compact upstream passthrough error:", err);
-    return new Response(
-      JSON.stringify({
-        error: "compaction_failed",
-        message: "Failed to reach upstream",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
-// ---------------------------------------------------------------------------
-
-const FOREGROUND_REQUEST_TIMEOUT_MS = 300_000;
-
-export function abortAwareDelay(
-  delayMs: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (delayMs <= 0) return Promise.resolve();
-  signal?.throwIfAborted();
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const cleanup = (): void => signal?.removeEventListener("abort", onAbort);
-    const finish = (operation: () => void): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      cleanup();
-      operation();
-    };
-    const onAbort = (): void => finish(() => reject(signal?.reason));
-    const timer = setTimeout(() => finish(resolve), delayMs);
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-  });
-}
-
-export async function completeBudgetThrottleDelay(
-  delayMs: number,
-  signal: AbortSignal | undefined,
-  record: () => void,
-): Promise<void> {
-  await abortAwareDelay(delayMs, signal);
-  signal?.throwIfAborted();
-  record();
-}
-
-export function createForegroundAbortScope(caller?: AbortSignal): {
-  signal: AbortSignal;
-  abort: (reason?: unknown) => void;
-  dispose: () => void;
-  deadlineAt: number;
-} {
-  const controller = new AbortController();
-  activeForegroundAbortControllers.add(controller);
-  const abort = (reason?: unknown) => {
-    if (!controller.signal.aborted) controller.abort(reason);
-  };
-  const onCallerAbort = () => abort(caller?.reason);
-  caller?.addEventListener("abort", onCallerAbort, { once: true });
-  if (caller?.aborted) onCallerAbort();
-  const deadlineAt = Date.now() + FOREGROUND_REQUEST_TIMEOUT_MS;
-  const timer = setTimeout(
-    () =>
-      abort(new DOMException("foreground request timed out", "TimeoutError")),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
-  );
-  return {
-    signal: controller.signal,
-    abort,
-    deadlineAt,
-    dispose: () => {
-      activeForegroundAbortControllers.delete(controller);
-      clearTimeout(timer);
-      caller?.removeEventListener("abort", onCallerAbort);
-    },
-  };
-}
-
-export function wrapBodyWithCleanup(
-  response: Response,
-  cleanup: () => void,
-  signal?: AbortSignal,
-  onCancel?: (reason?: unknown) => void,
-): Response {
-  if (!response.body) {
-    cleanup();
-    return response;
-  }
-  const reader = response.body.getReader();
-  let finished = false;
-  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
-  const onAbort = (): void => {
-    if (finished) return;
-    const reason = signal?.reason;
-    finish();
-    cancelAndReleaseReader(reader, reason);
-    try {
-      bodyController?.error(reason);
-    } catch {
-      // Already closed/cancelled.
-    }
-  };
-  const finish = () => {
-    if (finished) return;
-    finished = true;
-    signal?.removeEventListener("abort", onAbort);
-    cleanup();
-  };
-  const body = new ReadableStream<Uint8Array>(
-    {
-      start(controller) {
-        bodyController = controller;
-      },
-      async pull(controller) {
-        try {
-          const { done, value } = signal
-            ? await readStreamChunk(reader, { signal })
-            : await reader.read();
-          if (done) {
-            finish();
-            try {
-              reader.releaseLock();
-            } catch {
-              // The stream completed with no pending read in normal runtimes.
-            }
-            controller.close();
-          } else if (value) {
-            controller.enqueue(value);
-          }
-        } catch (error) {
-          finish();
-          cancelAndReleaseReader(reader, error);
-          controller.error(error);
-        }
-      },
-      cancel(reason) {
-        onCancel?.(reason);
-        finish();
-        cancelAndReleaseReader(reader, reason);
-      },
-    },
-    // Do not read ahead while a terminal-aware downstream parser is handling
-    // the current chunk. It may cancel at that terminal while the transport
-    // remains open, and a speculative read can otherwise strand the wrapper.
-    { highWaterMark: 0 },
-  );
-  signal?.addEventListener("abort", onAbort, { once: true });
-  if (signal?.aborted) onAbort();
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-}
-
-async function claimPipelineSession(
-  active: ActivePipelineRequest,
-  sessionID: string,
-  signal: AbortSignal,
-): Promise<void> {
-  if (active.sessionIDs.has(sessionID)) return;
-  signal.throwIfAborted();
-  if (pipelineSessionHasCapacity(sessionID)) {
-    active.sessionIDs.add(sessionID);
-    return;
-  }
-  if (
-    pendingSessionClaims.has(sessionID) ||
-    pendingSessionClaims.size >= MAX_PENDING_SESSION_CLAIMS ||
-    pendingSessionClaimsForAdmissionKey(active.admissionKey) >=
-      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
-  ) {
-    throw new PipelineCapacityError("session request queue full");
-  }
-
-  activePipelineRequests.delete(active);
-  return new Promise<void>((resolve, reject) => {
-    let claim: PendingSessionClaim;
-    const onAbort = () => {
-      if (pendingSessionClaims.get(sessionID) !== claim) return;
-      pendingSessionClaims.delete(sessionID);
-      signal.removeEventListener("abort", onAbort);
-      reject(signal.reason);
-      pumpPendingSessionClaims();
-    };
-    claim = { active, sessionID, signal, resolve, reject, onAbort };
-    pendingSessionClaims.set(sessionID, claim);
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    else pumpPendingSessionClaims();
-  });
-}
-
-async function runActivePipelineRequest(
-  callerSignal: AbortSignal | undefined,
-  operation: (
-    signal: AbortSignal,
-    trackOperation: (operation: Promise<unknown>) => void,
-    claimSession: (sessionID: string) => Promise<void>,
-  ) => Promise<Response>,
-  onResponseBodySettled?: () => void,
-  onResponseBodyCancelled?: () => void,
-  admissionKey = "",
-): Promise<Response> {
-  if (
-    detachedPipelineRequests.size +
-      activePipelineRequests.size +
-      pendingSessionClaims.size >=
-      maxDetachedPipelineRequests ||
-    activePipelineRequests.size + streamingPostResponsePending >=
-      maxActivePipelineRequests ||
-    activePipelineRequestsForAdmissionKey(admissionKey) +
-      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) >=
-      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
-  ) {
-    return errorResponse(503, "Gateway is busy");
-  }
-  const lifecycle = new AbortController();
-  const signal = callerSignal
-    ? AbortSignal.any([callerSignal, lifecycle.signal])
-    : lifecycle.signal;
-  let settle: (() => void) | undefined;
-  const settled = new Promise<void>((resolve) => {
-    settle = resolve;
-  });
-  const pendingOperations = new Set<Promise<void>>();
-  let finished = false;
-  let bodySettled = false;
-  let responseReturned = false;
-  let responseCancelled = false;
-  const markResponseCancelled = (): void => {
-    if (responseCancelled) return;
-    responseCancelled = true;
-    onResponseBodyCancelled?.();
-  };
-  function onAbort(): void {
-    if (responseReturned) {
-      if (callerSignal?.aborted) markResponseCancelled();
-      settleResponse();
-    }
-  }
-  const trackOperation = (operation: Promise<unknown>): void => {
-    const tracked = operation.then(
-      () => {},
-      () => {},
-    );
-    pendingOperations.add(tracked);
-    void tracked.finally(() => pendingOperations.delete(tracked));
-  };
-  async function finish(): Promise<void> {
-    if (finished) return;
-    finished = true;
-    signal.removeEventListener("abort", onAbort);
-    while (pendingOperations.size > 0) {
-      await Promise.all(pendingOperations);
-    }
-    activePipelineRequests.delete(active);
-    detachedPipelineRequests.delete(active);
-    pumpPendingSessionClaims();
-    settle?.();
-  }
-  function settleResponse(): void {
-    if (bodySettled) return;
-    bodySettled = true;
-    onResponseBodySettled?.();
-    void finish();
-  }
-  const active: ActivePipelineRequest = {
-    admissionKey,
-    abort: (reason) => {
-      lifecycle.abort(reason);
-      if (responseReturned) settleResponse();
-    },
-    settled,
-    sessionIDs: new Set(),
-  };
-  activePipelineRequests.add(active);
-  signal.addEventListener("abort", onAbort, { once: true });
-
-  try {
-    const response = await operation(signal, trackOperation, (sessionID) =>
-      claimPipelineSession(active, sessionID, signal),
-    );
-    responseReturned = true;
-    if (signal.aborted) {
-      if (callerSignal?.aborted) markResponseCancelled();
-      settleResponse();
-    }
-    return wrapBodyWithCleanup(response, settleResponse, undefined, () => {
-      markResponseCancelled();
-      settleResponse();
-    });
-  } catch (error) {
-    onResponseBodySettled?.();
-    void finish();
-    throw error;
-  }
-}
-
-export function validatedMetaStream(
-  response: Response,
-  protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
-  codex: boolean,
-  signal?: AbortSignal,
-): Response {
-  if (protocol === "openai-responses") {
-    return streamResponsesPassthrough(
-      response,
-      () => {},
-      undefined,
-      codex ? "codex" : "public",
-      signal,
-    );
-  }
-  const abort = new AbortController();
-  let downstreamCancelled = false;
-  let externalAborted = false;
-  let pumpStarted = false;
-  let resumeDemand: (() => void) | undefined;
-  const cleanup = (): void => {
-    signal?.removeEventListener("abort", onAbort);
-  };
-  const onAbort = () => {
-    externalAborted = true;
-    resumeDemand?.();
-    resumeDemand = undefined;
-    abort.abort(signal?.reason);
-    if (!pumpStarted)
-      void response.body?.cancel(signal?.reason).catch(() => {});
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  if (signal?.aborted) onAbort();
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      let settled = false;
-      const waitForDemand = async (): Promise<void> => {
-        while (
-          !downstreamCancelled &&
-          !externalAborted &&
-          (controller.desiredSize ?? 1) <= 0
-        ) {
-          await new Promise<void>((resolve) => {
-            resumeDemand = resolve;
-          });
-        }
-        if (externalAborted) throw signal?.reason;
-      };
-      const forward = async (event: string, data: string): Promise<void> => {
-        await waitForDemand();
-        const wire =
-          event === "message"
-            ? `data: ${data}\n\n`
-            : formatSSEEvent(event, data);
-        controller.enqueue(encoder.encode(wire));
-      };
-      const safeClose = (): void => {
-        if (downstreamCancelled || settled) return;
-        settled = true;
-        cleanup();
-        try {
-          controller.close();
-        } catch {
-          // Already closed/cancelled.
-        }
-      };
-      const safeError = (error: unknown): void => {
-        if (downstreamCancelled || settled) return;
-        settled = true;
-        cleanup();
-        try {
-          controller.error(error);
-        } catch {
-          // Already closed/cancelled.
-        }
-      };
-      const pump = async (): Promise<void> => {
-        pumpStarted = true;
-        if (downstreamCancelled) return;
-        try {
-          if (protocol === "anthropic") {
-            if (!response.body)
-              throw new Error("Upstream response has no body");
-            const reader = response.body.getReader();
-            const validator = new AnthropicSSEValidator();
-            try {
-              for await (const { event, data } of parseSSEStream(reader, {
-                signal: abort.signal,
-                requireEventTerminator: true,
-                fatalUtf8: true,
-                maxFrames: DEFAULT_MAX_SSE_FRAMES,
-                maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
-              })) {
-                validator.process(event, data);
-                await forward(event, data);
-                if (validator.isDone()) break;
-              }
-              validator.assertDone();
-            } finally {
-              cancelAndReleaseReader(reader);
-            }
-          } else if (protocol === "openai") {
-            await accumulateOpenAISSEStream(response, {
-              signal: abort.signal,
-              strict: true,
-              stopAtTerminal: true,
-              consumeUntilDone: true,
-              onValidatedEvent: forward,
-            });
-          } else {
-            await accumulateGeminiSSEStream(response, {
-              signal: abort.signal,
-              strict: true,
-              stopAtTerminal: true,
-              onValidatedEvent: forward,
-            });
-          }
-          safeClose();
-        } catch (error) {
-          if (downstreamCancelled) {
-            cleanup();
-            return;
-          }
-          safeError(externalAborted ? (signal?.reason ?? error) : error);
-        }
-      };
-      queueMicrotask(() => void pump().catch((error) => safeError(error)));
-    },
-    pull() {
-      resumeDemand?.();
-      resumeDemand = undefined;
-    },
-    cancel(reason) {
-      resumeDemand?.();
-      resumeDemand = undefined;
-      downstreamCancelled = true;
-      abort.abort(new DOMException("client disconnected", "AbortError"));
-      cleanup();
-      if (!pumpStarted) void response.body?.cancel(reason).catch(() => {});
-    },
-  });
-  return new Response(stream, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-}
-
-async function handlePassthrough(
-  req: GatewayRequest,
-  config: GatewayConfig,
-): Promise<Response> {
-  setSentryLightContext({ model: req.model });
-
-  const abortScope = createForegroundAbortScope(req.signal);
-  let forwarded: UpstreamResult;
-  try {
-    forwarded = await forwardToUpstream(
-      req,
-      config,
-      undefined,
-      undefined,
-      abortScope.signal,
-    );
-  } catch (error) {
-    abortScope.dispose();
-    throw error;
-  }
-  const effectiveProtocol = forwarded.effectiveProtocol;
-  const upstreamResponse = wrapBodyWithCleanup(
-    forwarded.response,
-    abortScope.dispose,
-    abortScope.signal,
-  );
-
-  const withLimits = (response: Response): Response => {
-    copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
-    return response;
-  };
-
-  // Meta/side-channel calls must preserve provider errors as ordinary HTTP
-  // responses. Running a 4xx/429 body through an SSE validator would launder
-  // it into status 200 or a synthetic stream failure.
-  if (!upstreamResponse.ok) {
-    return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
-  }
-
-  // Vertex speaks the native Anthropic wire format (Anthropic SSE for streaming
-  // and the native Anthropic JSON shape for non-streaming), so for passthrough
-  // routing it is wire-equivalent to "anthropic". Without this mapping a
-  // streaming meta request (title-gen/summary) on a Vertex session would fail
-  // the same-wire fast path below and get buffered+re-emitted through the
-  // cross-protocol branch instead of streaming through raw. Collapse
-  // vertex→anthropic here so a same-wire client (anthropic) streams through
-  // unchanged.
-  const wireProtocol: typeof effectiveProtocol =
-    effectiveProtocol === "vertex" ? "anthropic" : effectiveProtocol;
-
-  // When upstream and client use the same protocol, pass through unchanged.
-  // Cross-protocol translation is only needed when provider routing maps
-  // to a different protocol (e.g., OpenAI client → Anthropic upstream).
-  if (wireProtocol === req.protocol) {
-    if (req.stream && upstreamResponse.body) {
-      return withLimits(
-        validatedMetaStream(
-          upstreamResponse,
-          wireProtocol,
-          req.codex === true,
-          abortScope.signal,
-        ),
-      );
-    }
-    const body = await readForegroundBody(
-      upstreamResponse,
-      false,
-      undefined,
-      abortScope.signal,
-    );
-    if (wireProtocol === "openai-responses") {
-      parseResponsesNonStreamEnvelope(
-        JSON.parse(body) as Record<string, unknown>,
-      );
-    }
-    const headers = new Headers({ "content-type": "application/json" });
-    copyUsageLimitHeaders(upstreamResponse.headers, headers);
-    return new Response(body, { status: upstreamResponse.status, headers });
-  }
-
-  // Cross-protocol: accumulate the upstream response and re-emit in the
-  // client's wire format (reuses the same translation infrastructure as
-  // conversation turns).
-  if (req.stream && upstreamResponse.body) {
-    if (wireProtocol === "anthropic") {
-      // Anthropic SSE upstream (incl. Vertex) → translate to client's format
-      const anthropicSSE = new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        headers: {
-          "content-type": "text/event-stream",
-          "cache-control": "no-cache",
-          connection: "keep-alive",
-        },
-      });
-      if (req.protocol === "openai") {
-        return withLimits(
-          translateAnthropicStreamToOpenAI(anthropicSSE, {
-            strict: true,
-            signal: abortScope.signal,
-          }),
-        );
-      }
-      if (req.protocol === "openai-responses") {
-        return withLimits(
-          translateAnthropicStreamToResponses(anthropicSSE, {
-            strict: true,
-            signal: abortScope.signal,
-          }),
-        );
-      }
-      if (req.protocol === "gemini") {
-        return withLimits(
-          translateAnthropicStreamToGemini(anthropicSSE, {
-            strict: true,
-            signal: abortScope.signal,
-          }),
-        );
-      }
-    }
-    // Other cross-protocol streaming combos: accumulate + re-emit
-    const resp = await preserveIncompleteResponsesTerminal(
-      wireProtocol === "openai"
-        ? accumulateOpenAISSEStream(upstreamResponse, {
-            signal: abortScope.signal,
-            strict: true,
-            stopAtTerminal: true,
-            consumeUntilDone: true,
-          })
-        : wireProtocol === "openai-responses"
-          ? accumulateResponsesSSEStream(upstreamResponse, {
-              signal: abortScope.signal,
-              validation: req.codex === true ? "codex" : "public",
-              stopAtTerminal: true,
-              requireCompletedTerminal: true,
-            })
-          : wireProtocol === "gemini"
-            ? accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
-                strict: true,
-                stopAtTerminal: true,
-              })
-            : accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
-                strict: true,
-                stopAtTerminal: true,
-              }),
-    );
-    return withLimits(
-      nonStreamHttpResponse(
-        resp,
-        req.protocol,
-        req.stream,
-        undefined,
-        requestEnablesLongContext(req),
-      ),
-    );
-  }
-
-  // Non-streaming cross-protocol: accumulate + re-emit
-  const resp = await preserveIncompleteResponsesTerminal(
-    accumulateNonStreamResponse(
-      upstreamResponse,
-      wireProtocol,
-      req.codex === true,
-      abortScope.signal,
-    ),
-  );
-  return withLimits(
-    nonStreamHttpResponse(
-      resp,
-      req.protocol,
-      req.stream,
-      undefined,
-      requestEnablesLongContext(req),
-    ),
-  );
-}
-
-/**
- * Validate a provisional session identity without touching session-owned state.
- * The full Lore turn runs only on a later retry after this successful response
- * confirms the presented header. Failed and incomplete attempts leave the
- * adopted session, project rows, auth registries, and gradient state untouched.
- */
-async function handleProvisionalConversationTurn(
-  req: GatewayRequest,
-  config: GatewayConfig,
-  identified: IdentifiedSession,
-  pathResult: ProjectPathResult,
-  requestOrder: number,
-  requestGeneration: number,
-  downstreamSettled: Promise<void>,
-  downstreamWasCancelled: () => boolean,
-): Promise<Response> {
-  // Resolve and validate route intent once, but keep it private until the
-  // provisional identity is confirmed by a complete response and client EOF.
-  const requestUpstream = prepareRequestUpstream(req, config);
-  const abortScope = createForegroundAbortScope(req.signal);
-  let forwarded: UpstreamResult;
-  try {
-    forwarded = await forwardToUpstream(
-      req,
-      config,
-      undefined,
-      undefined,
-      abortScope.signal,
-      requestUpstream.route,
-    );
-  } catch (error) {
-    abortScope.dispose();
-    throw error;
-  }
-  const upstreamResponse = wrapBodyWithCleanup(
-    forwarded.response,
-    abortScope.dispose,
-    abortScope.signal,
-  );
-  if (!upstreamResponse.ok) {
-    // A provisional request cannot use provider diagnostics for recovery, and
-    // must never expose them while proving a session identity.
-    void upstreamResponse.body?.cancel().catch(() => {});
-    return sanitizedUpstreamErrorResponse(upstreamResponse);
-  }
-
-  let accumulated: GatewayResponse;
-  try {
-    accumulated = req.stream
-      ? forwarded.effectiveProtocol === "openai-responses"
-        ? await accumulateResponsesSSEStream(upstreamResponse, {
-            signal: abortScope.signal,
-            validation: req.codex ? "codex" : "public",
-            stopAtTerminal: true,
-            requireCompletedTerminal: true,
-          })
-        : forwarded.effectiveProtocol === "openai"
-          ? await accumulateOpenAISSEStream(upstreamResponse, {
-              signal: abortScope.signal,
-              strict: true,
-              stopAtTerminal: true,
-              consumeUntilDone: true,
-            })
-          : forwarded.effectiveProtocol === "gemini"
-            ? await accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
-                strict: true,
-                stopAtTerminal: true,
-              })
-            : await accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
-                strict: true,
-                stopAtTerminal: true,
-              })
-      : await accumulateNonStreamResponse(
-          upstreamResponse,
-          forwarded.effectiveProtocol,
-          req.codex === true,
-          abortScope.signal,
-          true,
-        );
-  } catch (error) {
-    abortScope.dispose();
-    if (!(error instanceof ResponsesTerminalError)) throw error;
-    scheduleStreamingPostResponse(
-      identified.sessionID,
-      requestGeneration,
-      async () => {
-        await downstreamSettled;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        const pause = provisionalFinalizerPauseForTest;
-        if (pause) {
-          pause.onWait();
-          await pause.pause;
-        }
-        if (requestGeneration !== streamingPostResponseGeneration) return;
-        if (
-          identified.guardProject &&
-          conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
-        ) {
-          dropOwnedProvisionalKey(
-            identified.provisionalKey,
-            identified.sessionID,
-          );
-          return;
-        }
-        accountUnsuccessfulResponse(
-          error.response,
-          identified.sessionID,
-          conversationTTLForAccounting(identified.sessionID),
-          undefined,
-          () => {},
-          () => {
-            const state = sessions.get(identified.sessionID);
-            if (state) state._dirty = true;
-          },
-        );
-      },
-      () => {},
-      true,
-      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-    );
-    if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
-      const response = nonStreamHttpResponse(
-        error.response,
-        req.protocol,
-        req.stream,
-        undefined,
-        requestEnablesLongContext(req),
-      );
-      copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
-      return response;
-    }
-    return errorResponse(502, "Gateway request failed");
-  }
-  if (
-    forwarded.effectiveProtocol === "gemini" &&
-    !["end_turn", "max_tokens", "tool_use"].includes(accumulated.stopReason)
-  ) {
-    throw new Error("upstream Gemini request did not complete");
-  }
-  abortScope.dispose();
-  const response = nonStreamHttpResponse(
-    accumulated,
-    req.protocol,
-    req.stream,
-    undefined,
-    requestEnablesLongContext(req),
-  );
-  copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
-
-  const commit = async (): Promise<boolean> => {
-    if (
-      requestGeneration !== streamingPostResponseGeneration ||
-      req.signal?.aborted ||
-      downstreamWasCancelled()
-    ) {
-      return false;
-    }
-    if (
-      identified.provisionalKey &&
-      !provisionalKeyOwned(identified.provisionalKey, identified.sessionID)
-    ) {
-      return false;
-    }
-    const credential = extractAuth(req.rawHeaders);
-    const persisted = loadSessionTracking(identified.sessionID);
-    const liveState = sessions.get(identified.sessionID);
-    let restoredUpstream:
-      | ReturnType<typeof deserializeUpstreamState>
-      | undefined;
-    if (!liveState && persisted?.lastUpstream) {
-      try {
-        restoredUpstream = deserializeUpstreamState(
-          persisted.lastUpstream,
-          config,
-        );
-      } catch {
-        log.warn(
-          `corrupt last upstream for session ${identified.sessionID.slice(0, 16)}, ignoring`,
-        );
-      }
-    }
-    const upstreamState: MutableUpstreamState = {
-      lastUpstream: liveState?.lastUpstream ?? restoredUpstream?.lastUpstream,
-      upstreamByProvider: new Map(
-        liveState?.upstreamByProvider ?? restoredUpstream?.upstreamByProvider,
-      ),
-      _upstreamRequestOrder: liveState?._upstreamRequestOrder,
-      _upstreamRequestOrderByProvider:
-        liveState?._upstreamRequestOrderByProvider
-          ? new Map(liveState._upstreamRequestOrderByProvider)
-          : undefined,
-    };
-    const upstreamUpdate = applyRequestUpstream(
-      upstreamState,
-      requestUpstream.snapshot,
-      requestOrder,
-      config,
-    );
-    // Reconstruct the binding exactly as the full pipeline does, but keep it
-    // private until this successful provisional turn is durably committed.
-    // This is what self-heals rows written to a cwd/unattributed bucket before
-    // publishing the newly adopted header and confident path.
-    postResponseStartObserver?.();
-    const noStore =
-      persisted?.amnesia === true ||
-      req.rawHeaders["x-lore-no-store"] === "true";
-    const userIndex = req.messages.findLastIndex(
-      (message) => message.role === "user",
-    );
-    const temporalInput: TurnTemporalInput = {
-      assistantIndex: req.messages.length,
-      ...(userIndex >= 0
-        ? {
-            latestUser: gatewayMessagesToLore(
-              [req.messages[userIndex]],
-              identified.sessionID,
-              userIndex,
-              userIndex,
-            )[0],
-          }
-        : {}),
-    };
-    const credentialFingerprint =
-      requestCredentialFingerprint(req.rawHeaders, config) ?? "";
-    const known = knownSessionHeaderForRequest(
-      req,
-      identified.sessionID,
-      config,
-    );
-    let projectPath = pathResult.path;
-    let projectPathProvisional = pathResult.source === "cwd";
-    withSavepoint("commit_provisional_turn", () => {
-      if (
-        identified.expectedUnowned &&
-        !legacyAdoptionTargetIsUnowned(identified.sessionID)
-      ) {
-        dropOwnedProvisionalKey(
-          identified.provisionalKey,
-          identified.sessionID,
-        );
-        throw new Error("legacy session owner changed during adoption");
-      }
-      if (
-        identified.guardProject &&
-        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
-      ) {
-        dropOwnedProvisionalKey(
-          identified.provisionalKey,
-          identified.sessionID,
-        );
-        throw new Error("session project changed during provisional migration");
-      }
-      // Project creation/reattribution belongs to the same transaction as the
-      // turn, tracking, route, and header confirmation. A local write failure
-      // must leave the provisional project and identity wholly unchanged.
-      const pathState = {
-        sessionID: identified.sessionID,
-        projectPath: persisted?.projectPath ?? pathResult.path,
-        projectPathProvisional: persisted?.projectPath
-          ? persisted.projectPathProvisional
-          : pathResult.source === "cwd",
-        gitRemote: pathResult.gitRemote,
-      } as Partial<SessionState> as SessionState;
-      projectPath = resolveSessionProjectPath(pathResult, pathState, config);
-      projectPathProvisional = pathState.projectPathProvisional === true;
-      if (
-        projectPathProvisional &&
-        (pathResult.source === "header" || pathResult.source === "inferred")
-      ) {
-        throw new Error("provisional project re-attribution failed");
-      }
-      ensureProject(projectPath, undefined, pathResult.gitRemote);
-      storeTurnTemporal({
-        temporalInput,
-        assistantContentBlocks: accumulated.content,
-        usage: accumulated.usage ?? ZERO_USAGE,
-        model: accumulated.model,
-        projectPath,
-        sessionID: identified.sessionID,
-        noStore,
-      });
-      saveSessionTracking(identified.sessionID, {
-        messageCount: req.messages.length,
-        turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
-        consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
-        projectPath,
-        projectPathProvisional,
-        credentialFingerprint,
-        ...(identified.adoptionFingerprint
-          ? { fingerprint: identified.adoptionFingerprint }
-          : {}),
-        ...(upstreamUpdate.changed
-          ? { lastUpstream: serializeUpstreamState(upstreamState) }
-          : {}),
-        ...(known
-          ? {
-              headerSessionId: known.sessionId,
-              headerName: known.headerName,
-            }
-          : {}),
-      });
-    });
-    const state = getOrCreateSession(
-      identified.sessionID,
-      projectPath,
-      projectPathProvisional ? "cwd" : "header",
-      credentialFingerprint,
-      config,
-    );
-    if (upstreamUpdate.changed) {
-      if (upstreamState.lastUpstream) {
-        state.lastUpstream = upstreamState.lastUpstream;
-      } else {
-        delete state.lastUpstream;
-      }
-      state.upstreamByProvider = upstreamState.upstreamByProvider;
-      if (upstreamState._upstreamRequestOrder !== undefined) {
-        state._upstreamRequestOrder = upstreamState._upstreamRequestOrder;
-      } else {
-        delete state._upstreamRequestOrder;
-      }
-      if (upstreamState._upstreamRequestOrderByProvider) {
-        state._upstreamRequestOrderByProvider =
-          upstreamState._upstreamRequestOrderByProvider;
-      } else {
-        delete state._upstreamRequestOrderByProvider;
-      }
-      if (upstreamUpdate.resetCache) {
-        state.cacheAnalytics.lastRequestBody = null;
-      }
-    }
-    if (known) publishKnownSessionHeader(known, state, credentialFingerprint);
-    else state.credentialFingerprint = credentialFingerprint;
-    if (identified.tier === 3) observeHeaderValues(req.rawHeaders);
-    state.projectPath = projectPath;
-    state.projectPathProvisional = projectPathProvisional;
-    if (identified.adoptionFingerprint) {
-      state.fingerprint = identified.adoptionFingerprint;
-    }
-    if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
-    state.messageCount = req.messages.length;
-    state._dirty = true;
-    if (credential) {
-      captureLegacyGlobalAuth(req, config, credential);
-      setSessionAuth(
-        state.sessionID,
-        credential,
-        extractProviderHeader(req.rawHeaders) || undefined,
-      );
-    }
-    captureBillingPrefix(state.sessionID, req.system);
-    captureSessionHeaders(state.sessionID, req.rawHeaders);
-    return true;
-  };
-  scheduleStreamingPostResponse(
-    identified.sessionID,
-    requestGeneration,
-    async () => {
-      await downstreamSettled;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      const pause = provisionalFinalizerPauseForTest;
-      if (pause) {
-        pause.onWait();
-        await pause.pause;
-      }
-      if (requestGeneration !== streamingPostResponseGeneration) return;
-      if (downstreamWasCancelled()) {
-        accountUnsuccessfulResponse(
-          accumulated,
-          identified.sessionID,
-          conversationTTLForAccounting(identified.sessionID),
-          undefined,
-          () => {},
-        );
-        return;
-      }
-      if (
-        identified.guardProject &&
-        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
-      ) {
-        dropOwnedProvisionalKey(
-          identified.provisionalKey,
-          identified.sessionID,
-        );
-        return;
-      }
-      if (!(await commit())) return;
-      accountConversationUsage(
-        accumulated.usage ?? ZERO_USAGE,
-        accumulated.model,
-        identified.sessionID,
-        conversationTTLForAccounting(identified.sessionID),
-      );
-      const state = sessions.get(identified.sessionID);
-      if (state) state._dirty = true;
-    },
-    () => {},
-    true,
-    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-  );
-  return response;
-}
-
-/**
- * Check whether the upstream prompt cache is likely still warm for this
- * session. Returns true when a warmup ping was successfully sent within
- * the current cache TTL window.
- *
- * When true, post-idle compaction should be skipped: the warmer replayed
- * the full (uncompacted) request body, so compacting now would produce
- * different bytes and bust the cache the warmer just paid to preserve.
- */
-function isCacheWarm(state: SessionState): boolean {
-  const warmup = state.warmup;
-  // Require at least one successful warmup before claiming warm.
-  // This also gates the forceKeepWarm early-return below.
-  if (!warmup?.lastWarmupAt) return false;
-
-  const profile = resolveWarmingProfile(
-    state.lastUpstream?.model,
-    state.lastUpstream?.protocol,
-    state.resolvedConversationTTL,
-  );
-  if (!profile) return false;
-
-  // /lore:warm:keep sessions: consider warm if the last warmup was within
-  // 2 TTL windows. The warmer fires once per TTL window, so 2× provides a
-  // safety margin while still expiring if the warmer has stopped
-  // (e.g. circuit breaker tripped, process-level failure).
-  if (warmup.forceKeepWarm) {
-    return Date.now() - warmup.lastWarmupAt < profile.ttlMs * 2;
-  }
-
-  return Date.now() - warmup.lastWarmupAt < profile.ttlMs;
-}
-
-/**
- * Decide whether to skip post-idle compaction (PR2b). The unified cache-economics
- * strategy provides the INTENT (hold-warm → protect the warm prefix by skipping
- * compaction; cool-bust/cool-full-write → let it compact), but the cache must
- * ACTUALLY still be live (`cacheIsLive` — the `isCacheWarm` time check) — a stale
- * hold-warm strategy whose cache has expired must NOT skip compaction (the cache
- * is cold; compaction is free and reduces ongoing read cost). Non-confident
- * strategy → `cacheIsLive` alone (the legacy behavior, byte-identical).
- */
-export function decideSkipCompact(
-  econ: {
-    result: { strategy: CacheStrategy; confident: boolean };
-    decidedAt: number;
-  } | null,
-  cacheIsLive: boolean,
-): boolean {
-  if (!econ?.result.confident) return cacheIsLive;
-  // Confident hold-warm wants to skip, but ONLY if the cache is actually live.
-  if (strategyWantsWarming(econ.result.strategy)) return cacheIsLive;
-  // cool-bust / cool-full-write: don't skip — let it compact.
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Case 3: Normal conversation turn — full pipeline
-// ---------------------------------------------------------------------------
-
-export function mergeRecallUsage(
-  current: GatewayUsage,
-  continuation: GatewayUsage,
-): GatewayUsage {
-  const merged: GatewayUsage = {
-    inputTokens: safeTokenSum(
-      [current.inputTokens, continuation.inputTokens],
-      "recall usage token overflow",
-    ),
-    outputTokens: safeTokenSum(
-      [current.outputTokens, continuation.outputTokens],
-      "recall usage token overflow",
-    ),
-  };
-  if (
-    current.cacheReadInputTokens !== undefined ||
-    continuation.cacheReadInputTokens !== undefined
-  ) {
-    merged.cacheReadInputTokens = safeTokenSum(
-      [current.cacheReadInputTokens, continuation.cacheReadInputTokens],
-      "recall usage token overflow",
-    );
-  }
-  if (
-    current.cacheCreationInputTokens !== undefined ||
-    continuation.cacheCreationInputTokens !== undefined
-  ) {
-    merged.cacheCreationInputTokens = safeTokenSum(
-      [current.cacheCreationInputTokens, continuation.cacheCreationInputTokens],
-      "recall usage token overflow",
-    );
-  }
-  safeTokenSum(
-    [
-      merged.inputTokens,
-      merged.outputTokens,
-      merged.cacheReadInputTokens,
-      merged.cacheCreationInputTokens,
-    ],
-    "recall usage token overflow",
-  );
-  return merged;
-}
-
-/** Compact, provider-neutral finalization guidance appended only to the last tool result. */
-function recallBudgetGuidance(
-  result: string,
-  reason: RecallStopReason | undefined,
-): string {
-  if (!reason) return result;
-  return (
-    `${result}\n\n[Recall policy: stop further recall because ${reason}. ` +
-    "Use the evidence above to answer now or hand back an ordinary tool.]"
-  );
-}
-
-function assertCurrentPipelineGeneration(
-  signal: AbortSignal | undefined,
-  requestGeneration: number,
-): void {
-  signal?.throwIfAborted();
-  if (
-    pipelineResetInProgress ||
-    requestGeneration !== streamingPostResponseGeneration
-  ) {
-    throw new DOMException("gateway pipeline generation changed", "AbortError");
-  }
-}
-
-async function handleConversationTurn(
-  req: GatewayRequest,
-  config: GatewayConfig,
-  requestOrder: number,
-  requestGeneration: number,
-  downstreamSettled: Promise<void>,
-  downstreamWasCancelled: () => boolean,
-  claimSession: (sessionID: string) => Promise<void>,
-  onSessionIdentified?: (sessionID: string) => void,
-): Promise<Response> {
-  if (
-    pipelineResetInProgress ||
-    requestGeneration !== streamingPostResponseGeneration
-  ) {
-    return errorResponse(503, "Gateway pipeline generation changed");
-  }
-  // --- 1. Project path & init ---
-  // Enrich headers with context markers injected by lore-hermes plugin.
-  // This lets getProjectPath() pick up [lore:project=...] via the existing
-  // header resolution path without modifying config.ts.
-  if (!req.rawHeaders["x-lore-project"]) {
-    const markerProject = extractProjectMarker(req.messages);
-    if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
-  }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
-
-  // --- 2. Capture auth credentials for background workers ---
-  const cred = extractAuth(req.rawHeaders);
-
-  // --- 3. Session identification ---
-  const admitted = await withIdentityAdmission(req, config, async () => {
-    const result = await identifySession(
-      req,
-      pathResult.path,
-      pathResult.source,
-      requestGeneration,
-      config,
-    );
-    const claimed = result.isNew || result.provisionalIdentity === true;
-    if (claimed) await claimSession(result.sessionID);
-    const revalidateConfirmedIdentity =
-      !result.isNew && result.provisionalIdentity !== true && result.tier !== 3;
-    return { identified: result, claimed, revalidateConfirmedIdentity };
-  });
-  const { identified } = admitted;
-  const { sessionID, isNew, tier } = identified;
-  try {
-    onSessionIdentified?.(sessionID);
-  } catch (error) {
-    log.warn("session diagnostic failed:", error);
-  }
-  if (!admitted.claimed) await claimSession(sessionID);
-  if (identified.expectedUnowned && !legacyAdoptionTargetIsUnowned(sessionID)) {
-    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
-    return errorResponse(404, "No authenticated session found");
-  }
-  if (
-    admitted.revalidateConfirmedIdentity &&
-    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-  ) {
-    return errorResponse(404, "No authenticated session found");
-  }
-  if (
-    identified.guardProject &&
-    conflictsWithConfidentSessionProject(sessionID, pathResult)
-  ) {
-    dropOwnedProvisionalKey(identified.provisionalKey, sessionID);
-    throw new Error("session project changed during provisional migration");
-  }
-  await awaitStreamingPostResponse(sessionID, req.signal);
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  if (
-    admitted.revalidateConfirmedIdentity &&
-    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-  ) {
-    return errorResponse(404, "No authenticated session found");
-  }
-  // Marker-derived project/session data has already been copied into headers;
-  // strip it before either the provisional verifier or full pipeline forwards.
-  stripContextMarkers(req.messages);
-  if (identified.provisionalIdentity) {
-    const preUpstreamPause = pipelinePreUpstreamPauseForTest;
-    if (preUpstreamPause) {
-      preUpstreamPause.onWait();
-      await preUpstreamPause.pause;
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-    }
-    return handleProvisionalConversationTurn(
-      req,
-      config,
-      identified,
-      pathResult,
-      requestOrder,
-      requestGeneration,
-      downstreamSettled,
-      downstreamWasCancelled,
-    );
-  }
-  const legacyGlobalProvider = cred
-    ? captureLegacyGlobalAuth(req, config, cred)
-    : undefined;
-
-  const sessionState = getOrCreateSession(
-    sessionID,
-    pathResult.path,
-    pathResult.source,
-    requestCredentialFingerprint(req.rawHeaders, config) ?? "",
-    config,
-  );
-  await beforeUpstreamCaptureForTest?.(req, sessionState);
-  const sessionSignal = sessionLifecycleSignal(sessionID);
-  const suppressTemporalStorage =
-    sessionState.amnesia || req.rawHeaders["x-lore-no-store"] === "true";
-  const preUpstreamPause = pipelinePreUpstreamPauseForTest;
-  if (preUpstreamPause) {
-    preUpstreamPause.onWait();
-    await preUpstreamPause.pause;
-    assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  }
-  let projectPath = resolveSessionProjectPath(pathResult, sessionState, config);
-
-  // Routing and policy are request intent, not a property of a successful
-  // response. Capture now so a failed policy-tightening request still governs
-  // workers, and use the order assigned synchronously in handleRequest so an
-  // older concurrent turn can never overwrite a newer one.
-  const requestUpstreamRoute = captureRequestUpstream(
-    req,
-    sessionState,
-    config,
-    requestOrder,
-  );
-
-  // --- Synthetic project-resolution: capture a returning tool_result ---
-  // If we previously injected a synthetic tool_use for project detection,
-  // capture the client's tool_result, parse it, and bind the project before
-  // initIfNeeded runs (so the project row targets the corrected path).
-  if (
-    (sessionState.syntheticResolveState === "readPending" ||
-      sessionState.syntheticResolveState === "shellPending") &&
-    sessionState.syntheticResolveToolUseId
-  ) {
-    const captured = captureSyntheticToolResult(
-      req,
-      sessionState.syntheticResolveToolUseId,
-    );
-    if (captured && sessionState.syntheticResolveKind) {
-      // A combined shell probe (#627 piggyback) carries the project-resolution
-      // output AND, after a separator, a reference-validity snapshot. Split
-      // first so resolution parsing only sees its own lines.
-      const split = sessionState.refcheckInProbe
-        ? splitProbeOutput(captured.text)
-        : { resolution: captured.text, refcheck: null };
-      const resolved = captured.isError
-        ? {}
-        : parseResolveProjectResult(
-            sessionState.syntheticResolveKind,
-            split.resolution,
-          );
-      // Apply the resolution — bind the project by remote and/or root.
-      projectPath = applySyntheticResolution(
-        sessionState,
-        resolved,
-        projectPath,
-      );
-      // Strip the synthetic round-trip from the conversation so the LLM
-      // never sees it and it's excluded from temporal storage.
-      stripSyntheticRoundTrips(req);
-
-      // Apply the piggybacked reference-validity snapshot against the NOW-BOUND
-      // project (#627). A missing/errored snapshot → NoopResolver (neutral, but
-      // still stamps the 24h gate). Never throws into the request path.
-      if (sessionState.refcheckInProbe) {
-        try {
-          const resolver =
-            captured.isError || split.refcheck == null
-              ? new NoopResolver()
-              : new SyntheticProbeResolver(split.refcheck);
-          const refRes = await ltm.validateProjectReferences(
-            projectPath,
-            resolver,
-            Date.now(),
-            req.signal,
-          );
-          assertCurrentPipelineGeneration(req.signal, requestGeneration);
-          if (refRes.penalized > 0) {
-            log.info(
-              `reference drift (remote): penalized ${refRes.penalized}/${refRes.checked} ` +
-                `entries for session ${sessionID.slice(0, 16)}`,
-            );
-          }
-        } catch (e) {
-          assertCurrentPipelineGeneration(req.signal, requestGeneration);
-          log.warn("synthetic reference-validation error (non-fatal):", e);
-        }
-        sessionState.refcheckInProbe = false;
-      }
-
-      // Escalation: read probe yielded no remote → try shell next.
-      const stillWeak = sessionState.projectPathProvisional === true;
-      sessionState.syntheticResolveStage =
-        sessionState.syntheticResolveKind === "read"
-          ? "readTried"
-          : "shellTried";
-      if (stillWeak && sessionState.syntheticResolveKind === "read") {
-        // Re-eligible for a shell probe on this same turn's injection phase.
-        sessionState.syntheticResolveState = "none";
-      } else {
-        sessionState.syntheticResolveState = "done";
-      }
-    } else {
-      // No tool_result arrived (non-agentic client or skipped) — give up.
-      sessionState.syntheticResolveState = "done";
-      sessionState.refcheckInProbe = false;
-    }
-    sessionState.syntheticResolveToolUseId = undefined;
-    sessionState.syntheticResolveKind = undefined;
-  }
-
-  // Also strip any stale synthetic blocks that might echo back from the
-  // conversation history (belt-and-suspenders — prevents leaking upstream).
-  stripSyntheticRoundTrips(req);
-
-  // Initialize the project AFTER path correction so a path-less probe request
-  // never creates a project row for the gateway's cwd or an unattributed
-  // bucket (provider-agnostic: applies to every protocol/client).
-  await initIfNeeded(
-    projectPath,
-    config,
-    pathResult.gitRemote,
-    req.signal,
-    requestGeneration,
-  );
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-
-  // Mark sub-agent sessions (x-parent-session-id OR x-claude-code-agent-id
-  // present). These get their own session but are flagged for cache warming
-  // exemption. Resolve the client-side parent ID to a Lore internal session ID
-  // via the headerSessionIndex (searches all indexed headers, including Tier 2
-  // learned). Tier 3 (fingerprint-only) parents have no index entry — resolution
-  // will fail and a warning is logged.
-  //
-  // Claude Code sub-agents do NOT carry x-parent-session-id (that header is
-  // OpenCode-only); they carry x-claude-code-agent-id. Their parent session is
-  // the one that shares the x-claude-code-session-id with this request, so we
-  // resolve it through the index by that shared session-id value.
-  {
-    const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
-    const parentClientId = req.rawHeaders["x-parent-session-id"];
-    const sharedSessionId = req.rawHeaders["x-claude-code-session-id"];
-    const credentialFingerprint = requestCredentialFingerprint(
-      req.rawHeaders,
-      config,
-    );
-    // Resolve by the OpenCode parent-session-id, or — for Claude Code — by
-    // the parent's shared x-claude-code-session-id (the only stable link back
-    // to the parent session; x-claude-code-parent-agent-id identifies the
-    // parent *agent*, not its session). May be undefined for a malformed or
-    // adversarial sub-agent request that carries neither header.
-    const parentLookupValue = parentClientId ?? sharedSessionId;
-    const shouldResolveParent =
-      credentialFingerprint !== null &&
-      (!sessionState.isSubagent || !sessionState.parentSessionId) &&
-      (isClaudeSubagent || !!parentClientId) &&
-      !!parentLookupValue;
-    if (shouldResolveParent) {
-      if (!sessionState.isSubagent) {
-        sessionState.isSubagent = true;
-      }
-      // Search the full headerSessionIndex — covers Tier 1 (known) and Tier 2 (learned) headers.
-      let resolvedParent: string | undefined;
-      for (const [key, loreId] of headerSessionIndex) {
-        const parsed = parseSessionIndexKey(key);
-        if (
-          parsed?.credentialFingerprint === credentialFingerprint &&
-          parsed.headerValue === parentLookupValue
-        ) {
-          resolvedParent = loreId;
-          break;
-        }
-      }
-      if (resolvedParent) {
-        sessionState.parentSessionId = resolvedParent;
-        saveSessionTracking(sessionID, {
-          isSubagent: true,
-          parentSessionId: resolvedParent,
-        });
-      } else if (!sessionState.parentSessionId) {
-        // Parent may use Tier 3 (fingerprint) identification, or hasn't made
-        // its first request yet. Persist isSubagent but leave parentSessionId
-        // null — subsequent requests will re-attempt resolution.
-        // Dedup the log: a child agent with an unresolvable parent fires this
-        // branch on every turn. Without dedup, a single parent-less agent
-        // produces 50+ identical log lines per session.
-        const pendingKey = `${sessionID}:${parentLookupValue}`;
-        if (!subagentParentPendingLogged.has(pendingKey)) {
-          subagentParentPendingLogged.add(pendingKey);
-          log.info(
-            `session ${sessionID.slice(0, 16)}: subagent parent resolution pending for client ID ${parentLookupValue.slice(0, 16)}`,
-          );
-        }
-        saveSessionTracking(sessionID, { isSubagent: true });
-      }
-    }
-  }
-
-  // Bind auth credential to this session for background workers.
-  // Pass providerID so credentials are stored per-provider — prevents
-  // cross-contamination when a session switches providers mid-conversation
-  // (e.g. Anthropic → MiniMax → Anthropic).
-  if (cred) {
-    const reqProviderID =
-      requestUpstreamRoute.providerID ??
-      (requestUpstreamRoute.effectiveProtocol === "anthropic"
-        ? "anthropic"
-        : requestUpstreamRoute.effectiveProtocol === "openai" ||
-            requestUpstreamRoute.effectiveProtocol === "openai-responses"
-          ? "openai"
-          : requestUpstreamRoute.effectiveProtocol === "gemini"
-            ? "google"
-            : undefined);
-    setSessionAuth(sessionID, cred, reqProviderID);
-    clearWarmupAuthDisabled(sessionID); // Re-enable cache warming on fresh credential
-
-    // One-time "it's working" signal. A fresh user has no easy way to tell
-    // their agent is actually routed through Lore; this confirms it the first
-    // time a credentialed turn is proxied, then stays quiet for the process.
-    if (!_firstTurnConfirmed) {
-      _firstTurnConfirmed = true;
-      log.info(
-        "\u2713 Connected — your agent's traffic is now flowing through Lore.",
-      );
-    }
-
-    // A session-less import may use only the deliberately captured local,
-    // configured direct-provider credential. Remote/custom routes never expose
-    // their credential through the process-global fallback.
-    if (legacyGlobalProvider) {
-      trackBackground(flushPendingImport(legacyGlobalProvider));
-    }
-  }
-
-  // Capture billing header prefix for worker cch computation, scoped to
-  // this session. Bearer tokens (Claude Code OAuth) embed an
-  // x-anthropic-billing-header in the system prompt; we extract the prefix
-  // so workers can rebuild it. Per-session storage prevents cross-session
-  // contamination when multiple Claude Code versions share one process.
-  captureBillingPrefix(sessionID, req.system);
-
-  // Sniff Claude Code headers from conversation turns for replay on worker
-  // calls. For OAuth sessions, workers need the same anthropic-beta and
-  // user-agent headers as conversation turns to avoid 401 rejections.
-  captureSessionHeaders(sessionID, req.rawHeaders);
-
-  // Track fingerprint for future correlation
-  if (isNew) {
-    if (!suppressTemporalStorage) {
-      const credentialFingerprint =
-        requestCredentialFingerprint(req.rawHeaders, config) ?? "";
-      const fingerprint = await fingerprintMessages(
-        req.messages.map((m) => ({ role: m.role, content: m.content })),
-        usesRemoteSessionBinding(config)
-          ? { tenantFingerprint: credentialFingerprint }
-          : { authSuffix: cred ? authFingerprint(cred) : "" },
-      );
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      sessionState.fingerprint = fingerprint;
-      // Persist fingerprint immediately — rare event (new session only)
-      saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
-    }
-
-    // Re-check knowledge files on new session start.  The file watcher
-    // covers live edits, but this catches cases where:
-    //  - The watcher wasn't set up (file didn't exist at startup)
-    //  - The watcher missed an event (e.g. network-mounted fs)
-    //  - The file was created after gateway startup (first export from another machine)
-    tryImportKnowledge(projectPath);
-  }
-
-  // --- Compaction anomaly detection ---
-  // If we reach here (normal turn) with a large message count drop, the client
-  // performed compaction that slipped past both structural and pattern detection.
-  // Skip for sub-agent sessions (small context by design) and tool-less
-  // requests (title-gen, summarization agents that resume with fresh context).
-  const prevMsgCount = sessionState.messageCount;
-  const currMsgCount = req.messages.length;
-  if (
-    prevMsgCount > 10 &&
-    currMsgCount < prevMsgCount * 0.5 &&
-    !sessionState.isSubagent &&
-    req.tools.length > 0
-  ) {
-    log.warn(
-      `compaction anomaly: session=${sessionID.slice(0, 16)} ` +
-        `messages dropped ${prevMsgCount}→${currMsgCount}. ` +
-        `Client may have compacted outside gateway control.`,
-    );
-    // Flag the session for urgent distillation on the next turn. The messages
-    // that just dropped out of the client's view are still in our temporal
-    // store and need to be distilled before any further distillation run
-    // picks up a stale snapshot — otherwise the dropped context is silently
-    // lost from the Lore-side view.
-    sessionState.compactionAnomalyPending = true;
-  }
-
-  // Update message count for proximity matching & structural compaction detection.
-  sessionState.messageCount = currMsgCount;
-  // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
-  // together to avoid multiple DB writes per turn.
-  // Also persist the project binding (v36): this runs AFTER
-  // resolveSessionProjectPath() above, so it captures the post-resolution
-  // binding — including a provisional→confident transition from self-heal —
-  // letting a gateway restart rehydrate the exact project_id and never split it.
-  saveSessionTracking(sessionID, {
-    messageCount: currMsgCount,
-    turnsSinceCuration: sessionState.turnsSinceCuration,
-    consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
-    projectPath: sessionState.projectPath || null,
-    projectPathProvisional: sessionState.projectPathProvisional === true,
-    credentialFingerprint: sessionState.credentialFingerprint ?? "",
-    // v37: persist the compaction anomaly flag so a gateway restart between
-    // detection (this turn) and consumption (next turn's scheduleBackgroundWork)
-    // doesn't lose the urgent-distillation signal.
-    ...(sessionState.compactionAnomalyPending
-      ? { compactionAnomalyPending: true }
-      : {}),
-  });
-
-  // Track session model for worker model discovery
-  _lastSeenSessionModel = req.model;
-
-  // --- Sentry scope enrichment ---
-  setSentryRequestContext({
-    authFingerprint: cred ? authFingerprint(cred) : null,
-    sessionID,
-    model: req.model,
-    upstreamUrl: (() => {
-      const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
-      if (hdrUp) return hdrUp;
-      const pid = extractProviderHeader(req.rawHeaders);
-      if (pid) {
-        const pr = resolveProviderRoute(pid);
-        if (pr?.url) return pr.url;
-      }
-      return (
-        resolveUpstreamRoute(req.model)?.url ??
-        (req.protocol === "anthropic"
-          ? config.upstreamAnthropic
-          : config.upstreamOpenAI)
-      );
-    })(),
-    port: config.port,
-    projectPath,
-  });
-
-  // Anchor provenance must use the normalized client transcript before recall
-  // expansion mutates historical markers into synthetic tool round trips.
-  const recallClientMessages = req.messages.map((message) => ({
-    role: message.role,
-    content: [...message.content],
-    ...(message.provenanceContent
-      ? { provenanceContent: [...message.provenanceContent] }
-      : {}),
-    ...(message.provenancePositions
-      ? { provenancePositions: [...message.provenancePositions] }
-      : {}),
-  }));
-
-  // --- Expand recall markers from previous turns ---
-  // Scan all assistant messages for marker text blocks and restore them
-  // to tool_use + tool_result pairs before forwarding upstream.
-  if (sessionState.recallStore.size > 0) {
-    // Cleanup must inspect the client transcript while anchors still exist.
-    // Expanding first would make every live anchor look orphaned.
-    const recallStoreChanged = cleanupRecallStore(
-      req,
-      sessionState.recallStore,
-    );
-    const expanded = expandRecallMarkers(req, sessionState.recallStore);
-    if (expanded) {
-      log.info(`expanded recall markers for session ${sessionID.slice(0, 16)}`);
-    }
-    if (recallStoreChanged) {
-      saveSessionTracking(sessionID, {
-        recallStore: serializeRecallStore(sessionState.recallStore),
-      });
-    }
-  }
-
-  // --- Strip context warning markers from previous turns ---
-  // The warning is injected into the response (assistant message) so the user
-  // can see it. On the next turn, the client sends it back as part of the
-  // assistant message. Strip it here so the API sees the original content,
-  // preserving the prompt cache prefix.
-  stripContextWarnings(req.messages);
-
-  // Per-turn attribution diagnostics. Surfacing source/header/mode here makes
-  // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
-  // or a hosted gateway falling back to its own cwd) immediately visible in
-  // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
-  const preparationTiming = new PreparationTiming(req);
-  log.info(
-    `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
-      `subagent=${!!sessionState.isSubagent} ` +
-      `source=${pathResult.source} ` +
-      `hdrProject=${req.rawHeaders["x-lore-project"] ? "present" : "absent"} ` +
-      `provisional=${sessionState.projectPathProvisional === true} ` +
-      `remoteGateway=${config.remoteGateway} hosted=${isHostedMode()} ` +
-      `project=${projectPath}`,
-  );
-
-  // --- 4. Resolve this request's model budget ---
-  // Snapshot ALL model-derived budget inputs into one object keyed to THIS
-  // request's model. The host does async work (ltm.forSession awaits) between
-  // here and the gradient transform; passing this snapshot to transform()
-  // applies it atomically there, so a concurrently-running request for a
-  // different model can't clobber the values mid-flight (the cross-model
-  // contamination that flipped l0cap 200000 ↔ 3571428 and thrashed layers).
-  //
-  // Close the cold-start race: the very first request after a restart can land
-  // before the fire-and-forget models.dev pre-warm resolves, which would size
-  // this turn's budget from fallback pricing/limits (wrong l0cap/usable for one
-  // turn). Wait briefly for real data; bounded so a slow/unreachable models.dev
-  // never hangs the request (falls back to the same fallback path as before).
-  // INVARIANT: this await must stay immediately before getModelSpec — it exists
-  // to make the budget below read real model data, not fallback. (Secondary
-  // getModelEntrySync sites — worker selection, cost metrics — intentionally
-  // keep using the sync fallback on the very first turn; they self-correct.)
-  await ensureModelDataReady();
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  // Price the session model from the provider it is actually routed to (the
-  // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
-  // published by several providers at different cache prices would otherwise
-  // corrupt cacheReadCost → computeLayer0Cap.
-  const modelSpec = getModelSpec(
-    req.model,
-    extractProviderHeader(req.rawHeaders),
-  );
-  const cfg = loreConfig();
-
-  // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
-  // never inherit another model's layer-0 cap: when this model has no
-  // cacheReadCost we resolve to 0 (disabled), NOT whatever the previous
-  // request left in the global.
-  let layer0Cap = 0;
-  if (cfg.budget.maxLayer0Tokens !== undefined) {
-    layer0Cap = cfg.budget.maxLayer0Tokens;
-  } else if (
-    modelSpec.cacheReadCost &&
-    cfg.budget.targetCacheReadCostPerTurn > 0
-  ) {
-    layer0Cap = computeLayer0Cap(
-      cfg.budget.targetCacheReadCostPerTurn,
-      modelSpec.cacheReadCost,
-      modelSpec.context,
-    );
-  }
-
-  // Cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
-  // Anthropic charges 2× cache_write for 1h TTL — adjust so shouldCompress()
-  // uses the actual write cost. When the model has no pricing data, resolve to
-  // 0/0 (conservative: do-not-compress) rather than the previous model's price.
-  let cacheWriteCostPerToken = 0;
-  let cacheReadCostPerToken = 0;
-  if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
-    cacheWriteCostPerToken =
-      sessionState.resolvedConversationTTL === "1h"
-        ? modelSpec.cacheWriteCost * 2
-        : modelSpec.cacheWriteCost;
-    cacheReadCostPerToken = modelSpec.cacheReadCost;
-  }
-
-  const modelBudget = {
-    contextLimit: modelSpec.context,
-    outputReserved: modelSpec.output,
-    maxLayer0Tokens: layer0Cap,
-    cacheWriteCostPerToken,
-    cacheReadCostPerToken,
-    qualityKneeFraction: modelSpec.qualityKneeFraction,
-  };
-
-  // Also apply to the module globals now, so any gradient helper invoked
-  // BEFORE transform() (and outside the atomic transform path) reads this
-  // request's values. transform() re-applies modelBudget atomically.
-  setModelLimits({ context: modelSpec.context, output: modelSpec.output });
-  setMaxLayer0Tokens(layer0Cap);
-  setCachePricing(cacheWriteCostPerToken, cacheReadCostPerToken);
-  setQualityKnee(
-    modelSpec.qualityKneeFraction ?? DEFAULT_QUALITY_KNEE_FRACTION,
-  );
-
-  // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
-  // Claude Code manages its own max_tokens (32K for modern models). Other
-  // clients often send low/missing values (defaults to 4096 in ingress
-  // parsing). Apply a hybrid headroom + history algorithm that tightens
-  // from the 32K ceiling based on actual output patterns.
-  const isCC =
-    isClaudeCodeClient(req.rawHeaders) || hasBillingHeader(req.system);
-  if (!isCC) {
-    // Anthropic extended thinking arrives as `metadata.thinking =
-    // { type: "enabled", budget_tokens: N }` (not a KNOWN_BODY_FIELD, so it
-    // lands in metadata). Extract the budget so max_tokens leaves room above it
-    // — otherwise a low output EMA collapses the cap to the floor and truncates
-    // thinking-heavy turns mid-reasoning.
-    const thinkingMeta = req.metadata?.thinking as
-      | { type?: string; budget_tokens?: number }
-      | undefined;
-    const thinkingBudget =
-      thinkingMeta?.type === "enabled" &&
-      typeof thinkingMeta.budget_tokens === "number" &&
-      thinkingMeta.budget_tokens > 0
-        ? thinkingMeta.budget_tokens
-        : undefined;
-    // Structural fallback: thinking-by-default models (e.g. claude-opus-4-8)
-    // emit thinking blocks WITHOUT an explicit `thinking` param, so the budget
-    // above is undefined. Detect active reasoning from the request's thinking
-    // blocks so the rewrite still reserves headroom and doesn't truncate the
-    // turn at the end of a thinking block.
-    const thinkingActive =
-      thinkingBudget !== undefined || requestHasThinking(req.messages);
-    // Unsatisfiable budget: if the thinking budget alone meets or exceeds the
-    // model's hard output limit, no rewrite can produce a valid
-    // `max_tokens > budget_tokens` (Anthropic 400s otherwise). The request is
-    // the client's responsibility — leave its max_tokens untouched rather than
-    // rewrite it into an invalid value.
-    if (thinkingBudget !== undefined && modelSpec.output <= thinkingBudget) {
-      // When models.dev data isn't loaded, modelSpec.output is the fallback
-      // (8192) — likely understating the model's true output limit and making
-      // a legitimate thinking budget look unsatisfiable. Surface that at WARN so
-      // a cold-cache/outage misfire is visible (vs. a genuinely invalid budget).
-      const onFallback = !isModelDataLoaded();
-      const logFn = onFallback ? log.warn : log.info;
-      logFn(
-        `max_tokens: leaving client value ${req.maxTokens} untouched ` +
-          `(thinkingBudget=${thinkingBudget} >= modelOutput=${modelSpec.output}` +
-          (onFallback
-            ? "; model data not loaded — using fallback limits"
-            : "") +
-          `)`,
-      );
-    } else {
-      const computed = computeMaxTokens(
-        modelSpec.output,
-        modelSpec.context,
-        sessionState.outputTokensEMA,
-        sessionState.lastStopReason,
-        sessionState.lastInputTokens,
-        thinkingBudget,
-        thinkingActive,
-      );
-      if (req.maxTokens !== computed) {
-        log.info(
-          `max_tokens: ${req.maxTokens} → ${computed} ` +
-            `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
-            `lastStop=${sessionState.lastStopReason ?? "none"}` +
-            (thinkingBudget
-              ? `, thinkingBudget=${thinkingBudget}`
-              : thinkingActive
-                ? ", thinking=active(no budget)"
-                : "") +
-            `)`,
-        );
-        req.maxTokens = computed;
-      }
-    }
-  }
-
-  // --- 5. Cold-cache idle-resume ---
-  // Auto-sync idle threshold with conversation TTL: when 1h TTL is active
-  // (explicit or auto-upgraded), use 60 min idle threshold instead of the
-  // configured value (which defaults to 5 min for the default cache tier).
-  const effectiveIdleMinutes =
-    sessionState.resolvedConversationTTL === "1h" && cfg.idleResumeMinutes <= 5
-      ? 60
-      : cfg.idleResumeMinutes;
-  const thresholdMs = effectiveIdleMinutes * 60_000;
-  // PR2b: the unified cache-economics strategy decides whether to skip
-  // post-idle compaction. When confident AND the cache is actually still live
-  // (isCacheWarm time check), hold-warm → skip compaction (protect the warm
-  // prefix); cool-bust/cool-full-write → don't skip (let it compact). The
-  // isCacheWarm liveness floor is ALWAYS required — a stale hold-warm strategy
-  // with an expired cache must NOT skip compaction (the cache is cold, compaction
-  // is free and beneficial). Falls back to isCacheWarm when non-confident.
-  const econ = getCacheStrategy(sessionID);
-  const cacheWarm = decideSkipCompact(econ, isCacheWarm(sessionState));
-  // `cacheWarm` also tells onIdleResume to PRESERVE the byte-identity caches
-  // (distilled prefix + raw-window pin) so the warm prefix survives the resume.
-  // A false-positive here (isCacheWarm true but the warmed bytes actually
-  // diverged) is safe: preserving at worst defers folding idle-distilled rows
-  // into the prefix by one cold cycle — never a worse cache bust than clearing
-  // (both produce a full write on a genuine miss; the preserved body is ≤ the
-  // re-rendered one).
-  const idleResult = onIdleResume(
-    sessionID,
-    thresholdMs,
-    Date.now(),
-    cacheWarm,
-  );
-  sessionState.lastTurnWasIdle = idleResult.triggered;
-  if (idleResult.triggered) {
-    ltmSessionCache.delete(sessionID);
-    saveSessionTracking(sessionID, {
-      ltmCacheText: null,
-      ltmCacheTokens: null,
-    });
-    // NOTE: the stable LTM block (system[1]: preferences + entities) is
-    // deliberately NOT refreshed here (v45). It is frozen for the session's life
-    // and replayed byte-identically — recomputing it from the live knowledge
-    // table on idle resume is what let a curator/consolidation delete change the
-    // "stable" prefix and bust the whole prompt cache (ses_14b9bf3d… incident).
-    // Re-warming after the 1h breakpoint expires re-sends the same frozen bytes;
-    // newly-curated preferences are picked up by the NEXT session, not mid-session.
-    log.info(
-      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
-        (cacheWarm ? " (cache warm — skipping compact)" : "") +
-        (econ?.result.confident
-          ? ` (strategy=${econ.result.strategy})`
-          : " (legacy isCacheWarm)"),
-    );
-    if (econ) {
-      log.info(
-        `cache-economics (compaction): session=${sessionID.slice(0, 16)} ` +
-          `strategy=${econ.result.strategy} skipCompact=${cacheWarm} ` +
-          `confident=${econ.result.confident === true} strategyAgeMs=${Date.now() - econ.decidedAt}`,
-      );
-    }
-  }
-
-  // Build the Lore message array once (resolved) — shared by the turn-1 LTM
-  // decision below (isLargeColdStart) and the gradient transform in step 7, so
-  // both see identical input and agree on whether this cold session compresses.
-  let {
-    loreMessages,
-    temporalInput,
-    provenanceByMessageId,
-    sourceWindow,
-    checkpoint,
-  } = await prepareSemanticMessages({
-    messages: req.messages,
-    sessionID,
-    projectPath,
-    noStore: suppressTemporalStorage,
-    protocol: req.protocol,
-    timing: preparationTiming,
-  });
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-
-  // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
-  // system[0]: Host prompt              [no cache_control]
-  // system[1]: Stable LTM (preferences) [cache_control: 1h] — pinned ≥1h
-  //
-  // system[0]+[1] form a stable prefix cached at 1h TTL (written at 2×
-  // cost, read at 0.1×). Context-bound LTM (gotchas/patterns/architecture +
-  // distillation/temporal context-sources) is NO LONGER emitted as a system[2]
-  // block — it rides the durable prompt-delta path from its FIRST injection
-  // onward (appended [user,assistant] pair at a frozen conversation-tail
-  // position, replayed byte-identically, re-anchored on compression). This
-  // removes the once-per-session first-population bust that a system[2] block
-  // caused (amplified on the OpenAI/OpenRouter path, where the whole system
-  // string shares a single cache_control breakpoint). The durable delta is the
-  // sole injection channel for context-bound LTM; the pin/cache bookkeeping
-  // below survives purely as the delta's diff baseline.
-  let stableLtmText: string | undefined; // block 2: preferences (system[1])
-  let pendingKnowledgeDelta:
-    | {
-        previousKeys: string[] | undefined;
-        nextKeys: string[] | undefined;
-        entries: Array<{
-          id: string;
-          category: string;
-          title: string;
-          content: string;
-        }>;
-        // #917: relevance-scored entries that didn't fit the system[2] budget,
-        // surfaced as a recall-by-id ToC inside the (frozen) knowledge delta.
-        overflow?: Array<{ id: string; category: string; title: string }>;
-      }
-    | undefined;
-  if (cfg.knowledge.enabled) {
-    // Track whether LTM state changed for batched DB persistence
-    let ltmDirty = false;
-    let pinDirty = false;
-
-    try {
-      const ltmFraction = cfg.budget.ltm;
-      // Per-session overhead (Bug 1, lever 2): budget off this session's own
-      // calibrated overhead, not a global EMA blended across sessions.
-      // Sub-agent sessions get a smaller, needs-based LTM budget so injected
-      // knowledge doesn't crowd out a short focused task's own context/output.
-      const ltmBudgetOpts = { isSubagent: !!sessionState.isSubagent };
-      const ltmBudget = getLtmBudget(
-        ltmFraction,
-        sessionID ?? undefined,
-        ltmBudgetOpts,
-      );
-      const prefBudget = getPreferenceLtmBudget(
-        cfg.budget.preferenceLtm,
-        sessionID ?? undefined,
-        ltmBudgetOpts,
-      );
-      // Surface the resolved LTM budget so a "knowledge is crowding my
-      // sub-agent" report is a one-grep diagnosis (LORE_DEBUG=1) instead of an
-      // inference from window sizes: sub-agents are capped tighter
-      // (SUBAGENT_MAX_LTM_BUDGET_FRACTION) so a small ctxBound here is expected
-      // and NOT the crowding cause — see the Onur sub-agent triage, Jul 2026.
-      log.info(
-        `ltm-budget: session=${sessionID?.slice(0, 16) ?? "none"} ` +
-          `subagent=${!!sessionState.isSubagent} ` +
-          `ctxBound=${ltmBudget} pref=${prefBudget} fraction=${ltmFraction}`,
-      );
-      const isFirstTurn =
-        sessionID != null && !temporal.hasMessages(projectPath, sessionID);
-      const contextHint = lastUserTextTrimmed(req);
-
-      // --- system[1]: Stable LTM (preferences) + known entities ---
-      // Computed once per session and pinned for ≥1h. NOT invalidated by
-      // curation — even if a preference changes, we keep the cached version
-      // so the Anthropic 1h prompt cache prefix stays warm.
-      // Uses a dedicated budget independent of context-bound LTM. The known-
-      // entities block is folded in here (not system[2]) so it is available on
-      // turn 1.
-      let stable = stableLtmCache.get(sessionID);
-      if (!stable) {
-        // Single-flight: a client header-timeout retry burst can fire several
-        // concurrent identical turns at a cold session. Without dedup they ALL
-        // recompute the heavy stable block (ltm.forSession ×2 + entity fetch +
-        // catalog scan) independently, compounding the very latency that caused
-        // the retries. Share one in-flight compute; the settled value lands in
-        // stableLtmCache before the promise resolves, so re-reading is race-free.
-        stable = await singleFlightStableLtm(
-          sessionID,
-          (signal) =>
-            computeStableLtm(
-              sessionID,
-              projectPath,
-              cfg,
-              contextHint,
-              prefBudget,
-              signal,
-              requestGeneration,
-            ),
-          req.signal,
-        );
-        assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      }
-      stableLtmText = stable?.formatted;
-
-      // Fallback for a genuinely-new but already-large session (no prior session
-      // to adopt — e.g. a transcript imported from another machine): the gradient
-      // will compress it on turn 1 (see gradient.isLargeColdStart), so inject
-      // context-bound LTM (system[2]) NOW instead of deferring to turn 2,
-      // collapsing the turn-2 system[2] bust and the turn-3 Layer 0→1 bust into
-      // the single cold write. Pass the stable-LTM token count as the ltm hint:
-      // when this returns false we skip system[2] and setLtmTokens(stableOnly),
-      // so the gradient transform sees the SAME expectedInput tested here — no
-      // decision-vs-compression drift band. (Adopted/resumed sessions are
-      // calibrated, so this is false for them — the restored pin handles
-      // system[2].) (issue #796)
-      const largeColdStart =
-        isFirstTurn &&
-        isLargeColdStart({
-          sourceWindow,
-          messages: loreMessages,
-          sessionID,
-          ltmTokens: stable?.tokenCount ?? 0,
-          // Re-apply this request's budget atomically: intervening awaits since
-          // the module globals were set (ltm/entity fetches above) could have
-          // let a concurrent request for a different model clobber them. (#1401)
-          budget: modelBudget,
-        });
-
-      // --- Context-bound LTM (non-preference entries; rides the durable prompt
-      // delta, NOT a system[2] block — issue #1502 retired that channel) ---
-      // Deferred to turn 2+ when real session context exists for relevance
-      // scoring. On turn 1, only stable LTM (preferences) is injected — EXCEPT
-      // for an already-large cold start (largeColdStart), where we inject now so
-      // LTM + the turn-1 compression are decided together (relevance scoring
-      // still works: contextHint comes from the incoming request, not temporal
-      // storage). (issue #796)
-      if (!isFirstTurn || largeColdStart) {
-        let cached = ltmSessionCache.get(sessionID);
-        // Entry-set keys for the *freshly computed* selection. Only populated
-        // on the recompute path (when ltmSessionCache was cold/invalidated) —
-        // that's the only path where re-ranking can churn the text. On the
-        // warm-cache path the text is unchanged, so byte equality with the pin
-        // suffices and keys aren't needed.
-        let cachedKeys: string[] | undefined;
-        let freshContextEntries:
-          | Array<{
-              id: string;
-              category: string;
-              title: string;
-              content: string;
-            }>
-          | undefined;
-        // #917: the budget-overflow tail from this turn's forSession, mapped to
-        // the ToC shape. Threaded into the knowledge delta below.
-        let freshContextOverflow:
-          | Array<{ id: string; category: string; title: string }>
-          | undefined;
-
-        if (!cached) {
-          // Full context-bound budget — preferences have their own dedicated budget.
-          const contextBudget = ltmBudget;
-          // Feed the previously-pinned entry set back in as a stability hint so
-          // per-turn relevance re-scoring doesn't churn the budget-boundary
-          // selection (which would bust the system[2] cache). New/removed/
-          // genuinely-more-relevant entries still change the set.
-          const stickyIds = entryKeyIds(
-            ltmPinnedText.get(sessionID)?.entryKeys,
-          );
-          // Exclude preferences — they're already in system[1]
-          const overflowSink: ltm.KnowledgeEntry[] = [];
-          const contextEntries = await ltm.forSession(
-            projectPath,
-            sessionID,
-            contextBudget,
-            {
-              signal: req.signal,
-              excludeCategories: ["preference"],
-              ...(contextHint ? { contextHint } : {}),
-              ...(stickyIds.size ? { stickyIds } : {}),
-              ...(cfg.knowledge.contextSources?.length
-                ? { includeContextSources: cfg.knowledge.contextSources }
-                : {}),
-              overflowSink,
-            },
-          );
-          assertCurrentPipelineGeneration(req.signal, requestGeneration);
-          freshContextEntries = contextEntries;
-          freshContextOverflow = overflowSink.map((e) => ({
-            id: e.id,
-            category: e.category,
-            title: e.title,
-          }));
-          if (contextEntries.length) {
-            const renderedIds: string[] = [];
-            const formatted = formatKnowledge(
-              contextEntries.map((e) => ({
-                id: e.id,
-                category: e.category,
-                title: e.title,
-                content: e.content,
-              })),
-              contextBudget,
-              renderedIds,
-            );
-            if (formatted) {
-              const tokenCount = coreEstimateTokens(formatted);
-              cached = { formatted, tokenCount };
-              cachedKeys = ltmEntryKeys(contextEntries, renderedIds);
-              ltmSessionCache.set(sessionID, cached);
-              ltmDirty = true;
-            }
-          }
-
-          const pinned = ltmPinnedText.get(sessionID);
-          if (!cached && pinned) {
-            // The fresh selection is empty, but removing the pinned system[2]
-            // block would still bust the cached prefix. Preserve the exact
-            // bytes and append a durable removal delta instead. Keep entryKeys
-            // frozen at the baseline (not []) so the coalesced delta describes
-            // the full frozen→current (empty) supersession — see the Layer-1
-            // material-delta note.
-            pendingKnowledgeDelta = {
-              previousKeys: pinned.entryKeys,
-              nextKeys: [],
-              entries: [],
-            };
-            cached = {
-              formatted: pinned.formatted,
-              tokenCount: pinned.tokenCount,
-            };
-            cachedKeys = [];
-            ltmSessionCache.set(sessionID, cached);
-            ltmPinnedText.set(sessionID, {
-              formatted: pinned.formatted,
-              tokenCount: pinned.tokenCount,
-              entryKeys: pinned.entryKeys,
-            });
-            ltmDirty = true;
-            pinDirty = true;
-          }
-        }
-
-        if (cached) {
-          // Reorder-tolerant diff-pinning: reuse the pinned system[2] text
-          // whenever the *selected entry set* is unchanged (same entry IDs,
-          // any order; same per-entry content). Pure re-ranking by
-          // forSession() must never bust the cache. Re-pin only when the
-          // selected set changes, an entry's content changed (curator update),
-          // or there is no pin yet. See ltmPinnedText docs.
-          const pinned = ltmPinnedText.get(sessionID);
-          // Key-format migration guard (#1320): a persisted pin from before the
-          // surfaceSignature change stores entryKeys in the old
-          // `id:fnv1a(title\x1f content)` format. On the first post-deploy turn
-          // the recomputed `cachedKeys` use the new normalized signature, so a
-          // pure element-wise compare would spuriously mismatch and re-pin (one-
-          // time cache bust for every warm session). shouldReanchorPinKeys
-          // detects the SAME selection in a new key encoding (same id set +
-          // byte-identical rendered text) so we re-anchor with zero bust.
-          if (
-            pinned?.entryKeys &&
-            cachedKeys &&
-            shouldReanchorPinKeys(
-              pinned.entryKeys,
-              cachedKeys,
-              cached.formatted,
-              pinned.formatted,
-            )
-          ) {
-            pinned.entryKeys = cachedKeys;
-          }
-          const setUnchanged = cachedKeys
-            ? // Recompute path: compare entry-key sets.
-              sameEntryKeys(pinned?.entryKeys, cachedKeys)
-            : // Warm-cache path (no fresh entries): the text didn't change, so
-              // byte equality against the pin is sufficient.
-              pinned != null && pinned.formatted === cached.formatted;
-
-          if (pinned && setUnchanged) {
-            // Same entry set (or identical text) — nothing to surface. The full
-            // set is already carried by the durable prompt-delta (appended on
-            // first injection), so we do NOT emit a system[2] block. Keep the
-            // session cache in lock-step with the pin so the
-            // persisted ltmCacheText never diverges from ltmPinText (a restart
-            // would otherwise reload cache=freshText / pin=oldText and spuriously
-            // re-pin). The pin is baseline-only metadata now — never on the wire.
-            if (cachedKeys && cached.formatted !== pinned.formatted) {
-              ltmSessionCache.set(sessionID, {
-                formatted: pinned.formatted,
-                tokenCount: pinned.tokenCount,
-              });
-              ltmDirty = true;
-            }
-          } else if (
-            pinned &&
-            cachedKeys &&
-            freshContextEntries &&
-            hasMaterialLtmDelta({
-              entries: freshContextEntries,
-              previousKeys: pinned.entryKeys,
-              nextKeys: cachedKeys,
-            })
-          ) {
-            // Material LTM changed mid-session. Surface the change via the
-            // durable prompt delta at the conversation tail; system[2] is never
-            // emitted, so the system prefix is never busted.
-            //
-            // CRITICAL: keep `entryKeys` frozen at the baseline that matches the
-            // set the durable delta was last coalesced against — do NOT advance
-            // it to cachedKeys. The delta is coalesced into a single row that is
-            // REPLACED each turn, so it must describe the CUMULATIVE delta from
-            // the frozen baseline. If we advanced the baseline, the next turn's
-            // delta would only describe that turn's increment and the coalesced
-            // row would silently drop earlier supersessions. The diff is
-            // recomputed from the frozen baseline every turn → re-upserting the
-            // same (frozen, current) pair yields byte-identical content
-            // (idempotent, no extra cache bust).
-            pendingKnowledgeDelta = {
-              previousKeys: pinned.entryKeys,
-              nextKeys: cachedKeys,
-              entries: freshContextEntries,
-              overflow: freshContextOverflow,
-            };
-            ltmPinnedText.set(sessionID, {
-              formatted: pinned.formatted,
-              tokenCount: pinned.tokenCount,
-              entryKeys: pinned.entryKeys,
-            });
-            ltmSessionCache.set(sessionID, {
-              formatted: pinned.formatted,
-              tokenCount: pinned.tokenCount,
-            });
-            ltmDirty = true;
-            pinDirty = true;
-            // Context-bound LTM rides the durable delta — no system[2] block.
-          } else if (freshContextEntries?.length && cachedKeys) {
-            // First injection (no prior system[2] pin). Historically this
-            // seeded a system[2] block, which — because system[2] sits inside
-            // the cached system prefix — cost a full
-            // prefix re-creation the first turn context-bound LTM appeared
-            // (~90–174K tokens; amplified on the OpenAI/OpenRouter path, where
-            // the whole system string shares a single cache_control breakpoint).
-            //
-            // Instead, route the first injection through the SAME durable
-            // prompt-delta path that already carries mid-session changes: append
-            // a [user,assistant] pair at the conversation tail (byte-stable,
-            // replayed verbatim, re-anchored on compression). system[2] is never
-            // populated, so the system prefix is never busted by context-bound
-            // LTM.
-            //
-            // Seed the delta baseline with an EMPTY-hash sentinel per current id
-            // (`fullSurfaceBaseline`) so `detectSurfacedMutations` surfaces the
-            // FULL set once (each entry's real hash differs from ""). The
-            // appended block records the true hashes, so the surfaced set
-            // advances and later turns don't re-fire — identical mechanics to
-            // the material-change branch, just with an empty baseline instead of
-            // a stale pinned one. We pin the RENDERED text bytes so the persisted
-            // pin (`ltmPinnedText`) keeps its entry-key identity as the baseline
-            // for subsequent material-delta detection, but we do NOT emit it as
-            // a system[2] block.
-            pendingKnowledgeDelta = {
-              previousKeys: fullSurfaceBaseline(entryKeyIds(cachedKeys)),
-              nextKeys: cachedKeys,
-              entries: freshContextEntries,
-              overflow: freshContextOverflow,
-            };
-            ltmPinnedText.set(sessionID, {
-              formatted: cached.formatted,
-              tokenCount: cached.tokenCount,
-              entryKeys: cachedKeys,
-            });
-            pinDirty = true;
-            // Context-bound LTM rides the durable delta — no system[2] block.
-          } else if (cached) {
-            // Fallback: a `cached` block reached here without matching the
-            // first-injection / material-change / setUnchanged branches — e.g.
-            // the empty-selection removal path above (cachedKeys=[], no fresh
-            // entries), which already queued its removal delta. Keep the pin as
-            // baseline metadata but do NOT emit system[2] — the durable delta
-            // is the sole carrier.
-            ltmPinnedText.set(sessionID, {
-              ...cached,
-              entryKeys: cachedKeys ?? ltmPinnedText.get(sessionID)?.entryKeys,
-            });
-            pinDirty = true;
-            // Context-bound LTM rides the durable delta — no system[2] block.
-          }
-        }
-      }
-
-      // Use the stable block's stored tokenCount rather than re-estimating
-      // from string length — avoids inconsistent estimates. Context-bound
-      // LTM rides the durable delta (accounted against the delta token
-      // budget, not the system cache budget), so it adds nothing here.
-      setLtmTokens(stable?.tokenCount ?? 0, sessionID);
-    } catch (e) {
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      log.error("LTM injection failed:", e);
-      setLtmTokens(0, sessionID);
-    } finally {
-      consumeCameOutOfIdle(sessionID);
-    }
-
-    // Batched LTM state persistence — single DB write for cache + pin changes
-    if (ltmDirty || pinDirty) {
-      const cached = ltmSessionCache.get(sessionID);
-      const pinned = ltmPinnedText.get(sessionID);
-      saveSessionTracking(sessionID, {
-        ...(ltmDirty && cached
-          ? {
-              ltmCacheText: cached.formatted,
-              ltmCacheTokens: cached.tokenCount,
-            }
-          : {}),
-        ...(pinDirty && pinned
-          ? {
-              ltmPinText: pinned.formatted,
-              ltmPinTokens: pinned.tokenCount,
-              ltmPinKeys: pinned.entryKeys
-                ? JSON.stringify(pinned.entryKeys)
-                : null,
-            }
-          : {}),
-      });
-    }
-  } else {
-    setLtmTokens(0, sessionID);
-    consumeCameOutOfIdle(sessionID);
-  }
-
-  // --- 7. Gradient transform on messages ---
-  // loreMessages was built + resolved once before the LTM block (step 6) so the
-  // turn-1 LTM decision and this transform share identical input. Reuse it.
-  //
-  // Pre-load the session's distillation snapshot off-thread first (#1082): the
-  // sync transform() below would otherwise run an unbounded distillation scan on
-  // this pre-upstream critical path. prewarm populates the same per-session
-  // snapshot transform() reads, so its loadDistillationsCached hits the cache
-  // instead of the DB. On a pool timeout it's a no-op and transform() falls back
-  // to the identical in-process load.
-  await prewarmDistillationSnapshot(
-    projectPath,
-    sessionID,
-    loreMessages,
-    req.signal,
-  );
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  // transform() updates core's attempted layer before dispatch. Use the
-  // last layer whose request was accepted upstream instead: a synthetic
-  // response or failed request must not consume a compaction boundary.
-  const previousTransformLayer =
-    sessionState.lastAcceptedProvenanceLayer ?? null;
-  let result;
-  try {
-    result = transform({
-      messages: loreMessages,
-      projectPath,
-      sessionID,
-      budget: modelBudget,
-      sourceWindow,
-    });
-  } catch (error) {
-    if (!(error instanceof FullSourceRequired) || !sourceWindow) throw error;
-    preparationTiming.metric(`source_fallback_${error.reason}`, 1);
-    ({
-      loreMessages,
-      temporalInput,
-      provenanceByMessageId,
-      sourceWindow,
-      checkpoint,
-    } = await prepareSemanticMessages({
-      messages: req.messages,
-      sessionID,
-      projectPath,
-      noStore: suppressTemporalStorage,
-      protocol: req.protocol,
-      forceFull: true,
-      timing: preparationTiming,
-    }));
-    assertCurrentPipelineGeneration(req.signal, requestGeneration);
-    result = transform({
-      messages: loreMessages,
-      projectPath,
-      sessionID,
-      budget: modelBudget,
-    });
-  }
-  checkpoint?.finish(result.messages);
-
-  // Drop trailing pure-text assistant messages to prevent prefill errors
-  for (;;) {
-    const last = result.messages.at(-1);
-    if (!last || last.info.role === "user") break;
-    const hasToolParts = last.parts.some((p) => p.type === "tool");
-    if (hasToolParts) break;
-    result.messages.pop();
-  }
-
-  // Persist the cross-turn dedup decision memo when it changed, so the stable
-  // full/collapsed form of each tool output survives a gateway restart (v41).
-  // Cheap change-guard avoids a DB write on turns where dedup didn't run.
-  {
-    const serialized = exportDedupDecisions(sessionID);
-    if (serialized !== lastSavedDedupDecisions.get(sessionID)) {
-      lastSavedDedupDecisions.set(sessionID, serialized ?? undefined);
-      saveSessionTracking(sessionID, { dedupDecisions: serialized });
-    }
-  }
-
-  // --- 7b. LTM refresh on emergency layer ---
-  // Layer 4 (emergency/transient reset) signals that the context was fully
-  // reset. Re-run forSession() to re-rank context-bound entries by relevance
-  // to the current conversation state — entries that became relevant mid-
-  // session (e.g. a gotcha discovered during debugging) are surfaced on the
-  // reset turn rather than waiting for the next session. Stable LTM
-  // (system[1]) is kept pinned — Layer 4 busts the prompt cache anyway, so
-  // system[1] will be re-written, but keeping the same content means the
-  // NEXT turn's prefix matches and gets a cache read.
-  if (result.refreshLtm && cfg.knowledge.enabled) {
-    try {
-      const ltmFraction = cfg.budget.ltm;
-      // Per-session overhead (Bug 1, lever 2). Sub-agents keep the smaller
-      // needs-based budget on the emergency-refresh path too.
-      const ltmBudget = getLtmBudget(ltmFraction, sessionID, {
-        isSubagent: !!sessionState.isSubagent,
-      });
-      // Full context-bound budget — preferences have their own dedicated budget.
-      const contextBudget = ltmBudget;
-      const stableTokens = stableLtmCache.get(sessionID)?.tokenCount ?? 0;
-      const contextHint = lastUserTextTrimmed(req);
-      // Stability hint: keep the previously-pinned set sticky so consecutive
-      // Layer-4 turns don't churn the selection (see step-6).
-      const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
-      const overflowSink: ltm.KnowledgeEntry[] = [];
-      const contextEntries = await ltm.forSession(
-        projectPath,
-        sessionID,
-        contextBudget,
-        {
-          signal: req.signal,
-          excludeCategories: ["preference"],
-          ...(contextHint ? { contextHint } : {}),
-          ...(stickyIds.size ? { stickyIds } : {}),
-          ...(cfg.knowledge.contextSources?.length
-            ? { includeContextSources: cfg.knowledge.contextSources }
-            : {}),
-          overflowSink,
-        },
-      );
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      const contextOverflow = overflowSink.map((e) => ({
-        id: e.id,
-        category: e.category,
-        title: e.title,
-      }));
-      let refreshed = false;
-
-      if (contextEntries.length) {
-        const renderedIds: string[] = [];
-        const formatted = formatKnowledge(
-          contextEntries.map((e) => ({
-            id: e.id,
-            category: e.category,
-            title: e.title,
-            content: e.content,
-          })),
-          contextBudget,
-          renderedIds,
-        );
-
-        if (formatted) {
-          const tokenCount = coreEstimateTokens(formatted);
-          const entryKeys = ltmEntryKeys(contextEntries, renderedIds);
-          // Always update the cache with freshly ranked entries.
-          ltmSessionCache.delete(sessionID);
-          ltmSessionCache.set(sessionID, { formatted, tokenCount });
-
-          // Reorder-tolerant diff-pinning: on consecutive Layer 4 turns,
-          // system[2] stability matters because system[0]+[1] ARE still cache
-          // reads at 1h TTL. Reuse the pin whenever the selected entry set is
-          // unchanged (same IDs + content, any order) — same policy as step 6.
-          const pinned = ltmPinnedText.get(sessionID);
-
-          if (pinned && sameEntryKeys(pinned.entryKeys, entryKeys)) {
-            // Same entry set — nothing to surface. The durable delta already
-            // carries the full set; do NOT emit a system[2] block.
-            setLtmTokens(stableTokens, sessionID);
-            saveSessionTracking(sessionID, {
-              ltmCacheText: formatted,
-              ltmCacheTokens: tokenCount,
-              // pin unchanged — don't write ltmPinText/ltmPinTokens/ltmPinKeys
-            });
-          } else if (
-            pinned &&
-            hasMaterialLtmDelta({
-              entries: contextEntries,
-              previousKeys: pinned.entryKeys,
-              nextKeys: entryKeys,
-            })
-          ) {
-            // Material LTM changed during emergency refresh. Surface the change
-            // as a durable prompt delta; system[2] is not emitted.
-            //
-            // CRITICAL: keep `entryKeys` frozen at the baseline matching the set
-            // the durable delta was last coalesced against — do NOT advance to
-            // the current `entryKeys`. The coalesced durable delta is replaced
-            // each turn, so it must describe the CUMULATIVE delta from the frozen
-            // baseline to the current selection; advancing the baseline would
-            // drop earlier supersessions from the single row.
-            const frozenKeys = pinned.entryKeys;
-            pendingKnowledgeDelta = {
-              previousKeys: frozenKeys,
-              nextKeys: entryKeys,
-              entries: contextEntries,
-              overflow: contextOverflow,
-            };
-            ltmPinnedText.set(sessionID, {
-              formatted: pinned.formatted,
-              tokenCount: pinned.tokenCount,
-              entryKeys: frozenKeys,
-            });
-            ltmSessionCache.delete(sessionID);
-            ltmSessionCache.set(sessionID, {
-              formatted: pinned.formatted,
-              tokenCount: pinned.tokenCount,
-            });
-            setLtmTokens(stableTokens, sessionID);
-            saveSessionTracking(sessionID, {
-              ltmCacheText: pinned.formatted,
-              ltmCacheTokens: pinned.tokenCount,
-              ltmPinText: pinned.formatted,
-              ltmPinTokens: pinned.tokenCount,
-              ltmPinKeys: JSON.stringify(frozenKeys),
-            });
-            // Context-bound LTM rides the durable delta — no system[2] block.
-          } else {
-            // First Layer 4 injection of context-bound LTM. Route it through the
-            // durable delta (full-surface baseline) rather than seeding system[2]
-            // — same rationale as the step-6 first-injection path. Layer 4 busts
-            // the prefix anyway, but keeping context-bound LTM out of system[2]
-            // means it stays cache-stable on the NEXT (non-emergency) turn too.
-            pendingKnowledgeDelta = {
-              previousKeys: fullSurfaceBaseline(entryKeyIds(entryKeys)),
-              nextKeys: entryKeys,
-              entries: contextEntries,
-              overflow: contextOverflow,
-            };
-            ltmPinnedText.set(sessionID, { formatted, tokenCount, entryKeys });
-            setLtmTokens(stableTokens, sessionID);
-            saveSessionTracking(sessionID, {
-              ltmCacheText: formatted,
-              ltmCacheTokens: tokenCount,
-              ltmPinText: formatted,
-              ltmPinTokens: tokenCount,
-              ltmPinKeys: JSON.stringify(entryKeys),
-            });
-            // Context-bound LTM rides the durable delta — no system[2] block.
-          }
-          refreshed = true;
-          log.info(
-            "Context-bound LTM refreshed on emergency layer (Layer 4) for session",
-            sessionID,
-          );
-        }
-      }
-
-      if (!refreshed) {
-        const pinned = ltmPinnedText.get(sessionID);
-        if (pinned) {
-          // No fresh context-bound entries were selected. Append a durable
-          // removal delta so the model knows the older entries are superseded;
-          // system[2] is not emitted.
-          //
-          // CRITICAL: keep entryKeys FROZEN at the baseline matching the set the
-          // durable delta was last coalesced against — do NOT wipe to []. The
-          // coalesced durable delta is replaced each turn and must describe the
-          // full cumulative frozen→current (empty) supersession. Wiping the
-          // baseline to [] here (in memory AND persisted) makes the next turn
-          // compute previous=[]→next=[] = no removals, dropping every earlier
-          // supersession from the single row.
-          const frozenKeys = pinned.entryKeys;
-          pendingKnowledgeDelta = {
-            previousKeys: frozenKeys,
-            nextKeys: [],
-            entries: [],
-          };
-          ltmPinnedText.set(sessionID, {
-            formatted: pinned.formatted,
-            tokenCount: pinned.tokenCount,
-            entryKeys: frozenKeys,
-          });
-          ltmSessionCache.delete(sessionID);
-          ltmSessionCache.set(sessionID, {
-            formatted: pinned.formatted,
-            tokenCount: pinned.tokenCount,
-          });
-          setLtmTokens(stableTokens, sessionID);
-          saveSessionTracking(sessionID, {
-            ltmCacheText: pinned.formatted,
-            ltmCacheTokens: pinned.tokenCount,
-            ltmPinText: pinned.formatted,
-            ltmPinTokens: pinned.tokenCount,
-            ltmPinKeys: JSON.stringify(frozenKeys),
-          });
-          // Context-bound LTM rides the durable delta — no system[2] block.
-          log.info(
-            "Context-bound LTM refresh returned no entries; superseding via durable delta for session",
-            sessionID,
-          );
-        } else {
-          // forSession() returned no context-bound entries and there is no prior
-          // pin to preserve — clear context LTM state. Stable LTM (system[1]) is
-          // preserved.
-          ltmSessionCache.delete(sessionID);
-          ltmPinnedText.delete(sessionID);
-          setLtmTokens(stableTokens, sessionID);
-          saveSessionTracking(sessionID, {
-            ltmCacheText: null,
-            ltmCacheTokens: null,
-            ltmPinText: null,
-            ltmPinTokens: null,
-            ltmPinKeys: null,
-          });
-          log.info(
-            "Context-bound LTM cleared on emergency layer (Layer 4) — stable LTM preserved for session",
-            sessionID,
-          );
-        }
-      }
-    } catch (e) {
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      // On error, leave the step-6 LTM state intact (cache, pin, text)
-      // so the turn proceeds with the pre-refresh knowledge rather than
-      // an inconsistent state. The next turn will retry via step 6.
-      log.error("LTM refresh on emergency layer failed:", e);
-    }
-  }
-
-  // --- 7c. (removed) Context health note ---
-  // Previously a per-turn "Context health" note was appended to system[2] when
-  // the gradient compressed context (layer ≥1). Its wording varied by layer,
-  // which busted the conversation cache on every layer oscillation (1→2→1)
-  // because system[2] has no cache_control of its own. The note was also
-  // largely redundant with the per-distillation "lossy" tags and the recall
-  // tool description. Its one unique signal (verify omitted specifics —
-  // rejected alternatives, exact errors, file paths, numbers — via recall) now
-  // lives statically in RECALL_TOOL_DESCRIPTION, which never busts the cache.
-  // See issue #741.
-
-  // --- 7d. Response-side warning injection ---
-  // The previous "unsustainable conversation detected (N consecutive cache busts)"
-  // warning was removed (#797). Rationale: the user has no actionable response
-  // (cache spirals are almost always upstream bugs — prefix drift, idle
-  // recompression artifacts, LTM pin mismatch — not user-correctable behavior),
-  // and the message was misleading. The bust-spiral signal is now routed
-  // directly to Sentry via `setupBustSpiralCapture` (past-grace = error,
-  // in-grace = info breadcrumb, recovery = info breadcrumb).
-  //
-  // Worker-degradation warning: still surfaced when background workers
-  // (distillation, curation, cache-warming) have been failing for a sustained
-  // period, so the user is told instead of silently losing compression/LTM.
-  // The user CAN act on this (e.g. check credentials / provider status), so
-  // user-visible text remains the right channel.
-  const workerWarningText = buildWorkerDegradationWarning(sessionID);
-  if (workerWarningText) {
-    log.warn(
-      `session ${sessionID}: worker degradation detected — warning will be prepended to response.`,
-    );
-  }
-  // A single combined flag/text drives all injection sites below.
-  const warningText: string | undefined = workerWarningText ?? undefined;
-  const shouldInjectWarning = !!warningText;
-
-  // --- 8. Build the modified request ---
-  // Reconstruct GatewayMessages from the transformed Lore messages.
-  // loreMessagesToGateway reconstructs tool_result blocks from assistant's
-  // completed/error tool parts; removeOrphanedToolResults is a safety net
-  // that catches any remaining orphaned tool_result references.
-  const transformedMessages = loreMessagesToGateway(
-    result.messages,
-    provenanceByMessageId,
-    shouldPreserveResponsesProvenance(previousTransformLayer, result.layer) &&
-      canReplayRequestProvenance(
-        req.protocol,
-        requestUpstreamRoute.effectiveProtocol,
-      ),
-  );
-  removeOrphanedToolResults(transformedMessages);
-
-  const modifiedReq: GatewayRequest = {
-    ...req,
-    // Host system prompt is passed through unmodified — LTM is injected
-    // as a separate system block via cache options for prefix stability.
-    messages: transformedMessages,
-  };
-
-  // --- 8b. Inject recall tool (with git reminder appended to description) ---
-  // Only inject if the client doesn't already have a recall tool (e.g. from
-  // a host plugin like OpenCode) and the request has other tools (so it's a
-  // coding agent, not a bare chat).
-  if (modifiedReq.tools.length > 0 && !clientHasRecallTool(modifiedReq.tools)) {
-    // Build the recall tool with git reminder baked into its description.
-    // This keeps the reminder in the stable tools prefix (1h cache) rather
-    // than the volatile system prompt.
-    const recallTool =
-      cfg.knowledge.enabled && cfg.loreFile.enabled
-        ? {
-            ...RECALL_GATEWAY_TOOL,
-            description: `${RECALL_GATEWAY_TOOL.description}\n\n${LORE_COMMIT_REMINDER}`,
-          }
-        : RECALL_GATEWAY_TOOL;
-    modifiedReq.tools = [...modifiedReq.tools, recallTool];
-  }
-  if (
-    modifiedReq.protocol === "openai-responses" &&
-    clientHasRecallTool(modifiedReq.tools)
-  ) {
-    modifiedReq.extras = {
-      ...modifiedReq.extras,
-      parallel_tool_calls: false,
-    };
-  }
-
-  // --- 8c. Synthetic project-resolution: inject probe if eligible ---
-  // When the session has a weak/provisional binding AND we haven't exhausted
-  // our probe attempts, short-circuit the turn with a synthetic tool_use
-  // targeting the client's own read or shell tool.
-  //
-  // Only fires on REMOTE gateways — for local gateways, process.cwd() is
-  // the real project directory (cwd is "weak but correct"), so injecting
-  // a probe would add latency for no benefit.
-  {
-    const weakBinding = sessionState.projectPathProvisional === true;
-    const resolveState = sessionState.syntheticResolveState ?? "none";
-    const eligible =
-      weakBinding &&
-      config.remoteGateway &&
-      resolveState === "none" &&
-      modifiedReq.tools.length > 0;
-
-    if (eligible) {
-      const stage = sessionState.syntheticResolveStage;
-      // Stage 1: prefer read (safer). Stage 2 (after readTried): shell only.
-      const readTarget = stage ? null : findReadTool(modifiedReq.tools);
-      const target = readTarget ?? findShellTool(modifiedReq.tools);
-      if (target) {
-        // Piggyback the #627 reference-validity snapshot onto the SHELL probe so
-        // it costs NO extra round-trip (a separate probe would short-circuit an
-        // additional turn). Only the shell stage can run a script; the read
-        // probe can't. Ref scope is best-effort: the project is still provisional
-        // here, so refs come from the provisional binding — capture re-gathers
-        // from the RESOLVED project, and file/command checks are repo-level
-        // (identity-independent), so accuracy is preserved; only a line ref whose
-        // basename wasn't pre-listed degrades to 'unknown' (neutral).
-        let block = buildSyntheticToolUseBlock(target);
-        if (
-          target.kind === "shell" &&
-          cfg.knowledge.enabled &&
-          cfg.knowledge.referenceValidation
-        ) {
-          const peek = await ltm.peekProjectRefsOffloaded(projectPath);
-          assertCurrentPipelineGeneration(req.signal, requestGeneration);
-          if (!peek.gated && peek.refs.length > 0) {
-            block = buildCombinedResolveRefcheckBlock(
-              target,
-              buildRefcheckProbeScript(peek.refs),
-            );
-            sessionState.refcheckInProbe = true;
-          }
-        }
-        sessionState.syntheticResolveState =
-          target.kind === "read" ? "readPending" : "shellPending";
-        sessionState.syntheticResolveToolUseId = block.id;
-        sessionState.syntheticResolveKind = target.kind;
-        log.info(
-          `synthetic-resolve: injecting ${target.kind} probe ` +
-            `(tool=${target.toolName}${sessionState.refcheckInProbe ? "+refcheck" : ""}) ` +
-            `for session ${sessionID.slice(0, 16)}`,
-        );
-        // SHORT-CIRCUIT: do NOT forward upstream. Return our own tool_use
-        // response so the client harness executes the probe locally.
-        return syntheticToolUseResponse(req, block);
-      }
-      // No usable tool — give up permanently for this session.
-      sessionState.syntheticResolveState = "done";
-    }
-  }
-
-  // Reset the durable delta when the gradient-transformed array reshuffles.
-  // The delta's persisted insertAt is a frozen absolute index into that array;
-  // when it reshuffles, the once-safe index can drift into a tool_use/
-  // tool_result pair (or simply onto a different message), busting the prompt
-  // cache. On such a turn we recompute the delta (position + content) THIS turn
-  // rather than replaying a stale index — keeping the request coherent and
-  // stopping removeOrphanedToolResults from destructively stripping a real tool
-  // pair every subsequent turn.
-  //
-  // Two events reshuffle the array: (1) a LAYER CHANGE (entering/escalating/
-  // de-escalating compression), and (2) a POST-IDLE COMPACT, which rebuilds the
-  // array (the distilled prefix grows, the raw window is rebuilt) while STAYING
-  // at the same layer — a steady layer-1 session resumes at layer 1. The layer
-  // comparison alone misses (2).
-  //
-  // 🔴 But (2) only reshuffles when the resume ACTUALLY recompacted. A WARM
-  // idle resume (`cacheWarm` / skipCompact — PR #1102) PRESERVES the distilled
-  // prefix and raw-window pin byte-for-byte, so the array does NOT reshuffle
-  // and the delta's insertAt stays valid. Gating on raw `lastTurnWasIdle`
-  // re-anchored the delta on those warm resumes too, moving it off its cached
-  // position and busting the very cache skipCompact was protecting (observed:
-  // 100%→9% drops at the delta's old index on large sessions). So a post-idle
-  // resume counts as a reshuffle ONLY when it was NOT cache-warm.
-  const idleRecompacted = idleResumeReshuffled(
-    sessionState.lastTurnWasIdle ?? false,
-    cacheWarm,
-  );
-  const deltaCompressed = shouldResetDeltaOnCompression(
-    sessionState.lastDeltaLayer ?? 0,
-    result.layer,
-    idleRecompacted,
-  );
-  // On a compressing turn the gradient reshuffled the array; re-anchor the
-  // durable delta blocks (preserving content + `mut`) to a fresh tool-pair-safe
-  // index. 🔴 Re-anchor — NOT delete — even when a fresh knowledge delta is
-  // produced this turn (see reanchorDeltaOnCompression): deleting wiped the
-  // surfaced-set history, so the append below re-derived the full cumulative
-  // pin→DB wall every compression+change turn (the regrowth #1013 only trimmed).
-  const reInsertAt = reanchorDeltaOnCompression(
-    sessionID,
-    projectPath,
-    modifiedReq.messages,
-    deltaCompressed,
-  );
-  if (reInsertAt !== null) {
-    log.info(
-      `prompt-delta: re-anchored durable delta for session ${sessionID.slice(0, 16)} after compression (layer ${sessionState.lastDeltaLayer ?? 0}→${result.layer}, insertAt=${reInsertAt})`,
-    );
-  }
-
-  if (pendingKnowledgeDelta) {
-    // Place the durable delta near the tail, but never between an
-    // assistant(tool_use) and its user(tool_result) — inserting there orphans
-    // the tool_use and triggers an Anthropic 400 (#747 regression). The index
-    // is computed tool-pair-safe and persisted; replay reuses it verbatim to
-    // keep the delta byte-position-stable for the prompt cache until the next
-    // compression resets it.
-    const insertAt = safeDeltaInsertIndex(
-      modifiedReq.messages,
-      Math.max(0, modifiedReq.messages.length - 1),
-    );
-    appendKnowledgePromptDelta({
-      sessionID,
-      projectPath,
-      insertAt,
-      now: Date.now(),
-      ...pendingKnowledgeDelta,
-    });
-  }
-  // Track the layer that produced the current delta placement so the next turn
-  // can detect a compression-driven reshuffle.
-  sessionState.lastDeltaLayer = result.layer;
-  modifiedReq.messages = applySessionPromptDeltas(
-    modifiedReq.messages,
-    sessionID,
-  );
-  // Hard guarantee: deltas are spliced into the wire array AFTER the orphan
-  // safety net (step 8) and persisted indices are replayed verbatim, so a
-  // later turn whose layout differs from the delta's creation turn could place
-  // a delta adjacent to a tool turn. Re-running the safety net ensures no
-  // orphaned tool_use/tool_result ever reaches the API. Note this is a
-  // last-ditch net: if it fires it strips the orphaned tool_use, which rewrites
-  // a historical assistant message and busts the cache from that point — strictly
-  // better than a hard 400, but it should essentially never fire given the
-  // creation-time placement above.
-  removeOrphanedToolResults(modifiedReq.messages);
-
-  // --- 9. Forward to upstream ---
-  // Enable prompt caching for conversation turns with layered breakpoints:
-  //  - System prompt: 1h TTL (host prompt is very stable within a session)
-  //  - LTM: separate system block (no breakpoint, benefits from prefix)
-  //  - Tools: 1h TTL on last tool (recall + git reminder are static)
-  //  - Conversation: configurable TTL on last message block (5m default, 1h opt-in/auto)
-  // Meta request passthrough (handlePassthrough) never reaches here — it
-  // forwards the raw request without buildAnthropicRequest, so no caching.
-
-  // Resolve conversation cache TTL: explicit "5m"/"1h" pass through,
-  // "auto" upgrades to 1h when cold-cache turns exceed 40% of recent window.
-  let resolvedConversationTTL: "5m" | "1h" =
-    sessionState.resolvedConversationTTL ?? "5m";
-  const configTTL = cfg.cache.conversationTTL;
-  if (configTTL === "5m" || configTTL === "1h") {
-    resolvedConversationTTL = configTTL;
-  } else if (configTTL === "auto") {
-    const window = sessionState.coldCacheWindow;
-    if (window && window.length >= 5) {
-      const coldFraction = window.filter(Boolean).length / window.length;
-      if (coldFraction > 0.4 && resolvedConversationTTL === "5m") {
-        // Upgrade immediately — switching to 1h is always beneficial
-        resolvedConversationTTL = "1h";
-        sessionState.ttlDowngradeStreak = 0;
-        log.info(
-          `auto-upgrade conversation TTL to 1h: session=${sessionID.slice(0, 16)}` +
-            ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
-        );
-      } else if (coldFraction < 0.2 && resolvedConversationTTL === "1h") {
-        // Hysteresis: require 3 consecutive qualifying turns before downgrading.
-        // A single fluctuation below 20% shouldn't trigger a downgrade because
-        // the TTL change modifies the cached bytes AND drops the idle threshold
-        // from 60min to 5min, causing a compounding cache bust.
-        const streak = (sessionState.ttlDowngradeStreak ?? 0) + 1;
-        sessionState.ttlDowngradeStreak = streak;
-        if (streak >= 3) {
-          resolvedConversationTTL = "5m";
-          sessionState.ttlDowngradeStreak = 0;
-          log.info(
-            `auto-downgrade conversation TTL to 5m: session=${sessionID.slice(0, 16)}` +
-              ` coldFraction=${(coldFraction * 100).toFixed(0)}% streak=${streak}`,
-          );
-        } else {
-          log.info(
-            `TTL downgrade deferred (streak ${streak}/3): session=${sessionID.slice(0, 16)}` +
-              ` coldFraction=${(coldFraction * 100).toFixed(0)}%`,
-          );
-        }
-      } else {
-        // Cold fraction not qualifying for downgrade — reset streak
-        if (resolvedConversationTTL === "1h") {
-          sessionState.ttlDowngradeStreak = 0;
-        }
-      }
-    }
-  }
-  sessionState.resolvedConversationTTL = resolvedConversationTTL;
-
-  const cacheOptions: AnthropicCacheOptions = {
-    systemTTL: "1h",
-    stableLtmSystem: stableLtmText,
-    cacheTools: true,
-    cacheConversation: true,
-    conversationTTL: resolvedConversationTTL,
-    // Lore's distilled prefix (buildPrefixMessages) is the first 2 messages
-    // (a [user, assistant] pair) whenever distillation is active
-    // (distilledTokens > 0), and always sits at the front of the transformed
-    // array ([...prefix, ...rawWindow]); the durable delta is inserted near the
-    // tail and orphan-removal never touches the front, so [0,1] stay the prefix.
-    // Passing 2 places an interior breakpoint on its boundary so a raw-window
-    // divergence falls back to the cached prefix instead of the ~54K head.
-    distilledPrefixLength: result.distilledTokens > 0 ? 2 : 0,
-  };
-
-  // The throttle is part of the foreground request's absolute lifetime. Start
-  // the shared scope before delaying so the 300-second deadline includes both
-  // the wait and every later upstream/recall phase.
-  const foregroundAbort = createForegroundAbortScope(modifiedReq.signal);
-
-  // --- Daily budget + OAuth quota throttle ---
-  // Apply an invisible proxy-level sleep to slow the agent when approaching
-  // the daily budget OR the Anthropic OAuth quota. The sleep is capped to
-  // avoid causing cache busts (which would be self-defeating — costing more
-  // than the throttle saved).
-  const dailyBudget = getDailyBudget();
-  // Quota pressure is an independent signal — applies even with no USD budget.
-  // Gated to Anthropic-OAuth accounts; 0 for everything else.
-  const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
-  const quotaPressure = computeQuotaPressure(quotaSnapshot);
-  if (dailyBudget > 0 || quotaPressure > 0) {
-    const inputTokens =
-      getLastTransformEstimate(sessionID) ||
-      coreEstimateTokens(JSON.stringify(modifiedReq.messages));
-    const estimatedCost = estimateRequestCost(req.model, inputTokens);
-    const delay = getDailyThrottleDelay(
-      dailyBudget,
-      estimatedCost,
-      quotaPressure,
-    );
-
-    if (delay > 0) {
-      // Cap delay to avoid pushing the next request past the cache TTL boundary.
-      // Use prevRequestTime (the request before this one) to compute how much
-      // of the cache TTL window has already been consumed.
-      const ttlMs = resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
-      const elapsed = sessionState.prevRequestTime
-        ? Date.now() - sessionState.prevRequestTime
-        : 0; // first request — no prior timing, full TTL available
-      const maxSafe = Math.max(0, (ttlMs - elapsed) * 0.5) / 1000;
-      const actualDelay = Math.min(delay, maxSafe);
-
-      if (actualDelay > 0.5) {
-        // don't bother sleeping < 500ms
-        log.info(
-          `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
-            `session=${sessionID.slice(0, 16)} ` +
-            `spend=$${getDailySpend().spend.toFixed(2)} ` +
-            `rate=$${getCostRate().toFixed(2)}/hr`,
-        );
-        try {
-          await completeBudgetThrottleDelay(
-            actualDelay * 1000,
-            foregroundAbort.signal,
-            () => {
-              const costs = getSessionCosts(sessionID);
-              if (costs) {
-                costs.throttle.events++;
-                costs.throttle.totalDelayMs += actualDelay * 1000;
-              }
-            },
-          );
-        } catch (error) {
-          foregroundAbort.dispose();
-          throw error;
-        }
-      }
-    }
-  }
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-
-  // Start gen_ai.chat span before the upstream call so it captures real
-  // wall-clock duration (including network latency and streaming time).
-  // The span is ended in postResponse() after usage attributes are set.
-  const genAiSpan = Sentry.startInactiveSpan({
-    op: "gen_ai.chat",
-    name: `chat ${req.model}`,
-    attributes: {
-      "gen_ai.operation.name": "chat",
-      "gen_ai.request.model": req.model,
-      "gen_ai.provider.name":
-        requestUpstreamRoute.providerID ??
-        requestUpstreamRoute.effectiveProtocol,
-      "gen_ai.response.streaming": req.stream,
-      // NO gen_ai.input.messages — privacy (proxy for other people's projects)
-    },
-  });
-  let streamingFinalizerRegistered = false;
-  let genAiSpanEnded = false;
-  let recallPersistenceTransaction:
-    | { commit: () => void; rollback: () => void }
-    | undefined;
-  const rollbackRecallPersistence = (): void => {
-    recallPersistenceTransaction?.rollback();
-    recallPersistenceTransaction = undefined;
-  };
-  const endGenAiSpan = (): void => {
-    if (genAiSpanEnded) return;
-    genAiSpanEnded = true;
-    genAiSpan?.end();
-  };
-  const dropStreamingFinalizer = (): void => {
-    rollbackRecallPersistence();
-    streamingFinalizerRegistered = true;
-    genAiSpan?.setStatus({
-      code: 2,
-      message: "post-response finalizer dropped",
-    });
-    endGenAiSpan();
-  };
-  const releaseForeground = (): void => {
-    if (!streamingFinalizerRegistered && !genAiSpanEnded) {
-      genAiSpan?.setStatus({
-        code: 2,
-        message: req.stream
-          ? "stream cancelled before terminal response"
-          : "request ended before terminal response",
-      });
-      endGenAiSpan();
-    }
-    foregroundAbort.dispose();
-  };
-
-  let upstreamResult: UpstreamResult;
-  try {
-    preparationTiming.upstreamStart();
-    upstreamResult = await forwardToUpstream(
-      modifiedReq,
-      config,
-      undefined,
-      cacheOptions,
-      foregroundAbort.signal,
-      requestUpstreamRoute,
-    );
-  } catch (error) {
-    releaseForeground();
-    throw error;
-  }
-  const upstreamResponse = wrapBodyWithCleanup(
-    upstreamResult.response,
-    () => {},
-    foregroundAbort.signal,
-  );
-  let foregroundOwnershipTransferred = false;
-  const finishForeground = (response: Response): Response => {
-    if (foregroundOwnershipTransferred) return response;
-    foregroundOwnershipTransferred = true;
-    copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
-    return wrapBodyWithCleanup(
-      response,
-      releaseForeground,
-      foregroundAbort.signal,
-      rollbackRecallPersistence,
-    );
-  };
-  const awaitForeground = async <T>(operation: Promise<T>): Promise<T> => {
-    try {
-      return await operation;
-    } catch (error) {
-      if (!foregroundOwnershipTransferred) releaseForeground();
-      throw error;
-    }
-  };
-  const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
-
-  if (!upstreamResponse.ok) {
-    const errorBodySignal = AbortSignal.any([
-      foregroundAbort.signal,
-      AbortSignal.timeout(foregroundErrorBodyTimeoutMs),
-    ]);
-    let errorBody = "";
-    try {
-      errorBody = await readForegroundBody(
-        upstreamResponse,
-        true,
-        undefined,
-        errorBodySignal,
-      );
-    } catch (error) {
-      if (foregroundAbort.signal.aborted) {
-        releaseForeground();
-        throw error;
-      }
-      log.warn("upstream error body read timed out");
-    }
-    log.error(`upstream error: ${upstreamResponse.status}`);
-
-    // When the API rejects with a context-length error, escalate the compression
-    // layer for the next turn so the session doesn't get stuck in a loop.
-    // Anthropic format: "prompt is too long: 206029 tokens > 200000 maximum"
-    // OpenAI format:    "maximum context length is 128000 tokens. However, your messages resulted in 135421 tokens"
-    if (
-      upstreamResponse.status === 400 &&
-      (errorBody.includes("prompt is too long") ||
-        errorBody.includes("context_length_exceeded") ||
-        errorBody.includes("maximum context length"))
-    ) {
-      const anthropicMatch = errorBody.match(
-        /prompt is too long: (\d+) tokens > (\d+) maximum/,
-      );
-      const openaiMatch =
-        !anthropicMatch &&
-        errorBody.match(/resulted in (\d+) tokens.*?(\d+) tokens/);
-      const match = anthropicMatch || openaiMatch;
-      // Default to 1.3 (maps to layer 3) when the format can't be parsed,
-      // since an unparseable error suggests an unexpected situation where
-      // aggressive compression is safer.
-      const overshootRatio = match ? Number(match[1]) / Number(match[2]) : 1.3;
-      const escalateLayer = overshootRatio >= 1.2 ? 3 : 2;
-      setForceMinLayer(escalateLayer, sessionID);
-      log.warn(
-        `prompt overflow: escalating to layer ${escalateLayer} for session ${sessionID.slice(0, 16)}` +
-          ` (ratio=${overshootRatio.toFixed(2)})`,
-      );
-    }
-
-    captureToolPairing400({
-      status: upstreamResponse.status,
-      errorBody,
-      messages: modifiedReq.messages,
-      layer: result.layer,
-      model: req.model,
-      sessionID,
-    });
-
-    genAiSpan.setStatus({
-      code: 2,
-      message: `HTTP ${upstreamResponse.status}`,
-    });
-    endGenAiSpan();
-    return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
-  }
-
-  // The upstream accepted this transformed request. Commit the provenance
-  // boundary only now; transform() itself is speculative and can be followed
-  // by a synthetic response, transport error, or non-2xx response.
-  sessionState.lastAcceptedProvenanceLayer = result.layer;
-  saveSessionTracking(sessionID, {
-    lastAcceptedProvenanceLayer: result.layer,
-  });
-
-  // Run the recall-interception loop over an already-accumulated
-  // (internal Anthropic-format) GatewayResponse and return the client HTTP
-  // response. Shared by the non-streaming path AND the OpenAI/openai-responses
-  // streaming paths — those accumulate the upstream SSE into the same internal
-  // Anthropic-format response, so the recall loop is protocol-agnostic here.
-  // Without this, a `recall` tool_use injected by the gateway would leak to the
-  // client (e.g. "Model tried to call unavailable tool 'recall'").
-  const bufferedRecallDiagnostics = createRecallDiagnostics(
-    !suppressTemporalStorage,
-  );
-  const finalizeWithRecall = async (
-    resp: GatewayResponse,
-  ): Promise<Response> => {
-    // --- Recall interception (non-streaming) ---
-    // Loop allows the model to call recall multiple times (e.g. drill down
-    // into t:<id> source citations). Resource, progress, and time budgets
-    // normally end the chain before its configured emergency ceiling.
-    let currentResp = resp;
-    let recallDepth = 0;
-    let currentModifiedReq = modifiedReq;
-    const responsesVisibleContent: GatewayContentBlock[] = [];
-    const cumulativeUsage = { ...(resp.usage ?? ZERO_USAGE) };
-    const recallBudget = new RecallChainBudget({
-      maxExecutions: loreConfig().search.recall.chainMaxExecutions,
-      deadlineAt: foregroundAbort.deadlineAt,
-    });
-    // Account the principal response before the first recall admission. Each
-    // subsequent continuation is recorded below exactly once.
-    recallBudget.recordUsage(resp.usage);
-    const logRecallBudgetStop = (reason: RecallStopReason): void => {
-      log.info(`recall final continuation: budget exhausted reason=${reason}`);
-    };
-    const bufferedRecallTransaction = createRecallPersistenceTransaction(
-      sessionState,
-      suppressTemporalStorage,
-    );
-    const finishBufferedResponse = (response: GatewayResponse): void => {
-      if (req.stream || recallDepth > 0) {
-        // Recall state and successful-turn storage share the existing atomic
-        // finalizer, after downstream EOF, for buffered clients as well.
-        finishStreaming(response);
-      } else {
-        postResponse(
-          req,
-          response,
-          sessionState,
-          config,
-          temporalInput,
-          requestBody,
-          genAiSpan,
-          suppressTemporalStorage,
-          endGenAiSpan,
-        );
-      }
-    };
-    const failRecall = (
-      category: RecallContinuationFailureCategory,
-    ): Response => {
-      reportRecallContinuationFailure(category);
-      rollbackRecallPersistence();
-      finishUnsuccessfulStreaming({ ...currentResp, usage: cumulativeUsage });
-      return errorResponse(502, "Recall continuation failed");
-    };
-    // Whether this request opted into the 1M window (context-1m beta); gates the
-    // client-usage cap so a 1M-capable model the client meters against 200K is
-    // clamped below its ~167K auto-compact threshold (#910 regression).
-    const longContext = requestEnablesLongContext(req);
-
-    // Snapshot LTM-in-context IDs once per request — system[1] catalog and
-    // durable delta entries are stable across the recall loop iterations, so
-    // reuse the same set for every recall (Seer 15623149/1). Mirrors the
-    // streaming path's pre-loop snapshot.
-    const alreadyInLtmIds = buildAlreadyInLtmIds(
-      stableLtmText,
-      pendingKnowledgeDelta,
-    );
-
-    while (hasRecallToolUse(currentResp)) {
-      if (
-        currentResp.content.filter(
-          (block) =>
-            block.type === "tool_use" && block.name === RECALL_TOOL_NAME,
-        ).length > 1
-      )
-        return failRecall("parallel_recall");
-      const recallBlock = findRecallToolUse(currentResp);
-      if (!recallBlock) break;
-      const admission = recallBudget.admit(
-        recallItemReservation(recallBlock.input),
-      );
-      if (admission) {
-        logRecallBudgetStop(admission);
-        return failRecall("depth_exhausted");
-      }
-      recallDepth++;
-      recallPersistenceTransaction ??= bufferedRecallTransaction;
-      const { result, input, coverage } = await promiseAgainstAbort(
-        () =>
-          executeRecall(
-            recallBlock,
-            sessionState.projectPath,
-            sessionState.sessionID,
-            getLLMClient(config),
-            alreadyInLtmIds.size > 0 ? alreadyInLtmIds : undefined,
-            foregroundAbort.signal,
-            bufferedRecallTransaction.deferTransfer,
-          ),
-        foregroundAbort.signal,
-      );
-
-      bufferedRecallDiagnostics.record(input, result, coverage);
-      const stopReason = recallBudget.record({
-        resultBytes: Buffer.byteLength(result),
-        coverage,
-      });
-      if (stopReason) logRecallBudgetStop(stopReason);
-      // Keep a whole continuation available to turn the final recall result
-      // into an answer instead of discovering the token boundary afterward.
-      const finalRecallRound = recallBudget.mustFinalizeNext();
-      const followUpResult = recallBudgetGuidance(result, stopReason);
-      // Store recall result for marker round-trip expansion
-      const scope = input.scope ?? "all";
-      const anchorId = crypto.randomUUID();
-      const storeKey = `anchor:${anchorId}`;
-      const position = currentResp.content.indexOf(recallBlock);
-      const anchorContextId = responsesAnchorContext(
-        recallClientMessages,
-        responsesVisibleContent,
-        currentResp,
-        recallBlock.id,
-      );
-      const companionToolUses = currentResp.content.flatMap((block, index) => {
-        if (block.type !== "tool_use" || block.id === recallBlock.id) return [];
-        const side: "before" | "after" = index < position ? "before" : "after";
-        return [{ id: block.id, name: block.name, input: block.input, side }];
-      });
-      if (!suppressTemporalStorage) {
-        const storedRecall: StoredRecall = {
-          toolUseId: recallBlock.id,
-          anchorId,
-          anchorContextId,
-          input,
-          position,
-          result,
-          ...(companionToolUses.length > 0 ? { companionToolUses } : {}),
-        };
-        bufferedRecallTransaction.stage(storeKey, storedRecall);
-      }
-
-      const markerText = buildAnchoredRecallMarker(
-        input.query,
-        scope,
-        input.id,
-        input.ids,
-        anchorId,
-      );
-      const markerResp = replaceRecallWithMarker(
-        currentResp,
-        new Map([[recallBlock.id, markerText]]),
-      );
-      responsesVisibleContent.push(
-        ...responsesProvenanceContent(
-          currentResp,
-          new Map([[recallBlock.id, markerText]]),
-        ),
-      );
-
-      if (hasOtherToolUse(currentResp)) {
-        // Mixed tools — return response with marker, client handles the rest
-        log.info(
-          `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
-        );
-        markerResp.usage = cumulativeUsage;
-        finishBufferedResponse(markerResp);
-        return nonStreamHttpResponse(
-          shouldInjectWarning
-            ? injectContextWarning(markerResp, warningText)
-            : markerResp,
-          req.protocol,
-          req.stream,
-          { "x-lore-recall-invoked": "true" },
-          longContext,
-        );
-      }
-
-      // Recall-only — send follow-up request for seamless UX.
-      // Build + forward + assert-content-type + parse in one coupled call so
-      // the follow-up's stream flag can never diverge from how the continuation
-      // is consumed.
-      //
-      // openai-codex (ChatGPT) MANDATES streaming: its `/backend-api/codex/
-      // responses` backend rejects `stream: false` with
-      // `400 {"detail":"Stream must be set to true"}`. A plain stream:false
-      // JSON follow-up therefore 400s on every Codex recall continuation. For
-      // codex we force the follow-up to stream and accumulate its SSE body back
-      // into a non-streaming continuation, so the recall loop below is
-      // unchanged. Every other backend keeps the stream:false JSON follow-up
-      // (the standard Responses API and Chat Completions both accept it).
-      const followUpRequiresStream = currentModifiedReq.codex === true;
-      log.info(
-        `recall (non-stream, depth=${recallDepth}, codex=${followUpRequiresStream}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
-      );
-      const jsonRecallCtx: RecallFollowUpCtx = {
-        forward: (r, signal) =>
-          forwardToUpstream(
-            r,
-            config,
-            undefined,
-            {
-              ...cacheOptions,
-              cacheConversation: false,
-            },
-            signal,
-            requestUpstreamRoute,
-          ),
-        parseJSON: (response, protocol, signal) =>
-          accumulateNonStreamResponse(
-            response,
-            protocol,
-            false,
-            signal,
-            finalRecallRound,
-          ),
-        parseSSE: (response, signal) =>
-          accumulateResponsesSSEStream(response, {
-            signal,
-            validation: currentModifiedReq.codex ? "codex" : "public",
-            stopAtTerminal: true,
-            requireCompletedTerminal: true,
-          }),
-      };
-      let jsonFollowUp: Awaited<ReturnType<typeof runRecallFollowUpJSON>>;
-      try {
-        jsonFollowUp = followUpRequiresStream
-          ? await runRecallFollowUpStreamAccumulated(
-              jsonRecallCtx,
-              currentModifiedReq,
-              currentResp,
-              followUpResult,
-              recallBlock,
-              foregroundAbort.signal,
-              finalRecallRound,
-            )
-          : await runRecallFollowUpJSON(
-              jsonRecallCtx,
-              currentModifiedReq,
-              currentResp,
-              followUpResult,
-              recallBlock,
-              foregroundAbort.signal,
-              finalRecallRound,
-            );
-      } catch (fetchErr) {
-        if (
-          foregroundAbort.signal.aborted ||
-          (fetchErr instanceof Error && fetchErr.name === "AbortError")
-        ) {
-          throw fetchErr;
-        }
-        if (
-          fetchErr instanceof ResponsesTerminalError ||
-          fetchErr instanceof NonStreamCompletionError
-        ) {
-          Object.assign(
-            cumulativeUsage,
-            mergeRecallUsage(
-              cumulativeUsage,
-              fetchErr.response.usage ?? ZERO_USAGE,
-            ),
-          );
-        }
-        log.error(
-          `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
-        );
-        if (finalRecallRound) return failRecall("follow_up_failed");
-        bufferedRecallDiagnostics.finish("failed");
-        // Fall back to response with marker (no continuation)
-        markerResp.usage = cumulativeUsage;
-        finishBufferedResponse(markerResp);
-        return nonStreamHttpResponse(
-          shouldInjectWarning
-            ? injectContextWarning(markerResp, warningText)
-            : markerResp,
-          req.protocol,
-          req.stream,
-          { "x-lore-recall-invoked": "true" },
-          longContext,
-        );
-      }
-
-      if (!jsonFollowUp.ok) {
-        log.error(
-          `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
-          new Error(`recall follow-up upstream ${jsonFollowUp.status ?? "?"}`),
-        );
-        captureToolPairing400({
-          status: jsonFollowUp.status ?? 0,
-          errorBody: jsonFollowUp.detail,
-          messages: currentModifiedReq.messages,
-          // `result` here is the recall string (shadowed); the transform layer
-          // is not in scope on the recall continuation. -1 signals "unknown".
-          layer: -1,
-          model: currentModifiedReq.model,
-          sessionID: sessionState.sessionID,
-        });
-        if (finalRecallRound) return failRecall("follow_up_failed");
-        bufferedRecallDiagnostics.finish("failed");
-        // Fall back to response with marker (no continuation)
-        markerResp.usage = cumulativeUsage;
-        finishBufferedResponse(markerResp);
-        return nonStreamHttpResponse(
-          shouldInjectWarning
-            ? injectContextWarning(markerResp, warningText)
-            : markerResp,
-          req.protocol,
-          req.stream,
-          { "x-lore-recall-invoked": "true" },
-          longContext,
-        );
-      }
-
-      const { continuation: continuationResp, followUp } = jsonFollowUp;
-
-      // Accumulate usage from this iteration
-      const contUsage = continuationResp.usage ?? ZERO_USAGE;
-      const continuationStopReason = recallBudget.recordUsage(contUsage);
-      Object.assign(
-        cumulativeUsage,
-        mergeRecallUsage(cumulativeUsage, contUsage),
-      );
-
-      // Update for next iteration
-      currentModifiedReq = followUp;
-      // Recall can consume another quota window or omit quota metadata entirely.
-      // Keep this turn's ordered updates so the rebuilt stream reports every
-      // bucket, with newer updates following older ones.
-      if (currentResp.codexRateLimits?.length) {
-        continuationResp.codexRateLimits = [
-          ...currentResp.codexRateLimits,
-          ...(continuationResp.codexRateLimits ?? []),
-        ];
-      }
-      currentResp = continuationResp;
-      if (
-        (finalRecallRound || continuationStopReason) &&
-        hasRecallToolUse(currentResp)
-      ) {
-        return failRecall("depth_exhausted");
-      }
-      // Loop continues — hasRecallToolUse checked at top
-    }
-
-    if (hasRecallToolUse(currentResp)) return failRecall("depth_exhausted");
-    if (recallBudget.stopReason() && !isUsableRecallContinuation(currentResp))
-      return failRecall("follow_up_failed");
-    currentResp.usage = cumulativeUsage;
-    if (recallBudget.stopReason())
-      log.info("recall final continuation: completed");
-    finishBufferedResponse(currentResp);
-    // Telemetry: flag a completion we're about to hand back with NO usable
-    // content (no text, no tool_use) — the "no response data" class
-    // (github-copilot #1052 follow-up). Checked on the model's response, before
-    // any lore context-warning banner is layered on. Never throws / never
-    // blocks the read path.
-    if (isEmptyCompletion(currentResp)) {
-      const emptyOutputTokens = currentResp.usage?.outputTokens ?? 0;
-      log.warn(
-        `empty completion → client: protocol=${effectiveProtocol} ` +
-          `model=${req.model} stopReason=${currentResp.stopReason} ` +
-          `outputTokens=${emptyOutputTokens} recallDepth=${recallDepth} ` +
-          `session=${sessionState.sessionID.slice(0, 16)}`,
-      );
-      captureEmptyCompletion({
-        protocol: effectiveProtocol,
-        model: req.model,
-        sessionID: sessionState.sessionID,
-        stopReason: currentResp.stopReason,
-        outputTokens: emptyOutputTokens,
-        recallDepth,
-      });
-    }
-    const recallHeaders =
-      recallDepth > 0 ? { "x-lore-recall-invoked": "true" } : undefined;
-    return nonStreamHttpResponse(
-      shouldInjectWarning
-        ? injectContextWarning(currentResp, warningText)
-        : currentResp,
-      req.protocol,
-      req.stream,
-      recallHeaders,
-      longContext,
-    );
-  };
-  const finishWithRecall = async (resp: GatewayResponse): Promise<Response> => {
-    try {
-      const response = await awaitForeground(finalizeWithRecall(resp));
-      bufferedRecallDiagnostics.finish(response.ok ? "completed" : "failed");
-      return finishForeground(response);
-    } catch (error) {
-      rollbackRecallPersistence();
-      bufferedRecallDiagnostics.finish(
-        foregroundAbort.signal.aborted ? "aborted" : "failed",
-      );
-      throw error;
-    }
-  };
-  function finishStreaming(resp: GatewayResponse): void {
-    if (streamingFinalizerRegistered) return;
-    streamingFinalizerRegistered = true;
-    scheduleStreamingPostResponse(
-      sessionState.sessionID,
-      requestGeneration,
-      async () => {
-        await downstreamSettled;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        if (requestGeneration !== streamingPostResponseGeneration) {
-          dropStreamingFinalizer();
-          return;
-        }
-        if (sessionSignal.aborted) {
-          dropStreamingFinalizer();
-          return;
-        }
-        if (downstreamWasCancelled()) {
-          rollbackRecallPersistence();
-          accountUnsuccessfulResponse(
-            resp,
-            sessionState.sessionID,
-            sessionState.resolvedConversationTTL,
-            genAiSpan,
-            endGenAiSpan,
-            () => {
-              sessionState._dirty = true;
-            },
-          );
-          return;
-        }
-        try {
-          const postResponseFailed = new Error(
-            "Responses recall post-response persistence failed",
-          );
-          try {
-            withTenant(sessionState.storageTenantId ?? "", () =>
-              withSavepoint("responses_recall_post_response", () => {
-                const persisted = postResponseForTenant(
-                  req,
-                  resp,
-                  sessionState,
-                  config,
-                  temporalInput,
-                  requestBody,
-                  genAiSpan,
-                  suppressTemporalStorage,
-                  endGenAiSpan,
-                );
-                if (!persisted) throw postResponseFailed;
-                recallPersistenceTransaction?.commit();
-              }),
-            );
-            recallPersistenceTransaction = undefined;
-          } catch (error) {
-            rollbackRecallPersistence();
-            if (error !== postResponseFailed) throw error;
-          }
-        } catch (error) {
-          rollbackRecallPersistence();
-          throw error;
-        }
-      },
-      dropStreamingFinalizer,
-      true,
-      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-    );
-  }
-  function finishUnsuccessfulStreaming(resp: GatewayResponse): void {
-    if (streamingFinalizerRegistered) return;
-    streamingFinalizerRegistered = true;
-    scheduleStreamingPostResponse(
-      sessionState.sessionID,
-      requestGeneration,
-      async () => {
-        await downstreamSettled;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        rollbackRecallPersistence();
-        if (
-          requestGeneration !== streamingPostResponseGeneration ||
-          sessionSignal.aborted
-        ) {
-          dropStreamingFinalizer();
-          return;
-        }
-        accountUnsuccessfulResponse(
-          resp,
-          sessionState.sessionID,
-          sessionState.resolvedConversationTTL,
-          genAiSpan,
-          endGenAiSpan,
-          () => {
-            sessionState._dirty = true;
-          },
-        );
-      },
-      dropStreamingFinalizer,
-      true,
-      requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-    );
-  }
-  async function captureUnsuccessfulResponses(
-    operation: Promise<GatewayResponse>,
-  ): Promise<{ response: GatewayResponse; successful: boolean } | undefined> {
-    try {
-      return { response: await operation, successful: true };
-    } catch (error) {
-      if (!(error instanceof ResponsesTerminalError)) throw error;
-      finishUnsuccessfulStreaming(error.response);
-      return error.status === "incomplete"
-        ? { response: error.response, successful: false }
-        : undefined;
-    }
-  }
-
-  if (req.stream && upstreamResponse.body) {
-    // Non-Anthropic upstream streaming responses need their own accumulator
-    // since the Anthropic SSE accumulator can't parse OpenAI SSE formats.
-    // Both OpenAI variants accumulate into internal Anthropic-format and then
-    // run the SAME recall interception loop as the non-streaming path —
-    // otherwise an injected `recall` tool_use would leak straight to the client.
-    if (effectiveProtocol === "openai-responses") {
-      // True streaming fast path: when the client also speaks the Responses API
-      // (the codex/ChatGPT case), no `recall` tool can appear (so no
-      // interception is needed), and there's no warning to layer in, forward
-      // each upstream SSE event to the client AS IT ARRIVES. This fixes the
-      // codex "waiting for response headers" hang — the buffered path below
-      // withholds all client bytes until the (slow, reasoning-heavy) upstream
-      // fully completes.
-      const hasRecallTool = modifiedReq.tools.some(
-        (t) => t.name === RECALL_TOOL_NAME,
-      );
-
-      // Only stream through recall-aware when the client ALSO speaks the
-      // Responses API AND no warning needs to be layered in. The recall-aware
-      // streamer forwards events live (fixing the header-timeout hang) while
-      // transparently intercepting a recall `function_call` — the buffered
-      // path (used otherwise) can't, so a recall tool_use would leak to the
-      // client.
-      if (req.protocol === "openai-responses" && !shouldInjectWarning) {
-        if (hasRecallTool) {
-          let responsesRecallRequest = modifiedReq;
-          const responsesVisibleContent: GatewayContentBlock[] = [];
-          return finishForeground(
-            streamResponsesRecallAware(upstreamResponse, {
-              validation: req.codex ? "codex" : "public",
-              onComplete: (response, successful) => {
-                if (successful) finishStreaming(response);
-                else finishUnsuccessfulStreaming(response);
-              },
-              onTransactionReady: (transaction) => {
-                rollbackRecallPersistence();
-                recallPersistenceTransaction = transaction;
-              },
-              sessionID: sessionState.sessionID,
-              maxRecallExecutions:
-                loreConfig().search.recall.chainMaxExecutions,
-              noStore: suppressTemporalStorage,
-              signal: foregroundAbort.signal,
-              recallDeadlineAt: foregroundAbort.deadlineAt,
-              retryPrincipal: async ({ signal }) => {
-                const retried = await upstreamResult.retry(signal);
-                return wrapBodyWithCleanup(retried, () => {}, signal);
-              },
-              onRecall: async ({
-                query,
-                scope,
-                id,
-                ids,
-                detailOffset,
-                detailLimit,
-                toolUseId,
-                contentPosition,
-                acc,
-                signal,
-              }) => {
-                const alreadyInLtm = buildAlreadyInLtmIds(
-                  stableLtmText,
-                  pendingKnowledgeDelta,
-                );
-                const deferredTransferRecordings: Array<() => void> = [];
-                const { result, input, coverage } = await withTenant(
-                  sessionState.storageTenantId ?? "",
-                  () =>
-                    executeRecall(
-                      {
-                        type: "tool_use",
-                        id: `recall_stream_${query}_${scope ?? ""}_${id ?? ""}_${ids?.join(",") ?? ""}`,
-                        name: RECALL_TOOL_NAME,
-                        input: {
-                          query,
-                          scope,
-                          id,
-                          ids,
-                          detailOffset,
-                          detailLimit,
-                        },
-                      },
-                      sessionState.projectPath,
-                      sessionState.sessionID,
-                      getLLMClient(config),
-                      alreadyInLtm.size > 0 ? alreadyInLtm : undefined,
-                      signal,
-                      (record) => deferredTransferRecordings.push(record),
-                    ),
-                );
-                const recallBlock = acc.content[contentPosition];
-                if (
-                  recallBlock?.type !== "tool_use" ||
-                  recallBlock.id !== toolUseId ||
-                  recallBlock.name !== RECALL_TOOL_NAME
-                ) {
-                  throw new Error(
-                    "recall execution: recall block not found in accumulated response",
-                  );
-                }
-                const anchorId = crypto.randomUUID();
-                const position = contentPosition;
-                const anchorContextId = responsesAnchorContext(
-                  recallClientMessages,
-                  responsesVisibleContent,
-                  acc,
-                  recallBlock.id,
-                );
-                const companionToolUses = acc.content.flatMap(
-                  (block, index) => {
-                    if (block.type !== "tool_use" || block.id === toolUseId) {
-                      return [];
-                    }
-                    const side: "before" | "after" =
-                      index < position ? "before" : "after";
-                    return [
-                      {
-                        id: block.id,
-                        name: block.name,
-                        input: block.input,
-                        side,
-                      },
-                    ];
-                  },
-                );
-                const storeKey = `anchor:${anchorId}`;
-                const storedRecall = {
-                  toolUseId,
-                  anchorId,
-                  anchorContextId,
-                  input,
-                  position,
-                  result,
-                  ...(companionToolUses.length > 0
-                    ? { companionToolUses }
-                    : {}),
-                } satisfies StoredRecall;
-                const persistStore = (): void => {
-                  saveSessionTracking(sessionState.sessionID, {
-                    recallStore: serializeRecallStore(sessionState.recallStore),
-                  });
-                };
-                const anchorText = buildRecallAnchor(anchorId);
-                responsesVisibleContent.push(
-                  ...responsesProvenanceContent(
-                    acc,
-                    new Map([[toolUseId, anchorText]]),
-                  ),
-                );
-                return {
-                  anchorText,
-                  resultText: result,
-                  coverage,
-                  commit: () => {
-                    if (suppressTemporalStorage) return;
-                    for (const record of deferredTransferRecordings) record();
-                    addRecallStoreEntry(
-                      sessionState.recallStore,
-                      storeKey,
-                      storedRecall,
-                    );
-                    persistStore();
-                    recallPersistenceCommitObserver?.();
-                  },
-                  rollback: () => {
-                    if (suppressTemporalStorage) return;
-                    if (sessionState.recallStore.delete(storeKey))
-                      persistStore();
-                  },
-                };
-              },
-              runFollowUp: async ({
-                finalRecallRound,
-                acc,
-                resultText,
-                toolUseId,
-                contentPosition,
-                signal,
-              }) => {
-                // Reconstruct the recall tool_use block for the follow-up request.
-                const recallBlock = acc.content[contentPosition];
-                if (
-                  recallBlock?.type !== "tool_use" ||
-                  recallBlock.id !== toolUseId ||
-                  recallBlock.name !== RECALL_TOOL_NAME
-                ) {
-                  throw new Error(
-                    "recall follow-up: recall block not found in accumulated response",
-                  );
-                }
-                const followUpCtx: RecallFollowUpCtx = {
-                  forward: (r, followUpSignal) =>
-                    forwardToUpstream(
-                      r,
-                      config,
-                      undefined,
-                      {
-                        ...cacheOptions,
-                        cacheConversation: false,
-                      },
-                      followUpSignal,
-                      requestUpstreamRoute,
-                    ),
-                  parseJSON: () => {
-                    throw new Error(
-                      "parseJSON must not be called on the streaming recall path",
-                    );
-                  },
-                };
-                const followUpBaseRequest = responsesRecallRequest;
-                const follow = await runRecallFollowUpStreaming(
-                  followUpCtx,
-                  followUpBaseRequest,
-                  acc,
-                  resultText,
-                  recallBlock,
-                  signal,
-                  finalRecallRound,
-                );
-                if (!follow.ok) {
-                  throw new Error(
-                    `recall follow-up upstream error: ${follow.status ?? "?"}`,
-                  );
-                }
-                return {
-                  reader: follow.reader,
-                  commit: () => {
-                    responsesRecallRequest = follow.followUp;
-                  },
-                };
-              },
-            }),
-          );
-        }
-        // No recall tool — plain passthrough.
-        return finishForeground(
-          streamResponsesPassthrough(
-            upstreamResponse,
-            (response, successful) => {
-              if (successful) finishStreaming(response);
-              else finishUnsuccessfulStreaming(response);
-            },
-            sessionState.sessionID,
-            req.codex ? "codex" : "public",
-            foregroundAbort.signal,
-          ),
-        );
-      }
-      // Warning to inject, or a non-Responses client: buffer the full
-      // upstream, run recall interception, then re-emit.
-      const captured = await awaitForeground(
-        captureUnsuccessfulResponses(
-          accumulateResponsesSSEStream(upstreamResponse, {
-            signal: foregroundAbort.signal,
-            validation: req.codex ? "codex" : "public",
-            stopAtTerminal: true,
-            requireCompletedTerminal: true,
-          }),
-        ),
-      );
-      if (!captured) {
-        return finishForeground(errorResponse(502, "Gateway request failed"));
-      }
-      if (!captured.successful) {
-        if (hasRecallToolUse(captured.response)) {
-          return finishForeground(errorResponse(502, "Gateway request failed"));
-        }
-        return finishForeground(
-          nonStreamHttpResponse(
-            captured.response,
-            req.protocol,
-            req.stream,
-            undefined,
-            requestEnablesLongContext(req),
-          ),
-        );
-      }
-      return finishWithRecall(captured.response);
-    }
-
-    if (effectiveProtocol === "openai") {
-      // OpenAI Chat Completions streaming — accumulate and return as
-      // non-streaming Anthropic format (same pattern as non-stream path).
-      const resp = await awaitForeground(
-        accumulateOpenAISSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
-          strict: true,
-          stopAtTerminal: true,
-          consumeUntilDone: true,
-        }),
-      );
-      return finishWithRecall(resp);
-    }
-
-    if (effectiveProtocol === "gemini") {
-      // Gemini native streaming — accumulate the SSE frames, then re-emit via
-      // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
-      const resp = await awaitForeground(
-        accumulateGeminiSSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
-          strict: true,
-          stopAtTerminal: true,
-        }),
-      );
-      return finishWithRecall(resp);
-    }
-
-    // Anthropic streaming: forward events and accumulate in parallel.
-    // Pass recall context so the accumulator can intercept recall tool_use.
-    const hasRecallTool = modifiedReq.tools.some(
-      (t) => t.name === RECALL_TOOL_NAME,
-    );
-    const anthropicSSE = buildStreamingResponse(
-      upstreamResponse,
-      finishStreaming,
-      hasRecallTool
-        ? {
-            clientMessages: recallClientMessages,
-            modifiedReq,
-            config,
-            sessionState,
-            cacheOptions,
-            upstreamRoute: requestUpstreamRoute,
-            noStore: suppressTemporalStorage,
-            onFailure: finishUnsuccessfulStreaming,
-            onTransactionReady: (transaction) => {
-              rollbackRecallPersistence();
-              recallPersistenceTransaction = transaction;
-            },
-            clientSpeaksAnthropic: req.protocol === "anthropic",
-            stableLtmText,
-            recallDeadlineAt: foregroundAbort.deadlineAt,
-            ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
-          }
-        : undefined,
-      warningText,
-      sessionState.sessionID,
-      // Cap usage against the window the CLIENT meters against: the model's real
-      // window only when this request opted into it via the context-1m beta,
-      // else 200K — so a 1M-capable model the client meters against 200K can't
-      // cross its ~167K auto-compact threshold (#910 regression; MiniMax-M3).
-      maxReportedUsageForModelID(req.model, requestEnablesLongContext(req)),
-      foregroundAbort.signal,
-    );
-    // Translate to client's wire format if needed. When the upstream is
-    // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
-    if (req.protocol === "openai") {
-      return finishForeground(
-        translateAnthropicStreamToOpenAI(anthropicSSE, {
-          signal: foregroundAbort.signal,
-          propagateErrors: true,
-        }),
-      );
-    }
-    if (req.protocol === "openai-responses") {
-      return finishForeground(
-        translateAnthropicStreamToResponses(anthropicSSE, {
-          signal: foregroundAbort.signal,
-        }),
-      );
-    }
-    if (req.protocol === "gemini") {
-      return finishForeground(
-        translateAnthropicStreamToGemini(anthropicSSE, {
-          signal: foregroundAbort.signal,
-        }),
-      );
-    }
-    return finishForeground(anthropicSSE);
-  }
-
-  // Non-streaming: dispatch to correct accumulator based on upstream protocol.
-  const captured = await awaitForeground(
-    captureUnsuccessfulResponses(
-      accumulateNonStreamResponse(
-        upstreamResponse,
-        effectiveProtocol,
-        modifiedReq.codex === true,
-        foregroundAbort.signal,
-      ),
-    ),
-  );
-  if (!captured) {
-    return finishForeground(errorResponse(502, "Gateway request failed"));
-  }
-  if (!captured.successful) {
-    if (hasRecallToolUse(captured.response)) {
-      return finishForeground(errorResponse(502, "Gateway request failed"));
-    }
-    return finishForeground(
-      nonStreamHttpResponse(
-        captured.response,
-        req.protocol,
-        req.stream,
-        undefined,
-        requestEnablesLongContext(req),
-      ),
-    );
-  }
-  return finishWithRecall(captured.response);
-}
-
-/**
- * Decide whether request-only Responses provenance may cross this transform.
- *
- * Encrypted reasoning is deliberately not part of Lore messages, temporal
- * storage, or embeddings. It is replayed only while the gradient layer is
- * stable; a layer transition is a compaction boundary and intentionally drops
- * the old wire provenance. A fresh in-memory session has no prior boundary
- * (`null`) and may replay its supplied history; persisted sessions with the
- * v89 `-1` sentinel fail closed until an upstream turn establishes one.
- * Emergency Layer 4 never replays it.
- *
- * @internal Exported for focused policy tests.
- */
-export function shouldPreserveResponsesProvenance(
-  previousLayer: number | null,
-  currentLayer: number,
-): boolean {
-  return (
-    currentLayer < 4 &&
-    (previousLayer === null || previousLayer === currentLayer)
-  );
-}
-
-/**
- * Provider-native thinking/encrypted blocks are opaque and valid only on the
- * same wire family that produced them. A cross-protocol request keeps its
- * visible projection but drops request-only provenance rather than sending
- * Anthropic blocks to Gemini, Gemini signatures to Anthropic, or Responses
- * reasoning items to Chat Completions.
- *
- * Vertex and Bedrock use the Anthropic Messages body, so they share the
- * Anthropic provenance family.
- *
- * @internal Exported for focused policy tests.
- */
-export function canReplayRequestProvenance(
-  ingressProtocol: GatewayProtocol,
-  effectiveProtocol: GatewayProtocol,
-): boolean {
-  const family = (protocol: GatewayProtocol): string =>
-    protocol === "vertex" ? "anthropic" : protocol;
-  return family(ingressProtocol) === family(effectiveProtocol);
-}
-
-// ---------------------------------------------------------------------------
-// Lore message → Gateway message conversion
-// ---------------------------------------------------------------------------
-
-/**
- * Convert transformed Lore messages back to gateway message format.
- *
- * This reverses `gatewayMessagesToLore` after gradient transform has
- * potentially trimmed/reordered messages.
- *
- * Completed/error tool parts on assistant messages produce BOTH a `tool_use`
- * block on the assistant AND a corresponding `tool_result` block injected at
- * the start of the following user message. This makes the conversion
- * self-contained: tool pairing is reconstructed from whatever messages
- * survived gradient eviction, without depending on cross-message `tool_result`
- * parts that can become orphaned when the assistant message is evicted.
- *
- * `resolveToolResults()` strips `tool: "result"` parts from user messages
- * after pairing, so under normal operation those parts are gone. The fallback
- * handling for residual `tool: "result"` parts is kept for robustness.
- */
-/**
- * Reconstruct tool_result content as a `GatewayContentBlock[]` from a Lore
- * tool state. If structured `blocks` were preserved (non-text sub-blocks like
- * images), re-emit them losslessly; otherwise wrap the text string.
- */
-function toolResultContent(state: {
-  status: string;
-  output?: string;
-  error?: string;
-  blocks?: unknown[];
-}): GatewayContentBlock[] {
-  if (state.blocks && state.blocks.length > 0) {
-    // Re-emit the structured blocks that were preserved from ingress.
-    return state.blocks as GatewayContentBlock[];
-  }
-  const text =
-    state.status === "error"
-      ? (state.error ?? "[error]")
-      : (state.output ?? "");
-  return text ? [{ type: "text", text }] : [];
-}
-
-/** @internal Exported for tests. */
-export function loreMessagesToGateway(
-  messages: LoreMessageWithParts[],
-  provenanceByMessageId: ReadonlyMap<
-    string,
-    Pick<
-      GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
-    >
-  > = new Map(),
-  allowProvenance = true,
-): GatewayMessage[] {
-  const out: GatewayMessage[] = [];
-
-  // tool_result blocks reconstructed from the preceding assistant message's
-  // completed/error tool parts. Injected at the start of the next user message.
-  let pendingToolResults: GatewayContentBlock[] = [];
-
-  for (const msg of messages) {
-    const content: GatewayContentBlock[] = [];
-
-    if (msg.info.role === "user") {
-      // Inject reconstructed tool_result blocks from preceding assistant
-      content.push(...pendingToolResults);
-      pendingToolResults = [];
-    } else {
-      // New assistant message — reset pending results (shouldn't have any
-      // in well-formed conversations, but handles back-to-back assistants)
-      pendingToolResults = [];
-    }
-
-    for (const part of msg.parts) {
-      switch (part.type) {
-        case "text":
-          content.push({
-            type: "text",
-            text: (part as { text: string }).text,
-          });
-          break;
-        case "reasoning":
-          // Native/encrypted reasoning is request-only provenance. Older
-          // temporal rows may still contain a reasoning part from before that
-          // boundary existed; never promote it back into visible request
-          // content on replay.
-          break;
-        case "tool": {
-          const toolPart = part as {
-            type: "tool";
-            tool: string;
-            callID: string;
-            toolName?: string;
-            state: {
-              status: string;
-              input?: unknown;
-              output?: string;
-              error?: string;
-            };
-          };
-          if (toolPart.tool === "result") {
-            // Residual tool_result part (should have been stripped by
-            // resolveToolResults, but handle gracefully for robustness)
-            content.push({
-              type: "tool_result",
-              toolUseId: toolPart.callID,
-              ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
-              content: toolResultContent(toolPart.state),
-            });
-          } else {
-            // Emit tool_use on this assistant message
-            content.push({
-              type: "tool_use",
-              id: toolPart.callID,
-              name: toolPart.tool,
-              input: toolPart.state.input ?? {},
-            });
-            // Completed/error tool parts: queue a tool_result for the next
-            // user message. This reconstructs the Anthropic API's split-
-            // message format from Lore's single-message representation.
-            if (toolPart.state.status === "completed") {
-              pendingToolResults.push({
-                type: "tool_result",
-                toolUseId: toolPart.callID,
-                toolName: toolPart.toolName ?? toolPart.tool,
-                content: toolResultContent(toolPart.state),
-              });
-            } else if (toolPart.state.status === "error") {
-              pendingToolResults.push({
-                type: "tool_result",
-                toolUseId: toolPart.callID,
-                toolName: toolPart.toolName ?? toolPart.tool,
-                content: toolResultContent(toolPart.state),
-                isError: true,
-              });
-            }
-            // Pending tool parts (not yet resolved) only emit tool_use —
-            // the model will see an unresolved tool call. sanitizeToolParts
-            // in gradient.ts converts these to error state before this point.
-          }
-          break;
-        }
-        // Opaque parts (image, audio, document, …) — reconstruct the
-        // gateway opaque block from the generic part's raw payload.
-        default:
-          if (
-            "raw" in part &&
-            typeof part.raw === "object" &&
-            part.raw !== null
-          ) {
-            content.push({
-              type: "opaque",
-              raw: part.raw as Record<string, unknown>,
-            });
-          } else if ("text" in part && typeof part.text === "string") {
-            content.push({ type: "text", text: part.text });
-          }
-          break;
-      }
-    }
-
-    const message: GatewayMessage = { role: msg.info.role, content };
-    const provenance = allowProvenance
-      ? provenanceByMessageId.get(msg.info.id)
-      : undefined;
-    if (
-      provenance?.provenanceContent &&
-      JSON.stringify(content) === JSON.stringify(provenance.content)
-    ) {
-      message.provenanceContent = [...provenance.provenanceContent];
-      if (provenance.provenancePositions) {
-        message.provenancePositions = [...provenance.provenancePositions];
-      }
-    }
-    out.push(message);
-  }
-
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Post-conversion validation: remove orphaned tool_result blocks
-// ---------------------------------------------------------------------------
-
-/**
- * Belt-and-suspenders safety net: ensures every `tool_result` block on a user
- * message references a `tool_use` block on the immediately preceding assistant
- * message. Removes orphans and logs a warning.
- *
- * This should never fire under normal operation (resolveToolResults strips
- * redundant tool_result parts, and loreMessagesToGateway reconstructs them
- * from the assistant's completed tool parts). But if a future code path
- * introduces orphaned references, this catches them before they reach the API.
- */
-/** @internal Exported for tests. */
-export function removeOrphanedToolResults(
-  messages: Array<{
-    role: "user" | "assistant";
-    content: GatewayContentBlock[];
-  }>,
-): void {
-  // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "user") continue;
-    if (!msg.content.some((b) => b.type === "tool_result")) continue;
-
-    // Collect tool_use IDs from the preceding assistant message
-    const prevMsg = i > 0 ? messages[i - 1] : undefined;
-    const prev = prevMsg?.role === "assistant" ? prevMsg : null;
-    const toolUseIds = new Set(
-      (prev?.content ?? [])
-        .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
-        .map((b) => b.id),
-    );
-
-    // Remove tool_result blocks that reference missing tool_use IDs
-    const before = msg.content.length;
-    msg.content = msg.content.filter(
-      (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
-    );
-    if (msg.content.length < before) {
-      log.warn(
-        `removed ${before - msg.content.length} orphaned tool_result block(s) from message ${i}`,
-      );
-    }
-    // If the user message is now empty, add placeholder text so the API
-    // doesn't reject an empty content array.
-    if (msg.content.length === 0) {
-      msg.content = [{ type: "text", text: "[tool results provided]" }];
-    }
-  }
-
-  // --- Pass 2: Remove orphaned tool_use blocks (tool_use → tool_result) ---
-  // Every tool_use on an assistant must have a matching tool_result on the
-  // immediately following user message. Without this, the Anthropic API
-  // rejects with "tool_use ids found without tool_result blocks immediately
-  // after". This catches edge cases where gradient eviction or back-to-back
-  // assistants leave tool_use blocks without matching results (#424).
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant") continue;
-    if (!msg.content.some((b) => b.type === "tool_use")) continue;
-
-    // Collect tool_result IDs from the following user message
-    const nextMsg = i + 1 < messages.length ? messages[i + 1] : undefined;
-    const next = nextMsg?.role === "user" ? nextMsg : null;
-    const toolResultIds = new Set(
-      (next?.content ?? [])
-        .filter((b): b is GatewayToolResultBlock => b.type === "tool_result")
-        .map((b) => b.toolUseId),
-    );
-
-    // Remove tool_use blocks that have no matching tool_result
-    const before = msg.content.length;
-    msg.content = msg.content.filter(
-      (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
-    );
-    if (msg.content.length < before) {
-      log.warn(
-        `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
-      );
-    }
-    // If the assistant message is now empty, add placeholder text.
-    if (msg.content.length === 0) {
-      msg.content = [{ type: "text", text: "[assistant response]" }];
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Slash command interception (/lore:warm:*)
-// ---------------------------------------------------------------------------
-
-/**
- * Extract the text of the last user message, trimmed.
- * Returns empty string if no user message found.
- */
-function lastUserTextTrimmed(req: GatewayRequest): string {
-  for (let i = req.messages.length - 1; i >= 0; i--) {
-    const msg = req.messages[i];
-    if (msg.role !== "user") continue;
-    const text = msg.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-    return text;
-  }
-  return "";
-}
-
-// ---------------------------------------------------------------------------
-// Generic /lore:* slash command dispatcher
-// ---------------------------------------------------------------------------
-
-/**
- * Intercepts all `/lore:*` slash commands. Routes to specific handlers
- * and returns a synthetic response. Unknown `/lore:*` commands get a
- * helpful error response instead of being forwarded upstream.
- */
-async function handleLoreSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-  claimSession: (sessionID: string) => Promise<void>,
-): Promise<Response | null> {
-  const text = lastUserTextTrimmed(req);
-  if (!text.toLowerCase().startsWith("/lore:")) return null;
-
-  let state = findLiveSessionState(req, config, allSessions);
-  const indexedSessionID = findIndexedSessionID(req, config);
-  if (!state && indexedSessionID) {
-    const pathResult = getProjectPath(req.system, req.rawHeaders);
-    state = getOrCreateSession(
-      indexedSessionID,
-      pathResult.path,
-      pathResult.source,
-      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
-      config,
-    );
-  }
-  const sessionID = indexedSessionID ?? state?.sessionID;
-  if (sessionID) {
-    await claimSession(sessionID);
-    if (
-      indexedSessionID &&
-      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-    ) {
-      return slashResponse(
-        req,
-        "No authenticated active session found.",
-        `msg_lore_${Date.now()}`,
-      );
-    }
-    await awaitStreamingPostResponse(sessionID, req.signal);
-    req.signal?.throwIfAborted();
-    if (
-      indexedSessionID &&
-      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-    ) {
-      return slashResponse(
-        req,
-        "No authenticated active session found.",
-        `msg_lore_${Date.now()}`,
-      );
-    }
-  }
-
-  // Route to specific handlers
-  const warmupResult = handleWarmupSlashCommand(req, allSessions, config);
-  if (warmupResult) return warmupResult;
-
-  const curateResult = await handleCurateSlashCommand(
-    req,
-    allSessions,
-    config,
-    claimSession,
-  );
-  if (curateResult) return curateResult;
-
-  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions, config);
-  if (amnesiaResult) return amnesiaResult;
-
-  // Unknown /lore:* command — return error instead of forwarding upstream
-  log.warn(`unknown slash command: ${text}`);
-  return slashResponse(
-    req,
-    `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto|on|off|reset, /lore:amnesia:on|off`,
-    `msg_lore_${Date.now()}`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// /lore:amnesia — toggle temporal storage and background work
-// ---------------------------------------------------------------------------
-
-/**
- * `/lore:amnesia:on` — suppresses temporal storage and background work.
- * `/lore:amnesia:off` — resumes normal storage.
- *
- * The session still gets full Lore processing (LTM injection, recall tool,
- * gradient transform) but doesn't write new memories. Useful for eval QA
- * questions, read-only introspection, and sensitive conversations.
- */
-function handleAmnesiaSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-): Response | null {
-  const text = lastUserTextTrimmed(req);
-  const lower = text.toLowerCase();
-
-  const isOn = lower === "/lore:amnesia:on";
-  const isOff = lower === "/lore:amnesia:off";
-  if (!isOn && !isOff) return null;
-
-  const state = findLiveSessionState(req, config, allSessions);
-
-  if (!state) {
-    return slashResponse(
-      req,
-      "No active session found. Amnesia mode was not changed.",
-      `msg_lore_${Date.now()}`,
-    );
-  }
-
-  state.amnesia = isOn;
-  saveSessionTracking(state.sessionID, { amnesia: isOn });
-  log.info(
-    `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
-      `storage ${isOn ? "suppressed" : "resumed"}`,
-  );
-
-  const responseText = isOn
-    ? "Amnesia mode on — memory storage suppressed. Recall still works."
-    : "Amnesia mode off — memory storage resumed.";
-  return slashResponse(req, responseText, `msg_lore_${Date.now()}`);
-}
-
-// ---------------------------------------------------------------------------
-// /lore:warm — cache warming control
-// ---------------------------------------------------------------------------
-
-/**
- * Check if the last user message is a warmup slash command.
- *
- * `/lore:warm:stop` — disables cache warming for this session.
- * `/lore:warm:keep` — forces cache warming regardless of survival analysis.
- * `/lore:warm:auto` — returns to normal survival-analysis-driven mode.
- * `/lore:warm:reset` — clears ALL tripped circuit-breaker buckets (re-enables
- *   warming that was disabled after repeated uncached warmups).
- * `/lore:warm:off` — disables cache warming GLOBALLY (persisted override).
- * `/lore:warm:on` — re-enables cache warming globally.
- *
- * Returns a synthetic Anthropic-format response if a command was matched,
- * or null to continue normal processing.
- */
-function handleWarmupSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-): Response | null {
-  const text = lastUserTextTrimmed(req);
-  const lower = text.toLowerCase();
-
-  const isStop = lower === "/lore:warm:stop";
-  const isKeep = lower === "/lore:warm:keep";
-  const isAuto = lower === "/lore:warm:auto";
-  const isReset = lower === "/lore:warm:reset";
-  const isOff = lower === "/lore:warm:off";
-  const isOn = lower === "/lore:warm:on";
-  if (!isStop && !isKeep && !isAuto && !isReset && !isOff && !isOn) return null;
-
-  const state = findLiveSessionState(req, config, allSessions);
-
-  if (
-    (isReset || isOff || isOn) &&
-    (config.remoteGateway || config.hostedMode)
-  ) {
-    return errorResponse(
-      403,
-      "Global cache-warming administration is unavailable on remote gateways",
-    );
-  }
-
-  // Global controls require an authenticated, resolved session. Otherwise any
-  // network caller could persistently change warming for every tenant.
-  if (
-    (isReset || isOff || isOn) &&
-    (isHostedMode() ||
-      !state ||
-      !state.lastUpstream ||
-      !extractAuth(req.rawHeaders))
-  ) {
-    return slashResponse(
-      req,
-      "No authenticated active session found. Global cache warming was not changed.",
-      `msg_lore_${Date.now()}`,
-    );
-  }
-
-  // Reset is a breaker-wide admin action.
-  if (isReset) {
-    resetCircuitBreaker();
-    log.info(
-      "cache-warmer: /lore:warm:reset received — circuit breaker cleared",
-    );
-    return slashResponse(
-      req,
-      "Cache warming circuit breaker reset.",
-      `msg_lore_${Date.now()}`,
-    );
-  }
-
-  // on/off are GLOBAL admin actions (persisted KV override).
-  if (isOff || isOn) {
-    setWarmingEnabled(isOn);
-    log.info(
-      `cache-warmer: /lore:warm:${isOn ? "on" : "off"} received — warming globally ${isOn ? "enabled" : "disabled"}`,
-    );
-    return slashResponse(
-      req,
-      isOn
-        ? "Cache warming enabled globally."
-        : "Cache warming disabled globally.",
-      `msg_lore_${Date.now()}`,
-    );
-  }
-
-  // Update session warmup state
-  if (state) {
-    if (!state.warmup) {
-      state.warmup = {
-        lastWarmupAt: 0,
-        warmupCount: 0,
-        totalWarmups: 0,
-        warmupHits: 0,
-        disabled: false,
-      };
-    }
-    if (isStop) {
-      state.warmup.disabled = true;
-      state.warmup.forceKeepWarm = false;
-    } else if (isKeep) {
-      state.warmup.forceKeepWarm = true;
-      state.warmup.disabled = false;
-    } else {
-      // isAuto — return to normal survival-analysis mode
-      state.warmup.disabled = false;
-      state.warmup.forceKeepWarm = false;
-    }
-    const modeLabel = isStop ? "stopped" : isKeep ? "forced" : "auto";
-    log.info(
-      `cache-warmer: ${lower} received for session=${state.sessionID.slice(0, 16)} — ` +
-        `warming mode: ${modeLabel}`,
-    );
-  }
-
-  const responseText = isStop
-    ? "Cache warming stopped."
-    : isKeep
-      ? "Keeping cache warm."
-      : "Cache warming set to auto.";
-  return slashResponse(req, responseText, `msg_lore_${Date.now()}`);
-}
-
-// ---------------------------------------------------------------------------
-// Slash command: /lore:curate — synchronous distillation + curation
-// ---------------------------------------------------------------------------
-
-/**
- * `/lore:curate` — runs distillation + curation synchronously for the
- * current session and returns the results. Useful for:
- * - Eval harnesses that need curation to complete between session replays
- * - Users who want to force knowledge extraction after a conversation
- *
- * Returns a synthetic response with the curation results.
- */
-async function handleCurateSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-  claimSession: (sessionID: string) => Promise<void>,
-): Promise<Response | null> {
-  const text = lastUserTextTrimmed(req);
-  if (text.toLowerCase() !== "/lore:curate") return null;
-
-  const indexedSessionID = findIndexedSessionID(req, config);
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
-  let state = findLiveSessionState(req, config, allSessions);
-  let sessionID = state?.sessionID;
-
-  if (!state && indexedSessionID) {
-    state = getOrCreateSession(
-      indexedSessionID,
-      pathResult.path,
-      pathResult.source,
-      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
-      config,
-    );
-    sessionID = indexedSessionID;
-  }
-
-  if (!sessionID || !state) {
-    return slashResponse(
-      req,
-      "No active session found for curation.",
-      "msg_lore_curate_none",
-    );
-  }
-
-  await claimSession(sessionID);
-  if (
-    indexedSessionID &&
-    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-  ) {
-    return slashResponse(
-      req,
-      "No active session found for curation.",
-      "msg_lore_curate_none",
-    );
-  }
-  await awaitStreamingPostResponse(sessionID, req.signal);
-  req.signal?.throwIfAborted();
-  if (
-    indexedSessionID &&
-    !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-  ) {
-    return slashResponse(
-      req,
-      "No active session found for curation.",
-      "msg_lore_curate_none",
-    );
-  }
-
-  const projectPath = resolveSessionProjectPath(pathResult, state, config);
-  saveSessionTracking(sessionID, {
-    projectPath: state.projectPath || null,
-    projectPathProvisional: state.projectPathProvisional === true,
-  });
-  const { distillation, curator } = await import("@loreai/core");
-  req.signal?.throwIfAborted();
-  const llm = getLLMClient(config);
-  const model = getWorkerModel(state.lastUpstream);
-
-  log.info(`/lore:curate: running for session=${sessionID.slice(0, 16)}`);
-
-  // Force-distill all pending messages (urgent bypasses batch queue)
-  let distilled = 0;
-  try {
-    const dResult = await distillation.run({
-      llm,
-      projectPath,
-      sessionID,
-      model,
-      force: true,
-      skipMeta: true,
-      urgent: true,
-      callType: "direct",
-      signal: req.signal,
-      workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-      // #627 Phase 1: stamp the session's gitHead on slash-curate rows.
-      metadata: buildSessionMetadata(state.gitHead),
-    });
-    req.signal?.throwIfAborted();
-    distilled = dResult.distilled;
-  } catch (e) {
-    req.signal?.throwIfAborted();
-    log.error("/lore:curate distillation error:", e);
-  }
-
-  // Run curation (uses urgent/direct call via the LLM client)
-  let created = 0;
-  let updated = 0;
-  let deleted = 0;
-  try {
-    const cResult = await curator.run({
-      llm,
-      projectPath,
-      sessionID,
-      model,
-      signal: req.signal,
-      workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-      // #627 Phase 1: stamp the session's gitHead on slash-curate entries.
-      metadata: buildSessionMetadata(state.gitHead),
-    });
-    req.signal?.throwIfAborted();
-    created = cResult.created;
-    updated = cResult.updated;
-    deleted = cResult.deleted;
-  } catch (e) {
-    req.signal?.throwIfAborted();
-    log.error("/lore:curate curation error:", e);
-  }
-
-  const responseText =
-    `Curation complete: ${distilled} segments distilled, ` +
-    `${created} entries created, ${updated} updated, ${deleted} deleted.`;
-
-  log.info(`/lore:curate: ${responseText}`);
-
-  return slashResponse(req, responseText, `msg_lore_curate_${Date.now()}`);
-}
-
-/** Build a synthetic slash-command response in the client's wire format. */
-function slashResponse(
-  req: GatewayRequest,
-  text: string,
-  msgId: string,
-): Response {
-  // Build a GatewayResponse and use the protocol-aware response builders
-  // so slash commands work correctly for all client protocols.
-  const resp: GatewayResponse = {
-    id: msgId,
-    model: req.model,
-    content: [{ type: "text", text }],
-    stopReason: "end_turn",
-    usage: {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadInputTokens: 0,
-      cacheCreationInputTokens: 0,
-    },
-  };
-
-  if (req.stream) {
-    // Build Anthropic SSE, then translate to client's format if needed
-    const anthropicSSE = streamHttpResponse(resp);
-    if (req.protocol === "openai") {
-      return translateAnthropicStreamToOpenAI(anthropicSSE, {
-        signal: req.signal,
-      });
-    }
-    if (req.protocol === "openai-responses") {
-      return translateAnthropicStreamToResponses(anthropicSSE, {
-        signal: req.signal,
-      });
-    }
-    if (req.protocol === "gemini") {
-      return translateAnthropicStreamToGemini(anthropicSSE, {
-        signal: req.signal,
-      });
-    }
-    return anthropicSSE;
-  }
-
-  return nonStreamHttpResponse(
-    resp,
-    req.protocol,
-    req.stream,
-    undefined,
-    requestEnablesLongContext(req),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Error response builder
-// ---------------------------------------------------------------------------
-
-function errorResponse(status: number, message: string): Response {
-  return new Response(
-    JSON.stringify({
-      type: "error",
-      error: {
-        type: "server_error",
-        message,
-      },
-    }),
-    {
-      status,
-      headers: { "content-type": "application/json" },
-    },
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Main entry point
-// ---------------------------------------------------------------------------
-
-/**
- * Process an incoming gateway request through the full Lore pipeline.
- *
- * Returns a standard `Response` object — either a streaming SSE response
- * or a JSON response, depending on the client's `stream` setting.
- */
-async function handleRequestForTenant(
-  req: GatewayRequest,
-  config: GatewayConfig,
-): Promise<Response> {
-  if (!req?.rawHeaders) {
-    return errorResponse(400, "Malformed request: missing headers");
-  }
-  if (pipelineResetInProgress) {
-    return errorResponse(503, "Gateway pipeline is resetting");
-  }
-  streamingPostResponsesAccepting = true;
-  const requestGeneration = streamingPostResponseGeneration;
-  let resolveDownstreamSettled: (() => void) | undefined;
-  let downstreamCancelled = false;
-  const downstreamSettled = new Promise<void>((resolve) => {
-    resolveDownstreamSettled = resolve;
-  });
-  return runActivePipelineRequest(
-    req.signal,
-    (signal, trackOperation, claimSession) =>
-      handleRequestInner(
-        { ...req, signal },
-        config,
-        requestGeneration,
-        downstreamSettled,
-        () => downstreamCancelled,
-        trackOperation,
-        claimSession,
-      ),
-    () => resolveDownstreamSettled?.(),
-    () => {
-      downstreamCancelled = true;
-    },
-    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-  );
-}
-
-async function handleRequestInner(
-  req: GatewayRequest,
-  config: GatewayConfig,
-  requestGeneration: number,
-  downstreamSettled: Promise<void>,
-  downstreamWasCancelled: () => boolean,
-  trackOperation: (operation: Promise<unknown>) => void,
-  claimSession: (sessionID: string) => Promise<void>,
-): Promise<Response> {
-  const requestStartMs = Date.now();
-  const requestOrder = ++upstreamRequestOrder;
-  try {
-    // Guard against malformed invocations (e.g. fuzzers / direct module calls
-    // that pass an undefined or header-less request). The real server path
-    // always supplies a fully-formed GatewayRequest; bailing out cleanly here
-    // avoids a TypeError on `req.rawHeaders` deeper in the pipeline.
-    if (!req?.rawHeaders) {
-      return errorResponse(400, "Malformed request: missing headers");
-    }
-
-    if (hasConflictingAuthHeaders(req.rawHeaders)) {
-      return errorResponse(
-        400,
-        "Conflicting authentication headers: send either x-api-key or Authorization, not both",
-      );
-    }
-
-    // Validate explicit provider/upstream selection before slash, side-channel,
-    // compaction, and meta branches can take alternate paths. This resolver is
-    // synchronous and performs no network I/O.
-    try {
-      resolveRequestUpstreamRoute(req, config);
-    } catch (error) {
-      return errorResponse(
-        400,
-        error instanceof Error ? error.message : "Invalid upstream route",
-      );
-    }
-
-    // Preserve the process-global legacy credential only for a local,
-    // header-less request to the exact configured provider base.
-    const earlyAuth = extractAuth(req.rawHeaders);
-    if (earlyAuth) {
-      captureLegacyGlobalAuth(req, config, earlyAuth);
-    }
-
-    // --- Quick Tier-1 session lookup for structural compaction detection ---
-    // O(1) header + map lookup — lets us compare message counts before routing.
-    const priorState = activeSessionForKnownHeader(req, sessions, config);
-
-    // --- Case 0: Slash command interception (/lore:*) ---
-    // All /lore:* commands are intercepted here and never forwarded upstream.
-    const slashResult = await handleLoreSlashCommand(
-      req,
-      sessions,
-      config,
-      claimSession,
-    );
-    if (slashResult) return slashResult;
-
-    // --- Case 0.5: Claude Code side-channel → forward upstream untouched ---
-    // Auto-mode permission classifier, title/topic generation, and subagent
-    // namer/summary calls carry the live session's `x-claude-code-session-id`
-    // but NO coding system prompt (skipSystemPromptPrefix). They must never
-    // enter the pipeline: running them through it injects LTM/distilled
-    // prefixes or (worse) mis-routes them to compaction — corrupting the
-    // auto-mode classifier verdict and tripping Claude Code's 3-strike fallback
-    // that drops auto mode back to prompting for every action. This check MUST
-    // stay ahead of the structural-compaction detection below.
-    if (isClaudeCodeSideChannel(req)) {
-      log.info(
-        `claude-code side-channel: passthrough (messages=${req.messages.length} tools=${req.tools.length} maxTokens=${req.maxTokens})`,
-      );
-      return await handlePassthrough(req, config);
-    }
-
-    // --- Case 1: Compaction request → intercept ---
-    // Structural detection (session-aware) first, pattern matching as fallback.
-    // Sub-agents now get their own sessions (separate x-session-affinity /
-    // x-claude-code-agent-id), so priorState is the sub-agent's own state —
-    // structural detection is safe.
-    //
-    // IMPORTANT: a Claude Code sub-agent still shares the parent's
-    // `x-claude-code-session-id`. Before x-claude-code-agent-id was added to the
-    // known-header priority (see credential-headers.ts), `activeSessionForKnownHeader`
-    // resolved it to the PARENT session, whose large message count made the
-    // sub-agent's short first request (1 user message + tool-schema attachments)
-    // look like a structural compaction. The gateway then intercepted it and
-    // returned the offline "# Session Summary" block as the sub-agent's
-    // task_result. Guarding structural detection on the sub-agent signal closes
-    // that hole regardless of which header resolved the session.
-    const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
-    const structuralCompaction =
-      !isClaudeSubagent && isStructuralCompaction(req, priorState);
-    const patternDetection = structuralCompaction
-      ? undefined
-      : detectCompactionRequest(req);
-    if (structuralCompaction || patternDetection?.detected) {
-      const reason = structuralCompaction
-        ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length})`
-        : patternDetection?.detected
-          ? patternDetection.reason === "system-prompt"
-            ? `pattern: system-prompt match "${patternDetection.pattern}"`
-            : patternDetection.reason === "user-keywords"
-              ? `pattern: user-keyword match "${patternDetection.pattern}"`
-              : `pattern: template-sections (${patternDetection.matchCount} matches)`
-          : "unknown";
-      log.info(
-        `compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`,
-      );
-      return await handleCompaction(
-        req,
-        config,
-        requestGeneration,
-        trackOperation,
-        claimSession,
-      );
-    }
-
-    // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
-    if (isMetaRequest(req)) {
-      log.info(
-        `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
-          ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
-      );
-      return await handlePassthrough(req, config);
-    }
-
-    // --- Case 3: Normal conversation turn → full pipeline ---
-    return await handleConversationTurn(
-      req,
-      config,
-      requestOrder,
-      requestGeneration,
-      downstreamSettled,
-      downstreamWasCancelled,
-      claimSession,
-    );
-  } catch (err) {
-    // Client disconnect / abort is benign — downgrade from error to info.
-    const isAbort = err instanceof DOMException && err.name === "AbortError";
-    if (isAbort) {
-      log.info("pipeline aborted (client disconnect)");
-      // Only surfaces to Sentry if the host was under pressure at abort time.
-      captureClientAbortUnderPressure({
-        startMs: requestStartMs,
-        route: "request",
-      });
-    } else {
-      // Only log fixed internal failures. Arbitrary parser/fetch messages can
-      // contain upstream response content, which must never reach the log.
-      const detail =
-        err instanceof OpenAIStreamValidationError
-          ? config.exposeProviderDiagnostics
-            ? `: ${err.message} (rule=${err.rule})`
-            : `: ${err.message}`
-          : err instanceof Error &&
-              [
-                "fetch failed",
-                "missing OpenAI finish_reason terminal",
-                "missing OpenAI [DONE] terminal",
-                "Upstream response has no body",
-              ].includes(err.message)
-            ? `: ${err.message}`
-            : "";
-      log.error(`pipeline request failed${detail}`);
-    }
-    return errorResponse(502, "Gateway request failed");
-  }
-}
-
-export async function handleRequest(
-  req: GatewayRequest,
-  config: GatewayConfig,
-): Promise<Response> {
-  if (!req?.rawHeaders) return handleRequestForTenant(req, config);
-  return withRequestStorageTenant(req.rawHeaders, config, () =>
-    handleRequestForTenant(req, config),
-  );
-}
+          argume۞�ʗ��h��癎ۛ�݈ۙX[�\X�ܝH
+
+N��ڙO��ڙۘ[��[[ݙQ]�[�\ݙ[�\��X�ܝ�۔ݜ�X[PX�ܝ
+Nۛ�݈۔ݜ�X[PX�ܝH
+
+N��ڙO��X؛XYۛܝX܋��[�\ڊ�X�ܝY�N�\ݛYQ[X[�ˊ
+N�\ݛYQ[X[�H[�Y�[�YY�
+ٙ\[]�U[Y\�HۙX\�[Y[ݝ
+ٙ\[]�U[Y\�Nٙ\[]�U[Y\�H�[Y�
+Xݚ]�T�XY\�H؛�ٛ[��[X\ٔ�XY\�Xݚ]�T�XY\�ڙۘ[��X\ۛ�N[ق��ڙݜ��[��[�ڜ[�\ܛًۜ��ٞO˘؛�ٛ
+ڙۘ[��X\ۛ�K�؝ڊ
+
+HO�ߊNNڙۘ[�Y]�[�\ݙ[�\��X�ܝ�۔ݜ�X[PX�ܝțَۘ��YHJNY�
+ڙۘ[�X�ܝY
+H۔ݜ�X[PX�ܝ
+
+Nۛ�݈ݜ�X[HH�]Ȕ�XYX�Tݜ�X[OZ[�\��^O�ݘ\�
+ۛ��ۛ\�H�ڙ
+\ޛ�Ȋ
+HO�ۛ�݈ؚ]�ܑ[X[�H\ޛ�Ȋ
+N��ۚ\ُ�ڙ�O�ښ[H
+�X؛�ٛY	���\ڙۘ[�X�ܝY	���
+ۛ��ۛ\��\ڜ�Yڞ�HψJHH�
+H]ؚ]�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO��\ݛYQ[X[�H�\ۛ�NJNB�ڙۘ[��ݒY�X�ܝY
+
+NN]�[�ڜ[]�[�[Z]YH�[َ]ܙ[�\�Uۛ[Z]YH�[َۛ�݈ؙ�Q[�]Y]YHH\ޛ�Ȋ�ڝ[�ΈZ[�\��^K�Y�\�[�]Y]YOΈ
+
+HO��ڙ�
+N��ۚ\ُ�ۛX[��O�Y�
+؛�ٛY
+H�]\���[َ]ؚ]ؚ]�ܑ[X[�
+
+NY�
+؛�ٛY
+H�]\���[َ�Hۛ��ۛ\��[�]Y]YJٜ]Y[�ِڝ[�ʘڝ[�ʊNH؝ڈ؛�ٛYH�YN�]\���[َB�Y�\�[�]Y]YOˊ
+N�]\���YNNۛ�݈[�]Y]YT�[�ڜ[H\ޛ�Ȋ�ڝ[�ΈZ[�\��^K�[Z]Ӝ�[�\�UۛH�[ً�Y�\�[�]Y]YOΈ
+
+HO��ڙ�
+N��ۚ\ُ�ۛX[��O��ؙ�Q[�]Y]YJڝ[�ˈ
+
+HO��[�ڜ[]�[�[Z]YH�YNY�
+[Z]Ӝ�[�\�Uۛ
+Hܙ[�\�Uۛ[Z]YH�YNY�\�[�]Y]YOˊ
+NJNۛ�݈ؙ�PۛܙHH
+
+N��ڙO�ۙX[�\X�ܝ
+
+NY�
+؛�ٛY
+H�]\���Hۛ��ۛ\��ۛܙJ
+NH؝ڈˈ[�XYHۛܙYؘ[�ٛY�B�Nۛ�݈ؙ�Q\��܈H
+\��܎�[�ۛݛ�N��ڙO�ۙX[�\X�ܝ
+
+NY�
+؛�ٛY
+H�]\���Hۛ��ۛ\��\��܊\��܊NH؝ڈˈ[�XYHۛܙYؘ[�ٛY��B�N�ۛ�݈�\ٝٙ\[]�HH
+
+N��ڙO�Y�
+ٙ\[]�U[Y\�HۙX\�[Y[ݝ
+ٙ\[]�U[Y\�Nٙ\[]�U[Y\�Hٝ[Y[ݝ
+�[�ݚ[ۈXڊ
+HY�
+؛�ٛYڙۘ[�X�ܝY
+H�]\��Y�
+
+ۛ��ۛ\��\ڜ�Yڞ�HψJH�
+H�ڙؙ�Q[�]Y]YJٙ\[]�Pۛ[Y[�
+NB�Y�
+\ڙۘ[�X�ܝY
+Hٙ\[]�U[Y\�Hٝ[Y[ݝ
+XڋёTSU�Wғ�PՒU�UWӔʎB�KёTSU�Wғ�PՒU�UWӔʎNۛ�݈ۙX\�ٙ\[]�HH
+
+N��ڙO�Y�
+ٙ\[]�U[Y\�HۙX\�[Y[ݝ
+ٙ\[]�U[Y\�Nٙ\[]�U[Y\�H�[N]�[�ڜ[�XY\���XYX�Tݜ�X[QY�][�XY\�Z[�\��^O��[B��[]�[�ڜ[�[�ܛܝ�]�Y\ȏH]�[�ڜ[�]�TݘؙYYY�\ܝYH�[َ]�[�ڜ[�XY�[�\ڙYH�[َ]ۛ�[�X][ې][\YH�[َ]ۛ�[�X][ۑ�Z[\�P؝Yۜ�N���X؛ۛ�[�X][ۑ�Z[\�P؝Yۜ�B�[�Y�[�Y]ۛ�[�X][ۑ�Z[\�T�\ܝYH�[َ]�X؛]XݙYH�[َ\H�[�ڜ[�Z[\�P؝Yۜ�HB���[�ڜ[ݜ�[�ܛܝ����[�ڜ[ܙ\۝\�ٗۚ[Z]����[�ڜ[ܜ�ݛ؛ۈ����[�ڜ[ۚ\ܚ[�ם\�Z[�[����[�ڜ[ݛ�^XݙY�]�[�ڜ[�Z[\�P؝Yۜ�N��[�ڜ[�Z[\�P؝Yۜ�HB���[�ڜ[ݛ�^XݙY�ۛ�݈ۘ\ܚY�T�[�ڜ[�Z[\�HH
+�\��܎�[�ۛݛ��
+N��[�ڜ[�Z[\�P؝Yۜ�HO�Y�
+\��܈[�ݘ[�ٛوԑTݜ�X[U�[�ܛܝ\��܊H�]\����[�ڜ[ݜ�[�ܛܝ�B�Y�
+\��܈[�ݘ[�ٛوԑTݜ�X[S[Z]\��܊H�]\����[�ڜ[ܙ\۝\�ٗۚ[Z]�B��]\���[�ڜ[�Z[\�P؝Yۜ�NNۛ�݈�[�ڜ[�[�ܛܝݘYوH
+
+HO��ܙ[�\�Uۛ[Z]Y�Ȋ�ܝݛۛ�\Șۛ�݊B���[�ڜ[]�[�[Z]Y�Ȋ�ܝ۝]]�\Șۛ�݊B��
+��W۝]]�\Șۛ�݊Nۛ�݈�\ܝۛ�[�X][ۑ�Z[\�HH
+�؝Yۜ�N��X؛ۛ�[�X][ۑ�Z[\�P؝Yۜ�K�
+N��ڙO�Y�
+ۛ�[�X][ۑ�Z[\�T�\ܝY
+H�]\��ۛ�[�X][ۑ�Z[\�T�\ܝYH�YN�\ܝ�X؛ۛ�[�X][ۑ�Z[\�J؝Yۜ�JNNˈ�X؛][\Ș\�H؝]؞KZ[�\��[[�]\݈ݘ^HY[�ۈ]�\�H^]�ˈ[�۝Y[�ș�Z[\�\Ȝ�Z\ٙ�Y�ܙHX\�ٜ��\XٛY[���ۛ�݈�X؛[�XٜȏH�]Ȕٝ�[X�\��
+Nۛ�݈[��\ۛ�Yۛ[�XٜȏH�]Ȕٝ�[X�\��
+Nۛ�݈�Y�\�[�ْ[�XٜȏH�]ȓX\�[X�\��Y�\�[�ٓY�XޘۙO�
+N�ۛ�݈�]Z[�Yݘ]P�\ٛ[�HH�]Z[�Yݘ]P�]\΂�ۛ�݈Y[��X؛�\ٛ[�HHY[��X؛�]\΂�ۛ�݈�[��[�ڜ[][\H\ޛ�Ȋ
+N��ۚ\ُ�ڙ�O��[�ڜ[�XY�[�\ڙYH�[َY�
+Xݜ��[��[�ڜ[�\ܛًۜ��ٞJH�݈�]ȑ\��܊�\ݜ�X[H�\ܛۜو\ț�Ș�ٞH�NB�ۛ�݈�XY\�Hݜ��[��[�ڜ[�\ܛًۜ��ٞK�ٝ�XY\�
+N�[�ڜ[�XY\�H�XY\�Xݚ]�T�XY\�H�XY\��ˈKKH�X؛[�\�ٜ[ۈݘ]HKKB�ˈݝ]ڛ�^�[Y\ȝڛܙH][H\ȘHݜ�\ܙY�X؛�[�ݚ[ؘۗ[��ۛ�݈\�ٙ�X؛[�]ȏH�]ȓX\�[X�\��X؛\�ݛY[�ϊ
+Nˈܙ\�Y\݈و\�ٙ�X؛[��ؘ][ۜΈțݝ][�^�ؚȟK��ۛ�݈[�[�ԙX؛Έ[�[�ԙ\ܛٜۜԙX؛׈H׎ۛ�݈ۛ\]Y�X؛[�XٜȏH�]Ȕٝ�[X�\��
+Nˈڙ]\�[�H�Ӌ\�X؛�[�ݚ[ؘۗ[\X\�Y
+Z^Y]ۛȘ؜يK��]ݚ\�ۛٙ[�H�[َۛ�݈[��\ۛ�Yۛ�]\ȏH�]ȓX\�[X�\��[X�\��
+Nۛ�݈Y�\��Y]�[�Έ\��^Oڝ[�ΈZ[�\��^N؛�Y]R[�^Έ�[X�\�O�H׎]Y�\��Y�]\ȏHۛ�݈\ؘ\�Y�\��Y؛�Y]HH
+ݝ][�^��[X�\�N��ڙO��܈
+][�^HY�\��Y]�[�˛[�ݚHNȚ[�^�HȚ[�^KJHY�
+Y�\��Y]�[�֚[�^K�؛�Y]R[�^OOHݝ][�^
+HY�\��Y]�[�˜ܛXي[�^JNB�B�Nۛ�݈�ۛݙQY�\��Y؛�Y]HH
+ݝ][�^��[X�\�N��ڙO�Y[��X؛�]\Ȋψ[��\ۛ�Yۛ�]\˙ٝ
+ݝ][�^
+Hψ[��\ۛ�Yۛ�]\˙[]Jݝ][�^
+NY�
+Y[��X؛�]\ȏ�X^Y[��X؛�]\ʈ�݈�]ȔԑTݜ�X[S[Z]\��܊���X؛ݜ�X[H^ٙYYY�\��Y]�[�[Z]��
+NB�N��\ٝٙ\[]�J
+N�܈]ؚ]
+ۛ�݈ș]�[�]HHو\�ٔԑTݜ�X[J�XY\�X^��[Y\ΈX^ԑQ��[Y\˂�[�Xݚ]�]S\ΈܙR[�Xݚ]�]S\˂�ڙۘ[���[YP۝[�\��JJH�\ٝٙ\[]�J
+Nȋˈ\ݜ�X[H[]�H8�%�\ٝ[�Xݚ]�]H[Y\���Y�
+Y]H]HOOH�ѓӑWH�Hۛ�[�YNݜ�X[P�]\Ȋψ[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+]�[�]JK�
+K��]S[�ݚY�
+ݜ�X[P�]\ȏ�X^ݜ�X[P�]\ʈ�݈�]ȔԑTݜ�X[S[Z]\��܊���\ܛٜۜȜݜ�X[H^ٙYY�]H[Z]��
+NB���[�ڜ[�Z[\�P؝Yۜ�HH��[�ڜ[ܜ�ݛ؛ۈ�]\�ٙ��Xۜ�ݜ�[�ˈ[�ۛݛ���H\�ٙH�ӓ��\�ي]JH\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��H؝ڈY�
+]�[��ݘ\�՚]
+��\ܛًۜ��JH�݈�]ȑ\��܊X[�ܛYY�ӓ�[��\ܛٜۜș]�[�	ٝ�[�X
+NB�ˈ�ۋR�ӓ�ٙ\[]�K؛ۛY[�]�[�8�%�ܝ؜�\˚\˂�Y�
+]�[�OOH�Y\ܘYو�Hۛ�݈ڝ[�ȏH[�ۙ\��[�ۙJ�ܛX]�\ܛٜۜѝ�[�
+]�[�]JJNY�
+�X؛[�Xٜ˜ڞ�H�[��\ۛ�Yۛ[�Xٜ˜ڞ�H�
+HY�\��Y�]\Ȋψڝ[�˘�]S[�ݚY�
+Y�\��Y�]\ȏ�X^Y�\��Y�]\ʈ�݈�]ȔԑTݜ�X[S[Z]\��܊���X؛ݜ�X[H^ٙYYY�\��Y]�[�[Z]��
+NB�Y�\��Y]�[�˜\ڊȘڝ[�ȟJNH[و]ؚ][�]Y]YT�[�ڜ[
+ڝ[�ˈݚ\�ۛٙ[�NB�B�ۛ�[�YNB�Y�
+\�ٙ�\HOOH]�[�
+H�݈�]ȑ\��܊�\ܛٜۜȜ^[ؙ\Hٜț�݈X]ڈ	ٝ�[�X
+NB�Y�
+�
+]�[�OOH��\ܛًۜ�ݝ]ڝ[K�YY��]�[�OOH��\ܛًۜ�ݝ]ڝ[K�ۙH�H	���
+\�ٙ�][H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��[�Y�[�Y
+O˝\HOOB���[�ݚ[ؘۗ[�	���
+\�ٙ�][H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��[YHOOH�PГՓӓӐSQB�
+H�X؛]XݙYH�YNB�ۛ�݈�ܛX[^�][۔ݘ]HH�ܛX[^�Pۙ^]�[�
+�ݘ]K�]�[��\�ٙ�
+N�[Y]T�\ܛۜٓY�XޘۙJݘ]K]�[�\�ٙ
+NٙY[\Xڝۙ^][Jݘ]K�ܛX[^�][۔ݘ]K]�[�\�ٙ
+N�Y�
+ۛ�ݛYT�Y�\�[�ّ]�[�
+ݘ]K�Y�\�[�ْ[�Xٜˈ]�[�\�ٙ
+JHۛ�[�YNB��ۛ�݈ݝ][�^Hݝ][�^�ܑ]�[�
+�]�[��\�ٙ�ݘ]K�
+[�^][JHO�Y�
+�][K�\HOOH��[�ݚ[ؘۗ[��][K��[YHOOH�PГՓӓӐSQB�
+H�]\��B��X؛]XݙYH�YN�X؛[�Xٜ˘Y
+[�^
+NK�
+NY�
+ݝ][�^OOH[�Y�[�Y
+H�]Z[�Yݘ]P�]\Ȋψ[�ۙ\��[�ۙJ]JK��]S[�ݚY�
+�]Z[�Yݘ]P�]\ȏ�X^�]Z[�Yݘ]P�]\ʈ�݈�]ȔԑTݜ�X[S[Z]\��܊���\ܛٜۜȜ�]Z[�Yݘ]H^ٙYY�]H[Z]��
+NB�ۛ�݈[\Xڝ][HHݘ]K��]ҝ[\˙ٝ
+ݝ][�^
+NY�
+�ܝ˝�[Y][ۈOOH�ۙ^�	���]�[�OOH��\ܛًۜ�ݝ]ڝ[K�YY�	���]�[�OOH��\ܛًۜ�ݝ]ڝ[K�ۙH�	���[\Xڝ][O˝\HOOH��[�ݚ[ؘۗ[�	���[\Xڝ][K��[YHOOH���
+H[��\ۛ�Yۛ[�Xٜ˘Y
+ݝ][�^
+NB�B��]�\ۛ�[�ԙX؛ۛH�[َ]�\ۛ�[�՚\ژ�UۛH�[َˈ]X݈�X؛[�[��\ۛ�Yܘ\�و�[�ݚ[ۋX؛Y[�]Y\˂�Y�
+�
+]�[�OOH��\ܛًۜ�ݝ]ڝ[K�YY��]�[�OOH��\ܛًۜ�ݝ]ڝ[K�ۙH�H	���ݝ][�^OOH[�Y�[�Y�
+Hۛ�݈][HH\�ٙ�][H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��[�Y�[�Yۛ�݈\ԙX؛؛B�][O˝\HOOH��[�ݚ[ؘۗ[�	��][O˛�[YHOOH��X؛�Y�
+\ԙX؛؛
+H�X؛]XݙYH�YN�X؛[�Xٜ˘Y
+ݝ][�^
+N�\ۛ�[�ԙX؛ۛH�YNH[وY�
+][O˝\HOOH��[�ݚ[ؘۗ[�HY�
+�]�[�OOH��\ܛًۜ�ݝ]ڝ[K�YY�	���ܝ˝�[Y][ۈOOH�ۙ^�	���][K��[YHOOH���
+H[��\ۛ�Yۛ[�Xٜ˘Y
+ݝ][�^
+NH[و�\ۛ�[�՚\ژ�UۛH�YNB�B�B��ˈ[؞\ȘX؝[][]H[�ȝH[�\��[ݘ]H�܈ܝ�\ܛًۜ��\T�\ܛٜۜѝ�[�
+ݘ]K]�[�\�ٙ
+NY�
+�]�[�OOH��\ܛًۜ�ݝ]ڝ[K�ۙH�	���ݝ][�^OOH[�Y�[�Y�
+H�\ٜ��Tݜ�X[YY�X\ۛ�[�ʜݘ]Kݝ][�^
+NB��]�\ۛ�Y�\ژ�UۛH�[َY�
+ݝ][�^OOH[�Y�[�Y	���\ۛ�[�ԙX؛ۛ
+H\ؘ\�Y�\��Y؛�Y]Jݝ][�^
+N�ۛݙQY�\��Y؛�Y]Jݝ][�^
+N[��\ۛ�Yۛ[�Xٜ˙[]Jݝ][�^
+NH[وY�
+ݝ][�^OOH[�Y�[�Y	���\ۛ�[�՚\ژ�Uۛ
+H�\ۛ�Y�\ژ�UۛH[��\ۛ�Yۛ[�Xٜ˙[]Jݝ][�^
+N[��\ۛ�Yۛ�]\˙[]Jݝ][�^
+Nݚ\�ۛٙ[�H�YNB��Y�
+��\ۛ�Y�\ژ�Uۛ	����X؛[�Xٜ˜ڞ�HOOH	���[��\ۛ�Yۛ[�Xٜ˜ڞ�HOOH�
+H�܈
+ۛ�݈Y�\��YوY�\��Y]�[�ʈY�
+J]ؚ][�]Y]YT�[�ڜ[
+Y�\��Y�ڝ[�ˈ�YJJJH��XZ΂�B�Y�\��Y]�[�˛[�ݚHY�\��Y�]\ȏHB��ۛ�݈\ԙX؛]�[�B�ݝ][�^OOH[�Y�[�Y	���X؛[�Xٜ˚\ʛݝ][�^
+Nۛ�݈\՛��\ۛ�Yۛ]�[�B�ݝ][�^OOH[�Y�[�Y	���[��\ۛ�Yۛ[�Xٜ˚\ʛݝ][�^
+N�ˈݜ�\܈[]�[�Ș�[ۙڛ�ȝȘH�X؛][K�]ݚ[۝[��ˈ[HۈX[�ܛYY\�ݛY[�ݜ�X[\Ș؛��݈ܛ݈ڝݝ�ݛ���Y�
+�
+\ԙX؛]�[�\՛��\ۛ�Yۛ]�[�
+H	���ݝ][�^OOH[�Y�[�Y�
+Hۛ�݈Y[�ڝ[�ȏH[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+]�[�]JK�
+Nۛ�݈Y[��]\ȏHY[�ڝ[�˘�]S[�ݚY�\��Y�]\ȊψY[��]\΂�Y�
+\ԙX؛]�[�
+HY[��X؛�]\ȊψY[��]\΂�H[و[��\ۛ�Yۛ�]\˜ٝ
+�ݝ][�^�
+[��\ۛ�Yۛ�]\˙ٝ
+ݝ][�^
+Hψ
+H
+ȚY[��]\˂�
+NB�Y�
+�Y�\��Y�]\ȏ�X^Y�\��Y�]\ȟ�Y[��X؛�]\ȏ�X^Y[��X؛�]\
+H�݈�]ȔԑTݜ�X[S[Z]\��܊���X؛ݜ�X[H^ٙYYY�\��Y]�[�[Z]��
+NB�Y�
+�]�[�OOH��\ܛًۜ��[�ݚ[ؘۗ[؜�ݛY[�˙ۙH�	���\ԙX؛]�[��
+H\�ٙ�X؛[�]˜ٝ
+�ݝ][�^�\�ٔ�X؛\�ݛY[�ʜ\�ٙ�\�ݛY[�ʋ�
+NB�Y�
+\՛��\ۛ�Yۛ]�[�	��Z\ԙX؛]�[�
+HY�\��Y]�[�˜\ڊڝ[�ΈY[�ڝ[�˂�؛�Y]R[�^�ݝ][�^�JNB�Y�
+]�[�OOH��\ܛًۜ�ݝ]ڝ[K�ۙH�HY�
+\ԙX؛]�[�
+HۛXݐۛ\]Y�X؛
+�ݘ]K�ݝ][�^�\�ٙ�X؛[�]˂�[�[�ԙX؛˂�ۛ\]Y�X؛[�Xٜ˂�
+NB�B�ˈۉ݈�ܝ؜��X؛Z][H]�[�ȝȝHۚY[���ۛ�[�YNB��ˈ\�Z[�[]�[�Έ[�H�X؛[�\�ٜ[ۈ�Y�ܙH�ܝ؜�[�˂�Y�
+�]�[�OOH��\ܛًۜ�ۛ\]Y��]�[�OOH��\ܛًۜ�ۙH��]�[�OOH��\ܛًۜ�[�ۛ\]H��]�[�OOH��\ܛًۜ��Z[Y��
+H�[�ڜ[�XY�[�\ڙYH�YNۛ�݈\�Z[�[\�ٙHݜ�\Y[��Y�\�[�ٓݝ]
+\�ٙ
+Nۛ�݈\�Z[�[�\ܛۜوH\�Z[�[\�ٙ��\ܛۜو\�Xۜ�ݜ�[�ˈ[�ۛݛ���[�Y�[�YY�
+�\��^K�\М��^J\�Z[�[�\ܛُۜ˛ݝ]
+H	���\�Z[�[�\ܛًۜ�ݝ]�ۛYJ�
+][JHO��][HOOH�[	���\[و][HOOH�ؚ�X݈�	���P\��^K�\М��^J][JH	���
+][H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K�\HOOB���[�ݚ[ؘۗ[�	���
+][H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��[YHOOH�PГՓӓӐSQK�
+B�
+H�X؛]XݙYH�YNB�Y�
+ܝ˝�[Y][ۈOOH�ۙ^�H\ܙ\�\�Z[�[ݝ]X]ڙ\ʂ�ݘ]K�\�Z[�[\�ٙ�
+ݝ][�^][JHO�Y�
+�][K�\HOOH��[�ݚ[ؘۗ[��][K��[YHOOH�PГՓӓӐSQH�
+\�X؛[�Xٜ˚\ʛݝ][�^
+H	���][��\ۛ�Yۛ[�Xٜ˚\ʛݝ][�^
+JB�
+H�]\��B��X؛]XݙYH�YN�X؛[�Xٜ˘Y
+ݝ][�^
+N[��\ۛ�Yۛ[�Xٜ˙[]Jݝ][�^
+N\ؘ\�Y�\��Y؛�Y]Jݝ][�^
+N�ۛݙQY�\��Y؛�Y]Jݝ][�^
+NK�
+ݝ][�^][JHO�Y�
+][K�\HOOH��[�ݚ[ؘۗ[�H�]\��Y�
+][K��[YHOOH�PГՓӓӐSQJHۛXݐۛ\]Y�X؛
+�ݘ]K�ݝ][�^�\�ٙ�X؛[�]˂�[�[�ԙX؛˂�ۛ\]Y�X؛[�Xٜ˂�
+NH[و[��\ۛ�Yۛ[�Xٜ˙[]Jݝ][�^
+N[��\ۛ�Yۛ�]\˙[]Jݝ][�^
+Nݚ\�ۛٙ[�H�YNB�K�
+N\ܙ\�ݝ]Y�Xޘۙ\Лۜ]Jݘ]JNH[و\ܙ\�ݝ]Y�Xޘۙ\Лۜ]Jݘ]JN\ܙ\�\�Z[�[ݝ]X]ڙ\ʜݘ]K\�Z[�[\�ٙ
+NB�\ܙ\��Y�\�[�ٓY�Xޘۙ\Лۜ]J�Y�\�[�ْ[�Xٜʎ\ܙ\��X؛][\Лۜ]Y
+�ݘ]K�[�[�ԙX؛˛X\
+
+�X؛
+HO��X؛�ݝ][�^
+K�
+NY�
+��[�ڜ[�[�ܛܝ�]�Y\ȏ�	���\�[�ڜ[�]�TݘؙYYY�\ܝY�
+H�[�ڜ[�]�TݘؙYYY�\ܝYH�YN�\ܝ�[�ڜ[�[�ܛܝ�Z[\�Jڛ����XY��ݘYَ���W۝]]��ݝۛYN���]�WܝXؙYYY��JNB�Y�
+[�[�ԙX؛˛[�ݚOOH
+HY�
+[��\ۛ�Yۛ[�Xٜ˜ڞ�H�
+H�݈�]ȑ\��܊���\ܛٜۜȝ\�Z[�[Y�ܘ\�و�[�ݚ[ۈY[�]H[��\ۛ�Y��
+NB�Y�
+�X؛[�Xٜ˜ڞ�H�
+H�݈�]ȑ\��܊���X؛ݜ�X[H[�Y�Y�ܙH�[�ݚ[ۈ\�ݛY[�Șۛ\]Y��
+NB��܈
+ۛ�݈Y�\��YوY�\��Y]�[�ʈY�
+J]ؚ][�]Y]YT�[�ڜ[
+Y�\��Y�ڝ[�ˈݚ\�ۛٙ[�JJB���XZ΂�B�Y�\��Y]�[�˛[�ݚHY�\��Y�]\ȏHˈ�Ȝ�X؛8�%�ܝ؜�H\�Z[�[]�[��\��][K��ۛ�݈�[�[�\ܛۜوH�[�[^�T�\ܛٜۜИ؊ݘ]JNY�
+�J]ؚ][�]Y]YT�[�ڜ[
+�[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+�]�[��\�Z[�[\�ٙOOH\�ٙ�ș]B���ӓ��ݜ�[�ڙ�J\�Z[�[\�ٙ
+K�
+K�
+K�ݚ\�ۛٙ[��
+
+HO�\�Z[�[[]�\�YH�YN�[�\ڊ��[�[�\ܛًۜ�ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ�ۛ\]Y��
+NK�
+JB�
+B���XZ΂�؛�ٛ[��[X\ٔ�XY\��XY\�ڙۘ[��X\ۛ�N�[�ڜ[�XY\�H�[ۙX\�ٙ\[]�J
+Nؙ�PۛܙJ
+N�]\��B�Y�
+ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ��Z[Y�H�݈�]ȑ\��܊��X؛�[�ڜ[�]\��Y�\ܛًۜ��Z[Y�NB�Y�
+ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ�[�ۛ\]H�H�݈�]ȑ\��܊��[�ۛ\]H�X؛�[�ڜ[؛��݈^XݝH�X؛��
+NB��ˈ�X؛؜ș]XݙY��]�HH�X؛ۜ��Y�
+[�[�ԙX؛˛[�ݚ�JH�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J�\�[[ܙX؛�NB�ۛ�݈[�ڛܕ^Έݜ�[�֗HH׎�[�ؘݚ[ې�\ٛ[�HH���ݘ]K�\َؙ�ȋ���ݘ]K�\ؙوK�][\Έ�]ȓX\
+ݘ]K�][\ʋ��]ҝ[\Έ�]ȓX\
+ݘ]K��]ҝ[\ʋ�N�[�ؘݚ[۔�ݚY\�\ؙوHȋ����T�וTБшNˈH�[�ڜ[�\ܛٜۜȜݜ�X[H\Ȝ\�وH؛YH�\]Y\݂�ˈ�Yٝ�۝[�]ۘو�Y�ܙH]ș�\�݈�X؛\ȘYZ]Yˈۛ�[�X][ۈݜ�X[\Ș\�HX؛ݛ�Y�܈Y�\�XXڈ�ۛ݋]\���X؛�Yٝ��Xۜ�\ؙيݘ]K�\ؙيNۛ�݈[�[�ЛۛZ]Έ\��^O
+
+HO��ڙ�H׎ۛ�݈�[�ؘݚ[ۘ[]�[�ΈZ[�\��^V׈H׎]�[�ؘݚ[ۘ[�]\ȏHۛ�݈�\ٜ��U�[�ؘݚ[ۘ[�]\ȏH
+ڝ[�ΈZ[�\��^JN��ڙO��[�ؘݚ[ۘ[�]\Ȋψڝ[�˘�]S[�ݚY�
+�[�ؘݚ[ۘ[�]\ȏ�X^�[�ؘݚ[ۘ[�]\ʈ�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��\۝\�ٗۚ[Z]�NB�Nۛ�݈]Y]YU�[�ؘݚ[ۘ[H
+ڝ[�ΈZ[�\��^JN��ڙO��\ٜ��U�[�ؘݚ[ۘ[�]\ʘڝ[�ʎ�[�ؘݚ[ۘ[]�[�˜\ڊڝ[�ʎN�܈
+ۛ�݈�X؛و[�[�ԙX؛ʈۛ�݈ޛ�]XҙH\ٗɞܝ]K�Y�ܙH�WɞܙX؛�ݝ][�^X�\ٜ��Tޛ�]Xҙ[�]Jޛ�]Xҙ
+Nۛ�݈�X؛X؈H�[�[^�T�\ܛٜۜИ؊ݘ]JNۛ�݈ۛ�[�ܚ][ۈH�X؛X؋�ۛ�[���[�[�^
+�
+�ؚʈO���ؚ˝\HOOH�ۛݜو�	���ؚ˚YOOH�X؛�ۛ\ْY�
+NY�
+ۛ�[�ܚ][ۈ
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J�Z\ܚ[�ל�X؛؛ؚȊNB�]^XݝY�]ؚ]Y�]\��\O\[وٝT�X؛���H^XݝYH]ؚ]ٝT�X؛
+]Y\�N��X؛�]Y\�K�؛ܙN��X؛�؛ܙK�Y��X؛�Y�YΈ�X؛�Y˂�]Z[ٙ�ٝ��X؛�]Z[ٙ�ٝ�]Z[[Z]��X؛�]Z[[Z]�ݝ][�^��X؛�ݝ][�^�ۛ\ْY��X؛�ۛ\ْY�ۛ�[�ܚ][ۋ�X؎��X؛X؋�ڙۘ[�JNH؝ڈ
+\��܊HY�
+ڙۘ[�X�ܝY
+H�݈\��܎Y�
+\��܈[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�JH�݈\��܎�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��X؛ٞXݝ[ۈ�NB�[�ڛܕ^˜\ڊ^XݝY�[�ڛܕ^
+NY�
+^XݝY�ۛ[Z]
+H[�[�ЛۛZ]˜\ڊ^XݝY�ۛ[Z]
+NY�
+^XݝY��ۛ�XڊH�[�ؘݚ[۔�ۛ�Xڜ˜\ڊ^XݝY��ۛ�XڊNB�ۛ�݈[�ڛܐڝ[�ȏH[�ۙ\��[�ۙJ�[Z]^][J��X؛�ݝ][�^�^XݝY�[�ڛܕ^�ޛ�]Xҙ�
+K�
+NY�
+ݚ\�ۛٙ[�Hݘ]K�][\˜ٝ
+�X؛�ݝ][�^\N��^��Y�\ٗɞܝ]K�Y�ܙH�WɞܙX؛�ݝ][�^X�^�^XݝY�[�ڛܕ^�JN]Y]YU�[�ؘݚ[ۘ[
+[�ڛܐڝ[�ʎ�܈
+ۛ�݈Y�\��YوY�\��Y]�[�ʈ]Y]YU�[�ؘݚ[ۘ[
+Y�\��Y�ڝ[�ʎB�H[و]Y]YU�[�ؘݚ[ۘ[
+[�ڛܐڝ[�ʎ�܈
+ۛ�݈Y�\��YوY�\��Y]�[�ʈ]Y]YU�[�ؘݚ[ۘ[
+Y�\��Y�ڝ[�ʎB�B�Y�\��Y]�[�˛[�ݚHY�\��Y�]\ȏH�Y�
+�[ݚ\�ۛٙ[�	����X؛OOH[�[�ԙX؛֜[�[�ԙX؛˛[�ݚHWB�
+Hˈ�X؛[ۛN��[�Hݜ�X[Z[�ș�ۛ݋]\[�\HB�ˈۛ�[�X][ۈ[�[�H�Y�ܙHH�[�[ۛ\][ۋ���Hۛ�[�X][ې][\YH�YNۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܙ]\�ڙۘ[��ݒY�X�ܝY
+
+N]�ۛ݈H]ؚ]ٝQ�ۛݕ\
+�[�[�X؛�ݛ���X؛�Yٝ�]\ݑ�[�[^�S�^
+
+K�[�ڛܕ^�^XݝY�[�ڛܕ^��\ݛ^�^XݝY��\ݛ^�X؎��X؛X؋�ۛ\ْY��X؛�ۛ\ْY�ۛ�[�ܚ][ۋ�ڙۘ[�JN]�X؛ۛ�[�X][ە�[�ܛܝ�]�Y\ȏH]ۛ�[�X][ۑ�ۛݕ\[�]�\�[Y]\�ς�\[وܝ˜�[��ۛݕ\��̗HH�[�[�X؛�ݛ���X؛�Yٝ�]\ݑ�[�[^�S�^
+
+K�[�ڛܕ^�^XݝY�[�ڛܕ^��\ݛ^�^XݝY��\ݛ^�X؎��X؛X؋�ۛ\ْY��X؛�ۛ\ْY�ۛ�[�ܚ][ۋ�ڙۘ[�N]ۛ�[�X][۔�]�P�\ٛ[�HH�[�ؘݚ[ۘ[]�[�Έ�[�ؘݚ[ۘ[]�[�˛[�ݚ��[�ؘݚ[ۘ[�]\˂��]Z[�Yݘ]P�]\˂�Y[��X؛�]\˂�ݝ]Y[�]Y\Έ�]Ȕٝ
+ݝ]Y[�]Y\ʋ��Y�\�[�ْY[�]Y\Έ�]Ȕٝ
+�Y�\�[�ْY[�]Y\ʋ�Nۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܜ�ݛ؛ۈ��܈
+ΊHXݚ]�T�XY\�H�ۛ݋��XY\�]�]�Q�ۛݕ\H�[َۛ�݈ۛ�ݘ]HHXZٔ�\ܛٜۜИؔݘ]J
+Nۛ�݈ۛ��X؛[�XٜȏH�]Ȕٝ�[X�\��
+Nۛ�݈ۛ��Y�\�[�ْ[�XٜȏH�]ȓX\��[X�\���Y�\�[�ٓY�XޘۙB��
+Nۛ�݈ۛ��X؛[�]ȏH�]ȓX\��[X�\���X؛\�ݛY[��
+Nۛ�݈ۛ�[�[�Έ[�[�ԙ\ܛٜۜԙX؛׈H׎ۛ�݈ۛ�ۛ\]Y�X؛[�XٜȏH�]Ȕٝ�[X�\��
+Nۛ�݈ۛ�[��\ۛ�Yۛ[�XٜȏH�]Ȕٝ�[X�\��
+Nۛ�݈ۛ�[��\ۛ�Yۛ�]\ȏH�]ȓX\�[X�\��[X�\��
+Nۛ�݈[ۛ�[�X][ۑ]�[�Έ\��^Oڝ[�ΈZ[�\��^N؛�Y]R[�^Έ�[X�\��[�ؘݚ[ۘ[��ۛX[�O�H׎]Y�\��Yۛ�[�X][ې�]\ȏHۛ�݈ۙۛ�[�X][ۈH
+�ڝ[�ΈZ[�\��^K�؛�Y]R[�^Έ�[X�\��
+N��ڙO�ۛ�݈�[�ؘݚ[ۘ[H؛�Y]R[�^OOH[�Y�[�YY�
+�[�ؘݚ[ۘ[
+H�\ٜ��U�[�ؘݚ[ۘ[�]\ʘڝ[�ʎ[وY�\��Yۛ�[�X][ې�]\Ȋψڝ[�˘�]S[�ݚY�
+Y�\��Yۛ�[�X][ې�]\ȏ�X^Y�\��Y�]\ʈ�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���\۝\�ٗۚ[Z]��
+NB�B�[ۛ�[�X][ۑ]�[�˜\ڊڝ[�˂��[�ؘݚ[ۘ[����؛�Y]R[�^OOH[�Y�[�Y�ȞȘ؛�Y]R[�^B��ߊK�JNNۛ�݈\ؘ\�ۛ�[�X][ې؛�Y]HH
+�ݝ][�^��[X�\��
+N��ڙO��܈
+�][�^H[ۛ�[�X][ۑ]�[�˛[�ݚHN[�^�H[�^KB�
+HY�
+�[ۛ�[�X][ۑ]�[�֚[�^K�؛�Y]R[�^OOB�ݝ][�^�
+HY�
+Z[ۛ�[�X][ۑ]�[�֚[�^K��[�ؘݚ[ۘ[
+HY�\��Yۛ�[�X][ې�]\ȋOB�[ۛ�[�X][ۑ]�[�֚[�^K�ڝ[�˘�]S[�ݚB�[ۛ�[�X][ۑ]�[�˜ܛXي[�^JNB�B�Nۛ�݈�ۛݙU�\ژ�Pۛ�[�X][ې؛�Y]HH
+�ݝ][�^��[X�\��
+N��ڙO��܈
+ۛ�݈[و[ۛ�[�X][ۑ]�[�ʈY�
+[�؛�Y]R[�^OOHݝ][�^
+Hۛ�[�YNY�\��Yۛ�[�X][ې�]\ȋOH[�ڝ[�˘�]S[�ݚ�\ٜ��U�[�ؘݚ[ۘ[�]\ʚ[�ڝ[�ʎ[��[�ؘݚ[ۘ[H�YNB�Nۛ�݈�\ڒ[ۛ�[�X][ۈH
+
+N��ڙO��܈
+ۛ�݈[و[ۛ�[�X][ۑ]�[�ʈY�
+[��[�ؘݚ[ۘ[
+H�[�ؘݚ[ۘ[]�[�˜\ڊ[�ڝ[�ʎH[و]Y]YU�[�ؘݚ[ۘ[
+[�ڝ[�ʎB�B�[ۛ�[�X][ۑ]�[�˛[�ݚHY�\��Yۛ�[�X][ې�]\ȏHN]ۛ�[�X][۔�X؛�]\ȏHۛ�݈�ۛݙPۛ�[�X][ې؛�Y]HH
+�ݝ][�^��[X�\��
+N��ڙO�ۛ�݈�]\ȏB�ۛ�[��\ۛ�Yۛ�]\˙ٝ
+ݝ][�^
+Hψۛ�[��\ۛ�Yۛ�]\˙[]Jݝ][�^
+Nۛ�[�X][۔�X؛�]\Ȋψ�]\΂�Y[��X؛�]\Ȋψ�]\΂�Y�
+�ۛ�[�X][۔�X؛�]\ȏ�X^Y�\��Y�]\ȟ�Y[��X؛�]\ȏ�X^Y[��X؛�]\
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��\۝\�ٗۚ[Z]�NB�N]ۛ�ݚ\�ۛH�[َ]ۛ�[�X][ېۛ\]YH�[َ]ۛ�[�X][ۑ�Z[YH�[َۛ�݈ۛ�[�^HښY�Yݝ][�^
+�X]�X^
+�LK����ݘ]K��]ҝ[\˚ٞ\ʊK����ݘ]K�][\˚ٞ\ʊK�
+K�K�
+N�H�܈]ؚ]
+ۛ�݈]�[��ً�]N�ً�Hو\�ٔԑTݜ�X[J�ۛ݋��XY\�X^��[Y\ΈX^ԑQ��[Y\˂�[�Xݚ]�]S\ΈܙR[�Xݚ]�]S\˂�ڙۘ[���[YP۝[�\��JJHY�
+؛�ٛY
+H��XZ΂�Y�
+XووOOH�ѓӑWH�Hۛ�[�YNݜ�X[P�]\Ȋψ[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+ًيK�
+K��]S[�ݚY�
+ݜ�X[P�]\ȏ�X^ݜ�X[P�]\ʈ�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���\۝\�ٗۚ[Z]��
+NB�]ܘ\�ٙ��Xۜ�ݜ�[�ˈ[�ۛݛ���Hܘ\�ٙH�ӓ��\�ييH\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��H؝ڈY�
+ً�ݘ\�՚]
+��\ܛًۜ��JH�݈�]ȑ\��܊�X[�ܛYY�ӓ�[��\ܛٜۜș]�[�	ؙ_X�
+NB�Y�
+وOOH�Y\ܘYو�Hۛ�݈ڝ[�ȏH[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+ًيK�
+NY�
+�ۛ��X؛[�Xٜ˜ڞ�H��ۛ�[��\ۛ�Yۛ[�Xٜ˜ڞ�H��
+Hۙۛ�[�X][ۊڝ[�ʎH[و]Y]YU�[�ؘݚ[ۘ[
+ڝ[�ʎB�B�ۛ�[�YNB�Y�
+ܘ\�ٙ�\HOOHيH�݈�]ȑ\��܊��\ܛٜۜȜ^[ؙ\Hٜț�݈X]ڈ	ؙ_X�
+NB�ۛ�݈ۛ��ܛX[^�][۔ݘ]HH�ܛX[^�Pۙ^]�[�
+�ۛ�ݘ]K�ً�ܘ\�ٙ�
+N�[Y]T�\ܛۜٓY�XޘۙJۛ�ݘ]Kًܘ\�ٙ
+NY�
+�ۛ�ݛYT�Y�\�[�ّ]�[�
+�ۛ�ݘ]K�ۛ��Y�\�[�ْ[�Xٜ˂�ً�ܘ\�ٙ�ۛ�[�^�
+B�
+Hۛ�[�YNB�Y�
+��[X�\��\ԘY�R[�Yٜ�ܘ\�ٙ�ݝ]ڛ�^
+H	���
+ܘ\�ٙ�ݝ]ڛ�^\ț�[X�\�H�H	���
+ܘ\�ٙ�ݝ]ڛ�^\ț�[X�\�HX^ܘ\�ْ[�^�
+H�ݛ�Yۛ�[�X][ۓݝ][�^
+�ܘ\�ٙ�ݝ]ڛ�^\ț�[X�\��ۛ�[�^�
+NB�ٙY[\Xڝۙ^][J�ۛ�ݘ]K�ۛ��ܛX[^�][۔ݘ]K�ً�ܘ\�ٙ�
+Nۛ�݈ڈHݝ][�^�ܑ]�[�
+�ً�ܘ\�ٙ�ۛ�ݘ]K�
+NY�
+ڈOOH[�Y�[�Y
+H�]Z[�Yݘ]P�]\Ȋψ[�ۙ\��[�ۙJيK��]S[�ݚY�
+�]Z[�Yݘ]P�]\ȏ�X^�]Z[�Yݘ]P�]\ʈ�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���\۝\�ٗۚ[Z]��
+NB�ۛ�݈[\Xڝ][HHۛ�ݘ]K��]ҝ[\˙ٝ
+ڊNY�
+�ܝ˝�[Y][ۈOOH�ۙ^�	���وOOH��\ܛًۜ�ݝ]ڝ[K�YY�	���وOOH��\ܛًۜ�ݝ]ڝ[K�ۙH�	���[\Xڝ][O˝\HOOH��[�ݚ[ؘۗ[�	���[\Xڝ][K��[YHOOH���
+Hۛ�[��\ۛ�Yۛ[�Xٜ˘Y
+ڊNB�B�]�\ۛ�[�ԙX؛ۛH�[َ]�\ۛ�[�՚\ژ�UۛH�[َY�
+�
+وOOH��\ܛًۜ�ݝ]ڝ[K�YY��وOOH��\ܛًۜ�ݝ]ڝ[K�ۙH�H	���ڈOOH[�Y�[�Y�
+Hۛ�݈][HHܘ\�ٙ�][H\�Xۜ�ݜ�[�ˈ[�ۛݛ���[�Y�[�YY�
+�][O˝\HOOH��[�ݚ[ؘۗ[�	���][K��[YHOOH�PГՓӓӐSQB�
+Hۛ��X؛[�Xٜ˘Y
+ڊN�\ۛ�[�ԙX؛ۛH�YNH[وY�
+][O˝\HOOH��[�ݚ[ؘۗ[�HY�
+�وOOH��\ܛًۜ�ݝ]ڝ[K�YY�	���ܝ˝�[Y][ۈOOH�ۙ^�	���][K��[YHOOH���
+Hۛ�[��\ۛ�Yۛ[�Xٜ˘Y
+ڊNH[و�\ۛ�[�՚\ژ�UۛH�YNB�B�B�\T�\ܛٜۜѝ�[�
+ۛ�ݘ]Kًܘ\�ٙ
+NY�
+�وOOH��\ܛًۜ�ݝ]ڝ[K�ۙH�	���ڈOOH[�Y�[�Y�
+H�\ٜ��Tݜ�X[YY�X\ۛ�[�ʘۛ�ݘ]KڊNB�]�\ۛ�Y�\ژ�UۛH�[َY�
+ڈOOH[�Y�[�Y	���\ۛ�[�ԙX؛ۛ
+H\ؘ\�ۛ�[�X][ې؛�Y]JڊN�ۛݙPۛ�[�X][ې؛�Y]JڊNۛ�[��\ۛ�Yۛ[�Xٜ˙[]JڊNH[وY�
+ڈOOH[�Y�[�Y	���\ۛ�[�՚\ژ�Uۛ
+H�ۛݙU�\ژ�Pۛ�[�X][ې؛�Y]JڊN�\ۛ�Y�\ژ�UۛB�ۛ�[��\ۛ�Yۛ[�Xٜ˙[]JڊNۛ�[��\ۛ�Yۛ�]\˙[]JڊNۛ�ݚ\�ۛH�YNB�Y�
+��\ۛ�Y�\ژ�Uۛ	���ۛ��X؛[�Xٜ˜ڞ�HOOH	���ۛ�[��\ۛ�Yۛ[�Xٜ˜ڞ�HOOH�
+H�\ڒ[ۛ�[�X][ۊ
+NB�ۛ�݈\Л۝�X؛B�ڈOOH[�Y�[�Y	��ۛ��X؛[�Xٜ˚\ʘڊNۛ�݈\Л۝[��\ۛ�YۛB�ڈOOH[�Y�[�Y	���ۛ�[��\ۛ�Yۛ[�Xٜ˚\ʘڊNY�
+�
+\Л۝�X؛\Л۝[��\ۛ�Yۛ
+H	���ڈOOH[�Y�[�Y�
+Hۛ�݈Y[�ڝ[�ȏH[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+�ً��ӓ��ݜ�[�ڙ�J���ܘ\�ٙ�ݝ]ڛ�^�ښY�Yݝ][�^
+�ڋ�ۛ�[�^�
+K�JK�
+K�
+Nۛ�݈Y[��]\ȏHY[�ڝ[�˘�]S[�ݚY�
+\Л۝�X؛
+Hۛ�[�X][۔�X؛�]\ȊψY[��]\΂�Y[��X؛�]\ȊψY[��]\΂�H[وۛ�[��\ۛ�Yۛ�]\˜ٝ
+�ڋ�
+ۛ�[��\ۛ�Yۛ�]\˙ٝ
+ڊHψ
+H
+Y[��]\˂�
+NB�Y�
+�ۛ�[�X][۔�X؛�]\ȏ�X^Y�\��Y�]\ȟ�Y[��X؛�]\ȏ�X^Y[��X؛�]\
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���\۝\�ٗۚ[Z]��
+NB�Y�
+�وOOH��\ܛًۜ��[�ݚ[ؘۗ[؜�ݛY[�˙ۙH�	���\Л۝�X؛�
+Hۛ��X؛[�]˜ٝ
+�ڋ�\�ٔ�X؛\�ݛY[�ʘܘ\�ٙ�\�ݛY[�ʋ�
+NB�Y�
+\Л۝[��\ۛ�Yۛ	��Z\Л۝�X؛
+Hۙۛ�[�X][ۊY[�ڝ[�ˈڊNB�Y�
+وOOH��\ܛًۜ�ݝ]ڝ[K�ۙH�HY�
+\Л۝�X؛
+HۛXݐۛ\]Y�X؛
+�ۛ�ݘ]K�ڋ�ۛ��X؛[�]˂�ۛ�[�[�˂�ۛ�ۛ\]Y�X؛[�Xٜ˂�
+NB�B�ۛ�[�YNB�Y�
+�وOOH��\ܛًۜ�ۛ\]Y��وOOH��\ܛًۜ�ۙH��وOOH��\ܛًۜ�[�ۛ\]H��وOOH��\ܛًۜ��Z[Y��
+Hۛ�݈\�Z[�[\�ٙB�ݜ�\Y[��Y�\�[�ٓݝ]
+ܘ\�ٙ
+Nۛ�݈[�ۛ\]T�X؛[�XٜȏH�]Ȕٝ
+�ˋ��ۛ��X؛[�Xٜ׋��[\��
+ݝ][�^
+HO��Xۛ�ۛ\]Y�X؛[�Xٜ˚\ʛݝ][�^
+K�
+K�
+NY�
+ܝ˝�[Y][ۈOOH�ۙ^�H\ܙ\�\�Z[�[ݝ]X]ڙ\ʂ�ۛ�ݘ]K�\�Z[�[\�ٙ�
+ݝ][�^][JHO�Y�
+�][K�\HOOH��[�ݚ[ؘۗ[��][K��[YHOOH�PГՓӓӐSQB�
+H�]\��B�ۛ��X؛[�Xٜ˘Y
+ݝ][�^
+Nۛ�[��\ۛ�Yۛ[�Xٜ˙[]Jݝ][�^
+N\ؘ\�ۛ�[�X][ې؛�Y]Jݝ][�^
+N�ۛݙPۛ�[�X][ې؛�Y]Jݝ][�^
+NK�
+ݝ][�^][JHO�Y�
+][K�\HOOH��[�ݚ[ؘۗ[�H�]\��Y�
+][K��[YHOOH�PГՓӓӐSQJHۛXݐۛ\]Y�X؛
+�ۛ�ݘ]K�ݝ][�^�ۛ��X؛[�]˂�ۛ�[�[�˂�ۛ�ۛ\]Y�X؛[�Xٜ˂�
+NH[وۛ�[��\ۛ�Yۛ[�Xٜ˙[]J�ݝ][�^�
+Nۛ�[��\ۛ�Yۛ�]\˙[]Jݝ][�^
+Nۛ�ݚ\�ۛH�YNB�K�
+N\ܙ\�ݝ]Y�Xޘۙ\Лۜ]J�ۛ�ݘ]K�[�ۛ\]T�X؛[�Xٜ˂�
+NH[و\ܙ\�ݝ]Y�Xޘۙ\Лۜ]J�ۛ�ݘ]K�[�ۛ\]T�X؛[�Xٜ˂�
+N\ܙ\�\�Z[�[ݝ]X]ڙ\ʂ�ۛ�ݘ]K�\�Z[�[\�ٙ�
+NB�\ܙ\��Y�\�[�ٓY�Xޘۙ\Лۜ]J�ۛ��Y�\�[�ْ[�Xٜ˂�
+N\ܙ\��X؛][\Лۜ]Y
+�ۛ�ݘ]K�ۛ�[�[�˛X\
+
+�X؛
+HO��X؛�ݝ][�^
+K�
+NY�
+ۛ�[��\ۛ�Yۛ[�Xٜ˜ڞ�H�
+H�݈�]ȑ\��܊���\ܛٜۜȘۛ�[�X][ۈY�ܘ\�و�[�ݚ[ۈY[�]H[��\ۛ�Y��
+NB�Y�
+ۛ��X؛[�Xٜ˜ڞ�HOOH
+H�\ڒ[ۛ�[�X][ۊ
+NB�ۛ�[�X][ېۛ\]YB�ۛ�ݘ]K�\�Z[�[]�[�OOH[�Y�[�Yۛ�[�X][ۑ�Z[YB�ۛ�ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ��Z[Y���XZ΂�B�Y�
+�وOOH��\ܛًۜ�ܙX]Y��وOOH��\ܛًۜ�[�ܜ�ٜ�\܈��
+Hۛ�[�YNB�Y�
+ڈOOH[�Y�[�Y
+Hۛ�݈ښY�Y[�^HښY�Yݝ][�^
+�ڋ�ۛ�[�^�
+Nۛ�݈�ڙXݙYH�ڙXݔ�X\ۛ�[�ѝ�[�
+�ً�ܘ\�ٙ�ښY�Y[�^�
+Nۛ�݈ښY�YH[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+�ً��ӓ��ݜ�[�ڙ�J��ڙXݙYψ���ܘ\�ٙ�ݝ]ڛ�^�ښY�Y[�^�K�
+K�
+K�
+NY�
+�ۛ��X؛[�Xٜ˜ڞ�H��ۛ�[��\ۛ�Yۛ[�Xٜ˜ڞ�H��
+Hۙۛ�[�X][ۊښY�Y
+NH[و]Y]YU�[�ؘݚ[ۘ[
+ښY�Y
+NH[وY�
+وOOH�Y\ܘYو�Hۛ�݈ڝ[�ȏH[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+ًيK�
+NY�
+�ۛ��X؛[�Xٜ˜ڞ�H��ۛ�[��\ۛ�Yۛ[�Xٜ˜ڞ�H��
+Hۙۛ�[�X][ۊڝ[�ʎH[و]Y]YU�[�ؘݚ[ۘ[
+ڝ[�ʎB�B�H؝ڈ
+\��܊HY�
+�\��܈[�ݘ[�ٛوԑTݜ�X[S[Z]\��܈���[YP۝[�\��۝[��X^ԑQ��[Y\ȟ�
+\��܈[�ݘ[�ٛو\��܈	���הԑHݜ�X[H^ٙYY
+ș��[YH[Z]	˝\݊�\��܋�Y\ܘYً�
+JB�
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��\۝\�ٗۚ[Z]�NB�Y�
+�\��܈[�ݘ[�ٛوԑTݜ�X[U�[�ܛܝ\��܈	���Xۛ�[�X][ۑ�ۛݕ\[�]��[�[�X؛�ݛ�	����X؛ۛ�[�X][ە�[�ܛܝ�]�Y\ȏ�X^�X؛ۛ�[�X][ە�[�ܛܝ�]�Y\
+H�X؛ۛ�[�X][ە�[�ܛܝ�]�Y\ʊ΂��[�ؘݚ[ۘ[]�[�˛[�ݚB�ۛ�[�X][۔�]�P�\ٛ[�K��[�ؘݚ[ۘ[]�[�΂��[�ؘݚ[ۘ[�]\ȏB�ۛ�[�X][۔�]�P�\ٛ[�K��[�ؘݚ[ۘ[�]\΂��]Z[�Yݘ]P�]\ȏB�ۛ�[�X][۔�]�P�\ٛ[�K��]Z[�Yݘ]P�]\΂�Y[��X؛�]\ȏB�ۛ�[�X][۔�]�P�\ٛ[�K�Y[��X؛�]\΂�ݝ]Y[�]Y\˘ۙX\�
+N�܈
+ۛ�݈Y[�]Hوۛ�[�X][۔�]�P�\ٛ[�K�ݝ]Y[�]Y\ʈݝ]Y[�]Y\˘Y
+Y[�]JNB��Y�\�[�ْY[�]Y\˘ۙX\�
+N�܈
+ۛ�݈Y[�]Hوۛ�[�X][۔�]�P�\ٛ[�K��Y�\�[�ْY[�]Y\ʈ�Y�\�[�ْY[�]Y\˘Y
+Y[�]JNB�ً�؜����]�Z[�Ȝ�X؛ۛ�[�X][ۈY�\�	ٜ��܋�ڛ�H�[�ܛܝ�Z[\�Iܙ\ܚ[ےQȘ
+ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_JX���X�
+N�]�Q�ۛݕ\H�YNH[وY�
+\��܈[�ݘ[�ٛوԑTݜ�X[U�[�ܛܝ\��܊Hۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜݜ�[�ܛܝ�B��݈\��܈[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�B�ș\��܂���]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J�ۛ�[�X][ۑ�Z[\�P؝Yۜ�Hψ�[�^XݙY��
+NB�H�[�[H؛�ٛ[��[X\ٔ�XY\��ۛ݋��XY\�ڙۘ[��X\ۛ�NB�Y�
+�]�Q�ۛݕ\
+Hۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܙ]\��ۛ݈H]ؚ]ٝQ�ۛݕ\
+�ۛ�[�X][ۑ�ۛݕ\[�]�
+Nۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܜ�ݛ؛ۈ�ۛ�[�YNB�ۛ�݈Y\�ِۛ�[�X][ۈH
+
+N��ڙO�ˈ]�\�Hۛ�[�X][ۈY[�]H\ȘYZ]Y�ݙڈB�ˈ�\]Y\݋]ڙHY[�]H[�^\Ș�Y�ܙH]�XXڙ\ȝ\ˈ�[�ؘݚ[ۘ[Y\�ً��K\ؘ[��[�Ș�ݚX\Ț\�B�ˈܙX]\ȘH]XY�]XȘܛܜ˜�ٝX݈ڝݝY[�ȘB�ˈ٘ۛ�[��\�X[����܈
+ۛ�݈ڙ][WHوۛ�ݘ]K�][\ʈݘ]K�][\˜ٝ
+�ښY�Yݝ][�^
+Yۛ�[�^
+K�][K�
+NB��܈
+ۛ�݈ڙ][WHوۛ�ݘ]K��]ҝ[\ʈݘ]K��]ҝ[\˜ٝ
+�ښY�Yݝ][�^
+Yۛ�[�^
+K�][K�
+NB�Y\�ٕ\ؙيݘ]K�\ًؙۛ�ݘ]K�\ؙيNN\ܙ\�\ؙٓY\�٘X�J��[�ؘݚ[۔�ݚY\�\ًؙ�ۛ�ݘ]K�\ًؙ�
+NY\�ٕ\ؙي�[�ؘݚ[۔�ݚY\�\ًؙۛ�ݘ]K�\ؙيN�X؛�Yٝ��Xۜ�\ؙيۛ�ݘ]K�\ؙيNY�
+�ۛ�[�X][ۑ�Z[Y�
+ۛ�[�X][ۑ�ۛݕ\[�]��[�[�X؛�ݛ�	���ۛ�ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ�[�ۛ\]H�B�
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��ۛݗݜ٘Z[Y�NB�Y�
+�Xۛ�[�X][ېۛ\]Y�ۛ�ݘ]K��]ҝ[\˜ڞ�HOOH�
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���ۛݗݜۚ\ܚ[�כݝ]��
+NB�Y�
+�ۛ�[�X][ۑ�ۛݕ\[�]��[�[�X؛�ݛ�	���ۛ�[�[�˛[�ݚOOH	���Z\՜ؘ�T�X؛ۛ�[�X][ۊ��[�[^�T�\ܛٜۜИ؊ۛ�ݘ]JK�
+B�
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���ۛݗݜۚ\ܚ[�כݝ]��
+NB�Y�
+ۛ��X؛[�Xٜ˜ڞ�HOOHۛ�[�[�˛[�ݚ
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���ۛݗݜڛ�ۛ\]W؜�ݛY[�ȋ�
+NB�Y�
+ۛ�[�[�˛[�ݚ�JH�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J�\�[[ܙX؛�NB�Y�
+�ۛ�ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ�[�ۛ\]H�	���ۛ�[�[�˛[�ݚ��
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���\ݙYܙX؛ڛ�ۛ\]H��
+NB�\ܙ\�\ؙٓY\�٘X�Jݘ]K�\ًؙۛ�ݘ]K�\ؙيN]�^�X؛��
+
+\[وۛ�[�[�ʖ۝[X�\�H	�ۛ�[�ܚ][ێ��[X�\�JB�[�Y�[�Y]�^^XݝY��[�ڛܕ^�ݜ�[�΂��\ݛ^�ݜ�[�΂�ۛ[Z]Έ
+
+HO��ڙ�ۛ�XڏΈ
+
+HO��ڙB�[�Y�[�Y]�^X؎�؝]؞T�\ܛۜو[�Y�[�YY�
+ۛ�[�[�˛[�ݚOOHJHY�
+ۛ�[�X][ۑ�ۛݕ\[�]��[�[�X؛�ݛ�
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��\ٞ]\ݙY��
+NH[و�^X؈H�[�[^�T�\ܛٜۜИ؊ۛ�ݘ]JNۛ�݈[�[�ә^�X؛Hۛ�[�[�֌Nۛ�݈ۛ�[�ܚ][ۈH�^X؋�ۛ�[���[�[�^
+�
+�ؚʈO���ؚ˝\HOOH�ۛݜو�	����ؚ˚YOOH[�[�ә^�X؛�ۛ\ْY�
+NY�
+ۛ�[�ܚ][ۈ
+H�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J��Z\ܚ[�ל�X؛؛ؚȋ�
+NB��^�X؛H���[�[�ә^�X؛�ۛ�[�ܚ][ۋ�Nۛ�݈ښY�Y�X؛[�^HښY�Yݝ][�^
+��^�X؛�ݝ][�^�ۛ�[�^�
+Nۛ�݈�^ޛ�]XҙH\ٗɞܝ]K�Y�ܙH�WɞܚY�Y�X؛[�^X�\ٜ��Tޛ�]Xҙ[�]J�^ޛ�]Xҙ
+Nۛ�[�X][ۑ�Z[\�P؝Yۜ�HB���\ݙYܙX؛ٞXݝ[ۈ��H�^^XݝYH]ؚ]ٝT�X؛
+����^�X؛�X؎��^X؋�ڙۘ[�JNH؝ڈ
+\��܊HY�
+ڙۘ[�X�ܝY
+H�݈\��܎Y�
+\��܈[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�JB��݈\��܎�݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J���\ݙYܙX؛ٞXݝ[ۈ��
+NB�ۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܜ�ݛ؛ۈ�Y�
+�^^XݝY�ۛ[Z]
+H[�[�ЛۛZ]˜\ڊ�^^XݝY�ۛ[Z]
+NB�Y�
+�^^XݝY��ۛ�XڊH�[�ؘݚ[۔�ۛ�Xڜ˜\ڊ�^^XݝY��ۛ�XڊNB�ۛ�݈�^�X؛[�^H�^�X؛�ݝ][�^ۛ�ݘ]K�][\˜ٝ
+�^�X؛[�^\N��^��Y��^ޛ�]Xҙ�^��^^XݝY�[�ڛܕ^�JN]Y]YU�[�ؘݚ[ۘ[
+�[�ۙ\��[�ۙJ�[Z]^][J�ښY�Y�X؛[�^��^^XݝY�[�ڛܕ^�
+K�
+K�
+NB�B��\ڒ[ۛ�[�X][ۊ
+N�܈
+ۛ�݈[�^وۛ��X؛[�Xٜʈ�X؛[�Xٜ˘Y
+ښY�Yݝ][�^
+[�^ۛ�[�^
+JNB�Y\�ِۛ�[�X][ۊ
+NY�
+ۛ�[�X][ۑ�ۛݕ\[�]��[�[�X؛�ݛ�
+B�ً�[��ʈ��X؛�[�[ۛ�[�X][ێ�ۛ\]Y�NY�
+[�^�X؛[�^^XݝYۛ�ݚ\�ۛ
+Hݘ]K�ݛܔ�X\ۛ�Hۛ�ݘ]K�ݛܔ�X\ۛ�ݘ]K�\�Z[�[]�[�Hۛ�ݘ]K�\�Z[�[]�[�ݘ]K�\�Z[�[�\ܛۜوHۛ�ݘ]K�\�Z[�[�\ܛَۜ��XZ΂�B��ۛ݋�ۛ[Z]ˊ
+Nۛ�[�X][ۑ�ۛݕ\[�]H�[�[�X؛�ݛ���X؛�Yٝ�]\ݑ�[�[^�S�^
+
+K�[�ڛܕ^��^^XݝY�[�ڛܕ^��\ݛ^��^^XݝY��\ݛ^�X؎��^X؈ψ�[�[^�T�\ܛٜۜИ؊ۛ�ݘ]JK�ۛ\ْY��^�X؛�ۛ\ْY�ۛ�[�ܚ][ێ��^�X؛�ۛ�[�ܚ][ۋ�ڙۘ[�Nۛ�[�X][۔�]�P�\ٛ[�HH�[�ؘݚ[ۘ[]�[�Έ�[�ؘݚ[ۘ[]�[�˛[�ݚ��[�ؘݚ[ۘ[�]\˂��]Z[�Yݘ]P�]\˂�Y[��X؛�]\˂�ݝ]Y[�]Y\Έ�]Ȕٝ
+ݝ]Y[�]Y\ʋ��Y�\�[�ْY[�]Y\Έ�]Ȕٝ
+�Y�\�[�ْY[�]Y\ʋ�Nۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܙ]\��ۛ݈H]ؚ]ٝQ�ۛݕ\
+ۛ�[�X][ۑ�ۛݕ\[�]
+Nۛ�[�X][ۑ�Z[\�P؝Yۜ�HH��ۛݗݜܜ�ݛ؛ۈ��X؛ۛ�[�X][ە�[�ܛܝ�]�Y\ȏHB�ݘ]K�][\˜ٝ
+�X؛�ݝ][�^\N��^��Y�\ٗɞܝ]K�Y�ܙH�WɞܙX؛�ݝ][�^X�^�^XݝY�[�ڛܕ^�JNH؝ڈ
+\��Hۛ�݈؝Yۜ�HB�\��[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�B�ș\���؝Yۜ�B��
+ۛ�[�X][ۑ�Z[\�P؝Yۜ�Hψ�[�^XݙY�Nً�\��܊��X؛�ۛ݋]\ݜ�X[H�Z[Y؝Yۜ�OIؘ]Yۜ�_Iܙ\ܚ[ےQȘ
+ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_JX���X�
+NY�
+�\��[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�H�ڙۘ[�X�ܝY�
+H�݈\��B��݈�]Ȕ�X؛ۛ�[�X][ۑ�Z[\�J؝Yۜ�JNB�B�B��ˈ�X�Z[H\�Z[�[�\ܛًۜ�ۛ\]Y�Y�Xݚ[�țۛHB�ˈۛ�[�X][ۈ
+�X؛[ۛJH܈HۚY[�[ݛ�YۛȊZ^Y
+K��ۛ�݈�[�[�\܈H�[�[^�T�\ܛٜۜИ؊ݘ]JN][�ڛܒ[�^Hۛ�݈�\ژ�T�\܈H����[�[�\܋�ۛ�[���[�[�\܋�ۛ�[��X\
+
+�ؚʈO�Y�
+�ؚ˝\HOOH�ۛݜو��ؚ˛�[YHOOH��X؛�H�]\���ؚ΂�B��]\��\N��^�\Șۛ�݋�^�[�ڛܕ^֘[�ڛܒ[�^
+ʗHψ���NJK��]ӝ]]][\Έ�Z[ݝ]][\ʊK�NY�
+ۛ�[�X][ې][\Y
+Hۛ�[�X][ۑ�Z[\�P؝Yۜ�HH�[]�\�H�B�ۙX\�ٙ\[]�J
+N�܈
+ۛ�݈ڝ[�țو�[�ؘݚ[ۘ[]�[�ʈY�
+J]ؚ]ؙ�Q[�]Y]YJڝ[�ʊJH�݈�]ȑ\��܊��ۚY[�\؛ۛ�XݙYښ[H[]�\�[�Ȝ�X؛ۛ�[�X][ۈ��
+NB�B�Y�
+�J]ؚ]ؙ�Q[�]Y]YJ�[�ۙ\��[�ۙJ�Z[\�Z[�[
+�\ژ�T�\܊JK�
+
+HO�\�Z[�[[]�\�YH�YNۛ�݈ݘؙ\ܙ�[B�ݘ]K�\�Z[�[]�[�OOH��\ܛًۜ�ۛ\]Y�]�[�ؘݚ[۔ٝYH�[َۛ�݈�[�ؘݚ[ۈHۛ[Z]�
+
+HO�Y�
+�[�ؘݚ[۔ٝY
+H�]\���H�܈
+ۛ�݈ۛ[Z]و[�[�ЛۛZ]ʈۛ[Z]
+
+N�[�ؘݚ[۔ٝYH�YN[�[�ЛۛZ]˛[�ݚH�[�ؘݚ[۔�ۛ�Xڜ˛[�ݚH�[�ؘݚ[ې�\ٛ[�HH[�Y�[�YH؝ڈ
+\��܊H[�[�ЛۛZ]˛[�ݚH�[�ؘݚ[ۋ��ۛ�Xڊ
+N�݈\��܎B�K��ۛ�Xڎ�
+
+HO�Y�
+�[�ؘݚ[۔ٝY
+H�]\���[�ؘݚ[۔ٝYH�YN[�[�ЛۛZ]˛[�ݚH�ۛ�Xڕ�[�ؘݚ[ۊ
+NK�NY�\��Y�[�ؘݚ[ۈH�[�ؘݚ[ێY�
+ݘؙ\ܙ�[
+Hܝ˛ە�[�ؘݚ[۔�XYOˊ�[�ؘݚ[ۊNY�
+Y�[�\ڊ�\ژ�T�\܋ݘؙ\ܙ�[
+JH�[�ؘݚ[ۋ��ۛ�Xڊ
+N�݈�]ȑ\��܊���X؛ېۛ\]H�Z[YY�\�[]�\�H��
+NB�Y�
+ݘؙ\ܙ�[
+HY�
+[ܝ˛ە�[�ؘݚ[۔�XYJH�[�ؘݚ[ۋ�ۛ[Z]
+
+NH[و�[�ؘݚ[ۋ��ۛ�Xڊ
+NB�K�
+JB�
+H�݈�]ȑ\��܊��ۚY[�\؛ۛ�XݙYښ[H[]�\�[�Ȝ�X؛\�Z[�[��
+NB�Y�
+؛�ٛY
+H�݈ڙۘ[��X\ۛ�؛�ٛ[��[X\ٔ�XY\��XY\�ڙۘ[��X\ۛ�N�[�ڜ[�XY\�H�[ؙ�PۛܙJ
+N�]\��B��ˈ�ۋ]\�Z[�[�ۋ\�X؛]�[���ڙX݈�]�Y]ٙ�X\ۛ�[�ˈؚ[X\Ș[��ܝ؜�[ݚ\��[Y]Y]�[�ȝ[�ژ[�ٙ��ۛ�݈�ڙXݙYH�ڙXݔ�X\ۛ�[�ѝ�[�
+]�[�\�ٙ
+Nۛ�݈ڝ[�ȏH[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+�]�[���ڙXݙYOOH[�Y�[�Yș]H��ӓ��ݜ�[�ڙ�J�ڙXݙY
+K�
+K�
+NY�
+�X؛[�Xٜ˜ڞ�H�[��\ۛ�Yۛ[�Xٜ˜ڞ�H�
+HY�\��Y�]\Ȋψڝ[�˘�]S[�ݚY�
+Y�\��Y�]\ȏ�X^Y�\��Y�]\ʈ�݈�]ȔԑTݜ�X[S[Z]\��܊���X؛ݜ�X[H^ٙYYY�\��Y]�[�[Z]��
+NB�Y�\��Y]�[�˜\ڊȘڝ[�ȟJNH[وY�
+J]ؚ][�]Y]YT�[�ڜ[
+ڝ[�ˈݚ\�ۛٙ[�JJH��XZ΂�B�B���[�ڜ[�Z[\�P؝Yۜ�HH��[�ڜ[ۚ\ܚ[�ם\�Z[�[��݈�]ȑ\��܊��\ݜ�X[H�\ܛٜۜȜݜ�X[H[�YڝݝH\�Z[�[]�[���
+NN��H�܈
+ΊH�H]ؚ]�[��[�ڜ[][\
+
+N��XZ΂�H؝ڈ
+\��܊Hۛ�݈\Ԝ�[�ڜ[�[�ܛܝ�Z[\�HB�\��܈[�ݘ[�ٛوԑTݜ�X[U�[�ܛܝ\��܈	���\�[�ڜ[�XY�[�\ڙY	���Xۛ�[�X][ې][\Yۛ�݈ڛݛ�]�T�[�ڜ[B�\Ԝ�[�ڜ[�[�ܛܝ�Z[\�H	���\��܋�ڛ�OOH��XY�	���\�[�ڜ[]�[�[Z]Y	���[ܙ[�\�Uۛ[Z]Y	���\ڙۘ[�X�ܝY	���ܝ˜�]�T�[�ڜ[OOH[�Y�[�Y	����[�ڜ[�[�ܛܝ�]�Y\ȏX^�[�ڜ[�[�ܛܝ�]�Y\΂�Y�
+\Ԝ�[�ڜ[�[�ܛܝ�Z[\�JH�\ܝ�[�ڜ[�[�ܛܝ�Z[\�Jڛ��\��܋�ڛ��ݘYَ��[�ڜ[�[�ܛܝݘYي
+K�ݝۛYN�ڛݛ�]�T�[�ڜ[�Ȉ��]�H����[�ڜ[]�[�[Z]Y�Ȉ�ۛ�[�YH����[�ڜ[�[�ܛܝ�]�Y\ȏ��Ȉ��]�Wٞ]\ݙY�����Z[Y��JNB�Y�
+\ڛݛ�]�T�[�ڜ[
+H�݈\��܎��[�ڜ[�[�ܛܝ�]�Y\ʊ΂�Y�
+�[�ڜ[�XY\�H؛�ٛ[��[X\ٔ�XY\��[�ڜ[�XY\�ڙۘ[��X\ۛ�NB��[�ڜ[�XY\�H�[Xݚ]�T�XY\�H�[ۙX\�ٙ\[]�J
+Nً�؜�����]�Z[�Ȝ�[�ڜ[�\ܛٜۜȜݜ�X[HY�\��XY�[�ܛܝ�Z[\�H��
+N�ۛ�݈�]�T�[�ڜ[Hܝ˜�]�T�[�ڜ[Y�
+\�]�T�[�ڜ[
+H�݈\��܎�]�]�T�\ܛَۜ��\ܛۜو[�Y�[�Y�H�]�T�\ܛۜوH]ؚ]�]�T�[�ڜ[
+][\��[�ڜ[�[�ܛܝ�]�Y\˂�ڙۘ[�JNڙۘ[��ݒY�X�ܝY
+
+NY�
+\�]�T�\ܛًۜ�ڈ\�]�T�\ܛًۜ��ٞJH�ڙ�]�T�\ܛًۜ��ٞO˘؛�ٛ
+
+K�؝ڊ
+
+HO�ߊN�݈�]ȑ\��܊��[�ڜ[�]�HY�݈�]\��Hݜ�X[H�NB�H؝ڈY�
+ڙۘ[�X�ܝY
+H�ڙ�]�T�\ܛُۜ˘�ٞB�˘؛�ٛ
+ڙۘ[��X\ۛ�B��؝ڊ
+
+HO�ߊN�݈ڙۘ[��X\ۛ�B��\ܝ�[�ڜ[�[�ܛܝ�Z[\�Jڛ��\��܋�ڛ��ݘYَ���W۝]]��ݝۛYN���]�Wٞ]\ݙY��JN�݈\��܎B��ݜ��[��[�ڜ[�\ܛۜوH�]�T�\ܛَۜݘ]HHXZٔ�\ܛٜۜИؔݘ]J
+Nޛ�]Xҙ[�]Y\˘ۙX\�
+N�Y�\�[�ْY[�]Y\˘ۙX\�
+Nݝ]Y[�]Y\˘ۙX\�
+N�X؛[�Xٜ˘ۙX\�
+N[��\ۛ�Yۛ[�Xٜ˘ۙX\�
+N�Y�\�[�ْ[�Xٜ˘ۙX\�
+N�X؛]XݙYH�[َ�[�ڜ[�Z[\�P؝Yۜ�HH��[�ڜ[ݛ�^XݙY��]Z[�Yݘ]P�]\ȏH�]Z[�Yݘ]P�\ٛ[�NY[��X؛�]\ȏHY[��X؛�\ٛ[�Nۛ�[�YNB�B�H؝ڈ
+\��H�ۛ�Xڕ�[�ؘݚ[ۊ
+NY�
+�[�ڜ[�XY\�H؛�ٛ[��[X\ٔ�XY\��[�ڜ[�XY\�ڙۘ[��X\ۛ�NB��[�ڜ[�XY\�H�[ۙX\�ٙ\[]�J
+NY�
+ܝ˜ڙۘ[˘X�ܝY	��X؛�ٛY
+Hؙ�Q\��܊ܝ˜ڙۘ[��X\ۛ�N�]\��B�Y�
+\�Z[�[[]�\�Y
+HY�
+ۛ�[�X][ې][\Y	��\ڙۘ[�X�ܝY
+H�\ܝۛ�[�X][ۑ�Z[\�J�\��[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�B�ș\���؝Yۜ�B��
+ۛ�[�X][ۑ�Z[\�P؝Yۜ�Hψ�[�^XݙY�K�
+NB�ؙ�PۛܙJ
+N�]\��B�ۛ�݈\И�ܝB�\��[�ݘ[�ٛوӑ^ٜ[ۈ	��\����[YHOOH�X�ܝ\��܈�Y�
+\И�ܝ
+Hً�[��ʈ�ܙ[�ZK\�\ܛٜۜȜ�X؛X]؜�Hݜ�X[HX�ܝY�NY�
+؛�ٛYڙۘ[�X�ܝY
+HY�
+ܝ˜ڙۘ[˘X�ܝY	��X؛�ٛY
+Hؙ�Q\��܊ܝ˜ڙۘ[��X\ۛ�NH[وؙ�PۛܙJ
+NB��]\��B�H[وۛ�݈؝Yۜ�HB�\��[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�B�ș\���؝Yۜ�B��ۛ�[�X][ې][\Y�Ȋۛ�[�X][ۑ�Z[\�P؝Yۜ�Hψ�[�^XݙY�B��ۘ\ܚY�T�[�ڜ[�Z[\�J\��Nً�\��܊�ܙ[�ZK\�\ܛٜۜȜ�X؛X]؜�Hݜ�X[H�Z[Y	ؘ]Yۜ�HȘ؝Yۜ�OIؘ]Yۜ�_X���X�
+NB�Y�
+\ڙۘ[�X�ܝY
+HY�
+\��[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�JH�\ܝۛ�[�X][ۑ�Z[\�J\���؝Yۜ�JNH[وY�
+ۛ�[�X][ې][\Y
+H�\ܝۛ�[�X][ۑ�Z[\�J�ۛ�[�X][ۑ�Z[\�P؝Yۜ�Hψ�[�^XݙY��
+NB�B�ۛ�݈�[�ڜ[�[�ܛܝ�Z[\�HB�\��[�ݘ[�ٛوԑTݜ�X[U�[�ܛܝ\��܈	��Xۛ�[�X][ې][\Yۛ�݈ۛ�[�YPY�\��[�ڜ[�[�ܛܝB��[�ڜ[�[�ܛܝ�Z[\�H	���[�ڜ[]�[�[Z]Yۛ�݈�X؛�Z[\�HB�\�[�ڜ[�[�ܛܝ�Z[\�H	���
+�X؛]XݙY�ۛ�[�X][ې][\Y�\��[�ݘ[�ٛو�X؛ۛ�[�X][ۑ�Z[\�JNۛ�݈�Z[Y�\ܛۜوH�[�[^�T�\ܛٜۜИ؊ݘ]JN�H\ܙ\�\ؙٓY\�٘X�J��Z[Y�\ܛًۜ�\ؙوψ�T�וTБы��[�ؘݚ[۔�ݚY\�\ًؙ�
+N�Z[Y�\ܛًۜ�\ؙوϏHȋ����T�וTБшNY\�ٕ\ؙي�Z[Y�\ܛًۜ�\ًؙ�[�ؘݚ[۔�ݚY\�\ؙيNH؝ڈ
+\ؙّ\��܊Hً�\��܊���Z[YțY\�و�X؛ۛ�[�X][ۈ\ؙو�܈X؛ݛ�[�Έ��\ؙّ\��܋�
+NB��[�ؘݚ[۔�ݚY\�\ؙوHȋ����T�וTБшNۛ�݈Y[�ݝ][�XٜȏH�]Ȕٝ
+����X؛[�Xٜ˂����[��\ۛ�Yۛ[�Xٜ˂�JNۛ�݈Y[�ݝ]Y[�]Y\ȏH�]Ȕٝݜ�[�ϊ
+N�܈
+ۛ�݈ݝ][�^وY[�ݝ][�Xٜʈۛ�݈][HHݘ]K�][\˙ٝ
+ݝ][�^
+Nۛ�݈�]ȏHݘ]K��]ҝ[\˙ٝ
+ݝ][�^
+N�܈
+ۛ�݈Y[�]Hو][O˚Y�][O˝\HOOH�ۛݜو�Ț][K�؛Y�[�Y�[�Y��]ϋ�Y��]ϋ�؛ڙ�JHY�
+\[وY[�]HOOH�ݜ�[�Ȉ	��Y[�]JHY[�ݝ]Y[�]Y\˘Y
+Y[�]JNB�B�B��Z[Y�\ܛًۜ�ۛ�[�H�Z[Y�\ܛًۜ�ۛ�[���[\��
+�ؚʈO��
+�ؚ˝\HOOH�ۛݜو��
+�ؚ˛�[YHOOH�PГՓӓӐSQH	���ZY[�ݝ]Y[�]Y\˚\ʘ�ؚ˚Y
+JJH	���
+�ؚ˝\HOOH�^�\\�ٔ�X؛[�ڛ܊�ؚ˝^
+JK�
+N�Z[Y�\ܛًۜ��]ӝ]]][\ȏH�Z[Y�\ܛًۜ��]ӝ]]][\ϋ��[\��
+][JHO��][K�\HOOH��[�ݚ[ؘۗ[��
+][K��[YHOOH�PГՓӓӐSQH	���Vڝ[K�Y][K�؛ڙK�ۛYJ�
+Y[�]JHO��\[وY[�]HOOH�ݜ�[�Ȉ	���Y[�ݝ]Y[�]Y\˚\ʚY[�]JK�
+JK�
+N]ؚ]ؙ�Q[�]Y]YJ�[�ۙ\��[�ۙJ��ܛX]�\ܛٜۜѝ�[�
+�ۛ�[�YPY�\��[�ڜ[�[�ܛܝ�Ȉ��\ܛًۜ�[�ۛ\]H�����\ܛًۜ��Z[Y���ӓ��ݜ�[�ڙ�J\N�ۛ�[�YPY�\��[�ڜ[�[�ܛܝ�Ȉ��\ܛًۜ�[�ۛ\]H�����\ܛًۜ��Z[Y���\ܛَۜ�Y�ݘ]K�Y��\ܗٜ��܈��ؚ�Xݎ���\ܛۜو��ܙX]Y؝�X]��ۜ�]K��݊
+HȌL
+K�[ٙ[�ݘ]K�[ٙ[�ݘ]\Έۛ�[�YPY�\��[�ڜ[�[�ܛܝ�Ȉ�[�ۛ\]H�����Z[Y��ݝ]��Z[ݝ]][\ʚY[�ݝ][�Xٜʋ�\َؙ��[����ۛ�[�YPY�\��[�ڜ[�[�ܛܝ�Ȟ[�ۛ\]Wٙ]Z[Έ�X\ۛ���S�ҔSՔ�S�ԓԕғ�ӓTUWԑPTӓ��K�B��ߊK�\��܎�\N��ٜ��\�ٜ��܈��ۙN��ٜ��\�ٜ��܈��Y\ܘYَ��X؛�Z[\�B�Ȉ�ܙH۝[�݈ۛ�[�YHH�\ܛۜوY�\��X؛����؝]؞H�\]Y\݈�Z[Y��K�K�JK�
+K�
+K�
+
+HO��[�\ڊ�Z[Y�\ܛًۜ�[يK�
+Nؙ�PۛܙJ
+NB�JJ
+K�؝ڊ
+\��܊HO�ۙX[�\X�ܝ
+
+NY�
+ٙ\[]�U[Y\�HۙX\�[Y[ݝ
+ٙ\[]�U[Y\�Nٙ\[]�U[Y\�H�[�Hۛ��ۛ\��\��܊\��܊NH؝ڈˈ[�XYHۛܙYؘ[�ٛY��B�JNK��[
+
+H�\ݛYQ[X[�ˊ
+N�\ݛYQ[X[�H[�Y�[�YK�؛�ٛ
+
+H�X؛XYۛܝX܋��[�\ڊ�X�ܝY�N�\ݛYQ[X[�ˊ
+N�\ݛYQ[X[�H[�Y�[�Y؛�ٛYH�YNۙX[�\X�ܝ
+
+NY�
+Y�\��Y�[�ؘݚ[ۊHY�\��Y�[�ؘݚ[ۋ��ۛ�Xڊ
+N[و�ۛ�Xڕ�[�ؘݚ[ۊ
+NX�ܝۛ��ۛ\��X�ܝ
+��]ȑӑ^ٜ[ۊ��\ܛٜۜȘۚY[�\؛ۛ�XݙY��X�ܝ\��܈�K�
+NY�
+ٙ\[]�U[Y\�HۙX\�[Y[ݝ
+ٙ\[]�U[Y\�NY�
+Xݚ]�T�XY\�H؛�ٛ[��[X\ٔ�XY\�Xݚ]�T�XY\�ڙۘ[��X\ۛ�N[ق��ڙݜ��[��[�ڜ[�\ܛًۜ��ٞB�˘؛�ٛ
+ڙۘ[��X\ۛ�B��؝ڊ
+
+HO�ߊNK�JN��]\���]Ȕ�\ܛۜيݜ�X[Kݘ]\Έ��XY\�Έ�ۛ�[�]\H���^ٝ�[�\ݜ�X[H���ؘڙKXۛ��ۈ����˘ؘڙH��ۛ��Xݚ[ێ��ٙ\X[]�H��K�JNB��ʊ��
+�X؝[][]HH�ۋ\ݜ�X[Z[�ȝ\ݜ�X[H�\ܛۜو[�ȘH؝]؞T�\ܛًۜ��
+��
+�\ܘ]ڙ\ȝȝHۜ��X݈\�ٜ��\ٙۈH\ݜ�X[Hڜ�H�ݛ؛ێ��
+�H�[��ܚXȎ�[��ܚXȓY\ܘYٜȐTH�ܛX]�
+�H�ܙ[�ZH��ܙ[�RHژ]ۛ\][ۜȐTH�ܛX]�
+�H�ܙ[�ZK\�\ܛٜۜȎ�ܙ[�RH�\ܛٜۜȐTH�ܛX]�
+�ۛ�݈PVѓԑQԓՓ�ԑTԓӔїЖUTȏH
+�L�
+�L�ۛ�݈PVѓԑQԓՓ�є��ԗЖUTȏH�
+�L�ۛ�݈�ԑQԓՓ�Ԕїғ�PՒU�UWӔȏHL�̌ˈH؝]؞K[ݛ�Y�X\ۛ�ݘ^\ș\ݚ[�݈��ۈ�ݚY\�ڙ[�[[Z]�X\ۛ�Ș[��ˈX\ȝȓܙ[�ۙI܈�]�XX�H[�ۛݛ��[�\ڋ�\ٜ��[�Ț]ȘYٛ�ۜ��ۛ�݈�S�ҔSՔ�S�ԓԕғ�ӓTUWԑPTӓ�H�؝]؞Wݜ�[�ܛܝ�ۛ�݈�ԑQԓՓ�є��ԗГіWՒSQSՕӔȏHL̌ۛ�݈PVԑSVWԑU�WБ�T�ӔȏH̌̌]�ܙYܛݛ�\��ܐ�ٞU[Y[ݝ\ȏH�ԑQԓՓ�є��ԗГіWՒSQSՕӔ΂��ʊ�\݋[ۛHݙ\��YH�܈H�ݛ�Y\ݜ�X[H\��܋X�ٞH�XY�
+�^ܝ�[�ݚ[ۈٝ�ܙYܛݛ�\��ܐ�ٞU[Y[ݝ�ܕ\݊[Y[ݝ\ώ��[X�\�N��ڙ�ܙYܛݛ�\��ܐ�ٞU[Y[ݝ\ȏH[Y[ݝ\ȏψ�ԑQԓՓ�є��ԗГіWՒSQSՕӔ΂�B���[�ݚ[ۈ�ݛ�Y�]�PY�\��[YN�ݜ�[�ʎ�ݜ�[�ȟ[�Y�[�Yۛ�݈�[[YYH�[YK��[J
+NY�
+]�[[YY
+H�]\��[�Y�[�Yۛ�݈٘ۛ�ȏH�[X�\��[[YY
+NY�
+�[X�\��\њ[�]J٘ۛ�ʈ	��٘ۛ�ȏ�H
+H�]\��ݜ�[�ʂ�X]�Z[�X]�ٚ[
+٘ۛ�ʋX]�ٚ[
+PVԑSVWԑU�WБ�T�ӔȋȌW̌
+JK�
+NB�ۛ�݈[Y\ݘ[\H]K�\�ي�[[YY
+NY�
+�[X�\��\ӘS�[Y\ݘ[\
+JH�]\��[�Y�[�Y�]\��ݜ�[�ʂ�X]�Z[��X]�X^
+X]�ٚ[
+
+[Y\ݘ[\H]K��݊
+JHȌW̌
+JK�X]�ٚ[
+PVԑSVWԑU�WБ�T�ӔȋȌW̌
+K�
+K�
+NB���[�ݚ[ۈ�ݛ�Y�]�PY�\�\ʝ�[YN�ݜ�[�ʎ�ݜ�[�ȟ[�Y�[�Yۛ�݈�[[YYH�[YK��[J
+NY�
+]�[[YY
+H�]\��[�Y�[�Yۛ�݈Z[\٘ۛ�ȏH�[X�\��[[YY
+NY�
+S�[X�\��\њ[�]JZ[\٘ۛ�ʈZ[\٘ۛ�ȏ
+H�]\��[�Y�[�Y�]\��ݜ�[�ʓX]�Z[�X]�ٚ[
+Z[\٘ۛ�ʋPVԑSVWԑU�WБ�T�ӔʊNB���[�ݚ[ۈ؛�]^�Y\ݜ�X[Q\��ܔ�\ܛۜي�\ܛَۜ��\ܛۜيN��\ܛۜوۛ�݈XY\�ȏH�]ȒXY\�ʞȈ�ۛ�[�]\H���\X؝[ۋڜۛ��JNۜU\ؙٓ[Z]XY\�ʜ�\ܛًۜ�XY\�ˈXY\�ʎۛ�݈�]�PY�\�H�\ܛًۜ�XY\�˙ٝ
+��]�KXY�\��Nۛ�݈�]�PY�\�\ȏH�\ܛًۜ�XY\�˙ٝ
+��]�KXY�\�[\ȊNۛ�݈�ݛ�Y�]�PY�\��[YHH�]�PY�\��Ș�ݛ�Y�]�PY�\��]�PY�\�B��[�Y�[�Yۛ�݈�ݛ�Y�]�PY�\�\՘[YHH�]�PY�\�\Ș�ݛ�Y�]�PY�\�\ʜ�]�PY�\�\ʂ��[�Y�[�YY�
+�ݛ�Y�]�PY�\��[YJHXY\�˜ٝ
+��]�KXY�\���ݛ�Y�]�PY�\��[YJNB�Y�
+�ݛ�Y�]�PY�\�\՘[YJHXY\�˜ٝ
+��]�KXY�\�[\ȋ�ݛ�Y�]�PY�\�\՘[YJNB��]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\N��\��܈��\��܎�ȝ\N��ٜ��\�ٜ��܈�Y\ܘYَ��؝]؞H�\]Y\݈�Z[Y�K�JK�Ȝݘ]\Έ�\ܛًۜ�ݘ]\ˈXY\�ȟK�
+NB��^ܝ\ޛ�ș�[�ݚ[ۈ�XY�ܙYܛݛ��ٞJ��\ܛَۜ��\ܛًۜ�XYۛܝXΈ�ۛX[��ە�[�؝YΈ
+
+HO��ڙ�ڙۘ[ΈX�ܝڙۘ[�N��ۚ\ُݜ�[�ψۛ�݈[Z]HXYۛܝXȓPVѓԑQԓՓ�є��ԗЖUT�PVѓԑQԓՓ�ԑTԓӔїЖUT΂�ۛ�݈�XY\�H�\ܛًۜ��ٞO˙ٝ�XY\�
+NY�
+\�XY\�H�]\����ۛ�݈ڝ[�܎�Z[�\��^V׈H׎]�]\ȏH�H�܈
+ΊHۛ�݈șۙK�[YHHH]ؚ]�XYݜ�X[Pڝ[�ʜ�XY\�Ȝڙۘ[JNY�
+ۙJH��XZ΂�Y�
+]�[YJHۛ�[�YNۛ�݈�[XZ[�[�ȏH[Z]H�]\΂�Y�
+�[YK��]S[�ݚ�H�[XZ[�[�ʈY�
+YXYۛܝXʈY�
+�[YK��]S[�ݚ��[XZ[�[�ʈ�݈�]ȑ\��܊�ܙYܛݛ��\ܛۜو^ٙYY	ۚ[Z]H�]H[Z]
+NB�H[وˈ�XXښ[�ȝH؜\Șۛ�ٜ��]]�[H�X]Y\ȝ�[�؝[ێ��ݚ[�ˈ^X݈Sш۝[�\]Z\�HۙH[ܙH�XYښXڈX^Hݘ[�ܙ]�\���ە�[�؝Yˊ
+NY�
+�[XZ[�[�ȏ�
+Hڝ[�܋�\ڊ�[YK�ݘ�\��^J�[XZ[�[�ʊN�]\ȊψX]�X^
+�[XZ[�[�ʎ��XZ΂�B�B�ڝ[�܋�\ڊ�[YJN�]\Ȋψ�[YK��]S[�ݚB�ۛ�݈�ٞHH�Y��\��ۛ�؝
+ڝ[�܊NY�
+XYۛܝXʈ�]\���]ȕ^Xۙ\�
+K�XۙJ�ٞJN�H�]\���]ȕ^Xۙ\��]�N�ș�][��YHJK�XۙJ�ٞJNH؝ڈ�݈�]ȑ\��܊�X[�ܛYY\ݜ�X[H�\ܛۜوU�N�NB�H�[�[H؛�ٛ[��[X\ٔ�XY\��XY\�NB�B��\ޛ�ș�[�ݚ[ۈ�\ٜ��U\ݜ�X[Q\��ܔ�\ܛۜي��\ܛَۜ��\ܛًۜ�ڙۘ[ΈX�ܝڙۘ[�N��ۚ\ُ�\ܛُۜ�]�[�؝YH�[َۛ�݈�ٞHH]ؚ]�XY�ܙYܛݛ��ٞJ��\ܛًۜ��YK�
+
+HO��[�؝YH�YNK�ڙۘ[�
+Nۛ�݈XY\�ȏH�]ȒXY\�ʜ�\ܛًۜ�XY\�ʎˈH�]Z[�Y�ٞHX^H�Hڛܝ\�[�H�ݚY\�܈ܚYڛ�[^[ؙ���܈
+ۛ�݈�[YHو�ۛ��Xݚ[ۈ���ۛ�[�Y[�ۙ[�ȋ��ۛ�[�[[�ݚ���ٙ\X[]�H����ޞKX]][�X؝H����ޞKX]]ܚ^�][ۈ���ٝXۛښYH���ٝXۛښYL����H����Z[\�����[�ٙ\�Y[�ۙ[�ȋ��\ܘYH��JHXY\�˙[]J�[YJNB�Y�
+�[�؝Y
+HXY\�˜ٝ
+�[ܙKX�ٞK]�[�؝Y���YH�N�]\���]Ȕ�\ܛۜي�ٞKݘ]\Έ�\ܛًۜ�ݘ]\˂�ݘ]\ՙ^��\ܛًۜ�ݘ]\ՙ^�XY\�˂�JNB��ʊ�\�ٙ\ؙو��ۈH�Y��\�Y�\ܛۜو]XڜȘH�[Yۛ\][ۋ�
+�ۘ\܈�۔ݜ�X[Pۛ\][ۑ\��܈^[�ȑ\��܈ۛ�ݜ�Xݛ܊�XYۛH�\ܛَۜ�؝]؞T�\ܛۜيHݜ\��\ݜ�X[H�\ܛۜوY�݈ۛ\]H�N\˛�[YHH��۔ݜ�X[Pۛ\][ۑ\��܈�B�B��^ܝ\ޛ�ș�[�ݚ[ۈX؝[][]S�۔ݜ�X[T�\ܛۜي�\ݜ�X[T�\ܛَۜ��\ܛًۜ��ݛ؛ێ���[��ܚXȂ��ܙ[�ZH���ܙ[�ZK\�\ܛٜۜȂ���\�^���ٛZ[�H�H�[��ܚXȋ�ۙ^H�[ً�ڙۘ[ΈX�ܝڙۘ[��\]Z\�U�[Yۛ\][ۈH�[ً�N��ۚ\ُ؝]؞T�\ܛُۜ�ˈۛYH�ݚY\�ȊHژ]ԕЛܚ[݋Лٙ^�Xڙ[�Y\ٙZʈ�]\��[�ԑB�ˈݜ�X[H]�[�ڙ[�ݜ�X[N��[و؜Ȝٛ�8�%ۛY][Y\ȕҕՕB�ˈ^ٝ�[�\ݜ�X[Hۛ�[�]\K�ۚY��H�ٞN�Y�]	܈ԑK�[�]�ݙڂ�ˈH�ݛ؛ۉ܈ݜ�X[HX؝[][]܈
+Y\�ٜȑU�T�Hڝ[�ˈۈH][KXڝ[�ˈݜ�X[H\Ȝ�Xۛ�ݜ�XݙY�Z]�[H8�%Zڛ�țۛHH\݈]N�[�H۝[�ˈ�܈[�]H�[�[[K[��ӓ��\�ًZ[�ȝH�ٞH۝[�݈ۂ�ˈ�]N�ˋ��H�Ȉ�]�[������^8�%ԑPRKQЕUЖKLΈȋLT
+K�ݚ\�ڜق�ˈ\�وHڛ�ۙH�ӓ��ٞK��ۛ�݈ۛ�[�\HH\ݜ�X[T�\ܛًۜ�XY\�˙ٝ
+�ۛ�[�]\H�Hψ��ۛ�݈�ٞHH]ؚ]�XY�ܙYܛݛ��ٞJ�\ݜ�X[T�\ܛًۜ��[ً�[�Y�[�Y�ڙۘ[�
+NY�
+ۚܓZٔԑJۛ�[�\K�ٞJJHۛ�݈ܙHH�]Ȕ�\ܛۜي�ٞKXY\�ΈȈ�ۛ�[�]\H���^ٝ�[�\ݜ�X[H�K�JNݚ]ڈ
+�ݛ؛ۊH؜و�ܙ[�ZH����]\��X؝[][]Sܙ[�RTԑTݜ�X[JܙKڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�ۛ�ݛYU[�[ۙN��YK�JN؜و�ܙ[�ZK\�\ܛٜۜȎ���]\��X؝[][]T�\ܛٜۜԔєݜ�X[JܙKڙۘ[��[Y][ێ�ۙ^Ȉ�ۙ^���X�Xȋ�ݛܐ]\�Z[�[��YK��\]Z\�Pۛ\]Y\�Z[�[��YK�JN؜و�ٛZ[�H����]\��X؝[][]QٛZ[�TԑTݜ�X[JܙKڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JNY�][��ˈ[��ܚXȝڜ�H
+[�ۋ��\�^ЙY�ؚ˛X[�JHԑK���]\��X؝[][]TԑT�\ܛۜيܙKڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JNB�B��ۛ�݈�ۛ�H�ӓ��\�ي�ٞJH\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��ۛ�݈\�ٔ�\ܛۜوB��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȂ�ȘX؝[][]T�\ܛٜۜӛ۔ݜ�X[R�ӓ����ݛ؛ۈOOH�ܙ[�ZH��ȘX؝[][]Sܙ[�RS�۔ݜ�X[R�ӓ����ݛ؛ۈOOH�ٛZ[�H��Ȝ\�ّٛZ[�T�\ܛْۜ�ӓ���X؝[][]P[��ܚXӛ۔ݜ�X[R�ӓ�]�\ܛَۜ�؝]؞T�\ܛۜو[�Y�[�Y�HY�
+�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊHۛ�݈\�ٙH\�ٔ�\ܛٜۜӛ۔ݜ�X[Q[��[ܙJ�ۛ�N�\ܛۜوH\�ٙ��\ܛَۜY�
+\�ٙ�ݘ]\ȈOOH�ۛ\]Y�B��݈�]Ȕ�\ܛٜۜՙ\�Z[�[\��܊�\ܛًۜ\�ٙ�ݘ]\ʎH[و�\ܛۜوH\�ٔ�\ܛۜي�ۛ�NY�
+�\]Z\�U�[Yۛ\][ۊB�\ܙ\��[Y�۔ݜ�X[Pۛ\][ۊ�ۛ��ݛ؛ۊNB��]\���\ܛَۜH؝ڈ
+\��܊HY�
+\�\]Z\�U�[Yۛ\][ۈ\��܈[�ݘ[�ٛو�\ܛٜۜՙ\�Z[�[\��܊B��݈\��܎ˈۛ�[�\�ڛ�Ș؛��Z[�Y�ܙH\ؙو�[Y][ۋ��]\وH؛YH\�ٜ��ˈۈ\ؙو�Y[Ș[ۙK�]Z[�[�Ț]ț�[Y\�XȘ[�ؘڙHۛ�ڜݙ[�ވڙXڜ˂�ˈ[��[Y\ؙوݚ[�ݜΈH�ڙXݚ[ۈ\ț�]�\��]\��Y\Ȝݘؙ\܋���\ܛۜوϏH\�ٔ�\ܛۜي\َؙ��ۛ��\ًؙ�\ؙٓY]Y]N��ۛ��\ؙٓY]Y]K�JN�݈�]ȓ�۔ݜ�X[Pۛ\][ۑ\��܊�\ܛۜيNB�B���[�ݚ[ۈ\�ٔ�\ܛٜۜӛ۔ݜ�X[Q[��[ܙJ�ۛ���Xۜ�ݜ�[�ˈ[�ۛݛ��N��\ܛَۜ�؝]؞T�\ܛَۜݘ]\Έݜ�[�΂�Hۛ�݈�\ܛۜوHX؝[][]T�\ܛٜۜӛ۔ݜ�X[R�ӓ��ۛ�Nۛ�݈ݘ]\ȏH\[و�ۛ��ݘ]\ȏOOH�ݜ�[�ȈȚ�ۛ��ݘ]\Ȏ��[�ۛݛ��Y�
+ݘ]\ȏOOH�ۛ\]Y�ݘ]\ȏOOH�[�ۛ\]H�H\ܙ\��[Y�۔ݜ�X[Pۛ\][ۊ�ۛ��ܙ[�ZK\�\ܛٜۜȊNB��]\��Ȝ�\ܛًۜݘ]\ȟNB��\ޛ�ș�[�ݚ[ۈ�\ٜ��R[�ۛ\]T�\ܛٜۜՙ\�Z[�[
+�ܙ\�][ێ��ۚ\ُ؝]؞T�\ܛُۜ��N��ۚ\ُ؝]؞T�\ܛُۜ��H�]\��]ؚ]ܙ\�][ێH؝ڈ
+\��܊HY�
+�\��܈[�ݘ[�ٛو�\ܛٜۜՙ\�Z[�[\��܈	���\��܋�ݘ]\ȏOOH�[�ۛ\]H��
+H�]\��\��܋��\ܛَۜB��݈\��܎B�B���[�ݚ[ۈ\ܙ\��[Y�۔ݜ�X[Pۛ\][ۊ��ۛ���Xۜ�ݜ�[�ˈ[�ۛݛ����ݛ؛ێ��[��ܚXȈ�ܙ[�ZH��ܙ[�ZK\�\ܛٜۜȈ��\�^��ٛZ[�H��N��ڙY�
+�ۛ��\��܈OOH[�Y�[�Y	���ۛ��\��܈OOH�[
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛۜوۛ�Z[�Y[�\��܈�NB��Y�
+�ݛ؛ۈOOH�ܙ[�ZH�Hۛ�݈ڛژٜȏH�ۛ��ڛژٜ΂�ۛ�݈�\�݈H\��^K�\М��^JڛژٜʈȘڛژٜ֌H�[�Y�[�YY�
+�Y�\�݈�\[و�\�݈OOH�ؚ�X݈��\��^K�\М��^J�\�݊H�J�\�݈\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K�Y\ܘYو�\[و
+�\�݈\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��[�\ڗܙX\ۛ�OOH�ݜ�[�Ȃ�
+H�݈�]ȑ\��܊�\ݜ�X[Hܙ[�RH�\]Y\݈Y�݈ۛ\]H�NB��]\��B��Y�
+�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊHۛ�݈ݘ]\ȏH�ۛ��ݘ]\΂�Y�
+�
+ݘ]\ȈOOH�ۛ\]Y�	��ݘ]\ȈOOH�[�ۛ\]H�H�\[و�ۛ��YOOH�ݜ�[�Ȉ�\[و�ۛ��[ٙ[OOH�ݜ�[�Ȉ�P\��^K�\М��^J�ۛ��ݝ]
+H�Z�ۛ��\ؙو�\[و�ۛ��\ؙوOOH�ؚ�X݈��\��^K�\М��^J�ۛ��\ؙيB�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�ۛ�݈ٙ[�Y[�]Y\ȏH�]Ȕٝݜ�[�ϊ
+N�܈
+ۛ�݈�]ҝ[Hو�ۛ��ݝ]
+HY�
+\�]ҝ[H\[و�]ҝ[HOOH�ؚ�X݈�\��^K�\М��^J�]ҝ[JJH�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�ۛ�݈][HH�]ҝ[H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��Y�
+�\[و][K�\HOOH�ݜ�[�Ȉ�Z][K�\H�Z\ԝ\ܝY�\ܛٜۜӝ]]][U\J][K�\JH�\[و][K�YOOH�ݜ�[�Ȉ�Z][K�Y�ٙ[�Y[�]Y\˚\ʚ][K�Y
+B�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�ٙ[�Y[�]Y\˘Y
+][K�Y
+NY�
+][K�\HOOH�Y\ܘYو�Hۛ�݈�[Y][Tݘ]\ȏB�][K�ݘ]\ȏOOH�ۛ\]Y��
+ݘ]\ȏOOH�[�ۛ\]H�	��][K�ݘ]\ȏOOH�[�ۛ\]H�NY�
+�][K��ۙHOOH�\ܚ\ݘ[���]�[Y][Tݘ]\ȟ�P\��^K�\М��^J][K�ۛ�[�
+B�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB��܈
+ۛ�݈�]Ԙ\�و][K�ۛ�[�
+HY�
+�\�]Ԙ\��\[و�]Ԙ\�OOH�ؚ�X݈��\��^K�\М��^J�]Ԙ\�
+B�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�ۛ�݈\�H�]Ԙ\�\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��Y�
+�
+\��\HOOH�ݝ]ݙ^�	��\[و\��^OOH�ݜ�[�ȊH�
+\��\HOOH��Y�\؛�	��\[و\���Y�\؛OOH�ݜ�[�ȊH�
+\��\HOOH�ݝ]ݙ^�	��\��\HOOH��Y�\؛�B�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�B�H[وY�
+][K�\HOOH��[�ݚ[ؘۗ[�Hۛ�݈�[Y][Tݘ]\ȏB�][K�ݘ]\ȏOOH�ۛ\]Y��][K�ݘ]\ȏOOH��Z[Y��
+ݘ]\ȏOOH�[�ۛ\]H�	��][K�ݘ]\ȏOOH�[�ۛ\]H�NY�
+�\[و][K�؛ڙOOH�ݜ�[�Ȉ�Z][K�؛ڙ�ٙ[�Y[�]Y\˚\ʚ][K�؛ڙ
+H�\[و][K��[YHOOH�ݜ�[�Ȉ�Z][K��[YH�\[و][K�\�ݛY[�ȈOOH�ݜ�[�Ȉ�]�[Y][Tݘ]\
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�ٙ[�Y[�]Y\˘Y
+][K�؛ڙ
+NH[وY�
+][K�\HOOH��X\ۛ�[�ȊHۛ�݈�[Y][Tݘ]\ȏB�][K�ݘ]\ȏOOH[�Y�[�Y�][K�ݘ]\ȏOOH�ۛ\]Y��
+ݘ]\ȏOOH�[�ۛ\]H�	��][K�ݘ]\ȏOOH�[�ۛ\]H�NY�
+]�[Y][Tݘ]\ʈ�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB��܈
+ۛ�݈ٚY[\�\WHوȜݛ[X\�H��ݛ[X\�Wݙ^�K�Șۛ�[����X\ۛ�[�ם^�K�H\Șۛ�݊Hۛ�݈\�ȏH][VٚY[NY�
+\�ȏOOH[�Y�[�Y
+Hۛ�[�YNY�
+P\��^K�\М��^J\�ʊH�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB��܈
+ۛ�݈�]Ԙ\�و\�ʈY�
+�\�]Ԙ\��\[و�]Ԙ\�OOH�ؚ�X݈��\��^K�\М��^J�]Ԙ\�
+H�
+�]Ԙ\�\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K�\HOOH\�\H�\[و
+�]Ԙ\�\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K�^OOH�ݜ�[�Ȃ�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�B�B�Y�
+�][K�[�ܞ\Y؛۝[�OOH[�Y�[�Y	���][K�[�ܞ\Y؛۝[�OOH�[	���\[و][K�[�ܞ\Y؛۝[�OOH�ݜ�[�Ȃ�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�H[وY�
+][K�\HOOH�][WܙY�\�[�و�HˈHݘ[�[ۙH�ۋ\ݜ�X[H�\ܛۜو\ț�Ȝݜ�X[YY][HY�XޘۙHˈ�\ۛ�H\Ȝ�Y�\�[�وYؚ[�ݎȘXؙ\[�Ț]۝[ڛ[�H\�\ق�ˈ�ݚY\�ݝ]\�[�ț�ܛX[^�][ۋ���݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NH[وY�
+�Z\՘[Y�\ܛٜۜӝ]]][Tݘ]\ʚ][K�\K][K�ݘ]\ˈ�\�Z[�[�B�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�B�B�Y�
+ݘ]\ȏOOH�[�ۛ\]H�Hۛ�݈]Z[ȏH�ۛ��[�ۛ\]Wٙ]Z[΂�Y�
+�]Z[ȈOOH[�Y�[�Y	���]Z[ȈOOH�[	���
+\[و]Z[ȈOOH�ؚ�X݈��\��^K�\М��^J]Z[ʈ�\[و
+]Z[Ș\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��X\ۛ�OOH�ݜ�[�ȊB�
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�ۛ�݈�X\ۛ�B�]Z[ȉ��\[و]Z[ȏOOH�ؚ�X݈�	��P\��^K�\М��^J]Z[ʂ�Ȋ]Z[Ș\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��X\ۛ���[�Y�[�YY�
+��X\ۛ�OOH[�Y�[�Y	����X\ۛ�OOH�X^۝]]ݛڙ[�Ȉ	����X\ۛ�OOH�ۛ�[�ٚ[\���
+H�݈�]ȑ\��܊�\ݜ�X[H�\ܛٜۜȜ�\]Y\݈Y�݈ۛ\]H�NB�B��]\��B��Y�
+�ݛ؛ۈOOH�ٛZ[�H�Hۛ�݈؛�Y]\ȏH�ۛ��؛�Y]\΂�ۛ�݈�\�݈H\��^K�\М��^J؛�Y]\ʈȘ؛�Y]\֌H�[�Y�[�Yۛ�݈�ۜ�YY�XڈH�ۛ���ۜ�YY�Xڎۛ�݈�ؚԙX\ۛ�B��ۜ�YY�Xڈ	���\[و�ۜ�YY�XڈOOH�ؚ�X݈�	���P\��^K�\М��^J�ۜ�YY�XڊB�Ȋ�ۜ�YY�Xڈ\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��ؚԙX\ۛ���[�Y�[�YY�
+�
+Y�\�݈�\[و�\�݈OOH�ؚ�X݈��\��^K�\М��^J�\�݊H�\[و
+�\�݈\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��[�\ڔ�X\ۛ�OOH�ݜ�[�ȊH	���\[و�ؚԙX\ۛ�OOH�ݜ�[�Ȃ�
+H�݈�]ȑ\��܊�\ݜ�X[HٛZ[�H�\]Y\݈Y�݈ۛ\]H�NB��]\��B��Y�
+��ۛ��\HOOH�Y\ܘYو���ۛ���ۙHOOH�\ܚ\ݘ[���\[و�ۛ��YOOH�ݜ�[�Ȉ�\[و�ۛ��[ٙ[OOH�ݜ�[�Ȉ�P\��^K�\М��^J�ۛ��ۛ�[�
+H�\[و�ۛ��ݛܗܙX\ۛ�OOH�ݜ�[�Ȉ�Z�ۛ��\ؙو�\[و�ۛ��\ؙوOOH�ؚ�X݈��\��^K�\М��^J�ۛ��\ؙيB�
+H�݈�]ȑ\��܊�\ݜ�X[H[��ܚXȜ�\]Y\݈Y�݈ۛ\]H�NB�B��ˈ[��ܚXț�ۋ\ݜ�X[H�ӓ�8���؝]؞T�\ܛَۜ�\وژ\�Y\�ِ[��ܚXԙ\ܛْۜ�ӓ��ۛ�݈X؝[][]P[��ܚXӛ۔ݜ�X[R�ӓ�H\�ِ[��ܚXԙ\ܛْۜ�ӓ��^ܝ�[�ݚ[ۈX؝[][]Sܙ[�RS�۔ݜ�X[R�ӓ���ۛ���Xۜ�ݜ�[�ˈ[�ۛݛ���N�؝]؞T�\ܛۜوۛ�݈ۛ�[��؝]؞Pۛ�[��ؚ֗HH׎Y�
+�ۛ��ڛژٜȈOOH[�Y�[�Y	��P\��^K�\М��^J�ۛ��ڛژٜʊH�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ۛ�݈ڛژٜȏH�ۛ��ڛژٜȘ\Ȑ\��^O�Xۜ�ݜ�[�ˈ[�ۛݛ���[�Y�[�Yۛ�݈ٚX؛ڛژْ[�XٜȏH�]Ȕٝ�[X�\��
+N�܈
+]ܚ][ۈHȜܚ][ۈ
+ڛژٜϋ�[�ݚψ
+NȜܚ][ۊʊHۛ�݈ڛژوHڛژٜϋ�ܛܚ][ۗNY�
+Xڛژو\[وڛژوOOH�ؚ�X݈�\��^K�\М��^JڛژيJH�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ۛ�݈ٚX؛[�^B�ڛژً�[�^OOH[�Y�[�YȜܚ][ۈ�
+ڛژً�[�^\ț�[X�\�NY�
+�S�[X�\��\ԘY�R[�Yٜ�ٚX؛[�^
+H�ٚX؛[�^�ٚX؛ڛژْ[�Xٜ˚\ʛٚX؛[�^
+B�
+H�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ٚX؛ڛژْ[�Xٜ˘Y
+ٚX؛[�^
+NB��܈
+ۛ�݈ڛژووڛژٜȏψ׊Hۛ�݈ڛژٕۛY[�]Y\ȏH�]Ȕٝݜ�[�ϊ
+NY�
+�Xڛژو�\[وڛژوOOH�ؚ�X݈��\��^K�\М��^JڛژيH�
+ڛژً�[�^OOH[�Y�[�Y	���
+S�[X�\��\ԘY�R[�Yٜ�ڛژً�[�^
+H�
+ڛژً�[�^\ț�[X�\�H
+JH�
+ڛژً��[�\ڗܙX\ۛ�OOH[�Y�[�Y	���ڛژً��[�\ڗܙX\ۛ�OOH�[	���\[وڛژً��[�\ڗܙX\ۛ�OOH�ݜ�[�ȊH�Xڛژً�Y\ܘYو�\[وڛژً�Y\ܘYوOOH�ؚ�X݈��\��^K�\М��^Jڛژً�Y\ܘYيB�
+H�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ۛ�݈؛�Y]SY\ܘYوHڛژً�Y\ܘYو\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��Y�
+�
+؛�Y]SY\ܘYً�ۛ�[�OOH[�Y�[�Y	���؛�Y]SY\ܘYً�ۛ�[�OOH�[	���\[و؛�Y]SY\ܘYً�ۛ�[�OOH�ݜ�[�ȊH�
+؛�Y]SY\ܘYً��ۙHOOH[�Y�[�Y	���\[و؛�Y]SY\ܘYً��ۙHOOH�ݜ�[�ȊB�
+H�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ۛ�݈؛�Y]P؛ȏH؛�Y]SY\ܘYُ˝ۛؘ[΂�Y�
+؛�Y]P؛ȏOOH[�Y�[�Y
+Hۛ�[�YNY�
+P\��^K�\М��^J؛�Y]P؛ʊH�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوۛY[�]H�NB��܈
+ۛ�݈؛و؛�Y]P؛ʈY�
+X؛\[و؛OOH�ؚ�X݈�\��^K�\М��^J؛
+JH�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ۛ�݈\Y؛H؛\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��ۛ�݈��H\Y؛��[�ݚ[ێY�
+�Y���\[و��OOH�ؚ�X݈��\��^K�\М��^J��H�\[و
+��\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��[YHOOH�ݜ�[�Ȉ�\[و
+��\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K�\�ݛY[�ȈOOH�ݜ�[�Ȃ�
+H�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوڛژو�NB�ۛ�݈YH\ԝ�[�ʝ\Y؛�Y
+NY�
+ZYڛژٕۛY[�]Y\˚\ʚY
+JH�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوۛY[�]H�NB�ڛژٕۛY[�]Y\˘Y
+Y
+NB�B�ۛ�݈�\�ݐڛژوHڛژٜϋ�̗Nۛ�݈Y\ܘYوH�\�ݐڛژُ˛Y\ܘYو\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��[�Y�[�Y�Y�
+Y\ܘYيHۛ�݈^ۛ�[�HY\ܘYً�ۛ�[�\Ȝݜ�[�ȟ[�Y�[�YY�
+^ۛ�[�
+Hۛ�[��\ڊȝ\N��^�^�^ۛ�[�JNB�ۛ�݈ۛ؛ȏHY\ܘYً�ۛؘ[Ș\\��^O�Xۜ�ݜ�[�ˈ[�ۛݛ����[�Y�[�YY�
+ۛ؛ʈۛ�݈ۛY[�]Y\ȏH�]Ȕٝݜ�[�ϊ
+N�܈
+ۛ�݈țوۛ؛ʈۛ�݈��H˙�[�ݚ[ۈ\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��[�Y�[�Y][�]�[�ۛݛ�HߎY�
+\[و��˘\�ݛY[�ȏOOH�ݜ�[�ȊH�H[�]H�ӓ��\�ي���\�ݛY[�ʎH؝ڈ[�]H���\�ݛY[�΂�B�B�ۛ�݈YH\ԝ�[�ʝ˚Y
+NY�
+ZYۛY[�]Y\˚\ʚY
+JH�݈�]ȑ\��܊�X[�ܛYYܙ[�RH�\ܛۜوۛY[�]H�NB�ۛY[�]Y\˘Y
+Y
+Nۛ�[��\ڊ\N��ۛݜو��Y��[YN�\ԝ�[�ʙ��˛�[YJK�[�]�JNB�B�B��ˈX\ܙ[�RH�[�\ڗܙX\ۛ�ș؝]؞Hݛ܈�X\ۛ��ۛ�݈�[�\ڔ�X\ۛ�H�\�ݐڛژُ˙�[�\ڗܙX\ۛ�\Ȝݜ�[�ȟ[�Y�[�Y]ݛܔ�X\ۛ�H�[�ݝ\���Y�
+�[�\ڔ�X\ۛ�OOH�ݛ܈�Hݛܔ�X\ۛ�H�[�ݝ\���[وY�
+�[�\ڔ�X\ۛ�OOH�[�ݚ�Hݛܔ�X\ۛ�H�X^ݛڙ[�Ȏ[وY�
+�[�\ڔ�X\ۛ�OOH�ۛؘ[ȊHݛܔ�X\ۛ�H�ۛݜو��ۛ�݈\ؙوH�[Y]Sܙ[�RU\ؙي��ۛ��\ًؙ��X[�ܛYYܙ[�RH�\ܛۜو\ؙو��
+Nۛ�݈�ۜڙ[�љ]Z[ȏH\ؙُ˜�ۜݛڙ[�י]Z[Ș\�Xۜ�ݜ�[�ˈ�[X�\���[�Y�[�Y��]\��Y�\ԝ�[�ʚ�ۛ��Y
+K�[ٙ[�\ԝ�[�ʚ�ۛ��[ٙ[
+K�ۛ�[��ݛܔ�X\ۛ��\َؙ�ˈ�ۜݛڙ[�Ț\Ț[�۝\ڝ�HوؘڙH�XY˝ܚ]\Έۛ��\�ȝB�ˈ؝]؞I܈\ڛڛ�ۛ��[�[ۈۈؘڙHڙ[�Ș\�[�݈ݘ�KX۝[�Y��[�]ڙ[�Έ\ڛڛ�ܙ[�RR[�]ڙ[�ʂ�\ؙُ˜�ۜݛڙ[�Ș\ț�[X�\�[�Y�[�Y��ۜڙ[�љ]Z[ϋ�ؘڙYݛڙ[�˂��ۜڙ[�љ]Z[ϋ�ؘڙWݜ�]Wݛڙ[�˂�
+K�ݝ]ڙ[�Έ
+\ؙُ˘ۛ\][ۗݛڙ[�Ș\ț�[X�\�Hψ�ؘڙT�XY[�]ڙ[�Έ�ۜڙ[�љ]Z[ϋ�ؘڙYݛڙ[�˂�ˈܙ[��ݝ\��\ܝȘؘڙK]ܚ]Hڙ[�Ȋ[��ܚXș^Xڝؘښ[�ʈ[��ˈ�ۜݛڙ[�י]Z[˘ؘڙWݜ�]Wݛڙ[�ˈܙ[�RH�ܙ\�ٜۉ݈�\ܝ�ˈܚ]\Ȝٜ\�][H
+X]�\Ț][�Y�[�Y
+H8�%ٙHHܙ[��ݝ\�\ؙق�ˈX؛ݛ�[�ș؜ˈY�[�Y�[�Yڙ[�X�ٛ�ۈ]�]�\�X\ܝY\�Y\ˈ\ȘH�X[�\�˝ܚ]H[�[�[]X܋؛ܝ�Xښ[�˂�ؘڙPܙX][ے[�]ڙ[�Έ�ۜڙ[�љ]Z[ϋ�ؘڙWݜ�]Wݛڙ[�˂�K�NB��^ܝ�[�ݚ[ۈX؝[][]T�\ܛٜۜӛ۔ݜ�X[R�ӓ���ۛ���Xۜ�ݜ�[�ˈ[�ۛݛ���N�؝]؞T�\ܛۜوۛ�݈ۛ�[��؝]؞Pۛ�[��ؚ֗HH׎ۛ�݈ݝ]H�ۛ��ݝ]\Ȑ\��^O�Xۜ�ݜ�[�ˈ[�ۛݛ���[�Y�[�Yۛ�݈�\^XX�Sݝ]Hݝ]˙�[\��
+][JHO�][K�\HOOH�][WܙY�\�[�و��
+N�Y�
+�\^XX�Sݝ]
+Hۛ�݈Y[�]Y\ȏH�]Ȕٝݜ�[�ϊ
+N�܈
+ۛ�݈][Hو�\^XX�Sݝ]
+Hۛ�݈][RYH\ԝ�[�ʚ][K�Y
+NY�
+Z][RYY[�]Y\˚\ʚ][RY
+JH�݈�]ȑ\��܊�X[�ܛYY�\ܛٜۜȜ�\ܛۜو][HY[�]H�NB�Y[�]Y\˘Y
+][RY
+NY�
+][K�\HOOH�Y\ܘYو�Hۛ�݈\ِۛ�[�H][K�ۛ�[�\\��^O�Xۜ�ݜ�[�ˈ[�ۛݛ����[�Y�[�YY�
+\ِۛ�[�
+H�܈
+ۛ�݈\�و\ِۛ�[�
+HY�
+\��\HOOH�ݝ]ݙ^�Hۛ�[��\ڊȝ\N��^�^�\ԝ�[�ʜ\��^
+HJNH[وY�
+�\��\HOOH��Y�\؛�	���\[و\���Y�\؛OOH�ݜ�[�Ȃ�
+Hˈݚ\�ۚY[��ݛ؛ۜș[Z]�ܛX[^�Yۛ�[��ٙ\H�]ˈ�Y�\؛ۈ�܈ܜۙ\܈�]]�H�\ܛٜۜțݝ][��\^K��ۛ�[��\ڊȝ\N��^�^�\���Y�\؛JNB�B�B�H[وY�
+][K�\HOOH��[�ݚ[ؘۗ[�H][�]�[�ۛݛ�HߎY�
+\[و][K�\�ݛY[�ȏOOH�ݜ�[�ȊH�H[�]H�ӓ��\�ي][K�\�ݛY[�ʎH؝ڈ[�]H][K�\�ݛY[�΂�B�B�ۛ�݈YH\ԝ�[�ʚ][K�؛ڙψ][K�Y
+NY�
+ZYY[�]Y\˚\ʚY
+JH�݈�]ȑ\��܊�X[�ܛYY�\ܛٜۜȜ�\ܛۜوۛY[�]H�NB�Y[�]Y\˘Y
+Y
+Nۛ�[��\ڊ\N��ۛݜو��Y��[YN�\ԝ�[�ʚ][K��[YJK�[�]�JNB�B�B��ˈX\�\ܛٜۜȐTHݘ]\ȝș؝]؞Hݛ܈�X\ۛ��ۛ�݈ݘ]\ȏH�ۛ��ݘ]\Ș\Ȝݜ�[�ȟ[�Y�[�Y]ݛܔ�X\ۛ�H�[�ݝ\���Y�
+ݘ]\ȏOOH�[�ۛ\]H�Hۛ�݈]Z[ȏH�ۛ��[�ۛ\]Wٙ]Z[΂�ۛ�݈�X\ۛ�B�]Z[ȉ��\[و]Z[ȏOOH�ؚ�X݈�	��P\��^K�\М��^J]Z[ʂ�Ȋ]Z[Ș\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��K��X\ۛ���[�Y�[�Yݛܔ�X\ۛ�H�X\ۛ�OOH�ۛ�[�ٚ[\��Ȉ�ۛ�[�ٚ[\����X^ݛڙ[�ȎB�Y�
+ۛ�[��ۛYJ
+�HO���\HOOH�ۛݜو�H	��ݛܔ�X\ۛ�OOH�[�ݝ\���Hݛܔ�X\ۛ�H�ۛݜو�B��ۛ�݈\ؙوH�[Y]T�\ܛٜۜ՜ؙي��ۛ��\ًؙ��X[�ܛYY�\ܛٜۜȜ�\ܛۜو\ؙو��
+Nˈ�\ܛٜۜȐTH�\ܝȘؘڙH]Z[ȝ[�\�[�]ݛڙ[�י]Z[؎ș�[�Xڂ�ˈȘ�ۜݛڙ[�י]Z[؈
+ژ]ۛ\][ۜȜژ\JH�܈�\ڛY[�وXܛܜˈܙ[�RKXۛ\]X�H�ݚY\�˂�ۛ�݈[�]ڙ[�љ]Z[ȏH
+\ؙُ˚[�]ݛڙ[�י]Z[ȏς�\ؙُ˜�ۜݛڙ[�י]Z[ʈ\Ȕ�Xۜ�ݜ�[�ˈ�[X�\��[�Y�[�Y��]\��Y�\ԝ�[�ʚ�ۛ��Y
+K�[ٙ[�\ԝ�[�ʚ�ۛ��[ٙ[
+K�ۛ�[���]ӝ]]][\Έ�\^XX�Sݝ]�ݛܔ�X\ۛ��\َؙ�[�]ڙ[�Έ\ڛڛ�ܙ[�RR[�]ڙ[�ʂ�\ؙُ˚[�]ݛڙ[�Ș\ț�[X�\�[�Y�[�Y�[�]ڙ[�љ]Z[ϋ�ؘڙYݛڙ[�˂�[�]ڙ[�љ]Z[ϋ�ؘڙWݜ�]Wݛڙ[�˂�
+K�ݝ]ڙ[�Έ
+\ؙُ˛ݝ]ݛڙ[�Ș\ț�[X�\�Hψ�ؘڙT�XY[�]ڙ[�Έ[�]ڙ[�љ]Z[ϋ�ؘڙYݛڙ[�˂�ؘڙPܙX][ے[�]ڙ[�Έ[�]ڙ[�љ]Z[ϋ�ؘڙWݜ�]Wݛڙ[�˂�K�NB��ʊ�[�\��[^ܝY�܈[�]˙[��\^H\ݜˈ
+�^ܝ�[�ݚ[ۈ�\ܛٜۜԜ�ݙ[�[�ِۛ�[�
+��\ܛَۜ�؝]؞T�\ܛًۜ��\XٛY[�Έ�XYۛSX\ݜ�[�ˈݜ�[�ψH�]ȓX\
+
+K�ݛܐ�Y�ܙUۛ\ْYΈݜ�[�˂�N�؝]؞Pۛ�[��ؚ֗HY�
+\�\ܛًۜ��]ӝ]]][\ϋ�[�ݚ
+Hۛ�݈ۛ�[��؝]؞Pۛ�[��ؚ֗HH׎�܈
+ۛ�݈�ؚțو�\ܛًۜ�ۛ�[�
+HY�
+�ؚ˝\HOOH�ۛݜو�HY�
+�ؚ˚YOOHݛܐ�Y�ܙUۛ\ْY
+H��XZ΂�ۛ�݈�\XٛY[�H�\XٛY[�˙ٝ
+�ؚ˚Y
+Nۛ�[��\ڊ�\XٛY[�Ȟȝ\N��^�^��\XٛY[�H��ؚʎH[وۛ�[��\ڊ�ؚʎB�B��]\��ۛ�[�B��ۛ�݈ۛ�[��؝]؞Pۛ�[��ؚ֗HH׎ۛ�݈^�ؚ܈H�\ܛًۜ�ۛ�[���[\��
+�ؚʎ��ؚȚ\ȑ^�Xݏ؝]؞Pۛ�[��ؚˈȝ\N��^�O�O���ؚ˝\HOOH�^��
+Nˈݜ�X[Z[�Ȝ�Y�\؛Ȝ�[XZ[�ܘ\]YNȘ�Y��\�Y�Y�\؛Ș[ۈ]�H�ܛX[^�Y�ˈ^�ۛHH]\�ۛ�ݛYHH^݈ۛڙ[��\^Z[�ȝZ\��]Ȝ\���ۛ�݈ܘ\]YSY\ܘYْYȏH�]Ȕٝ
+��\ܛًۜ�ۛ�[���]X\
+
+�ؚʈO���ؚ˝\HOOH�ܘ\]YH�	����ؚ˜�\ܛٜۜҝ[HOOH�YH	����ؚ˜�]˝\HOOH�Y\ܘYو�	���\[و�ؚ˜�]˚YOOH�ݜ�[�Ȃ�Ȗ؛ؚ˜�]˚YB��׋�
+K�
+N]^[�^H�܈
+ۛ�݈�]țو�\ܛًۜ��]ӝ]]][\ʈY�
+�]˝\HOOH�][WܙY�\�[�و�Hۛ�[�YNY�
+�]˝\HOOH��X\ۛ�[�ȊHۛ�[��\ڊȝ\N��ܘ\]YH��]ˈ�\ܛٜۜҝ[N��YHJNۛ�[�YNB�Y�
+�]˝\HOOH�Y\ܘYو�Hۛ�݈\�ȏH\��^K�\М��^J�]˘ۛ�[�
+B�Ȋ�]˘ۛ�[�\Ȑ\��^O�Xۜ�ݜ�[�ˈ[�ۛݛ���B��׎�܈
+ۛ�݈\�و\�ʈۛ�[��\ڊ\N��ܘ\]YH���]Έȋ����]ˈۛ�[��ܘ\�HK��\ܛٜۜҝ[N��YK�JNY�
+�
+\��\HOOH�ݝ]ݙ^�	��\[و\��^OOH�ݜ�[�ȊH�
+\��\HOOH��Y�\؛�	���\[و\���Y�\؛OOH�ݜ�[�Ȉ	���\[و�]˚YOOH�ݜ�[�Ȉ	���[ܘ\]YSY\ܘYْY˚\ʜ�]˚Y
+JB�
+H^[�^
+ʎB�B�Y�
+\�˛[�ݚOOH	��^�ؚܖݙ^[�^JHۛ�[��\ڊ^�ؚܖݙ^[�^
+ʗJNB�ۛ�[�YNB�Y�
+�]˝\HOOH��[�ݚ[ؘۗ[�Hۛ�݈ۛ\ْYH\ԝ�[�ʜ�]˘؛ڙψ�]˚Y
+NY�
+ۛ\ْYOOHݛܐ�Y�ܙUۛ\ْY
+H��XZ΂�ۛ�݈�\XٛY[�H�\XٛY[�˙ٝ
+ۛ\ْY
+NY�
+�\XٛY[�
+Hۛ�[��\ڊȝ\N��^�^��\XٛY[�JNۛ�[�YNB�ۛ�݈�ؚȏH�\ܛًۜ�ۛ�[���[�
+�
+؛�Y]JN�؛�Y]H\ȑ؝]؞Uۛ\ِ�ؚȏO��؛�Y]K�\HOOH�ۛݜو�	��؛�Y]K�YOOHۛ\ْY�
+NY�
+�ؚʈۛ�[��\ڊ�ؚʎۛ�[�YNB�ۛ�[��\ڊȝ\N��ܘ\]YH��]ˈ�\ܛٜۜҝ[N��YHJNB��]\��ۛ�[�B��ʊ�[�\��[�Z[H؛�ۚX؛[�ڛ܈\ڈ\ٙ�H]�\�H�\ܛٜۜȜ]�
+�^ܝ�[�ݚ[ۈ�\ܛٜۜЛ�ڛܐۛ�^
+�ۚY[�Y\ܘYٜΈ؝]؞SY\ܘYٖ׋��\ژ�Pۛ�[��؝]؞Pۛ�[��ؚ֗K��\ܛَۜ�؝]؞T�\ܛًۜ�ݛܐ�Y�ܙUۛ\ْY�ݜ�[�˂�N�ݜ�[�Ȟ�]\���X؛[�ڛܐۛ�^
+ۚY[�Y\ܘYٜˈۚY[�Y\ܘYٜ˛[�ݚ����\ژ�Pۛ�[������\ܛٜۜԜ�ݙ[�[�ِۛ�[�
+�\ܛًۜ�]ȓX\
+
+Kݛܐ�Y�ܙUۛ\ْY
+K�JNB��ʊ��
+�ۛ��\�H؝]؞T�\ܛۜوȘH�ۋ\ݜ�X[Z[�Ȓ�\ܛًۜ��
+�ؘ[\ȝ\ؙو�Y[ȝȜ�]�[�ۚY[�]]˘ۛ\Xݚ[ۋ��
+��[�ݚ[ۈ�۔ݜ�X[R�\ܛۜي��\܎�؝]؞T�\ܛًۜ�ۚY[��ݛ؛ۏΈ؝]؞T�\]Y\ݖȜ�ݛ؛ۈ�K�ۚY[�ݜ�X[OΈ�ۛX[��^�RXY\�ώ��Xۜ�ݜ�[�ˈݜ�[�ϋ�ʊ�ڙ]\�HܚYڛ�][�Ȝ�\]Y\݈ܝY[�ȝHSHڛ�݈�XHۛ�^L[X�
+��]K�Y�][ȝȘ�[٘ۈH؜\Șۘ[\YȝH�˝ڛ�݈�[YH8�%�
+�Hؙ�Kۛ\Xݚ[ۋ\�ۙ�Y�][�܈؛\�ȝ]ۉ݈�XY]�
+�ۙЛ۝^H�[ً�N��\ܛۜوˈݘ\���\܋�\ؙو؛��H[�Y�[�Y]�[�[YH�܈�HȜ\�X[�\ܛٜۜ˂�ۛ�݈\ؙوH�\܋�\ؙوψ�T�וTБю�ˈؘ[H\ؙوۈHۚY[�	܈ڙ[�ݘ[ݘ^\Ș�[݈]]˘ۛ\X݈�\ڛۙ��ˈܝ�\ܛۜي
+H\Ș[�XYHۛ�ݛYYH�X[�[Y\ș�܈؛X��][ۋ؝\ݔ�]K��ˈ؜\Ȝ\�[[ٙ[S�\�ۚY[�[Y]\�Y]ڛ�ݎ�Hٛ�Z[�HSH�\]Y\݈
+ڝ�ˈHۛ�^L[H�]JH\ۉ݈�ݝYȝH�Ș؜�]HSKX؜X�H[ٙ[�ˈHۚY[�Y]\�ȘYؚ[�݈�Ȋ�Ș�]JHTȘۘ[\Yۈ]؛�݈ܛܜȝB�ˈۚY[�	܈�M�҈]]˘ۛ\X݈�\ڛۙ
+ΌL�Yܙ\ܚ[ێȓZ[�SX^SLʋ��ۛ�݈ؘ[Y\ؙوHؘ[U\ؙّ�ܐۚY[�
+�[�]ݛڙ[�Έ\ًؙ�[�]ڙ[�˂�ݝ]ݛڙ[�Έ\ًؙ�ݝ]ڙ[�˂�ؘڙWܙXYڛ�]ݛڙ[�Έ\ًؙ�ؘڙT�XY[�]ڙ[�˂�ؘڙW؜�X][ۗڛ�]ݛڙ[�Έ\ًؙ�ؘڙPܙX][ے[�]ڙ[�˂�K�X^�\ܝY\ؙّ�ܓ[ٙ[Q
+�\܋�[ٙ[ۙЛ۝^
+K�
+Nۛ�݈ؘ[Y�\܎�؝]؞T�\ܛۜوH����\܋�\َؙ�[�]ڙ[�Έؘ[Y\ًؙ�[�]ݛڙ[�˂�ݝ]ڙ[�Έؘ[Y\ًؙ�ݝ]ݛڙ[�˂�ؘڙT�XY[�]ڙ[�Έؘ[Y\ًؙ�ؘڙWܙXYڛ�]ݛڙ[�˂�ؘڙPܙX][ے[�]ڙ[�Έؘ[Y\ًؙ�ؘڙW؜�X][ۗڛ�]ݛڙ[�˂�K�N�ˈ�]\��H�\ܛۜو[�HۚY[�	܈�]]�Hڜ�H�ܛX]ۈٜ��\�[�\�ˈ؛�\܈�ݙڈڝݝ�K]�[�ۘ][ۋ�\Ȝ�]�[�ȝHۘ\܈و�Y܂�ˈڙ\�HHݜ�X[H�YȚ\ș�ܙ۝[�\�[�Ȝٜ��\�\ڙH�ܛX]ۛ��\�ڛۋ��]ۚY[��\܎��\ܛَۜY�
+ۚY[��ݛ؛ۈOOH�ܙ[�ZH�HۚY[��\܈H�Z[ܙ[�RT�\ܛۜيؘ[Y�\܋ۚY[�ݜ�X[Hψ�[يNH[وY�
+ۚY[��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊHۚY[��\܈H�Z[ܙ[�RT�\ܛٜۜԙ\ܛۜي�ؘ[Y�\܋�ۚY[�ݜ�X[Hψ�[ً�
+NH[وY�
+ۚY[��ݛ؛ۈOOH�ٛZ[�H�HۚY[��\܈H�Z[ٛZ[�T�\ܛۜيؘ[Y�\܋ۚY[�ݜ�X[Hψ�[يNH[وY�
+ۚY[�ݜ�X[JHˈ[��ܚXȊ܈[�ܙXڙ�YY
+HۚY[�]�\]Y\ݙYݜ�X[N��YX�B�ˈ\ݜ�X[H�\ܛۜو؜Ȑ�Q��T�Q
+�ۋP[��ܚXȝ\ݜ�X[\ȸ�%ܙ[�RHˈ�\ܛٜۜȋȑٛZ[�H8�%\�HX؝[][]Y�݈ݜ�X[YY�ݙڊKۈق�ˈޛ�\ڞ�HHۛ\]H[��ܚXȔԑHݜ�X[H��ۈ]��]\��[�ȝB�ˈ�ۋ\ݜ�X[Z[�Ȓ�ӓ��ٞH�[݈۝[X]�HHۚY[�	܈ђȝؚ][�ˈ�ܙ]�\��܈[�ԑHݜ�X[H]ܙ[�YH�\]Y\݈�܈8�%HڝX�Xۜ[݂�ˈ
+Ȑۘ]YK[[ٙ[��\ܛۜو�]�\��XXڙ\ȝHRH��YȊ̌L�K�Hݚ\��ˈۚY[��ݛ؛ۜȘ[�XYHۛ܈ۚY[�ݜ�X[X�XHZ\��Z[\�ȘX�ݙK��ۚY[��\܈Hݜ�X[R�\ܛۜيؘ[Y�\܊NH[وˈ[��ܚXț܈[�ܙXڙ�YY8�%Y�][�ۋ\ݜ�X[Z[�Ȓ�ӓ��ܛX]��ۛ�݈�ٞHH�Z[[��ܚXӛ۔ݜ�X[T�\ܛۜيؘ[Y�\܊NۚY[��\܈H�]Ȕ�\ܛۜي�ӓ��ݜ�[�ڙ�J�ٞJKݘ]\Έ��XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��K�JNB��Y�
+^�RXY\�ʈ�܈
+ۛ�݈ڋ�Hوؚ�X݋�[��Y\ʙ^�RXY\�ʊHۚY[��\܋�XY\�˜ٝ
+ˈ�NB�B��]\��ۚY[��\܎B��ʊ��
+�ۛ��\�H؝]؞T�\ܛۜوȘHݜ�X[Z[�ȔԑH�\ܛًۜ��
+��[�ݚ[ۈݜ�X[R�\ܛۜي�\܎�؝]؞T�\ܛۜيN��\ܛۜوˈޛ�\ڞ�HHۛ\]H[��ܚXȔԑHݜ�X[H��ۈH�[KXX؝[][]Y�ˈ�\ܛًۜ�\ٜ��[�ȐS�ؚ܈
+^
+ȝۛݜو
+ȝ[�ڛ�Ȋțܘ\]YJK�\ˈ\ȝ\ٙ�ݚ�܈ޛ�]XȜ�\ܛٜۜȊۘ\ڈۛ[X[�ʈ[�8�%ܚ]X؛H8�%�ˈڙ[��KY[Z][�ȘH�Q��T�Q�ۋP[��ܚXȝ\ݜ�X[H
+ܙ[�RKԙ\ܛٜۜˑٛZ[�JB�ˈȘ[�[��ܚXȘۚY[�]�\]Y\ݙYݜ�X[N��YX�H^[ۛHޛ�\ڜˈ۝[ڛ[�H�܈ۛ؛ˈ��XZڛ�Șۙ[�ȘYٛ�Ȋ̌L�K��ۛ�݈ܙP�ٞHH�Z[ԑT�\ܛۜي�\܊N��]\���]Ȕ�\ܛۜيܙP�ٞKݘ]\Έ��XY\�Έ�ۛ�[�]\H���^ٝ�[�\ݜ�X[H���ؘڙKXۛ��ۈ����˘ؘڙH��ۛ��Xݚ[ێ��ٙ\X[]�H��K�JNB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈܝ\�\ܛۜو�ؙ\ܚ[�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�[�[^�H\ȝ\��܈ؘڙH�Z]�[܈[��YYH�\ݛ[�Ȑ�ՒB�
+�[[Y]�Hڛ�܈
+ܘ[�]�X�]\ˈٛ��HY]�Xˈ\�X�H�\݈۝[�\�H[��
+�Hۛ�٘ݝ]�KX�\݈�Xڙ\�
+�Xۜ�ؘڙU\ؙيK��
+��
+�^�XݙY��ۈܝ�\ܛۜي
+H\ȘH\ݘX�H٘[H
+\ܝYHΌ�
+K�Hڜ�H]�
+�X]\�ș�܈ۜ��Xݛ�\܈\Έ[�[^�PؘڙU\��O�؝Yۜ�^�P�\݈O��
+��Xۜ�ؘڙU\ؙي����\ݐ؝\يK��XY[�ȝH؝Yۜ�^�Y؝\و\ȝژ]�
+�]Ȝ�Xۜ�ؘڙU\ؙو^[\�Y�^\�]ܚ]H�\ݜȊ؝\ٙ�HܙI܈ݛ��
+�Y]KY\ݚ[][ۊH��ۈۛ�٘ݝ]�P�\ݜˈH؛YH؞H]^[\ȚYK\�\ݛYB�
+��K]؜�\ȸ�%�Z]\�\ȝ\ٜ�Xۛ�^ܛݝ�]ڜ�H؜Ȝ�]�[ݜ۞HۛB�
+��XXژX�H�ݙڈH�[\[[�Nȝ\Ȝ٘[HXZٜȚ]\�XݛH[�]]\ݘX�B�
+�
+H\��]؝Yۜ�^�\Ș\Ȝ�Y�^\�]ܚ]H]\݈�Ո[�ܙ[Y[�H۝[�\�K��
+��
+�ڙHY��XݜȊ[�ژ[�ٙ��ۈH[�[�Y�\�ڛۊN��
+�H]]]\Ȝٜܚ[۔ݘ]K�ؘڙP[�[]X܈
+�XH[�[^�PؘڙU\��K�
+�ٜܚ[۔ݘ]K�\ݕ\��؜ҙH
+ۛ�ݛYYO��[يH[��
+�ٜܚ[۔ݘ]K�ۛؘڙUڛ�݈
+�ۛ[�Ȍ�]\��ۛ]\��\ݛܞJK�
+�H[��Xڙ\șٛ�ZTܘ[�ڝؘڙKY]�\�ٛ�و]�X�]\Ș[�[�Ț]
+Hܘ[��
+�\ș�[�[^�Y\�K�Y�ܙH�Xۜ�ؘڙU\ًؙ^XݛH\Ț[�HܚYڛ�[�
+�[�[�Y�ؚʋ�
+�H[�ܙ[Y[�ȝH\�\ٜܚ[ۈۛ�٘ݝ]�KX�\݈۝[�\�[�ܙXZK؛ܙK��
+��
+��]\��ȝH؝Yۜ�^�Y�\݈؝\ً܈[�Y�[�Yڙ[�\�H\ț�Ȝ�\]Y\݂�
+��ٞHȘۛ\\�H
+H�\�H�˘�ٞH]8�%H�\݈�Xڙ\�[��[
+��XڈȚ]țYؘވ�۝[�]��Z]�[܊K��
+�^ܝ�[�ݚ[ۈ�Xۜ�ؘڙU\��\ؙي�ٜܚ[۔ݘ]N�ٜܚ[۔ݘ]K�\َؙ�؝]؞U\ًؙ�[ٙ[�ݜ�[�˂��ڙXݔ]�ݜ�[�˂�ʊ�ٜ�X[^�Y�ӓ��ٞHٛ�\ݜ�X[H8�%�܈ؘڙH�Y�^ۛ\\�\ۛ��
+��\]Y\ݐ�ٞOΈݜ�[�˂�ʊ�Xݚ]�Hٛ�ؚK�ژ]ܘ[�ș[��Xڈڝ]�\�ٛ�وXYۛܝX܋�
+�ٛ�ZTܘ[�Έٛ��K�ܘ[��[�ܘ[�Έ
+
+HO��ڙ�N�ؘڙP�\ݐ؝\و[�Y�[�Yˈ؜\�HHYK\�\ݛYH�Yȝ\��۝�]\Șۛ�ݛYY
+ٝ�[يH[�ڙB�ˈH�ؚȘ�[݈�]\Ȝݚ[�YYYY�\�؜�Ș�H�Xۜ�ؘڙU\ؙوۈB�ˈۛXؘڙH�K]؜�H\ț�݈۝[�Y\ȘHۛ�٘ݝ]�H�\݋��ۛ�݈\��؜ҙT�\ݛYHHٜܚ[۔ݘ]K�\ݕ\��؜ҙHψ�[َˈ�\ݐ؝\و\Șۛ\]Y[�ڙHH�\]Y\ݐ�ٞH�ؚȊۈو݈ۛو]�HB�ˈ�ٞHȘ[�[^�JNțY�[�Y�[�Yڙ[�H�ٞH\țZ\ܚ[�ȜۈB�ˈ�Xۜ�ؘڙU\ؙو؛�[݈�[ȝ�ݙڈȝHYؘވ�۝[�]��ˈ�Z]�[܈ۈH�\�H�˘�ٞH]��]�\ݐ؝\َ�ؘڙP�\ݐ؝\و[�Y�[�YY�
+�\]Y\ݐ�ٞJHˈ�XYH[�Y�YYؘڙHݜ�]YވۈHؘڙKX[�[]X܈؜��]؛��ˈښ\H�[X]X˙�܈[\��܈ۛۋJ�ٜܚ[ۜȊܙHݜ�]Yڙ\ˈ^XڝHڛܙHț]H�Y�^ۈۛȝH[\�\Ț�\݈�ڜيK��ˈ�\ݛ\Ș[�Y�[�Y�܈�ۋXۛ��Y[�ݜ�]Yڙ\ȸ�%[�[^�PؘڙU\���ˈ�[Ș�XڈȝH^\ݚ[�ț�ڜވ�Z]�[܈[�]؜و
+ۛ�ٜ��]]�JK��ۛ�݈Xۛ��\ݛHٝؘڙTݜ�]Yފٜܚ[۔ݘ]K�ٜܚ[ےQ
+Nۛ�݈ؘڙTݜ�]YވHXۛ��\ݛ˜�\ݛ�ۛ��Y[��șXۛ��\ݛ��\ݛ�ݜ�]Yނ��[�Y�[�Yۛ�݈\��[�[\ڜȏH[�[^�PؘڙU\���ٜܚ[۔ݘ]K�ؘڙP[�[]X܋��\]Y\ݐ�ٞK�\ًؙ�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ٜܚ[۔ݘ]K�Y\ܘYِ۝[��ؘڙTݜ�]Yދ�
+N�\ݐ؝\وH؝Yۜ�^�P�\݊\��[�[\ڜˈ\��؜ҙT�\ݛYJNY�
+ٛ�ZTܘ[�HٝؘڙP[�[]Xܐ]�X�]\ʂ�ٛ�ZTܘ[��\��[�[\ڜ˂��\ݐ؝\ً�\��[�[\ڜ˜�]�ۚ\]�\��[�[\ڜ˘ݜ��ۚ\]�
+NB�[Z]ؘڙP�\ݓY]�Xʂ��\ݐ؝\ً�\ًؙ�ؘڙPܙX][ے[�]ڙ[�ȏψ�[ٙ[�\��[�[\ڜ˜�[ؘ]X�K�ˈ\ݚ[�ݚ\ڈH��YHۛX�ݛ�\�H�Y�^\�]ܚ]H
+�ٙH[ۙȝڝ[��ˈYK\�\ݛYHܚ]H]؜Ț\[�[�Ș[�]؞JH��ۈ[�]�ڙX�H؜�HۙB�ˈ
+Y]KY\ݚ[][ۈXZڛ�ț۝ȘH]�HؘڙJH8�%ٙH[Z]ؘڙP�\ݓY]�X˂�\��؜ҙT�\ݛYK�
+Nˈ\�ڜ݈H\�X�H۝[�\�ۈH\ܝYH͎LH�\Ȝޜݙ[V̗H[�[ZXˈۛ�[�HX]\�X[ؘڙKX�\݈؝\ُȈ؝Hݜ��]�\ș؝]؞H�\ݘ\�ˈ
+H[�[Y[[ܞH[�[]X܈�\ٝ]�\�H�\ݘ\�
+K�\ܚ]�H[[Y]�HۛK���Xۜ�ؘڙP�\ݓ؜ٜ��][ۊ�ڙXݒQ�[�ݜ�T�ڙX݊�ڙXݔ]
+K�؝\َ��\ݐ؝\ً��[ؘ]X�N�\��[�[\ڜ˜�[ؘ]X�K�ܚ]Uڙ[�Έ\ًؙ�ؘڙPܙX][ے[�]ڙ[�ȏψ�JNٜܚ[۔ݘ]K�\ݕ\��؜ҙHH�[َȋˈۛ�ݛYY��ˈ�XڈۛXؘڙH\��ș�܈]]˕\ܘYH
+�ۛ[�Ȍ�]\��ڛ�݊B�ۛ�݈ؘڙT�XYH\ًؙ�ؘڙT�XY[�]ڙ[�ȏψۛ�݈ؘڙPܙX][ۈH\ًؙ�ؘڙPܙX][ے[�]ڙ[�ȏψۛ�݈\Лۙ\��HؘڙT�XYOOH	��ؘڙPܙX][ۈ�Y�
+\ٜܚ[۔ݘ]K�ۛؘڙUڛ�݊Hٜܚ[۔ݘ]K�ۛؘڙUڛ�݈H׎ٜܚ[۔ݘ]K�ۛؘڙUڛ�݋�\ڊ\Лۙ\��NY�
+ٜܚ[۔ݘ]K�ۛؘڙUڛ�݋�[�ݚ��
+Hٜܚ[۔ݘ]K�ۛؘڙUڛ�݋�ښY�
+
+NB�B��ˈKKH�[�[^�Hٛ�ؚK�ژ]ܘ[�
+Y�\�ؘڙH[�[]X܈[��XڛY[�
+HKKB�ˈ[�Y\�H
+�Y�ܙH�Xۜ�ؘڙU\ًؙX]ښ[�ȝHܚYڛ�[[�[�Yܙ\�B�ˈۈH^�Xݚ[ۈ\țܙ\�[�˚Y[�X؛��Xۜ�ؘڙU\ؙو\Ȝ\�B�ˈٜܚ[ۋ\ݘ]H�ۚڙY\[�ȝ]�]�\�ݘڙ\ȝHܘ[�[�[�[�ȝHܘ[��ˈ�\�݈YX[�ȘH�݈[��Xۜ�ؘڙU\ؙو؛�݈XZȘ[�[��[�\ڙYܘ[���Y�
+ٛ�ZTܘ[�HY�
+[�ܘ[�H[�ܘ[�
+N[وٛ�ZTܘ[��[�
+
+NB��ˈKKHۛ�٘ݝ]�H�\݈�Xښ[�ș�܈Y\�X�\ٙXڜڛۜȋKKB�ˈ\܈Hݜ��[�\��܈YK\�\ݛYH�YȜۈHۛXؘڙH�K]؜�H
+ؘڙB�ˈYڝ[X][H^\�Y\�[�ȝH\ٜ�܈]\يH\ț�݈۝[�Y\ȘB�ˈۛ�٘ݝ]�H�\݈8�%]�ٝXٙ�[و�[�ݜݘZ[�X�H�؜��[�܈ۈ�\�ݞB�ˈٜܚ[ۜȝڛܙH\��Ș\�HܘXٙ�^[ۙHۛ��\�؝[ۈؘڙH��ˈ[ۈ\܈H؝Yۜ�^�Y�\݈؝\وۈ�Y�^\�]ܚ]H�\ݜȊ؝\ٙ�B�ˈܙI܈ݛ�Y]KY\ݚ[][ۊH\�H[H؛YH؞HYK\�\ݛYH�\ݜˈ\�H8�%\و\�H�݈\ٜ�Xۛ�^ܛݝ���Xۜ�ؘڙU\ؙي�\ًؙ�ؘڙPܙX][ے[�]ڙ[�ȏψ�\ًؙ�ؘڙT�XY[�]ڙ[�ȏψ�\ًؙ�[�]ڙ[�ȏψ�ٜܚ[۔ݘ]K�ٜܚ[ےQ�\��؜ҙT�\ݛYK��\ݐ؝\ً�
+N��]\���\ݐ؝\َB���[�ݚ[ۈX؛ݛ�ۛ��\�؝[ە\ؙي�\َؙ�؝]؞U\ًؙ�[ٙ[�ݜ�[�˂�ٜܚ[ےQ�ݜ�[�˂��\ۛ�Yۛ��\�؝[ە��[H��Z�[�Y�[�Y�N�[��ܚX՜ؙوۛ�݈\ؙّ�ܔٛ��N�[��ܚX՜ؙوH[�]ݛڙ[�Έ\ًؙ�[�]ڙ[�˂�ݝ]ݛڙ[�Έ\ًؙ�ݝ]ڙ[�˂�ؘڙWܙXYڛ�]ݛڙ[�Έ\ًؙ�ؘڙT�XY[�]ڙ[�˂�ؘڙW؜�X][ۗڛ�]ݛڙ[�Έ\ًؙ�ؘڙPܙX][ے[�]ڙ[�˂�Nٝٛ��PؘڙPۛ�^
+\ؙيN[Z]ۜݓY]�Xʂ�[ٙ[�\ؙّ�ܔٛ��K��ۛ��\�؝[ۈ���\ۛ�Yۛ��\�؝[ە�
+N�Xۜ�ۛ��\�؝[ېۜ݊�ٜܚ[ےQ�[ٙ[�\ؙّ�ܔٛ��K��\ۛ�Yۛ��\�؝[ە�
+N�]\��\ؙّ�ܔٛ��NB��ʊ��
+��[�Y�\�Hݘؙ\ܙ�[�\ܛَۜ�؛X��]KݛܙH[\ܘ[Y\ܘYٜ˂�
+�[�ؚY[H�Xڙܛݛ�ۜ�Ȋ\ݚ[][ۋݜ�][ۊK��
+��[�ݚ[ۈܝ�\ܛّۜ�ܕ[�[�
+��\N�؝]؞T�\]Y\݋��\܎�؝]؞T�\ܛًۜ�ٜܚ[۔ݘ]N�ٜܚ[۔ݘ]K�ۛ��YΈ؝]؞Pۛ��Y˂�[\ܘ[[�]�\��[\ܘ[[�]�ʊ�ٜ�X[^�Y�ӓ��ٞHٛ�\ݜ�X[H8�%�܈ؘڙH�Y�^ۛ\\�\ۛ��
+��\]Y\ݐ�ٞOΈݜ�[�˂�ʊ�Xݚ]�Hٛ�ؚK�ژ]ܘ[�ș�[�[^�Hڝ\ؙو]�X�]\ˈ
+�ٛ�ZTܘ[�Έٛ��K�ܘ[��ʊ�ݛܘYوۚXވ؜\�Yڙ[�\ȝ\���\ۛ�Y]Ȝٜܚ[ۋ�
+�ݜ�\ܕ[\ܘ[ݛܘYوH�[ً�[�ܘ[�Έ
+
+HO��ڙ�N��ۛX[�ܝ�\ܛۜٔݘ\�؜ٜ��\�ˊ
+Nۛ�݈Ȝٜܚ[ےQ�ڙXݔ]HHٜܚ[۔ݘ]N�ˈݘ\���\܋�\ؙو؛��H[�Y�[�Y]�[�[YH�܈�HȜ\�X[�\ܛٜۜ˂�ۛ�݈\ؙوH�\܋�\ؙوψ�T�וTБю��Hۛ��\�Rۛݛ�ٜܚ[ےXY\��\Kٜܚ[۔ݘ]Kۛ��Yʎ�ˈKKH؛X��]Hݙ\�XY��ۈ�X[ڙ[�۝[�ȋKKB�ۛ�݈XݝX[[�]B�
+\ًؙ�[�]ڙ[�ȏψ
+H
+
+\ًؙ�ؘڙT�XY[�]ڙ[�ȏψ
+H
+
+\ًؙ�ؘڙPܙX][ے[�]ڙ[�ȏψ
+N؛X��]JXݝX[[�]ٜܚ[ےQٝ\ݕ�[�ٛܛYY۝[�
+ٜܚ[ےQ
+JN�ˈKKHٛ��HؘڙHۛ�^
+Ș݈ۜY]�XȋKKB�ۛ�݈\ؙّ�ܔٛ��HHX؛ݛ�ۛ��\�؝[ە\ؙي�\ًؙ��\܋�[ٙ[�ٜܚ[ےQ�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ە�
+NY�
+ٛ�ZTܘ[�Hٝٛ�ZU\ؙِ]�X�]\ʙٛ�ZTܘ[�\ؙّ�ܔٛ��K�\܋�[ٙ[
+NB��ˈKKHؘڙH[�[]X܈
+Ș�\݈؝\و[[Y]�H
+Șۛ�٘ݝ]�KX�\݈�Xښ[�ȋKKB�ˈ^�XݙY[�Ȝ�Xۜ�ؘڙU\��\ؙي
+HۈH[�[^�HO�؝Yۜ�^�HO��ˈ�Xۜ�ؘڙU\ؙوڜ�H
+\܋��XY[�ȝH�\݈؝\وۈ�Y�^\�]ܚ]B�ˈ�\ݜȘ\�H^[\Y��ۈۛ�٘ݝ]�P�\ݜʈ\ȝ[�]]\ݘX�Hڝݝ�]�[�ˈHڛۙH\[[�K�H٘[H[ۈ[��Xڙ\Ș[�S�șٛ�ZTܘ[�
+�Y�ܙH]ˈݛ��Xۜ�ؘڙU\ؙو؛
+HۈH^�Xݚ[ۈ\țܙ\�[�˚Y[�X؛ȝB�ˈܚYڛ�[[�[�Y�ؚˈٙH\ܝYHΌ���Y�
+ݜ�\ܕ[\ܘ[ݛܘYيHٜܚ[۔ݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞHH�[ٜܚ[۔ݘ]K�ؘڙP[�[]X܋�\ݓ�ܛX[^�Y�ٞHH�[ٜܚ[۔ݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞS[�ݚHB��Xۜ�ؘڙU\��\ؙي�ٜܚ[۔ݘ]K�\ًؙ��\܋�[ٙ[��ڙXݔ]�ݜ�\ܕ[\ܘ[ݛܘYوȝ[�Y�[�Y��\]Y\ݐ�ٞK�ٛ�ZTܘ[��[�ܘ[��
+NˈYZ[�ܙY[�X[Ș\�H]]ܚ^�Y]\ܘ]ڈ[YH[��]�\��]Z[�Y[��ˈٜܚ[ۈۘ\ڛݜˈHYH؜�Y\�ݚ[�Xٚ]�\ș؝]؞KYؘۛ[^�\˂�ˈۈ�]�[�]��ۈ�\^Z[�ȘHؘڙY�ٞHȘHۚY[�\ٛXݙY[�ڛ��ˈ]\țݝڙH]�\�Hۛ��Yݜ�Y�\ݙY�\ً��Y�
+�ؚ�X݋�ٞ\ʘۛ��Y˝\ݜ�X[Q^�RXY\�ʋ�[�ݚ�	���ٜܚ[۔ݘ]K�\ݕ\ݜ�X[H	���ؚ�X݋�ٞ\ʂ�^�RXY\�ћܕ\ݜ�X[Jۛ��Yˈٜܚ[۔ݘ]K�\ݕ\ݜ�X[K�\�
+K�
+K�[�ݚOOH�
+Hٜܚ[۔ݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞHH�[B��ˈ؜\�H�]�[ݜȜݛ܈�X\ۛ��Y�ܙH]	܈ݙ\�ܚ][��[݈
+[�H�M��ʋ��ˈ\ٙș]X݈ۛ]\وۛ�[�X][ۈ\��ș�܈؜�Xۜ�[�ș�[\�[�˂�ۛ�݈�]�ݛܔ�X\ۛ�Hٜܚ[۔ݘ]K�\ݔݛܔ�X\ۛ��ˈKKH[\ܘ[ݛܘYو	�ٜܚ[ۋ\ݘ]H\]\ȋKKB�ˈ\وHܚYڛ�[\ٜ��\ݛۘ\ڛ݈؜\�Y�Y�ܙHܘYY[���ˈ\ݛܚX؛ۛ��\�ڛۈ܈ۛ�\ۛ][ۈ\ț�YYYY�\�H�\ܛًۜ���ˈښ\[\ܘ[ݛܘYو[�[[�\ژH[ٙH܈ڙ[�[ܙK[�˜ݛܙH\Ȝٝ��ˈHٜܚ[ۈݚ[ٝș�[ܙH�ؙ\ܚ[�ȊK�X؛ܘYY[�
+B�ˈ�]ٜۉ݈ܚ]HțY[[ܞK�[[�\ژH\Ȝٜܚ[ۋ\؛ܙY
+ٙۙH�XB�ˈۛܙN�[[�\ژN�۟ٙ�Nț�˜ݛܙH\Ȝ\�\�\]Y\݈
+XY\�X�\ٙ
+K��ˈ�ݙN�ۛX؛ݝۛY\ș�܈HۛݜوٙYY\�[�ȘH�˜ݛܙH\��\�B�ˈ[�[�[ۘ[H�ܜY8�%HٙY�݈�]�\�^\ݜˈۈH]\��ˈۛܙ\ݛTUH\ȘH\�[\܈�˛܈
+�Ȝ[�ۈ	ܙ[�[�Ɉ�ݜțXZʋ��ۛ�݈�ԝܙHHݜ�\ܕ[\ܘ[ݛܘYَ�ˈ\�ڜ݈
+[�ۛ]�XيH\ȝ\��܈Y\ܘYٜˈ�]ڙY[�țۙH؝�\ڛ���ˈ^�XݙY٘[H8�%ٙHݛܙU\��[\ܘ[
+̌
+K��ݛܙU\��[\ܘ[
+[\ܘ[[�]�\ܚ\ݘ[�ۛ�[��ؚ܎��\܋�ۛ�[��\ًؙ�[ٙ[��\܋�[ٙ[��ڙXݔ]�ٜܚ[ےQ��ԝܙK�JN�ˈ\]Hٜܚ[ۈݘ]H
+\�ڜݙY[�H�]ڙY؝�HY�\�Y\ܘYِ۝[�\]JB�ٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۈB�
+ٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۈψ
+H
+ȌN�ˈKKH�Xڈۛ�٘ݝ]�H^[ۛH[�ݝ\���\ܛٜۜȊٜܚ[ۋY[�]\�\ݚXʈKKB�ۛ�݈\՛ۛ\وH�\܋�ۛ�[��ۛYJ
+�HO���\HOOH�ۛݜو�NY�
+�\܋�ݛܔ�X\ۛ�OOH�[�ݝ\���	��Z\՛ۛ\يHٜܚ[۔ݘ]K�ۛ�٘ݝ]�U^ۛU\��ȏB�
+ٜܚ[۔ݘ]K�ۛ�٘ݝ]�U^ۛU\��ȏψ
+H
+ȌNH[وٜܚ[۔ݘ]K�ۛ�٘ݝ]�U^ۛU\��ȏHB��ˈKKHݝ]�Xښ[�ș�܈[�[ZXțX^ݛڙ[�Ȝڞ�[�ȋKKB�ٜܚ[۔ݘ]K�\ݔݛܔ�X\ۛ�H�\܋�ݛܔ�X\ۛ�ٜܚ[۔ݘ]K�\ݒ[�]ڙ[�ȏB�
+\ًؙ�[�]ڙ[�ȏψ
+H
+
+\ًؙ�ؘڙT�XY[�]ڙ[�ȏψ
+H
+
+\ًؙ�ؘڙPܙX][ے[�]ڙ[�ȏψ
+Nۛ�݈ݝ]ڙ[�ȏH\ًؙ�ݝ]ڙ[�΂�Y�
+ݝ]ڙ[�ȏ�
+Hۛ�݈SPWГHH�΂�ٜܚ[۔ݘ]K�ݝ]ڙ[�ѓPHB�ٜܚ[۔ݘ]K�ݝ]ڙ[�ѓPHOH�[�țݝ]ڙ[��X]��ݛ�
+�ٜܚ[۔ݘ]K�ݝ]ڙ[�ѓPH
+�
+HHSPWГJH
+ݝ]ڙ[�Ȋ�SPWГK�
+NB��ˈKKHؘڙH؜�Z[�Έ�Xۜ�[�\�]\��؜
+ȝ�Xڈ؜�]\]ȋKKB�ۛ�݈�݈H]K��݊
+N�ٜܚ[۔ݘ]K�\ݔ�\ܛٕۜ[YHH�ݎ�ˈ
+JH�Xۜ�[�\�]\��؜8�%ۛH�܈ٛ�Z[�H\ٜ�Z[�]X]Y\��˂�ˈۛ]\و]]˘ۛ�[�X][ۜȊ�[܈ݛܗܙX\ۛ�؜Ȉ�ۛݜو�H�ٝXق�ˈݘ�\٘ۛ�؜ȝ]�\�\ٛ�]]ۘ]Y�ݛ�]�\ˈ�݈[X[�[�ˈ[YK��Xۜ�[�ȝ\و۝[ڙ]ȝHݜ��]�[[ٙ[ݘ\��\�Hڛܝ�ˈ�]\��[Y\˂�ۛ�݈\՛ۛ\ِۛ�[�X][ۈH�]�ݛܔ�X\ۛ�OOH�ۛݜو�Y�
+Z\՛ۛ\ِۛ�[�X][ۊHY�
+ٜܚ[۔ݘ]K�\ݕ\ٜ�\��[YH�
+Hۛ�݈؜H�݈Hٜܚ[۔ݘ]K�\ݕ\ٜ�\��[YN�Xۜ�؜
+ٝٜܚ[ے\ݛٜ�[Jٜܚ[۔ݘ]JK؜
+N�Xۜ�ؘۛ[؜
+ٜܚ[۔ݘ]K��ڙXݔ]؜
+NB�ˈ\]H�\ٛ[�H�܈�^؜YX\ݜ�[Y[�8�%ۛHY�\��Xۜ�[�˂�ٜܚ[۔ݘ]K�\ݕ\ٜ�\��[YHH�ݎB��ˈ
+�H�Xڈ؜�]\]Ș[�؝�[�܈8�%�[Y�܈S\��\\˂�ˈH\ٜ��]\��[�ȘY�\�H؜�]\\ȘH]�Y؜�\܈وڙ]\�]	܂�ˈHۛ]\وۛ�[�X][ۋ��ˈ�ՑN�؜�]\]Ș[�؝�[�܈\�H]]X[H^۝\ڝ�H8�%Y�H\���ˈ\Ș]�X�]YȘH؜�]\]ښ\؝�[�܈Ș]�ڙݘ�KX۝[�[�ˈH؛YHؘڙT�XYڙ[�Ț[��ݚ�Xڙ]˂�Y�
+ٜܚ[۔ݘ]K�\ݔ�\]Y\ݕ[YH�
+H]؜�]\]\՝\��H�[َ�ˈ�Xڈ؜�]\]�\ٜ��]\��YY�\�TȜٜܚ[ۈ؜�YYHؘڙK��ˈܙY]؜�]\]ۛ�ݛY\ȝH؜�]\
+ۙX\�ț\ݕ؜�]\]
+Ȝ�Y��\ڂ�ˈڙ[�ʋݘ\�ȘYؚ[�݈[�ۈ؝�[�܈
+�YȐN�ۛHܙY]ȝڙ[�\ˈٜܚ[ۈZY�܈H؜�]\
+K[��]\��ȝH�˜�]H؝�[�܂�ˈ
+�YȐ��Z[��]\��[�˝\��ؘڙH�XY�Y�^H؜�]\�Y��\ڙY
+JK��Y�
+ٜܚ[۔ݘ]K�؜�]\˛\ݕ؜�]\]
+Hۛ�݈\ȏB�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەOOH�Z�Ȍ׍�̌�̌̌ۛ�݈ڛ�ٕ؜�]\H�݈Hٜܚ[۔ݘ]K�؜�]\�\ݕ؜�]\]ۛ�݈ݝۛYHHܙY]؜�]\]
+�ٜܚ[۔ݘ]K�؜�]\�ڛ�ٕ؜�]\�\˂�\ًؙ�ؘڙT�XY[�]ڙ[�ȏψ�
+NY�
+ݝۛYK�]
+H؜�]\]\՝\��H�YN[Z]؜�]\]Y]�Xʂ�ٜܚ[۔ݘ]K�\ݕ\ݜ�X[O˛[ٙ[ψ�\K�[ٙ[�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەψ�[H��
+Nˈ�Xۜ�۝[�\��XݝX[؝�[�܈HH�˜�]HܙY]�ˈZ[��]\��[�˝\��ؘڙH�XY�Y�^H؜�]\�Y��\ڙY
+H8�%�ˈڝݝ؜�Z[�ȝ\و�XYȝ۝[]�H�Y[�H�[ؘڙHܚ]K��Y�
+ݝۛYK�ܙY]Yڙ[�ȏ�
+H�Xۜ�؜�]\]
+�ٜܚ[ےQ��\K�[ٙ[�ݝۛYK�ܙY]Yڙ[�˂�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەψ�[H��
+NB�ً�[��ʂ�ؘڙK]؜�Y\��Uٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_H
+\ٜ��]\��Y	ʜڛ�ٕ؜�]\ȌL
+K�њ^Y
+
+_\ȘY�\�؜�]\
+
+ܙY]YI۝]ۛYK�ܙY]Yڙ[�߈ڙ[�ʘ�
+NB�B��ˈ�XڈZ؝�[�܎�Y�؜�[H�]وݚ[۝ؘڙH�XY˂�ˈHZ؝�YH�[ؘڙHܚ]K�ښ\Y�[�XYH۝[�Y\ˈH؜�]\]Ș]�ڙݘ�KX۝[�[�ȝH؛YHڙ[�˂�Y�
+]؜�]\]\՝\��Hۛ�݈�\]Y\ݑ؜H�݈Hٜܚ[۔ݘ]K�\ݔ�\]Y\ݕ[YNY�
+�\]Y\ݑ؜�̌̌
+Hۛ�݈ؘڙT�XYH\ًؙ�ؘڙT�XY[�]ڙ[�ȏψY�
+ؘڙT�XY�
+H�Xۜ�؝�[�܊ٜܚ[ےQ�\K�[ٙ[ؘڙT�XY
+NB�B�B�B�ˈ�\ٝ؜�Z[�Ȝݘ]HY�ٜܚ[ۈ؜țX\�ٙXY܈YXݚ]�H؜�Z[�˂�ˈXY�YȚ\ȘۙX\�YۈH�^��XZșٝȘH��\ڈ�҈[�[\ڜ˂�ˈ؜�]\۝[�\Ȝ�\ٝۈH��XZ˙]�[�؜ݘ\�ș��ۈۈH�^��XZ˂�Y�
+ٜܚ[۔ݘ]K�؜�]\
+HY�
+ٜܚ[۔ݘ]K�؜�]\�\ؘ�Y
+Hٜܚ[۔ݘ]K�؜�]\�\ؘ�YH�[َً�[��ʂ�ؘڙK]؜�Y\���KY[�X�Yٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_H
+\ٜ��\ݛYY
+X�
+NB�Y�
+�ٜܚ[۔ݘ]K�؜�]\�؜�]\۝[��	���\ٜܚ[۔ݘ]K�؜�]\��ܘْٙ\؜�B�
+Hٜܚ[۔ݘ]K�؜�]\�؜�]\۝[�HB�B��ˈKKHژY݈ۛ�^�Xښ[�ș�܈۝[�\��XݝX[ۛ\Xݚ[ۈ\ݚ[X][ۈKKB�ˈ�Xڈ݈\�وHۛ�^
+�۝[
+��HڝݝܙI܈\ݚ[][ۂ�ˈۛ\�\ܚ[�Ț]�ڙ[�HژY݈۝[�\�ܛܜٜȝH]]˘ۛ\X݂�ˈ�\ڛۙ�Xۜ�H۝[�\��XݝX[ۛ\Xݚ[ۈ]�[���\]TژYݐۛ�^
+�ٜܚ[ےQ�XݝX[[�]�\ًؙ�ݝ]ڙ[�ȏψ�ٝۜ�ٜ�[ٙ[
+ٜܚ[۔ݘ]K�\ݕ\ݜ�X[JO˛[ٙ[Qψ�[�ۛݛ����\K�[ٙ[�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ە��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+N�ˈX\�Ȝٜܚ[ۈ\�H�܈\�[ٚXș�\ڈ
+ܘYY[�
+ȝ؜�Z[�ȊȘۜݜʋ��ˈH̜ȚYHXڈڛ\�ڜ݈ݘ]HۛH�܈\�Hٜܚ[ۜ˂�ٜܚ[۔ݘ]K�ٚ\�HH�YN�ˈKKHۛ[Z]]�Yٙ\�Yݜ�][ۈKKB�ˈڝۛ[Z]Ș\�H�]\�[\ڈ�ݛ�\�Y\ȝڙ\�HXڜڛۜȘܞ\ݘ[^�K��ˈڙ[�Hۛ[Z]\ș]XݙY[�ۛݝ]ˈ�ܘوݜ�][ۈȝ�Yٙ\��ˈۈ\ȝ\���H�[\[�ȝ\��Ԛ[�ِݜ�][ۈȝH�\ڛۙ��Y�
+�ܙPۛ��YʊK�ۛݛYً�[�X�Y	���ܙPۛ��YʊK�ݜ�]܋�ےYH	���ۛ�Z[�њ]ۛ[Z]
+�\JB�
+Hۛ�݈[ٙ[[�]݈ۜB�ٝ[ٙ[[��Tޛ�ʂ�ٝۜ�ٜ�[ٙ[
+ٜܚ[۔ݘ]K�\ݕ\ݜ�X[JO˛[ٙ[Qψ�[�ۛݛ���
+K�ۜݏ˚[�]ψ΂�ۛ�݈ݜ�][ۓ][\Y\�B�[ٙ[[�]݈ۜ�HHȌȎ�[ٙ[[�]݈ۜ�HHȌ��Nۛ�݈Y��Xݚ]�PY�\�\��ȏB�ܙPۛ��YʊK�ݜ�]܋�Y�\�\��Ȋ�ݜ�][ۓ][\Y\�Y�
+ٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۈY��Xݚ]�PY�\�\��ʈً�[��ʂ�ۛ[Z]]XݙY[�ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_H8�%�Yٙ\�[�Șݜ�][ۘ�
+Nٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۈHY��Xݚ]�PY�\�\��΂�B�B��ˈKKHؚY[H�Xڙܛݛ�ۜ�Ȋ�\�KX[�Y�ܙٝ
+HKKB�؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQY\ܘYِ۝[��ٜܚ[۔ݘ]K�Y\ܘYِ۝[��\��Ԛ[�ِݜ�][ێ�ٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۋ�ۛ�٘ݝ]�U^ۛU\��Έٜܚ[۔ݘ]K�ۛ�٘ݝ]�U^ۛU\��˂��ڙXݔ]�ٜܚ[۔ݘ]K��ڙXݔ]�[��ڙXݔ]�ݚ\ڛۘ[�ٜܚ[۔ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YK����ٜܚ[۔ݘ]K�ۛ\Xݚ[ې[�ۘ[T[�[�ȞȘۛ\Xݚ[ې[�ۘ[T[�[�Έ�YHB��ߊK�JNY�
+\ٜܚ[۔ݘ]K�XY\�ٜܚ[ےY
+Hۛ�݈�\ݛHX\��XY\�ʂ�ٜܚ[۔ݘ]K�؛�Y]RXY\�˂��\K��]ҙXY\�˂�
+Nٜܚ[۔ݘ]K�؛�Y]RXY\�ȏH�\ݛ�\]Y؛�Y]\΂�B�Y�
+[�ԝܙJHؚY[P�Xڙܛݛ�ۜ�ʜٜܚ[۔ݘ]Kۛ��YʎB��]\���YNH؝ڈ
+JHً�\��܊�ܝ\�\ܛۜو�ؙ\ܚ[�ș�Z[Y��JN�]\���[َH�[�[H[�ܘ[�ˊ
+NB�B��ʊ��Xۜ��[Y]Y�ݚY\�\ؙوڝݝX�\ښ[�Ȝݘؙ\ܙ�[]\��ݘ]K�
+��[�ݚ[ۈX؛ݛ�[�ݘؙ\ܙ�[�\ܛۜي��\܎�؝]؞T�\ܛًۜ�ٜܚ[ےQ�ݜ�[�˂��\ۛ�Yۛ��\�؝[ە��[H��Z�[�Y�[�Y�ٛ�ZTܘ[��ٛ��K�ܘ[�[�Y�[�Y�[�ܘ[��
+
+HO��ڙ�X\�њ\�OΈ
+
+HO��ڙ�N��ڙۛ�݈\ؙوH�\܋�\ؙوψ�T�וTБюۛ�݈\՜ؙوHؚ�X݋��[Y\ʝ\ؙيK�ۛYJ�
+ڙ[�ʈO�\[وڙ[�ȏOOH��[X�\��	��ڙ[�ȏ��
+N�HY�
+\՜ؙيHX\�њ\�Oˊ
+Nۛ�݈\ؙّ�ܔٛ��HHX؛ݛ�ۛ��\�؝[ە\ؙي�\ًؙ��\܋�[ٙ[�ٜܚ[ےQ��\ۛ�Yۛ��\�؝[ە�
+NY�
+ٛ�ZTܘ[�Hٝٛ�ZU\ؙِ]�X�]\ʙٛ�ZTܘ[�\ؙّ�ܔٛ��K�\܋�[ٙ[
+NB�B�H�[�[Hٛ�ZTܘ[�˜ٝݘ]\ʞۙN���Y\ܘYَ��\ݜ�X[H�\ܛۜوY�݈ۛ\]H��JN[�ܘ[�
+NB�B���[�ݚ[ۈۛ��\�؝[ە�ܐX؛ݛ�[�ʂ�ٜܚ[ےQ�ݜ�[�˂�N��[H��Z�[�Y�[�Yۛ�݈]�UHٜܚ[ۜ˙ٝ
+ٜܚ[ےQ
+O˜�\ۛ�Yۛ��\�؝[ەY�
+]�UOOH�[H�]�UOOH�Z�H�]\��]�Uۛ�݈\�ڜݙYHؙٜܚ[ە�Xښ[�ʜٜܚ[ےQ
+O˜�\ۛ�Yۛ��\�؝[ە�]\��\�ڜݙYOOH�[H�\�ڜݙYOOH�Z��Ȝ\�ڜݙY��[�Y�[�YB���[�ݚ[ۈܝ�\ܛۜي��\N�؝]؞T�\]Y\݋��\܎�؝]؞T�\ܛًۜ�ٜܚ[۔ݘ]N�ٜܚ[۔ݘ]K�ۛ��YΈ؝]؞Pۛ��Y˂�[\ܘ[[�]�\��[\ܘ[[�]��\]Y\ݐ�ٞOΈݜ�[�˂�ٛ�ZTܘ[�Έٛ��K�ܘ[��ݜ�\ܕ[\ܘ[ݛܘYوH�[ً�[�ܘ[�Έ
+
+HO��ڙ�N��ۛX[��]\��ڝ[�[�
+ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ��
+
+HO��ܝ�\ܛّۜ�ܕ[�[�
+��\K��\܋�ٜܚ[۔ݘ]K�ۛ��Y˂�[\ܘ[[�]��\]Y\ݐ�ٞK�ٛ�ZTܘ[��ݜ�\ܕ[\ܘ[ݛܘYً�[�ܘ[��
+K�
+NB��ʊ��
+�ؚY[H�Xڙܛݛ�\ݚ[][ۈ[�ݜ�][ۈ
+�\�KX[�Y�ܙٝ
+K��
+�ʊ��
+��[�Xڙܛݛ�ژZ[�ˈ[�۝Y[�ȜܝXۛ\][ۈݘ]Hܚ]\ˈ�\ٝ�
+�]ؚ]ȝ\و[ۙܚYHH[Z]\�܈�Z[��Y�ܙHݘ\[�ȝH�
+ΎJK��
+�ٜܚ[ۈݛ�\�ښ\[ۈ۝�\�șؘۛ[\]Y]YHؚ][YH�Y�ܙHHۜ�H[Z]\��
+�\ș[�\�YۈYH]�Xݚ[ۈ؛��݈\ؘ\�ܙY[�X[ȝ[�\�]Y]YYۜ�˂�
+�ۛ�݈[��Yڝ�Xڙܛݛ�H�]Ȕٝ�ۚ\ُ[�ۛݛ���
+N�[�ݚ[ۈ�Xڐ�Xڙܛݛ�
+��ۚ\ُ[�ۛݛ��ݘ]OΈٜܚ[۔ݘ]JN��ڙY�
+ݘ]JHݘ]K��Xڙܛݛ�ۜ�Лݛ�H
+ݘ]K��Xڙܛݛ�ۜ�Лݛ�ψ
+H
+ȌN[��Yڝ�Xڙܛݛ��Y
+
+Nۛ�݈ٝYH
+
+HO�[��Yڝ�Xڙܛݛ��[]J
+NY�
+ݘ]JHݘ]K��Xڙܛݛ�ۜ�Лݛ�KKNN�ڙ�[�ٝYٝY
+NB���[�ݚ[ۈؚY[P�Xڙܛݛ�ۜ�ћܕ[�[�
+�ٜܚ[۔ݘ]N�ٜܚ[۔ݘ]K�ۛ��YΈ؝]؞Pۛ��Y˂�N��ڙۛ�݈Ȝٜܚ[ےQ�ڙXݔ]HHٜܚ[۔ݘ]Nۛ�݈ڙۘ[HX�ܝڙۘ[�[�J\[[�Qٛ�\�][ېX�ܝ�ڙۘ[�ٜܚ[ۓY�XޘۙTڙۘ[
+ٜܚ[ےQ
+K�JN�ˈښ\�Xڙܛݛ�ۜ�ȝڙ[�Hٜܚ[ۉ܈]]ܙY[�X[\Ȝݘ[H[��ˈ��\ڈ�[�Xڈ\Ș]�Z[X�H8�%ۜ�ٜ�H؛ȝ۝[�\݈K��ˈ]]�Y��\ڙ\ȝڙ[�H�^ۚY[��\]Y\݈\��]�\ȝ�XHٝٜܚ[ې]]
+
+K��Y�
+\Н]ݘ[Jٜܚ[ےQ
+H	��\�\ۛ�P]]
+ٜܚ[ےQ
+JH�]\���ۛ�݈HHٝPۚY[�
+ۛ��Yʎۛ�݈ٙȏHܙPۛ��YʊNۛ�݈[ٙ[Hٝۜ�ٜ�[ٙ[
+ٜܚ[۔ݘ]K�\ݕ\ݜ�X[JNˈ�ݚY\�Hۜ�ٜ�ڛ؛8�%\ٙȜ؛ܙHHڜ�ݚ]X��XZٜ�ڙXڈۂ�ˈH�H��ۈHQ��T�S��ݚY\�ٜۉ݈]\و\Ȝٜܚ[ۉ܈�Xڙܛݛ��ˈۜ�ˈ[�Y�[�Yڙ[�Hۜ�ٜ�[ٙ[؛�݈�H�\ۛ�Y
+8���ؘۛ[��XZٜ�K��ۛ�݈ۜ�ٜ��ݚY\�QH[ٙ[˜�ݚY\�Q�ˈ�ݚY\�X]؜�H]]ݘ\��Y�H�\ۛ�Yۜ�ٜ�[ٙ[	܈�ݚY\�\ț�ˈ\ؘ�HܙY[�X[�܈\Ȝٜܚ[ۋ]�\�H�Xڙܛݛ�ۜ�ٜ�؛Ț]�\݂�ˈ�]\��ț�˘]][�YܘY\ȝۜ�ٜ�ZX[XXڈXڋ�\țZ\��ܜȝB�ˈۜ�ٜ�܈ݛ��\ۛ][ۈ
+�\ۛ�P]]ڝH[ٙ[	܈�ݚY\�[�ۋ�B�ˈܛܜ˜�ݚY\��Z[XۛܙY
+K�H�ݚY\�XYۛܝXșݘ\�X�ݙHZ\ܙ\ȝ\΂�ˈHٜܚ[ۈ؛�ۙHܙY[�X[[�\��ݚY\�Hښ[H\ݕ\ݜ�X[Hڛ�ˈ]�ݚY\��
+K�ˈH\��Xۘ\�Y[ܙK\�ݚY\��[��ܚXȘ�]ݛܙY�ˈ[��ܚXȚٞJK�ښ\[�ݙXYو�ۙ[�ȸ�%ٝٜܚ[ې]][Z]ȝB�ˈݛܙKZٞKۛۚݜZٞHZ\ۘ]ڈ؜��[�țًۘ[�وݘ^H]ZY][�ۜ�ˈ�\ݛY\Ș]]ۘ]X؛HۘوH\��\ٜȘH�ݚY\�وۙHܙY[�X[�܋��ˈ؝\ȝ\�ٛ�\ݚ[][ۈێ�H�˘]]؛؛��]�\�ݘؙYY�ΎM�ˈ^[\HYX؝Y]ۜ�ٜ�ZٞHٝ\
+ԑWՓԒє�ДWґVJN�\�HB�ˈۜ�ٜ�\ٜȚ]țݛ�ܙY[�X[[��\\ܙ\Ȝ�\ۛ�P]]
+ٝۜ�ٜ�]]�ˈ�M�MʋۈHٜܚ[ۋX]]Z\܈]\݈�Ո\ؘ�H�Xڙܛݛ�ۜ�ȸ�%]�ˈܛܜ˜�ݚY\�ۛ��YȊK�ˈZ[�SX^ۜ�ٜ�ˈ[��ܚXȜٜܚ[ۜʈ\ș^XݛB�ˈڙ[�[ٙ[��ݚY\�QYڝ[X][HY��\�ș��ۈHٜܚ[ۉ܈ܙY[�X[��Y�
+�Xۛ��Y˝ۜ�ٜ�\RٞH	���[ٙ[	���Z\՛ܚٜ�ٜܚ[ې]]
+�ٜܚ[ےQ�[ٙ[��ݚY\�Q�X]ښ[�Ԝ�ݚY\�ۘ\ڛ݊ٜܚ[۔ݘ]K[ٙ[��ݚY\�Q
+O˜�ݛ؛ۋ�
+B�
+B��]\���ˈڙ[�HН]X؛ݛ�\ț�X\�][ݘH^]\ݚ[ۋښ\�ۋ]\�ٛ��ˈ�Xڙܛݛ�ۜ�ȝȜ�\ٜ��H�[XZ[�[�ș[�][Y[��܈\ٜ�Y�Xڛ�ȝ\��˂�ˈ\�ٛ�\ݚ[][ۈ\ș^[\
+][��ؚ܈H�^\ٜ�\��K��ۛ�݈][ݘT]\ٙH\ԝ[ݘT]\ٙ
+�\ۛ�P]]
+ٜܚ[ےQ
+JN�ˈۜ�ٜ�ڜ�ݚ]��XZٜ��ڙ[��Xڙܛݛ�ۜ�ٜ�Ț]�H�Y[��Z[[�ș�܈B�ˈݜݘZ[�Y\�[ًݛ܈[[Y\�[�ȝH\ݜ�X[H]�\�H\��8�%[݈ۛHB�ˈ\�[ٚXȜ�ؙHۈH�X۝�\�Y\ݜ�X[H\ș]XݙYڝݝ�\��[�ˈݜ؛�țو�][H؛Ȋٛ��N��[�]؞HܙKY\ݚ[�Z[\�H۝[�ʋ��ˈ\�ٛ�\ݚ[][ۈ�[݈\Ț[�[�[ۘ[H^[\8�%][��ؚ܈H\ٜ���ˈ[ۈ�ݝHٜܚ[ۜȜۙ�\]\ٙ�H[�\ݜ�X[HܙY]ؚ[[�Ȝݘ]B�ˈ
+�H8�%�]�Z[�ȝH�Z[[�Ȝ�ݚY\�]�\�H\���\݈؜ݙ\Ș؛΂�ˈH�ؙH\Ș[ݙY\�[ٚX؛H
+ٙH\՛ܚٜ�ܙY]]\ٙ
+Hș]X݈B�ˈܙY]܋]\��ۛ�݈ۜ�ٜ��ݝYB�X[ݕۜ�ٜ��ؙJٜܚ[ےQ
+H\՛ܚٜ�ܙY]]\ٙ
+ٜܚ[ےQ
+N�ˈڙXڈY�\�ٛ�\ݚ[][ۈ\ț�YYY
+ܘYY[��YٙY]ԈB�ˈۛ\Xݚ[ۈ[�ۘ[H؜ș]XݙYۈH�]�[ݜȝ\��K�X\�ȝ\�ٛ���YB�ˈۈ\و�\\܈H�]ڈ]Y]YH8�%HܘYY[�\Ț[�ݙ\��݈
+܈B�ˈۚY[��\݈ۛ\XݙY
+H[��YYȝH�\ݛ�Y�ܙHH�^\ٜ�\����ˈ�ݙN�\�ٛ�\ݚ[][ۈ\ȓ�Ո؝Y�H\ИXڙܛݛ�]\ٙ
+
+H8�%B�ˈYܘYY۝�\��ݚ[�Șۛ�^ڛ�݈�܈\ȌLZ[�]\ȊX^��XZٜ��ˈ\�][ۊH\ȝۜ�و[�ۙHTH؛ڝ]țݛ�Yڝ�]�H�Yٝ�ˈ
+PVԑU�QTוT�ѓ�H�KMȘ�Xڛٙ�K��ۛ�݈\�ٛ���ۑܘYY[�H�YY՜�ٛ�\ݚ[][ۊٜܚ[۔ݘ]K�ٜܚ[ےQ
+Nۛ�݈\�ٛ���ېۛ\Xݚ[ۈHٜܚ[۔ݘ]K�ۛ\Xݚ[ې[�ۘ[T[�[�ȏOOH�YNY�
+\�ٛ���ېۛ\Xݚ[ۊHˈۛ�ݛYHHۙK\ڛ݈�YȚ[[YYX][HۈH�^�ۋXۛ\Xݚ[ۂ�ˈ\��ٜۉ݈�K]�Yٙ\�\�ٛ�\ݚ[][ۋ�\�ڜݙYڝB�ˈٜܚ[ۋ]�Xښ[�Ȝ؝�H�[݋��ٜܚ[۔ݘ]K�ۛ\Xݚ[ې[�ۘ[T[�[�ȏH�[َ؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQȘۛ\Xݚ[ې[�ۘ[T[�[�Έ�[وJNB�Y�
+\�ٛ���ۑܘYY[�\�ٛ���ېۛ\Xݚ[ۊH�Xڐ�Xڙܛݛ�
+�ڝ[�[�
+ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ��
+
+HO��\ݚ[][ۂ���[�K��ڙXݔ]�ٜܚ[ےQ�[ٙ[��ܘَ��YK�\�ٛ���YK�؛\N��\�X݈��ڙۘ[�ۜ�ٜ�X[�XZٕۜ�ٜ�X[
+ٜܚ[ےQ�ܙKY\ݚ[�K�ˈ�]�\��[�Y]KY\ݚ[][ۈښ[HHۛ��\�؝[ۈؘڙH\ȝ؜�K��ˈY]H\�ښ]�\șٛ�L�ݜȘ[�ܙX]\ȘHٛ�LH�݋�]ܚ][�ȝB�ˈޛ�]Xș\ݚ[Y�Y�^]Y\ܘYٜ֌̗HۈH�^\���]�ˈX\�K[Y\ܘYو�]ܚ]H\ȘH�X[�ۜXؘڙH�\݋�YK][YHY]H[��ˈYK�Ȝ�[XZ[�ș[�X�Y�X؝\وHؘڙH\Ș[�XYHۛ\�K��ښ\Y]N��YK�JB��؝ڊ
+JHO�ً�\��܊��Xڙܛݛ�\ݚ[][ۈ�Z[Y��JJK�
+K�ٜܚ[۔ݘ]K�
+NH[وY�
+�Z\ИXڙܛݛ�]\ٙ
+ۜ�ٜ��ݚY\�Q
+H	���\][ݘT]\ٙ	���]ۜ�ٜ��ݝY�
+Hˈ[�ܙ[Y[�[\ݚ[][ۈ[�ݜ�][ۈ\�H�ۋ]\�ٛ�8�%ښ\ڙ[�B�ˈڜ�ݚ]��XZٜ�\ȘXݚ]�HȜ�YXوTH�\ܝ\�K�\و\�H[ۈ؝Y�ˈ�H�[��Xڙܛݛ�
+
+HښXڈڙXڜȚ\ИXڙܛݛ�]\ٙ
+
+K�]HX\�B�ˈڙXڈ\�H]�ڙȝ[��Xٜܘ\�Hڙ[�۝[�[�Ș[�[ٙ[ۚݜ˂�ˈYK][YHۜ�Ț[�YK�Ș[ۈ\ٜȜ�[��Xڙܛݛ�
+
+Kۈ[�\�ݜݘZ[�Y�ˈ�]H�\ܝ\�H]�\�][�șY�\�ȝ[�[H��XZٜ��]\�[H^\�\˂�˂�ˈۘ[\ؙN�Y�H\ݚ[][ۈ\Ș[�XYH[�Y�Yڝ܈]Y]YY�܈Tˈٜܚ[ۈ
+\ݚ[[Z]\�\Ȝ\�\ٜܚ[ۈ[[Z]
+JJKښ\ؚY[[�ˈ[�ݚ\��H[�Y�Yڝ�[�ڛXڈ\H�]۞KX\��]�Yڙ[�țۂ�ˈ]ț�^ٙۙ[�\܋[�]Y]Z[�ș\X؝\Ț�\݈ݘ\��\ȝHؘۛ[�ˈ[[Z]
+�H�Xڙܛݛ�݈ۛ8�%\ݚ[][ۜșٝ[�Ș�ؚٙ�Z[��ˈXXڈݚ\�[�Hؘۛ[]Y]YK��Y�
+Y\ݚ[[Z]\��\Н\ފٜܚ[ےQ
+JHۛ�݈[�[�՛ڙ[�ȏH[\ܘ[�[�\ݚ[Yڙ[�ʜ�ڙXݔ]ٜܚ[ےQ
+NY�
+[�[�՛ڙ[�ȏ�Hٙ˙\ݚ[][ۋ�X^ٙۙ[�ڙ[�ʈً�[��ʂ�[�ܙ[Y[�[\ݚ[][ێ�	ܙ[�[�՛ڙ[�߈[�\ݚ[Yڙ[�Ț[�	ܙ\ܚ[ےQ�ۚXيM�_X�
+N�Xڐ�Xڙܛݛ�
+��[��Xڙܛݛ�
+�
+
+HO��ڝ[�[�
+ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ��
+
+HO��\ݚ[][ۋ��[�K��ڙXݔ]�ٜܚ[ےQ�[ٙ[�ښ\Y]N��YK�؛\N��]ڔ]Y]YQ[�X�YȈ��]ڈ���\�X݈��ۜ�ٜ�X[�XZٕۜ�ٜ�X[
+ٜܚ[ےQ�ܙKY\ݚ[�K�ڙۘ[�ˈ͌�Ȕ\وN�ݘ[\Hٜܚ[ۉ܈ڝXYۈ]�\�H\ݚ[Y�݋��Y]Y]N��Z[ٜܚ[ۓY]Y]Jٜܚ[۔ݘ]K�ڝXY
+K�JK�
+K�[�ܙ[Y[�[Y\ݚ[ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_X�ۜ�ٜ��ݚY\�Q�
+K�؝ڊ
+JHO�ً�\��܊��Xڙܛݛ�\ݚ[][ۈ�Z[Y��JJK�ٜܚ[۔ݘ]K�
+NB�B�B��ˈݜ�][ێ��[�\�[ٚX؛Hڙ[�HۛݛYوޜݙ[H\ș[�X�Y��ˈۜ݋X]؜�H��\]Y[�ގ�ۈ^[�ڝ�H[ٙ[ˈݜ�]H\܈ٝ[�Ȝ�YXق�ˈH�ؘX�[]HوHژ[�ٜȝ]�\݈HؘڙK�XXڈHژ[�ق�ˈ]^ٙYȝHY��[��[�ȝ�\ڛۙ[��[Y]\ȝۛȊțY\ܘYٜ˂�ˈ[ۈ؝Y�Hڜ�ݚ]��XZٜ�8�%ݜ�][ۈ\ț�]�\�\�ٛ���ˈ][ݘK\]\ٙX؛ݛ�Ȝښ\ݜ�][ۈۈ
+�ۋ]\�ٛ��Xڙܛݛ�ۜ�ʋ��ˈۜ�ٜ�]�ݝYٜܚ[ۜȊݜݘZ[�Yۜ�ٜ��Z[\�JHښ\]\ȝٛ��Y�
+\ИXڙܛݛ�]\ٙ
+ۜ�ٜ��ݚY\�Q
+H][ݘT]\ٙۜ�ٜ��ݝY
+B��]\���ۛ�݈[ٙ[[�]݈ۜB�ٝ[ٙ[[��Tޛ�ʂ�ٝۜ�ٜ�[ٙ[
+ٜܚ[۔ݘ]K�\ݕ\ݜ�X[JO˛[ٙ[Qψ�[�ۛݛ���
+K�ۜݏ˚[�]ψ΂�ۛ�݈ݜ�][ۓ][\Y\�B�[ٙ[[�]݈ۜ�HHȌȎ�[ٙ[[�]݈ۜ�HHȌ��Nۛ�݈Y��Xݚ]�PY�\�\��ȏHٙ˘ݜ�]܋�Y�\�\��Ȋ�ݜ�][ۓ][\Y\��ˈۘ[\ؙN�ښ\ؚY[[�Șݜ�][ۈڙ[�ۙH\Ș[�XYHؚY[Y]Y]YY�ˈ܈[�Y�Yڝ�܈TȜٜܚ[ۋ�ڝݝ\ˈ\��Ԛ[�ِݜ�][ۘݘ^\ˈ]ؘ�ݙHH�\ڛۙ
+]\țۛH�\ٝ[�H�[�
+XY�\�H�[��ˈۛ\]\ȸ�%ٙH�[݊Kۈ]�\�Hݘ�ٜ]Y[�\���K\ؚY[\Șݜ�][ۋ�ˈ�ۙ[�ȝH�Xڙܛݛ�]Y]YHڝ\X؝\ȝ]\�HڙY]]Y]YKY�[��˂�ˈۈڙۘ[Ș\�H�\]Z\�Y��ˈHݜ�][۔ؚY[Y
+ޛ�ڜ�ۛݜʎ�ٝ�Q�ԑH�[��Xڙܛݛ�
+
+H[��ˈۙX\�Y[���[�[J
+K�ݜ�]ܓ[Z]\�\țۛH[�\�Yڙ[�H\ڂ�ˈXݝX[H^Xݝ\Ț[�ڙHݜ�]܋��[�
+Kۈ[�\�H؝\�]Yؘۛ[�ˈ]Y]YH\Н\ޘݘ^\ș�[و�]ٙ[�ؚY[[�Ș[�^Xݝ[ۈ8�%\ș�Yˈۛܙ\ȝ]ڛ�݈]\�Z[�\ݚX؛K��ˈHݜ�]ܓ[Z]\��\Н\ޘ
+\�X�HXܛܜȝXڜʎ�[ۈ۝�\�ȝB�ˈYK\]ݜ�][ۈ
+YK�ʈښXڈٜۉ݈ٝݜ�][۔ؚY[Y��ˈZ\��ܜȝH[�ܙ[Y[�[Y\ݚ[ݘ\�X�ݙH[�HYK\]ݘ\���ˈ[�Y�Yڝ
+\��X�\ٙ
+Hݜ�][ۈ\ȓё��HY�][�ژ[�ڛ�ȝHۛݛYق�ˈ�\وZYXۛ��\�؝[ۈ�]ܚ]\Ȝޜݙ[V̗H
+ۛ�^X�ݛ�JH[��\ݜȝB�ˈ�ۜؘڙH�܈H�\݈وH\�وٜܚ[ۋ�ݜ�][ۈݚ[�[�țۈYB�ˈ
+YK�ʋڙ\�HHؘڙH\ȘۛۈH�]ܚ]H\ș��YK�\��Ԛ[�ِݜ�][ۘ�ˈٙ\ȘX؝[][][�ș\�[�ȝHXݚ]�Hۛ��\�؝[ۈ[��\�\țۈH�^YK��Y�
+�ڛݛ�[�[��Yڝݜ�][ۊۛݛYّ[�X�Y�ٙ˚ۛݛYً�[�X�Y�[��Yڝ�ٙ˘ݜ�]܋�[��Yڝ�\��Ԛ[�ِݜ�][ێ�ٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۋ�Y��Xݚ]�PY�\�\��˂�ݜ�][۔ؚY[Y�H\ٜܚ[۔ݘ]K�ݜ�][۔ؚY[Y�ݜ�]ܐ�\ގ�ݜ�]ܓ[Z]\��\Н\ފٜܚ[ےQ
+K�JB�
+Hٜܚ[۔ݘ]K�ݜ�][۔ؚY[YH�YNˈ�XڈH�SژZ[�
+�݈�\݈H[Z]\�\ڊHۈ�\ٝ\[[�Tݘ]I܂�ˈ�Z[�[ۈ]ؚ]ȝHܝXۛ\][ۈ؝�Tٜܚ[ە�Xښ[�ȝܚ]\Ț[�B�ˈ�[��[݈8�%ܙH�[�H�]țZXܛݘ\ڜȘY�\�H[��\�\ڈٝ\Ș[��ˈ۝[ݚ\�ڜو\ؘ\HH�Z[��
+][�٘^Hڛ�و[�Y�Yڝݜ�][ۂ�ˈ\țٙ��HY�][�]ٙ\ȝHXZȘۛܙYY�]	܈]�\�[�X�Y�HΎB��Xڐ�Xڙܛݛ�
+��[��Xڙܛݛ�
+�
+
+HO��ڝ[�[�
+ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ��
+
+HO��ٛ��K�ݘ\�ܘ[���[YN��ܙK�ݜ�]܈��܎��ܙK�ݜ�][ۈ��]�X�]\Έȝ�Yٙ\���[�Y�Yڝ�K�K�
+
+HO��ݜ�]܋��[�K��ڙXݔ]�ٜܚ[ےQ�[ٙ[�ۜ�ٜ�X[�XZٕۜ�ٜ�X[
+ٜܚ[ےQ�ܙKXݜ�]܈�K�ڙۘ[�ˈ͌�Ȕ\وN�ݘ[\Hٜܚ[ۉ܈ڝXYۈݜ�]܈[��Y\˂�Y]Y]N��Z[ٜܚ[ۓY]Y]Jٜܚ[۔ݘ]K�ڝXY
+K�JK�
+K�
+K�[�Y�YڝXݜ�][ۈٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_X�ۜ�ٜ��ݚY\�Q�
+B��[�
+�\ݛ
+HO�Y�
+\�\ݛ
+H�]\��ȋˈښ\Y�Hڜ�ݚ]��XZٜ��ڙۘ[��ݒY�X�ܝY
+
+Nٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۈH؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQȝ\��Ԛ[�ِݜ�][ێ�JNY�
+��\ݛ�ܙX]Y���\ݛ�\]Y���\ݛ�[]Y���\ݛ�ژ[�ٙ[��Y\ϋ�[�ݚ��
+Hˈ[��[Y]HHؘڙHۛHڙ[�ݜ�][ۈXݝX[Hژ[�ٙ[��Y\Tٜܚ[ېؘڙK�[]Jٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^��[�PؘڙUڙ[�Έ�[�JNً�[��ʂ�ݜ�][ێ�	ܙ\ݛ�ܙX]YHܙX]Y	ܙ\ݛ�\]YH\]Y	ܙ\ݛ�[]YH[]Y�
+N[Z]ݜ�][ۓY]�X܊ȋ����\ݛ�Yٙ\���[�Y�Yڝ�JNB�JB��؝ڊ
+JHO�ً�\��܊��Xڙܛݛ�ݜ�][ۈ�Z[Y��JJB���[�[J
+
+HO�ٜܚ[۔ݘ]K�ݜ�][۔ؚY[YH�[َJK�ٜܚ[۔ݘ]K�
+NB�B��^ܝ�[�ݚ[ۈؚY[P�Xڙܛݛ�ۜ�ʂ�ٜܚ[۔ݘ]N�ٜܚ[۔ݘ]K�ۛ��YΈ؝]؞Pۛ��Y˂�N��ڙڝ[�[�
+ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ��
+
+HO��ؚY[P�Xڙܛݛ�ۜ�ћܕ[�[�
+ٜܚ[۔ݘ]Kۛ��Yʋ�
+NB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈۛ\Xݚ[ۈݛ[X\�Hٛ�\�][ۈ8�%ژ\�Y�H[�\�ٜ[ۈ[�݌K؛ۜX݂�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�[�\��[�]ٙ[�ٙ\X[]�H[�؈]�[�Ȝٛ�ۈHۛ\Xݚ[ۈԑHݜ�X[B�
+�ښ[HHݛ[X\�H\Ș�Z[�șٛ�\�]Y�[��ܚXȚ]ٛ�ٛ�Ȝ\�[ٚXȜ[�܂�
+�ۈۙ˜�[��[�Ȝݜ�X[\Έ\Țٙ\ȝHۚY[�ۛ��Xݚ[ۈ��ۈ[Z[�țݝ�
+�ښ[Hو
+ܜژ�JH\ݚ[H�[XZ[�\�[�\�H�]H[Z]��
+�ۛ�݈ӓTP՗ґQTSU�WԒS�דTȏHMW̌�ʊ��
+�ٛ�\�]HHۛ\Xݚ[ۈݛ[X\�H�܈Hٜܚ[ۋ\ܙ[X�Y]\�Z[�\ݚX؛B�
+���ۈܙI܈ݛ�Y[[ܞH
+\ݚ[][ۜȊțۙ˝\�HۛݛYو
+ȝH�[܂�
+�ݛ[X\�JK�HۛHHۜ�Ț\ȝ\�ٛ�H\ݚ[[�Ș[�H[�\ݚ[Y�
+��[XZ[�\��\�ݎȝ\�H\ț�șYX؝Y�ۛ\Xݚ[ۈ�H؛��]\��ț�[�
+�ۛHڙ[�\�H\șٛ�Z[�[H�ݚ[�ȝȘۛ\X݋��
+��
+�\Ț\ȝHۜ�HٚXȜژ\�Y�H�ݚ��
+�H[�Pۛ\Xݚ[ۘ
+Z[�\�ٜYۛ\Xݚ[ۈ��ۈۘ]YHۙHȓܙ[�ۙJB�
+�H[�Pۛ\Xݑ[�ڛ�
+^Xڝԕ݌K؛ۜX݈��ۈHYڛ�B�
+�^ܝ\ޛ�ș�[�ݚ[ۈٛ�\�]Pۛ\Xݚ[۔ݛ[X\�JܝΈ�ڙXݔ]�ݜ�[�΂�ٜܚ[ےQ�ݜ�[�΂�ۛ��YΈ؝]؞Pۛ��Y΂��]�[ݜԝ[[X\�OΈݜ�[�΂�ٜܚ[ە\ݜ�X[OΈȜ�ݚY\�QΈݜ�[�Έ[ٙ[QΈݜ�[�ȟNڙۘ[ΈX�ܝڙۘ[�Xړܙ\�][ۏΈ
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙJN��ۚ\ُݜ�[�ȟ�[�ۛ�݈Ȝ�ڙXݔ]ٜܚ[ےQۛ��Yˈ�]�[ݜԝ[[X\�Kٜܚ[ە\ݜ�X[HHB�ܝ΂�ܝ˜ڙۘ[˝�ݒY�X�ܝY
+
+N�ˈK���[�ș\ݚ[][ۜȘݜ��[��ۛ\Xݚ[ۈٜȓ�ՈXZوHYX؝Y�ˈ�ۛ\Xݚ[ۈ�H؛[�[[ܙH8�%]țۛHHۜ�Ț\ș\ݚ[[�ȝB�ˈ[�\ݚ[Y�[XZ[�\��ڙ[�]�\�][�Ț\Ș[�XYH\ݚ[Y\Ț\ˈښ\Y[�\�[H
+[�ݘ[��\�˘݈ۜۛ\Xݚ[ۊK�ڙ[��݋و\ݚ[�ˈ\�ٛ�NȝH؛\�܈ٙ\X[]�Hݜ�X[HۙȝHۚY[�ۛ��Xݚ[ۂ�ˈܙ[�\�[�Ș[�H�]K[[Z]ؚ]�H\ݚ[][ۈ�Z[\�H\ț�ۋY�][��ˈݙ\Ș\ܙ[X�\ș��ۈژ]]�\�\ݚ[][ۜș^\݈\ȝH�]ȝZ[��Y�
+[\ܘ[�[�\ݚ[Y۝[�
+�ڙXݔ]ٜܚ[ےQ
+H�
+Hۛ�݈HHٝPۚY[�
+ۛ��Yʎۛ�݈[ٙ[Hٝۜ�ٜ�[ٙ[
+ٜܚ[ە\ݜ�X[JN]ؚ]�ۚ\ِYؚ[�ݐX�ܝ
+
+
+HO�ۛ�݈ܙ\�][ۈH\ݚ[][ۋ��[�K��ڙXݔ]�ٜܚ[ےQ�[ٙ[��ܘَ��YK�\�ٛ���YK�؛\N��\�X݈��ڙۘ[�ܝ˜ڙۘ[�ۜ�ٜ�X[�XZٕۜ�ٜ�X[
+ٜܚ[ےQ�ܙKY\ݚ[�K�ˈ͌�Ȕ\وN�ݘ[\Hٜܚ[ۉ܈ڝXYۈ\�ٛ�Xۛ\Xݚ[ۈ�ݜ˂�ˈۛ\Xݚ[ۈ\Ț[��ڙY�XH[�\�ٜ܈݌K؛ۜX݋ۈوۚȝ\�ˈHٜܚ[ۈ�HQ�]\�[��XY[�Ȝݘ]H�ݙڈH؛��Y]Y]N��Z[ٜܚ[ۓY]Y]Jٜܚ[ۜ˙ٝ
+ٜܚ[ےQ
+O˙ڝXY
+K�JNܝ˝�Xړܙ\�][ۏˊܙ\�][ۊN�]\��ܙ\�][ێKܝ˜ڙۘ[
+NB��ˈ��ؙ\ݚ[][ۈݛ[X\�Y\Ȋțۙ˝\�HۛݛYً��ۛ�݈\ݚ[][ۜȏH\ݚ[][ۋ�ؙ�ܔٜܚ[ۊ�ڙXݔ]ٜܚ[ےQ
+Nۛ�݈ٙȏHܙPۛ��YʊNۛ�݈[��Y\ȏHٙ˚ۛݛYً�[�X�Y�Ș]ؚ]�ۚ\ِYؚ[�ݐX�ܝ
+
+
+HO�ۛ�݈ܙ\�][ۈHK��ܔ�ڙXݓٙ�ؙY
+��ڙXݔ]�ٙ˘ܛܜԜ�ڙX݋�
+Nܝ˝�Xړܙ\�][ۏˊܙ\�][ۊN�]\��ܙ\�][ێKܝ˜ڙۘ[
+B��׎ܝ˜ڙۘ[˝�ݒY�X�ܝY
+
+Nۛ�݈ۛݛYوH[��Y\˛[�ݚ�ș�ܛX]ۛݛYي�[��Y\˛X\
+
+JHO�
+Y�K�Y�؝Yۜ�N�K�؝Yۜ�K�]N�K�]K�ۛ�[��K�ۛ�[��JJK�
+B�����ˈˈ\ܙ[X�HHۛ\Xݚ[ۈݛ[X\�H]\�Z[�\ݚX؛H��ۈܙI܈Y[[ܞH8�%�ˈ�ȓK�[�۝YH[�Hݚ[][�\ݚ[YY\ܘYٜȝ�\��][HۈH�Xٛ��ˈZ[\ț�]�\�ܝY�\ݚ[][ۈ۝[�݈��[�ș]�\�][�Șݜ��[���ˈ�ݙN�Hۛ�ݜ��[�ۚY[�\��۝[ݛܙH�]ȝ[\ܘ[Y\ܘYٜȘ�]ٙ[��ˈݙ\H
+\ݚ[][ۊH[�\Ȝ�XY8�%ܙHY\ܘYٜȘ\X\�[��ݚB�ˈݛ[X\�HZ[S�H�^ۛ��\�؝[ۈ\���\Ț\Ș�[�Yۈ\X؝[ۋ�ˈ�݈]Hܜˈ[�Hڛ�݈\ț�\��݈
+Xݚ]�Hۛ�ݜ��[�\��țۛJK���]\��\ܙ[X�Sٙ�[�Pۛ\Xݚ[ۊ�]�[ݜԝ[[X\�K�\ݚ[][ۜ˂�ۛݛYً�[�\ݚ[Y�[\ܘ[��[�\ݚ[Y
+�ڙXݔ]ٜܚ[ےQ
+B��X\
+
+JHO�
+Ȝ�ۙN�K��ۙKۛ�[��K�ۛ�[�JJK�JNB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈ؜وN�ۛ\Xݚ[ۈ[�\�ٜ[ۂ�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��\ޛ�ș�[�ݚ[ۈ[�Pۛ\Xݚ[ے[��\���\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂��\]Y\ݑٛ�\�][ێ��[X�\���Xړܙ\�][ێ�
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙ�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��N��ۚ\ُ�\ܛُۜ�Y�
+\�\K��]ҙXY\�ֈ�[ܙK\�ڙX݈�JHۛ�݈X\�ٜ��ڙX݈H^�Xݔ�ڙXݓX\�ٜ��\K�Y\ܘYٜʎY�
+X\�ٜ��ڙX݊H�\K��]ҙXY\�ֈ�[ܙK\�ڙX݈�HHX\�ٜ��ڙXݎB�ۛ�݈]�\ݛHٝ�ڙXݔ]
+�\K�ޜݙ[K�\K��]ҙXY\�ʎۛ�݈ܙY[�X[H^�Xݐ]]
+�\K��]ҙXY\�ʎY�
+XܙY[�X[
+H�]\��\��ܔ�\ܛۜيK�H�ݚY\�ܙY[�X[\Ȝ�\]Z\�Y�NB�ۛ�݈ٜܚ[۔ݘ]HH�\ۛ�P]][�X؝Y\�Xݔٜܚ[ۊ��\K�]�\ݛ�]�ۛ��Y˂��[ً�
+NY�
+�\ٜܚ[۔ݘ]H�
+\ٜܚ[۔ݘ]K�\ݕ\ݜ�X[H	���\ݜ�X[Z[�ԛܝ�\ܛّۜ�[�[^�\�˚\ʜٜܚ[۔ݘ]K�ٜܚ[ےQ
+JB�
+H�]\��\��ܔ�\ܛۜي��Ș]][�X؝Yٜܚ[ۈ�ݛ��NB�Y�
+�ٜܚ[۔ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YH�
+]�\ݛ�۝\�وOOH�ݙ�	���ٜܚ[۔ݘ]K��ڙXݔ]OOH]�\ݛ�]
+B�
+H�]\��\��ܔ�\ܛۜي�˂���ڙX݈]ٜț�݈X]ڈH]][�X؝Yٜܚ[ۈ��
+NB�ۛ�݈ٜܚ[ےQHٜܚ[۔ݘ]K�ٜܚ[ےQۛ�݈]]ܚ^�Y�ڙXݔ]Hٜܚ[۔ݘ]K��ڙXݔ]]ؚ]ۘZ[Tٜܚ[ۊٜܚ[ےQ
+NY�
+Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��YʊH�]\��\��ܔ�\ܛۜي��Ș]][�X؝Yٜܚ[ۈ�ݛ��NB�]ؚ]]ؚ]ݜ�X[Z[�ԛܝ�\ܛۜيٜܚ[ےQ�\K�ڙۘ[
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNY�
+Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��YʊH�]\��\��ܔ�\ܛۜي��Ș]][�X؝Yٜܚ[ۈ�ݛ��NB�Y�
+Z\Лۙ�Y[�P�ݛ�Ԝ�ڙX݊ٜܚ[۔ݘ]K]]ܚ^�Y�ڙXݔ]
+JH�]\��\��ܔ�\ܛۜي�˂���ڙX݈]ٜț�݈X]ڈH]][�X؝Yٜܚ[ۈ��
+NB�ݜ�\ۛ�^X\�ٜ�ʜ�\K�Y\ܘYٜʎۛ�݈�ڙXݔ]Hٜܚ[۔ݘ]K��ڙXݔ]ٝٜܚ[ې]]
+ٜܚ[ےQܙY[�X[ٜܚ[۔ݘ]K�\ݕ\ݜ�X[O˜�ݚY\�Q
+Nˈ�ՑN�H�ڙX݈�[�[�Ț\ȓ�Ո\�ڜݙY\�H8�%ۛ\Xݚ[ۈ�]�\�ژ[�ٜˈH�[�[�ˈ[�H�Xٙ[�ț�ܛX[\��[�XYH\�ڜݙY]�H�\ݘ\��ˈ�]ٙ[�H\݈�ܛX[\��[�Hۛ\Xݚ[ۋ[ۛH\���ZY�]\ȝB�ˈ�[�[�ș��ۈH�[܈؝�KښXڈ\Ș[؞\Ȝ�\ٛ�
+ۛ\Xݚ[ۈ�\]Z\�\ˈX؝[][]Yۛ�^][\Y\Ș]X\݈ۙH�ܛX[\��\[�Y�\�݊K���ˈ[�]X[^�HH�ڙX݈Q�T�]ۜ��Xݚ[ۈۈو�]�\�ܙX]HH�݈�܂�ˈH؝]؞I܈ݙȘ[�[�]�X�]Y�Xڙ]��ۈH][\܈�ؙH�\]Y\݋��]ؚ][�]Y��YYY
+��ڙXݔ]�ۛ��Y˂�]�\ݛ�ڝ�[[ݙK��\K�ڙۘ[��\]Y\ݑٛ�\�][ۋ�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊN�ٝٛ��SYڝۛ�^
+ț[ٙ[��\K�[ٙ[�ڙXݔ]JNً�[��ʘۛ\Xݚ[ۈ[�\�ٜY�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X
+N�ˈܝXۛ\Xݚ[ۈHۚY[�ٛ�Ș[�[�\�[HY��\�[�Y\ܘYوٝۈB�ˈؘڙY�KXۛ\Xݚ[ۈ؜�]\�ٞH\Ȝݘ[H�Y؜�\܈و݈\Ȝ�\ۛ�\˂�ٜܚ[۔ݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞHH�[�ˈژڈٙ�ݛ[X\�Hٛ�\�][ێ�][ܝۙHH؛
+\�ٛ�\ݚ[][ۂ�ˈوH[�\ݚ[Y�[XZ[�\�Y�[�JK[�]\�Z[�\ݚXȘ\ܙ[X�H��ۂ�ˈܙI܈Y[[ܞK��]\��ț�[ۛHڙ[�\�H\șٛ�Z[�[H�ݚ[�ȝˈۛ\X݈
+��[�[�]Ȝٜܚ[ۋ�Ț\ݛܞK�ȚۛݛYيK��ۛ�݈ݛ[X\�T�ۚ\وHٛ�\�]Pۛ\Xݚ[۔ݛ[X\�J�ڙXݔ]�ٜܚ[ےQ�ۛ��Y˂��]�[ݜԝ[[X\�N�^�Xݔ�]�[ݜԝ[[X\�J�\JK�ٜܚ[ە\ݜ�X[N�ٜܚ[۔ݘ]K�\ݕ\ݜ�X[K�ڙۘ[��\K�ڙۘ[��Xړܙ\�][ۋ�JN�Xړܙ\�][ۊݛ[X\�T�ۚ\يN�Y�
+�\K�ݜ�X[JHˈܙ[�HԑHݜ�X[H[[YYX][H[�[Z]ٙ\X[]�H[�؜ȝښ[HB�ˈݛ[X\�H\Șۛ\]Y
+H�[XZ[�\�Y\ݚ[][ۈX^H�YHݝH�JKۂ�ˈHۚY[�ۛ��Xݚ[ۈ�]�\�]ȘH�XY][Y[ݝ�H�\ܛۜو]\݈�B�ˈ�]\��Yڝݝ]ؚ][�ȜۈH[�܈�݈ȝHۚY[��ٜ�\ܚ]�[K��˂�ˈ�[ؙ�]N�\ܙ[X�Sٙ�[�Pۛ\Xݚ[ۈ�]\��ț�[ۛH�܈H��[�[�]ˈٜܚ[ۈڝ�\�Ț\ݛܞH8�%[�]؜و[�[\H\ܚ\ݘ[�\��\ˈۜ��X݈
+\�I܈�ݚ[�ȝȘۛ\X݋ۈ��\Xڛ�Șۛ�^ڝ�ݚ[�Ȃ�ˈ\ȘX؝\�]JK�ووH؜��[�ș�܈؜ٜ��X�[]K��ۛ�݈ٙٙ�ۚ\وHݛ[X\�T�ۚ\ً�[�
+ʈO�Y�
+ȏOH�[
+Hً�؜���ۛ\Xݚ[ۈݛ[X\�H[\H
+ݜ�X[Z[�ʈ�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X�
+NB��]\��΂�JNۛ�݈YH\ٗۛܙW؛ۜXݗɞ؜�\˜�[�ەURQ
+
+K�ۚXي
+_Xۛ�݈[��ܚXԔшH�Z[ٙ\[]�Pۛ\Xݚ[۔ݜ�X[J�Y��\K�[ٙ[�ٙٙ�ۚ\ً�ӓTP՗ґQTSU�WԒS�דT˂�
+Nˈ[؞\Ȑ[��ܚXȔԑH8�%ܘ\�܈ܙ[�RK\�ݛ؛ۈۚY[�ȊZ\��ˈ�[�ۘ]ܜȜښ\[�܊K��Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZH�H�]\���[�ۘ]P[��ܚXԝ�X[UӜ[�RJ[��ܚXԔыڙۘ[��\K�ڙۘ[�JNB�Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊH�]\���[�ۘ]P[��ܚXԝ�X[Uԙ\ܛٜۜʘ[��ܚXԔыڙۘ[��\K�ڙۘ[�JNB�Y�
+�\K��ݛ؛ۈOOH�ٛZ[�H�H�]\���[�ۘ]P[��ܚXԝ�X[Uљ[Z[�J[��ܚXԔыڙۘ[��\K�ڙۘ[�JNB��]\��[��ܚXԔюB��ˈ�ۋ\ݜ�X[Z[�ȘۚY[�Έ]ؚ]Hݛ[X\�H[��]\���ӓ���[�Xڈˈ\ݜ�X[H\ܝ�ݙڈۛHڙ[�\�H\șٛ�Z[�[H�ݚ[�ȝȘۛ\X݋��ۛ�݈ݛ[X\�HH]ؚ]ݛ[X\�T�ۚ\َY�
+ݛ[X\�HOH�[
+Hً�؜���ۛ\Xݚ[ۈݛ[X\�H[\H�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_H8�%\ڛ�Ș]][�X؝Y\ݜ�X[X�
+Nۛ�݈�\ݙY\ݜ�X[HH^�Xݕ\ݜ�X[U\�XY\��[ܙK]\ݜ�X[K]\���ٜܚ[۔ݘ]K�\ݕ\ݜ�X[O˝\�ψ���JNY�
+]�\ݙY\ݜ�X[JH�]\��\��ܔ�\ܛۜيL���ȝ�\ݙY\ݜ�X[H\ݚ[�][ۈ�NB�ۛ�݈�[�XڒXY\�ȏHȋ����\K��]ҙXY\�ȟN�[�XڒXY\�ֈ�[ܙK]\ݜ�X[K]\��HH�\ݙY\ݜ�X[NY�
+ٜܚ[۔ݘ]K�\ݕ\ݜ�X[O˜�ݚY\�Q
+H�[�XڒXY\�ֈ�[ܙK\�ݚY\��HHٜܚ[۔ݘ]K�\ݕ\ݜ�X[K��ݚY\�QH[و[]H�[�XڒXY\�ֈ�[ܙK\�ݚY\��NB��]\��]ؚ][�T\ܝ�ݙڊ�ȋ����\K�]ҙXY\�Έ�[�XڒXY\�ȟK�ۛ��Y˂�
+NB�ۛ�݈�\܈H�Z[ۛ\Xݚ[۔�\ܛۜيٜܚ[ےQݛ[X\�K�\K�[ٙ[
+N�]\���۔ݜ�X[R�\ܛۜي��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+NB��\ޛ�ș�[�ݚ[ۈ[�Pۛ\Xݚ[ۊ��\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂��\]Y\ݑٛ�\�][ێ��[X�\���Xړܙ\�][ێ�
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙ�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��N��ۚ\ُ�\ܛُۜ�ۛ�݈X�ܝ؛ܙHHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ�\K�ڙۘ[
+N�Hۛ�݈�[�H
+ڙۘ[�X�ܝڙۘ[
+HO�Y�
+�\[[�T�\ٝ[��ٜ�\܈��\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۂ�
+H�]\���ۚ\ً��\ۛ�J�\��ܔ�\ܛۜيLˈ�؝]؞H\[[�Hٛ�\�][ۈژ[�ٙ�K�
+NB��]\��[�Pۛ\Xݚ[ے[��\��ȋ����\Kڙۘ[K�ۛ��Y˂��\]Y\ݑٛ�\�][ۋ��Xړܙ\�][ۋ�ۘZ[Tٜܚ[ۋ�
+NNۛ�݈�\ܛۜوH]ؚ]�[�X�ܝ؛ܙK�ڙۘ[
+N�]\��ܘ\�ٞUڝۙX[�\
+��\ܛًۜ�X�ܝ؛ܙK�\ܛܙK�X�ܝ؛ܙK�ڙۘ[�
+�X\ۛ�HO��X�ܝ؛ܙK�X�ܝ
+��X\ۛ�ψ�]ȑӑ^ٜ[ۊ��\ܛۜو؛�ٛY��X�ܝ\��܈�K�
+K�
+NH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+N�݈\��܎B�B��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈ؜وX��^Xڝۛ\Xݚ[ۈ[�ڛ�
+ԕ݌K؛ۜX݊B�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB���[�ݚ[ۈ\�Xݐۛ\Xݚ[ۑ�Z[\�T�\ܛۜي��ݝN�ݜ�[�˂�\��܎�[�ۛݛ��N��\ܛۜوً�\��܊	ܛݝ_H\��܎�\��܊Nۛ�݈[�]�Z[X�HB�\��܈[�ݘ[�ٛوݜ�X[Z[�ԛܝ�\ܛؚٕۜ]؜XڝQ\��܈�\��܈[�ݘ[�ٛو\[[�P؜XڝQ\��܎ۛ�݈X�ܝYB�\��܈[�ݘ[�ٛوӑ^ٜ[ۈ	���
+\��܋��[YHOOH�X�ܝ\��܈�\��܋��[YHOOH�[Y[ݝ\��܈�N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗ٘Z[Y��Y\ܘYَ�[�]�Z[X�B�Ȉ�ۛ\Xݚ[ۈ[\ܘ\�[H[�]�Z[X�H����ۛ\Xݚ[ۈ�Z[Y��JK�ݘ]\Έ[�]�Z[X�HȍLȎ�X�ܝYȍL��L�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��K�K�
+NB���[�ݚ[ۈ�Y�Yڝ\�Xݐۛ\Xݚ[۔ٜܚ[ۊ��\N��\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N��\ܛۜو�[ۛ�݈�]ҙXY\�Έ�Xۜ�ݜ�[�ˈݜ�[�ψHߎ�\K�XY\�˙�ܑXXڊ
+�[YKٞJHO��]ҙXY\�֚ٞWHH�[YNJNY�
+\Лۙ�Xݚ[�Н]XY\�ʜ�]ҙXY\�ʊH�]\��\��ܔ�\ܛۜي���ۛ��Xݚ[�Ș]][�X؝[ۈXY\�Έٛ�Z]\�X\KZٞH܈]]ܚ^�][ۋ�݈�ݚ��
+NB�Y�
+Y^�Xݐ]]
+�]ҙXY\�ʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[�]]ܚ^�Y��Y\ܘYَ��H�ݚY\�ܙY[�X[\Ȝ�\]Z\�Y��JK�Ȝݘ]\ΈKXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈Z[�[X[�\N�؝]؞T�\]Y\݈H�ݛ؛ێ��[��ܚXȋ�ޜݙ[N����Y\ܘYٜΈ׋�ۛΈ׋�[ٙ[����X^ڙ[�Έ�ݜ�X[N��[ً�Y]Y]N�ߋ��]ҙXY\�˂�Nۛ�݈ٜܚ[ےQH�[�[�^Yۛݛ�ٜܚ[ےQ
+Z[�[X[�\Kۛ��YʎY�
+\ٜܚ[ےQ
+ؙٜܚ[ە�Xښ[�ʜٜܚ[ےQ
+O˛Y\ܘYِ۝[�ψ
+HOOH
+H�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ���Ș]][�X؝Yٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ȋ�JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��]\���[B���[�ݚ[ۈ\�Xݔ�\]Y\ݐܙY[�X[�[�ٜ��[�
+��\N��\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N�ݜ�[�Ȟۛ�݈�]ҙXY\�Έ�Xۜ�ݜ�[�ˈݜ�[�ψHߎ�\K�XY\�˙�ܑXXڊ
+�[YKٞJHO��]ҙXY\�֚ٞWHH�[YNJN�]\���\]Y\ݐܙY[�X[�[�ٜ��[�
+�]ҙXY\�ˈۛ��Yʈψ��B��ʊ��
+�؛�ٛ]ڙ[�Y�]șXڜڛۈ�܈H^Xڝ݌K؛ۜXݘ[�ڛ���
+��
+��]\��΂�
+�Ș؛�ٛ��YK�X\ۛ��ݜ�[�ˈ]\ݐۛ\Xݎ��[وH8�%؛\�ڛݛ�
+�؛�ٛHܝYٛ�	܈ۛ\Xݚ[ۈ[�ٙ\H�]Șۛ�^�
+�Ș؛�ٛ��[ً�X\ۛ��ݜ�[�ˈ]\ݐۛ\Xݎ��YHH8�%؛\�ڛݛ�
+��ؙYYșٛ�\�]HHܙKX]؜�Hݛ[X\�B�
+�Ș؛�ٛ��[ً�X\ۛ��ݜ�[�ˈ]\ݐۛ\Xݎ��[وH8�%؛\�؛��݂�
+�XڙH
+�ȝ\ݜ�X[Hۈٜܚ[ۋ܈ڙ[�ט�Y�ܙH\ȝ[�ۛݛ�
+�Z\ܚ[�ʎșY�][ȝH^\ݚ[�Ȝݛ[X\�H]�
+��
+�\�N��ȒKӋ�Ȝݘ]H]]][ۋ�X\ވȝ[�]]\݈[�\ۛ][ۋ��
+��
+�H��Yٝ�\Ș[ٙ[�ۛ�^H[ٙ[�ݝ]
+\�[ٙ[˙]�K�B�
+��X\ۛ�[�Ț\ș؝[Y[�Y]H؛ڝH[�[�Pۛ\Xݑ[�ڛ���
+�^ܝ\Hۛ\Xݐ؛�ٛXڜڛۈB�Ș؛�ٛ��YNț]\ݐۛ\Xݎ��[َȜ�X\ۛ��ݜ�[�ȟB�Ș؛�ٛ��[َț]\ݐۛ\Xݎ��YNȜ�X\ۛ��ݜ�[�ȟB�Ș؛�ٛ��[َț]\ݐۛ\Xݎ��[َȜ�X\ۛ��ݜ�[�ȟN�^ܝ�[�ݚ[ۈڛݛ؛�ٛۛ\Xݚ[ۑ��ې�Yٝ
+�ڙ[�ЙY�ܙN��[X�\�[�Y�[�Y�\ݜ�X[N�ț[ٙ[Έݜ�[�Έ�ݚY\�QΈݜ�[�ȟH[�Y�[�Y�N�ۛ\Xݐ؛�ٛXڜڛۈˈ؛\�Y�݈\܈ڙ[�ט�Y�ܙH8���و؛�݈XڙNș�[�ݙڈˈH^\ݚ[�Ȝݛ[X\�H]
+�\ٜ��\ȝH�KH΍�Hۛ��X݊K��Y�
+\[وڙ[�ЙY�ܙHOOH��[X�\��S�[X�\��\њ[�]Jڙ[�ЙY�ܙJJH�]\��؛�ٛ��[ً�]\ݐۛ\Xݎ��[ً��X\ۛ���ڙ[�ט�Y�ܙH\ȝ[�ۛݛ�
+؛\�Y�݈\܈]
+H��NB�ˈڙ[�ט�Y�ܙHH\ȝ�X]Y\Ȉ�[�ۛݛ��8�%Y�[�ژ�H�X؝\و]�\�B�ˈ�X[ٜܚ[ۈ[��Yڝ\ȏ�ڙ[�ˈښ\[�ȝH؛�ٛ]\�B�ˈX]ڙ\ȝH^\ݚ[�Ȍ]�[YH�Z]�[܈[�HܘYY[�^Y\���Y�
+ڙ[�ЙY�ܙHH
+H�]\��؛�ٛ��[ً�]\ݐۛ\Xݎ��[ً��X\ۛ��ڙ[�ט�Y�ܙOIݛڙ[�ЙY�ܙ_H\ț�ۋ\ܚ]]�Nȝ�X][�Ș\ȝ[�ۛݛ��NB�ˈ�ȝ\ݜ�X[Hۈٜܚ[ۈ8����ț[ٙ[ܙXȝȘۛ\]HH�Yٝ��ۋ��ˈۛ�ٜ��]]�[Hٛ�\�]HHݛ[X\�H�]\�[�؛�ٛ��Y�
+]\ݜ�X[O˛[ٙ[
+H�]\��؛�ٛ��[ً�]\ݐۛ\Xݎ��[ً��X\ۛ����ȝ\ݜ�X[H[ٙ[ۈٜܚ[ێȘ؛��݈ۛ\]H�Yٝ��NB�ۛ�݈ܙXȏHٝ[ٙ[ܙXʝ\ݜ�X[K�[ٙ[\ݜ�X[K��ݚY\�Q
+Nۛ�݈Y��Xݚ]�P�YٝHܙX˘ۛ�^HܙX˛ݝ]Y�
+ڙ[�ЙY�ܙHHY��Xݚ]�P�Yٝ
+H�]\��؛�ٛ��YK�]\ݐۛ\Xݎ��[ً��X\ۛ��ڙ[�ЙY�ܙOIݛڙ[�ЙY�ܙ_HH�YٝIٙ��Xݚ]�P�YٝH
+[ٙ[IܜX˘ۛ�^H8�$�ݝ]IܜX˛ݝ]JNȚܝڛݛٙ\�]Șۛ�^�NB��]\��؛�ٛ��[ً�]\ݐۛ\Xݎ��YK��X\ۛ��ڙ[�ЙY�ܙOIݛڙ[�ЙY�ܙ_H��YٝIٙ��Xݚ]�P�YٝH
+[ٙ[IܜX˘ۛ�^H8�$�ݝ]IܜX˛ݝ]JNț]\݈ۛ\Xݘ�NB��ʊ��
+�[�H[�^Xڝۛ\Xݚ[ۈݛ[X\�H�\]Y\݈��ۈHYڛ�
+K�ˈJK��
+�[�Zو[�Pۛ\Xݚ[ۘښXڈ]XݜȘۛ\Xݚ[ۈ��ۈ�\]Y\݈]\��˂�
+�\ș[�ڛ�Xؙ\ȘH\�X݈�ӓ��ٞHڝ�ڙX݈][�ܝ[ۘ[�
+��]�[ݜȜݛ[X\�K��
+��
+�H؛\�]\݈[�۝YHHٜܚ[ۋZY[�Y�Z[�ȚXY\�
+K�ˈ[ܙK\ٜܚ[ۋZY
+B�
+�ۈH؝]؞H؛��\ۛ�HHۜ��X݈[�\��[ٜܚ[ۋ��
+��
+��ٞHؚ[XN��
+��ڙXݗܘ]�ݜ�[�Ȉ
+�\]Z\�Y
+H8�%X�ۛ]H�ڙX݈�۝�
+��]�[ݜלݛ[X\�N�ݜ�[�ψ
+ܝ[ۘ[
+H8�%\݈ݛ[X\�K�܈]\�]]�H\]B�
+�ڙ[�ט�Y�ܙN��[X�\�Ȉ
+ܝ[ۘ[
+H8�%؛\�܈\ݚ[X]HوHٜܚ[ۉ܂�
+�ݜ��[��KXۛ\Xݚ[ۈڙ[�۝[��ڙ[��ݚYYB�
+�؝]؞Hۛ\\�\Ț]Yؚ[�݈H�\ۛ�Y[ٙ[	܂�
+�ۛ�^Hݝ]�YٝȚY�]�]ˈH؝]؞B�
+��]\��ȘȘ؛�ٛ��YHX[�ٜȓ�Ոٛ�\�]HB�
+�ݛ[X\�K�H؛\�
+K�ˈJH\ș^XݙYȜ�[^H\
+�ȝHܝ	܈ٜܚ[ؙۗY�ܙW؛ۜXݘۚȘ\
+�Ș؛�ٛ��YHXښXڈ�]�[�ȝHܝ��ۂ�
+�ۛ\Xݚ[�Ș][[�ٙ\ȝH�]Șۛ�^[�]˙[���
+�\Ț\ȝHۋTH[�[ووܙ[�ۙI܂�
+�ٙ˘ۛ\Xݚ[ۈHȘ]]Έ�[ً�[�N��[وX8�%B�
+�؝]؞HX[�YٜȝHڛ�݋�݈HܝYٛ���
+�\ޛ�ș�[�ݚ[ۈ[�Pۛ\Xݑ[�ڛ�[��\���\N��\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�ڙۘ[�X�ܝڙۘ[��\]Y\ݑٛ�\�][ێ��[X�\���Xړܙ\�][ێ�
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙ�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ���]ҙXY\�Έ�Xۜ�ݜ�[�ˈݜ�[�ϋ�N��ۚ\ُ�\ܛُۜ�Y�
+\Лۙ�Xݚ[�Н]XY\�ʜ�]ҙXY\�ʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ���ۛ��Xݚ[�Ș]][�X؝[ۈXY\�Έٛ�Z]\�X\KZٞH܈]]ܚ^�][ۋ�݈�ݚ��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ˈ]][�X؝H��ۈXY\�Ș�Y�ܙHݘښ[�ȘHݙ[�X[H[��ݛ�Y܂�ˈݘ[Y\ؙ�\ș[�ڛ�[؞\Ȝ�\]Z\�\ȘH�ݚY\�ܙY[�X[��ۛ�݈ܙY[�X[H^�Xݐ]]
+�]ҙXY\�ʎY�
+XܙY[�X[
+H�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[�]]ܚ^�Y��Y\ܘYَ��H�ݚY\�ܙY[�X[\Ȝ�\]Z\�Y��JK�Ȝݘ]\ΈKXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��]�ٞN��ڙXݗܘ]Έݜ�[�΂��]�[ݜלݛ[X\�OΈݜ�[�΂�ڙ[�ט�Y�ܙOΈ�[X�\�N�HˈXۙH[�Hۛ�[�Q[�ۙ[�ȊK�ˈ�ݙ
+H�Y�ܙH�ӓ�\\�ڛ�˂��ٞHH�ӓ��\�ي]ؚ]XۙT�\]Y\ݐ�ٞJ�\Kڙۘ[
+JH\ȝ\[و�ٞNH؝ڈڙۘ[��ݒY�X�ܝY
+
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ��[��[Y�ӓ��ٞH��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��ۛ�݈�ڙXݔ]H�ٞK��ڙXݗܘ]Y�
+\�ڙXݔ]\[و�ڙXݔ]OOH�ݜ�[�ȊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ���ڙXݗܘ]\Ȝ�\]Z\�Y��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��ˈ^�X݈ڝ�[[ݙH��ۈXY\�Y�]�Z[X�H
+HYڛ�[��Xݜȝ\ʋ��ۛ�݈ڝ�[[ݙHH^�Xݑڝ�[[ݙRXY\��]ҙXY\�ʎ�ˈ�Z[HZ[�[X[؝]؞T�\]Y\݈�܈ٜܚ[ۈY[�Y�X؝[ۋ��ˈۛH�]ҙXY\�Ș[�Y\ܘYٜȘ\�H\ٙ�HY[�Y�Tٜܚ[ۊ
+K���ۛ�݈Z[�[X[�\N�؝]؞T�\]Y\݈H�ݛ؛ێ��[��ܚXȋ�ޜݙ[N����Y\ܘYٜΈ׋�ۛΈ׋�[ٙ[����X^ڙ[�Έ�ݜ�X[N��[ً�Y]Y]N�ߋ��]ҙXY\�˂�ڙۘ[�N�ۛ�݈ݘ]HH�\ۛ�P]][�X؝Y\�Xݔٜܚ[ۊ�Z[�[X[�\K��ڙXݔ]�ۛ��Y˂�
+NY�
+\ݘ]JH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ����ȘXݚ]�Hٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ˈ�
+�[�ݜ�H]X\݈ۙHۛ��\�؝[ۈ\��\Ș�Y[��ݝY�ݙڈH؝]؞K���JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��Y�
+Z\Лۙ�Y[�P�ݛ�Ԝ�ڙX݊ݘ]K�ڙXݔ]
+JH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎���ڙXݗۚ\ۘ]ڈ��Y\ܘYَ���ڙXݗܘ]ٜț�݈X]ڈH]][�X؝Yٜܚ[ۈ��JK�Ȝݘ]\ΈˈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈ٜܚ[ےQHݘ]K�ٜܚ[ےQ]ؚ]ۘZ[Tٜܚ[ۊٜܚ[ےQ
+NY�
+Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʛZ[�[X[�\Kٜܚ[ےQۛ��YʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ���Ș]][�X؝Yٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ȋ�JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�]ؚ]]ؚ]ݜ�X[Z[�ԛܝ�\ܛۜيٜܚ[ےQڙۘ[
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊڙۘ[�\]Y\ݑٛ�\�][ۊNY�
+Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʛZ[�[X[�\Kٜܚ[ےQۛ��YʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ���Ș]][�X؝Yٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ȋ�JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�Y�
+�ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YH�ݘ]K��ڙXݔ]OOH�ڙXݔ]�
+H�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎���ڙXݗۚ\ۘ]ڈ��Y\ܘYَ���ڙXݗܘ]ٜț�݈X]ڈH]][�X؝Yٜܚ[ۈ��JK�Ȝݘ]\ΈˈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ٝٜܚ[ې]]
+ٜܚ[ےQܙY[�X[ݘ]K�\ݕ\ݜ�X[O˜�ݚY\�Q
+N�]ؚ][�]Y��YYY
+�ݘ]K��ڙXݔ]�ۛ��Y˂�ڝ�[[ݙK�ڙۘ[��\]Y\ݑٛ�\�][ۋ�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊڙۘ[�\]Y\ݑٛ�\�][ۊN�ˈ؛�ٛ]ڙ[�Y�]ȜۚXދ�H؝]؞H\ȝH]]ܚ]]]�H۝\�و�܂�ˈ�ٜȝ\Ȝٜܚ[ۉ܈�]Șۛ�^�][�H^Y\�L�YٝȈ8�%HYڛ��ˈ�\݈�[^\ˈو�\ۛ�HHٜܚ[ۉ܈\ݕ\ݜ�X[HȘH�X[[ٙ[ܙXˈ
+\�[ٙ[˙]�ۛ�^۝]][Z]ʈ[�ۛ\\�Hڙ[�ЙY�ܙHˈ
+ۛ�^Hݝ]
+K�Y�H؛\�܈ۘZ[Hو�Hٜܚ[ۈ�]Ȉ\ˈٛ�Z[�K�]\��Ș؛�ٛ��YHH[�ښ\Hݛ[X\�Hۜ�ș[�\�[K��˂�ˈX�ݙKX�Yٝٜܚ[ۜȜݚ[ٝH^\ݚ[�Ȝݛ[X\�H]��[݋X�Yٝ�ˈٜܚ[ۜȘ\�H؛�ٛY8�%HܝYٛ�ٙ\ȝH�]Șۛ�^[�ܙB�ˈۛ�[�Y\ȝțX[�YوHڛ�݈�XH\ݚ[][ۈ
+Ȝ�X؛ۈݘ�ٜ]Y[��ˈ\��˂�˂�ˈ\Ț[�[�[ۘ[Hٜȓ�Ոۛ�ݛX^^Y\�ڙ[�ȊH\�[[ٙ[݂ۜ�ˈ؜��ۈٝ[ٙ[[Z]ʋ�]�[YH\Ȝ\�\�\]Y\݈[�\ț�݈ݛܙY�ˈXܛܜȝ\��ˈۈ�XY[�Ț]��ۈHܘYY[�[ٝ[H\�H۝[�B�ˈ�Xދޙ\�ˈH�]\�[؛�ٛ�\ڛۙTȝH[ٙ[	܈�X[ۛ�^�ˈڛ�݈Z[�\țݝ]�\ٜ��H8�%[�][�ȝ]�]ȝ\�H\Ȝؙ�Hˈٙ\�]Έ[�][�ȘX�ݙH]]\݈�Hݛ[X\�^�Y
+܈H�^H؛�ˈڛݙ\��݊K�Y�و]\�؛�HYڝ\�\�\ٜܚ[ۈ؜]	܈B�ˈڛ�ۙHۛ�ݘ[�[�ۙHXوȘژ[�ً��ۛ�݈؛�ٛXڜڛۈHڛݛ؛�ٛۛ\Xݚ[ۑ��ې�Yٝ
+��ٞK�ڙ[�ט�Y�ܙK�ݘ]O˛\ݕ\ݜ�X[K�
+NY�
+؛�ٛXڜڛۋ�؛�ٛ
+Hً�[��ʘۛ\X݈[�ڛ��؛�ٛ8�%	ؘ[�ٛXڜڛۋ��X\ۛ�X
+N�]\���]Ȕ�\ܛۜي�ӓ��ݜ�[�ڙ�JȘ؛�ٛ��YHJKݘ]\Έ��XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��K�JNB�Y�
+؛�ٛXڜڛۋ�]\ݐۛ\X݊Hً�[��ʘۛ\X݈[�ڛ��]\݈ۛ\X݈8�%	ؘ[�ٛXڜڛۋ��X\ۛ�X
+NB��ً�[��ʂ�ۛ\X݈[�ڛ��ٛ�\�][�Ȝݛ[X\�H�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X�
+N��Hۛ�݈ݛ[X\�HH]ؚ]ٛ�\�]Pۛ\Xݚ[۔ݛ[X\�J�ڙXݔ]�ٜܚ[ےQ�ۛ��Y˂��]�[ݜԝ[[X\�N��\[و�ٞK��]�[ݜלݛ[X\�HOOH�ݜ�[�Ȃ�Ș�ٞK��]�[ݜלݛ[X\�B��[�Y�[�Y�ٜܚ[ە\ݜ�X[N�ݘ]O˛\ݕ\ݜ�X[K�ڙۘ[��Xړܙ\�][ۋ�JN\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊڙۘ[�\]Y\ݑٛ�\�][ۊN�Y�
+ݛ[X\�HOH�[
+Hً�؜���ۛ\X݈[�ڛ��ݛ[X\�Hٛ�\�][ۈ�Z[Y�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_H8�%�]\��[�ȍL��
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗ٘Z[Y��Y\ܘYَ��ݛ[X\�Hٛ�\�][ۈ�Z[Y
+ۜ�ٜ�[ٙ[[�]�Z[X�JH��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��ˈۙX\�HؘڙY؜�]\�ٞH8�%ܝXۛ\Xݚ[ۈHۚY[�ڛٛ��ˈ[�\�[HY��\�[�Y\ܘYٜˈۈH�KXۛ\Xݚ[ۈ�ٞH\Ȝݘ[K��ۛ�݈ٜܚ[۔ݘ]HHٜܚ[ۜ˙ٝ
+ٜܚ[ےQ
+NY�
+ٜܚ[۔ݘ]JHٜܚ[۔ݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞHH�[B���]\���]Ȕ�\ܛۜي�ӓ��ݜ�[�ڙ�JȜݛ[X\�HJKݘ]\Έ��XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��K�JNH؝ڈ
+\��Hً�\��܊�ۛ\X݈[�ڛ�\��܎��\��N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗ٘Z[Y��Y\ܘYَ��ۛ\Xݚ[ۈ�Z[Y��JK�Ȝݘ]\ΈLXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�B��^ܝ\ޛ�ș�[�ݚ[ۈ[�Pۛ\Xݑ[�ڛ�
+��\N��\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N��ۚ\ُ�\ܛُۜ�ۛ�݈�]ҙXY\�ȏH�\]Y\ݒXY\�ʜ�\K�XY\�ʎ�]\��ڝ�\]Y\ݔݛܘYٕ[�[�
+�]ҙXY\�ˈۛ��Yˈ\ޛ�Ȋ
+HO�Y�
+\[[�T�\ٝ[��ٜ�\܊H�]\��\��ܔ�\ܛۜيLˈ�؝]؞H\[[�H\Ȝ�\ٝ[�ȊNB�ۛ�݈�Y�YڝH�Y�Yڝ\�Xݐۛ\Xݚ[۔ٜܚ[ۊ�\Kۛ��YʎY�
+�Y�Yڝ
+H�]\���Y�Yڝݜ�X[Z[�ԛܝ�\ܛٜۜИؙ\[�ȏH�YNۛ�݈�\]Y\ݑٛ�\�][ۈHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ێۛ�݈X�ܝ؛ܙHHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ�\K�ڙۘ[
+N�Hۛ�݈�\ܛۜوH]ؚ]�[�Xݚ]�T\[[�T�\]Y\݊�X�ܝ؛ܙK�ڙۘ[�
+ڙۘ[�Xړܙ\�][ۋۘZ[Tٜܚ[ۊHO��[�Pۛ\Xݑ[�ڛ�[��\���\K�ۛ��Y˂�ڙۘ[��\]Y\ݑٛ�\�][ۋ��Xړܙ\�][ۋ�ۘZ[Tٜܚ[ۋ��]ҙXY\�˂�
+K�[�Y�[�Y�[�Y�[�Y�\�Xݔ�\]Y\ݐܙY[�X[�[�ٜ��[�
+�\Kۛ��Yʋ�
+N�]\��ܘ\�ٞUڝۙX[�\
+��\ܛًۜ�X�ܝ؛ܙK�\ܛܙK�X�ܝ؛ܙK�ڙۘ[�
+NH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+N�]\��\�Xݐۛ\Xݚ[ۑ�Z[\�T�\ܛۜي�ۛ\X݈[�ڛ��\��܊NB�JNB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈ؜وXΈۙ^ۛ\Xݚ[ۈ[�ڛ�
+ԕ݌Kܙ\ܛٜۜ˘ۛ\X݊B�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�[�HHۙ^\ݞ[Hۛ\Xݚ[ۈ�\]Y\݈]݌Kܙ\ܛٜۜ˘ۛ\Xݘ��
+��
+�ۙ^ٛ�Șۛ\Xݚ[ۈ�\]Y\ݜȘ\ȘHԕȘؘ\ٗݜ�Kܙ\ܛٜۜ˘ۛ\Xݘ�
+�ڝH�ٞHژ\YZوH�\ܛٜۜȐTH�\]Y\݈
+[ٙ[[�ݜ�Xݚ[ۜ؋�
+�[�]ۛ؋]ˊK�H^XݙY�\ܛۜو\Șțݝ]��\ܛْۜ][V׈X��
+��
+�ݜ�]Yގ��
+�K�\�وH�\]Y\݈ȚY[�Y�HHٜܚ[ۈ
+�XHXY\�ʋ��
+����HܙI܈ݛ�ۛ\Xݚ[ۈݛ[X\�Hٛ�\�][ۋ��
+�ˈۈݘؙ\܎��]\��H�\ܛٜۜːTK\ݞ[Hۛ\XݙYݝ]��
+��ۈ�Z[\�N�\ܝ�ݙڈȝH\ݜ�X[Hܙ[�RHTK��
+�\ޛ�ș�[�ݚ[ۈ[�T�\ܛٜۜЛۜXݑ[�ڛ�[��\���\N��\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�ڙۘ[�X�ܝڙۘ[��\]Y\ݑٛ�\�][ێ��[X�\���Xړܙ\�][ێ�
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙ�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ���]ҙXY\�Έ�Xۜ�ݜ�[�ˈݜ�[�ϋ�N��ۚ\ُ�\ܛُۜ�Y�
+\Лۙ�Xݚ[�Н]XY\�ʜ�]ҙXY\�ʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ���ۛ��Xݚ[�Ș]][�X؝[ۈXY\�Έٛ�Z]\�X\KZٞH܈]]ܚ^�][ۋ�݈�ݚ��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈ܙY[�X[H^�Xݐ]]
+�]ҙXY\�ʎY�
+XܙY[�X[
+H�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[�]]ܚ^�Y��Y\ܘYَ��H�ݚY\�ܙY[�X[\Ȝ�\]Z\�Y��JK�Ȝݘ]\ΈKXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ˈ�XYH�ٞH\ȝ^ۈو؛��ݚ\�و][��\^H]�܈\ܝ�ݙڋ��ˈXۙH[�Hۛ�[�Q[�ۙ[�Ȋۙ^ٛ�Ȟ�ݙ�HY�][
+H�\�݈8�%ݚ\�ڜق�ˈH�]Șۛ\�\ܙY�]\ș�Z[Ȓ�ӓ��\�و[�H\ܝ�ݙڈ�\^\ˈ[�XۙX�H�]\ȝ\ݜ�X[K��]�ٞU^�ݜ�[�΂��H�ٞU^H]ؚ]XۙT�\]Y\ݐ�ٞJ�\Kڙۘ[
+NH؝ڈڙۘ[��ݒY�X�ܝY
+
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ��[��[Y�ӓ��ٞH��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�]�ٞN��Xۜ�ݜ�[�ˈ[�ۛݛ���H�ٞHH�ӓ��\�ي�ٞU^
+H\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ��H؝ڈ�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ��[��[Y�ӓ��ٞH��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��ˈ\�وH�ٞH\ȘH�\ܛٜۜȐTH�\]Y\݈șٝY\ܘYٜș�܈ٜܚ[ۂ�ˈ�[�ٜ��[�[�ˈHۛ\X݈�\]Y\݈�ٞH\ȝH؛YHژ\H\ȘH�ܛX[�ˈ݌Kܙ\ܛٜۜȜ�\]Y\݈
+[ٙ[[�ݜ�Xݚ[ۜˈ[�]ۛˈ]ˊK��]؝]؞T�\N�؝]؞T�\]Y\ݎ�H؝]؞T�\HH\�ٓܙ[�RT�\ܛٜۜԙ\]Y\݊�ٞK�]ҙXY\�ʎ؝]؞T�\K�ڙۘ[Hڙۘ[H؝ڈ�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��[��[Yܙ\]Y\݈��Y\ܘYَ��[��[Y�\ܛٜۜȘۛ\Xݚ[ۈ�ٞH��JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��ۛ�݈]�\ݛHٝ�ڙXݔ]
+؝]؞T�\K�ޜݙ[K�]ҙXY\�ʎۛ�݈ڝ�[[ݙHH^�Xݑڝ�[[ݙRXY\��]ҙXY\�ʎۛ�݈ݘ]HH�\ۛ�P]][�X؝Y\�Xݔٜܚ[ۊ�؝]؞T�\K�]�\ݛ�]�ۛ��Y˂�
+NY�
+\ݘ]JHY�
+Y^�Xݒۛݛ�ٜܚ[ےXY\��]ҙXY\�ʊH�]\��]ؚ]\ܝ�ݙڔ�\ܛٜۜЛۜX݊��ٞU^��]ҙXY\�˂�ۛ��Y˂�ڙۘ[�[�Y�[�Y�؝]؞T�\K�
+NB��]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ���Ș]][�X؝Yٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ȋ�JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�Y�
+Z\Лۙ�Y[�P�ݛ�Ԝ�ڙX݊ݘ]K]�\ݛ�]
+JH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎���ڙXݗۚ\ۘ]ڈ��Y\ܘYَ���ڙX݈]ٜț�݈X]ڈH]][�X؝Yٜܚ[ۈ��JK�Ȝݘ]\ΈˈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈ٜܚ[ےQHݘ]K�ٜܚ[ےQ]ؚ]ۘZ[Tٜܚ[ۊٜܚ[ےQ
+NY�
+Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʙ؝]؞T�\Kٜܚ[ےQۛ��YʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ���Ș]][�X؝Yٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ȋ�JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�]ؚ]]ؚ]ݜ�X[Z[�ԛܝ�\ܛۜيٜܚ[ےQڙۘ[
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊڙۘ[�\]Y\ݑٛ�\�][ۊNY�
+Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʙ؝]؞T�\Kٜܚ[ےQۛ��YʊH�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ٜܚ[ۗۛݗٛݛ���Y\ܘYَ���Ș]][�X؝Yٜܚ[ۈ�ݛ��܈Hڝ�[�XY\�ȋ�JK�Ȝݘ]\ΈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�Y�
+�ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YH�ݘ]K��ڙXݔ]OOH]�\ݛ�]�
+H�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎���ڙXݗۚ\ۘ]ڈ��Y\ܘYَ���ڙX݈]ٜț�݈X]ڈH]][�X؝Yٜܚ[ۈ��JK�Ȝݘ]\ΈˈXY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ٝٜܚ[ې]]
+ٜܚ[ےQܙY[�X[ݘ]K�\ݕ\ݜ�X[O˜�ݚY\�Q
+N�]ؚ][�]Y��YYY
+�ݘ]K��ڙXݔ]�ۛ��Y˂�ڝ�[[ݙK�ڙۘ[��\]Y\ݑٛ�\�][ۋ�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊڙۘ[�\]Y\ݑٛ�\�][ۊN�ً�[��ʂ��\ܛٜۜ˘ۛ\Xݎ�ٛ�\�][�ȓܙHݛ[X\�H�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X�
+N��Hۛ�݈ݛ[X\�HH]ؚ]ٛ�\�]Pۛ\Xݚ[۔ݛ[X\�J�ڙXݔ]�ݘ]K��ڙXݔ]�ٜܚ[ےQ�ۛ��Y˂�ٜܚ[ە\ݜ�X[N�ݘ]K�\ݕ\ݜ�X[K�ڙۘ[��Xړܙ\�][ۋ�JN\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊڙۘ[�\]Y\ݑٛ�\�][ۊN�Y�
+ݛ[X\�HOH�[
+Hݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞHH�[�ˈ�]\��[�ۙ^	܈^XݙY�ܛX]�țݝ]��\ܛْۜ][V׈B�ˈ]\݈[�۝YHYݘ]\ˈ[�[��ݘ][ۜȝțX]ڈB�ˈۛ\Xݒ\ݛܞT�\ܛۜوțݝ]��Xϔ�\ܛْۜ][O�Hݜ�X݋���]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�Jݝ]�\N��Y\ܘYو��Y�\ٗۛܙW؛ۜXݗɞ؜�\˜�[�ەURQ
+
+K��\Xيˋً��K�ۚXيL�_X��ۙN��\ܚ\ݘ[���ݘ]\Έ�ۛ\]Y��ۛ�[��ȝ\N��ݝ]ݙ^�^�ݛ[X\�K[��ݘ][ۜΈ׈K�K�K�K�JK�Ȝݘ]\Έ�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB��ً�؜����\ܛٜۜ˘ۛ\Xݎ�ܙHݛ[X\�Hٛ�\�][ۈ�Z[Y�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_H8�%�[[�Ș�Xڈȝ\ݜ�X[X�
+NH؝ڈ
+\��Hڙۘ[��ݒY�X�ܝY
+
+Nً�؜�����\ܛٜۜ˘ۛ\Xݎ�ܙHۛ\Xݚ[ۈ\��܋�[[�Ș�Xڈȝ\ݜ�X[N���\���
+NB��ˈ�[�XڈۛHȝH\ݚ[�][ۈ�]�[ݜ۞H]][�X؝Y�HH�ܛX[\�����]\��]ؚ]\ܝ�ݙڔ�\ܛٜۜЛۜX݊��ٞU^��]ҙXY\�˂�ۛ��Y˂�ڙۘ[�ݘ]K�\ݕ\ݜ�X[O˝\��[�؝]؞T�\K�
+NB��^ܝ\ޛ�ș�[�ݚ[ۈ[�T�\ܛٜۜЛۜXݑ[�ڛ�
+��\N��\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N��ۚ\ُ�\ܛُۜ�ۛ�݈�]ҙXY\�ȏH�\]Y\ݒXY\�ʜ�\K�XY\�ʎ�]\��ڝ�\]Y\ݔݛܘYٕ[�[�
+�]ҙXY\�ˈۛ��Yˈ\ޛ�Ȋ
+HO�Y�
+\[[�T�\ٝ[��ٜ�\܊H�]\��\��ܔ�\ܛۜيLˈ�؝]؞H\[[�H\Ȝ�\ٝ[�ȊNB�ݜ�X[Z[�ԛܝ�\ܛٜۜИؙ\[�ȏH�YNۛ�݈�\]Y\ݑٛ�\�][ۈHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ێۛ�݈X�ܝ؛ܙHHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ�\K�ڙۘ[
+N�Hۛ�݈�\ܛۜوH]ؚ]�[�Xݚ]�T\[[�T�\]Y\݊�X�ܝ؛ܙK�ڙۘ[�
+ڙۘ[�Xړܙ\�][ۋۘZ[Tٜܚ[ۊHO��[�T�\ܛٜۜЛۜXݑ[�ڛ�[��\���\K�ۛ��Y˂�ڙۘ[��\]Y\ݑٛ�\�][ۋ��Xړܙ\�][ۋ�ۘZ[Tٜܚ[ۋ��]ҙXY\�˂�
+K�[�Y�[�Y�[�Y�[�Y�\�Xݔ�\]Y\ݐܙY[�X[�[�ٜ��[�
+�\Kۛ��Yʋ�
+N�]\��ܘ\�ٞUڝۙX[�\
+��\ܛًۜ�X�ܝ؛ܙK�\ܛܙK�X�ܝ؛ܙK�ڙۘ[�
+NH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+N�]\��\�Xݐۛ\Xݚ[ۑ�Z[\�T�\ܛۜي���\ܛٜۜ˘ۛ\X݈[�ڛ���\��܋�
+NB�JNB��ʊ��
+��ܝ؜�Hۛ\Xݚ[ۈ�\]Y\݈ȝH\ݜ�X[Hܙ[�RHTH\˚\˂�
+�^ܝ\ޛ�ș�[�ݚ[ۈ\ܝ�ݙڔ�\ܛٜۜЛۜX݊��ٞU^�ݜ�[�˂��]ҙXY\�Έ�Xۜ�ݜ�[�ˈݜ�[�ϋ�ۛ��YΈ؝]؞Pۛ��Y˂�؛\�ڙۘ[ΈX�ܝڙۘ[��\ݙY\ݜ�X[P�\ُΈݜ�[�ȟ�[�\�ٙ�\]Y\ݏΈ؝]؞T�\]Y\݋�N��ۚ\ُ�\ܛُۜ�ۛ�݈X�ܝ؛ܙHHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ؛\�ڙۘ[
+NY�
+\Лۙ�Xݚ[�Н]XY\�ʜ�]ҙXY\�ʊHX�ܝ؛ܙK�\ܛܙJ
+N�]\��\��ܔ�\ܛۜي���ۛ��Xݚ[�Ș]][�X؝[ۈXY\�Έٛ�Z]\�X\KZٞH܈]]ܚ^�][ۋ�݈�ݚ��
+NB��ˈ�\ۛ�HڝH؛YH�ݚY\�ڙXY\�ۛٙ[�[ܚ]HژZ[�\ȘH�ܛX[�ˈ�\ܛٜۜȜ�\]Y\݋�Y�\�ڛ�ș�Z[Y[�^Xڝ�[Y]YT�ݙ\��YH\ˈHۛHؙ�Hݜݛۈ�ݝNȘ[�^Xڝ�ݚY\�ڝݝHۛ\]X�HT��ˈ�Z[ȘۛܙY�X؝\و[ٙ[�ݝ[�Ț\ȝ[�]�Z[X�K��ۛ�݈�\ݙY\ݜ�X[HB��\ݙY\ݜ�X[P�\وOOH[�Y�[�Y�ȝ[�Y�[�Y���\ݙY\ݜ�X[P�\ق�ș^�Xݕ\ݜ�X[U\�XY\��[ܙK]\ݜ�X[K]\����\ݙY\ݜ�X[P�\ً�JB��[�Y�[�YY�
+�\ݙY\ݜ�X[P�\وOOH[�Y�[�Y	��]�\ݙY\ݜ�X[JHX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗ٘Z[Y��Y\ܘYَ���ȝ�\ݙY\ݜ�X[H\ݚ[�][ۈ��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈XY\�\ݜ�X[HB��\ݙY\ݜ�X[P�\وOOH[�Y�[�Y�ș^�Xݕ\ݜ�X[U\�XY\��]ҙXY\�ʂ��[�Y�[�YY�
+XY\�\ݜ�X[H	��Y^�Xݐ]]
+�]ҙXY\�ʊHX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ��[�^Xڝ\ݜ�X[HT��\]Z\�\ȘۚY[�]][�X؝[ۈ��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�]�ݝN��\ۛ�Y�\]Y\ݕ\ݜ�X[T�ݝH[�Y�[�YY�
+\�ٙ�\]Y\݈	���\ݙY\ݜ�X[P�\وOOH[�Y�[�Y
+H�H�ݝHH�\ۛ�T�\]Y\ݕ\ݜ�X[T�ݝJ\�ٙ�\]Y\݋ۛ��YʎH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ��\��܈[�ݘ[�ٛو\��܈ș\��܋�Y\ܘYو��[��[Yۛ\X݈�ݝH��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�B�ۛ�݈�[�Xڔ�ݚY\�QH�ݝB�Ȝ�ݝK��ݚY\�Q��^�Xݔ�ݚY\�XY\��]ҙXY\�ʎY�
+��\ݙY\ݜ�X[P�\وOOH[�Y�[�Y	����]ҙXY\�ֈ�[ܙK\�ݚY\��H	���Y�[�Xڔ�ݚY\�Q�
+HX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ��[�ݜܝY܈[��[YSܙKT�ݚY\���JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�Y�
+��\ݙY\ݜ�X[P�\وOOH[�Y�[�Y	����]ҙXY\�ֈ�[ܙK]\ݜ�X[K]\��H	���ZXY\�\ݜ�X[B�
+HX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ��[��[YSܙKU\ݜ�X[KUT���JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�Y�
+XY\�\ݜ�X[H	��Z\И[\�\ݜ�X[P[ݙY
+ۛ��YˈXY\�\ݜ�X[JJHX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ���SܙKU\ݜ�X[KUT�ܚYڛ�\ț�݈[ݙY�H\Ȝ�[[ݙH؝]؞H��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈�[�Xڔ�ݚY\��ݝHB�\�ݝH	���[�Xڔ�ݚY\�Q�Ȋ�\ۛ�T�ݚY\��ݝJ�[�Xڔ�ݚY\�Q
+Hς�ۚݜ�ݚY\��ݝJ�[�Xڔ�ݚY\�Q�[يJB���[Y�
+��ݝO˜�ݚY\�Q	���\�ݝK�XY\�\ݜ�X[H	���
+\�ݝK��ݚY\��ݝO˝\��
+�ݝK��ݚY\��ݝK��ݛ؛ۈOOH�[	����ݝK��ݚY\��ݝK��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊJB�
+HX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ�؛��݈ؙ�[H�\ۛ�HH�\ܛٜۜȘۛ\X݈[�ڛ��܈�ݚY\��ܛݝK��ݚY\�QH��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�Y�
+�\�ݝH	����[�Xڔ�ݚY\�Q	���ZXY\�\ݜ�X[H	���
+Y�[�Xڔ�ݚY\��ݝO˝\��
+�[�Xڔ�ݚY\��ݝK��ݛ؛ۈOOH�[	����[�Xڔ�ݚY\��ݝK��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊJB�
+HX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ�؛��݈ؙ�[H�\ۛ�HH�\ܛٜۜȘۛ\X݈[�ڛ��܈�ݚY\��٘[�Xڔ�ݚY\�QH��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈Y��Xݚ]�U\ݜ�X[P�\وB��\ݙY\ݜ�X[Hς��ݝO˙Y��Xݚ]�U\ݜ�X[P�\وς�XY\�\ݜ�X[Hς��[�Xڔ�ݚY\��ݝO˝\�ς�ۛ��Y˝\ݜ�X[Sܙ[�RNۛ�݈Y��Xݚ]�T�ݛ؛ۈH�\ݙY\ݜ�X[B�Ȉ�ܙ[�ZK\�\ܛٜۜȂ��
+�ݝO˙Y��Xݚ]�T�ݛ؛ۈς��[�Xڔ�ݚY\��ݝO˜�ݛ؛ۈς��ܙ[�ZK\�\ܛٜۜȊNY�
+Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊHX�ܝ؛ܙK�\ܛܙJ
+N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗܛݝ[�י�Z[Y��Y\ܘYَ���H�\ۛ�Y\ݜ�X[Hٜț�݈ݜܝHܙ[�RH�\ܛٜۜȘۛ\X݈�ݛ؛ۈ��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�ۛ�݈\ݜ�X[T]H^�Xݕ\ݜ�X[T]XY\��]ҙXY\�ʎۛ�݈ۛ\Xݔ]H\ݜ�X[T]˙[�՚]
+�ܙ\ܛٜۜ˘ۛ\X݈�B�ȝ\ݜ�X[T]��[�Y�[�Yۛ�݈\ݜ�X[U\�Hۛ\Xݔ]�ț�]ȕT�
+ۛ\Xݔ]	ٙ��Xݚ]�U\ݜ�X[P�\ً��\Xي׋ʉˈ��_K؊K��Y����[�Xڔ�ݚY\�QOOH�ܙ[�ZKXۙ^��Ș	ٙ��Xݚ]�U\ݜ�X[P�\ٟK؛ٙ^ܙ\ܛٜۜ˘ۛ\Xݘ��	ٙ��Xݚ]�U\ݜ�X[P�\ٟK݌Kܙ\ܛٜۜ˘ۛ\Xݘۛ�݈XY\�Έ�Xۜ�ݜ�[�ˈݜ�[�ψH�ۛ�[�]\H���\X؝[ۋڜۛ���N�ˈ�\ٜ��HHۙHٛ��[KX\�ݙY�ݚY\�X]]ؚ[YH^XݛK��ؚ�X݋�\ܚYۊXY\�ˈۜT�ݚY\�]]XY\�ʜ�]ҙXY\�ʊN�ˈ�ܝ؜�ܙ[�RK\ܙXڙ�XȚXY\�ۛ�݈ܙ[�ZP�]HH�]ҙXY\�ֈ�ܙ[�ZKX�]H�NY�
+ܙ[�ZP�]JHXY\�ֈ�ܙ[�ZKX�]H�HHܙ[�ZP�]N�ˈ�KXۛ\�\܈ڝHۚY[�	܈ܚYڛ�[ۛ�[�Q[�ۙ[�Ȋۙ^ٛ�Ȟ�ݙ
+N��ˈ�ٞU^؜șXۙYۈ[�ܙ\܋ۈ�\^H][�H؛YHڜ�H[�ۙ[�˂�ˈ\Ț\ȘH�]]�H\ܝ�ݙڈ8�%݌Kܙ\ܛٜۜ˘ۛ\Xݘ[�H؛YHܙ[�RB�ˈ[�ڛ�ݝ�ș؝]؞H�ݛ؛ۈ�[�ۘ][ۈ8�%ۈ]�ݝ\ȝ�ݙڈB�ˈ؛YH[�ۙU\ݜ�X[P�ٞQ�ܔ�ݝXڛڙ\ڛ�
+\]X[�ݛ؛ۜȏO��\ݙY
+B�ˈ�]\�[�H�]ș[�ۙ\�ٙ\[�ȝ]Hڛ�ۙH�KY[�ۙH]
+̌̊K��ۛ�݈Ș�ٞN�\ܝ�ݙڐ�ٞKۛ�[�[�ۙ[�ȟHH[�ۙU\ݜ�X[P�ٞQ�ܔ�ݝJ��ٞU^��]ҙXY\�ֈ�ۛ�[�Y[�ۙ[�ȗK��Z[\ݜ�X[T�ݝPۛ�^
+\ݜ�X[U\�XY\��XY\�\ݜ�X[K��ݚY\�XY\���[�Xڔ�ݚY\�Q�[�ܙ\ܔ�ݛ؛ێ��ܙ[�ZK\�\ܛٜۜȋ�Y��Xݚ]�T�ݛ؛ۋ�[�ܙ\ܕ\ݜ�X[P�\َ�ۛ��Y˝\ݜ�X[Sܙ[�RK�Y��Xݚ]�U\ݜ�X[P�\ً�JK�
+NY�
+ۛ�[�[�ۙ[�ʈXY\�ֈ�ۛ�[�Y[�ۙ[�ȗHHۛ�[�[�ۙ[�΂��ˈ\H\ٜ�\ݜYYԑWՔՔ�PSWі�WґPQT�Ș\ȘH�[�[ݙ\�^Hۂ�ˈۜ�ܘ]H�ޚY\ȋȓ]SHX[K\�ݝ[�ȝڙ[�ȋȐۛݙ�\�HRH؝]؞B�ˈȜٜ��XًXX؛ݛ�ؙ[�\�[܈ۜ�ș�܈ۛ\Xݚ[ۋ\\ܝ�ݙڈ؛ȝۋ��\U\ݜ�X[Q^�RXY\�ʂ�XY\�˂�^�RXY\�ћܕ\ݜ�X[Jۛ��Yˈ\ݜ�X[U\�
+K�
+N��Hۛ�݈\ݜ�X[HH]ؚ]�\ܛِۜYؚ[�ݐX�ܝ
+�
+
+HO��\ݜ�X[Q�]ڊ\ݜ�X[U\�Y]َ��ԕ��XY\�˂��ٞN�\ܝ�ݙڐ�ٞK�ڙۘ[�X�ܝ؛ܙK�ڙۘ[�JK�X�ܝ؛ܙK�ڙۘ[�
+N�]\��ܘ\�ٞUڝۙX[�\
+\ݜ�X[KX�ܝ؛ܙK�\ܛܙKX�ܝ؛ܙK�ڙۘ[
+NH؝ڈ
+\��HX�ܝ؛ܙK�\ܛܙJ
+Nً�\��܊��\ܛٜۜ˘ۛ\X݈\ݜ�X[H\ܝ�ݙڈ\��܎��\��N�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\��܎��ۛ\Xݚ[ۗ٘Z[Y��Y\ܘYَ���Z[YȜ�XXڈ\ݜ�X[H��JK�Ȝݘ]\ΈL�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��HK�
+NB�B��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈ؜و��Y]H�\]Y\݈\ܝ�ݙڈ
+]Hٛ�ݛ[X\�Y\ˈ؝Yۜ�^�][ۋ]ˊB�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ۛ�݈�ԑQԓՓ�ԑTUQT՗ՒSQSՕӔȏH̌̌�^ܝ�[�ݚ[ۈX�ܝ]؜�Q[^J�[^S\Έ�[X�\��ڙۘ[ΈX�ܝڙۘ[�N��ۚ\ُ�ڙ�Y�
+[^S\ȏH
+H�]\���ۚ\ً��\ۛ�J
+Nڙۘ[˝�ݒY�X�ܝY
+
+N�]\���]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�K�Z�X݊HO�]ٝYH�[َۛ�݈ۙX[�\H
+
+N��ڙO�ڙۘ[˜�[[ݙQ]�[�\ݙ[�\��X�ܝ�ېX�ܝ
+Nۛ�݈�[�\ڈH
+ܙ\�][ێ�
+
+HO��ڙ
+N��ڙO�Y�
+ٝY
+H�]\��ٝYH�YNۙX\�[Y[ݝ
+[Y\�NۙX[�\
+
+Nܙ\�][ۊ
+NNۛ�݈ېX�ܝH
+
+N��ڙO��[�\ڊ
+
+HO��Z�X݊ڙۘ[˜�X\ۛ�JNۛ�݈[Y\�Hٝ[Y[ݝ
+
+
+HO��[�\ڊ�\ۛ�JK[^S\ʎڙۘ[˘Y]�[�\ݙ[�\��X�ܝ�ېX�ܝțَۘ��YHJNY�
+ڙۘ[˘X�ܝY
+HېX�ܝ
+
+NJNB��^ܝ\ޛ�ș�[�ݚ[ۈۛ\]P�Yٝ�ݝQ[^J�[^S\Έ�[X�\��ڙۘ[�X�ܝڙۘ[[�Y�[�Y��Xۜ��
+
+HO��ڙ�N��ۚ\ُ�ڙ�]ؚ]X�ܝ]؜�Q[^J[^S\ˈڙۘ[
+Nڙۘ[˝�ݒY�X�ܝY
+
+N�Xۜ�
+
+NB��^ܝ�[�ݚ[ۈܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ؛\�ΈX�ܝڙۘ[
+N�ڙۘ[�X�ܝڙۘ[X�ܝ�
+�X\ۛ�Έ[�ۛݛ�HO��ڙ\ܛܙN�
+
+HO��ڙXY[�P]��[X�\�Hۛ�݈ۛ��ۛ\�H�]ȐX�ܝۛ��ۛ\�
+NXݚ]�Q�ܙYܛݛ�X�ܝۛ��ۛ\�˘Y
+ۛ��ۛ\�Nۛ�݈X�ܝH
+�X\ۛ�Έ[�ۛݛ�HO�Y�
+Xۛ��ۛ\��ڙۘ[�X�ܝY
+Hۛ��ۛ\��X�ܝ
+�X\ۛ�NNۛ�݈ې؛\�X�ܝH
+
+HO�X�ܝ
+؛\�˜�X\ۛ�N؛\�˘Y]�[�\ݙ[�\��X�ܝ�ې؛\�X�ܝțَۘ��YHJNY�
+؛\�˘X�ܝY
+Hې؛\�X�ܝ
+
+Nۛ�݈XY[�P]H]K��݊
+H
+ȑ�ԑQԓՓ�ԑTUQT՗ՒSQSՕӔ΂�ۛ�݈[Y\�Hٝ[Y[ݝ
+�
+
+HO��X�ܝ
+�]ȑӑ^ٜ[ۊ��ܙYܛݛ��\]Y\݈[YYݝ��[Y[ݝ\��܈�JK��ԑQԓՓ�ԑTUQT՗ՒSQSՕӔ˂�
+N�]\��ڙۘ[�ۛ��ۛ\��ڙۘ[�X�ܝ�XY[�P]�\ܛܙN�
+
+HO�Xݚ]�Q�ܙYܛݛ�X�ܝۛ��ۛ\�˙[]Jۛ��ۛ\�NۙX\�[Y[ݝ
+[Y\�N؛\�˜�[[ݙQ]�[�\ݙ[�\��X�ܝ�ې؛\�X�ܝ
+NK�NB��^ܝ�[�ݚ[ۈܘ\�ٞUڝۙX[�\
+��\ܛَۜ��\ܛًۜ�ۙX[�\�
+
+HO��ڙ�ڙۘ[ΈX�ܝڙۘ[�ې؛�ٛΈ
+�X\ۛ�Έ[�ۛݛ�HO��ڙ�N��\ܛۜوY�
+\�\ܛًۜ��ٞJHۙX[�\
+
+N�]\���\ܛَۜB�ۛ�݈�XY\�H�\ܛًۜ��ٞK�ٝ�XY\�
+N]�[�\ڙYH�[َ]�ٞPۛ��ۛ\���XYX�Tݜ�X[QY�][ۛ��ۛ\�Z[�\��^O�[�Y�[�Yۛ�݈ېX�ܝH
+
+N��ڙO�Y�
+�[�\ڙY
+H�]\��ۛ�݈�X\ۛ�Hڙۘ[˜�X\ۛ��[�\ڊ
+N؛�ٛ[��[X\ٔ�XY\��XY\��X\ۛ�N�H�ٞPۛ��ۛ\�˙\��܊�X\ۛ�NH؝ڈˈ[�XYHۛܙYؘ[�ٛY��B�Nۛ�݈�[�\ڈH
+
+HO�Y�
+�[�\ڙY
+H�]\���[�\ڙYH�YNڙۘ[˜�[[ݙQ]�[�\ݙ[�\��X�ܝ�ېX�ܝ
+NۙX[�\
+
+NNۛ�݈�ٞHH�]Ȕ�XYX�Tݜ�X[OZ[�\��^O��ݘ\�
+ۛ��ۛ\�H�ٞPۛ��ۛ\�Hۛ��ۛ\�K�\ޛ�Ȝ[
+ۛ��ۛ\�H�Hۛ�݈șۙK�[YHHHڙۘ[�Ș]ؚ]�XYݜ�X[Pڝ[�ʜ�XY\�Ȝڙۘ[JB��]ؚ]�XY\���XY
+
+NY�
+ۙJH�[�\ڊ
+N�H�XY\���[X\ٓؚʊNH؝ڈˈHݜ�X[Hۛ\]Yڝ�Ȝ[�[�Ȝ�XY[��ܛX[�[�[Y\˂�B�ۛ��ۛ\��ۛܙJ
+NH[وY�
+�[YJHۛ��ۛ\��[�]Y]YJ�[YJNB�H؝ڈ
+\��܊H�[�\ڊ
+N؛�ٛ[��[X\ٔ�XY\��XY\�\��܊Nۛ��ۛ\��\��܊\��܊NB�K�؛�ٛ
+�X\ۛ�Hې؛�ٛˊ�X\ۛ�N�[�\ڊ
+N؛�ٛ[��[X\ٔ�XY\��XY\��X\ۛ�NK�K�ˈț�݈�XYZXYښ[HH\�Z[�[X]؜�Hݛ�ݜ�X[H\�ٜ�\Ț[�[�ˈHݜ��[�ڝ[�ˈ]X^H؛�ٛ]]\�Z[�[ښ[HH�[�ܛܝ�ˈ�[XZ[�țܙ[�[�HܙXݛ]]�H�XY؛�ݚ\�ڜوݜ�[�Hܘ\\���ȚYڕ؝\�X\�ΈK�
+Nڙۘ[˘Y]�[�\ݙ[�\��X�ܝ�ېX�ܝțَۘ��YHJNY�
+ڙۘ[˘X�ܝY
+HېX�ܝ
+
+N�]\���]Ȕ�\ܛۜي�ٞKݘ]\Έ�\ܛًۜ�ݘ]\˂�ݘ]\ՙ^��\ܛًۜ�ݘ]\ՙ^�XY\�Έ�\ܛًۜ�XY\�˂�JNB��\ޛ�ș�[�ݚ[ۈۘZ[T\[[�Tٜܚ[ۊ�Xݚ]�N�Xݚ]�T\[[�T�\]Y\݋�ٜܚ[ےQ�ݜ�[�˂�ڙۘ[�X�ܝڙۘ[�N��ۚ\ُ�ڙ�Y�
+Xݚ]�K�ٜܚ[ےQ˚\ʜٜܚ[ےQ
+JH�]\��ڙۘ[��ݒY�X�ܝY
+
+NY�
+\[[�Tٜܚ[ے\И\XڝJٜܚ[ےQ
+JHXݚ]�K�ٜܚ[ےQ˘Y
+ٜܚ[ےQ
+N�]\��B�Y�
+�[�[�ԙ\ܚ[ېۘZ[\˚\ʜٜܚ[ےQ
+H�[�[�ԙ\ܚ[ېۘZ[\˜ڞ�H�HPVԑS�S�הєԒSӗГRSTȟ�[�[�ԙ\ܚ[ېۘZ[\ћܐYZ\ܚ[ےٞJXݚ]�K�YZ\ܚ[ےٞJH�B�PVАՒU�WԒTSS�WԑTUQTՔהT�БRTԒSӗґVB�
+H�݈�]Ȕ\[[�P؜XڝQ\��܊�ٜܚ[ۈ�\]Y\݈]Y]YH�[�NB��Xݚ]�T\[[�T�\]Y\ݜ˙[]JXݚ]�JN�]\���]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�K�Z�X݊HO�]ۘZ[N�[�[�ԙ\ܚ[ېۘZ[Nۛ�݈ېX�ܝH
+
+HO�Y�
+[�[�ԙ\ܚ[ېۘZ[\˙ٝ
+ٜܚ[ےQ
+HOOHۘZ[JH�]\��[�[�ԙ\ܚ[ېۘZ[\˙[]Jٜܚ[ےQ
+Nڙۘ[��[[ݙQ]�[�\ݙ[�\��X�ܝ�ېX�ܝ
+N�Z�X݊ڙۘ[��X\ۛ�N[\[�[�ԙ\ܚ[ېۘZ[\ʊNNۘZ[HHȘXݚ]�Kٜܚ[ےQڙۘ[�\ۛ�K�Z�X݋ېX�ܝN[�[�ԙ\ܚ[ېۘZ[\˜ٝ
+ٜܚ[ےQۘZ[JNڙۘ[�Y]�[�\ݙ[�\��X�ܝ�ېX�ܝțَۘ��YHJNY�
+ڙۘ[�X�ܝY
+HېX�ܝ
+
+N[و[\[�[�ԙ\ܚ[ېۘZ[\ʊNJNB��\ޛ�ș�[�ݚ[ۈ�[�Xݚ]�T\[[�T�\]Y\݊�؛\�ڙۘ[�X�ܝڙۘ[[�Y�[�Y�ܙ\�][ێ�
+�ڙۘ[�X�ܝڙۘ[��Xړܙ\�][ێ�
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙ�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��
+HO��ۚ\ُ�\ܛُۜ��۔�\ܛِۜ�ٞTٝYΈ
+
+HO��ڙ�۔�\ܛِۜ�ٞP؛�ٛYΈ
+
+HO��ڙ�YZ\ܚ[ےٞHH���N��ۚ\ُ�\ܛُۜ�Y�
+�]XڙY\[[�T�\]Y\ݜ˜ڞ�H
+Xݚ]�T\[[�T�\]Y\ݜ˜ڞ�H
+[�[�ԙ\ܚ[ېۘZ[\˜ڞ�H�B�X^]XڙY\[[�T�\]Y\ݜȟ�Xݚ]�T\[[�T�\]Y\ݜ˜ڞ�H
+Ȝݜ�X[Z[�ԛܝ�\ܛۜٔ[�[�ȏ�B�X^Xݚ]�T\[[�T�\]Y\ݜȟ�Xݚ]�T\[[�T�\]Y\ݜћܐYZ\ܚ[ےٞJYZ\ܚ[ےٞJH
+
+ݜ�X[Z[�ԛܝ�\ܛۜٔ[�[�ОPYZ\ܚ[ےٞK�ٝ
+YZ\ܚ[ےٞJHψ
+H�B�PVАՒU�WԒTSS�WԑTUQTՔהT�БRTԒSӗґVB�
+H�]\��\��ܔ�\ܛۜيLˈ�؝]؞H\Ș�\ވ�NB�ۛ�݈Y�XޘۙHH�]ȐX�ܝۛ��ۛ\�
+Nۛ�݈ڙۘ[H؛\�ڙۘ[�ȐX�ܝڙۘ[�[�Jؘ[\�ڙۘ[Y�XޘۙK�ڙۘ[JB��Y�XޘۙK�ڙۘ[]ٝN�
+
+
+HO��ڙ
+H[�Y�[�Yۛ�݈ٝYH�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO�ٝHH�\ۛ�NJNۛ�݈[�[�Ӝ\�][ۜȏH�]Ȕٝ�ۚ\ُ�ڙ��
+N]�[�\ڙYH�[َ]�ٞTٝYH�[َ]�\ܛۜٔ�]\��YH�[َ]�\ܛِۜ؛�ٛYH�[َۛ�݈X\�ԙ\ܛِۜ؛�ٛYH
+
+N��ڙO�Y�
+�\ܛِۜ؛�ٛY
+H�]\���\ܛِۜ؛�ٛYH�YN۔�\ܛِۜ�ٞP؛�ٛYˊ
+NN�[�ݚ[ۈېX�ܝ
+
+N��ڙY�
+�\ܛۜٔ�]\��Y
+HY�
+؛\�ڙۘ[˘X�ܝY
+HX\�ԙ\ܛِۜ؛�ٛY
+
+NٝT�\ܛۜي
+NB�B�ۛ�݈�Xړܙ\�][ۈH
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��N��ڙO�ۛ�݈�XڙYHܙ\�][ۋ�[��
+
+HO�ߋ�
+
+HO�ߋ�
+N[�[�Ӝ\�][ۜ˘Y
+�XڙY
+N�ڙ�XڙY��[�[J
+
+HO�[�[�Ӝ\�][ۜ˙[]J�XڙY
+JNN\ޛ�ș�[�ݚ[ۈ�[�\ڊ
+N��ۚ\ُ�ڙ�Y�
+�[�\ڙY
+H�]\���[�\ڙYH�YNڙۘ[��[[ݙQ]�[�\ݙ[�\��X�ܝ�ېX�ܝ
+Nښ[H
+[�[�Ӝ\�][ۜ˜ڞ�H�
+H]ؚ]�ۚ\ً�[
+[�[�Ӝ\�][ۜʎB�Xݚ]�T\[[�T�\]Y\ݜ˙[]JXݚ]�JN]XڙY\[[�T�\]Y\ݜ˙[]JXݚ]�JN[\[�[�ԙ\ܚ[ېۘZ[\ʊNٝOˊ
+NB��[�ݚ[ۈٝT�\ܛۜي
+N��ڙY�
+�ٞTٝY
+H�]\���ٞTٝYH�YN۔�\ܛِۜ�ٞTٝYˊ
+N�ڙ�[�\ڊ
+NB�ۛ�݈Xݚ]�N�Xݚ]�T\[[�T�\]Y\݈HYZ\ܚ[ےٞK�X�ܝ�
+�X\ۛ�HO�Y�XޘۙK�X�ܝ
+�X\ۛ�NY�
+�\ܛۜٔ�]\��Y
+HٝT�\ܛۜي
+NK�ٝY�ٜܚ[ےQΈ�]Ȕٝ
+
+K�NXݚ]�T\[[�T�\]Y\ݜ˘Y
+Xݚ]�JNڙۘ[�Y]�[�\ݙ[�\��X�ܝ�ېX�ܝțَۘ��YHJN��Hۛ�݈�\ܛۜوH]ؚ]ܙ\�][ۊڙۘ[�Xړܙ\�][ۋ
+ٜܚ[ےQ
+HO��ۘZ[T\[[�Tٜܚ[ۊXݚ]�Kٜܚ[ےQڙۘ[
+K�
+N�\ܛۜٔ�]\��YH�YNY�
+ڙۘ[�X�ܝY
+HY�
+؛\�ڙۘ[˘X�ܝY
+HX\�ԙ\ܛِۜ؛�ٛY
+
+NٝT�\ܛۜي
+NB��]\��ܘ\�ٞUڝۙX[�\
+�\ܛًۜٝT�\ܛًۜ[�Y�[�Y
+
+HO�X\�ԙ\ܛِۜ؛�ٛY
+
+NٝT�\ܛۜي
+NJNH؝ڈ
+\��܊H۔�\ܛِۜ�ٞTٝYˊ
+N�ڙ�[�\ڊ
+N�݈\��܎B�B��^ܝ�[�ݚ[ۈ�[Y]YY]Tݜ�X[J��\ܛَۜ��\ܛًۜ��ݛ؛ێ��[��ܚXȈ�ܙ[�ZH��ܙ[�ZK\�\ܛٜۜȈ�ٛZ[�H��ۙ^��ۛX[��ڙۘ[ΈX�ܝڙۘ[�N��\ܛۜوY�
+�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊH�]\��ݜ�X[T�\ܛٜۜԘ\ܝ�ݙڊ��\ܛًۜ�
+
+HO�ߋ�[�Y�[�Y�ۙ^Ȉ�ۙ^���X�Xȋ�ڙۘ[�
+NB�ۛ�݈X�ܝH�]ȐX�ܝۛ��ۛ\�
+N]ݛ�ݜ�X[P؛�ٛYH�[َ]^\��[X�ܝYH�[َ][\ݘ\�YH�[َ]�\ݛYQ[X[��
+
+
+HO��ڙ
+H[�Y�[�Yۛ�݈ۙX[�\H
+
+N��ڙO�ڙۘ[˜�[[ݙQ]�[�\ݙ[�\��X�ܝ�ېX�ܝ
+NNۛ�݈ېX�ܝH
+
+HO�^\��[X�ܝYH�YN�\ݛYQ[X[�ˊ
+N�\ݛYQ[X[�H[�Y�[�YX�ܝ�X�ܝ
+ڙۘ[˜�X\ۛ�NY�
+\[\ݘ\�Y
+B��ڙ�\ܛًۜ��ٞO˘؛�ٛ
+ڙۘ[˜�X\ۛ�K�؝ڊ
+
+HO�ߊNNڙۘ[˘Y]�[�\ݙ[�\��X�ܝ�ېX�ܝțَۘ��YHJNY�
+ڙۘ[˘X�ܝY
+HېX�ܝ
+
+Nۛ�݈[�ۙ\�H�]ȕ^[�ۙ\�
+Nۛ�݈ݜ�X[HH�]Ȕ�XYX�Tݜ�X[OZ[�\��^O�ݘ\�
+ۛ��ۛ\�H]ٝYH�[َۛ�݈ؚ]�ܑ[X[�H\ޛ�Ȋ
+N��ۚ\ُ�ڙ�O�ښ[H
+�Yݛ�ݜ�X[P؛�ٛY	���Y^\��[X�ܝY	���
+ۛ��ۛ\��\ڜ�Yڞ�HψJHH�
+H]ؚ]�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO��\ݛYQ[X[�H�\ۛ�NJNB�Y�
+^\��[X�ܝY
+H�݈ڙۘ[˜�X\ۛ�Nۛ�݈�ܝ؜�H\ޛ�Ȋ]�[��ݜ�[�ˈ]N�ݜ�[�ʎ��ۚ\ُ�ڙ�O�]ؚ]ؚ]�ܑ[X[�
+
+Nۛ�݈ڜ�HB�]�[�OOH�Y\ܘYو��Ș]N�	٘]_W�����ܛX]ԑQ]�[�
+]�[�]JNۛ��ۛ\��[�]Y]YJ[�ۙ\��[�ۙJڜ�JJNNۛ�݈ؙ�PۛܙHH
+
+N��ڙO�Y�
+ݛ�ݜ�X[P؛�ٛYٝY
+H�]\��ٝYH�YNۙX[�\
+
+N�Hۛ��ۛ\��ۛܙJ
+NH؝ڈˈ[�XYHۛܙYؘ[�ٛY��B�Nۛ�݈ؙ�Q\��܈H
+\��܎�[�ۛݛ�N��ڙO�Y�
+ݛ�ݜ�X[P؛�ٛYٝY
+H�]\��ٝYH�YNۙX[�\
+
+N�Hۛ��ۛ\��\��܊\��܊NH؝ڈˈ[�XYHۛܙYؘ[�ٛY��B�Nۛ�݈[\H\ޛ�Ȋ
+N��ۚ\ُ�ڙ�O�[\ݘ\�YH�YNY�
+ݛ�ݜ�X[P؛�ٛY
+H�]\���HY�
+�ݛ؛ۈOOH�[��ܚXȊHY�
+\�\ܛًۜ��ٞJB��݈�]ȑ\��܊�\ݜ�X[H�\ܛۜو\ț�Ș�ٞH�Nۛ�݈�XY\�H�\ܛًۜ��ٞK�ٝ�XY\�
+Nۛ�݈�[Y]܈H�]Ȑ[��ܚXԔѕ�[Y]܊
+N�H�܈]ؚ]
+ۛ�݈ș]�[�]HHو\�ٔԑTݜ�X[J�XY\�ڙۘ[�X�ܝ�ڙۘ[��\]Z\�Q]�[�\�Z[�]܎��YK��][]���YK�X^��[Y\ΈQ�USӐVԔїє�SQT˂�X^ݘ[�]\ΈPVѓԑQԓՓ�ԑTԓӔїЖUT˂�JJH�[Y]܋��ؙ\܊]�[�]JN]ؚ]�ܝ؜�
+]�[�]JNY�
+�[Y]܋�\ћۙJ
+JH��XZ΂�B��[Y]܋�\ܙ\�ۙJ
+NH�[�[H؛�ٛ[��[X\ٔ�XY\��XY\�NB�H[وY�
+�ݛ؛ۈOOH�ܙ[�ZH�H]ؚ]X؝[][]Sܙ[�RTԑTݜ�X[J�\ܛًۜڙۘ[�X�ܝ�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�ۛ�ݛYU[�[ۙN��YK�ە�[Y]Y]�[���ܝ؜��JNH[و]ؚ]X؝[][]QٛZ[�TԑTݜ�X[J�\ܛًۜڙۘ[�X�ܝ�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�ە�[Y]Y]�[���ܝ؜��JNB�ؙ�PۛܙJ
+NH؝ڈ
+\��܊HY�
+ݛ�ݜ�X[P؛�ٛY
+HۙX[�\
+
+N�]\��B�ؙ�Q\��܊^\��[X�ܝYȊڙۘ[˜�X\ۛ�ψ\��܊H�\��܊NB�N]Y]YSZXܛݘ\ڊ
+
+HO��ڙ[\
+
+K�؝ڊ
+\��܊HO�ؙ�Q\��܊\��܊JJNK�[
+
+H�\ݛYQ[X[�ˊ
+N�\ݛYQ[X[�H[�Y�[�YK�؛�ٛ
+�X\ۛ�H�\ݛYQ[X[�ˊ
+N�\ݛYQ[X[�H[�Y�[�Yݛ�ݜ�X[P؛�ٛYH�YNX�ܝ�X�ܝ
+�]ȑӑ^ٜ[ۊ�ۚY[�\؛ۛ�XݙY��X�ܝ\��܈�JNۙX[�\
+
+NY�
+\[\ݘ\�Y
+H�ڙ�\ܛًۜ��ٞO˘؛�ٛ
+�X\ۛ�K�؝ڊ
+
+HO�ߊNK�JN�]\���]Ȕ�\ܛۜيݜ�X[Kݘ]\Έ�\ܛًۜ�ݘ]\˂�ݘ]\ՙ^��\ܛًۜ�ݘ]\ՙ^�XY\�Έ�\ܛًۜ�XY\�˂�JNB��\ޛ�ș�[�ݚ[ۈ[�T\ܝ�ݙڊ��\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N��ۚ\ُ�\ܛُۜ�ٝٛ��SYڝۛ�^
+ț[ٙ[��\K�[ٙ[JN�ۛ�݈X�ܝ؛ܙHHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ�\K�ڙۘ[
+N]�ܝ؜�Y�\ݜ�X[T�\ݛ�H�ܝ؜�YH]ؚ]�ܝ؜�՜ݜ�X[J��\K�ۛ��Y˂�[�Y�[�Y�[�Y�[�Y�X�ܝ؛ܙK�ڙۘ[�
+NH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+N�݈\��܎B�ۛ�݈Y��Xݚ]�T�ݛ؛ۈH�ܝ؜�Y�Y��Xݚ]�T�ݛ؛ێۛ�݈\ݜ�X[T�\ܛۜوHܘ\�ٞUڝۙX[�\
+��ܝ؜�Y��\ܛًۜ�X�ܝ؛ܙK�\ܛܙK�X�ܝ؛ܙK�ڙۘ[�
+N�ۛ�݈ڝ[Z]ȏH
+�\ܛَۜ��\ܛۜيN��\ܛۜوO�ۜU\ؙٓ[Z]XY\�ʝ\ݜ�X[T�\ܛًۜ�XY\�ˈ�\ܛًۜ�XY\�ʎ�]\���\ܛَۜN�ˈY]KܚYKXژ[��[؛ț]\݈�\ٜ��H�ݚY\�\��ܜȘ\țܙ[�\�H�ˈ�\ܛٜۜˈ�[��[�ȘH͌�H�ٞH�ݙڈ[�ԑH�[Y]܈۝[][�\��ˈ][�Ȝݘ]\Ȍ�܈Hޛ�]XȜݜ�X[H�Z[\�K��Y�
+]\ݜ�X[T�\ܛًۜ�ڊH�]\���\ٜ��U\ݜ�X[Q\��ܔ�\ܛۜي\ݜ�X[T�\ܛًۜX�ܝ؛ܙK�ڙۘ[
+NB��ˈ�\�^ܙXZ܈H�]]�H[��ܚXȝڜ�H�ܛX]
+[��ܚXȔԑH�܈ݜ�X[Z[�ˈ[�H�]]�H[��ܚXȒ�ӓ�ژ\H�܈�ۋ\ݜ�X[Z[�ʋۈ�܈\ܝ�ݙڂ�ˈ�ݝ[�Ț]\ȝڜ�KY\]Z]�[[�Ȉ�[��ܚXȋ�ڝݝ\țX\[�ȘB�ˈݜ�X[Z[�țY]H�\]Y\݈
+]KYٛ�ܝ[[X\�JHۈH�\�^ٜܚ[ۈ۝[�Z[�ˈH؛YK]ڜ�H�\݈]�[݈[�ٝ�Y��\�Y
+ܙKY[Z]Y�ݙڈB�ˈܛܜ˜�ݛ؛ۈ��[�ڈ[�ݙXYوݜ�X[Z[�ȝ�ݙڈ�]ˈۛ\ق�ˈ�\�^8���[��ܚXȚ\�HۈH؛YK]ڜ�HۚY[�
+[��ܚXʈݜ�X[\ȝ�ݙڂ�ˈ[�ژ[�ٙ��ۛ�݈ڜ�T�ݛ؛ێ�\[وY��Xݚ]�T�ݛ؛ۈB�Y��Xݚ]�T�ݛ؛ۈOOH��\�^�Ȉ�[��ܚXȈ�Y��Xݚ]�T�ݛ؛ێ�ˈڙ[�\ݜ�X[H[�ۚY[�\وH؛YH�ݛ؛ۋ\܈�ݙڈ[�ژ[�ٙ��ˈܛܜ˜�ݛ؛ۈ�[�ۘ][ۈ\țۛH�YYYڙ[��ݚY\��ݝ[�țX\ˈȘHY��\�[��ݛ؛ۈ
+K�ˋܙ[�RHۚY[�8���[��ܚXȝ\ݜ�X[JK��Y�
+ڜ�T�ݛ؛ۈOOH�\K��ݛ؛ۊHY�
+�\K�ݜ�X[H	��\ݜ�X[T�\ܛًۜ��ٞJH�]\��ڝ[Z]ʂ��[Y]YY]Tݜ�X[J�\ݜ�X[T�\ܛًۜ�ڜ�T�ݛ؛ۋ��\K�ۙ^OOH�YK�X�ܝ؛ܙK�ڙۘ[�
+K�
+NB�ۛ�݈�ٞHH]ؚ]�XY�ܙYܛݛ��ٞJ�\ݜ�X[T�\ܛًۜ��[ً�[�Y�[�Y�X�ܝ؛ܙK�ڙۘ[�
+NY�
+ڜ�T�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊH\�ٔ�\ܛٜۜӛ۔ݜ�X[Q[��[ܙJ��ӓ��\�ي�ٞJH\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ���
+NB�ۛ�݈XY\�ȏH�]ȒXY\�ʞȈ�ۛ�[�]\H���\X؝[ۋڜۛ��JNۜU\ؙٓ[Z]XY\�ʝ\ݜ�X[T�\ܛًۜ�XY\�ˈXY\�ʎ�]\���]Ȕ�\ܛۜي�ٞKȜݘ]\Έ\ݜ�X[T�\ܛًۜ�ݘ]\ˈXY\�ȟJNB��ˈܛܜ˜�ݛ؛ێ�X؝[][]HH\ݜ�X[H�\ܛۜو[��KY[Z][�B�ˈۚY[�	܈ڜ�H�ܛX]
+�]\ٜȝH؛YH�[�ۘ][ۈ[���\ݜ�Xݝ\�H\ˈۛ��\�؝[ۈ\��ʋ��Y�
+�\K�ݜ�X[H	��\ݜ�X[T�\ܛًۜ��ٞJHY�
+ڜ�T�ݛ؛ۈOOH�[��ܚXȊHˈ[��ܚXȔԑH\ݜ�X[H
+[�ۋ��\�^
+H8����[�ۘ]HȘۚY[�	܈�ܛX]�ۛ�݈[��ܚXԔшH�]Ȕ�\ܛۜي\ݜ�X[T�\ܛًۜ��ٞKݘ]\Έ\ݜ�X[T�\ܛًۜ�ݘ]\˂�XY\�Έ�ۛ�[�]\H���^ٝ�[�\ݜ�X[H���ؘڙKXۛ��ۈ����˘ؘڙH��ۛ��Xݚ[ێ��ٙ\X[]�H��K�JNY�
+�\K��ݛ؛ۈOOH�ܙ[�ZH�H�]\��ڝ[Z]ʂ��[�ۘ]P[��ܚXԝ�X[UӜ[�RJ[��ܚXԔыݜ�Xݎ��YK�ڙۘ[�X�ܝ؛ܙK�ڙۘ[�JK�
+NB�Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊH�]\��ڝ[Z]ʂ��[�ۘ]P[��ܚXԝ�X[Uԙ\ܛٜۜʘ[��ܚXԔыݜ�Xݎ��YK�ڙۘ[�X�ܝ؛ܙK�ڙۘ[�JK�
+NB�Y�
+�\K��ݛ؛ۈOOH�ٛZ[�H�H�]\��ڝ[Z]ʂ��[�ۘ]P[��ܚXԝ�X[Uљ[Z[�J[��ܚXԔыݜ�Xݎ��YK�ڙۘ[�X�ܝ؛ܙK�ڙۘ[�JK�
+NB�B�ˈݚ\�ܛܜ˜�ݛ؛ۈݜ�X[Z[�ȘۛX�܎�X؝[][]H
+Ȝ�KY[Z]�ۛ�݈�\܈H]ؚ]�\ٜ��R[�ۛ\]T�\ܛٜۜՙ\�Z[�[
+�ڜ�T�ݛ؛ۈOOH�ܙ[�ZH��ȘX؝[][]Sܙ[�RTԑTݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�ۛ�ݛYU[�[ۙN��YK�JB��ڜ�T�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȂ�ȘX؝[][]T�\ܛٜۜԔєݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[��[Y][ێ��\K�ۙ^OOH�YHȈ�ۙ^���X�Xȋ�ݛܐ]\�Z[�[��YK��\]Z\�Pۛ\]Y\�Z[�[��YK�JB��ڜ�T�ݛ؛ۈOOH�ٛZ[�H��ȘX؝[][]QٛZ[�TԑTݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JB��X؝[][]TԑT�\ܛۜي\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JK�
+N�]\��ڝ[Z]ʂ��۔ݜ�X[R�\ܛۜي��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+K�
+NB��ˈ�ۋ\ݜ�X[Z[�Șܛܜ˜�ݛ؛ێ�X؝[][]H
+Ȝ�KY[Z]�ۛ�݈�\܈H]ؚ]�\ٜ��R[�ۛ\]T�\ܛٜۜՙ\�Z[�[
+�X؝[][]S�۔ݜ�X[T�\ܛۜي�\ݜ�X[T�\ܛًۜ�ڜ�T�ݛ؛ۋ��\K�ۙ^OOH�YK�X�ܝ؛ܙK�ڙۘ[�
+K�
+N�]\��ڝ[Z]ʂ��۔ݜ�X[R�\ܛۜي��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+K�
+NB��ʊ��
+��[Y]HH�ݚ\ڛۘ[ٜܚ[ۈY[�]Hڝݝݘښ[�Ȝٜܚ[ۋ[ݛ�Yݘ]K��
+�H�[ܙH\���[�țۛHۈH]\��]�HY�\�\Ȝݘؙ\ܙ�[�\ܛۜق�
+�ۛ��\�\ȝH�\ٛ�YXY\���Z[Y[�[�ۛ\]H][\țX]�HB�
+�YܝYٜܚ[ۋ�ڙX݈�ݜˈ]]�Yڜݜ�Y\ˈ[�ܘYY[�ݘ]H[�ݘڙY��
+�\ޛ�ș�[�ݚ[ۈ[�T�ݚ\ڛۘ[ۛ��\�؝[ە\����\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�Y[�Y�YY�Y[�Y�YYٜܚ[ۋ�]�\ݛ��ڙXݔ]�\ݛ��\]Y\ݓܙ\���[X�\���\]Y\ݑٛ�\�][ێ��[X�\��ݛ�ݜ�X[TٝY��ۚ\ُ�ڙ��ݛ�ݜ�X[U؜И[�ٛY�
+
+HO��ۛX[��N��ۚ\ُ�\ܛُۜ�ˈ�\ۛ�H[��[Y]H�ݝH[�[�ًۘ�]ٙ\]�]�]H[�[B�ˈ�ݚ\ڛۘ[Y[�]H\Șۛ��\�YY�HHۛ\]H�\ܛۜو[�ۚY[�Sы��ۛ�݈�\]Y\ݕ\ݜ�X[HH�\\�T�\]Y\ݕ\ݜ�X[J�\Kۛ��Yʎۛ�݈X�ܝ؛ܙHHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ�\K�ڙۘ[
+N]�ܝ؜�Y�\ݜ�X[T�\ݛ�H�ܝ؜�YH]ؚ]�ܝ؜�՜ݜ�X[J��\K�ۛ��Y˂�[�Y�[�Y�[�Y�[�Y�X�ܝ؛ܙK�ڙۘ[��\]Y\ݕ\ݜ�X[K��ݝK�
+NH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+N�݈\��܎B�ۛ�݈\ݜ�X[T�\ܛۜوHܘ\�ٞUڝۙX[�\
+��ܝ؜�Y��\ܛًۜ�X�ܝ؛ܙK�\ܛܙK�X�ܝ؛ܙK�ڙۘ[�
+NY�
+]\ݜ�X[T�\ܛًۜ�ڊHˈH�ݚ\ڛۘ[�\]Y\݈؛��݈\و�ݚY\�XYۛܝX܈�܈�X۝�\�K[��ˈ]\݈�]�\�^ܙH[Hښ[H�ݚ[�ȘHٜܚ[ۈY[�]K���ڙ\ݜ�X[T�\ܛًۜ��ٞO˘؛�ٛ
+
+K�؝ڊ
+
+HO�ߊN�]\��؛�]^�Y\ݜ�X[Q\��ܔ�\ܛۜي\ݜ�X[T�\ܛۜيNB��]X؝[][]Y�؝]؞T�\ܛَۜ�HX؝[][]YH�\K�ݜ�X[B�ș�ܝ؜�Y�Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȂ�Ș]ؚ]X؝[][]T�\ܛٜۜԔєݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[��[Y][ێ��\K�ۙ^Ȉ�ۙ^���X�Xȋ�ݛܐ]\�Z[�[��YK��\]Z\�Pۛ\]Y\�Z[�[��YK�JB���ܝ؜�Y�Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZH��Ș]ؚ]X؝[][]Sܙ[�RTԑTݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�ۛ�ݛYU[�[ۙN��YK�JB���ܝ؜�Y�Y��Xݚ]�T�ݛ؛ۈOOH�ٛZ[�H��Ș]ؚ]X؝[][]QٛZ[�TԑTݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JB��]ؚ]X؝[][]TԑT�\ܛۜي\ݜ�X[T�\ܛًۜڙۘ[�X�ܝ؛ܙK�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JB��]ؚ]X؝[][]S�۔ݜ�X[T�\ܛۜي�\ݜ�X[T�\ܛًۜ��ܝ؜�Y�Y��Xݚ]�T�ݛ؛ۋ��\K�ۙ^OOH�YK�X�ܝ؛ܙK�ڙۘ[��YK�
+NH؝ڈ
+\��܊HX�ܝ؛ܙK�\ܛܙJ
+NY�
+J\��܈[�ݘ[�ٛو�\ܛٜۜՙ\�Z[�[\��܊JH�݈\��܎ؚY[Tݜ�X[Z[�ԛܝ�\ܛۜي�Y[�Y�YY�ٜܚ[ےQ��\]Y\ݑٛ�\�][ۋ�\ޛ�Ȋ
+HO�]ؚ]ݛ�ݜ�X[TٝY]ؚ]�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO�ٝ[[YYX]J�\ۛ�JJNۛ�݈]\وH�ݚ\ڛۘ[�[�[^�\�]\ّ�ܕ\ݎY�
+]\يH]\ً�ەؚ]
+
+N]ؚ]]\ً�]\َB�Y�
+�\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۊH�]\��Y�
+�Y[�Y�YY�ݘ\��ڙX݈	���ۛ��Xݜ՚]ۛ��Y[�ٜܚ[۔�ڙX݊Y[�Y�YY�ٜܚ[ےQ]�\ݛ
+B�
+H�ܓݛ�Y�ݚ\ڛۘ[ٞJ�Y[�Y�YY��ݚ\ڛۘ[ٞK�Y[�Y�YY�ٜܚ[ےQ�
+N�]\��B�X؛ݛ�[�ݘؙ\ܙ�[�\ܛۜي�\��܋��\ܛًۜ�Y[�Y�YY�ٜܚ[ےQ�ۛ��\�؝[ە�ܐX؛ݛ�[�ʚY[�Y�YY�ٜܚ[ےQ
+K�[�Y�[�Y�
+
+HO�ߋ�
+
+HO�ۛ�݈ݘ]HHٜܚ[ۜ˙ٝ
+Y[�Y�YY�ٜܚ[ےQ
+NY�
+ݘ]JHݘ]K�ٚ\�HH�YNK�
+NK�
+
+HO�ߋ��YK��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ[�Y�[�Y�
+NY�
+\��܋�ݘ]\ȏOOH�[�ۛ\]H�	��Z\ԙX؛ۛ\ي\��܋��\ܛۜيJHۛ�݈�\ܛۜوH�۔ݜ�X[R�\ܛۜي�\��܋��\ܛًۜ��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+NۜU\ؙٓ[Z]XY\�ʝ\ݜ�X[T�\ܛًۜ�XY\�ˈ�\ܛًۜ�XY\�ʎ�]\���\ܛَۜB��]\��\��ܔ�\ܛۜيL��؝]؞H�\]Y\݈�Z[Y�NB�Y�
+��ܝ؜�Y�Y��Xݚ]�T�ݛ؛ۈOOH�ٛZ[�H�	���Vș[�ݝ\����X^ݛڙ[�ȋ�ۛݜو�K�[�۝Y\ʘX؝[][]Y�ݛܔ�X\ۛ�B�
+H�݈�]ȑ\��܊�\ݜ�X[HٛZ[�H�\]Y\݈Y�݈ۛ\]H�NB�X�ܝ؛ܙK�\ܛܙJ
+Nۛ�݈�\ܛۜوH�۔ݜ�X[R�\ܛۜي�X؝[][]Y��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+NۜU\ؙٓ[Z]XY\�ʝ\ݜ�X[T�\ܛًۜ�XY\�ˈ�\ܛًۜ�XY\�ʎ�ۛ�݈ۛ[Z]H\ޛ�Ȋ
+N��ۚ\ُ�ۛX[��O�Y�
+��\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۈ��\K�ڙۘ[˘X�ܝY�ݛ�ݜ�X[U؜И[�ٛY
+
+B�
+H�]\���[َB�Y�
+�Y[�Y�YY��ݚ\ڛۘ[ٞH	���\�ݚ\ڛۘ[ٞSݛ�Y
+Y[�Y�YY��ݚ\ڛۘ[ٞKY[�Y�YY�ٜܚ[ےQ
+B�
+H�]\���[َB�ۛ�݈ܙY[�X[H^�Xݐ]]
+�\K��]ҙXY\�ʎۛ�݈\�ڜݙYHؙٜܚ[ە�Xښ[�ʚY[�Y�YY�ٜܚ[ےQ
+Nۛ�݈]�Tݘ]HHٜܚ[ۜ˙ٝ
+Y[�Y�YY�ٜܚ[ےQ
+N]�\ݛܙY\ݜ�X[N���]\��\O\[و\ٜ�X[^�U\ݜ�X[Tݘ]O��[�Y�[�YY�
+[]�Tݘ]H	��\�ڜݙY˛\ݕ\ݜ�X[JH�H�\ݛܙY\ݜ�X[HH\ٜ�X[^�U\ݜ�X[Tݘ]J�\�ڜݙY�\ݕ\ݜ�X[K�ۛ��Y˂�
+NH؝ڈً�؜���ۜ��\\݈\ݜ�X[H�܈ٜܚ[ۈ	ڙ[�Y�YY�ٜܚ[ےQ�ۚXيM�_KYۛܚ[�؋�
+NB�B�ۛ�݈\ݜ�X[Tݘ]N�]]X�U\ݜ�X[Tݘ]HH\ݕ\ݜ�X[N�]�Tݘ]O˛\ݕ\ݜ�X[Hψ�\ݛܙY\ݜ�X[O˛\ݕ\ݜ�X[K�\ݜ�X[P�T�ݚY\���]ȓX\
+�]�Tݘ]O˝\ݜ�X[P�T�ݚY\�ψ�\ݛܙY\ݜ�X[O˝\ݜ�X[P�T�ݚY\��
+K�ݜݜ�X[T�\]Y\ݓܙ\��]�Tݘ]O˗ݜݜ�X[T�\]Y\ݓܙ\��ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\���]�Tݘ]O˗ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\��ț�]ȓX\
+]�Tݘ]K�ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\�B��[�Y�[�Y�Nۛ�݈\ݜ�X[U\]HH\T�\]Y\ݕ\ݜ�X[J�\ݜ�X[Tݘ]K��\]Y\ݕ\ݜ�X[K�ۘ\ڛ݋��\]Y\ݓܙ\��ۛ��Y˂�
+Nˈ�Xۛ�ݜ�X݈H�[�[�ș^XݛH\ȝH�[\[[�Hٜˈ�]ٙ\]�ˈ�]�]H[�[\Ȝݘؙ\ܙ�[�ݚ\ڛۘ[\��\ș\�X�Hۛ[Z]Y��ˈ\Ț\ȝژ]ٛ�ZX[Ȝ�ݜȝܚ][�ȘHݙݛ�]�X�]Y�Xڙ]�Y�ܙB�ˈX�\ښ[�ȝH�]۞HYܝYXY\�[�ۛ��Y[�]��ܝ�\ܛۜٔݘ\�؜ٜ��\�ˊ
+Nۛ�݈�ԝܙHB�\�ڜݙY˘[[�\ژHOOH�YH��\K��]ҙXY\�ֈ�[ܙK[�˜ݛܙH�HOOH��YH�ۛ�݈\ٜ�[�^H�\K�Y\ܘYٜ˙�[�\ݒ[�^
+�
+Y\ܘYيHO�Y\ܘYً��ۙHOOH�\ٜ���
+Nۛ�݈[\ܘ[[�]�\��[\ܘ[[�]H\ܚ\ݘ[�[�^��\K�Y\ܘYٜ˛[�ݚ����\ٜ�[�^�H�Ȟ]\ݕ\ٜ��؝]؞SY\ܘYٜ՛ӛܙJ�ܙ\K�Y\ܘYٜ֝\ٜ�[�^WK�Y[�Y�YY�ٜܚ[ےQ�\ٜ�[�^�\ٜ�[�^�
+V̗K�B��ߊK�Nۛ�݈ܙY[�X[�[�ٜ��[�B��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ��ۛ�݈ۛݛ�Hۛݛ�ٜܚ[ےXY\��ܔ�\]Y\݊��\K�Y[�Y�YY�ٜܚ[ےQ�ۛ��Y˂�
+N]�ڙXݔ]H]�\ݛ�]]�ڙXݔ]�ݚ\ڛۘ[H]�\ݛ�۝\�وOOH�ݙ�ڝ؝�\ڛ�
+�ۛ[Z]ܜ�ݚ\ڛۘ[ݝ\���
+
+HO�Y�
+�Y[�Y�YY�^XݙY[�ݛ�Y	���[YؘސYܝ[ە\�ٝ\՛�ݛ�Y
+Y[�Y�YY�ٜܚ[ےQ
+B�
+H�ܓݛ�Y�ݚ\ڛۘ[ٞJ�Y[�Y�YY��ݚ\ڛۘ[ٞK�Y[�Y�YY�ٜܚ[ےQ�
+N�݈�]ȑ\��܊�Yؘވٜܚ[ۈݛ�\�ژ[�ٙ\�[�ȘYܝ[ۈ�NB�Y�
+�Y[�Y�YY�ݘ\��ڙX݈	���ۛ��Xݜ՚]ۛ��Y[�ٜܚ[۔�ڙX݊Y[�Y�YY�ٜܚ[ےQ]�\ݛ
+B�
+H�ܓݛ�Y�ݚ\ڛۘ[ٞJ�Y[�Y�YY��ݚ\ڛۘ[ٞK�Y[�Y�YY�ٜܚ[ےQ�
+N�݈�]ȑ\��܊�ٜܚ[ۈ�ڙX݈ژ[�ٙ\�[�Ȝ�ݚ\ڛۘ[ZYܘ][ۈ�NB�ˈ�ڙX݈ܙX][ۋܙX]�X�][ۈ�[ۙ܈ȝH؛YH�[�ؘݚ[ۈ\ȝB�ˈ\���Xښ[�ˈ�ݝK[�XY\�ۛ��\�X][ۋ�Hؘ[ܚ]H�Z[\�B�ˈ]\݈X]�HH�ݚ\ڛۘ[�ڙX݈[�Y[�]HڛۛH[�ژ[�ٙ��ۛ�݈]ݘ]HHٜܚ[ےQ�Y[�Y�YY�ٜܚ[ےQ��ڙXݔ]�\�ڜݙY˜�ڙXݔ]ψ]�\ݛ�]��ڙXݔ]�ݚ\ڛۘ[�\�ڜݙY˜�ڙXݔ]�Ȝ\�ڜݙY��ڙXݔ]�ݚ\ڛۘ[��]�\ݛ�۝\�وOOH�ݙ��ڝ�[[ݙN�]�\ݛ�ڝ�[[ݙK�H\Ȕ\�X[ٜܚ[۔ݘ]O�\Ȕٜܚ[۔ݘ]N�ڙXݔ]H�\ۛ�Tٜܚ[۔�ڙXݔ]
+]�\ݛ]ݘ]Kۛ��Yʎ�ڙXݔ]�ݚ\ڛۘ[H]ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YNY�
+��ڙXݔ]�ݚ\ڛۘ[	���
+]�\ݛ�۝\�وOOH�XY\��]�\ݛ�۝\�وOOH�[��\��Y�B�
+H�݈�]ȑ\��܊��ݚ\ڛۘ[�ڙX݈�KX]�X�][ۈ�Z[Y�NB�[�ݜ�T�ڙX݊�ڙXݔ][�Y�[�Y]�\ݛ�ڝ�[[ݙJNݛܙU\��[\ܘ[
+[\ܘ[[�]�\ܚ\ݘ[�ۛ�[��ؚ܎�X؝[][]Y�ۛ�[��\َؙ�X؝[][]Y�\ؙوψ�T�וTБы�[ٙ[�X؝[][]Y�[ٙ[��ڙXݔ]�ٜܚ[ےQ�Y[�Y�YY�ٜܚ[ےQ��ԝܙK�JN؝�Tٜܚ[ە�Xښ[�ʚY[�Y�YY�ٜܚ[ےQY\ܘYِ۝[���\K�Y\ܘYٜ˛[�ݚ�\��Ԛ[�ِݜ�][ێ�\�ڜݙY˝\��Ԛ[�ِݜ�][ۈψ�ۛ�٘ݝ]�U^ۛU\��Έ\�ڜݙY˘ۛ�٘ݝ]�U^ۛU\��ȏψ��ڙXݔ]��ڙXݔ]�ݚ\ڛۘ[�ܙY[�X[�[�ٜ��[�����Y[�Y�YY�Yܝ[ۑ�[�ٜ��[��Ȟș�[�ٜ��[��Y[�Y�YY�Yܝ[ۑ�[�ٜ��[�B��ߊK����\ݜ�X[U\]K�ژ[�ٙ�Ȟț\ݕ\ݜ�X[N�ٜ�X[^�U\ݜ�X[Tݘ]J\ݜ�X[Tݘ]JHB��ߊK����ۛݛ��ȞXY\�ٜܚ[ےY�ۛݛ��ٜܚ[ےY�XY\��[YN�ۛݛ��XY\��[YK�B��ߊK�JNJNۛ�݈ݘ]HHٝܐܙX]Tٜܚ[ۊ�Y[�Y�YY�ٜܚ[ےQ��ڙXݔ]��ڙXݔ]�ݚ\ڛۘ[Ȉ�ݙ���XY\���ܙY[�X[�[�ٜ��[��ۛ��Y˂�
+NY�
+\ݜ�X[U\]K�ژ[�ٙ
+HY�
+\ݜ�X[Tݘ]K�\ݕ\ݜ�X[JHݘ]K�\ݕ\ݜ�X[HH\ݜ�X[Tݘ]K�\ݕ\ݜ�X[NH[و[]Hݘ]K�\ݕ\ݜ�X[NB�ݘ]K�\ݜ�X[P�T�ݚY\�H\ݜ�X[Tݘ]K�\ݜ�X[P�T�ݚY\�Y�
+\ݜ�X[Tݘ]K�ݜݜ�X[T�\]Y\ݓܙ\�OOH[�Y�[�Y
+Hݘ]K�ݜݜ�X[T�\]Y\ݓܙ\�H\ݜ�X[Tݘ]K�ݜݜ�X[T�\]Y\ݓܙ\�H[و[]Hݘ]K�ݜݜ�X[T�\]Y\ݓܙ\�B�Y�
+\ݜ�X[Tݘ]K�ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\�Hݘ]K�ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\�B�\ݜ�X[Tݘ]K�ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\�H[و[]Hݘ]K�ݜݜ�X[T�\]Y\ݓܙ\��T�ݚY\�B�Y�
+\ݜ�X[U\]K��\ٝؘڙJHݘ]K�ؘڙP[�[]X܋�\ݔ�\]Y\ݐ�ٞHH�[B�B�Y�
+ۛݛ�HX�\ڒۛݛ�ٜܚ[ےXY\�ۛݛ�ݘ]KܙY[�X[�[�ٜ��[�
+N[وݘ]K�ܙY[�X[�[�ٜ��[�HܙY[�X[�[�ٜ��[�Y�
+Y[�Y�YY�Y\�OOHʈ؜ٜ��RXY\��[Y\ʜ�\K��]ҙXY\�ʎݘ]K��ڙXݔ]H�ڙXݔ]ݘ]K��ڙXݔ]�ݚ\ڛۘ[H�ڙXݔ]�ݚ\ڛۘ[Y�
+Y[�Y�YY�Yܝ[ۑ�[�ٜ��[�
+Hݘ]K��[�ٜ��[�HY[�Y�YY�Yܝ[ۑ�[�ٜ��[�B�Y�
+]�\ݛ�ڝ�[[ݙJHݘ]K�ڝ�[[ݙHH]�\ݛ�ڝ�[[ݙNݘ]K�Y\ܘYِ۝[�H�\K�Y\ܘYٜ˛[�ݚݘ]K�ٚ\�HH�YNY�
+ܙY[�X[
+H؜\�SYؘޑؘۛ[]]
+�\Kۛ��YˈܙY[�X[
+Nٝٜܚ[ې]]
+�ݘ]K�ٜܚ[ےQ�ܙY[�X[�^�Xݔ�ݚY\�XY\��\K��]ҙXY\�ʈ[�Y�[�Y�
+NB�؜\�P�[[�Ԝ�Y�^
+ݘ]K�ٜܚ[ےQ�\K�ޜݙ[JN؜\�Tٜܚ[ےXY\�ʜݘ]K�ٜܚ[ےQ�\K��]ҙXY\�ʎ�]\���YNNؚY[Tݜ�X[Z[�ԛܝ�\ܛۜي�Y[�Y�YY�ٜܚ[ےQ��\]Y\ݑٛ�\�][ۋ�\ޛ�Ȋ
+HO�]ؚ]ݛ�ݜ�X[TٝY]ؚ]�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO�ٝ[[YYX]J�\ۛ�JJNۛ�݈]\وH�ݚ\ڛۘ[�[�[^�\�]\ّ�ܕ\ݎY�
+]\يH]\ً�ەؚ]
+
+N]ؚ]]\ً�]\َB�Y�
+�\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۊH�]\��Y�
+ݛ�ݜ�X[U؜И[�ٛY
+
+JHX؛ݛ�[�ݘؙ\ܙ�[�\ܛۜي�X؝[][]Y�Y[�Y�YY�ٜܚ[ےQ�ۛ��\�؝[ە�ܐX؛ݛ�[�ʚY[�Y�YY�ٜܚ[ےQ
+K�[�Y�[�Y�
+
+HO�ߋ�
+N�]\��B�Y�
+�Y[�Y�YY�ݘ\��ڙX݈	���ۛ��Xݜ՚]ۛ��Y[�ٜܚ[۔�ڙX݊Y[�Y�YY�ٜܚ[ےQ]�\ݛ
+B�
+H�ܓݛ�Y�ݚ\ڛۘ[ٞJ�Y[�Y�YY��ݚ\ڛۘ[ٞK�Y[�Y�YY�ٜܚ[ےQ�
+N�]\��B�Y�
+J]ؚ]ۛ[Z]
+
+JJH�]\��X؛ݛ�ۛ��\�؝[ە\ؙي�X؝[][]Y�\ؙوψ�T�וTБы�X؝[][]Y�[ٙ[�Y[�Y�YY�ٜܚ[ےQ�ۛ��\�؝[ە�ܐX؛ݛ�[�ʚY[�Y�YY�ٜܚ[ےQ
+K�
+Nۛ�݈ݘ]HHٜܚ[ۜ˙ٝ
+Y[�Y�YY�ٜܚ[ےQ
+NY�
+ݘ]JHݘ]K�ٚ\�HH�YNK�
+
+HO�ߋ��YK��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ[�Y�[�Y�
+N�]\���\ܛَۜB��ʊ��
+�ڙXڈڙ]\�H\ݜ�X[H�ۜؘڙH\țZٛHݚ[؜�H�܈\
+�ٜܚ[ۋ��]\��ȝ�YHڙ[�H؜�]\[�ȝ؜Ȝݘؙ\ܙ�[Hٛ�ڝ[��
+�Hݜ��[�ؘڙHڛ�݋��
+��
+�ڙ[��YKܝZYHۛ\Xݚ[ۈڛݛ�Hښ\Y�H؜�Y\��\^YY�
+�H�[
+[�ۛ\XݙY
+H�\]Y\݈�ٞKۈۛ\Xݚ[�ț�݈۝[�ٝXق�
+�Y��\�[��]\Ș[��\݈HؘڙHH؜�Y\��\݈ZYȜ�\ٜ��K��
+��[�ݚ[ۈ\ИXڙU؜�Jݘ]N�ٜܚ[۔ݘ]JN��ۛX[�ۛ�݈؜�]\Hݘ]K�؜�]\ˈ�\]Z\�H]X\݈ۙHݘؙ\ܙ�[؜�]\�Y�ܙHۘZ[Z[�ȝ؜�K��ˈ\Ș[ۈ؝\ȝH�ܘْٙ\؜�HX\�K\�]\���[݋��Y�
+]؜�]\˛\ݕ؜�]\]
+H�]\���[َ�ۛ�݈�ٚ[HH�\ۛ�U؜�Z[�Ԝ�ٚ[J�ݘ]K�\ݕ\ݜ�X[O˛[ٙ[�ݘ]K�\ݕ\ݜ�X[O˜�ݛ؛ۋ�ݘ]K��\ۛ�Yۛ��\�؝[ە�
+NY�
+\�ٚ[JH�]\���[َ�ˈۛܙN�؜�N�ٙ\ٜܚ[ۜΈۛ�ڙ\�؜�HY�H\݈؜�]\؜ȝڝ[��ˈ�ڛ�ݜˈH؜�Y\��\�\țۘو\�ڛ�݋ۈ�刜�ݚY\ȘB�ˈؙ�]HX\�ڛ�ښ[Hݚ[^\�[�ȚY�H؜�Y\�\ȜݛܜY�ˈ
+K�ˈڜ�ݚ]��XZٜ��\Y�ؙ\܋[]�[�Z[\�JK��Y�
+؜�]\��ܘْٙ\؜�JH�]\��]K��݊
+HH؜�]\�\ݕ؜�]\]�ٚ[K�\Ȋ��B���]\��]K��݊
+HH؜�]\�\ݕ؜�]\]�ٚ[K�\΂�B��ʊ��
+�XڙHڙ]\�Ȝښ\ܝZYHۛ\Xݚ[ۈ
+���K�H[�Y�YYؘڙKYXۛ�ۚX܂�
+�ݜ�]Yވ�ݚY\ȝHS�S�
+ۙ]؜�H8����ݙX݈H؜�H�Y�^�Hښ\[�
+�ۛ\Xݚ[ێȘۛۋX�\݋؛ۛY�[]ܚ]H8���]]ۛ\X݊K�]HؘڙH]\݂�
+�PՕPSHݚ[�H]�H
+ؘڙR\Ӛ]�X8�%H\ИXڙU؜�X[YHڙXڊH8�%Hݘ[B�
+�ۙ]؜�Hݜ�]YވڛܙHؘڙH\ș^\�Y]\݈�Ոښ\ۛ\Xݚ[ۈ
+HؘڙB�
+�\ȘۛȘۛ\Xݚ[ۈ\ș��YH[��YXٜțۙۚ[�Ȝ�XYۜ݊K��ۋXۛ��Y[��
+�ݜ�]Yވ8���ؘڙR\Ӛ]�X[ۙH
+HYؘވ�Z]�[܋�]KZY[�X؛
+K��
+�^ܝ�[�ݚ[ۈXڙTښ\ۛ\X݊�Xۛ���\ݛ�Ȝݜ�]Yގ�ؘڙTݜ�]YގȘۛ��Y[���ۛX[�NXڙY]��[X�\�H�[�ؘڙR\Ӛ]�N��ۛX[��N��ۛX[�Y�
+YXۛ�˜�\ݛ�ۛ��Y[�
+H�]\��ؘڙR\Ӛ]�Nˈۛ��Y[�ۙ]؜�H؛�ȝȜښ\�]ӓHY�HؘڙH\ȘXݝX[H]�K��Y�
+ݜ�]Yޕ؛�՘\�Z[�ʙXۛ���\ݛ�ݜ�]YފJH�]\��ؘڙR\Ӛ]�NˈۛۋX�\݈ȘۛۋY�[]ܚ]N�ۉ݈ښ\8�%]]ۛ\X݋���]\���[َB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈ؜وΈ�ܛX[ۛ��\�؝[ۈ\��8�%�[\[[�B�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��^ܝ�[�ݚ[ۈY\�ٔ�X؛\ؙي�ݜ��[��؝]؞U\ًؙ�ۛ�[�X][ێ�؝]؞U\ًؙ�N�؝]؞U\ؙوۛ�݈Y\�ٙ�؝]؞U\ؙوH[�]ڙ[�Έؙ�Uڙ[�ݛJ�؝\��[��[�]ڙ[�ˈۛ�[�X][ۋ�[�]ڙ[�׋���X؛\ؙوڙ[�ݙ\��݈��
+K�ݝ]ڙ[�Έؙ�Uڙ[�ݛJ�؝\��[��ݝ]ڙ[�ˈۛ�[�X][ۋ�ݝ]ڙ[�׋���X؛\ؙوڙ[�ݙ\��݈��
+K�NY�
+�ݜ��[��ؘڙT�XY[�]ڙ[�ȈOOH[�Y�[�Y�ۛ�[�X][ۋ�ؘڙT�XY[�]ڙ[�ȈOOH[�Y�[�Y�
+HY\�ٙ�ؘڙT�XY[�]ڙ[�ȏHؙ�Uڙ[�ݛJ�؝\��[��ؘڙT�XY[�]ڙ[�ˈۛ�[�X][ۋ�ؘڙT�XY[�]ڙ[�׋���X؛\ؙوڙ[�ݙ\��݈��
+NB�Y�
+�ݜ��[��ؘڙPܙX][ے[�]ڙ[�ȈOOH[�Y�[�Y�ۛ�[�X][ۋ�ؘڙPܙX][ے[�]ڙ[�ȈOOH[�Y�[�Y�
+HY\�ٙ�ؘڙPܙX][ے[�]ڙ[�ȏHؙ�Uڙ[�ݛJ�؝\��[��ؘڙPܙX][ے[�]ڙ[�ˈۛ�[�X][ۋ�ؘڙPܙX][ے[�]ڙ[�׋���X؛\ؙوڙ[�ݙ\��݈��
+NB�ؙ�Uڙ[�ݛJ�Y\�ٙ�[�]ڙ[�˂�Y\�ٙ�ݝ]ڙ[�˂�Y\�ٙ�ؘڙT�XY[�]ڙ[�˂�Y\�ٙ�ؘڙPܙX][ے[�]ڙ[�˂�K���X؛\ؙوڙ[�ݙ\��݈��
+N�]\��Y\�ٙB��ʊ�ۛ\X݋�ݚY\�[�]]�[�[�[^�][ۈݚY[�و\[�YۛHȝH\݈ۛ�\ݛ�
+��[�ݚ[ۈ�X؛�YٝݚY[�ي��\ݛ�ݜ�[�˂��X\ۛ���X؛ݛܔ�X\ۛ�[�Y�[�Y�N�ݜ�[�ȞY�
+\�X\ۛ�H�]\���\ݛ�]\��
+�	ܙ\ݛW��ԙX؛ۚXގ�ݛ܈�\�\��X؛�X؝\و	ܙX\ۛ�K�
+�\وH]�Y[�وX�ݙHȘ[�ݙ\��݈܈[��Xڈ[�ܙ[�\�Hۛ�H��
+NB���[�ݚ[ۈ\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�ڙۘ[�X�ܝڙۘ[[�Y�[�Y��\]Y\ݑٛ�\�][ێ��[X�\��N��ڙڙۘ[˝�ݒY�X�ܝY
+
+NY�
+�\[[�T�\ٝ[��ٜ�\܈��\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۂ�
+H�݈�]ȑӑ^ٜ[ۊ�؝]؞H\[[�Hٛ�\�][ۈژ[�ٙ��X�ܝ\��܈�NB�B��\ޛ�ș�[�ݚ[ۈ[�Pۛ��\�؝[ە\����\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂��\]Y\ݓܙ\���[X�\���\]Y\ݑٛ�\�][ێ��[X�\��ݛ�ݜ�X[TٝY��ۚ\ُ�ڙ��ݛ�ݜ�X[U؜И[�ٛY�
+
+HO��ۛX[��ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��۔ٜܚ[ےY[�Y�YYΈ
+ٜܚ[ےQ�ݜ�[�ʈO��ڙ�N��ۚ\ُ�\ܛُۜ�Y�
+�\[[�T�\ٝ[��ٜ�\܈��\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۂ�
+H�]\��\��ܔ�\ܛۜيLˈ�؝]؞H\[[�Hٛ�\�][ۈژ[�ٙ�NB�ˈKKHK��ڙX݈]	�[�]KKB�ˈ[��XڈXY\�ȝڝۛ�^X\�ٜ�Ț[��XݙY�HܙKZ\�Y\ȜYڛ���ˈ\ț]șٝ�ڙXݔ]
+
+HXڈ\ۛܙN��ڙXݏK���H�XHH^\ݚ[�ˈXY\��\ۛ][ۈ]ڝݝ[ٚY�Z[�Șۛ��Y˝˂�Y�
+\�\K��]ҙXY\�ֈ�[ܙK\�ڙX݈�JHۛ�݈X\�ٜ��ڙX݈H^�Xݔ�ڙXݓX\�ٜ��\K�Y\ܘYٜʎY�
+X\�ٜ��ڙX݊H�\K��]ҙXY\�ֈ�[ܙK\�ڙX݈�HHX\�ٜ��ڙXݎB�ۛ�݈]�\ݛHٝ�ڙXݔ]
+�\K�ޜݙ[K�\K��]ҙXY\�ʎ�ˈKKH��؜\�H]]ܙY[�X[ș�܈�Xڙܛݛ�ۜ�ٜ�ȋKKB�ۛ�݈ܙYH^�Xݐ]]
+�\K��]ҙXY\�ʎ�ˈKKHˈٜܚ[ۈY[�Y�X؝[ۈKKB�ۛ�݈YZ]YH]ؚ]ڝY[�]PYZ\ܚ[ۊ�\Kۛ��Yˈ\ޛ�Ȋ
+HO�ۛ�݈�\ݛH]ؚ]Y[�Y�Tٜܚ[ۊ��\K�]�\ݛ�]�]�\ݛ�۝\�ً��\]Y\ݑٛ�\�][ۋ�ۛ��Y˂�
+Nۛ�݈ۘZ[YYH�\ݛ�\ә]ȟ�\ݛ��ݚ\ڛۘ[Y[�]HOOH�YNY�
+ۘZ[YY
+H]ؚ]ۘZ[Tٜܚ[ۊ�\ݛ�ٜܚ[ےQ
+Nۛ�݈�]�[Y]Pۛ��\�YYY[�]HB�\�\ݛ�\ә]ȉ���\ݛ��ݚ\ڛۘ[Y[�]HOOH�YH	���\ݛ�Y\�OOH΂��]\��ȚY[�Y�YY��\ݛۘZ[YY�]�[Y]Pۛ��\�YYY[�]HNJNۛ�݈ȚY[�Y�YYHHYZ]Yۛ�݈Ȝٜܚ[ےQ\ә]ˈY\�HHY[�Y�YY�H۔ٜܚ[ےY[�Y�YYˊٜܚ[ےQ
+NH؝ڈ
+\��܊Hً�؜���ٜܚ[ۈXYۛܝXș�Z[Y��\��܊NB�Y�
+XYZ]Y�ۘZ[YY
+H]ؚ]ۘZ[Tٜܚ[ۊٜܚ[ےQ
+NY�
+Y[�Y�YY�^XݙY[�ݛ�Y	��[YؘސYܝ[ە\�ٝ\՛�ݛ�Y
+ٜܚ[ےQ
+JH�ܓݛ�Y�ݚ\ڛۘ[ٞJY[�Y�YY��ݚ\ڛۘ[ٞKٜܚ[ےQ
+N�]\��\��ܔ�\ܛۜي��Ș]][�X؝Yٜܚ[ۈ�ݛ��NB�Y�
+�YZ]Y��]�[Y]Pۛ��\�YYY[�]H	���Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��Yʂ�
+H�]\��\��ܔ�\ܛۜي��Ș]][�X؝Yٜܚ[ۈ�ݛ��NB�Y�
+�Y[�Y�YY�ݘ\��ڙX݈	���ۛ��Xݜ՚]ۛ��Y[�ٜܚ[۔�ڙX݊ٜܚ[ےQ]�\ݛ
+B�
+H�ܓݛ�Y�ݚ\ڛۘ[ٞJY[�Y�YY��ݚ\ڛۘ[ٞKٜܚ[ےQ
+N�݈�]ȑ\��܊�ٜܚ[ۈ�ڙX݈ژ[�ٙ\�[�Ȝ�ݚ\ڛۘ[ZYܘ][ۈ�NB�]ؚ]]ؚ]ݜ�X[Z[�ԛܝ�\ܛۜيٜܚ[ےQ�\K�ڙۘ[
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNY�
+�YZ]Y��]�[Y]Pۛ��\�YYY[�]H	���Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��Yʂ�
+H�]\��\��ܔ�\ܛۜي��Ș]][�X؝Yٜܚ[ۈ�ݛ��NB�ˈX\�ٜ�Y\�]�Y�ڙX݋ܙ\ܚ[ۈ]H\Ș[�XYH�Y[�ۜYY[�ȚXY\�΂�ˈݜ�\]�Y�ܙHZ]\�H�ݚ\ڛۘ[�\�Y�Y\�܈�[\[[�H�ܝ؜�˂�ݜ�\ۛ�^X\�ٜ�ʜ�\K�Y\ܘYٜʎY�
+Y[�Y�YY��ݚ\ڛۘ[Y[�]JHۛ�݈�U\ݜ�X[T]\وH\[[�T�U\ݜ�X[T]\ّ�ܕ\ݎY�
+�U\ݜ�X[T]\يH�U\ݜ�X[T]\ً�ەؚ]
+
+N]ؚ]�U\ݜ�X[T]\ً�]\َ\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNB��]\��[�T�ݚ\ڛۘ[ۛ��\�؝[ە\����\K�ۛ��Y˂�Y[�Y�YY�]�\ݛ��\]Y\ݓܙ\���\]Y\ݑٛ�\�][ۋ�ݛ�ݜ�X[TٝY�ݛ�ݜ�X[U؜И[�ٛY�
+NB�ۛ�݈Yؘޑؘۛ[�ݚY\�HܙY�Ș؜\�SYؘޑؘۛ[]]
+�\Kۛ��YˈܙY
+B��[�Y�[�Y�ۛ�݈ٜܚ[۔ݘ]HHٝܐܙX]Tٜܚ[ۊ�ٜܚ[ےQ�]�\ݛ�]�]�\ݛ�۝\�ً��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ���ۛ��Y˂�
+N]ؚ]�Y�ܙU\ݜ�X[P؜\�Q�ܕ\ݏˊ�\Kٜܚ[۔ݘ]JNۛ�݈ٜܚ[۔ڙۘ[Hٜܚ[ۓY�XޘۙTڙۘ[
+ٜܚ[ےQ
+Nۛ�݈ݜ�\ܕ[\ܘ[ݛܘYوB�ٜܚ[۔ݘ]K�[[�\ژH�\K��]ҙXY\�ֈ�[ܙK[�˜ݛܙH�HOOH��YH�ۛ�݈�U\ݜ�X[T]\وH\[[�T�U\ݜ�X[T]\ّ�ܕ\ݎY�
+�U\ݜ�X[T]\يH�U\ݜ�X[T]\ً�ەؚ]
+
+N]ؚ]�U\ݜ�X[T]\ً�]\َ\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNB�]�ڙXݔ]H�\ۛ�Tٜܚ[۔�ڙXݔ]
+]�\ݛٜܚ[۔ݘ]Kۛ��Yʎ�ˈ�ݝ[�Ș[�ۚXވ\�H�\]Y\݈[�[��݈H�ܙ\�HوHݘؙ\ܙ�[�ˈ�\ܛًۜ�؜\�H�݈ۈH�Z[YۚXދ]Yڝ[�[�Ȝ�\]Y\݈ݚ[۝�\��ˈۜ�ٜ�ˈ[�\وHܙ\�\ܚYۙYޛ�ڜ�ۛݜ۞H[�[�T�\]Y\݈ۈ[��ˈۙ\�ۛ�ݜ��[�\��؛��]�\�ݙ\�ܚ]HH�]ٜ�ۙK��ۛ�݈�\]Y\ݕ\ݜ�X[T�ݝHH؜\�T�\]Y\ݕ\ݜ�X[J��\K�ٜܚ[۔ݘ]K�ۛ��Y˂��\]Y\ݓܙ\��
+N�ˈKKHޛ�]XȜ�ڙX݋\�\ۛ][ێ�؜\�HH�]\��[�ȝۛܙ\ݛKKB�ˈY�و�]�[ݜ۞H[��XݙYHޛ�]Xȝۛݜو�܈�ڙX݈]Xݚ[ۋ�ˈ؜\�HHۚY[�	܈ۛܙ\ݛ\�و][��[�H�ڙX݈�Y�ܙB�ˈ[�]Y��YYY�[�ȊۈH�ڙX݈�݈\�ٝȝHۜ��XݙY]
+K��Y�
+�
+ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HOOH��XY[�[�Ȉ�ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HOOH�ڙ[[�[�ȊH	���ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Uۛ\ْY�
+Hۛ�݈؜\�YH؜\�Tޛ�]X՛ۛ�\ݛ
+��\K�ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Uۛ\ْY�
+NY�
+؜\�Y	��ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Rڛ�
+HˈHۛX�[�Yڙ[�ؙH
+͌�ȜYٞX�XڊH؜��Y\ȝH�ڙX݋\�\ۛ][ۂ�ˈݝ]S�Y�\�Hٜ\�]܋H�Y�\�[�ً]�[Y]Hۘ\ڛ݋�ܛ]�ˈ�\�݈ۈ�\ۛ][ۈ\�ڛ�țۛHٙ\Ț]țݛ�[�\˂�ۛ�݈ܛ]Hٜܚ[۔ݘ]K��Y�ڙXڒ[��ؙB�Ȝܛ]�ؙSݝ]
+؜\�Y�^
+B��Ȝ�\ۛ][ێ�؜\�Y�^�Y�ڙXڎ��[Nۛ�݈�\ۛ�YH؜\�Y�\ќ��܂�Ȟ߂��\�ٔ�\ۛ�T�ڙXݔ�\ݛ
+�ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Rڛ��ܛ]��\ۛ][ۋ�
+Nˈ\HH�\ۛ][ۈ8�%�[�H�ڙX݈�H�[[ݙH[�ۜ��۝���ڙXݔ]H\Tޛ�]Xԙ\ۛ][ۊ�ٜܚ[۔ݘ]K��\ۛ�Y��ڙXݔ]�
+Nˈݜ�\Hޛ�]XȜ�ݛ�]�\��ۈHۛ��\�؝[ۈۈHB�ˈ�]�\�ٙ\Ț][�]	܈^۝YY��ۈ[\ܘ[ݛܘYً��ݜ�\ޛ�]Xԛݛ��\ʜ�\JN�ˈ\HHYٞX�XڙY�Y�\�[�ً]�[Y]Hۘ\ڛ݈Yؚ[�݈H�ՋP�Փ��ˈ�ڙX݈
+͌�ʋ�HZ\ܚ[�˙\��ܙYۘ\ڛ݈8����ۜ�\ۛ�\�
+�]]�[�]�ˈݚ[ݘ[\ȝH�؝JK��]�\��ݜȚ[�ȝH�\]Y\݈]��Y�
+ٜܚ[۔ݘ]K��Y�ڙXڒ[��ؙJH�Hۛ�݈�\ۛ�\�B�؜\�Y�\ќ��܈ܛ]��Y�ڙXڈOH�[�ț�]ȓ�ۜ�\ۛ�\�
+B���]Ȕޛ�]XԜ�ؙT�\ۛ�\�ܛ]��Y�ڙXڊNۛ�݈�Y��\ȏH]ؚ]K��[Y]T�ڙXݔ�Y�\�[�ٜʂ��ڙXݔ]��\ۛ�\��]K��݊
+K��\K�ڙۘ[�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNY�
+�Y��\˜[�[^�Y�
+Hً�[��ʂ��Y�\�[�و�Y�
+�[[ݙJN�[�[^�Y	ܙY��\˜[�[^�YKɞܙY��\˘ڙXڙYH
+[��Y\ș�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X�
+NB�H؝ڈ
+JH\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNً�؜���ޛ�]XȜ�Y�\�[�ً]�[Y][ۈ\��܈
+�ۋY�][
+N��JNB�ٜܚ[۔ݘ]K��Y�ڙXڒ[��ؙHH�[َB��ˈ\ؘ[][ێ��XY�ؙHZY[Y�Ȝ�[[ݙH8����Hڙ[�^��ۛ�݈ݚ[٘ZȏHٜܚ[۔ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YNٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�TݘYوB�ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Rڛ�OOH��XY��Ȉ��XY�YY����ڙ[�YY�Y�
+ݚ[٘Zȉ��ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Rڛ�OOH��XY�Hˈ�KY[Yژ�H�܈Hڙ[�ؙHۈ\Ȝ؛YH\��܈[��Xݚ[ۈ\ً��ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HH��ۙH�H[وٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HH�ۙH�B�H[وˈ�ȝۛܙ\ݛ\��]�Y
+�ۋXYٛ�XȘۚY[�܈ښ\Y
+H8�%ڝ�H\��ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HH�ۙH�ٜܚ[۔ݘ]K��Y�ڙXڒ[��ؙHH�[َB�ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Uۛ\ْYH[�Y�[�Yٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Rڛ�H[�Y�[�YB��ˈ[ۈݜ�\[�Hݘ[Hޛ�]XȘ�ؚ܈]ZYڝXڛȘ�Xڈ��ۈB�ˈۛ��\�؝[ۈ\ݛܞH
+�[X[�\ݜܙ[�\�ȸ�%�]�[�țXZڛ�ȝ\ݜ�X[JK��ݜ�\ޛ�]Xԛݛ��\ʜ�\JN�ˈ[�]X[^�HH�ڙX݈Q�T�]ۜ��Xݚ[ۈۈH][\܈�ؙH�\]Y\݂�ˈ�]�\�ܙX]\ȘH�ڙX݈�݈�܈H؝]؞I܈ݙ܈[�[�]�X�]Y�ˈ�Xڙ]
+�ݚY\�XYۛܝXΈ\Y\ȝș]�\�H�ݛ؛ۋ؛Y[�
+K��]ؚ][�]Y��YYY
+��ڙXݔ]�ۛ��Y˂�]�\ݛ�ڝ�[[ݙK��\K�ڙۘ[��\]Y\ݑٛ�\�][ۋ�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊN�ˈX\�Ȝݘ�XYٛ�ٜܚ[ۜȊ\\�[�\ٜܚ[ۋZYԈXۘ]YKXۙKXYٛ�ZY�ˈ�\ٛ�
+K�\وٝZ\�ݛ�ٜܚ[ۈ�]\�H�YٙY�܈ؘڙH؜�Z[�ˈ^[\[ۋ��\ۛ�HHۚY[�\ڙH\�[�QȘHܙH[�\��[ٜܚ[ۈQ�ˈ�XHHXY\�ٜܚ[ے[�^
+٘\�ڙ\Ș[[�^YXY\�ˈ[�۝Y[�ȕY\���ˈX\��Y
+K�Y\�Ȋ�[�ٜ��[�[ۛJH\�[�Ț]�H�Ț[�^[��H8�%�\ۛ][ۂ�ˈڛ�Z[[�H؜��[�Ț\țٙٙ��˂�ˈۘ]YHۙHݘ�XYٛ�șȓ�Ո؜��H\\�[�\ٜܚ[ۋZY
+]XY\�\ˈܙ[�ۙK[ۛJNȝ^H؜��HXۘ]YKXۙKXYٛ�ZY�Z\�\�[�ٜܚ[ۈ\ˈHۙH]ژ\�\ȝHXۘ]YKXۙK\ٜܚ[ۋZYڝ\Ȝ�\]Y\݋ۈق�ˈ�\ۛ�H]�ݙڈH[�^�H]ژ\�Yٜܚ[ۋZY�[YK��ۛ�݈\Л]YTݘ�Yٛ�H\Л]YPۙTݘ�Yٛ�
+�\K��]ҙXY\�ʎۛ�݈\�[�ۚY[�YH�\K��]ҙXY\�ֈ�\\�[�\ٜܚ[ۋZY�Nۛ�݈ژ\�Yٜܚ[ےYH�\K��]ҙXY\�ֈ�Xۘ]YKXۙK\ٜܚ[ۋZY�Nۛ�݈ܙY[�X[�[�ٜ��[�H�\]Y\ݐܙY[�X[�[�ٜ��[�
+��\K��]ҙXY\�˂�ۛ��Y˂�
+Nˈ�\ۛ�H�HHܙ[�ۙH\�[�\ٜܚ[ۋZY܈8�%�܈ۘ]YHۙH8�%�B�ˈH\�[�	܈ژ\�YXۘ]YKXۙK\ٜܚ[ۋZY
+HۛHݘX�H[�Ș�Xڂ�ˈȝH\�[�ٜܚ[ێȞXۘ]YKXۙK\\�[�XYٛ�ZYY[�Y�Y\ȝB�ˈ\�[�
+�Yٛ�
+��݈]Ȝٜܚ[ۊK�X^H�H[�Y�[�Y�܈HX[�ܛYY܂�ˈY�\�؜�X[ݘ�XYٛ��\]Y\݈]؜��Y\ț�Z]\�XY\���ۛ�݈\�[�ۚݜ�[YHH\�[�ۚY[�Yψژ\�Yٜܚ[ےYۛ�݈ڛݛ�\ۛ�T\�[�B�ܙY[�X[�[�ٜ��[�OOH�[	���
+\ٜܚ[۔ݘ]K�\ԝX�Yٛ�\ٜܚ[۔ݘ]K�\�[�ٜܚ[ےY
+H	���
+\Л]YTݘ�Yٛ�H\\�[�ۚY[�Y
+H	���H\\�[�ۚݜ�[YNY�
+ڛݛ�\ۛ�T\�[�
+HY�
+\ٜܚ[۔ݘ]K�\ԝX�Yٛ�
+Hٜܚ[۔ݘ]K�\ԝX�Yٛ�H�YNB�ˈ٘\�ڈH�[XY\�ٜܚ[ے[�^8�%۝�\�ȕY\�H
+ۛݛ�H[�Y\��
+X\��Y
+HXY\�˂�]�\ۛ�Y\�[��ݜ�[�ȟ[�Y�[�Y�܈
+ۛ�݈ڙ^KܙRYHوXY\�ٜܚ[ے[�^
+Hۛ�݈\�ٙH\�ٜٔܚ[ے[�^ٞJٞJNY�
+�\�ٙ˘ܙY[�X[�[�ٜ��[�OOHܙY[�X[�[�ٜ��[�	���\�ٙ�XY\��[YHOOH\�[�ۚݜ�[YB�
+H�\ۛ�Y\�[�HܙRY��XZ΂�B�B�Y�
+�\ۛ�Y\�[�
+Hٜܚ[۔ݘ]K�\�[�ٜܚ[ےYH�\ۛ�Y\�[�؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQ\ԝX�Yٛ���YK�\�[�ٜܚ[ےY��\ۛ�Y\�[��JNH[وY�
+\ٜܚ[۔ݘ]K�\�[�ٜܚ[ےY
+Hˈ\�[�X^H\وY\�Ȋ�[�ٜ��[�
+HY[�Y�X؝[ۋ܈\ۉ݈XYB�ˈ]ș�\�݈�\]Y\݈Y]�\�ڜ݈\ԝX�Yٛ��]X]�H\�[�ٜܚ[ےY�ˈ�[8�%ݘ�ٜ]Y[��\]Y\ݜȝڛ�KX][\�\ۛ][ۋ��ˈY\Hَ�Hښ[Yٛ�ڝ[�[��\ۛ�X�H\�[��\�\ȝ\ˈ��[�ڈۈ]�\�H\���ڝݝY\Hڛ�ۙH\�[�[\܈Yٛ��ˈ�ٝXٜȍL
+ȚY[�X؛و[�\Ȝ\�ٜܚ[ۋ��ۛ�݈[�[�ҙ^HH	ܙ\ܚ[ےQN�ܘ\�[�ۚݜ�[Y_XY�
+\ݘ�Yٛ�\�[�[�[�ӛٙٙ�\ʜ[�[�ҙ^JJHݘ�Yٛ�\�[�[�[�ӛٙٙ�Y
+[�[�ҙ^JNً�[��ʂ�ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_N�ݘ�Yٛ�\�[��\ۛ][ۈ[�[�ș�܈ۚY[�Q	ܘ\�[�ۚݜ�[YK�ۚXيM�_X�
+NB�؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQȚ\ԝX�Yٛ���YHJNB�B�B��ˈ�[�]]ܙY[�X[ȝ\Ȝٜܚ[ۈ�܈�Xڙܛݛ�ۜ�ٜ�˂�ˈ\܈�ݚY\�QۈܙY[�X[Ș\�HݛܙY\�\�ݚY\�8�%�]�[�ˈܛܜ˘ۛ�[Z[�][ۈڙ[�Hٜܚ[ۈݚ]ڙ\Ȝ�ݚY\�țZYXۛ��\�؝[ۂ�ˈ
+K�ˈ[��ܚXȸ���Z[�SX^8���[��ܚXʋ��Y�
+ܙY
+Hۛ�݈�\T�ݚY\�QB��\]Y\ݕ\ݜ�X[T�ݝK��ݚY\�Qς�
+�\]Y\ݕ\ݜ�X[T�ݝK�Y��Xݚ]�T�ݛ؛ۈOOH�[��ܚXȂ�Ȉ�[��ܚXȂ���\]Y\ݕ\ݜ�X[T�ݝK�Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZH���\]Y\ݕ\ݜ�X[T�ݝK�Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȂ�Ȉ�ܙ[�ZH����\]Y\ݕ\ݜ�X[T�ݝK�Y��Xݚ]�T�ݛ؛ۈOOH�ٛZ[�H��Ȉ�ۛٛH���[�Y�[�Y
+Nٝٜܚ[ې]]
+ٜܚ[ےQܙY�\T�ݚY\�Q
+NۙX\�؜�]\]]\ؘ�Y
+ٜܚ[ےQ
+Nȋˈ�KY[�X�HؘڙH؜�Z[�țۈ��\ڈܙY[�X[��ˈۙK][YH�]	܈ۜ�ڛ�Ȉڙۘ[�H��\ڈ\ٜ�\ț�șX\ވ؞Hȝ[�ˈZ\�Yٛ�\ȘXݝX[H�ݝY�ݙڈܙNȝ\Șۛ��\�\Ț]H�\�݂�ˈ[YHHܙY[�X[Y\��\Ȝ�ޚYY[�ݘ^\Ȝ]ZY]�܈H�ؙ\܋��Y�
+Wٚ\�ݕ\��ۛ��\�YY
+Hٚ\�ݕ\��ۛ��\�YYH�YNً�[��ʂ��L�̌Ȑۛ��XݙY8�%[ݜ�Yٛ�	܈�Y��XȚ\ț�݈�ݚ[�ȝ�ݙڈܙK���
+NB��ˈHٜܚ[ۋ[\܈[\ܝX^H\وۛHH[X�\�][H؜\�Yؘ[�ˈۛ��Yݜ�Y\�X݋\�ݚY\�ܙY[�X[��[[ݙK؝\ݛۈ�ݝ\ț�]�\�^ܙB�ˈZ\�ܙY[�X[�ݙڈH�ؙ\܋Yؘۛ[�[�Xڋ��Y�
+Yؘޑؘۛ[�ݚY\�H�Xڐ�Xڙܛݛ�
+�\ڔ[�[�қ\ܝ
+Yؘޑؘۛ[�ݚY\�JNB�B��ˈ؜\�H�[[�ȚXY\��Y�^�܈ۜ�ٜ�ؚۛ\]][ۋ؛ܙYˈ\Ȝٜܚ[ۋ��X\�\�ڙ[�Ȋۘ]YHۙHН]
+H[X�Y[��ˈX[��ܚX˘�[[�˚XY\�[�Hޜݙ[H�ۜȝو^�X݈H�Y�^�ˈۈۜ�ٜ�Ș؛��X�Z[]�\�\ٜܚ[ۈݛܘYو�]�[�Șܛܜ˜ٜܚ[ۂ�ˈۛ�[Z[�][ۈڙ[�][\Hۘ]YHۙH�\�ڛۜȜژ\�HۙH�ؙ\܋��؜\�P�[[�Ԝ�Y�^
+ٜܚ[ےQ�\K�ޜݙ[JN�ˈۚY��ۘ]YHۙHXY\�ș��ۈۛ��\�؝[ۈ\��ș�܈�\^Hۈۜ�ٜ��ˈ؛ˈ�܈Н]ٜܚ[ۜˈۜ�ٜ�ț�YYH؛YH[��ܚX˘�]H[��ˈ\ٜ�XYٛ�XY\�Ș\Șۛ��\�؝[ۈ\��ȝȘ]�ڙH�Z�Xݚ[ۜ˂�؜\�Tٜܚ[ےXY\�ʜٜܚ[ےQ�\K��]ҙXY\�ʎ�ˈ�Xڈ�[�ٜ��[��܈�]\�Hۜ��[][ۂ�Y�
+\ә]ʈY�
+\ݜ�\ܕ[\ܘ[ݛܘYيHۛ�݈ܙY[�X[�[�ٜ��[�B��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ��ۛ�݈�[�ٜ��[�H]ؚ]�[�ٜ��[�Y\ܘYٜʂ��\K�Y\ܘYٜ˛X\
+
+JHO�
+Ȝ�ۙN�K��ۙKۛ�[��K�ۛ�[�JJK�\ٜԙ[[ݙTٜܚ[ې�[�[�ʘۛ��Yʂ�Ȟȝ[�[��[�ٜ��[��ܙY[�X[�[�ٜ��[�B��Ș]]ݙ��^�ܙYȘ]]�[�ٜ��[�
+ܙY
+H���K�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNٜܚ[۔ݘ]K��[�ٜ��[�H�[�ٜ��[�ˈ\�ڜ݈�[�ٜ��[�[[YYX][H8�%�\�H]�[�
+�]Ȝٜܚ[ۈۛJB�؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQș�[�ٜ��[�ܙY[�X[�[�ٜ��[�JNB��ˈ�KXڙXڈۛݛYو�[\țۈ�]Ȝٜܚ[ۈݘ\��H�[H؝ڙ\��ˈ۝�\�ț]�HY]ˈ�]\Ș؝ڙ\Ș؜ٜȝڙ\�N��ˈHH؝ڙ\�؜ۉ݈ٝ\
+�[HY�݈^\݈]ݘ\�\
+B�ˈHH؝ڙ\�Z\ܙY[�]�[�
+K�ˈ�]ۜ�˛[ݛ�Y�ʂ�ˈHH�[H؜ȘܙX]YY�\�؝]؞Hݘ\�\
+�\�݈^ܝ��ۈ[�ݚ\�XXښ[�JB��R[\ܝۛݛYي�ڙXݔ]
+NB��ˈKKHۛ\Xݚ[ۈ[�ۘ[H]Xݚ[ۈKKB�ˈY�و�XXڈ\�H
+�ܛX[\��HڝH\�وY\ܘYو۝[��܋HۚY[��ˈ\��ܛYYۛ\Xݚ[ۈ]ۚ\Y\݈�ݚݜ�Xݝ\�[[�]\��]Xݚ[ۋ��ˈښ\�܈ݘ�XYٛ�ٜܚ[ۜȊۘ[ۛ�^�H\ڙۊH[�ۛ[\܂�ˈ�\]Y\ݜȊ]KYٛ�ݛ[X\�^�][ۈYٛ�ȝ]�\ݛYHڝ��\ڈۛ�^
+K��ۛ�݈�]�\ِ۝[�Hٜܚ[۔ݘ]K�Y\ܘYِ۝[�ۛ�݈ݜ��\ِ۝[�H�\K�Y\ܘYٜ˛[�ݚY�
+��]�\ِ۝[��L	���ݜ��\ِ۝[��]�\ِ۝[�
+��H	���\ٜܚ[۔ݘ]K�\ԝX�Yٛ�	����\K�ۛ˛[�ݚ��
+Hً�؜���ۛ\Xݚ[ۈ[�ۘ[N�ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_H
+Y\ܘYٜș�ܜY	ܜ�]�\ِ۝[�x���؝\��\ِ۝[�K�
+ۚY[�X^H]�Hۛ\XݙYݝڙH؝]؞Hۛ��ۋ��
+Nˈ�YȝHٜܚ[ۈ�܈\�ٛ�\ݚ[][ۈۈH�^\���HY\ܘYٜˈ]�\݈�ܜYݝوHۚY[�	܈�Y]Ș\�Hݚ[[�ݜ�[\ܘ[�ˈݛܙH[��YYȘ�H\ݚ[Y�Y�ܙH[�H�\�\�\ݚ[][ۈ�[��ˈXڜȝ\Hݘ[Hۘ\ڛ݈8�%ݚ\�ڜوH�ܜYۛ�^\Ȝڛ[�B�ˈܝ��ۈHܙK\ڙH�Y]˂�ٜܚ[۔ݘ]K�ۛ\Xݚ[ې[�ۘ[T[�[�ȏH�YNB��ˈ\]HY\ܘYو۝[��܈�ޚ[Z]HX]ښ[�ȉ�ݜ�Xݝ\�[ۛ\Xݚ[ۈ]Xݚ[ۋ��ٜܚ[۔ݘ]K�Y\ܘYِ۝[�Hݜ��\ِ۝[�ˈ�]ڙY؝�N�Y\ܘYِ۝[�
+ȝ\��Ԛ[�ِݜ�][ۈ
+Șۛ�٘ݝ]�U^ۛU\��ˈٙ]\�Ș]�ڙ][\H�ܚ]\Ȝ\�\����ˈ[ۈ\�ڜ݈H�ڙX݈�[�[�Ȋ�͊N�\Ȝ�[�ȐQ�T��ˈ�\ۛ�Tٜܚ[۔�ڙXݔ]
+
+HX�ݙKۈ]؜\�\ȝHܝ\�\ۛ][ۂ�ˈ�[�[�ȸ�%[�۝Y[�ȘH�ݚ\ڛۘ[8���ۛ��Y[��[�ڝ[ۈ��ۈٛ�ZX[8�%�ˈ][�ȘH؝]؞H�\ݘ\��ZY�]HH^X݈�ڙXݗڙ[��]�\�ܛ]]��؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQY\ܘYِ۝[��ݜ��\ِ۝[��\��Ԛ[�ِݜ�][ێ�ٜܚ[۔ݘ]K�\��Ԛ[�ِݜ�][ۋ�ۛ�٘ݝ]�U^ۛU\��Έٜܚ[۔ݘ]K�ۛ�٘ݝ]�U^ۛU\��˂��ڙXݔ]�ٜܚ[۔ݘ]K��ڙXݔ]�[��ڙXݔ]�ݚ\ڛۘ[�ٜܚ[۔ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YK�ܙY[�X[�[�ٜ��[��ٜܚ[۔ݘ]K�ܙY[�X[�[�ٜ��[�ψ���ˈ�͎�\�ڜ݈Hۛ\Xݚ[ۈ[�ۘ[H�YȜۈH؝]؞H�\ݘ\��]ٙ[��ˈ]Xݚ[ۈ
+\ȝ\��H[�ۛ�ݛ\[ۈ
+�^\��܈ؚY[P�Xڙܛݛ�ۜ�ʂ�ˈٜۉ݈ܙHH\�ٛ�Y\ݚ[][ۈڙۘ[�����ٜܚ[۔ݘ]K�ۛ\Xݚ[ې[�ۘ[T[�[�ȞȘۛ\Xݚ[ې[�ۘ[T[�[�Έ�YHB��ߊK�JN�ˈ�Xڈٜܚ[ۈ[ٙ[�܈ۜ�ٜ�[ٙ[\؛ݙ\�B�ۘ\ݔٙ[�ٜܚ[ۓ[ٙ[H�\K�[ٙ[�ˈKKHٛ��H؛ܙH[��XڛY[�KKB�ٝٛ��T�\]Y\ݐۛ�^
+]]�[�ٜ��[��ܙYȘ]]�[�ٜ��[�
+ܙY
+H��[�ٜܚ[ےQ�[ٙ[��\K�[ٙ[�\ݜ�X[U\��
+
+
+HO�ۛ�݈�\H^�Xݕ\ݜ�X[U\�XY\��\K��]ҙXY\�ʎY�
+�\
+H�]\���\ۛ�݈YH^�Xݔ�ݚY\�XY\��\K��]ҙXY\�ʎY�
+Y
+Hۛ�݈�H�\ۛ�T�ݚY\��ݝJY
+NY�
+�˝\�
+H�]\����\�B��]\��
+��\ۛ�U\ݜ�X[T�ݝJ�\K�[ٙ[
+O˝\�ς�
+�\K��ݛ؛ۈOOH�[��ܚXȂ�Șۛ��Y˝\ݜ�X[P[��ܚX�ۛ��Y˝\ݜ�X[Sܙ[�RJB�
+NJJ
+K�ܝ�ۛ��Y˜ܝ��ڙXݔ]�JN�ˈ[�ڛ܈�ݙ[�[�و]\݈\وH�ܛX[^�YۚY[��[�؜�\�Y�ܙH�X؛�ˈ^[�ڛۈ]]]\Ț\ݛܚX؛X\�ٜ�Ț[�Ȝޛ�]Xȝۛ�ݛ��\˂�ۛ�݈�X؛ۚY[�Y\ܘYٜȏH�\K�Y\ܘYٜ˛X\
+
+Y\ܘYيHO�
+�ۙN�Y\ܘYً��ۙK�ۛ�[��ˋ��Y\ܘYً�ۛ�[�K����Y\ܘYً��ݙ[�[�ِۛ�[��ȞȜ�ݙ[�[�ِۛ�[��ˋ��Y\ܘYً��ݙ[�[�ِۛ�[�HB��ߊK����Y\ܘYً��ݙ[�[�ٔܚ][ۜȞȜ�ݙ[�[�ٔܚ][ۜΈˋ��Y\ܘYً��ݙ[�[�ٔܚ][ۜ׈B��ߊK�JJN�ˈKKH^[��X؛X\�ٜ�ș��ۈ�]�[ݜȝ\��ȋKKB�ˈؘ[�[\ܚ\ݘ[�Y\ܘYٜș�܈X\�ٜ�^�ؚ܈[��\ݛܙH[B�ˈȝۛݜو
+ȝۛܙ\ݛZ\�Ș�Y�ܙH�ܝ؜�[�ȝ\ݜ�X[K��Y�
+ٜܚ[۔ݘ]K��X؛ݛܙK�ڞ�H�
+HˈۙX[�\]\݈[�ܙX݈HۚY[��[�؜�\ښ[H[�ڛܜȜݚ[^\݋��ˈ^[�[�ș�\�݈۝[XZو]�\�H]�H[�ڛ܈ۚțܜ[�Y��ۛ�݈�X؛ݛܙPژ[�ٙHۙX[�\�X؛ݛܙJ��\K�ٜܚ[۔ݘ]K��X؛ݛܙK�
+Nۛ�݈^[�YH^[��X؛X\�ٜ�ʜ�\Kٜܚ[۔ݘ]K��X؛ݛܙJNY�
+^[�Y
+Hً�[��ʘ^[�Y�X؛X\�ٜ�ș�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X
+NB�Y�
+�X؛ݛܙPژ[�ٙ
+H؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQ�X؛ݛܙN�ٜ�X[^�T�X؛ݛܙJٜܚ[۔ݘ]K��X؛ݛܙJK�JNB�B��ˈKKHݜ�\ۛ�^؜��[�țX\�ٜ�ș��ۈ�]�[ݜȝ\��ȋKKB�ˈH؜��[�Ț\Ț[��XݙY[�ȝH�\ܛۜو
+\ܚ\ݘ[�Y\ܘYيHۈH\ٜ��ˈ؛�ٙH]�ۈH�^\��HۚY[�ٛ�Ț]�Xڈ\Ȝ\�وB�ˈ\ܚ\ݘ[�Y\ܘYً�ݜ�\]\�HۈHTHٙ\ȝHܚYڛ�[ۛ�[��ˈ�\ٜ��[�ȝH�ۜؘڙH�Y�^��ݜ�\ۛ�^؜��[�܊�\K�Y\ܘYٜʎ�ˈ\�]\��]�X�][ۈXYۛܝX܋�ݜ��Xڛ�Ȝ۝\�ًڙXY\�ۛٙH\�HXZٜˈٜܚ[ۋZY[�]H[��ڙX݋X�[�[�Ș�Y܈
+K�ˈHY\�X��ݘ][ۈY\�ً�ˈ܈HܝY؝]؞H�[[�Ș�XڈȚ]țݛ�ݙ
+H[[YYX][H�\ژ�H[��ˈԑWёP�QόXٜȚ[�ݙXYو�\]Z\�[�ȘH�]]ܜދ��ۛ�݈�\\�][ە[Z[�ȏH�]Ȕ�\\�][ە[Z[�ʜ�\JNً�[��ʂ�\���ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_HY\ܘYٜωܙ\K�Y\ܘYٜ˛[�ݚH
+[ٙ[Iܙ\K�[ٙ[Hݜ�X[OIܙ\K�ݜ�X[_H�]ωڜә]߈Y\�IݚY\�H
+ݘ�Yٛ�IȈ\ٜܚ[۔ݘ]K�\ԝX�Yٛ�H
+۝\�ُIܘ]�\ݛ�۝\�ٟH
+��ڙXݏIܙ\K��]ҙXY\�ֈ�[ܙK\�ڙX݈�HȈ��\ٛ����X�ٛ��H
+�ݚ\ڛۘ[Iܙ\ܚ[۔ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�Y_H
+�[[ݙQ؝]؞OI؛ۙ�Y˜�[[ݙQ؝]؞_HܝYIڜқܝY[ٙJ
+_H
+�ڙXݏIܜ�ڙXݔ]X�
+N�ˈKKH��\ۛ�H\Ȝ�\]Y\݉܈[ٙ[�YٝKKB�ˈۘ\ڛ݈S[ٙ[Y\�]�Y�Yٝ[�]Ț[�țۙHؚ�X݈ٞYYȕTˈ�\]Y\݉܈[ٙ[�HܝٜȘ\ޛ�ȝۜ�ȊK��ܔٜܚ[ۈ]ؚ]ʈ�]ٙ[��ˈ\�H[�HܘYY[��[�ٛܛNȜ\ܚ[�ȝ\Ȝۘ\ڛ݈ȝ�[�ٛܛJ
+B�ˈ\Y\Ț]]ۚX؛H\�KۈHۛ�ݜ��[�K\�[��[�Ȝ�\]Y\݈�܈B�ˈY��\�[�[ٙ[؛�݈ؘۛ�\�H�[Y\țZYY�Yڝ
+Hܛܜ˛[ٙ[�ˈۛ�[Z[�][ۈ]�\Y؜�8��͍̍�[��\ڙY^Y\�ʋ��˂�ˈۛܙHHۛ\ݘ\��Xَ�H�\�H�\�݈�\]Y\݈Y�\�H�\ݘ\�؛�[��ˈ�Y�ܙHH�\�KX[�Y�ܙٝ[ٙ[˙]��K]؜�H�\ۛ�\ˈښXڈ۝[ڞ�B�ˈ\ȝ\��܈�Yٝ��ۈ�[�Xڈ�Xڛ�˛[Z]Ȋܛۙț؜ݜؘ�H�܈ۙB�ˈ\��K�ؚ]��YY�H�܈�X[]NȘ�ݛ�YۈHۛ݋ݛ��XXژX�H[ٙ[˙]��ˈ�]�\�[�܈H�\]Y\݈
+�[Ș�XڈȝH؛YH�[�Xڈ]\Ș�Y�ܙJK��ˈS��T�PS��\Ș]ؚ]]\݈ݘ^H[[YYX][H�Y�ܙHٝ[ٙ[ܙXȸ�%]^\ݜˈțXZوH�Yٝ�[݈�XY�X[[ٙ[]K�݈�[�Xڋ�
+٘ۛ�\�B�ˈٝ[ٙ[[��Tޛ�Ȝڝ\ȸ�%ۜ�ٜ�ٛXݚ[ۋ݈ۜY]�X܈8�%[�[�[ۘ[B�ˈٙ\\ڛ�ȝHޛ�ș�[�XڈۈH�\�H�\�݈\��ȝ^Hٛ�Xۜ��X݋�B�]ؚ][�ݜ�S[ٙ[]T�XYJ
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNˈ�XوHٜܚ[ۈ[ٙ[��ۈH�ݚY\�]\ȘXݝX[H�ݝYȊB�ˈSܙKT�ݚY\�XY\�K�݈H�]\݋]ܚ]K]ڛ�ș[��H8�%H�\�HY�ˈX�\ڙY�Hٝ�\�[�ݚY\�Ș]Y��\�[�ؘڙH�Xٜȝ۝[ݚ\�ڜق�ˈۜ��\ؘڙT�XY݈ۜ8���ۛ\]S^Y\�؜��ۛ�݈[ٙ[ܙXȏHٝ[ٙ[ܙXʂ��\K�[ٙ[�^�Xݔ�ݚY\�XY\��\K��]ҙXY\�ʋ�
+Nۛ�݈ٙȏHܙPۛ��YʊN�ˈۜ݋X]؜�H^Y\�L؜�^Xڝۛ��Yȝڛ�ȏ�݈ۜ�ܛ][H�\ؘ�Y��ˈ�]�\�[�\�][�ݚ\�[ٙ[	܈^Y\�L؜�ڙ[�\ț[ٙ[\ț�ˈؘڙT�XY݈ۜو�\ۛ�HȌ
+\ؘ�Y
+K�Ոژ]]�\�H�]�[ݜˈ�\]Y\݈Y�[�Hؘۛ[��]^Y\�؜HY�
+ٙ˘�Yٝ�X^^Y\�ڙ[�ȈOOH[�Y�[�Y
+H^Y\�؜Hٙ˘�Yٝ�X^^Y\�ڙ[�΂�H[وY�
+�[ٙ[ܙX˘ؘڙT�XY݈ۜ	���ٙ˘�Yٝ�\�ٝؘڙT�XYۜݔ\�\����
+H^Y\�؜Hۛ\]S^Y\�؜
+�ٙ˘�Yٝ�\�ٝؘڙT�XYۜݔ\�\���[ٙ[ܙX˘ؘڙT�XYۜ݋�[ٙ[ܙX˘ۛ�^�
+NB��ˈؘڙH�Xڛ�ș�܈Y\�X�\ٙ�\݋]�˘ۛ�[�YHXڜڛۜȚ[�ܘYY[��˂�ˈ[��ܚXȘژ\�ٜȌ�刘ؘڙWݜ�]H�܈Z8�%Y�\݈ۈڛݛۛ\�\܊
+B�ˈ\ٜȝHXݝX[ܚ]Hۜ݋�ڙ[�H[ٙ[\ț�Ȝ�Xڛ�ș]K�\ۛ�Hˈ̈
+ۛ�ٜ��]]�N�˛�݋Xۛ\�\܊H�]\�[�H�]�[ݜț[ٙ[	܈�Xً��]ؘڙUܚ]Pۜݔ\�ڙ[�H]ؘڙT�XYۜݔ\�ڙ[�HY�
+[ٙ[ܙX˘ؘڙUܚ]P݈ۜ	��[ٙ[ܙX˘ؘڙT�XYۜ݊HؘڙUܚ]Pۜݔ\�ڙ[�B�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەOOH�Z��ț[ٙ[ܙX˘ؘڙUܚ]P݈ۜ
+����[ٙ[ܙX˘ؘڙUܚ]PۜݎؘڙT�XYۜݔ\�ڙ[�H[ٙ[ܙX˘ؘڙT�XYۜݎB��ۛ�݈[ٙ[�YٝHۛ�^[Z]�[ٙ[ܙX˘ۛ�^�ݝ]�\ٜ��Y�[ٙ[ܙX˛ݝ]�X^^Y\�ڙ[�Έ^Y\�؜�ؘڙUܚ]Pۜݔ\�ڙ[��ؘڙT�XYۜݔ\�ڙ[��]X[]RۙYQ��Xݚ[ێ�[ٙ[ܙX˜]X[]RۙYQ��Xݚ[ۋ�N�ˈ[ۈ\HȝH[ٝ[Hؘۛ[ț�݋ۈ[�HܘYY[�[\�[��ڙY�ˈ�Q�ԑH�[�ٛܛJ
+H
+[�ݝڙHH]ۚXȝ�[�ٛܛH]
+H�XYȝ\ˈ�\]Y\݉܈�[Y\ˈ�[�ٛܛJ
+H�KX\Y\ț[ٙ[�Yٝ]ۚX؛K��ٝ[ٙ[[Z]ʞȘۛ�^�[ٙ[ܙX˘ۛ�^ݝ]�[ٙ[ܙX˛ݝ]JNٝX^^Y\�ڙ[�ʛ^Y\�؜
+NٝؘڙT�Xڛ�ʘؘڙUܚ]Pۜݔ\�ڙ[�ؘڙT�XYۜݔ\�ڙ[�Nٝ]X[]RۙYJ�[ٙ[ܙX˜]X[]RۙYQ��Xݚ[ۈψQ�USԕPSUWғ�QWє�PՒSӋ�
+N�ˈKKHˈ[�[ZXțX^ݛڙ[�Ȝڞ�[�ș�܈�ۋPۘ]YKPۙHۚY[�ȋKKB�ˈۘ]YHۙHX[�YٜȚ]țݛ�X^ݛڙ[�Ȋ̒ș�܈[ٙ\��[ٙ[ʋ�ݚ\��ˈۚY[�țٝ[�ٛ�݋ۚ\ܚ[�ȝ�[Y\ȊY�][ȝȍM�[�[�ܙ\܂�ˈ\�ڛ�ʋ�\HHX��YXY�ۛH
+Ț\ݛܞH[ۜ�]H]Yڝ[�ˈ��ۈH̒Șٚ[[�Ș�\ٙۈXݝX[ݝ]]\��˂�ۛ�݈\АȏB�\Л]YPۙPۚY[�
+�\K��]ҙXY\�ʈ\К[[�ҙXY\��\K�ޜݙ[JNY�
+Z\Аʈˈ[��ܚXș^[�Y[�ڛ�Ș\��]�\Ș\ȘY]Y]K�[�ڛ�ȏB�ˈȝ\N��[�X�Y��Yٝݛڙ[�Έ�X
+�݈HӓՓ�ГіWђQSۈ]�ˈ[�Ț[�Y]Y]JK�^�X݈H�YٝۈX^ݛڙ[�țX]�\Ȝ�ۛHX�ݙH]�ˈ8�%ݚ\�ڜوH݈ݝ]SPHۛ\ٜȝH؜ȝH�ۜ�[��[�؝\ˈ[�ڛ�˚X]�H\��țZY\�X\ۛ�[�˂�ۛ�݈[�ڛ�ә]HH�\K�Y]Y]O˝[�ڛ�Ș\ȝ\OΈݜ�[�Έ�Yٝݛڙ[�ώ��[X�\�B�[�Y�[�Yۛ�݈[�ڛ�НYٝB�[�ڛ�ә]O˝\HOOH�[�X�Y�	���\[و[�ڛ�ә]K��Yٝݛڙ[�ȏOOH��[X�\��	���[�ڛ�ә]K��Yٝݛڙ[�ȏ��ȝ[�ڛ�ә]K��Yٝݛڙ[��[�Y�[�Yˈݜ�Xݝ\�[�[�Xڎ�[�ڛ�˘�KYY�][[ٙ[ȊK�ˈۘ]YK[ܝ\ˍN
+B�ˈ[Z][�ڛ�Ș�ؚ܈ҕՕ[�^Xڝ[�ڛ�؈\�[KۈH�Yٝ�ˈX�ݙH\ȝ[�Y�[�Y�]X݈Xݚ]�H�X\ۛ�[�ș��ۈH�\]Y\݉܈[�ڛ�ˈ�ؚ܈ۈH�]ܚ]Hݚ[�\ٜ��\ȚXY�ۛH[�ٜۉ݈�[�؝HB�ˈ\��]H[�وH[�ڛ�Ș�ؚ˂�ۛ�݈[�ڛ�Иݚ]�HB�[�ڛ�НYٝOOH[�Y�[�Y�\]Y\ݒ\՚[�ڛ�ʜ�\K�Y\ܘYٜʎˈ[�؝\ٚXX�H�Yٝ�Y�H[�ڛ�Ș�Yٝ[ۙHYY]ț܈^ٙYȝB�ˈ[ٙ[	܈\�ݝ][Z]�Ȝ�]ܚ]H؛��ٝXوH�[Y�ˈX^ݛڙ[�ȏ��Yٝݛڙ[�؈
+[��ܚXȍțݚ\�ڜيK�H�\]Y\݈\ˈHۚY[�	܈�\ܛۜژ�[]H8�%X]�H]țX^ݛڙ[�ȝ[�ݘڙY�]\�[��ˈ�]ܚ]H][�Ș[�[��[Y�[YK��Y�
+[�ڛ�НYٝOOH[�Y�[�Y	��[ٙ[ܙX˛ݝ]H[�ڛ�НYٝ
+Hˈڙ[�[ٙ[˙]�]H\ۉ݈ؙY[ٙ[ܙX˛ݝ]\ȝH�[�Xڂ�ˈ
+NL�H8�%ZٛH[�\�ݘ][�ȝH[ٙ[	܈�YHݝ][Z][�XZڛ�ˈHYڝ[X]H[�ڛ�Ș�Yٝۚȝ[�؝\ٚXX�K�ݜ��Xو]]Д��ۂ�ˈHۛXؘڙK۝]YوZ\ٚ\�H\ȝ�\ژ�H
+�ˈHٛ�Z[�[H[��[Y�Yٝ
+K��ۛ�݈ۑ�[�XڈHZ\ӛٙ[]SؙY
+
+Nۛ�݈ّ��Hۑ�[�Xڈțً�؜���ً�[��΂�ّ���X^ݛڙ[�ΈX]�[�ȘۚY[��[YH	ܙ\K�X^ڙ[�߈[�ݘڙY
+
+[�ڛ�НYٝIݚ[�ڛ�НYٝH�H[ٙ[ݝ]Iۛٙ[ܙX˛ݝ]X
+
+ۑ�[�Xڂ�Ȉ�ț[ٙ[]H�݈ؙY8�%\ڛ�ș�[�Xڈ[Z]Ȃ����H
+
+X�
+NH[وۛ�݈ۛ\]YHۛ\]SX^ڙ[�ʂ�[ٙ[ܙX˛ݝ]�[ٙ[ܙX˘ۛ�^�ٜܚ[۔ݘ]K�ݝ]ڙ[�ѓPK�ٜܚ[۔ݘ]K�\ݔݛܔ�X\ۛ��ٜܚ[۔ݘ]K�\ݒ[�]ڙ[�˂�[�ڛ�НYٝ�[�ڛ�Иݚ]�K�
+NY�
+�\K�X^ڙ[�ȈOOHۛ\]Y
+Hً�[��ʂ�X^ݛڙ[�Έ	ܙ\K�X^ڙ[�߈8���	؛ۜ]YH
+
+[XOIܙ\ܚ[۔ݘ]K�ݝ]ڙ[�ѓPHψ��ۙH�K
+\ݔݛ܏Iܙ\ܚ[۔ݘ]K�\ݔݛܔ�X\ۛ�ψ��ۙH�X
+
+[�ڛ�НYٝ�Ș[�ڛ�НYٝIݚ[�ڛ�НYٝX��[�ڛ�Иݚ]�B�Ȉ�[�ڛ�ϘXݚ]�J�Ș�Yٝ
+H�����H
+
+X�
+N�\K�X^ڙ[�ȏHۛ\]YB�B�B��ˈKKHK�ۛXؘڙHYK\�\ݛYHKKB�ˈ]]˜ޛ�ȚYH�\ڛۙڝۛ��\�؝[ۈ�ڙ[�Z\ȘXݚ]�B�ˈ
+^Xڝ܈]]˝\ܘYY
+K\و�Z[�YH�\ڛۙ[�ݙXYوB�ˈۛ��Yݜ�Y�[YH
+ښXڈY�][ȝȍHZ[��܈HY�][ؘڙHY\�K��ۛ�݈Y��Xݚ]�RYSZ[�]\ȏB�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەOOH�Z�	��ٙ˚YT�\ݛYSZ[�]\ȏHB�ȍ���ٙ˚YT�\ݛYSZ[�]\΂�ۛ�݈�\ڛۙ\ȏHY��Xݚ]�RYSZ[�]\Ȋ��̌ˈ����H[�Y�YYؘڙKYXۛ�ۚX܈ݜ�]YވXڙ\ȝڙ]\�Ȝښ\�ˈܝZYHۛ\Xݚ[ۋ�ڙ[�ۛ��Y[�S�HؘڙH\ȘXݝX[Hݚ[]�B�ˈ
+\ИXڙU؜�H[YHڙXڊKۙ]؜�H8���ښ\ۛ\Xݚ[ۈ
+�ݙX݈H؜�B�ˈ�Y�^
+NȘۛۋX�\݋؛ۛY�[]ܚ]H8���ۉ݈ښ\
+]]ۛ\X݊K�B�ˈ\ИXڙU؜�H]�[�\܈�ۜ�\ȐSЖTȜ�\]Z\�Y8�%Hݘ[Hۙ]؜�Hݜ�]Yނ�ˈڝ[�^\�YؘڙH]\݈�Ոښ\ۛ\Xݚ[ۈ
+HؘڙH\Șۛۛ\Xݚ[ۂ�ˈ\ș��YH[��[�Y�Xژ[
+K��[Ș�XڈȚ\ИXڙU؜�Hڙ[��ۋXۛ��Y[���ۛ�݈Xۛ�HٝؘڙTݜ�]Yފٜܚ[ےQ
+Nۛ�݈ؘڙU؜�HHXڙTښ\ۛ\X݊Xۛ�\ИXڙU؜�Jٜܚ[۔ݘ]JJNˈؘڙU؜�X[ۈ[țےYT�\ݛYHȔ�Tє��HH�]KZY[�]Hؘڙ\ˈ
+\ݚ[Y�Y�^
+Ȝ�]˝ڛ�݈[�HۈH؜�H�Y�^ݜ��]�\ȝH�\ݛYK��ˈH�[ً\ܚ]]�H\�H
+\ИXڙU؜�H�YH�]H؜�YY�]\ȘXݝX[B�ˈ]�\�ٙ
+H\Ȝؙ�N��\ٜ��[�Ș]ۜ�݈Y�\�ș�ۙ[�ȚYKY\ݚ[Y�ݜˈ[�ȝH�Y�^�HۙHۛޘۙH8�%�]�\�Hۜ�وؘڙH�\݈[�ۙX\�[�ˈ
+�ݚ�ٝXوH�[ܚ]HۈHٛ�Z[�HZ\܎ȝH�\ٜ��Y�ٞH\ȸ�iB�ˈ�K\�[�\�YۙJK��ۛ�݈YT�\ݛHےYT�\ݛYJ�ٜܚ[ےQ��\ڛۙ\˂�]K��݊
+K�ؘڙU؜�K�
+Nٜܚ[۔ݘ]K�\ݕ\��؜ҙHHYT�\ݛ��Yٙ\�YY�
+YT�\ݛ��Yٙ\�Y
+HTٜܚ[ېؘڙK�[]Jٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^��[�PؘڙUڙ[�Έ�[�JNˈ�ՑN�HݘX�HH�ؚȊޜݙ[V̗N��Y�\�[�ٜȊș[�]Y\ʈ\ˈ[X�\�][H�Ո�Y��\ڙY\�H
+�JK�]\ș��ޙ[��܈Hٜܚ[ۉ܈Y�B�ˈ[��\^YY�]KZY[�X؛H8�%�Xۛ\][�Ț]��ۈH]�HۛݛYق�ˈX�HۈYH�\ݛYH\ȝژ]]Hݜ�]܋؛ۜۛY][ۈ[]Hژ[�وB�ˈ�ݘX�H��Y�^[��\݈HڛۙH�ۜؘڙH
+ٜ׌M�X��ٸ�)�[�ڙ[�
+K��ˈ�K]؜�Z[�ȘY�\�HZ��XZܛڛ�^\�\Ȝ�K\ٛ�ȝH؛YH��ޙ[��]\΂�ˈ�]۞KXݜ�]Y�Y�\�[�ٜȘ\�HXڙY\�HH�Vٜܚ[ۋ�݈ZY\ٜܚ[ۋ��ً�[��ʂ�ٜܚ[ۈYH	Ә]��ݛ�
+YT�\ݛ�YS\ȋȍ�̌
+_[Z[�8�%�Y��\ښ[�Șؘڙ\؈
+
+ؘڙU؜�HȈ�
+ؘڙH؜�H8�%ښ\[�Șۛ\X݊H����H
+
+Xۛ�˜�\ݛ�ۛ��Y[��Ș
+ݜ�]YޏI٘ۛ���\ݛ�ݜ�]YޟJX���
+Yؘވ\ИXڙU؜�JH�K�
+NY�
+Xۛ�Hً�[��ʂ�ؘڙKYXۛ�ۚX܈
+ۛ\Xݚ[ۊN�ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_H
+ݜ�]YޏI٘ۛ���\ݛ�ݜ�]YޟHښ\ۛ\XݏIؘXڙU؜�_H
+ۛ��Y[�I٘ۛ���\ݛ�ۛ��Y[�OOH�Y_Hݜ�]YސYٓ\ωј]K��݊
+HHXۛ��XڙY]X�
+NB�B��ˈ�Z[HܙHY\ܘYو\��^Hۘو
+�\ۛ�Y
+H8�%ژ\�Y�HH\��LHB�ˈXڜڛۈ�[݈
+\Ә\�ِۛݘ\�
+H[�HܘYY[��[�ٛܛH[�ݙ\ˈۂ�ˈ�ݚٙHY[�X؛[�][�YܙYHۈڙ]\�\Șۛٜܚ[ۈۛ\�\ܙ\˂�]ܙSY\ܘYٜ˂�[\ܘ[[�]��ݙ[�[�ِ�SY\ܘYْY�۝\�ٕڛ�݋�ڙXڜڛ��HH]ؚ]�\\�TٛX[�Xә\ܘYٜʞY\ܘYٜΈ�\K�Y\ܘYٜ˂�ٜܚ[ےQ��ڙXݔ]��ԝܙN�ݜ�\ܕ[\ܘ[ݛܘYً��ݛ؛ێ��\K��ݛ؛ۋ�[Z[�Έ�\\�][ە[Z[�˂�JN\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊN�ˈKKH��H[��Xݚ[ۈ
+ޜݙ[V̗HݘX�H�Y�^
+ș\�X�KY[Hۛ�^JHKKB�ˈޜݙ[V̗N�ܝ�ۜۛȘؘڙW؛۝�ۗB�ˈޜݙ[V̗N�ݘX�HH
+�Y�\�[�ٜʈؘXڙW؛۝�ێ�ZH8�%[��Y8�iLZ�˂�ˈޜݙ[V̗J֌WH�ܛHHݘX�H�Y�^ؘڙY]Z
+ܚ][�]�傈ˈۜ݋�XY]�p劋�ۛ�^X�ݛ�H
+۝ژ\˜]\��˘\�ښ]Xݝ\�H
+ˈ\ݚ[][ۋݙ[\ܘ[ۛ�^\۝\�ٜʈ\ȓ�ȓӑє�[Z]Y\ȘHޜݙ[V̗B�ˈ�ؚȸ�%]�Y\ȝH\�X�H�ۜY[H]��ۈ]ȑ�T�Ո[��Xݚ[ۂ�ˈ۝؜�
+\[�Yݜٜ�\ܚ\ݘ[�HZ\�]H��ޙ[�ۛ��\�؝[ۋ]Z[�ˈܚ][ۋ�\^YY�]KZY[�X؛K�KX[�ڛܙYۈۛ\�\ܚ[ۊK�\ˈ�[[ݙ\ȝHًۘ\\�\ٜܚ[ۈ�\�݋\ܝ[][ۈ�\݈]Hޜݙ[V̗H�ؚˈ؝\ٙ
+[\Y�YYۈHܙ[�RKӜ[��ݝ\�]ڙ\�HHڛۙHޜݙ[B�ˈݜ�[�Ȝژ\�\ȘHڛ�ۙHؘڙW؛۝�ۈ��XZܛڛ�
+K�H\�X�H[H\ȝB�ˈۛH[��Xݚ[ۈژ[��[�܈ۛ�^X�ݛ�NȝH[�ؘXڙH�ۚڙY\[�ˈ�[݈ݜ��]�\Ȝ\�[H\ȝH[I܈Y���\ٛ[�K��]ݘX�SU^�ݜ�[�ȟ[�Y�[�Yȋˈ�ؚȌ���Y�\�[�ٜȊޜݙ[V̗JB�][�[�қ�ݛYّ[N���]�[ݜҙ^\Έݜ�[�֗H[�Y�[�Y�^ٞ\Έݜ�[�֗H[�Y�[�Y[��Y\Έ\��^OY�ݜ�[�΂�؝Yۜ�N�ݜ�[�΂�]N�ݜ�[�΂�ۛ�[��ݜ�[�΂�O�ˈΌMΈ�[]�[�ً\؛ܙY[��Y\ȝ]Y�݈�]Hޜݙ[V̗H�Yٝ�ˈݜ��Xٙ\ȘH�X؛X�KZYЈ[�ڙHH
+��ޙ[�HۛݛYو[K��ݙ\��ݏΈ\��^OȚY�ݜ�[�Έ؝Yۜ�N�ݜ�[�Έ]N�ݜ�[�ȟO�B�[�Y�[�YY�
+ٙ˚ۛݛYً�[�X�Y
+Hˈ�Xڈڙ]\�Hݘ]Hژ[�ٙ�܈�]ڙY�\�ڜݙ[�ق�]Q\�HH�[َ][�\�HH�[َ��Hۛ�݈Q��Xݚ[ۈHٙ˘�Yٝ�Nˈ\�\ٜܚ[ۈݙ\�XY
+�YȌK]�\��N��Yٝٙ�\Ȝٜܚ[ۉ܈ݛ��ˈ؛X��]Yݙ\�XY�݈Hؘۛ[SPH�[�YXܛܜȜٜܚ[ۜ˂�ˈݘ�XYٛ�ٜܚ[ۜșٝHۘ[\��YY˘�\ٙH�Yٝۈ[��XݙY�ˈۛݛYوٜۉ݈ܛݙݝHڛܝ�؝\ٙ\ډ܈ݛ�ۛ�^۝]]��ۛ�݈P�YٝܝȏHȚ\ԝX�Yٛ��H\ٜܚ[۔ݘ]K�\ԝX�Yٛ�Nۛ�݈P�YٝHٝP�Yٝ
+�Q��Xݚ[ۋ�ٜܚ[ےQψ[�Y�[�Y�P�Yٝܝ˂�
+Nۛ�݈�Y��YٝHٝ�Y�\�[�ٓP�Yٝ
+�ٙ˘�Yٝ��Y�\�[�ٓK�ٜܚ[ےQψ[�Y�[�Y�P�Yٝܝ˂�
+Nˈݜ��XوH�\ۛ�YH�YٝۈH�ۛݛYو\Șܛݙ[�ț^B�ˈݘ�XYٛ���\ܝ\ȘHۙKYܙ\XYۛܚ\ȊԑWёP�QόJH[�ݙXYو[��ˈ[��\�[�و��ۈڛ�݈ڞ�\Έݘ�XYٛ�Ș\�H؜YYڝ\��ˈ
+Ր�Qѓ�ӐVӕWЕQѕє�PՒSӊHۈHۘ[ݞ�ݛ�\�H\ș^XݙY�ˈ[��ՈHܛݙ[�Ș؝\و8�%ٙHH۝\�ݘ�XYٛ��XYً�[�����ً�[��ʂ�KX�Yٝ�ٜܚ[ۏIܙ\ܚ[ےQ˜ۚXيM�Hψ��ۙH�H
+ݘ�Yٛ�IȈ\ٜܚ[۔ݘ]K�\ԝX�Yٛ�H
+ݞ�ݛ�I۝P�YٝH�Y�Iܜ�Y��YٝH��Xݚ[ۏI۝Q��Xݚ[۟X�
+Nۛ�݈\њ\�ݕ\��B�ٜܚ[ےQOH�[	��][\ܘ[�\ә\ܘYٜʜ�ڙXݔ]ٜܚ[ےQ
+Nۛ�݈ۛ�^[�H\ݕ\ٜ�^�[[YY
+�\JN�ˈKKHޜݙ[V̗N�ݘX�HH
+�Y�\�[�ٜʈ
+Țۛݛ�[�]Y\ȋKKB�ˈۛ\]Yۘو\�ٜܚ[ۈ[�[��Y�܈8�iLZ��Ո[��[Y]Y�B�ˈݜ�][ۈ8�%]�[�Y�H�Y�\�[�وژ[�ٜˈوٙ\HؘڙY�\�ڛۂ�ˈۈH[��ܚXȌZ�ۜؘڙH�Y�^ݘ^\ȝ؜�K��ˈ\ٜȘHYX؝Y�Yٝ[�\[�[�وۛ�^X�ݛ�K�Hۛݛ�B�ˈ[�]Y\Ș�ؚȚ\ș�ۙY[�\�H
+�݈ޜݙ[V̗JHۈ]\Ș]�Z[X�Hۂ�ˈ\��K��]ݘX�HHݘX�SPؘڙK�ٝ
+ٜܚ[ےQ
+NY�
+\ݘX�JHˈڛ�ۙKY�Yڝ�HۚY[�XY\�][Y[ݝ�]�H�\�݈؛��\�Hٝ�\�[�ˈۛ�ݜ��[�Y[�X؛\��Ș]Hۛٜܚ[ۋ�ڝݝY\^HS�ˈ�Xۛ\]HHX]�HݘX�H�ؚȊK��ܔٜܚ[ۈ0匈
+ș[�]H�]ڈ
+ˈ؝[وؘ[�H[�\[�[�Kۛ\ݛ�[�ȝH�\�H][�ވ]؝\ٙ�ˈH�]�Y\ˈژ\�HۙH[�Y�Yڝۛ\]NȝHٝY�[YH[�Ț[��ˈݘX�SPؘڙH�Y�ܙHH�ۚ\و�\ۛ�\ˈۈ�K\�XY[�Ț\Ȝ�XًY��YK��ݘX�HH]ؚ]ڛ�ۙQ�YڝݘX�SJ�ٜܚ[ےQ�
+ڙۘ[
+HO��ۛ\]TݘX�SJ�ٜܚ[ےQ��ڙXݔ]�ٙ˂�ۛ�^[���Y��Yٝ�ڙۘ[��\]Y\ݑٛ�\�][ۋ�
+K��\K�ڙۘ[�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNB�ݘX�SU^HݘX�O˙�ܛX]Y�ˈ�[�Xڈ�܈Hٛ�Z[�[K[�]Ș�][�XYK[\�وٜܚ[ۈ
+�Ȝ�[܈ٜܚ[ۂ�ˈȘYܝ8�%K�ˈH�[�؜�\[\ܝY��ۈ[�ݚ\�XXښ[�JN�HܘYY[��ˈڛۛ\�\܈]ۈ\��H
+ٙHܘYY[��\Ә\�ِۛݘ\�
+Kۈ[��X݂�ˈۛ�^X�ݛ�H
+ޜݙ[V̗JH�Ո[�ݙXYوY�\��[�ȝȝ\����ˈۛ\ڛ�ȝH\��L�ޜݙ[V̗H�\݈[�H\��Lȓ^Y\�8���H�\݈[�ˈHڛ�ۙHۛܚ]K�\܈HݘX�KSHڙ[�۝[�\ȝHH[���ˈڙ[�\Ȝ�]\��ș�[ووښ\ޜݙ[V̗H[�ٝUڙ[�ʜݘX�SۛJK�ˈۈHܘYY[��[�ٛܛHٙ\ȝHГQH^XݙY[�]\ݙY\�H8�%�ˈXڜڛۋ]�˘ۛ\�\ܚ[ۈ�Y��[��
+YܝYܙ\ݛYYٜܚ[ۜȘ\�B�ˈ؛X��]Yۈ\Ț\ș�[و�܈[H8�%H�\ݛܙY[�[�\ˈޜݙ[V̗K�H
+\ܝYH͎M�B�ۛ�݈\�ِۛݘ\�B�\њ\�ݕ\��	���\Ә\�ِۛݘ\�
+۝\�ٕڛ�݋�Y\ܘYٜΈܙSY\ܘYٜ˂�ٜܚ[ےQ�Uڙ[�ΈݘX�O˝ڙ[�۝[�ψ�ˈ�KX\H\Ȝ�\]Y\݉܈�Yٝ]ۚX؛N�[�\��[�[�Ș]ؚ]Ȝڛ�ق�ˈH[ٝ[Hؘۛ[ȝٜ�Hٝ
+Kٛ�]H�]ڙ\ȘX�ݙJH۝[]�B�ˈ]Hۛ�ݜ��[��\]Y\݈�܈HY��\�[�[ٙ[ؘۛ�\�[K�
+̍JB��Yٝ�[ٙ[�Yٝ�JN�ˈKKHۛ�^X�ݛ�H
+�ۋ\�Y�\�[�و[��Y\Έ�Y\ȝH\�X�H�ۜ�ˈ[K�ՈHޜݙ[V̗H�ؚȸ�%\ܝYH̍L��]\�Y]ژ[��[
+HKKB�ˈY�\��Yȝ\���ȝڙ[��X[ٜܚ[ۈۛ�^^\ݜș�܈�[]�[�ق�ˈ؛ܚ[�ˈۈ\��KۛHݘX�HH
+�Y�\�[�ٜʈ\Ț[��XݙY8�%Vє�ˈ�܈[�[�XYK[\�وۛݘ\�
+\�ِۛݘ\�
+Kڙ\�Hو[��X݈�݈ۂ�ˈH
+ȝH\��LHۛ\�\ܚ[ۈ\�HXڙYٙ]\�
+�[]�[�و؛ܚ[�ˈݚ[ۜ�܎�ۛ�^[�ۛY\ș��ۈH[�ۛZ[�Ȝ�\]Y\݋�݈[\ܘ[�ˈݛܘYيK�
+\ܝYH͎M�B�Y�
+Z\њ\�ݕ\��\�ِۛݘ\�
+H]ؘڙYHTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQ
+Nˈ[��K\ٝٞ\ș�܈H
+���\ڛHۛ\]Y
+�ٛXݚ[ۋ�ۛHܝ[]Y�ˈۈH�Xۛ\]H]
+ڙ[�Tٜܚ[ېؘڙH؜Șۛڛ��[Y]Y
+H8�%�ˈ]	܈HۛH]ڙ\�H�K\�[�ڛ�Ș؛�ڝ\��H^�ۈB�ˈ؜�KXؘڙH]H^\ȝ[�ژ[�ٙۈ�]H\]X[]HڝH[��ˈݙ��XٜȘ[�ٞ\Ș\�[�݈�YYY��]ؘڙYٞ\Έݜ�[�֗H[�Y�[�Y]��\ڐۛ�^[��Y\΂�\��^OY�ݜ�[�΂�؝Yۜ�N�ݜ�[�΂�]N�ݜ�[�΂�ۛ�[��ݜ�[�΂�O��[�Y�[�YˈΌMΈH�Yٝ[ݙ\��݈Z[��ۈ\ȝ\��܈�ܔٜܚ[ۋX\YˈHЈژ\K��XYY[�ȝHۛݛYو[H�[݋��]��\ڐۛ�^ݙ\��ݎ��\��^OȚY�ݜ�[�Έ؝Yۜ�N�ݜ�[�Έ]N�ݜ�[�ȟO��[�Y�[�Y�Y�
+XؘڙY
+Hˈ�[ۛ�^X�ݛ��Yٝ8�%�Y�\�[�ٜȚ]�HZ\�ݛ�YX؝Y�Yٝ��ۛ�݈ۛ�^�YٝHP�Yٝˈ�YYH�]�[ݜ۞K\[��Y[��Hٝ�Xڈ[�\ȘHݘX�[]H[�ۂ�ˈ\�]\���[]�[�و�K\؛ܚ[�șٜۉ݈ڝ\��H�YٝX�ݛ�\�B�ˈٛXݚ[ۈ
+ښXڈ۝[�\݈Hޜݙ[V̗HؘڙJK��]˜�[[ݙYˈٛ�Z[�[K[[ܙK\�[]�[�[��Y\Ȝݚ[ژ[�وHٝ��ۛ�݈ݚXڞRYȏH[��RٞRYʂ�T[��Y^�ٝ
+ٜܚ[ےQ
+O˙[��Rٞ\˂�
+Nˈ^۝YH�Y�\�[�ٜȸ�%^IܙH[�XYH[�ޜݙ[V̗B�ۛ�݈ݙ\��ݔڛ�ΈK�ۛݛYّ[��V׈H׎ۛ�݈ۛ�^[��Y\ȏH]ؚ]K��ܔٜܚ[ۊ��ڙXݔ]�ٜܚ[ےQ�ۛ�^�Yٝ�ڙۘ[��\K�ڙۘ[�^۝YP؝Yۜ�Y\ΈȜ�Y�\�[�و�K����ۛ�^[�ȞȘۛ�^[�H�ߊK����ݚXڞRY˜ڞ�HȞȜݚXڞRYȟH�ߊK����ٙ˚ۛݛYً�ۛ�^۝\�ٜϋ�[�ݚ�ȞȚ[�۝YPۛ�^۝\�ٜΈٙ˚ۛݛYً�ۛ�^۝\�ٜȟB��ߊK�ݙ\��ݔڛ�˂�K�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊN��\ڐۛ�^[��Y\ȏHۛ�^[��Y\΂���\ڐۛ�^ݙ\��݈Hݙ\��ݔڛ�˛X\
+
+JHO�
+Y�K�Y�؝Yۜ�N�K�؝Yۜ�K�]N�K�]K�JJNY�
+ۛ�^[��Y\˛[�ݚ
+Hۛ�݈�[�\�YYΈݜ�[�֗HH׎ۛ�݈�ܛX]YH�ܛX]ۛݛYي�ۛ�^[��Y\˛X\
+
+JHO�
+Y�K�Y�؝Yۜ�N�K�؝Yۜ�K�]N�K�]K�ۛ�[��K�ۛ�[��JJK�ۛ�^�Yٝ��[�\�YY˂�
+NY�
+�ܛX]Y
+Hۛ�݈ڙ[�۝[�Hۜ�Q\ݚ[X]Uڙ[�ʙ�ܛX]Y
+NؘڙYHș�ܛX]Yڙ[�۝[�NؘڙYٞ\ȏHQ[��Rٞ\ʘۛ�^[��Y\ˈ�[�\�YYʎTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQؘڙY
+NQ\�HH�YNB�B��ۛ�݈[��YHT[��Y^�ٝ
+ٜܚ[ےQ
+NY�
+XؘڙY	��[��Y
+HˈH��\ڈٛXݚ[ۈ\ș[\K�]�[[ݚ[�ȝH[��Yޜݙ[V̗B�ˈ�ؚȝ۝[ݚ[�\݈HؘڙY�Y�^��\ٜ��HH^X݂�ˈ�]\Ș[�\[�H\�X�H�[[ݘ[[H[�ݙXY�ٙ\[��Rٞ\ˈ��ޙ[�]H�\ٛ[�H
+�݈׊HۈHۘ[\ؙY[H\؜�X�\ˈH�[��ޙ[����ݜ��[�
+[\JHݜ\�ٜܚ[ۈ8�%ٙHH^Y\�LB�ˈX]\�X[Y[H�ݙK��[�[�қ�ݛYّ[HH�]�[ݜҙ^\Έ[��Y�[��Rٞ\˂��^ٞ\Έ׋�[��Y\Έ׋�NؘڙYH�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��NؘڙYٞ\ȏH׎Tٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQؘڙY
+NT[��Y^�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��[��Rٞ\Έ[��Y�[��Rٞ\˂�JNQ\�HH�YN[�\�HH�YNB�B��Y�
+ؘڙY
+Hˈ�[ܙ\�]ۙ\�[�Y��\[��[�Έ�]\وH[��Yޜݙ[V̗H^�ˈڙ[�]�\�H
+�ٛXݙY[��Hٝ
+�\ȝ[�ژ[�ٙ
+؛YH[��HQ˂�ˈ[�Hܙ\�Ȝ؛YH\�Y[��Hۛ�[�
+K�\�H�K\�[�ڛ�Ș�B�ˈ�ܔٜܚ[ۊ
+H]\݈�]�\��\݈HؘڙK��K\[�ۛHڙ[�B�ˈٛXݙYٝژ[�ٜˈ[�[��I܈ۛ�[�ژ[�ٙ
+ݜ�]܈\]JK�ˈ܈\�H\ț�Ȝ[�Y]�ٙHT[��Y^؜˂�ۛ�݈[��YHT[��Y^�ٝ
+ٜܚ[ےQ
+NˈٞKY�ܛX]ZYܘ][ۈݘ\�
+̌̌
+N�H\�ڜݙY[���ۈ�Y�ܙHB�ˈݜ��Xٔڙۘ]\�Hژ[�وݛܙ\ș[��Rٞ\Ț[�Hۙ�ˈY����XJ]WY�ۛ�[�
+X�ܛX]�ۈH�\�݈ܝY\ވ\���ˈH�Xۛ\]YؘڙYٞ\؈\وH�]ț�ܛX[^�Yڙۘ]\�KۈB�ˈ\�H[[Y[�]ڜوۛ\\�H۝[ܝ\�[ݜ۞HZ\ۘ]ڈ[��K\[�
+ۙKB�ˈ[YHؘڙH�\݈�܈]�\�H؜�Hٜܚ[ۊK�ڛݛ�X[�ڛܔ[�ٞ\ˈ]XݜȝHГQHٛXݚ[ۈ[�H�]ȚٞH[�ۙ[�Ȋ؛YHYٝ
+ˈ�]KZY[�X؛�[�\�Y^
+Hۈو�KX[�ڛ܈ڝ�\�Ș�\݋��Y�
+�[��Y˙[��Rٞ\ȉ���ؘڙYٞ\ȉ���ڛݛ�X[�ڛܔ[�ٞ\ʂ�[��Y�[��Rٞ\˂�ؘڙYٞ\˂�ؘڙY��ܛX]Y�[��Y��ܛX]Y�
+B�
+H[��Y�[��Rٞ\ȏHؘڙYٞ\΂�B�ۛ�݈ٝ[�ژ[�ٙHؘڙYٞ\ȋˈ�Xۛ\]H]�ۛ\\�H[��KZٞHٝ˂�؛YQ[��Rٞ\ʜ[��Y˙[��Rٞ\ˈؘڙYٞ\ʂ��ˈ؜�KXؘڙH]
+�ș��\ڈ[��Y\ʎ�H^Y�݈ژ[�ًۂ�ˈ�]H\]X[]HYؚ[�݈H[�\Ȝݙ��Xڙ[���[��YOH�[	��[��Y��ܛX]YOOHؘڙY��ܛX]Y�Y�
+[��Y	��ٝ[�ژ[�ٙ
+Hˈ؛YH[��Hٝ
+܈Y[�X؛^
+H8�%�ݚ[�ȝȜݜ��Xً�H�[�ˈٝ\Ș[�XYH؜��YY�HH\�X�H�ۜY[H
+\[�Yۂ�ˈ�\�݈[��Xݚ[ۊKۈوȓ�Ո[Z]Hޜݙ[V̗H�ؚˈٙ\B�ˈٜܚ[ۈؘڙH[�ؚ˜ݙ\ڝH[�ۈB�ˈ\�ڜݙYPؘڙU^�]�\�]�\�ٜș��ۈT[�^
+H�\ݘ\��ˈ۝[ݚ\�ڜو�[ؙؘڙOY��\ڕ^Ȝ[�[ۙ^[�ܝ\�[ݜ۞B�ˈ�K\[�K�H[�\Ș�\ٛ[�K[ۛHY]Y]H�݈8�%�]�\�ۈHڜ�K��Y�
+ؘڙYٞ\ȉ��ؘڙY��ܛX]YOOH[��Y��ܛX]Y
+HTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��JNQ\�HH�YNB�H[وY�
+�[��Y	���ؘڙYٞ\ȉ�����\ڐۛ�^[��Y\ȉ���\Ә]\�X[Q[J[��Y\Έ��\ڐۛ�^[��Y\˂��]�[ݜҙ^\Έ[��Y�[��Rٞ\˂��^ٞ\ΈؘڙYٞ\˂�JB�
+HˈX]\�X[Hژ[�ٙZY\ٜܚ[ۋ�ݜ��XوHژ[�و�XHB�ˈ\�X�H�ۜ[H]Hۛ��\�؝[ۈZ[Ȝޜݙ[V̗H\ț�]�\��ˈ[Z]YۈHޜݙ[H�Y�^\ț�]�\��\ݙY��˂�ˈԒUPГ�ٙ\[��Rٞ\؈��ޙ[�]H�\ٛ[�H]X]ڙ\ȝB�ˈٝH\�X�H[H؜ț\݈ۘ[\ؙYYؚ[�݈8�%ȓ�ՈY�[�ق�ˈ]ȘؘڙYٞ\ˈH[H\Șۘ[\ؙY[�ȘHڛ�ۙH�݈]\ˈ�TPёXXڈ\��ۈ]]\݈\؜�X�HHՓUSUU�H[H��ۂ�ˈH��ޙ[��\ٛ[�K�Y�وY�[�ٙH�\ٛ[�KH�^\��܂�ˈ[H۝[ۛH\؜�X�H]\��܈[�ܙ[Y[�[�Hۘ[\ؙY�ˈ�݈۝[ڛ[�H�܈X\�Y\�ݜ\�ٜܚ[ۜˈHY��\ˈ�Xۛ\]Y��ۈH��ޙ[��\ٛ[�H]�\�H\��8����K]\ٜ�[�ȝB�ˈ؛YH
+��ޙ[�ݜ��[�
+HZ\�ZY[Ș�]KZY[�X؛ۛ�[��ˈ
+Y[\ݙ[��ș^�HؘڙH�\݊K��[�[�қ�ݛYّ[HH�]�[ݜҙ^\Έ[��Y�[��Rٞ\˂��^ٞ\ΈؘڙYٞ\˂�[��Y\Έ��\ڐۛ�^[��Y\˂�ݙ\��ݎ���\ڐۛ�^ݙ\��݋�NT[��Y^�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��[��Rٞ\Έ[��Y�[��Rٞ\˂�JNTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��JNQ\�HH�YN[�\�HH�YNˈۛ�^X�ݛ�H�Y\ȝH\�X�H[H8�%�Ȝޜݙ[V̗H�ؚ˂�H[وY�
+��\ڐۛ�^[��Y\ϋ�[�ݚ	��ؘڙYٞ\ʈˈ�\�݈[��Xݚ[ۈ
+�Ȝ�[܈ޜݙ[V̗H[�K�\ݛܚX؛H\ˈٙYYHޜݙ[V̗H�ؚˈښXڈ8�%�X؝\وޜݙ[V̗HڝȚ[�ڙB�ˈHؘڙYޜݙ[H�Y�^8�%݈ۜH�[�ˈ�Y�^�KXܙX][ۈH�\�݈\��ۛ�^X�ݛ�H\X\�Y�ˈ
+�L8�$̍͒ȝڙ[�Έ[\Y�YYۈHܙ[�RKӜ[��ݝ\�]ڙ\�B�ˈHڛۙHޜݙ[Hݜ�[�Ȝژ\�\ȘHڛ�ۙHؘڙW؛۝�ۈ��XZܛڛ�
+K��˂�ˈ[�ݙXY�ݝHH�\�݈[��Xݚ[ۈ�ݙڈHГQH\�X�B�ˈ�ۜY[H]][�XYH؜��Y\țZY\ٜܚ[ۈژ[�ٜΈ\[��ˈHݜٜ�\ܚ\ݘ[�HZ\�]Hۛ��\�؝[ۈZ[
+�]K\ݘX�K�ˈ�\^YY�\��][K�KX[�ڛܙYۈۛ\�\ܚ[ۊK�ޜݙ[V̗H\ț�]�\��ˈܝ[]YۈHޜݙ[H�Y�^\ț�]�\��\ݙY�Hۛ�^X�ݛ��ˈK��˂�ˈٙYH[H�\ٛ[�Hڝ[�STKZ\ڈٛ�[�[\�ݜ��[�Y�ˈ
+�[ݜ��Xِ�\ٛ[�X
+Hۈ]Xݔݜ��Xٙ]]][ۜ؈ݜ��XٜȝB�ˈ�Sٝۘو
+XXڈ[��I܈�X[\ڈY��\�ș��ۈ��K�B�ˈ\[�Y�ؚȜ�Xۜ�ȝH�YH\ڙ\ˈۈHݜ��Xٙٝ�ˈY�[�ٜȘ[�]\�\��șۉ݈�KY�\�H8�%Y[�X؛YXژ[�X܈ˈHX]\�X[Xژ[�و��[�ڋ�\݈ڝ[�[\H�\ٛ[�H[�ݙXYق�ˈHݘ[H[��YۙK�و[�H�S�T�Q^�]\ȜۈH\�ڜݙY�ˈ[�
+T[��Y^
+Hٙ\Ț]ș[��KZٞHY[�]H\ȝH�\ٛ[�B�ˈ�܈ݘ�ٜ]Y[�X]\�X[Y[H]Xݚ[ۋ�]وȓ�Ո[Z]]\ˈHޜݙ[V̗H�ؚ˂�[�[�қ�ݛYّ[HH�]�[ݜҙ^\Έ�[ݜ��Xِ�\ٛ[�J[��RٞRYʘؘڙYٞ\ʊK��^ٞ\ΈؘڙYٞ\˂�[��Y\Έ��\ڐۛ�^[��Y\˂�ݙ\��ݎ���\ڐۛ�^ݙ\��݋�NT[��Y^�ٝ
+ٜܚ[ےQ�ܛX]Y�ؘڙY��ܛX]Y�ڙ[�۝[��ؘڙY�ڙ[�۝[��[��Rٞ\ΈؘڙYٞ\˂�JN[�\�HH�YNˈۛ�^X�ݛ�H�Y\ȝH\�X�H[H8�%�Ȝޜݙ[V̗H�ؚ˂�H[وY�
+ؘڙY
+Hˈ�[�Xڎ�HؘڙY�ؚȜ�XXڙY\�HڝݝX]ښ[�ȝB�ˈ�\�݋Z[��Xݚ[ۈțX]\�X[Xژ[�وȜٝ[�ژ[�ٙ��[�ڙ\ȸ�%K�˂�ˈH[\K\ٛXݚ[ۈ�[[ݘ[]X�ݙH
+ؘڙYٞ\ϖ׋�ș��\ڂ�ˈ[��Y\ʋښXڈ[�XYH]Y]YY]Ȝ�[[ݘ[[K�ٙ\H[�\ˈ�\ٛ[�HY]Y]H�]ȓ�Ո[Z]ޜݙ[V̗H8�%H\�X�H[B�ˈ\ȝHۛH؜��Y\���T[��Y^�ٝ
+ٜܚ[ےQ���ؘڙY�[��Rٞ\ΈؘڙYٞ\ȏψT[��Y^�ٝ
+ٜܚ[ےQ
+O˙[��Rٞ\˂�JN[�\�HH�YNˈۛ�^X�ݛ�H�Y\ȝH\�X�H[H8�%�Ȝޜݙ[V̗H�ؚ˂�B�B�B��ˈ\وHݘX�H�ؚɜȜݛܙYڙ[�۝[��]\�[��KY\ݚ[X][�ˈ��ۈݜ�[�ț[�ݚ8�%]�ڙȚ[�ۛ�ڜݙ[�\ݚ[X]\ˈۛ�^X�ݛ��ˈH�Y\ȝH\�X�H[H
+X؛ݛ�YYؚ[�݈H[Hڙ[��ˈ�Yٝ�݈Hޜݙ[HؘڙH�Yٝ
+Kۈ]Yț�ݚ[�Ț\�K��ٝUڙ[�ʜݘX�O˝ڙ[�۝[�ψٜܚ[ےQ
+NH؝ڈ
+JH\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNً�\��܊�H[��Xݚ[ۈ�Z[Y��JNٝUڙ[�ʌٜܚ[ےQ
+NH�[�[Hۛ�ݛYP؛YSݝْYJٜܚ[ےQ
+NB��ˈ�]ڙYHݘ]H\�ڜݙ[�و8�%ڛ�ۙH�ܚ]H�܈ؘڙH
+Ȝ[�ژ[�ٜY�
+Q\�H[�\�JHۛ�݈ؘڙYHTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQ
+Nۛ�݈[��YHT[��Y^�ٝ
+ٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQ���Q\�H	��ؘڙY�ȞPؘڙU^�ؘڙY��ܛX]Y�PؘڙUڙ[�ΈؘڙY�ڙ[�۝[��B��ߊK����[�\�H	��[��Y�ȞT[�^�[��Y��ܛX]Y�T[�ڙ[�Έ[��Y�ڙ[�۝[��T[�ٞ\Έ[��Y�[��Rٞ\Ȓ�ӓ��ݜ�[�ڙ�J[��Y�[��Rٞ\ʂ���[�B��ߊK�JNB�H[وٝUڙ[�ʌٜܚ[ےQ
+Nۛ�ݛYP؛YSݝْYJٜܚ[ےQ
+NB��ˈKKHˈܘYY[��[�ٛܛHۈY\ܘYٜȋKKB�ˈܙSY\ܘYٜȝ؜Ș�Z[
+Ȝ�\ۛ�Yۘو�Y�ܙHHH�ؚȊݙ\�HۈB�ˈ\��LHHXڜڛۈ[�\ȝ�[�ٛܛHژ\�HY[�X؛[�]��]\و]��˂�ˈ�K[ؙHٜܚ[ۉ܈\ݚ[][ۈۘ\ڛ݈ٙ�]�XY�\�݈
+̌�N�B�ˈޛ�ȝ�[�ٛܛJ
+H�[݈۝[ݚ\�ڜو�[�[�[��ݛ�Y\ݚ[][ۈؘ[�ۂ�ˈ\Ȝ�K]\ݜ�X[Hܚ]X؛]��]؜�Hܝ[]\ȝH؛YH\�\ٜܚ[ۂ�ˈۘ\ڛ݈�[�ٛܛJ
+H�XYˈۈ]țؙ\ݚ[][ۜИXڙY]ȝHؘڙB�ˈ[�ݙXYوH��ۈHۛ[Y[ݝ]	܈H�˛܈[��[�ٛܛJ
+H�[Ș�Xڂ�ˈȝHY[�X؛[�\�ؙ\܈ؙ��]ؚ]�]؜�Q\ݚ[][۔ۘ\ڛ݊��ڙXݔ]�ٜܚ[ےQ�ܙSY\ܘYٜ˂��\K�ڙۘ[�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNˈ�[�ٛܛJ
+H\]\Șۜ�I܈][\Y^Y\��Y�ܙH\ܘ]ڋ�\وB�ˈ\݈^Y\�ڛܙH�\]Y\݈؜ȘXؙ\Y\ݜ�X[H[�ݙXY�Hޛ�]Xˈ�\ܛۜو܈�Z[Y�\]Y\݈]\݈�݈ۛ�ݛYHHۛ\Xݚ[ۈ�ݛ�\�K��ۛ�݈�]�[ݜ՜�[�ٛܛS^Y\�B�ٜܚ[۔ݘ]K�\ݐXؙ\Y�ݙ[�[�ٓ^Y\�ψ�[]�\ݛ�H�\ݛH�[�ٛܛJY\ܘYٜΈܙSY\ܘYٜ˂��ڙXݔ]�ٜܚ[ےQ��Yٝ�[ٙ[�Yٝ�۝\�ٕڛ�݋�JNH؝ڈ
+\��܊HY�
+J\��܈[�ݘ[�ٛو�[۝\�ٔ�\]Z\�Y
+H\۝\�ٕڛ�݊H�݈\��܎�\\�][ە[Z[�˛Y]�Xʘ۝\�ٗ٘[�Xڗɞٜ��܋��X\ۛ�XJN
+ܙSY\ܘYٜ˂�[\ܘ[[�]��ݙ[�[�ِ�SY\ܘYْY�۝\�ٕڛ�݋�ڙXڜڛ��HH]ؚ]�\\�TٛX[�Xә\ܘYٜʞY\ܘYٜΈ�\K�Y\ܘYٜ˂�ٜܚ[ےQ��ڙXݔ]��ԝܙN�ݜ�\ܕ[\ܘ[ݛܘYً��ݛ؛ێ��\K��ݛ؛ۋ��ܘّ�[��YK�[Z[�Έ�\\�][ە[Z[�˂�JJN\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊN�\ݛH�[�ٛܛJY\ܘYٜΈܙSY\ܘYٜ˂��ڙXݔ]�ٜܚ[ےQ��Yٝ�[ٙ[�Yٝ�JNB�ڙXڜڛ�˙�[�\ڊ�\ݛ�Y\ܘYٜʎ�ˈ�܈�Z[[�Ȝ\�K]^\ܚ\ݘ[�Y\ܘYٜȝȜ�]�[��Y�[\��ܜ�܈
+ΊHۛ�݈\݈H�\ݛ�Y\ܘYٜ˘]
+LJNY�
+[\݈\݋�[��˜�ۙHOOH�\ٜ��H��XZ΂�ۛ�݈\՛ۛ\�ȏH\݋�\�˜ۛYJ
+
+HO��\HOOH�ۛ�NY�
+\՛ۛ\�ʈ��XZ΂��\ݛ�Y\ܘYٜ˜܊
+NB��ˈ\�ڜ݈Hܛܜ˝\��Y\XڜڛۈY[[ȝڙ[�]ژ[�ٙۈHݘX�B�ˈ�[؛ۛ\ٙ�ܛHوXXڈۛݝ]ݜ��]�\ȘH؝]؞H�\ݘ\�
+�JK��ˈڙX\ژ[�ًYݘ\�]�ڙȘH�ܚ]Hۈ\��ȝڙ\�HY\Y�݈�[���ۛ�݈ٜ�X[^�YH^ܝY\Xڜڛۜʜٜܚ[ےQ
+NY�
+ٜ�X[^�YOOH\ݔ؝�YY\Xڜڛۜ˙ٝ
+ٜܚ[ےQ
+JH\ݔ؝�YY\Xڜڛۜ˜ٝ
+ٜܚ[ےQٜ�X[^�Yψ[�Y�[�Y
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQșY\XڜڛۜΈٜ�X[^�YJNB�B��ˈKKH؋�H�Y��\ڈۈ[Y\�ٛ�ވ^Y\�KKB�ˈ^Y\�
+[Y\�ٛ�ދݜ�[�ڙ[��\ٝ
+Hڙۘ[ȝ]Hۛ�^؜ș�[B�ˈ�\ٝ��K\�[��ܔٜܚ[ۊ
+HȜ�K\�[�Șۛ�^X�ݛ�[��Y\Ș�H�[]�[�ق�ˈȝHݜ��[�ۛ��\�؝[ۈݘ]H8�%[��Y\ȝ]�X؛YH�[]�[�ZYB�ˈٜܚ[ۈ
+K�ˈH۝ژH\؛ݙ\�Y\�[�șX�Yٚ[�ʈ\�Hݜ��XٙۈB�ˈ�\ٝ\���]\�[�ؚ][�ș�܈H�^ٜܚ[ۋ�ݘX�HB�ˈ
+ޜݙ[V̗JH\Țٜ[��Y8�%^Y\��\ݜȝH�ۜؘڙH[�]؞Kۂ�ˈޜݙ[V̗Hڛ�H�K]ܚ][��]ٙ\[�ȝH؛YHۛ�[�YX[�ȝB�ˈ�V\��܈�Y�^X]ڙ\Ș[�ٝȘHؘڙH�XY��Y�
+�\ݛ��Y��\ړH	��ٙ˚ۛݛYً�[�X�Y
+H�Hۛ�݈Q��Xݚ[ۈHٙ˘�Yٝ�Nˈ\�\ٜܚ[ۈݙ\�XY
+�YȌK]�\��K�ݘ�XYٛ�Țٙ\Hۘ[\��ˈ�YY˘�\ٙ�YٝۈH[Y\�ٛ�ދ\�Y��\ڈ]ۋ��ۛ�݈P�YٝHٝP�Yٝ
+Q��Xݚ[ۋٜܚ[ےQ\ԝX�Yٛ��H\ٜܚ[۔ݘ]K�\ԝX�Yٛ��JNˈ�[ۛ�^X�ݛ��Yٝ8�%�Y�\�[�ٜȚ]�HZ\�ݛ�YX؝Y�Yٝ��ۛ�݈ۛ�^�YٝHP�Yٝۛ�݈ݘX�Uڙ[�ȏHݘX�SPؘڙK�ٝ
+ٜܚ[ےQ
+O˝ڙ[�۝[�ψۛ�݈ۛ�^[�H\ݕ\ٜ�^�[[YY
+�\JNˈݘX�[]H[��ٙ\H�]�[ݜ۞K\[��YٝݚXڞHۈۛ�٘ݝ]�B�ˈ^Y\�M\��șۉ݈ڝ\��HٛXݚ[ۈ
+ٙHݙ\M�K��ۛ�݈ݚXڞRYȏH[��RٞRYʛT[��Y^�ٝ
+ٜܚ[ےQ
+O˙[��Rٞ\ʎۛ�݈ݙ\��ݔڛ�ΈK�ۛݛYّ[��V׈H׎ۛ�݈ۛ�^[��Y\ȏH]ؚ]K��ܔٜܚ[ۊ��ڙXݔ]�ٜܚ[ےQ�ۛ�^�Yٝ�ڙۘ[��\K�ڙۘ[�^۝YP؝Yۜ�Y\ΈȜ�Y�\�[�و�K����ۛ�^[�ȞȘۛ�^[�H�ߊK����ݚXڞRY˜ڞ�HȞȜݚXڞRYȟH�ߊK����ٙ˚ۛݛYً�ۛ�^۝\�ٜϋ�[�ݚ�ȞȚ[�۝YPۛ�^۝\�ٜΈٙ˚ۛݛYً�ۛ�^۝\�ٜȟB��ߊK�ݙ\��ݔڛ�˂�K�
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNۛ�݈ۛ�^ݙ\��݈Hݙ\��ݔڛ�˛X\
+
+JHO�
+Y�K�Y�؝Yۜ�N�K�؝Yۜ�K�]N�K�]K�JJN]�Y��\ڙYH�[َ�Y�
+ۛ�^[��Y\˛[�ݚ
+Hۛ�݈�[�\�YYΈݜ�[�֗HH׎ۛ�݈�ܛX]YH�ܛX]ۛݛYي�ۛ�^[��Y\˛X\
+
+JHO�
+Y�K�Y�؝Yۜ�N�K�؝Yۜ�K�]N�K�]K�ۛ�[��K�ۛ�[��JJK�ۛ�^�Yٝ��[�\�YY˂�
+N�Y�
+�ܛX]Y
+Hۛ�݈ڙ[�۝[�Hۜ�Q\ݚ[X]Uڙ[�ʙ�ܛX]Y
+Nۛ�݈[��Rٞ\ȏHQ[��Rٞ\ʘۛ�^[��Y\ˈ�[�\�YYʎˈ[؞\ȝ\]HHؘڙHڝ��\ڛH�[�ٙ[��Y\˂�Tٜܚ[ېؘڙK�[]Jٜܚ[ےQ
+NTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQș�ܛX]Yڙ[�۝[�JN�ˈ�[ܙ\�]ۙ\�[�Y��\[��[�Έۈۛ�٘ݝ]�H^Y\�\��˂�ˈޜݙ[V̗HݘX�[]HX]\�Ș�X؝\وޜݙ[V̗J֌WHT�Hݚ[ؘڙB�ˈ�XYȘ]Z��]\وH[�ڙ[�]�\�HٛXݙY[��Hٝ\ˈ[�ژ[�ٙ
+؛YHQȊȘۛ�[�[�Hܙ\�H8�%؛YHۚXވ\Ȝݙ\���ۛ�݈[��YHT[��Y^�ٝ
+ٜܚ[ےQ
+N�Y�
+[��Y	��؛YQ[��Rٞ\ʜ[��Y�[��Rٞ\ˈ[��Rٞ\ʊHˈ؛YH[��Hٝ8�%�ݚ[�ȝȜݜ��Xً�H\�X�H[H[�XYB�ˈ؜��Y\ȝH�[ٝșȓ�Ո[Z]Hޜݙ[V̗H�ؚ˂�ٝUڙ[�ʜݘX�Uڙ[�ˈٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^��ܛX]Y�PؘڙUڙ[�Έڙ[�۝[��ˈ[�[�ژ[�ٙ8�%ۉ݈ܚ]HT[�^۝T[�ڙ[�˛T[�ٞ\JNH[وY�
+�[��Y	���\Ә]\�X[Q[J[��Y\Έۛ�^[��Y\˂��]�[ݜҙ^\Έ[��Y�[��Rٞ\˂��^ٞ\Έ[��Rٞ\˂�JB�
+HˈX]\�X[Hژ[�ٙ\�[�ș[Y\�ٛ�ވ�Y��\ڋ�ݜ��XوHژ[�ق�ˈ\ȘH\�X�H�ۜ[NȜޜݙ[V̗H\ț�݈[Z]Y��˂�ˈԒUPГ�ٙ\[��Rٞ\؈��ޙ[�]H�\ٛ[�HX]ښ[�ȝHٝ�ˈH\�X�H[H؜ț\݈ۘ[\ؙYYؚ[�݈8�%ȓ�ՈY�[�وˈHݜ��[�[��Rٞ\؋�Hۘ[\ؙY\�X�H[H\Ȝ�\Xٙ�ˈXXڈ\��ۈ]]\݈\؜�X�HHՓUSUU�H[H��ۈH��ޙ[��ˈ�\ٛ[�HȝHݜ��[�ٛXݚ[ێȘY�[�ڛ�ȝH�\ٛ[�H۝[�ˈ�܈X\�Y\�ݜ\�ٜܚ[ۜș��ۈHڛ�ۙH�݋��ۛ�݈��ޙ[�ٞ\ȏH[��Y�[��Rٞ\΂�[�[�қ�ݛYّ[HH�]�[ݜҙ^\Έ��ޙ[�ٞ\˂��^ٞ\Έ[��Rٞ\˂�[��Y\Έۛ�^[��Y\˂�ݙ\��ݎ�ۛ�^ݙ\��݋�NT[��Y^�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��[��Rٞ\Έ��ޙ[�ٞ\˂�JNTٜܚ[ېؘڙK�[]Jٜܚ[ےQ
+NTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��JNٝUڙ[�ʜݘX�Uڙ[�ˈٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^�[��Y��ܛX]Y�PؘڙUڙ[�Έ[��Y�ڙ[�۝[��T[�^�[��Y��ܛX]Y�T[�ڙ[�Έ[��Y�ڙ[�۝[��T[�ٞ\Έ�ӓ��ݜ�[�ڙ�J��ޙ[�ٞ\ʋ�JNˈۛ�^X�ݛ�H�Y\ȝH\�X�H[H8�%�Ȝޜݙ[V̗H�ؚ˂�H[وˈ�\�݈^Y\�[��Xݚ[ۈوۛ�^X�ݛ�K��ݝH]�ݙڈB�ˈ\�X�H[H
+�[\ݜ��Xو�\ٛ[�JH�]\�[�ٙY[�Ȝޜݙ[V̗B�ˈ8�%؛YH�][ۘ[H\ȝHݙ\M��\�݋Z[��Xݚ[ۈ]�^Y\��\ݜˈH�Y�^[�]؞K�]ٙ\[�Șۛ�^X�ݛ�Hݝوޜݙ[V̗B�ˈYX[�Ț]ݘ^\ȘؘڙK\ݘX�HۈH�V
+�ۋY[Y\�ٛ�ފH\��ۋ��[�[�қ�ݛYّ[HH�]�[ݜҙ^\Έ�[ݜ��Xِ�\ٛ[�J[��RٞRYʙ[��Rٞ\ʊK��^ٞ\Έ[��Rٞ\˂�[��Y\Έۛ�^[��Y\˂�ݙ\��ݎ�ۛ�^ݙ\��݋�NT[��Y^�ٝ
+ٜܚ[ےQș�ܛX]Yڙ[�۝[�[��Rٞ\ȟJNٝUڙ[�ʜݘX�Uڙ[�ˈٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^��ܛX]Y�PؘڙUڙ[�Έڙ[�۝[��T[�^��ܛX]Y�T[�ڙ[�Έڙ[�۝[��T[�ٞ\Έ�ӓ��ݜ�[�ڙ�J[��Rٞ\ʋ�JNˈۛ�^X�ݛ�H�Y\ȝH\�X�H[H8�%�Ȝޜݙ[V̗H�ؚ˂�B��Y��\ڙYH�YNً�[��ʂ��ۛ�^X�ݛ�H�Y��\ڙYۈ[Y\�ٛ�ވ^Y\�
+^Y\�
+H�܈ٜܚ[ۈ��ٜܚ[ےQ�
+NB�B��Y�
+\�Y��\ڙY
+Hۛ�݈[��YHT[��Y^�ٝ
+ٜܚ[ےQ
+NY�
+[��Y
+Hˈ�ș��\ڈۛ�^X�ݛ�[��Y\ȝٜ�HٛXݙY�\[�H\�X�B�ˈ�[[ݘ[[HۈH[ٙ[ۛݜȝHۙ\�[��Y\Ș\�Hݜ\�ٙYˈޜݙ[V̗H\ț�݈[Z]Y��˂�ˈԒUPГ�ٙ\[��Rٞ\ȑ��֑S�]H�\ٛ[�HX]ښ[�ȝHٝB�ˈ\�X�H[H؜ț\݈ۘ[\ؙYYؚ[�݈8�%ȓ�ՈڜHȖ׋�B�ˈۘ[\ؙY\�X�H[H\Ȝ�\XٙXXڈ\��[�]\݈\؜�X�HB�ˈ�[ݛ][]]�H��ޙ[����ݜ��[�
+[\JHݜ\�ٜܚ[ۋ�ڜ[�ȝB�ˈ�\ٛ[�HȖ׈\�H
+[�Y[[ܞHS�\�ڜݙY
+HXZٜȝH�^\���ˈۛ\]H�]�[ݜϖ׸����^V׈H�Ȝ�[[ݘ[ˈ�ܜ[�ș]�\�HX\�Y\��ˈݜ\�ٜܚ[ۈ��ۈHڛ�ۙH�݋��ۛ�݈��ޙ[�ٞ\ȏH[��Y�[��Rٞ\΂�[�[�қ�ݛYّ[HH�]�[ݜҙ^\Έ��ޙ[�ٞ\˂��^ٞ\Έ׋�[��Y\Έ׋�NT[��Y^�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��[��Rٞ\Έ��ޙ[�ٞ\˂�JNTٜܚ[ېؘڙK�[]Jٜܚ[ےQ
+NTٜܚ[ېؘڙK�ٝ
+ٜܚ[ےQ�ܛX]Y�[��Y��ܛX]Y�ڙ[�۝[��[��Y�ڙ[�۝[��JNٝUڙ[�ʜݘX�Uڙ[�ˈٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^�[��Y��ܛX]Y�PؘڙUڙ[�Έ[��Y�ڙ[�۝[��T[�^�[��Y��ܛX]Y�T[�ڙ[�Έ[��Y�ڙ[�۝[��T[�ٞ\Έ�ӓ��ݜ�[�ڙ�J��ޙ[�ٞ\ʋ�JNˈۛ�^X�ݛ�H�Y\ȝH\�X�H[H8�%�Ȝޜݙ[V̗H�ؚ˂�ً�[��ʂ��ۛ�^X�ݛ�H�Y��\ڈ�]\��Y�ș[��Y\Έݜ\�ٙ[�ȝ�XH\�X�H[H�܈ٜܚ[ۈ��ٜܚ[ےQ�
+NH[وˈ�ܔٜܚ[ۊ
+H�]\��Y�Șۛ�^X�ݛ�[��Y\Ș[�\�H\ț�Ȝ�[܂�ˈ[�Ȝ�\ٜ��H8�%ۙX\�ۛ�^Hݘ]K�ݘX�HH
+ޜݙ[V̗JH\ˈ�\ٜ��Y��Tٜܚ[ېؘڙK�[]Jٜܚ[ےQ
+NT[��Y^�[]Jٜܚ[ےQ
+NٝUڙ[�ʜݘX�Uڙ[�ˈٜܚ[ےQ
+N؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQPؘڙU^��[�PؘڙUڙ[�Έ�[�T[�^��[�T[�ڙ[�Έ�[�T[�ٞ\Έ�[�JNً�[��ʂ��ۛ�^X�ݛ�HۙX\�Yۈ[Y\�ٛ�ވ^Y\�
+^Y\�
+H8�%ݘX�HH�\ٜ��Y�܈ٜܚ[ۈ��ٜܚ[ےQ�
+NB�B�H؝ڈ
+JH\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNˈۈ\��܋X]�HHݙ\M�Hݘ]H[�X݈
+ؘڙK[�^
+B�ˈۈH\���ؙYYȝڝH�K\�Y��\ڈۛݛYو�]\�[��ˈ[�[�ۛ�ڜݙ[�ݘ]K�H�^\��ڛ�]�H�XHݙ\���ً�\��܊�H�Y��\ڈۈ[Y\�ٛ�ވ^Y\��Z[Y��JNB�B��ˈKKH؋�
+�[[ݙY
+Hۛ�^X[�ݙHKKB�ˈ�]�[ݜ۞HH\�]\���ۛ�^X[��ݙH؜Ș\[�YȜޜݙ[V̗Hڙ[��ˈHܘYY[�ۛ\�\ܙYۛ�^
+^Y\�8�iLJK�]ȝۜ�[�ȝ�\�YY�H^Y\��ˈښXڈ�\ݙYHۛ��\�؝[ۈؘڙHۈ]�\�H^Y\�ܘڛ][ۈ
+x�������JB�ˈ�X؝\وޜݙ[V̗H\ț�ȘؘڙW؛۝�ۈو]țݛ��H�ݙH؜Ș[ۂ�ˈ\�ٛH�Y[�[�ڝH\�Y\ݚ[][ۈ�ܜވ�Y܈[�H�X؛�ˈۛ\؜�\[ۋ�]țۙH[�\]YHڙۘ[
+�\�Y�Hۚ]YܙXڙ�X܈8�%�ˈ�Z�XݙY[\��]]�\ˈ^X݈\��ܜˈ�[H]ˈ�[X�\�ȸ�%�XH�X؛
+H�݂�ˈ]�\Ȝݘ]X؛H[��PГՓӓёTД�TSӋښXڈ�]�\��\ݜȝHؘڙK��ˈٙH\ܝYH͍K���ˈKKHً��\ܛًۜ\ڙH؜��[�Ț[��Xݚ[ۈKKB�ˈH�]�[ݜȈ�[�ݜݘZ[�X�Hۛ��\�؝[ۈ]XݙY
+�ۛ�٘ݝ]�HؘڙH�\ݜʈ��ˈ؜��[�ȝ؜Ȝ�[[ݙY
+͎Mʋ��][ۘ[N�H\ٜ�\ț�ȘXݚ[ۘX�H�\ܛۜق�ˈ
+ؘڙHܚ\�[Ș\�H[[ܝ[؞\ȝ\ݜ�X[H�Y܈8�%�Y�^�Y�YB�ˈ�Xۛ\�\ܚ[ۈ\�Y�XݜˈH[�Z\ۘ]ڈ8�%�݈\ٜ�Xۜ��XݘX�H�Z]�[܊K�ˈ[�HY\ܘYو؜țZ\ۙXY[�ˈH�\݋\ܚ\�[ڙۘ[\ț�݈�ݝY�ˈ\�XݛHȔٛ��H�XHٝ\�\ݔܚ\�[؜\�X
+\݋YܘXوH\��܋�ˈ[�YܘXوH[��Ș��XYܝ[X��X۝�\�HH[��Ș��XYܝ[X�K��˂�ˈۜ�ٜ�YYܘY][ۈ؜��[�Έݚ[ݜ��Xٙڙ[��Xڙܛݛ�ۜ�ٜ�ˈ
+\ݚ[][ۋݜ�][ۋؘڙK]؜�Z[�ʈ]�H�Y[��Z[[�ș�܈HݜݘZ[�Y�ˈ\�[ًۈH\ٜ�\ȝۙ[�ݙXYوڛ[�Hܚ[�Șۛ\�\ܚ[ۋӕK��ˈH\ٜ�Г�X݈ۈ\ȊK�ˈڙXڈܙY[�X[ȋȜ�ݚY\�ݘ]\ʋۂ�ˈ\ٜ�]�\ژ�H^�[XZ[�ȝH�Yڝژ[��[��ۛ�݈ۜ�ٜ�؜��[�ՙ^H�Z[ۜ�ٜ�YܘY][ە؜��[�ʜٜܚ[ےQ
+NY�
+ۜ�ٜ�؜��[�ՙ^
+Hً�؜���ٜܚ[ۈ	ܙ\ܚ[ےQN�ۜ�ٜ�YܘY][ۈ]XݙY8�%؜��[�ȝڛ�H�\[�YȜ�\ܛًۜ��
+NB�ˈHڛ�ۙHۛX�[�Y�Y˝^�]�\Ș[[��Xݚ[ۈڝ\Ș�[݋��ۛ�݈؜��[�ՙ^�ݜ�[�ȟ[�Y�[�YHۜ�ٜ�؜��[�ՙ^ψ[�Y�[�Yۛ�݈ڛݛ[��Xݕ؜��[�ȏHH]؜��[�ՙ^�ˈKKH��Z[H[ٚY�YY�\]Y\݈KKB�ˈ�Xۛ�ݜ�X݈؝]؞SY\ܘYٜș��ۈH�[�ٛܛYYܙHY\ܘYٜ˂�ˈܙSY\ܘYٜ՛ј]]؞H�Xۛ�ݜ�Xݜȝۛܙ\ݛ�ؚ܈��ۈ\ܚ\ݘ[�	܂�ˈۛ\]Yٜ��܈ۛ\�Έ�[[ݙSܜ[�Yۛ�\ݛȚ\ȘHؙ�]H�]�ˈ]؝ڙ\Ș[�H�[XZ[�[�țܜ[�Yۛܙ\ݛ�Y�\�[�ٜ˂�ۛ�݈�[�ٛܛYYY\ܘYٜȏHܙSY\ܘYٜ՛ј]]؞J��\ݛ�Y\ܘYٜ˂��ݙ[�[�ِ�SY\ܘYْY�ڛݛ�\ٜ��T�\ܛٜۜԜ�ݙ[�[�ي�]�[ݜ՜�[�ٛܛS^Y\��\ݛ�^Y\�H	���؛��\^T�\]Y\ݔ�ݙ[�[�ي��\K��ݛ؛ۋ��\]Y\ݕ\ݜ�X[T�ݝK�Y��Xݚ]�T�ݛ؛ۋ�
+K�
+N�[[ݙSܜ[�Yۛ�\ݛʝ�[�ٛܛYYY\ܘYٜʎ�ۛ�݈[ٚY�YY�\N�؝]؞T�\]Y\݈H����\K�ˈܝޜݙ[H�ۜ\Ȝ\ܙY�ݙڈ[�[ٚY�YY8�%H\Ț[��XݙY�ˈ\ȘHٜ\�]Hޜݙ[H�ؚȝ�XHؘڙHܝ[ۜș�܈�Y�^ݘX�[]K��Y\ܘYٜΈ�[�ٛܛYYY\ܘYٜ˂�N�ˈKKH��[��X݈�X؛ۛ
+ڝڝ�[Z[�\�\[�Yș\؜�\[ۊHKKB�ˈۛH[��X݈Y�HۚY[�ٜۉ݈[�XYH]�HH�X؛ۛ
+K�ˈ��ۂ�ˈHܝYڛ�Zوܙ[�ۙJH[�H�\]Y\݈\țݚ\�ۛȊۈ]	܈B�ˈۙ[�ȘYٛ��݈H�\�Hژ]
+K��Y�
+[ٚY�YY�\K�ۛ˛[�ݚ�	��XۚY[�\ԙX؛ۛ
+[ٚY�YY�\K�ۛʊHˈ�Z[H�X؛ۛڝڝ�[Z[�\��Zٙ[�Ț]ș\؜�\[ۋ��ˈ\Țٙ\ȝH�[Z[�\�[�HݘX�HۛȜ�Y�^
+ZؘڙJH�]\��ˈ[�H�ۘ][Hޜݙ[H�ۜ��ۛ�݈�X؛ۛB�ٙ˚ۛݛYً�[�X�Y	��ٙ˛ܙQ�[K�[�X�Y�Ȟ����PГѐUUЖWՓӓ�\؜�\[ێ�	ԑPГѐUUЖWՓӓ�\؜�\[۟W��ӓԑWГӓRUԑSRS�T�X�B���PГѐUUЖWՓӓ[ٚY�YY�\K�ۛȏHˋ��[ٚY�YY�\K�ۛˈ�X؛ۛNB�Y�
+�[ٚY�YY�\K��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȈ	���ۚY[�\ԙX؛ۛ
+[ٚY�YY�\K�ۛʂ�
+H[ٚY�YY�\K�^�\ȏH���[ٚY�YY�\K�^�\˂�\�[[ݛۛؘ[Έ�[ً�NB��ˈKKHˈޛ�]XȜ�ڙX݋\�\ۛ][ێ�[��X݈�ؙHY�[Yژ�HKKB�ˈڙ[�Hٜܚ[ۈ\ȘH٘Z˜�ݚ\ڛۘ[�[�[�ȐS�و]�[�݈^]\ݙY�ˈݜ��ؙH][\ˈڛܝXڜ�ݚ]H\��ڝHޛ�]Xȝۛݜق�ˈ\�ٝ[�ȝHۚY[�	܈ݛ��XY܈ڙ[ۛ��˂�ˈۛH�\�\țۈ�SSՑH؝]؞\ȸ�%�܈ؘ[؝]؞\ˈ�ؙ\܋�ݙ
+
+H\ˈH�X[�ڙX݈\�XݛܞH
+ݙ\Ȉ�٘ZȘ�]ۜ��X݈�Kۈ[��Xݚ[�ˈH�ؙH۝[Y][�ވ�܈�Ș�[�Y�]��ۛ�݈٘ZК[�[�ȏHٜܚ[۔ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YNۛ�݈�\ۛ�Tݘ]HHٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]Hψ��ۙH�ۛ�݈[Yژ�HB�٘ZК[�[�ȉ���ۛ��Y˜�[[ݙQ؝]؞H	����\ۛ�Tݘ]HOOH��ۙH�	���[ٚY�YY�\K�ۛ˛[�ݚ��Y�
+[Yژ�JHۛ�݈ݘYوHٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�TݘYَˈݘYوN��Y�\��XY
+ؙ�\�K�ݘYو�
+Y�\��XY�YY
+N�ڙ[ۛK��ۛ�݈�XY\�ٝHݘYوț�[��[��XYۛ
+[ٚY�YY�\K�ۛʎۛ�݈\�ٝH�XY\�ٝψ�[�ڙ[ۛ
+[ٚY�YY�\K�ۛʎY�
+\�ٝ
+HˈYٞX�XڈH͌�Ȝ�Y�\�[�ً]�[Y]Hۘ\ڛ݈۝ȝHґS�ؙHۂ�ˈ]ۜݜȓ�ș^�H�ݛ�]�\
+Hٜ\�]H�ؙH۝[ڛܝXڜ�ݚ][��ˈY][ۘ[\��K�ۛHHڙ[ݘYو؛��[�H؜�\ȝH�XY�ˈ�ؙH؛�݋��Y�؛ܙH\Ș�\݋YY��ܝ�H�ڙX݈\Ȝݚ[�ݚ\ڛۘ[�ˈ\�Kۈ�Y�ȘۛYH��ۈH�ݚ\ڛۘ[�[�[�ȸ�%؜\�H�KY؝\�ˈ��ۈH�Tӓ�Q�ڙX݋[��[K؛ۛX[�ڙXڜȘ\�H�\˛]�[�ˈ
+Y[�]KZ[�\[�[�
+KۈX؝\�Xވ\Ȝ�\ٜ��YțۛHH[�H�Y�ڛܙB�ˈ�\ٛ�[YH؜ۉ݈�K[\ݙYYܘY\ȝȉݛ�ۛݛ�Ȋ�]]�[
+K��]�ؚȏH�Z[ޛ�]X՛ۛ\ِ�ؚʝ\�ٝ
+NY�
+�\�ٝ�ڛ�OOH�ڙ[�	���ٙ˚ۛݛYً�[�X�Y	���ٙ˚ۛݛYً��Y�\�[�ٕ�[Y][ۂ�
+Hۛ�݈YZȏH]ؚ]K�YZԜ�ڙXݔ�Y�ә��ؙY
+�ڙXݔ]
+N\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊNY�
+\YZ˙؝Y	��YZ˜�Y�˛[�ݚ�
+H�ؚȏH�Z[ۛX�[�Y�\ۛ�T�Y�ڙXڐ�ؚʂ�\�ٝ��Z[�Y�ڙXڔ�ؙT؜�\
+YZ˜�Y�ʋ�
+Nٜܚ[۔ݘ]K��Y�ڙXڒ[��ؙHH�YNB�B�ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HB�\�ٝ�ڛ�OOH��XY�Ȉ��XY[�[�Ȉ��ڙ[[�[�Ȏٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Uۛ\ْYH�ؚ˚Yٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Rڛ�H\�ٝ�ڛ�ً�[��ʂ�ޛ�]X˜�\ۛ�N�[��Xݚ[�ȉݘ\�ٝ�ڛ�H�ؙH
+
+ۛIݘ\�ٝ�ۛ�[Y_Iܙ\ܚ[۔ݘ]K��Y�ڙXڒ[��ؙHȈ�ܙY�ڙXڈ����JH
+�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X�
+NˈғԕPҔ�ՒU�ȓ�Ո�ܝ؜�\ݜ�X[K��]\��ݜ�ݛ�ۛݜق�ˈ�\ܛۜوۈHۚY[�\��\܈^Xݝ\ȝH�ؙHؘ[K���]\��ޛ�]X՛ۛ\ٔ�\ܛۜي�\K�ؚʎB�ˈ�ȝ\ؘ�Hۛ8�%ڝ�H\\�X[�[�H�܈\Ȝٜܚ[ۋ��ٜܚ[۔ݘ]K�ޛ�]Xԙ\ۛ�Tݘ]HH�ۙH�B�B��ˈ�\ٝH\�X�H[Hڙ[�HܘYY[�]�[�ٛܛYY\��^H�\ڝY��\˂�ˈH[I܈\�ڜݙY[�ٜ�]\ȘH��ޙ[�X�ۛ]H[�^[�ȝ]\��^Nˈڙ[�]�\ڝY��\ˈHًۘ\ؙ�H[�^؛��Y�[�ȘHۛݜًˈۛܙ\ݛZ\�
+܈ڛ\H۝ȘHY��\�[�Y\ܘYيK�\ݚ[�ȝH�ۜ�ˈؘڙK�ۈݘڈH\��و�Xۛ\]HH[H
+ܚ][ۈ
+Șۛ�[�
+HTȝ\���ˈ�]\�[��\^Z[�ȘHݘ[H[�^8�%ٙ\[�ȝH�\]Y\݈ۚ\�[�[��ˈݛܜ[�Ȝ�[[ݙSܜ[�Yۛ�\ݛș��ۈ\ݜ�Xݚ]�[Hݜ�\[�ȘH�X[ۛ�ˈZ\�]�\�Hݘ�ٜ]Y[�\����˂�ˈۈ]�[�Ȝ�\ڝY��HH\��^N�
+JHHVQT�ҐS�ш
+[�\�[�˙\ؘ[][�˂�ˈKY\ؘ[][�Șۛ\�\ܚ[ۊK[�
+�HHԕRQHӓTPՋښXڈ�X�Z[ȝB�ˈ\��^H
+H\ݚ[Y�Y�^ܛݜˈH�]ȝڛ�݈\Ȝ�X�Z[
+Hښ[HՐVRS�ˈ]H؛YH^Y\�8�%HݙXYH^Y\�LHٜܚ[ۈ�\ݛY\Ș]^Y\�K�H^Y\��ˈۛ\\�\ۛ�[ۙHZ\ܙ\Ȋ�K��˂�ˈ<'孈�]
+�HۛH�\ڝY��\ȝڙ[�H�\ݛYHPՕPSH�Xۛ\XݙY�HД�B�ˈYH�\ݛYH
+ؘڙU؜�XȜښ\ۛ\X݈8�%�̌L�H�Tє��TȝH\ݚ[Y�ˈ�Y�^[��]˝ڛ�݈[��]KY�܋X�]KۈH\��^Hٜȓ�Ո�\ڝY��B�ˈ[�H[I܈[�ٜ�]ݘ^\ȝ�[Y�؝[�țۈ�]Ș\ݕ\��؜ҙX�ˈ�KX[�ڛܙYH[HۈܙH؜�H�\ݛY\ȝۋ[ݚ[�Ț]ٙ�]ȘؘڙY�ˈܚ][ۈ[��\ݚ[�ȝH�\�HؘڙHښ\ۛ\X݈؜Ȝ�ݙXݚ[�Ȋ؜ٜ��Y��ˈL	x���IH�ܜȘ]H[I܈ۙ[�^ۈ\�وٜܚ[ۜʋ�ۈHܝZYB�ˈ�\ݛYH۝[�Ș\ȘH�\ڝY��HӓHڙ[�]؜ȓ�ՈؘڙK]؜�K��ۛ�݈YT�Xۛ\XݙYHYT�\ݛYT�\ڝY��Y
+�ٜܚ[۔ݘ]K�\ݕ\��؜ҙHψ�[ً�ؘڙU؜�K�
+Nۛ�݈[Pۛ\�\ܙYHڛݛ�\ٝ[Sېۛ\�\ܚ[ۊ�ٜܚ[۔ݘ]K�\ݑ[S^Y\�ψ��\ݛ�^Y\��YT�Xۛ\XݙY�
+NˈۈHۛ\�\ܚ[�ȝ\��HܘYY[��\ڝY��YH\��^NȜ�KX[�ڛ܈B�ˈ\�X�H[H�ؚ܈
+�\ٜ��[�Șۛ�[�
+Ș]]
+HȘH��\ڈۛ\Z\�\ؙ�B�ˈ[�^�<'孈�KX[�ڛ܈8�%�Ո[]H8�%]�[�ڙ[�H��\ڈۛݛYو[H\ˈ�ٝXٙ\ȝ\��
+ٙH�X[�ڛܑ[Sېۛ\�\ܚ[ۊN�[][�ȝڜYB�ˈݜ��Xٙ\ٝ\ݛܞKۈH\[��[݈�KY\�]�YH�[ݛ][]]�B�ˈ[�����؛]�\�Hۛ\�\ܚ[ۊؚ[�و\��
+H�Yܛݝ̌LțۛH�[[YY
+K��ۛ�݈�R[�ٜ�]H�X[�ڛܑ[Sېۛ\�\ܚ[ۊ�ٜܚ[ےQ��ڙXݔ]�[ٚY�YY�\K�Y\ܘYٜ˂�[Pۛ\�\ܙY�
+NY�
+�R[�ٜ�]OOH�[
+Hً�[��ʂ��ۜY[N��KX[�ڛܙY\�X�H[H�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_HY�\�ۛ\�\ܚ[ۈ
+^Y\�	ܙ\ܚ[۔ݘ]K�\ݑ[S^Y\�ψx���ܙ\ݛ�^Y\�K[�ٜ�]IܙR[�ٜ�]JX�
+NB��Y�
+[�[�қ�ݛYّ[JHˈXوH\�X�H[H�X\�HZ[�]�]�\��]ٙ[�[��ˈ\ܚ\ݘ[�
+ۛݜيH[�]ȝ\ٜ�ۛܙ\ݛ
+H8�%[�ٜ�[�ȝ\�Hܜ[�ˈHۛݜو[��Yٙ\�Ș[�[��ܚXȍ
+͍Ȝ�Yܙ\ܚ[ۊK�H[�^�ˈ\Șۛ\]Yۛ\Z\�\ؙ�H[�\�ڜݙYȜ�\^H�]\ٜȚ]�\��][Hˈٙ\H[H�]K\ܚ][ۋ\ݘX�H�܈H�ۜؘڙH[�[H�^�ˈۛ\�\ܚ[ۈ�\ٝȚ]��ۛ�݈[�ٜ�]Hؙ�Q[R[�ٜ�[�^
+�[ٚY�YY�\K�Y\ܘYٜ˂�X]�X^
+[ٚY�YY�\K�Y\ܘYٜ˛[�ݚHJK�
+N\[�ۛݛYٔ�ۜ[Jٜܚ[ےQ��ڙXݔ]�[�ٜ�]��ݎ�]K��݊
+K����[�[�қ�ݛYّ[K�JNB�ˈ�XڈH^Y\�]�ٝXٙHݜ��[�[HXٛY[�ۈH�^\���ˈ؛�]X݈Hۛ\�\ܚ[ۋY�]�[��\ڝY��K��ٜܚ[۔ݘ]K�\ݑ[S^Y\�H�\ݛ�^Y\�[ٚY�YY�\K�Y\ܘYٜȏH\Tٜܚ[۔�ۜ[\ʂ�[ٚY�YY�\K�Y\ܘYٜ˂�ٜܚ[ےQ�
+Nˈ\�ݘ\�[�YN�[\Ș\�HܛXٙ[�ȝHڜ�H\��^HQ�T�Hܜ[��ˈؙ�]H�]
+ݙ\
+H[�\�ڜݙY[�XٜȘ\�H�\^YY�\��][KۈB�ˈ]\�\��ڛܙH^[ݝY��\�ș��ۈH[I܈ܙX][ۈ\��۝[Xق�ˈH[HY�Xٛ�ȘHۛ\����K\�[��[�ȝHؙ�]H�][�ݜ�\ț�ˈܜ[�Yۛݜًݛۛܙ\ݛ]�\��XXڙ\ȝHTK��ݙH\Ț\ȘB�ˈ\݋Y]ڈ�]�Y�]�\�\Ț]ݜ�\ȝHܜ[�YۛݜًښXڈ�]ܚ]\ˈH\ݛܚX؛\ܚ\ݘ[�Y\ܘYو[��\ݜȝHؘڙH��ۈ]ڛ�8�%ݜ�XݛB�ˈ�]\�[�H\��]]ڛݛ\ܙ[�X[H�]�\��\�Hڝ�[�B�ˈܙX][ۋ][YHXٛY[�X�ݙK���[[ݙSܜ[�Yۛ�\ݛʛ[ٚY�YY�\K�Y\ܘYٜʎ�ˈKKHK��ܝ؜�ȝ\ݜ�X[HKKB�ˈ[�X�H�ۜؘښ[�ș�܈ۛ��\�؝[ۈ\��ȝڝ^Y\�Y��XZܛڛ�΂�ˈHޜݙ[H�ۜ�Z
+ܝ�ۜ\ȝ�\�HݘX�Hڝ[�Hٜܚ[ۊB�ˈHN�ٜ\�]Hޜݙ[H�ؚȊ�Ș��XZܛڛ��[�Y�]ș��ۈ�Y�^
+B�ˈHۛΈZۈ\݈ۛ
+�X؛
+șڝ�[Z[�\�\�Hݘ]Xʂ�ˈHۛ��\�؝[ێ�ۛ��Yݜ�X�Hۈ\݈Y\ܘYو�ؚȊ[HY�][ZܝZ[�؝]ʂ�ˈY]H�\]Y\݈\ܝ�ݙڈ
+[�T\ܝ�ݙڊH�]�\��XXڙ\Ț\�H8�%]�ˈ�ܝ؜�ȝH�]Ȝ�\]Y\݈ڝݝ�Z[[��ܚXԙ\]Y\݋ۈ�Șؘښ[�˂��ˈ�\ۛ�Hۛ��\�؝[ۈؘڙH�^Xڝ�[H�ȌZ�\܈�ݙڋ�ˈ�]]Ȉ\ܘY\ȝȌZڙ[�ۛXؘڙH\��ș^ٙY	Hو�Xٛ�ڛ�݋��]�\ۛ�Yۛ��\�؝[ە��[H��Z�B�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەψ�[H�ۛ�݈ۛ��YՕHٙ˘ؘڙK�ۛ��\�؝[ەY�
+ۛ��YՕOOH�[H�ۛ��YՕOOH�Z�H�\ۛ�Yۛ��\�؝[ەHۛ��YՕH[وY�
+ۛ��YՕOOH�]]ȊHۛ�݈ڛ�݈Hٜܚ[۔ݘ]K�ۛؘڙUڛ�ݎY�
+ڛ�݈	��ڛ�݋�[�ݚ�HJHۛ�݈ۛ��Xݚ[ۈHڛ�݋��[\��ۛX[�K�[�ݚȝڛ�݋�[�ݚY�
+ۛ��Xݚ[ۈ��	���\ۛ�Yۛ��\�؝[ەOOH�[H�Hˈ\ܘYH[[YYX][H8�%ݚ]ښ[�ȝȌZ\Ș[؞\Ș�[�Y�Xژ[��\ۛ�Yۛ��\�؝[ەH�Z�ٜܚ[۔ݘ]K�ݛ�ܘYTݜ�XZȏHً�[��ʂ�]]˝\ܘYHۛ��\�؝[ۈȌZ�ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_X
+ۛ��Xݚ[ۏIʘۛ��Xݚ[ۈ
+�L
+K�њ^Y
+
+_IX�
+NH[وY�
+ۛ��Xݚ[ۈ��	���\ۛ�Yۛ��\�؝[ەOOH�Z�Hˈ\ݙ\�\ڜΈ�\]Z\�HȘۛ�٘ݝ]�H]X[Y�Z[�ȝ\��Ș�Y�ܙHݛ�ܘY[�˂�ˈHڛ�ۙH�XݝX][ۈ�[݈�	Hڛݛ�݈�Yٙ\�Hݛ�ܘYH�X؝\ق�ˈHژ[�و[ٚY�Y\ȝHؘڙY�]\ȐS��ܜȝHYH�\ڛۙ�ˈ��ۈ�Z[�ȍ[Z[�؝\ڛ�ȘHۛ\ݛ�[�ȘؘڙH�\݋��ۛ�݈ݜ�XZȏH
+ٜܚ[۔ݘ]K�ݛ�ܘYTݜ�XZȏψ
+H
+ȌNٜܚ[۔ݘ]K�ݛ�ܘYTݜ�XZȏHݜ�XZ΂�Y�
+ݜ�XZȏ�Hʈ�\ۛ�Yۛ��\�؝[ەH�[H�ٜܚ[۔ݘ]K�ݛ�ܘYTݜ�XZȏHً�[��ʂ�]]˙ݛ�ܘYHۛ��\�؝[ۈȍ[N�ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_X
+ۛ��Xݚ[ۏIʘۛ��Xݚ[ۈ
+�L
+K�њ^Y
+
+_IHݜ�XZωܝ�XZߘ�
+NH[وً�[��ʂ�ݛ�ܘYHY�\��Y
+ݜ�XZȉܝ�XZߋ̊N�ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_X
+ۛ��Xݚ[ۏIʘۛ��Xݚ[ۈ
+�L
+K�њ^Y
+
+_IX�
+NB�H[وˈۛ��Xݚ[ۈ�݈]X[Y�Z[�ș�܈ݛ�ܘYH8�%�\ٝݜ�XZY�
+�\ۛ�Yۛ��\�؝[ەOOH�Z�Hٜܚ[۔ݘ]K�ݛ�ܘYTݜ�XZȏHB�B�B�B�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ەH�\ۛ�Yۛ��\�؝[ە�ۛ�݈ؘڙSܝ[ۜΈ[��ܚXИXڙSܝ[ۜȏHޜݙ[U��Z��ݘX�STޜݙ[N�ݘX�SU^�ؘڙUۛΈ�YK�ؘڙPۛ��\�؝[ێ��YK�ۛ��\�؝[ە��\ۛ�Yۛ��\�؝[ە�ˈܙI܈\ݚ[Y�Y�^
+�Z[�Y�^Y\ܘYٜʈ\ȝH�\�݈�Y\ܘYٜˈ
+Hݜٜ�\ܚ\ݘ[�HZ\�Hڙ[�]�\�\ݚ[][ۈ\ȘXݚ]�B�ˈ
+\ݚ[Yڙ[�ȏ�
+K[�[؞\ȜڝȘ]H��۝وH�[�ٛܛYY�ˈ\��^H
+ˋ���Y�^����]՚[�ݗJNȝH\�X�H[H\Ț[�ٜ�Y�X\�B�ˈZ[[�ܜ[�\�[[ݘ[�]�\�ݘڙ\ȝH��۝ۈ̋WHݘ^HH�Y�^��ˈ\ܚ[�Ȍ�XٜȘ[�[�\�[܈��XZܛڛ�ۈ]Ș�ݛ�\�HۈH�]˝ڛ�݂�ˈ]�\�ٛ�و�[Ș�XڈȝHؘڙY�Y�^[�ݙXYوH�MȚXY��\ݚ[Y�Y�^[�ݚ��\ݛ�\ݚ[Yڙ[�ȏ�Ȍ���N�ˈH�ݝH\Ȝ\�وH�ܙYܛݛ��\]Y\݉܈X�ۛ]HY�][YK�ݘ\��ˈHژ\�Y؛ܙH�Y�ܙH[^Z[�ȜۈH̌\٘ۛ�XY[�H[�۝Y\Ș�ݚ�ˈHؚ][�]�\�H]\�\ݜ�X[KܙX؛\ً��ۛ�݈�ܙYܛݛ�X�ܝHܙX]Q�ܙYܛݛ�X�ܝ؛ܙJ[ٚY�YY�\K�ڙۘ[
+N�ˈKKHZ[H�Yٝ
+ȓН]][ݘH�ݝHKKB�ˈ\H[�[��\ژ�H�ޞK[]�[ۙY\Ȝ݈ۛHYٛ�ڙ[�\�ؘښ[�ˈHZ[H�YٝԈH[��ܚXȓН]][ݘK�HۙY\\Ș؜Yˈ]�ڙ؝\ڛ�ȘؘڙH�\ݜȊښXڈ۝[�Hٛ�YY�X][�ȸ�%ۜݚ[�ț[ܙB�ˈ[�H�ݝH؝�Y
+K��ۛ�݈Z[P�YٝHٝZ[P�Yٝ
+
+Nˈ][ݘH�\ܝ\�H\Ș[�[�\[�[�ڙۘ[8�%\Y\ș]�[�ڝ�ȕTш�Yٝ��ˈ؝YȐ[��ܚX˓Н]X؛ݛ�Έ�܈]�\�][�ș[ً��ۛ�݈][ݘTۘ\ڛ݈Hٝ][ݘQ�ܐܙY[�X[
+�\ۛ�P]]
+ٜܚ[ےQ
+JNۛ�݈][ݘT�\ܝ\�HHۛ\]T][ݘT�\ܝ\�J][ݘTۘ\ڛ݊NY�
+Z[P�Yٝ�][ݘT�\ܝ\�H�
+Hۛ�݈[�]ڙ[�ȏB�ٝ\ݕ�[�ٛܛQ\ݚ[X]Jٜܚ[ےQ
+H�ۜ�Q\ݚ[X]Uڙ[�ʒ�ӓ��ݜ�[�ڙ�J[ٚY�YY�\K�Y\ܘYٜʊNۛ�݈\ݚ[X]Y݈ۜH\ݚ[X]T�\]Y\ݐۜ݊�\K�[ٙ[[�]ڙ[�ʎۛ�݈[^HHٝZ[U�ݝQ[^J�Z[P�Yٝ�\ݚ[X]Yۜ݋�][ݘT�\ܝ\�K�
+N�Y�
+[^H�
+Hˈ؜[^HȘ]�ڙ\ښ[�ȝH�^�\]Y\݈\݈HؘڙH�ݛ�\�K��ˈ\و�]��\]Y\ݕ[YH
+H�\]Y\݈�Y�ܙH\țۙJHȘۛ\]H݈]Xڂ�ˈوHؘڙHڛ�݈\Ș[�XYH�Y[�ۛ�ݛYY��ۛ�݈\ȏH�\ۛ�Yۛ��\�؝[ەOOH�Z�Ȍ׍�̌�̌̌ۛ�݈[\ٙHٜܚ[۔ݘ]K��]��\]Y\ݕ[YB�ȑ]K��݊
+HHٜܚ[۔ݘ]K��]��\]Y\ݕ[YB��ȋˈ�\�݈�\]Y\݈8�%�Ȝ�[܈[Z[�ˈ�[]�Z[X�B�ۛ�݈X^ؙ�HHX]�X^
+
+\ȋH[\ٙ
+H
+��JHȌLۛ�݈XݝX[[^HHX]�Z[�[^KX^ؙ�JN�Y�
+XݝX[[^H��JHˈۉ݈�ݚ\�ۙY\[�ȏL\ً�[��ʂ��Yٝ]�ݝN�ۙY\[�ȉؘݝX[[^K�њ^Y
+J_\Ș
+ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_H
+ܙ[�I	ٙ]Z[Tܙ[�
+
+K�ܙ[��њ^Y
+�_H
+�]OI	ٙ]ۜݔ�]J
+K�њ^Y
+�_Kڜ��
+N�H]ؚ]ۛ\]P�Yٝ�ݝQ[^J�XݝX[[^H
+�L��ܙYܛݛ�X�ܝ�ڙۘ[�
+
+HO�ۛ�݈ۜݜȏHٝٜܚ[ېۜݜʜٜܚ[ےQ
+NY�
+ۜݜʈۜݜ˝�ݝK�]�[�ʊ΂�ۜݜ˝�ݝK�ݘ[[^S\ȊψXݝX[[^H
+�LB�K�
+NH؝ڈ
+\��܊H�ܙYܛݛ�X�ܝ�\ܛܙJ
+N�݈\��܎B�B�B�B�\ܙ\�ݜ��[�\[[�Qٛ�\�][ۊ�\K�ڙۘ[�\]Y\ݑٛ�\�][ۊN�ˈݘ\�ٛ�ؚK�ژ]ܘ[��Y�ܙHH\ݜ�X[H؛ۈ]؜\�\Ȝ�X[�ˈ؛Xؚۛș\�][ۈ
+[�۝Y[�ț�]ۜ�ț][�ވ[�ݜ�X[Z[�ȝ[YJK��ˈHܘ[�\ș[�Y[�ܝ�\ܛۜي
+HY�\�\ؙو]�X�]\Ș\�Hٝ��ۛ�݈ٛ�ZTܘ[�Hٛ��K�ݘ\�[�Xݚ]�Tܘ[�܎��ٛ�ؚK�ژ]���[YN�ژ]	ܙ\K�[ٙ[X�]�X�]\Έ�ٛ�ؚK�ܙ\�][ۋ��[YH���ژ]���ٛ�ؚK��\]Y\݋�[ٙ[���\K�[ٙ[��ٛ�ؚK��ݚY\���[YH����\]Y\ݕ\ݜ�X[T�ݝK��ݚY\�Qς��\]Y\ݕ\ݜ�X[T�ݝK�Y��Xݚ]�T�ݛ؛ۋ��ٛ�ؚK��\ܛًۜ�ݜ�X[Z[�Ȏ��\K�ݜ�X[K�ˈ�șٛ�ؚK�[�]�Y\ܘYٜȸ�%�]�Xވ
+�ޞH�܈ݚ\�[ܛI܈�ڙXݜʂ�K�JN]ݜ�X[Z[�њ[�[^�\��Yڜݙ\�YH�[َ]ٛ�ZTܘ[�[�YH�[َ]�X؛\�ڜݙ[�ٕ�[�ؘݚ[ێ��Șۛ[Z]�
+
+HO��ڙȜ�ۛ�Xڎ�
+
+HO��ڙB�[�Y�[�Yۛ�݈�ۛ�Xڔ�X؛\�ڜݙ[�وH
+
+N��ڙO��X؛\�ڜݙ[�ٕ�[�ؘݚ[ۏ˜�ۛ�Xڊ
+N�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۈH[�Y�[�YNۛ�݈[�ٛ�ZTܘ[�H
+
+N��ڙO�Y�
+ٛ�ZTܘ[�[�Y
+H�]\��ٛ�ZTܘ[�[�YH�YNٛ�ZTܘ[�˙[�
+
+NNۛ�݈�ܔݜ�X[Z[�њ[�[^�\�H
+
+N��ڙO��ۛ�Xڔ�X؛\�ڜݙ[�ي
+Nݜ�X[Z[�њ[�[^�\��Yڜݙ\�YH�YNٛ�ZTܘ[�˜ٝݘ]\ʞۙN���Y\ܘYَ��ܝ\�\ܛۜو�[�[^�\��ܜY��JN[�ٛ�ZTܘ[�
+NNۛ�݈�[X\ّ�ܙYܛݛ�H
+
+N��ڙO�Y�
+\ݜ�X[Z[�њ[�[^�\��Yڜݙ\�Y	��Yٛ�ZTܘ[�[�Y
+Hٛ�ZTܘ[�˜ٝݘ]\ʞۙN���Y\ܘYَ��\K�ݜ�X[B�Ȉ�ݜ�X[H؛�ٛY�Y�ܙH\�Z[�[�\ܛۜو�����\]Y\݈[�Y�Y�ܙH\�Z[�[�\ܛۜو��JN[�ٛ�ZTܘ[�
+NB��ܙYܛݛ�X�ܝ�\ܛܙJ
+NN�]\ݜ�X[T�\ݛ�\ݜ�X[T�\ݛ�H�\\�][ە[Z[�˝\ݜ�X[Tݘ\�
+
+N\ݜ�X[T�\ݛH]ؚ]�ܝ؜�՜ݜ�X[J�[ٚY�YY�\K�ۛ��Y˂�[�Y�[�Y�ؘڙSܝ[ۜ˂��ܙYܛݛ�X�ܝ�ڙۘ[��\]Y\ݕ\ݜ�X[T�ݝK�
+NH؝ڈ
+\��܊H�[X\ّ�ܙYܛݛ�
+
+N�݈\��܎B�ۛ�݈\ݜ�X[T�\ܛۜوHܘ\�ٞUڝۙX[�\
+�\ݜ�X[T�\ݛ��\ܛًۜ�
+
+HO�ߋ��ܙYܛݛ�X�ܝ�ڙۘ[�
+N]�ܙYܛݛ�ݛ�\�ښ\�[�ٙ\��YH�[َۛ�݈�[�\ڑ�ܙYܛݛ�H
+�\ܛَۜ��\ܛۜيN��\ܛۜوO�Y�
+�ܙYܛݛ�ݛ�\�ښ\�[�ٙ\��Y
+H�]\���\ܛَۜ�ܙYܛݛ�ݛ�\�ښ\�[�ٙ\��YH�YNۜU\ؙٓ[Z]XY\�ʝ\ݜ�X[T�\ܛًۜ�XY\�ˈ�\ܛًۜ�XY\�ʎ�]\��ܘ\�ٞUڝۙX[�\
+��\ܛًۜ��[X\ّ�ܙYܛݛ���ܙYܛݛ�X�ܝ�ڙۘ[��ۛ�Xڔ�X؛\�ڜݙ[�ً�
+NNۛ�݈]ؚ]�ܙYܛݛ�H\ޛ�ȏ�ܙ\�][ێ��ۚ\ُ�N��ۚ\ُ�O��H�]\��]ؚ]ܙ\�][ێH؝ڈ
+\��܊HY�
+Y�ܙYܛݛ�ݛ�\�ښ\�[�ٙ\��Y
+H�[X\ّ�ܙYܛݛ�
+
+N�݈\��܎B�Nۛ�݈Ȝٜ�X[^�Y�ٞN��\]Y\ݐ�ٞKY��Xݚ]�T�ݛ؛ۈHH\ݜ�X[T�\ݛ�Y�
+]\ݜ�X[T�\ܛًۜ�ڊHۛ�݈\��ܐ�ٞTڙۘ[HX�ܝڙۘ[�[�J�ܙYܛݛ�X�ܝ�ڙۘ[�X�ܝڙۘ[�[Y[ݝ
+�ܙYܛݛ�\��ܐ�ٞU[Y[ݝ\ʋ�JN]\��ܐ�ٞHH���H\��ܐ�ٞHH]ؚ]�XY�ܙYܛݛ��ٞJ�\ݜ�X[T�\ܛًۜ��YK�[�Y�[�Y�\��ܐ�ٞTڙۘ[�
+NH؝ڈ
+\��܊HY�
+�ܙYܛݛ�X�ܝ�ڙۘ[�X�ܝY
+H�[X\ّ�ܙYܛݛ�
+
+N�݈\��܎B�ً�؜���\ݜ�X[H\��܈�ٞH�XY[YYݝ�NB�ً�\��܊\ݜ�X[H\��܎�	ݜݜ�X[T�\ܛًۜ�ݘ]\ߘ
+N�ˈڙ[�HTH�Z�XݜȝڝHۛ�^[[�ݚ\��܋\ؘ[]HHۛ\�\ܚ[ۂ�ˈ^Y\��܈H�^\��ۈHٜܚ[ۈٜۉ݈ٝݝXڈ[�Hۜ��ˈ[��ܚXș�ܛX]���ۜ\ȝۈۙΈ���Hڙ[�ȏ��X^[][H��ˈܙ[�RH�ܛX]��X^[][Hۛ�^[�ݚ\ȌL�ڙ[�ˈݙ]�\�[ݜ�Y\ܘYٜȜ�\ݛY[�L͍�Hڙ[�Ȃ�Y�
+�\ݜ�X[T�\ܛًۜ�ݘ]\ȏOOH	���
+\��ܐ�ٞK�[�۝Y\ʈ��ۜ\ȝۈۙȊH�\��ܐ�ٞK�[�۝Y\ʈ�ۛ�^ۙ[�ݚٞٙYY�H�\��ܐ�ٞK�[�۝Y\ʈ�X^[][Hۛ�^[�ݚ�JB�
+Hۛ�݈[��ܚXӘ]ڈH\��ܐ�ٞK�X]ڊ�ܜ�ۜ\ȝۈۙΈ
+
+ʈڙ[�ȏ�
+
+ʈX^[][K˂�
+Nۛ�݈ܙ[�ZSX]ڈB�X[��ܚXӘ]ڈ	���\��ܐ�ٞK�X]ڊܙ\ݛY[�
+
+ʈڙ[�ˊ�ʗ
+ʈڙ[�ˊNۛ�݈X]ڈH[��ܚXӘ]ڈܙ[�ZSX]ڎˈY�][ȌK�ȊX\ȝț^Y\�ʈڙ[�H�ܛX]؛�݈�H\�ٙ�ˈڛ�و[�[�\�٘X�H\��܈ݙٙ\ݜȘ[�[�^XݙYڝX][ۈڙ\�B�ˈYٜ�\ܚ]�Hۛ\�\ܚ[ۈ\Ȝؙ�\���ۛ�݈ݙ\�ڛ۝�][ȏHX]ڈȓ�[X�\�X]ږ̗JHȓ�[X�\�X]ږ̗JH�K�΂�ۛ�݈\ؘ[]S^Y\�Hݙ\�ڛ۝�][ȏ�HK��ȌȎ��ٝ�ܘٓZ[�^Y\�\ؘ[]S^Y\�ٜܚ[ےQ
+Nً�؜����ۜݙ\��ݎ�\ؘ[][�ȝț^Y\�	ؘٜ[]S^Y\�H�܈ٜܚ[ۈ	ܙ\ܚ[ےQ�ۚXيM�_X
+
+�][ω۝�\�ڛ۝�][˝њ^Y
+�_JX�
+NB��؜\�UۛZ\�[�͌
+ݘ]\Έ\ݜ�X[T�\ܛًۜ�ݘ]\˂�\��ܐ�ٞK�Y\ܘYٜΈ[ٚY�YY�\K�Y\ܘYٜ˂�^Y\���\ݛ�^Y\��[ٙ[��\K�[ٙ[�ٜܚ[ےQ�JN�ٛ�ZTܘ[��ٝݘ]\ʞۙN���Y\ܘYَ�	ݜݜ�X[T�\ܛًۜ�ݘ]\ߘ�JN[�ٛ�ZTܘ[�
+N�]\���[�\ڑ�ܙYܛݛ�
+؛�]^�Y\ݜ�X[Q\��ܔ�\ܛۜي\ݜ�X[T�\ܛۜيJNB��ˈH\ݜ�X[HXؙ\Y\ȝ�[�ٛܛYY�\]Y\݋�ۛ[Z]H�ݙ[�[�ق�ˈ�ݛ�\�HۛH�ݎȝ�[�ٛܛJ
+H]ٛ�\ȜܙXݛ]]�H[�؛��H�ۛݙY�ˈ�HHޛ�]XȜ�\ܛًۜ�[�ܛܝ\��܋܈�ۋL��\ܛًۜ��ٜܚ[۔ݘ]K�\ݐXؙ\Y�ݙ[�[�ٓ^Y\�H�\ݛ�^Y\�؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQ\ݐXؙ\Y�ݙ[�[�ٓ^Y\���\ݛ�^Y\��JN�ˈ�[�H�X؛Z[�\�ٜ[ۈۜݙ\�[�[�XYKXX؝[][]Y�ˈ
+[�\��[[��ܚX˙�ܛX]
+H؝]؞T�\ܛۜو[��]\��HۚY[��ˈ�\ܛًۜ�ژ\�Y�HH�ۋ\ݜ�X[Z[�Ȝ]S�Hܙ[�RKۜ[�ZK\�\ܛٜۜˈݜ�X[Z[�Ȝ]ȸ�%ܙHX؝[][]HH\ݜ�X[HԑH[�ȝH؛YH[�\��[�ˈ[��ܚX˙�ܛX]�\ܛًۜۈH�X؛ۜ\Ȝ�ݛ؛ۋXYۛܝXȚ\�K��ˈڝݝ\ˈH�X؛ۛݜو[��XݙY�HH؝]؞H۝[XZȝȝB�ˈۚY[�
+K�ˈ�[ٙ[�YYȘ؛[�]�Z[X�Hۛ	ܙX؛	ȊK��ۛ�݈�Y��\�Y�X؛XYۛܝX܈HܙX]T�X؛XYۛܝX܊�\ݜ�\ܕ[\ܘ[ݛܘYً�
+Nۛ�݈�[�[^�Uڝ�X؛H\ޛ�Ȋ��\܎�؝]؞T�\ܛًۜ�
+N��ۚ\ُ�\ܛُۜ�O�ˈKKH�X؛[�\�ٜ[ۈ
+�ۋ\ݜ�X[Z[�ʈKKB�ˈۜ[ݜȝH[ٙ[Ș؛�X؛][\H[Y\ȊK�ˈ�[ݛ��ˈ[�ȝ�Y�۝\�وڝ][ۜʋ��\۝\�ً�ٜ�\܋[�[YH�Yٝˈ�ܛX[H[�HژZ[��Y�ܙH]Șۛ��Yݜ�Y[Y\�ٛ�ވٚ[[�˂�]ݜ��[��\܈H�\܎]�X؛\H]ݜ��[�[ٚY�YY�\HH[ٚY�YY�\Nۛ�݈�\ܛٜۜ՚\ژ�Pۛ�[��؝]؞Pۛ�[��ؚ֗HH׎ۛ�݈ݛ][]]�U\ؙوHȋ����\܋�\ؙوψ�T�וTБъHNۛ�݈�X؛�YٝH�]Ȕ�X؛ژZ[��Yٝ
+X^^Xݝ[ۜΈܙPۛ��YʊK�٘\�ڋ��X؛�ژZ[�X^^Xݝ[ۜ˂�XY[�P]��ܙYܛݛ�X�ܝ�XY[�P]�JNˈX؛ݛ�H�[�ڜ[�\ܛۜو�Y�ܙHH�\�݈�X؛YZ\ܚ[ۋ�XXڂ�ˈݘ�ٜ]Y[�ۛ�[�X][ۈ\Ȝ�Xۜ�Y�[݈^XݛHًۘ���X؛�Yٝ��Xۜ�\ؙي�\܋�\ؙيNۛ�݈ٔ�X؛�Yٝݛ܈H
+�X\ۛ���X؛ݛܔ�X\ۛ�N��ڙO�ً�[��ʘ�X؛�[�[ۛ�[�X][ێ��Yٝ^]\ݙY�X\ۛ�IܙX\ۛ�X
+NNۛ�݈�Y��\�Y�X؛�[�ؘݚ[ۈHܙX]T�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۊ�ٜܚ[۔ݘ]K�ݜ�\ܕ[\ܘ[ݛܘYً�
+Nۛ�݈�[�\ڐ�Y��\�Y�\ܛۜوH
+�\ܛَۜ�؝]؞T�\ܛۜيN��ڙO�Y�
+�\K�ݜ�X[H�X؛\�
+Hˈ�X؛ݘ]H[�ݘؙ\ܙ�[]\��ݛܘYوژ\�HH^\ݚ[�Ș]ۚXˈ�[�[^�\�Y�\�ݛ�ݜ�X[HSы�܈�Y��\�YۚY[�Ș\ȝٛ���[�\ڔݜ�X[Z[�ʜ�\ܛۜيNH[وܝ�\ܛۜي��\K��\ܛًۜ�ٜܚ[۔ݘ]K�ۛ��Y˂�[\ܘ[[�]��\]Y\ݐ�ٞK�ٛ�ZTܘ[��ݜ�\ܕ[\ܘ[ݛܘYً�[�ٛ�ZTܘ[��
+NB�Nۛ�݈�Z[�X؛H
+�؝Yۜ�N��X؛ۛ�[�X][ۑ�Z[\�P؝Yۜ�K�
+N��\ܛۜوO��\ܝ�X؛ۛ�[�X][ۑ�Z[\�J؝Yۜ�JN�ۛ�Xڔ�X؛\�ڜݙ[�ي
+N�[�\ڕ[�ݘؙ\ܙ�[ݜ�X[Z[�ʞȋ���ݜ��[��\܋\َؙ�ݛ][]]�U\ؙوJN�]\��\��ܔ�\ܛۜيL���X؛ۛ�[�X][ۈ�Z[Y�NNˈڙ]\�\Ȝ�\]Y\݈ܝY[�ȝHSHڛ�݈
+ۛ�^L[H�]JNș؝\ȝB�ˈۚY[�]\ؙو؜ۈHSKX؜X�H[ٙ[HۚY[�Y]\�ȘYؚ[�݈�Ț\ˈۘ[\Y�[݈]ȟ�M�҈]]˘ۛ\X݈�\ڛۙ
+ΌL�Yܙ\ܚ[ۊK��ۛ�݈ۙЛ۝^H�\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JN�ˈۘ\ڛ݈KZ[�Xۛ�^Qțۘو\��\]Y\݈8�%ޜݙ[V̗H؝[و[��ˈ\�X�H[H[��Y\Ș\�HݘX�HXܛܜȝH�X؛ۜ]\�][ۜˈۂ�ˈ�]\وH؛YHٝ�܈]�\�H�X؛
+ٙ\�MM��̍K̊K�Z\��ܜȝB�ˈݜ�X[Z[�Ȝ]	܈�K[ۜۘ\ڛ݋��ۛ�݈[�XYR[�RYȏH�Z[[�XYR[�RYʂ�ݘX�SU^�[�[�қ�ݛYّ[K�
+N�ښ[H
+\ԙX؛ۛ\يݜ��[��\܊JHY�
+�ݜ��[��\܋�ۛ�[���[\��
+�ؚʈO���ؚ˝\HOOH�ۛݜو�	���ؚ˛�[YHOOH�PГՓӓӐSQK�
+K�[�ݚ�B�
+B��]\���Z[�X؛
+�\�[[ܙX؛�Nۛ�݈�X؛�ؚȏH�[��X؛ۛ\يݜ��[��\܊NY�
+\�X؛�ؚʈ��XZ΂�ۛ�݈YZ\ܚ[ۈH�X؛�Yٝ�YZ]
+��X؛][T�\ٜ��][ۊ�X؛�ؚ˚[�]
+K�
+NY�
+YZ\ܚ[ۊHٔ�X؛�Yٝݛ܊YZ\ܚ[ۊN�]\���Z[�X؛
+�\ٞ]\ݙY�NB��X؛\
+ʎ�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۈϏH�Y��\�Y�X؛�[�ؘݚ[ێۛ�݈Ȝ�\ݛ[�]۝�\�YوHH]ؚ]�ۚ\ِYؚ[�ݐX�ܝ
+�
+
+HO��^XݝT�X؛
+��X؛�ؚ˂�ٜܚ[۔ݘ]K��ڙXݔ]�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ٝPۚY[�
+ۛ��Yʋ�[�XYR[�RY˜ڞ�H�Ș[�XYR[�RYȎ�[�Y�[�Y��ܙYܛݛ�X�ܝ�ڙۘ[��Y��\�Y�X؛�[�ؘݚ[ۋ�Y�\��[�ٙ\��
+K��ܙYܛݛ�X�ܝ�ڙۘ[�
+N��Y��\�Y�X؛XYۛܝX܋��Xۜ�
+[�]�\ݛ۝�\�YيNۛ�݈ݛܔ�X\ۛ�H�X؛�Yٝ��Xۜ�
+�\ݛ�]\Έ�Y��\���]S[�ݚ
+�\ݛ
+K�۝�\�Yً�JNY�
+ݛܔ�X\ۛ�Hٔ�X؛�Yٝݛ܊ݛܔ�X\ۛ�Nˈٙ\HڛۙHۛ�[�X][ۈ]�Z[X�Hȝ\��H�[�[�X؛�\ݛ�ˈ[�Ș[�[�ݙ\�[�ݙXYو\؛ݙ\�[�ȝHڙ[��ݛ�\�HY�\�؜���ۛ�݈�[�[�X؛�ݛ�H�X؛�Yٝ�]\ݑ�[�[^�S�^
+
+Nۛ�݈�ۛݕ\�\ݛH�X؛�YٝݚY[�ي�\ݛݛܔ�X\ۛ�NˈݛܙH�X؛�\ݛ�܈X\�ٜ��ݛ�]�\^[�ڛۂ�ۛ�݈؛ܙHH[�]�؛ܙHψ�[�ۛ�݈[�ڛܒYHܞ\˜�[�ەURQ
+
+Nۛ�݈ݛܙRٞHH[�ڛ܎�؛�ڛܒYXۛ�݈ܚ][ۈHݜ��[��\܋�ۛ�[��[�^ي�X؛�ؚʎۛ�݈[�ڛܐۛ�^YH�\ܛٜۜЛ�ڛܐۛ�^
+��X؛ۚY[�Y\ܘYٜ˂��\ܛٜۜ՚\ژ�Pۛ�[��ݜ��[��\܋��X؛�ؚ˚Y�
+Nۛ�݈ۛ\[�[ەۛ\ٜȏHݜ��[��\܋�ۛ�[���]X\
+
+�ؚˈ[�^
+HO�Y�
+�ؚ˝\HOOH�ۛݜو��ؚ˚YOOH�X؛�ؚ˚Y
+H�]\��׎ۛ�݈ڙN���Y�ܙH��Y�\��H[�^ܚ][ۈȈ��Y�ܙH���Y�\���]\��ވY��ؚ˚Y�[YN��ؚ˛�[YK[�]��ؚ˚[�]ڙHWNJNY�
+\ݜ�\ܕ[\ܘ[ݛܘYيHۛ�݈ݛܙY�X؛�ݛܙY�X؛Hۛ\ْY��X؛�ؚ˚Y�[�ڛܒY�[�ڛܐۛ�^Y�[�]�ܚ][ۋ��\ݛ����ۛ\[�[ەۛ\ٜ˛[�ݚ�ȞȘۛ\[�[ەۛ\ٜȟH�ߊK�N�Y��\�Y�X؛�[�ؘݚ[ۋ�ݘYيݛܙRٞKݛܙY�X؛
+NB��ۛ�݈X\�ٜ�^H�Z[[�ڛܙY�X؛X\�ٜ��[�]�]Y\�K�؛ܙK�[�]�Y�[�]�Y˂�[�ڛܒY�
+Nۛ�݈X\�ٜ��\܈H�\Xٔ�X؛ڝX\�ٜ��ݜ��[��\܋��]ȓX\
+֜�X؛�ؚ˚YX\�ٜ�^WJK�
+N�\ܛٜۜ՚\ژ�Pۛ�[��\ڊ�����\ܛٜۜԜ�ݙ[�[�ِۛ�[�
+�ݜ��[��\܋��]ȓX\
+֜�X؛�ؚ˚YX\�ٜ�^WJK�
+K�
+N�Y�
+\ӝ\�ۛ\يݜ��[��\܊JHˈZ^Yۛȸ�%�]\���\ܛۜوڝX\�ٜ�ۚY[�[�\ȝH�\݂�ً�[��ʂ��X؛
+�ۋ\ݜ�X[KZ^Y\IܙX؛\JN�ݛܙY�\ݛ�܈ٜܚ[ۈ	ܙ\ܚ[۔ݘ]K�ٜܚ[ےQ�ۚXيM�_X�
+NX\�ٜ��\܋�\ؙوHݛ][]]�U\َؙ�[�\ڐ�Y��\�Y�\ܛۜيX\�ٜ��\܊N�]\���۔ݜ�X[R�\ܛۜي�ڛݛ[��Xݕ؜��[�Ț[��Xݐۛ�^؜��[�ʛX\�ٜ��\܋؜��[�ՙ^
+B��X\�ٜ��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�Ȉ�[ܙK\�X؛Z[��ڙY����YH�K�ۙЛ۝^�
+NB��ˈ�X؛[ۛH8�%ٛ��ۛ݋]\�\]Y\݈�܈٘[[\܈V��ˈ�Z[
+ș�ܝ؜�
+Ș\ܙ\�Xۛ�[�]\H
+Ȝ\�و[�ۙH۝\Y؛ۂ�ˈH�ۛ݋]\	܈ݜ�X[H�YȘ؛��]�\�]�\�و��ۈ݈Hۛ�[�X][ۂ�ˈ\Șۛ�ݛYY��˂�ˈܙ[�ZKXۙ^
+ژ]ԕ
+HPS�UTȜݜ�X[Z[�Έ]ȘؘXڙ[�X\K؛ٙ^ˈ�\ܛٜۜ؈�Xڙ[��Z�XݜȘݜ�X[N��[٘ڝ�ˈș]Z[���ݜ�X[H]\݈�Hٝȝ�YH�X�HZ[�ݜ�X[N��[ق�ˈ�ӓ��ۛ݋]\\�Y�ܙHțۈ]�\�Hۙ^�X؛ۛ�[�X][ۋ��܂�ˈۙ^و�ܘوH�ۛ݋]\Ȝݜ�X[H[�X؝[][]H]ȔԑH�ٞH�Xڂ�ˈ[�ȘH�ۋ\ݜ�X[Z[�Șۛ�[�X][ۋۈH�X؛ۜ�[݈\ˈ[�ژ[�ٙ�]�\�Hݚ\��Xڙ[�ٙ\ȝHݜ�X[N��[و�ӓ��ۛ݋]\�ˈ
+Hݘ[�\��\ܛٜۜȐTH[�ژ]ۛ\][ۜȘ�ݚXؙ\]
+K��ۛ�݈�ۛݕ\�\]Z\�\ԝ�X[HHݜ��[�[ٚY�YY�\K�ۙ^OOH�YNً�[��ʂ��X؛
+�ۋ\ݜ�X[K\IܙX؛\Kۙ^Iٛۛݕ\�\]Z\�\ԝ�X[_JN�^Xݝ[�ș�ۛ݋]\�܈ٜܚ[ۈ	ܙ\ܚ[۔ݘ]K�ٜܚ[ےQ�ۚXيM�_X�
+Nۛ�݈�ۛ��X؛ݞ��X؛�ۛݕ\ݞH�ܝ؜��
+�ڙۘ[
+HO���ܝ؜�՜ݜ�X[J���ۛ��Y˂�[�Y�[�Y����ؘڙSܝ[ۜ˂�ؘڙPۛ��\�؝[ێ��[ً�K�ڙۘ[��\]Y\ݕ\ݜ�X[T�ݝK�
+K�\�ْ�ӓ��
+�\ܛًۜ�ݛ؛ۋڙۘ[
+HO��X؝[][]S�۔ݜ�X[T�\ܛۜي��\ܛًۜ��ݛ؛ۋ��[ً�ڙۘ[��[�[�X؛�ݛ��
+K�\�ٔԑN�
+�\ܛًۜڙۘ[
+HO��X؝[][]T�\ܛٜۜԔєݜ�X[J�\ܛًۜڙۘ[��[Y][ێ�ݜ��[�[ٚY�YY�\K�ۙ^Ȉ�ۙ^���X�Xȋ�ݛܐ]\�Z[�[��YK��\]Z\�Pۛ\]Y\�Z[�[��YK�JK�N]�ۛ��ۛݕ\�]ؚ]Y�]\��\O\[و�[��X؛�ۛݕ\�ӓ����H�ۛ��ۛݕ\H�ۛݕ\�\]Z\�\ԝ�X[B�Ș]ؚ]�[��X؛�ۛݕ\ݜ�X[PX؝[][]Y
+��ۛ��X؛ݞ�ݜ��[�[ٚY�YY�\K�ݜ��[��\܋��ۛݕ\�\ݛ��X؛�ؚ˂��ܙYܛݛ�X�ܝ�ڙۘ[��[�[�X؛�ݛ��
+B��]ؚ]�[��X؛�ۛݕ\�ӓ���ۛ��X؛ݞ�ݜ��[�[ٚY�YY�\K�ݜ��[��\܋��ۛݕ\�\ݛ��X؛�ؚ˂��ܙYܛݛ�X�ܝ�ڙۘ[��[�[�X؛�ݛ��
+NH؝ڈ
+�]ڑ\��HY�
+��ܙYܛݛ�X�ܝ�ڙۘ[�X�ܝY�
+�]ڑ\��[�ݘ[�ٛو\��܈	���]ڑ\����[YHOOH�X�ܝ\��܈�B�
+H�݈�]ڑ\��B�Y�
+��]ڑ\��[�ݘ[�ٛو�\ܛٜۜՙ\�Z[�[\��܈��]ڑ\��[�ݘ[�ٛو�۔ݜ�X[Pۛ\][ۑ\��܂�
+Hؚ�X݋�\ܚYۊ�ݛ][]]�U\ًؙ�Y\�ٔ�X؛\ؙي�ݛ][]]�U\ًؙ��]ڑ\����\ܛًۜ�\ؙوψ�T�וTБы�
+K�
+NB�ً�\��܊��X؛�ۛ݋]\�]ڈ�Z[Y
+�ۋ\ݜ�X[K\IܙX؛\JH�܈ٜܚ[ۈ	ܙ\ܚ[۔ݘ]K�ٜܚ[ےQ�ۚXيM�_X�
+NY�
+�[�[�X؛�ݛ�
+H�]\���Z[�X؛
+��ۛݗݜ٘Z[Y�N�Y��\�Y�X؛XYۛܝX܋��[�\ڊ��Z[Y�Nˈ�[�XڈȜ�\ܛۜوڝX\�ٜ�
+�Șۛ�[�X][ۊB�X\�ٜ��\܋�\ؙوHݛ][]]�U\َؙ�[�\ڐ�Y��\�Y�\ܛۜيX\�ٜ��\܊N�]\���۔ݜ�X[R�\ܛۜي�ڛݛ[��Xݕ؜��[�Ț[��Xݐۛ�^؜��[�ʛX\�ٜ��\܋؜��[�ՙ^
+B��X\�ٜ��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�Ȉ�[ܙK\�X؛Z[��ڙY����YH�K�ۙЛ۝^�
+NB��Y�
+Z�ۛ��ۛݕ\�ڊHً�\��܊��X؛�ۛ݋]\\ݜ�X[H\��܎�	ڜۛ��ۛݕ\�ݘ]\ȏψ�ȟX��]ȑ\��܊�X؛�ۛ݋]\\ݜ�X[H	ڜۛ��ۛݕ\�ݘ]\ȏψ�ȟX
+K�
+N؜\�UۛZ\�[�͌
+ݘ]\Έ�ۛ��ۛݕ\�ݘ]\ȏψ�\��ܐ�ٞN��ۛ��ۛݕ\�]Z[�Y\ܘYٜΈݜ��[�[ٚY�YY�\K�Y\ܘYٜ˂�ˈ�\ݛ\�H\ȝH�X؛ݜ�[�ȊژYݙY
+NȝH�[�ٛܛH^Y\��ˈ\ț�݈[�؛ܙHۈH�X؛ۛ�[�X][ۋ�LHڙۘ[Ȉ�[�ۛݛ����^Y\��LK�[ٙ[�ݜ��[�[ٚY�YY�\K�[ٙ[�ٜܚ[ےQ�ٜܚ[۔ݘ]K�ٜܚ[ےQ�JNY�
+�[�[�X؛�ݛ�
+H�]\���Z[�X؛
+��ۛݗݜ٘Z[Y�N�Y��\�Y�X؛XYۛܝX܋��[�\ڊ��Z[Y�Nˈ�[�XڈȜ�\ܛۜوڝX\�ٜ�
+�Șۛ�[�X][ۊB�X\�ٜ��\܋�\ؙوHݛ][]]�U\َؙ�[�\ڐ�Y��\�Y�\ܛۜيX\�ٜ��\܊N�]\���۔ݜ�X[R�\ܛۜي�ڛݛ[��Xݕ؜��[�Ț[��Xݐۛ�^؜��[�ʛX\�ٜ��\܋؜��[�ՙ^
+B��X\�ٜ��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�Ȉ�[ܙK\�X؛Z[��ڙY����YH�K�ۙЛ۝^�
+NB��ۛ�݈Șۛ�[�X][ێ�ۛ�[�X][۔�\܋�ۛݕ\HH�ۛ��ۛݕ\�ˈX؝[][]H\ؙو��ۈ\Ț]\�][ۂ�ۛ�݈ۛ�\ؙوHۛ�[�X][۔�\܋�\ؙوψ�T�וTБюۛ�݈ۛ�[�X][۔ݛܔ�X\ۛ�H�X؛�Yٝ��Xۜ�\ؙيۛ�\ؙيNؚ�X݋�\ܚYۊ�ݛ][]]�U\ًؙ�Y\�ٔ�X؛\ؙيݛ][]]�U\ًؙۛ�\ؙيK�
+N�ˈ\]H�܈�^]\�][ۂ�ݜ��[�[ٚY�YY�\HH�ۛݕ\ˈ�X؛؛�ۛ�ݛYH[�ݚ\�][ݘHڛ�݈܈ۚ]][ݘHY]Y]H[�\�[K��ˈٙ\\ȝ\��܈ܙ\�Y\]\ȜۈH�X�Z[ݜ�X[H�\ܝș]�\�B�ˈ�Xڙ]ڝ�]ٜ�\]\ș�ۛݚ[�țۙ\�ۙ\˂�Y�
+ݜ��[��\܋�ۙ^�]S[Z]ϋ�[�ݚ
+Hۛ�[�X][۔�\܋�ۙ^�]S[Z]ȏH���ݜ��[��\܋�ۙ^�]S[Z]˂����ۛ�[�X][۔�\܋�ۙ^�]S[Z]ȏψ׊K�NB�ݜ��[��\܈Hۛ�[�X][۔�\܎Y�
+�
+�[�[�X؛�ݛ�ۛ�[�X][۔ݛܔ�X\ۛ�H	���\ԙX؛ۛ\يݜ��[��\܊B�
+H�]\���Z[�X؛
+�\ٞ]\ݙY�NB�ˈۜۛ�[�Y\ȸ�%\ԙX؛ۛ\وڙXڙY]܂�B��Y�
+\ԙX؛ۛ\يݜ��[��\܊JH�]\���Z[�X؛
+�\ٞ]\ݙY�NY�
+�X؛�Yٝ�ݛܔ�X\ۛ�
+H	��Z\՜ؘ�T�X؛ۛ�[�X][ۊݜ��[��\܊JB��]\���Z[�X؛
+��ۛݗݜ٘Z[Y�Nݜ��[��\܋�\ؙوHݛ][]]�U\َؙY�
+�X؛�Yٝ�ݛܔ�X\ۛ�
+JB�ً�[��ʈ��X؛�[�[ۛ�[�X][ێ�ۛ\]Y�N�[�\ڐ�Y��\�Y�\ܛۜيݜ��[��\܊Nˈ[[Y]�N��YȘHۛ\][ۈىܙHX�ݝȚ[��Xڈڝ�ȝ\ؘ�B�ˈۛ�[�
+�ȝ^�ȝۛݜيH8�%H��Ȝ�\ܛۜو]H�ۘ\܂�ˈ
+ڝX�Xۜ[݈̌L��ۛ݋]\
+K�ڙXڙYۈH[ٙ[	܈�\ܛًۜ�Y�ܙB�ˈ[�HܙHۛ�^]؜��[�Ș�[��\�\ț^Y\�Yۋ��]�\��ݜȋț�]�\��ˈ�ؚ܈H�XY]��Y�
+\ћ\Pۛ\][ۊݜ��[��\܊JHۛ�݈[\Sݝ]ڙ[�ȏHݜ��[��\܋�\ؙُ˛ݝ]ڙ[�ȏψً�؜���[\Hۛ\][ۈ8���ۚY[���ݛ؛ۏIٙ��Xݚ]�T�ݛ؛۟H
+[ٙ[Iܙ\K�[ٙ[Hݛܔ�X\ۛ�I؝\��[��\܋�ݛܔ�X\ۛ�H
+ݝ]ڙ[�ωٛ\Sݝ]ڙ[�߈�X؛\IܙX؛\H
+ٜܚ[ۏIܙ\ܚ[۔ݘ]K�ٜܚ[ےQ�ۚXيM�_X�
+N؜\�Q[\Pۛ\][ۊ�ݛ؛ێ�Y��Xݚ]�T�ݛ؛ۋ�[ٙ[��\K�[ٙ[�ٜܚ[ےQ�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ݛܔ�X\ۛ��ݜ��[��\܋�ݛܔ�X\ۛ��ݝ]ڙ[�Έ[\Sݝ]ڙ[�˂��X؛\�JNB�ۛ�݈�X؛XY\�ȏB��X؛\�ȞȈ�[ܙK\�X؛Z[��ڙY����YH�H�[�Y�[�Y�]\���۔ݜ�X[R�\ܛۜي�ڛݛ[��Xݕ؜��[�Ț[��Xݐۛ�^؜��[�ʘݜ��[��\܋؜��[�ՙ^
+B��ݜ��[��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K��X؛XY\�˂�ۙЛ۝^�
+NNۛ�݈�[�\ڕڝ�X؛H\ޛ�Ȋ�\܎�؝]؞T�\ܛۜيN��ۚ\ُ�\ܛُۜ�O��Hۛ�݈�\ܛۜوH]ؚ]]ؚ]�ܙYܛݛ�
+�[�[^�Uڝ�X؛
+�\܊JN�Y��\�Y�X؛XYۛܝX܋��[�\ڊ�\ܛًۜ�ڈȈ�ۛ\]Y����Z[Y�N�]\���[�\ڑ�ܙYܛݛ�
+�\ܛۜيNH؝ڈ
+\��܊H�ۛ�Xڔ�X؛\�ڜݙ[�ي
+N�Y��\�Y�X؛XYۛܝX܋��[�\ڊ��ܙYܛݛ�X�ܝ�ڙۘ[�X�ܝYȈ�X�ܝY����Z[Y��
+N�݈\��܎B�N�[�ݚ[ۈ�[�\ڔݜ�X[Z[�ʜ�\܎�؝]؞T�\ܛۜيN��ڙY�
+ݜ�X[Z[�њ[�[^�\��Yڜݙ\�Y
+H�]\��ݜ�X[Z[�њ[�[^�\��Yڜݙ\�YH�YNؚY[Tݜ�X[Z[�ԛܝ�\ܛۜي�ٜܚ[۔ݘ]K�ٜܚ[ےQ��\]Y\ݑٛ�\�][ۋ�\ޛ�Ȋ
+HO�]ؚ]ݛ�ݜ�X[TٝY]ؚ]�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO�ٝ[[YYX]J�\ۛ�JJNY�
+�\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۊH�ܔݜ�X[Z[�њ[�[^�\�
+N�]\��B�Y�
+ٜܚ[۔ڙۘ[�X�ܝY
+H�ܔݜ�X[Z[�њ[�[^�\�
+N�]\��B�Y�
+ݛ�ݜ�X[U؜И[�ٛY
+
+JH�ۛ�Xڔ�X؛\�ڜݙ[�ي
+NX؛ݛ�[�ݘؙ\ܙ�[�\ܛۜي��\܋�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ە�ٛ�ZTܘ[��[�ٛ�ZTܘ[��
+
+HO�ٜܚ[۔ݘ]K�ٚ\�HH�YNK�
+N�]\��B��Hۛ�݈ܝ�\ܛّۜ�Z[YH�]ȑ\��܊���\ܛٜۜȜ�X؛ܝ\�\ܛۜو\�ڜݙ[�و�Z[Y��
+N�Hڝ[�[�
+ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ��
+
+HO��ڝ؝�\ڛ�
+��\ܛٜۜל�X؛ܛܝܙ\ܛۜو�
+
+HO�ۛ�݈\�ڜݙYHܝ�\ܛّۜ�ܕ[�[�
+��\K��\܋�ٜܚ[۔ݘ]K�ۛ��Y˂�[\ܘ[[�]��\]Y\ݐ�ٞK�ٛ�ZTܘ[��ݜ�\ܕ[\ܘ[ݛܘYً�[�ٛ�ZTܘ[��
+NY�
+\\�ڜݙY
+H�݈ܝ�\ܛّۜ�Z[Y�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۏ˘ۛ[Z]
+
+NJK�
+N�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۈH[�Y�[�YH؝ڈ
+\��܊H�ۛ�Xڔ�X؛\�ڜݙ[�ي
+NY�
+\��܈OOHܝ�\ܛّۜ�Z[Y
+H�݈\��܎B�H؝ڈ
+\��܊H�ۛ�Xڔ�X؛\�ڜݙ[�ي
+N�݈\��܎B�K��ܔݜ�X[Z[�њ[�[^�\���YK��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ[�Y�[�Y�
+NB��[�ݚ[ۈ�[�\ڕ[�ݘؙ\ܙ�[ݜ�X[Z[�ʜ�\܎�؝]؞T�\ܛۜيN��ڙY�
+ݜ�X[Z[�њ[�[^�\��Yڜݙ\�Y
+H�]\��ݜ�X[Z[�њ[�[^�\��Yڜݙ\�YH�YNؚY[Tݜ�X[Z[�ԛܝ�\ܛۜي�ٜܚ[۔ݘ]K�ٜܚ[ےQ��\]Y\ݑٛ�\�][ۋ�\ޛ�Ȋ
+HO�]ؚ]ݛ�ݜ�X[TٝY]ؚ]�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO�ٝ[[YYX]J�\ۛ�JJN�ۛ�Xڔ�X؛\�ڜݙ[�ي
+NY�
+��\]Y\ݑٛ�\�][ۈOOHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ۈ�ٜܚ[۔ڙۘ[�X�ܝY�
+H�ܔݜ�X[Z[�њ[�[^�\�
+N�]\��B�X؛ݛ�[�ݘؙ\ܙ�[�\ܛۜي��\܋�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ٜܚ[۔ݘ]K��\ۛ�Yۛ��\�؝[ە�ٛ�ZTܘ[��[�ٛ�ZTܘ[��
+
+HO�ٜܚ[۔ݘ]K�ٚ\�HH�YNK�
+NK��ܔݜ�X[Z[�њ[�[^�\���YK��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ[�Y�[�Y�
+NB�\ޛ�ș�[�ݚ[ۈ؜\�U[�ݘؙ\ܙ�[�\ܛٜۜʂ�ܙ\�][ێ��ۚ\ُ؝]؞T�\ܛُۜ��
+N��ۚ\ُȜ�\ܛَۜ�؝]؞T�\ܛَۜȜݘؙ\ܙ�[��ۛX[�H[�Y�[�Y��H�]\��Ȝ�\ܛَۜ�]ؚ]ܙ\�][ۋݘؙ\ܙ�[��YHNH؝ڈ
+\��܊HY�
+J\��܈[�ݘ[�ٛو�\ܛٜۜՙ\�Z[�[\��܊JH�݈\��܎�[�\ڕ[�ݘؙ\ܙ�[ݜ�X[Z[�ʙ\��܋��\ܛۜيN�]\��\��܋�ݘ]\ȏOOH�[�ۛ\]H��ȞȜ�\ܛَۜ�\��܋��\ܛًۜݘؙ\ܙ�[��[وB��[�Y�[�YB�B��Y�
+�\K�ݜ�X[H	��\ݜ�X[T�\ܛًۜ��ٞJHˈ�ۋP[��ܚXȝ\ݜ�X[Hݜ�X[Z[�Ȝ�\ܛٜۜț�YYZ\�ݛ�X؝[][]܂�ˈڛ�وH[��ܚXȔԑHX؝[][]܈؛�݈\�وܙ[�RHԑH�ܛX]˂�ˈ�ݚܙ[�RH�\�X[�ȘX؝[][]H[�Ț[�\��[[��ܚX˙�ܛX][�[��ˈ�[�HГQH�X؛[�\�ٜ[ۈۜ\ȝH�ۋ\ݜ�X[Z[�Ȝ]8�%�ˈݚ\�ڜو[�[��XݙY�X؛ۛݜو۝[XZȜݜ�ZYڝȝHۚY[���Y�
+Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊHˈ�YHݜ�X[Z[�ș�\݈]�ڙ[�HۚY[�[ۈܙXZ܈H�\ܛٜۜȐTB�ˈ
+Hۙ^К]ԕ؜يK�Ș�X؛ۛ؛�\X\�
+ۈ�ˈ[�\�ٜ[ۈ\ț�YYY
+K[�\�I܈�ȝ؜��[�ȝț^Y\�[��ܝ؜��ˈXXڈ\ݜ�X[HԑH]�[�ȝHۚY[�TȒUT��U�Tˈ\ș�^\ȝB�ˈۙ^�ؚ][�ș�܈�\ܛۜوXY\�Ȉ[�ȸ�%H�Y��\�Y]�[݂�ˈڝۙȘ[ۚY[��]\ȝ[�[H
+ۛ݋�X\ۛ�[�˚X]�JH\ݜ�X[B�ˈ�[Hۛ\]\˂�ۛ�݈\ԙX؛ۛH[ٚY�YY�\K�ۛ˜ۛYJ�
+
+HO���[YHOOH�PГՓӓӐSQK�
+N�ˈۛHݜ�X[H�ݙڈ�X؛X]؜�Hڙ[�HۚY[�SӈܙXZ܈B�ˈ�\ܛٜۜȐTHS��ȝ؜��[�ț�YYȝȘ�H^Y\�Y[��H�X؛X]؜�B�ˈݜ�X[Y\��ܝ؜�ș]�[�ț]�H
+�^[�ȝHXY\�][Y[ݝ[�ʈښ[B�ˈ�[�ܘ\�[�H[�\�ٜ[�ȘH�X؛�[�ݚ[ؘۗ[8�%H�Y��\�Y�ˈ]
+\ٙݚ\�ڜيH؛�݋ۈH�X؛ۛݜو۝[XZȝȝB�ˈۚY[���Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȈ	��\ڛݛ[��Xݕ؜��[�ʈY�
+\ԙX؛ۛ
+H]�\ܛٜۜԙX؛�\]Y\݈H[ٚY�YY�\Nۛ�݈�\ܛٜۜ՚\ژ�Pۛ�[��؝]؞Pۛ�[��ؚ֗HH׎�]\���[�\ڑ�ܙYܛݛ�
+�ݜ�X[T�\ܛٜۜԙX؛]؜�J\ݜ�X[T�\ܛًۜ�[Y][ێ��\K�ۙ^Ȉ�ۙ^���X�Xȋ�ېۛ\]N�
+�\ܛًۜݘؙ\ܙ�[
+HO�Y�
+ݘؙ\ܙ�[
+H�[�\ڔݜ�X[Z[�ʜ�\ܛۜيN[و�[�\ڕ[�ݘؙ\ܙ�[ݜ�X[Z[�ʜ�\ܛۜيNK�ە�[�ؘݚ[۔�XYN�
+�[�ؘݚ[ۊHO��ۛ�Xڔ�X؛\�ڜݙ[�ي
+N�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۈH�[�ؘݚ[ێK�ٜܚ[ےQ�ٜܚ[۔ݘ]K�ٜܚ[ےQ�X^�X؛^Xݝ[ۜ΂�ܙPۛ��YʊK�٘\�ڋ��X؛�ژZ[�X^^Xݝ[ۜ˂��ԝܙN�ݜ�\ܕ[\ܘ[ݛܘYً�ڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[��X؛XY[�P]��ܙYܛݛ�X�ܝ�XY[�P]��]�T�[�ڜ[�\ޛ�ȊȜڙۘ[JHO�ۛ�݈�]�YYH]ؚ]\ݜ�X[T�\ݛ��]�Jڙۘ[
+N�]\��ܘ\�ٞUڝۙX[�\
+�]�YY
+
+HO�ߋڙۘ[
+NK�۔�X؛�\ޛ�Ȋ]Y\�K�؛ܙK�Y�Y˂�]Z[ٙ�ٝ�]Z[[Z]�ۛ\ْY�ۛ�[�ܚ][ۋ�X؋�ڙۘ[�JHO�ۛ�݈[�XYR[�HH�Z[[�XYR[�RYʂ�ݘX�SU^�[�[�қ�ݛYّ[K�
+Nۛ�݈Y�\��Y�[�ٙ\��Xۜ�[�܎�\��^O
+
+HO��ڙ�H׎ۛ�݈Ȝ�\ݛ[�]۝�\�YوHH]ؚ]ڝ[�[�
+�ٜܚ[۔ݘ]K�ݛܘYٕ[�[�Yψ���
+
+HO��^XݝT�X؛
+�\N��ۛݜو��Y��X؛ܝ�X[WɞܝY\�_WɞܘۜHψ��Wɞڙψ��Wɞڙϋ��ڛ���Hψ��X��[YN��PГՓӓӐSQK�[�]�]Y\�K�؛ܙK�Y�Y˂�]Z[ٙ�ٝ�]Z[[Z]�K�K�ٜܚ[۔ݘ]K��ڙXݔ]�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ٝPۚY[�
+ۛ��Yʋ�[�XYR[�K�ڞ�H�Ș[�XYR[�H�[�Y�[�Y�ڙۘ[�
+�Xۜ�
+HO�Y�\��Y�[�ٙ\��Xۜ�[�܋�\ڊ�Xۜ�
+K�
+K�
+Nۛ�݈�X؛�ؚȏHX؋�ۛ�[�؛۝[�ܚ][ۗNY�
+��X؛�ؚϋ�\HOOH�ۛݜو���X؛�ؚ˚YOOHۛ\ْY��X؛�ؚ˛�[YHOOH�PГՓӓӐSQB�
+H�݈�]ȑ\��܊���X؛^Xݝ[ێ��X؛�ؚț�݈�ݛ�[�X؝[][]Y�\ܛۜو��
+NB�ۛ�݈[�ڛܒYHܞ\˜�[�ەURQ
+
+Nۛ�݈ܚ][ۈHۛ�[�ܚ][ێۛ�݈[�ڛܐۛ�^YH�\ܛٜۜЛ�ڛܐۛ�^
+��X؛ۚY[�Y\ܘYٜ˂��\ܛٜۜ՚\ژ�Pۛ�[��X؋��X؛�ؚ˚Y�
+Nۛ�݈ۛ\[�[ەۛ\ٜȏHX؋�ۛ�[���]X\
+�
+�ؚˈ[�^
+HO�Y�
+�ؚ˝\HOOH�ۛݜو��ؚ˚YOOHۛ\ْY
+H�]\��׎B�ۛ�݈ڙN���Y�ܙH��Y�\��B�[�^ܚ][ۈȈ��Y�ܙH���Y�\���]\��Y��ؚ˚Y��[YN��ؚ˛�[YK�[�]��ؚ˚[�]�ڙK�K�NK�
+Nۛ�݈ݛܙRٞHH[�ڛ܎�؛�ڛܒYXۛ�݈ݛܙY�X؛Hۛ\ْY�[�ڛܒY�[�ڛܐۛ�^Y�[�]�ܚ][ۋ��\ݛ����ۛ\[�[ەۛ\ٜ˛[�ݚ��ȞȘۛ\[�[ەۛ\ٜȟB��ߊK�H؝\ٚY\ȔݛܙY�X؛ۛ�݈\�ڜݔݛܙHH
+
+N��ڙO�؝�Tٜܚ[ە�Xښ[�ʜٜܚ[۔ݘ]K�ٜܚ[ےQ�X؛ݛܙN�ٜ�X[^�T�X؛ݛܙJٜܚ[۔ݘ]K��X؛ݛܙJK�JNNۛ�݈[�ڛܕ^H�Z[�X؛[�ڛ܊[�ڛܒY
+N�\ܛٜۜ՚\ژ�Pۛ�[��\ڊ�����\ܛٜۜԜ�ݙ[�[�ِۛ�[�
+�X؋��]ȓX\
+֝ۛ\ْY[�ڛܕ^WJK�
+K�
+N�]\��[�ڛܕ^��\ݛ^��\ݛ�۝�\�Yً�ۛ[Z]�
+
+HO�Y�
+ݜ�\ܕ[\ܘ[ݛܘYيH�]\���܈
+ۛ�݈�Xۜ�وY�\��Y�[�ٙ\��Xۜ�[�܊H�Xۜ�
+
+NY�X؛ݛܙQ[��J�ٜܚ[۔ݘ]K��X؛ݛܙK�ݛܙRٞK�ݛܙY�X؛�
+N\�ڜݔݛܙJ
+N�X؛\�ڜݙ[�ِۛ[Z]؜ٜ��\�ˊ
+NK��ۛ�Xڎ�
+
+HO�Y�
+ݜ�\ܕ[\ܘ[ݛܘYيH�]\��Y�
+ٜܚ[۔ݘ]K��X؛ݛܙK�[]JݛܙRٞJJB�\�ڜݔݛܙJ
+NK�NK��[��ۛݕ\�\ޛ�Ȋ�[�[�X؛�ݛ��X؋��\ݛ^�ۛ\ْY�ۛ�[�ܚ][ۋ�ڙۘ[�JHO�ˈ�Xۛ�ݜ�X݈H�X؛ۛݜو�ؚș�܈H�ۛ݋]\�\]Y\݋��ۛ�݈�X؛�ؚȏHX؋�ۛ�[�؛۝[�ܚ][ۗNY�
+��X؛�ؚϋ�\HOOH�ۛݜو���X؛�ؚ˚YOOHۛ\ْY��X؛�ؚ˛�[YHOOH�PГՓӓӐSQB�
+H�݈�]ȑ\��܊���X؛�ۛ݋]\��X؛�ؚț�݈�ݛ�[�X؝[][]Y�\ܛۜو��
+NB�ۛ�݈�ۛݕ\ݞ��X؛�ۛݕ\ݞH�ܝ؜��
+��ۛݕ\ڙۘ[
+HO���ܝ؜�՜ݜ�X[J���ۛ��Y˂�[�Y�[�Y����ؘڙSܝ[ۜ˂�ؘڙPۛ��\�؝[ێ��[ً�K��ۛݕ\ڙۘ[��\]Y\ݕ\ݜ�X[T�ݝK�
+K�\�ْ�ӓ��
+
+HO��݈�]ȑ\��܊��\�ْ�ӓ�]\݈�݈�H؛YۈHݜ�X[Z[�Ȝ�X؛]��
+NK�Nۛ�݈�ۛݕ\�\ٔ�\]Y\݈H�\ܛٜۜԙX؛�\]Y\ݎۛ�݈�ۛ݈H]ؚ]�[��X؛�ۛݕ\ݜ�X[Z[�ʂ��ۛݕ\ݞ��ۛݕ\�\ٔ�\]Y\݋�X؋��\ݛ^��X؛�ؚ˂�ڙۘ[��[�[�X؛�ݛ��
+NY�
+Y�ۛ݋�ڊH�݈�]ȑ\��܊��X؛�ۛ݋]\\ݜ�X[H\��܎�	ٛۛ݋�ݘ]\ȏψ�ȟX�
+NB��]\���XY\���ۛ݋��XY\��ۛ[Z]�
+
+HO��\ܛٜۜԙX؛�\]Y\݈H�ۛ݋��ۛݕ\K�NK�JK�
+NB�ˈ�Ȝ�X؛ۛ8�%Z[�\ܝ�ݙڋ���]\���[�\ڑ�ܙYܛݛ�
+�ݜ�X[T�\ܛٜۜԘ\ܝ�ݙڊ�\ݜ�X[T�\ܛًۜ�
+�\ܛًۜݘؙ\ܙ�[
+HO�Y�
+ݘؙ\ܙ�[
+H�[�\ڔݜ�X[Z[�ʜ�\ܛۜيN[و�[�\ڕ[�ݘؙ\ܙ�[ݜ�X[Z[�ʜ�\ܛۜيNK�ٜܚ[۔ݘ]K�ٜܚ[ےQ��\K�ۙ^Ȉ�ۙ^���X�Xȋ��ܙYܛݛ�X�ܝ�ڙۘ[�
+K�
+NB�ˈ؜��[�ȝȚ[��X݋܈H�ۋT�\ܛٜۜȘۚY[���Y��\�H�[�ˈ\ݜ�X[K�[��X؛[�\�ٜ[ۋ[��KY[Z]��ۛ�݈؜\�YH]ؚ]]ؚ]�ܙYܛݛ�
+�؜\�U[�ݘؙ\ܙ�[�\ܛٜۜʂ�X؝[][]T�\ܛٜۜԔєݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[��[Y][ێ��\K�ۙ^Ȉ�ۙ^���X�Xȋ�ݛܐ]\�Z[�[��YK��\]Z\�Pۛ\]Y\�Z[�[��YK�JK�
+K�
+NY�
+X؜\�Y
+H�]\���[�\ڑ�ܙYܛݛ�
+\��ܔ�\ܛۜيL��؝]؞H�\]Y\݈�Z[Y�JNB�Y�
+X؜\�Y�ݘؙ\ܙ�[
+HY�
+\ԙX؛ۛ\ي؜\�Y��\ܛۜيJH�]\���[�\ڑ�ܙYܛݛ�
+\��ܔ�\ܛۜيL��؝]؞H�\]Y\݈�Z[Y�JNB��]\���[�\ڑ�ܙYܛݛ�
+��۔ݜ�X[R�\ܛۜي�؜\�Y��\ܛًۜ��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+K�
+NB��]\���[�\ڕڝ�X؛
+؜\�Y��\ܛۜيNB��Y�
+Y��Xݚ]�T�ݛ؛ۈOOH�ܙ[�ZH�Hˈܙ[�RHژ]ۛ\][ۜȜݜ�X[Z[�ȸ�%X؝[][]H[��]\��\ˈ�ۋ\ݜ�X[Z[�Ȑ[��ܚXș�ܛX]
+؛YH]\��\ț�ۋ\ݜ�X[H]
+K��ۛ�݈�\܈H]ؚ]]ؚ]�ܙYܛݛ�
+�X؝[][]Sܙ[�RTԑTݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�ۛ�ݛYU[�[ۙN��YK�JK�
+N�]\���[�\ڕڝ�X؛
+�\܊NB��Y�
+Y��Xݚ]�T�ݛ؛ۈOOH�ٛZ[�H�HˈٛZ[�H�]]�Hݜ�X[Z[�ȸ�%X؝[][]HHԑH��[Y\ˈ[��KY[Z]�XB�ˈH�X؛X]؜�H�[�[^�\�
+؛YH�Y��\�Y]\��\ȝHܙ[�RH]ʋ��ۛ�݈�\܈H]ؚ]]ؚ]�ܙYܛݛ�
+�X؝[][]QٛZ[�TԑTݜ�X[J\ݜ�X[T�\ܛًۜڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[�ݜ�Xݎ��YK�ݛܐ]\�Z[�[��YK�JK�
+N�]\���[�\ڕڝ�X؛
+�\܊NB��ˈ[��ܚXȜݜ�X[Z[�Έ�ܝ؜�]�[�Ș[�X؝[][]H[�\�[[��ˈ\܈�X؛ۛ�^ۈHX؝[][]܈؛�[�\�ٜ�X؛ۛݜً��ۛ�݈\ԙX؛ۛH[ٚY�YY�\K�ۛ˜ۛYJ�
+
+HO���[YHOOH�PГՓӓӐSQK�
+Nۛ�݈[��ܚXԔшH�Z[ݜ�X[Z[�ԙ\ܛۜي�\ݜ�X[T�\ܛًۜ��[�\ڔݜ�X[Z[�˂�\ԙX؛ۛ�ȞۚY[�Y\ܘYٜΈ�X؛ۚY[�Y\ܘYٜ˂�[ٚY�YY�\K�ۛ��Y˂�ٜܚ[۔ݘ]K�ؘڙSܝ[ۜ˂�\ݜ�X[T�ݝN��\]Y\ݕ\ݜ�X[T�ݝK��ԝܙN�ݜ�\ܕ[\ܘ[ݛܘYً�ۑ�Z[\�N��[�\ڕ[�ݘؙ\ܙ�[ݜ�X[Z[�˂�ە�[�ؘݚ[۔�XYN�
+�[�ؘݚ[ۊHO��ۛ�Xڔ�X؛\�ڜݙ[�ي
+N�X؛\�ڜݙ[�ٕ�[�ؘݚ[ۈH�[�ؘݚ[ێK�ۚY[�ܙXZܐ[��ܚXΈ�\K��ݛ؛ۈOOH�[��ܚXȋ�ݘX�SU^��X؛XY[�P]��ܙYܛݛ�X�ܝ�XY[�P]����[�[�қ�ݛYّ[HȞȜ[�[�қ�ݛYّ[HH�ߊK�B��[�Y�[�Y�؜��[�ՙ^�ٜܚ[۔ݘ]K�ٜܚ[ےQ�ˈ؜\ؙوYؚ[�݈Hڛ�݈HӒQS�Y]\�ȘYؚ[�ݎ�H[ٙ[	܈�X[�ˈڛ�݈ۛHڙ[�\Ȝ�\]Y\݈ܝY[�Ț]�XHHۛ�^L[H�]K�ˈ[و�ȸ�%ۈHSKX؜X�H[ٙ[HۚY[�Y]\�ȘYؚ[�݈�Ș؛�݂�ˈܛܜȚ]ȟ�M�҈]]˘ۛ\X݈�\ڛۙ
+ΌL�Yܙ\ܚ[ێȓZ[�SX^SLʋ��X^�\ܝY\ؙّ�ܓ[ٙ[Q
+�\K�[ٙ[�\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JJK��ܙYܛݛ�X�ܝ�ڙۘ[�
+Nˈ�[�ۘ]HȘۚY[�	܈ڜ�H�ܛX]Y��YYY�ڙ[�H\ݜ�X[H\ˈ[��ܚXȘ�]HۚY[�ܙXZ܈ܙ[�RKܘ\H[��ܚXȔԑHݜ�X[K��Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZH�H�]\���[�\ڑ�ܙYܛݛ�
+��[�ۘ]P[��ܚXԝ�X[UӜ[�RJ[��ܚXԔыڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[��ܘY؝Q\��ܜΈ�YK�JK�
+NB�Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊH�]\���[�\ڑ�ܙYܛݛ�
+��[�ۘ]P[��ܚXԝ�X[Uԙ\ܛٜۜʘ[��ܚXԔыڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[�JK�
+NB�Y�
+�\K��ݛ؛ۈOOH�ٛZ[�H�H�]\���[�\ڑ�ܙYܛݛ�
+��[�ۘ]P[��ܚXԝ�X[Uљ[Z[�J[��ܚXԔыڙۘ[��ܙYܛݛ�X�ܝ�ڙۘ[�JK�
+NB��]\���[�\ڑ�ܙYܛݛ�
+[��ܚXԔъNB��ˈ�ۋ\ݜ�X[Z[�Έ\ܘ]ڈȘۜ��X݈X؝[][]܈�\ٙۈ\ݜ�X[H�ݛ؛ۋ��ۛ�݈؜\�YH]ؚ]]ؚ]�ܙYܛݛ�
+�؜\�U[�ݘؙ\ܙ�[�\ܛٜۜʂ�X؝[][]S�۔ݜ�X[T�\ܛۜي�\ݜ�X[T�\ܛًۜ�Y��Xݚ]�T�ݛ؛ۋ�[ٚY�YY�\K�ۙ^OOH�YK��ܙYܛݛ�X�ܝ�ڙۘ[�
+K�
+K�
+NY�
+X؜\�Y
+H�]\���[�\ڑ�ܙYܛݛ�
+\��ܔ�\ܛۜيL��؝]؞H�\]Y\݈�Z[Y�JNB�Y�
+X؜\�Y�ݘؙ\ܙ�[
+HY�
+\ԙX؛ۛ\ي؜\�Y��\ܛۜيJH�]\���[�\ڑ�ܙYܛݛ�
+\��ܔ�\ܛۜيL��؝]؞H�\]Y\݈�Z[Y�JNB��]\���[�\ڑ�ܙYܛݛ�
+��۔ݜ�X[R�\ܛۜي�؜\�Y��\ܛًۜ��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+K�
+NB��]\���[�\ڕڝ�X؛
+؜\�Y��\ܛۜيNB��ʊ��
+�XڙHڙ]\��\]Y\݋[ۛH�\ܛٜۜȜ�ݙ[�[�وX^Hܛܜȝ\ȝ�[�ٛܛK��
+��
+�[�ܞ\Y�X\ۛ�[�Ț\ș[X�\�][H�݈\�وܙHY\ܘYٜˈ[\ܘ[�
+�ݛܘYً܈[X�Y[�܋�]\Ȝ�\^YYۛHښ[HHܘYY[�^Y\�\
+�ݘX�NȘH^Y\��[�ڝ[ۈ\ȘHۛ\Xݚ[ۈ�ݛ�\�H[�[�[�[ۘ[H�ܜ
+�Hۙڜ�H�ݙ[�[�ً�H��\ڈ[�[Y[[ܞHٜܚ[ۈ\ț�Ȝ�[܈�ݛ�\�B�
+�
+�[
+H[�X^H�\^H]ȜݜYY\ݛܞNȜ\�ڜݙYٜܚ[ۜȝڝB�
+��HLXٛ�[�[�Z[ۛܙY[�[[�\ݜ�X[H\��\ݘX�\ڙ\țۙK��
+�[Y\�ٛ�ވ^Y\��]�\��\^\Ț]��
+��
+�[�\��[^ܝY�܈�؝\ٙۚXވ\ݜ˂�
+�^ܝ�[�ݚ[ۈڛݛ�\ٜ��T�\ܛٜۜԜ�ݙ[�[�ي��]�[ݜӘ^Y\���[X�\��[�ݜ��[�^Y\���[X�\��N��ۛX[��]\��
+�ݜ��[�^Y\�	���
+�]�[ݜӘ^Y\�OOH�[�]�[ݜӘ^Y\�OOHݜ��[�^Y\�B�
+NB��ʊ��
+��ݚY\�[�]]�H[�ڛ�˙[�ܞ\Y�ؚ܈\�Hܘ\]YH[��[YۛHۈB�
+�؛YHڜ�H�[Z[H]�ٝXٙ[K�Hܛܜ˜�ݛ؛ۈ�\]Y\݈ٙ\Ț]
+��\ژ�H�ڙXݚ[ۈ�]�ܜȜ�\]Y\݋[ۛH�ݙ[�[�و�]\�[�ٛ�[�
+�[��ܚXȘ�ؚ܈ȑٛZ[�KٛZ[�Hڙۘ]\�\ȝȐ[��ܚXˈ܈�\ܛٜۜ
+��X\ۛ�[�Ț][\ȝȐژ]ۛ\][ۜ˂�
+��
+��\�^[��Y�ؚȝ\وH[��ܚXȓY\ܘYٜȘ�ٞKۈ^Hژ\�HB�
+�[��ܚXȜ�ݙ[�[�و�[Z[K��
+��
+�[�\��[^ܝY�܈�؝\ٙۚXވ\ݜ˂�
+�^ܝ�[�ݚ[ۈ؛��\^T�\]Y\ݔ�ݙ[�[�ي�[�ܙ\ܔ�ݛ؛ێ�؝]؞T�ݛ؛ۋ�Y��Xݚ]�T�ݛ؛ێ�؝]؞T�ݛ؛ۋ�N��ۛX[�ۛ�݈�[Z[HH
+�ݛ؛ێ�؝]؞T�ݛ؛ۊN�ݜ�[�ȏO���ݛ؛ۈOOH��\�^�Ȉ�[��ܚXȈ��ݛ؛ێ�]\���[Z[J[�ܙ\ܔ�ݛ؛ۊHOOH�[Z[JY��Xݚ]�T�ݛ؛ۊNB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈܙHY\ܘYو8���؝]؞HY\ܘYوۛ��\�ڛۂ�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�ۛ��\��[�ٛܛYYܙHY\ܘYٜȘ�Xڈș؝]؞HY\ܘYو�ܛX]��
+��
+�\Ȝ�]�\�ٜȘ؝]؞SY\ܘYٜ՛ӛܙXY�\�ܘYY[��[�ٛܛH\
+�ݙ[�X[H�[[YYܙ[ܙ\�YY\ܘYٜ˂�
+��
+�ۛ\]Yٜ��܈ۛ\�țۈ\ܚ\ݘ[�Y\ܘYٜȜ�ٝXو�ՒHۛݜ٘�
+��ؚțۈH\ܚ\ݘ[�S�Hۜ��\ܛۙ[�Șۛܙ\ݛ�ؚȚ[��XݙY]�
+�Hݘ\�وH�ۛݚ[�ȝ\ٜ�Y\ܘYً�\țXZٜȝHۛ��\�ڛۂ�
+�ٛ�Xۛ�Z[�Y�ۛZ\�[�Ț\Ȝ�Xۛ�ݜ�XݙY��ۈژ]]�\�Y\ܘYٜ
+�ݜ��]�YܘYY[�]�Xݚ[ۋڝݝ\[�[�țۈܛܜ˛Y\ܘYوۛܙ\ݛ�
+�\�ȝ]؛��XۛYHܜ[�Yڙ[�H\ܚ\ݘ[�Y\ܘYو\ș]�XݙY��
+��
+��\ۛ�Uۛ�\ݛʊXݜ�\Șۛ���\ݛ�\�ș��ۈ\ٜ�Y\ܘYٜ
+�Y�\�Z\�[�ˈۈ[�\��ܛX[ܙ\�][ۈܙH\�Ș\�Hۛ�K�H�[�Xڂ�
+�[�[�ș�܈�\ڙX[ۛ���\ݛ�\�Ț\Țٜ�܈�؝\ݛ�\܋��
+�ʊ��
+��Xۛ�ݜ�X݈ۛܙ\ݛۛ�[�\ȘH؝]؞Pۛ�[��ؚ֗X��ۈHܙB�
+�ۛݘ]K�Y�ݜ�Xݝ\�Y�ؚܘٜ�H�\ٜ��Y
+�ۋ]^ݘ�X�ؚ܈Zق�
+�[XYٜʋ�KY[Z][Hܜۙ\ܛNțݚ\�ڜوܘ\H^ݜ�[�˂�
+��[�ݚ[ۈۛ�\ݛۛ�[�
+ݘ]N�ݘ]\Έݜ�[�΂�ݝ]Έݜ�[�΂�\��܏Έݜ�[�΂��ؚ܏Έ[�ۛݛ�׎JN�؝]؞Pۛ�[��ؚ֗HY�
+ݘ]K��ؚ܈	��ݘ]K��ؚ܋�[�ݚ�
+Hˈ�KY[Z]Hݜ�Xݝ\�Y�ؚ܈]ٜ�H�\ٜ��Y��ۈ[�ܙ\܋���]\��ݘ]K��ؚ܈\ȑ؝]؞Pۛ�[��ؚ֗NB�ۛ�݈^B�ݘ]K�ݘ]\ȏOOH�\��܈��Ȋݘ]K�\��܈ψ�ٜ��ܗH�B��
+ݘ]K�ݝ]ψ��N�]\��^Ȗވ\N��^�^WH�׎B��ʊ�[�\��[^ܝY�܈\ݜˈ
+�^ܝ�[�ݚ[ۈܙSY\ܘYٜ՛ј]]؞J�Y\ܘYٜΈܙSY\ܘYٕڝ\�֗K��ݙ[�[�ِ�SY\ܘYْY��XYۛSX\�ݜ�[�˂�Xڏ�؝]؞SY\ܘYً��ۛ�[����ݙ[�[�ِۛ�[����ݙ[�[�ٔܚ][ۜȂ����H�]ȓX\
+
+K�[ݔ�ݙ[�[�وH�YK�N�؝]؞SY\ܘYٖ׈ۛ�݈ݝ�؝]؞SY\ܘYٖ׈H׎�ˈۛܙ\ݛ�ؚ܈�Xۛ�ݜ�XݙY��ۈH�Xٙ[�Ș\ܚ\ݘ[�Y\ܘYى܂�ˈۛ\]Yٜ��܈ۛ\�ˈ[��XݙY]Hݘ\�وH�^\ٜ�Y\ܘYً��][�[�՛ۛ�\ݛΈ؝]؞Pۛ�[��ؚ֗HH׎��܈
+ۛ�݈\ووY\ܘYٜʈۛ�݈ۛ�[��؝]؞Pۛ�[��ؚ֗HH׎�Y�
+\ً�[��˜�ۙHOOH�\ٜ��Hˈ[��X݈�Xۛ�ݜ�XݙYۛܙ\ݛ�ؚ܈��ۈ�Xٙ[�Ș\ܚ\ݘ[��ۛ�[��\ڊ���[�[�՛ۛ�\ݛʎ[�[�՛ۛ�\ݛȏH׎H[وˈ�]Ș\ܚ\ݘ[�Y\ܘYو8�%�\ٝ[�[�Ȝ�\ݛȊڛݛ�݈]�H[�B�ˈ[�ٛY�ܛYYۛ��\�؝[ۜˈ�][�\Ș�Xڋ]˘�Xڈ\ܚ\ݘ[�ʂ�[�[�՛ۛ�\ݛȏH׎B���܈
+ۛ�݈\�و\ً�\�ʈݚ]ڈ
+\��\JH؜و�^���ۛ�[��\ڊ\N��^��^�
+\�\Ȟȝ^�ݜ�[�ȟJK�^�JN��XZ΂�؜و��X\ۛ�[�Ȏ��ˈ�]]�Kٛ�ܞ\Y�X\ۛ�[�Ț\Ȝ�\]Y\݋[ۛH�ݙ[�[�ً�ۙ\��ˈ[\ܘ[�ݜțX^Hݚ[ۛ�Z[�H�X\ۛ�[�Ȝ\���ۈ�Y�ܙH]�ˈ�ݛ�\�H^\ݙYț�]�\��ۛݙH]�Xڈ[�ȝ�\ژ�H�\]Y\݂�ˈۛ�[�ۈ�\^K����XZ΂�؜و�ۛ��ۛ�݈ۛ\�H\�\Ȟ\N��ۛ�ۛ�ݜ�[�΂�؛Q�ݜ�[�΂�ۛ�[YOΈݜ�[�΂�ݘ]N�ݘ]\Έݜ�[�΂�[�]Έ[�ۛݛ�ݝ]Έݜ�[�΂�\��܏Έݜ�[�΂�NNY�
+ۛ\��ۛOOH��\ݛ�Hˈ�\ڙX[ۛܙ\ݛ\�
+ڛݛ]�H�Y[�ݜ�\Y�B�ˈ�\ۛ�Uۛ�\ݛˈ�][�HܘXٙ�[H�܈�؝\ݛ�\܊B�ۛ�[��\ڊ\N��ۛܙ\ݛ��ۛ\ْY�ۛ\��؛Q����ۛ\��ۛ�[YHȞȝۛ�[YN�ۛ\��ۛ�[YHH�ߊK�ۛ�[��ۛ�\ݛۛ�[�
+ۛ\��ݘ]JK�JNH[وˈ[Z]ۛݜوۈ\Ș\ܚ\ݘ[�Y\ܘYق�ۛ�[��\ڊ\N��ۛݜو��Y�ۛ\��؛Q��[YN�ۛ\��ۛ�[�]�ۛ\��ݘ]K�[�]ψߋ�JNˈۛ\]Yٜ��܈ۛ\�Έ]Y]YHHۛܙ\ݛ�܈H�^�ˈ\ٜ�Y\ܘYً�\Ȝ�Xۛ�ݜ�XݜȝH[��ܚXȐTI܈ܛ]B�ˈY\ܘYو�ܛX]��ۈܙI܈ڛ�ۙK[Y\ܘYو�\�\ٛ�][ۋ��Y�
+ۛ\��ݘ]K�ݘ]\ȏOOH�ۛ\]Y�H[�[�՛ۛ�\ݛ˜\ڊ\N��ۛܙ\ݛ��ۛ\ْY�ۛ\��؛Q�ۛ�[YN�ۛ\��ۛ�[YHψۛ\��ۛ�ۛ�[��ۛ�\ݛۛ�[�
+ۛ\��ݘ]JK�JNH[وY�
+ۛ\��ݘ]K�ݘ]\ȏOOH�\��܈�H[�[�՛ۛ�\ݛ˜\ڊ\N��ۛܙ\ݛ��ۛ\ْY�ۛ\��؛Q�ۛ�[YN�ۛ\��ۛ�[YHψۛ\��ۛ�ۛ�[��ۛ�\ݛۛ�[�
+ۛ\��ݘ]JK�\ќ��܎��YK�JNB�ˈ[�[�ȝۛ\�Ȋ�݈Y]�\ۛ�Y
+HۛH[Z]ۛݜو8�%�ˈH[ٙ[ڛٙH[�[��\ۛ�Yۛ؛�؛�]^�Uۛ\�ˈ[�ܘYY[��Șۛ��\�ȝ\وș\��܈ݘ]H�Y�ܙH\Ȝڛ���B���XZ΂�B�ˈܘ\]YH\�Ȋ[XYً]Y[ˈ؝[Y[�8�)�H8�%�Xۛ�ݜ�X݈B�ˈ؝]؞Hܘ\]YH�ؚș��ۈHٛ�\�XȜ\�	܈�]Ȝ^[ؙ��Y�][��Y�
+���]Ȉ[�\�	���\[و\���]ȏOOH�ؚ�X݈�	���\���]ȈOOH�[�
+Hۛ�[��\ڊ\N��ܘ\]YH���]Έ\���]Ș\Ȕ�Xۜ�ݜ�[�ˈ[�ۛݛ���JNH[وY�
+�^�[�\�	��\[و\��^OOH�ݜ�[�ȊHۛ�[��\ڊȝ\N��^�^�\��^JNB���XZ΂�B�B��ۛ�݈Y\ܘYَ�؝]؞SY\ܘYوHȜ�ۙN�\ً�[��˜�ۙKۛ�[�Nۛ�݈�ݙ[�[�وH[ݔ�ݙ[�[�ق�Ȝ�ݙ[�[�ِ�SY\ܘYْY�ٝ
+\ً�[��˚Y
+B��[�Y�[�YY�
+��ݙ[�[�ُ˜�ݙ[�[�ِۛ�[�	����ӓ��ݜ�[�ڙ�Jۛ�[�
+HOOH�ӓ��ݜ�[�ڙ�J�ݙ[�[�ً�ۛ�[�
+B�
+HY\ܘYً��ݙ[�[�ِۛ�[�Hˋ���ݙ[�[�ً��ݙ[�[�ِۛ�[�NY�
+�ݙ[�[�ً��ݙ[�[�ٔܚ][ۜʈY\ܘYً��ݙ[�[�ٔܚ][ۜȏHˋ���ݙ[�[�ً��ݙ[�[�ٔܚ][ۜ׎B�B�ݝ�\ڊY\ܘYيNB���]\��ݝB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈܝXۛ��\�ڛۈ�[Y][ێ��[[ݙHܜ[�Yۛܙ\ݛ�ؚ܂�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+��[X[�\ݜܙ[�\�Ȝؙ�]H�]�[�ݜ�\ș]�\�Hۛܙ\ݛ�ؚțۈH\ٜ��
+�Y\ܘYو�Y�\�[�ٜȘHۛݜ٘�ؚțۈH[[YYX][H�Xٙ[�Ș\ܚ\ݘ[��
+�Y\ܘYً��[[ݙ\țܜ[�Ș[�ٜȘH؜��[�˂�
+��
+�\Ȝڛݛ�]�\��\�H[�\��ܛX[ܙ\�][ۈ
+�\ۛ�Uۛ�\ݛȜݜ�\
+��Y[�[�ۛܙ\ݛ\�ˈ[�ܙSY\ܘYٜ՛ј]]؞H�Xۛ�ݜ�Xݜȝ[B�
+���ۈH\ܚ\ݘ[�	܈ۛ\]Yۛ\�ʋ��]Y�H�]\�HۙH]�
+�[��ٝXٜțܜ[�Y�Y�\�[�ٜˈ\Ș؝ڙ\ȝ[H�Y�ܙH^H�XXڈHTK��
+�ʊ�[�\��[^ܝY�܈\ݜˈ
+�^ܝ�[�ݚ[ۈ�[[ݙSܜ[�Yۛ�\ݛʂ�Y\ܘYٜΈ\��^O�ۙN��\ٜ���\ܚ\ݘ[��ۛ�[��؝]؞Pۛ�[��ؚ֗NO��N��ڙˈKKH\܈N��[[ݙHܜ[�Yۛܙ\ݛ�ؚ܈
+ۛܙ\ݛ8���ۛݜيHKKB��܈
+]HHȚHY\ܘYٜ˛[�ݚȚJʊHۛ�݈\وHY\ܘYٜ֚WNY�
+\ُ˜�ۙHOOH�\ٜ��Hۛ�[�YNY�
+[\ً�ۛ�[��ۛYJ
+�HO���\HOOH�ۛܙ\ݛ�JHۛ�[�YN�ˈۛX݈ۛݜوQș��ۈH�Xٙ[�Ș\ܚ\ݘ[�Y\ܘYق�ۛ�݈�]�\وHH�țY\ܘYٜ֚HHWH�[�Y�[�Yۛ�݈�]�H�]�\ُ˜�ۙHOOH�\ܚ\ݘ[��Ȝ�]�\و��[ۛ�݈ۛ\ْYȏH�]Ȕٝ
+�
+�]�˘ۛ�[�ψ׊B���[\�
+�N��\ȑ؝]؞Uۛ\ِ�ؚȏO���\HOOH�ۛݜو�B��X\
+
+�HO���Y
+K�
+N�ˈ�[[ݙHۛܙ\ݛ�ؚ܈]�Y�\�[�وZ\ܚ[�ȝۛݜوQۛ�݈�Y�ܙHH\ً�ۛ�[��[�ݚ\ً�ۛ�[�H\ً�ۛ�[���[\��
+�HO���\HOOH�ۛܙ\ݛ�ۛ\ْY˚\ʘ��ۛ\ْY
+K�
+NY�
+\ً�ۛ�[��[�ݚ�Y�ܙJHً�؜����[[ݙY	ؙY�ܙHH\ً�ۛ�[��[�ݚHܜ[�Yۛܙ\ݛ�ؚʜʈ��ۈY\ܘYو	ڟX�
+NB�ˈY�H\ٜ�Y\ܘYو\ț�݈[\KYXٚۙ\�^ۈHTB�ˈٜۉ݈�Z�X݈[�[\Hۛ�[�\��^K��Y�
+\ً�ۛ�[��[�ݚOOH
+H\ً�ۛ�[�Hވ\N��^�^��ݛۛ�\ݛȜ�ݚYYH�WNB�B��ˈKKH\܈���[[ݙHܜ[�Yۛݜو�ؚ܈
+ۛݜو8���ۛܙ\ݛ
+HKKB�ˈ]�\�Hۛݜوۈ[�\ܚ\ݘ[�]\݈]�HHX]ښ[�ȝۛܙ\ݛۈB�ˈ[[YYX][H�ۛݚ[�ȝ\ٜ�Y\ܘYً�ڝݝ\ˈH[��ܚXȐTB�ˈ�Z�Xݜȝڝ�ۛݜوYș�ݛ�ڝݝۛܙ\ݛ�ؚ܈[[YYX][B�ˈY�\���\Ș؝ڙ\șYو؜ٜȝڙ\�HܘYY[�]�Xݚ[ۈ܈�Xڋ]˘�Xڂ�ˈ\ܚ\ݘ[�țX]�Hۛݜو�ؚ܈ڝݝX]ښ[�Ȝ�\ݛȊ͌�
+K���܈
+]HHȚHY\ܘYٜ˛[�ݚȚJʊHۛ�݈\وHY\ܘYٜ֚WNY�
+\ُ˜�ۙHOOH�\ܚ\ݘ[��Hۛ�[�YNY�
+[\ً�ۛ�[��ۛYJ
+�HO���\HOOH�ۛݜو�JHۛ�[�YN�ˈۛX݈ۛܙ\ݛQș��ۈH�ۛݚ[�ȝ\ٜ�Y\ܘYق�ۛ�݈�^\وHH
+ȌHY\ܘYٜ˛[�ݚțY\ܘYٜ֚H
+ȌWH�[�Y�[�Yۛ�݈�^H�^\ُ˜�ۙHOOH�\ٜ��ț�^\و��[ۛ�݈ۛ�\ݛYȏH�]Ȕٝ
+�
+�^˘ۛ�[�ψ׊B���[\�
+�N��\ȑ؝]؞Uۛ�\ݛ�ؚȏO���\HOOH�ۛܙ\ݛ�B��X\
+
+�HO���ۛ\ْY
+K�
+N�ˈ�[[ݙHۛݜو�ؚ܈]]�H�țX]ښ[�ȝۛܙ\ݛ�ۛ�݈�Y�ܙHH\ً�ۛ�[��[�ݚ\ً�ۛ�[�H\ً�ۛ�[���[\��
+�HO���\HOOH�ۛݜو�ۛ�\ݛY˚\ʘ��Y
+K�
+NY�
+\ً�ۛ�[��[�ݚ�Y�ܙJHً�؜����[[ݙY	ؙY�ܙHH\ً�ۛ�[��[�ݚHܜ[�Yۛݜو�ؚʜʈ��ۈ\ܚ\ݘ[�Y\ܘYو	ڟX�
+NB�ˈY�H\ܚ\ݘ[�Y\ܘYو\ț�݈[\KYXٚۙ\�^��Y�
+\ً�ۛ�[��[�ݚOOH
+H\ً�ۛ�[�Hވ\N��^�^��؜ܚ\ݘ[��\ܛۜٗH�WNB�B�B��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈۘ\ڈۛ[X[�[�\�ٜ[ۈ
+ۛܙN�؜�N��B�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�^�X݈H^وH\݈\ٜ�Y\ܘYً�[[YY��
+��]\��ș[\Hݜ�[�ȚY��ȝ\ٜ�Y\ܘYو�ݛ���
+��[�ݚ[ۈ\ݕ\ٜ�^�[[YY
+�\N�؝]؞T�\]Y\݊N�ݜ�[�Ȟ�܈
+]HH�\K�Y\ܘYٜ˛[�ݚHNȚH�HȚKKJHۛ�݈\وH�\K�Y\ܘYٜ֚WNY�
+\ً��ۙHOOH�\ٜ��Hۛ�[�YNۛ�݈^H\ً�ۛ�[����[\�
+�HO���\HOOH�^�B��X\
+
+�HO���^
+B���ڛ����B���[J
+N�]\��^B��]\����B��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈٛ�\�XȋۛܙN��ۘ\ڈۛ[X[�\ܘ]ڙ\��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�[�\�ٜȘ[ۛܙN��ۘ\ڈۛ[X[�ˈ�ݝ\ȝȜܙXڙ�XȚ[�\�
+�[��]\��ȘHޛ�]XȜ�\ܛًۜ�[�ۛݛ�ۛܙN��ۛ[X[�șٝB�
+�[�[\��܈�\ܛۜو[�ݙXYو�Z[�ș�ܝ؜�Y\ݜ�X[K��
+�\ޛ�ș�[�ݚ[ۈ[�SܙTۘ\ڐۛ[X[�
+��\N�؝]؞T�\]Y\݋�[ٜܚ[ۜΈX\ݜ�[�ˈٜܚ[۔ݘ]O��ۛ��YΈ؝]؞Pۛ��Y˂�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��N��ۚ\ُ�\ܛۜو�[�ۛ�݈^H\ݕ\ٜ�^�[[YY
+�\JNY�
+]^�ӛݙ\�؜ي
+K�ݘ\�՚]
+�ۛܙN��JH�]\���[�]ݘ]HH�[�]�Tٜܚ[۔ݘ]J�\Kۛ��Yˈ[ٜܚ[ۜʎۛ�݈[�^Yٜܚ[ےQH�[�[�^Yٜܚ[ےQ
+�\Kۛ��YʎY�
+\ݘ]H	��[�^Yٜܚ[ےQ
+Hۛ�݈]�\ݛHٝ�ڙXݔ]
+�\K�ޜݙ[K�\K��]ҙXY\�ʎݘ]HHٝܐܙX]Tٜܚ[ۊ�[�^Yٜܚ[ےQ�]�\ݛ�]�]�\ݛ�۝\�ً��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ���ۛ��Y˂�
+NB�ۛ�݈ٜܚ[ےQH[�^Yٜܚ[ےQψݘ]O˜ٜܚ[ےQY�
+ٜܚ[ےQ
+H]ؚ]ۘZ[Tٜܚ[ۊٜܚ[ےQ
+NY�
+�[�^Yٜܚ[ےQ	���Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��Yʂ�
+H�]\��ۘ\ڔ�\ܛۜي��\K���Ș]][�X؝YXݚ]�Hٜܚ[ۈ�ݛ����\ٗۛܙWɞј]K��݊
+_X�
+NB�]ؚ]]ؚ]ݜ�X[Z[�ԛܝ�\ܛۜيٜܚ[ےQ�\K�ڙۘ[
+N�\K�ڙۘ[˝�ݒY�X�ܝY
+
+NY�
+�[�^Yٜܚ[ےQ	���Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��Yʂ�
+H�]\��ۘ\ڔ�\ܛۜي��\K���Ș]][�X؝YXݚ]�Hٜܚ[ۈ�ݛ����\ٗۛܙWɞј]K��݊
+_X�
+NB�B��ˈ�ݝHȜܙXڙ�XȚ[�\�ۛ�݈؜�]\�\ݛH[�U؜�]\ۘ\ڐۛ[X[�
+�\K[ٜܚ[ۜˈۛ��YʎY�
+؜�]\�\ݛ
+H�]\��؜�]\�\ݛ�ۛ�݈ݜ�]T�\ݛH]ؚ][�Pݜ�]Tۘ\ڐۛ[X[�
+��\K�[ٜܚ[ۜ˂�ۛ��Y˂�ۘZ[Tٜܚ[ۋ�
+NY�
+ݜ�]T�\ݛ
+H�]\��ݜ�]T�\ݛ�ۛ�݈[[�\ژT�\ݛH[�P[[�\ژTۘ\ڐۛ[X[�
+�\K[ٜܚ[ۜˈۛ��YʎY�
+[[�\ژT�\ݛ
+H�]\��[[�\ژT�\ݛ�ˈ[�ۛݛ�ۛܙN��ۛ[X[�8�%�]\��\��܈[�ݙXYو�ܝ؜�[�ȝ\ݜ�X[B�ً�؜��[�ۛݛ�ۘ\ڈۛ[X[��	ݙ^X
+N�]\��ۘ\ڔ�\ܛۜي��\K�[�ۛݛ�ۛ[X[��	ݙ^K�]�Z[X�N�ۛܙN�ݜ�]KۛܙN�؜�N�ݛܟٙ\]]ߛ۟ٙ��\ٝۛܙN�[[�\ژN�۟ٙ��\ٗۛܙWɞј]K��݊
+_X�
+NB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈۛܙN�[[�\ژH8�%ٙۙH[\ܘ[ݛܘYو[��Xڙܛݛ�ۜ�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�ۛܙN�[[�\ژN�ۘ8�%ݜ�\ܙ\ȝ[\ܘ[ݛܘYو[��Xڙܛݛ�ۜ�˂�
+�ۛܙN�[[�\ژN�ٙ�8�%�\ݛY\ț�ܛX[ݛܘYً��
+��
+�Hٜܚ[ۈݚ[ٝș�[ܙH�ؙ\ܚ[�ȊH[��Xݚ[ۋ�X؛ۛ�
+�ܘYY[��[�ٛܛJH�]ٜۉ݈ܚ]H�]țY[[ܚY\ˈ\ٙ�[�܈]�[PB�
+�]Y\ݚ[ۜˈ�XY[ۛH[��ܜXݚ[ۋ[�ٛ�ڝ]�Hۛ��\�؝[ۜ˂�
+��[�ݚ[ۈ[�P[[�\ژTۘ\ڐۛ[X[�
+��\N�؝]؞T�\]Y\݋�[ٜܚ[ۜΈX\ݜ�[�ˈٜܚ[۔ݘ]O��ۛ��YΈ؝]؞Pۛ��Y˂�N��\ܛۜو�[ۛ�݈^H\ݕ\ٜ�^�[[YY
+�\JNۛ�݈ݙ\�H^�ӛݙ\�؜ي
+N�ۛ�݈\ӛ�Hݙ\�OOH�ۛܙN�[[�\ژN�ۈ�ۛ�݈\ә��Hݙ\�OOH�ۛܙN�[[�\ژN�ٙ��Y�
+Z\ӛ�	��Z\ә��H�]\���[�ۛ�݈ݘ]HH�[�]�Tٜܚ[۔ݘ]J�\Kۛ��Yˈ[ٜܚ[ۜʎ�Y�
+\ݘ]JH�]\��ۘ\ڔ�\ܛۜي��\K���ȘXݚ]�Hٜܚ[ۈ�ݛ��[[�\ژH[ٙH؜ț�݈ژ[�ٙ���\ٗۛܙWɞј]K��݊
+_X�
+NB��ݘ]K�[[�\ژHH\ӛ�؝�Tٜܚ[ە�Xښ[�ʜݘ]K�ٜܚ[ےQȘ[[�\ژN�\ӛ�JNً�[��ʂ�[[�\ژN�	ۛݙ\�H�܈ٜܚ[ۏIܝ]K�ٜܚ[ےQ�ۚXيM�_H8�%
+ݛܘYو	ڜӛ�Ȉ�ݜ�\ܙY����\ݛYY�X�
+N�ۛ�݈�\ܛٕۜ^H\ӛ��Ȉ�[[�\ژH[ٙHۈ8�%Y[[ܞHݛܘYوݜ�\ܙY��X؛ݚ[ۜ�܋�����[[�\ژH[ٙHٙ�8�%Y[[ܞHݛܘYو�\ݛYY���]\��ۘ\ڔ�\ܛۜي�\K�\ܛٕۜ^\ٗۛܙWɞј]K��݊
+_X
+NB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈۛܙN�؜�H8�%ؘڙH؜�Z[�Șۛ��ۂ�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�ڙXڈY�H\݈\ٜ�Y\ܘYو\ȘH؜�]\ۘ\ڈۛ[X[���
+��
+�ۛܙN�؜�N�ݛܘ8�%\ؘ�\ȘؘڙH؜�Z[�ș�܈\Ȝٜܚ[ۋ��
+�ۛܙN�؜�N�ٙ\8�%�ܘٜȘؘڙH؜�Z[�Ȝ�Y؜�\܈وݜ��]�[[�[\ڜ˂�
+�ۛܙN�؜�N�]]؈8�%�]\��ȝț�ܛX[ݜ��]�[X[�[\ڜ˙�]�[�[ٙK��
+�ۛܙN�؜�N��\ٝ8�%ۙX\�ȐS�\Yڜ�ݚ]X��XZٜ��Xڙ]Ȋ�KY[�X�\
+�؜�Z[�ȝ]؜ș\ؘ�YY�\��\X]Y[�ؘڙY؜�]\ʋ��
+�ۛܙN�؜�N�ٙ�8�%\ؘ�\ȘؘڙH؜�Z[�ȑӓАSH
+\�ڜݙYݙ\��YJK��
+�ۛܙN�؜�N�ۘ8�%�KY[�X�\ȘؘڙH؜�Z[�șؘۛ[K��
+��
+��]\��ȘHޛ�]XȐ[��ܚX˙�ܛX]�\ܛۜوY�Hۛ[X[�؜țX]ڙY�
+�܈�[Șۛ�[�YH�ܛX[�ؙ\ܚ[�˂�
+��[�ݚ[ۈ[�U؜�]\ۘ\ڐۛ[X[�
+��\N�؝]؞T�\]Y\݋�[ٜܚ[ۜΈX\ݜ�[�ˈٜܚ[۔ݘ]O��ۛ��YΈ؝]؞Pۛ��Y˂�N��\ܛۜو�[ۛ�݈^H\ݕ\ٜ�^�[[YY
+�\JNۛ�݈ݙ\�H^�ӛݙ\�؜ي
+N�ۛ�݈\ԝ܈Hݙ\�OOH�ۛܙN�؜�N�ݛ܈�ۛ�݈\ҙY\Hݙ\�OOH�ۛܙN�؜�N�ٙ\�ۛ�݈\Н]ȏHݙ\�OOH�ۛܙN�؜�N�]]Ȏۛ�݈\ԙ\ٝHݙ\�OOH�ۛܙN�؜�N��\ٝ�ۛ�݈\ә��Hݙ\�OOH�ۛܙN�؜�N�ٙ��ۛ�݈\ӛ�Hݙ\�OOH�ۛܙN�؜�N�ۈ�Y�
+Z\ԝ܈	��Z\ҙY\	��Z\Н]ȉ��Z\ԙ\ٝ	��Z\ә��	��Z\ӛ�H�]\���[�ۛ�݈ݘ]HH�[�]�Tٜܚ[۔ݘ]J�\Kۛ��Yˈ[ٜܚ[ۜʎ�Y�
+�
+\ԙ\ٝ\ә��\ӛ�H	���
+ۛ��Y˜�[[ݙQ؝]؞Hۛ��Y˚ܝY[ٙJB�
+H�]\��\��ܔ�\ܛۜي�˂��ؘۛ[ؘڙK]؜�Z[�ȘYZ[�\ݜ�][ۈ\ȝ[�]�Z[X�Hۈ�[[ݙH؝]؞\ȋ�
+NB��ˈؘۛ[ۛ��ۜȜ�\]Z\�H[�]][�X؝Y�\ۛ�Yٜܚ[ۋ�ݚ\�ڜو[�B�ˈ�]ۜ�Ș؛\�۝[\�ڜݙ[�Hژ[�و؜�Z[�ș�܈]�\�H[�[���Y�
+�
+\ԙ\ٝ\ә��\ӛ�H	���
+\қܝY[ٙJ
+H�\ݘ]H�\ݘ]K�\ݕ\ݜ�X[H�Y^�Xݐ]]
+�\K��]ҙXY\�ʊB�
+H�]\��ۘ\ڔ�\ܛۜي��\K���Ș]][�X؝YXݚ]�Hٜܚ[ۈ�ݛ��ؘۛ[ؘڙH؜�Z[�ȝ؜ț�݈ژ[�ٙ���\ٗۛܙWɞј]K��݊
+_X�
+NB��ˈ�\ٝ\ȘH��XZٜ�]ڙHYZ[�Xݚ[ۋ��Y�
+\ԙ\ٝ
+H�\ٝڜ�ݚ]��XZٜ�
+Nً�[��ʂ��ؘڙK]؜�Y\��ۛܙN�؜�N��\ٝ�Xٚ]�Y8�%ڜ�ݚ]��XZٜ�ۙX\�Y��
+N�]\��ۘ\ڔ�\ܛۜي��\K��ؘڙH؜�Z[�Șڜ�ݚ]��XZٜ��\ٝ���\ٗۛܙWɞј]K��݊
+_X�
+NB��ˈۋۙ��\�HӓАSYZ[�Xݚ[ۜȊ\�ڜݙYՈݙ\��YJK��Y�
+\ә��\ӛ�Hٝ؜�Z[�ћ�X�Y
+\ӛ�Nً�[��ʂ�ؘڙK]؜�Y\��ۛܙN�؜�N�ڜӛ�Ȉ�ۈ���ٙ��H�Xٚ]�Y8�%؜�Z[�șؘۛ[H	ڜӛ�Ȉ�[�X�Y���\ؘ�Y�X�
+N�]\��ۘ\ڔ�\ܛۜي��\K�\ӛ��Ȉ�ؘڙH؜�Z[�ș[�X�Yؘۛ[K�����ؘڙH؜�Z[�ș\ؘ�Yؘۛ[K���\ٗۛܙWɞј]K��݊
+_X�
+NB��ˈ\]Hٜܚ[ۈ؜�]\ݘ]B�Y�
+ݘ]JHY�
+\ݘ]K�؜�]\
+Hݘ]K�؜�]\H\ݕ؜�]\]��؜�]\۝[���ݘ[؜�]\Έ�؜�]\]Έ�\ؘ�Y��[ً�NB�Y�
+\ԝ܊Hݘ]K�؜�]\�\ؘ�YH�YNݘ]K�؜�]\��ܘْٙ\؜�HH�[َH[وY�
+\ҙY\
+Hݘ]K�؜�]\��ܘْٙ\؜�HH�YNݘ]K�؜�]\�\ؘ�YH�[َH[وˈ\Н]ȸ�%�]\��ț�ܛX[ݜ��]�[X[�[\ڜț[ٙB�ݘ]K�؜�]\�\ؘ�YH�[َݘ]K�؜�]\��ܘْٙ\؜�HH�[َB�ۛ�݈[ٙSX�[H\ԝ܈Ȉ�ݛܜY��\ҙY\Ȉ��ܘٙ���]]Ȏً�[��ʂ�ؘڙK]؜�Y\��	ۛݙ\�H�Xٚ]�Y�܈ٜܚ[ۏIܝ]K�ٜܚ[ےQ�ۚXيM�_H8�%
+؜�Z[�ț[ٙN�	ۛٙSX�[X�
+NB��ۛ�݈�\ܛٕۜ^H\ԝ܂�Ȉ�ؘڙH؜�Z[�ȜݛܜY����\ҙY\�Ȉ�ٙ\[�ȘؘڙH؜�K�����ؘڙH؜�Z[�ȜٝȘ]]ˈ��]\��ۘ\ڔ�\ܛۜي�\K�\ܛٕۜ^\ٗۛܙWɞј]K��݊
+_X
+NB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈۘ\ڈۛ[X[��ۛܙN�ݜ�]H8�%ޛ�ڜ�ۛݜș\ݚ[][ۈ
+Șݜ�][ۂ�ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+�ۛܙN�ݜ�]X8�%�[�ș\ݚ[][ۈ
+Șݜ�][ۈޛ�ڜ�ۛݜ۞H�܈B�
+�ݜ��[�ٜܚ[ۈ[��]\��ȝH�\ݛˈ\ٙ�[�܎��
+�H]�[\��\ܙ\ȝ]�YYݜ�][ۈȘۛ\]H�]ٙ[�ٜܚ[ۈ�\^\
+�H\ٜ�ȝڛȝ؛�ș�ܘوۛݛYو^�Xݚ[ۈY�\�Hۛ��\�؝[ۂ�
+��
+��]\��ȘHޛ�]XȜ�\ܛۜوڝHݜ�][ۈ�\ݛ˂�
+�\ޛ�ș�[�ݚ[ۈ[�Pݜ�]Tۘ\ڐۛ[X[�
+��\N�؝]؞T�\]Y\݋�[ٜܚ[ۜΈX\ݜ�[�ˈٜܚ[۔ݘ]O��ۛ��YΈ؝]؞Pۛ��Y˂�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��N��ۚ\ُ�\ܛۜو�[�ۛ�݈^H\ݕ\ٜ�^�[[YY
+�\JNY�
+^�ӛݙ\�؜ي
+HOOH�ۛܙN�ݜ�]H�H�]\���[�ۛ�݈[�^Yٜܚ[ےQH�[�[�^Yٜܚ[ےQ
+�\Kۛ��Yʎۛ�݈]�\ݛHٝ�ڙXݔ]
+�\K�ޜݙ[K�\K��]ҙXY\�ʎ]ݘ]HH�[�]�Tٜܚ[۔ݘ]J�\Kۛ��Yˈ[ٜܚ[ۜʎ]ٜܚ[ےQHݘ]O˜ٜܚ[ےQ�Y�
+\ݘ]H	��[�^Yٜܚ[ےQ
+Hݘ]HHٝܐܙX]Tٜܚ[ۊ�[�^Yٜܚ[ےQ�]�\ݛ�]�]�\ݛ�۝\�ً��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ���ۛ��Y˂�
+Nٜܚ[ےQH[�^Yٜܚ[ےQB��Y�
+\ٜܚ[ےQ\ݘ]JH�]\��ۘ\ڔ�\ܛۜي��\K���ȘXݚ]�Hٜܚ[ۈ�ݛ��܈ݜ�][ۋ����\ٗۛܙW؝\�]WۛۙH��
+NB��]ؚ]ۘZ[Tٜܚ[ۊٜܚ[ےQ
+NY�
+�[�^Yٜܚ[ےQ	���Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��Yʂ�
+H�]\��ۘ\ڔ�\ܛۜي��\K���ȘXݚ]�Hٜܚ[ۈ�ݛ��܈ݜ�][ۋ����\ٗۛܙW؝\�]WۛۙH��
+NB�]ؚ]]ؚ]ݜ�X[Z[�ԛܝ�\ܛۜيٜܚ[ےQ�\K�ڙۘ[
+N�\K�ڙۘ[˝�ݒY�X�ܝY
+
+NY�
+�[�^Yٜܚ[ےQ	���Xۛ��\�YY[�^YY[�]T�\ۛ�\՛ʜ�\Kٜܚ[ےQۛ��Yʂ�
+H�]\��ۘ\ڔ�\ܛۜي��\K���ȘXݚ]�Hٜܚ[ۈ�ݛ��܈ݜ�][ۋ����\ٗۛܙW؝\�]WۛۙH��
+NB��ۛ�݈�ڙXݔ]H�\ۛ�Tٜܚ[۔�ڙXݔ]
+]�\ݛݘ]Kۛ��Yʎ؝�Tٜܚ[ە�Xښ[�ʜٜܚ[ےQ�ڙXݔ]�ݘ]K��ڙXݔ]�[��ڙXݔ]�ݚ\ڛۘ[�ݘ]K��ڙXݔ]�ݚ\ڛۘ[OOH�YK�JNۛ�݈ș\ݚ[][ۋݜ�]܈HH]ؚ][\ܝ
+�ܙXZK؛ܙH�N�\K�ڙۘ[˝�ݒY�X�ܝY
+
+Nۛ�݈HHٝPۚY[�
+ۛ��Yʎۛ�݈[ٙ[Hٝۜ�ٜ�[ٙ[
+ݘ]K�\ݕ\ݜ�X[JN�ً�[��ʘۛܙN�ݜ�]N��[��[�ș�܈ٜܚ[ۏIܙ\ܚ[ےQ�ۚXيM�_X
+N�ˈ�ܘًY\ݚ[[[�[�țY\ܘYٜȊ\�ٛ��\\ܙ\Ș�]ڈ]Y]YJB�]\ݚ[YH�Hۛ�݈�\ݛH]ؚ]\ݚ[][ۋ��[�K��ڙXݔ]�ٜܚ[ےQ�[ٙ[��ܘَ��YK�ښ\Y]N��YK�\�ٛ���YK�؛\N��\�X݈��ڙۘ[��\K�ڙۘ[�ۜ�ٜ�X[�XZٕۜ�ٜ�X[
+ٜܚ[ےQ�ܙKY\ݚ[�K�ˈ͌�Ȕ\وN�ݘ[\Hٜܚ[ۉ܈ڝXYۈۘ\ڋXݜ�]H�ݜ˂�Y]Y]N��Z[ٜܚ[ۓY]Y]Jݘ]K�ڝXY
+K�JN�\K�ڙۘ[˝�ݒY�X�ܝY
+
+N\ݚ[YH�\ݛ�\ݚ[YH؝ڈ
+JH�\K�ڙۘ[˝�ݒY�X�ܝY
+
+Nً�\��܊�ۛܙN�ݜ�]H\ݚ[][ۈ\��܎��JNB��ˈ�[�ݜ�][ۈ
+\ٜȝ\�ٛ�ٚ\�X݈؛�XHHHۚY[�
+B�]ܙX]YH]\]YH][]YH�Hۛ�݈ԙ\ݛH]ؚ]ݜ�]܋��[�K��ڙXݔ]�ٜܚ[ےQ�[ٙ[�ڙۘ[��\K�ڙۘ[�ۜ�ٜ�X[�XZٕۜ�ٜ�X[
+ٜܚ[ےQ�ܙKXݜ�]܈�K�ˈ͌�Ȕ\وN�ݘ[\Hٜܚ[ۉ܈ڝXYۈۘ\ڋXݜ�]H[��Y\˂�Y]Y]N��Z[ٜܚ[ۓY]Y]Jݘ]K�ڝXY
+K�JN�\K�ڙۘ[˝�ݒY�X�ܝY
+
+NܙX]YHԙ\ݛ�ܙX]Y\]YHԙ\ݛ�\]Y[]YHԙ\ݛ�[]YH؝ڈ
+JH�\K�ڙۘ[˝�ݒY�X�ܝY
+
+Nً�\��܊�ۛܙN�ݜ�]Hݜ�][ۈ\��܎��JNB��ۛ�݈�\ܛٕۜ^B�ݜ�][ۈۛ\]N�	ٚ\ݚ[YHٙۙ[�ș\ݚ[Y
+	؜�X]YH[��Y\ȘܙX]Y	ݜ]YH\]Y	ٙ[]YH[]Y��ً�[��ʘۛܙN�ݜ�]N�	ܙ\ܛٕۜ^X
+N��]\��ۘ\ڔ�\ܛۜي�\K�\ܛٕۜ^\ٗۛܙW؝\�]Wɞј]K��݊
+_X
+NB��ʊ��Z[Hޛ�]XȜۘ\ڋXۛ[X[��\ܛۜو[�HۚY[�	܈ڜ�H�ܛX]�
+��[�ݚ[ۈۘ\ڔ�\ܛۜي��\N�؝]؞T�\]Y\݋�^�ݜ�[�˂�\ْY�ݜ�[�˂�N��\ܛۜوˈ�Z[H؝]؞T�\ܛۜو[�\وH�ݛ؛ۋX]؜�H�\ܛۜو�Z[\�ˈۈۘ\ڈۛ[X[�ȝۜ�Șۜ��XݛH�܈[ۚY[��ݛ؛ۜ˂�ۛ�݈�\܎�؝]؞T�\ܛۜوHY�\ْY�[ٙ[��\K�[ٙ[�ۛ�[��ވ\N��^�^WK�ݛܔ�X\ۛ���[�ݝ\����\َؙ�[�]ڙ[�Έ�ݝ]ڙ[�Έ�ؘڙT�XY[�]ڙ[�Έ�ؘڙPܙX][ے[�]ڙ[�Έ�K�N�Y�
+�\K�ݜ�X[JHˈ�Z[[��ܚXȔԑK[��[�ۘ]HȘۚY[�	܈�ܛX]Y��YYY�ۛ�݈[��ܚXԔшHݜ�X[R�\ܛۜي�\܊NY�
+�\K��ݛ؛ۈOOH�ܙ[�ZH�H�]\���[�ۘ]P[��ܚXԝ�X[UӜ[�RJ[��ܚXԔыڙۘ[��\K�ڙۘ[�JNB�Y�
+�\K��ݛ؛ۈOOH�ܙ[�ZK\�\ܛٜۜȊH�]\���[�ۘ]P[��ܚXԝ�X[Uԙ\ܛٜۜʘ[��ܚXԔыڙۘ[��\K�ڙۘ[�JNB�Y�
+�\K��ݛ؛ۈOOH�ٛZ[�H�H�]\���[�ۘ]P[��ܚXԝ�X[Uљ[Z[�J[��ܚXԔыڙۘ[��\K�ڙۘ[�JNB��]\��[��ܚXԔюB���]\���۔ݜ�X[R�\ܛۜي��\܋��\K��ݛ؛ۋ��\K�ݜ�X[K�[�Y�[�Y��\]Y\ݑ[�X�\ӛۙЛ۝^
+�\JK�
+NB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈ\��܈�\ܛۜو�Z[\��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB���[�ݚ[ۈ\��ܔ�\ܛۜيݘ]\Έ�[X�\�Y\ܘYَ�ݜ�[�ʎ��\ܛۜو�]\���]Ȕ�\ܛۜي��ӓ��ݜ�[�ڙ�J\N��\��܈��\��܎�\N��ٜ��\�ٜ��܈��Y\ܘYً�K�JK�ݘ]\˂�XY\�ΈȈ�ۛ�[�]\H���\X؝[ۋڜۛ��K�K�
+NB��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB�ˈXZ[�[��Hڛ��ˈKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKB��ʊ��
+��ؙ\܈[�[�ۛZ[�ș؝]؞H�\]Y\݈�ݙڈH�[ܙH\[[�K��
+��
+��]\��ȘHݘ[�\��\ܛۜ٘ؚ�X݈8�%Z]\�Hݜ�X[Z[�ȔԑH�\ܛۜق�
+�܈H�ӓ��\ܛًۜ\[�[�țۈHۚY[�	܈ݜ�X[Xٝ[�˂�
+�\ޛ�ș�[�ݚ[ۈ[�T�\]Y\ݑ�ܕ[�[�
+��\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N��ۚ\ُ�\ܛُۜ�Y�
+\�\O˜�]ҙXY\�ʈ�]\��\��ܔ�\ܛۜي�X[�ܛYY�\]Y\ݎ�Z\ܚ[�ȚXY\�ȊNB�Y�
+\[[�T�\ٝ[��ٜ�\܊H�]\��\��ܔ�\ܛۜيLˈ�؝]؞H\[[�H\Ȝ�\ٝ[�ȊNB�ݜ�X[Z[�ԛܝ�\ܛٜۜИؙ\[�ȏH�YNۛ�݈�\]Y\ݑٛ�\�][ۈHݜ�X[Z[�ԛܝ�\ܛّۜٛ�\�][ێ]�\ۛ�Qݛ�ݜ�X[TٝY�
+
+
+HO��ڙ
+H[�Y�[�Y]ݛ�ݜ�X[P؛�ٛYH�[َۛ�݈ݛ�ݜ�X[TٝYH�]Ȕ�ۚ\ُ�ڙ�
+�\ۛ�JHO��\ۛ�Qݛ�ݜ�X[TٝYH�\ۛ�NJN�]\���[�Xݚ]�T\[[�T�\]Y\݊��\K�ڙۘ[�
+ڙۘ[�Xړܙ\�][ۋۘZ[Tٜܚ[ۊHO��[�T�\]Y\ݒ[��\��ȋ����\Kڙۘ[K�ۛ��Y˂��\]Y\ݑٛ�\�][ۋ�ݛ�ݜ�X[TٝY�
+
+HO�ݛ�ݜ�X[P؛�ٛY��Xړܙ\�][ۋ�ۘZ[Tٜܚ[ۋ�
+K�
+
+HO��\ۛ�Qݛ�ݜ�X[TٝYˊ
+K�
+
+HO�ݛ�ݜ�X[P؛�ٛYH�YNK��\]Y\ݐܙY[�X[�[�ٜ��[�
+�\K��]ҙXY\�ˈۛ��Yʈψ[�Y�[�Y�
+NB��\ޛ�ș�[�ݚ[ۈ[�T�\]Y\ݒ[��\���\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂��\]Y\ݑٛ�\�][ێ��[X�\��ݛ�ݜ�X[TٝY��ۚ\ُ�ڙ��ݛ�ݜ�X[U؜И[�ٛY�
+
+HO��ۛX[���Xړܙ\�][ێ�
+ܙ\�][ێ��ۚ\ُ[�ۛݛ��HO��ڙ�ۘZ[Tٜܚ[ێ�
+ٜܚ[ےQ�ݜ�[�ʈO��ۚ\ُ�ڙ��N��ۚ\ُ�\ܛُۜ�ۛ�݈�\]Y\ݔݘ\�\ȏH]K��݊
+Nۛ�݈�\]Y\ݓܙ\�H
+ʝ\ݜ�X[T�\]Y\ݓܙ\��Hˈݘ\�Yؚ[�݈X[�ܛYY[��ؘ][ۜȊK�ˈ�^��\�ȋș\�X݈[ٝ[H؛ˈ]\܈[�[�Y�[�Y܈XY\�[\܈�\]Y\݊K�H�X[ٜ��\�]�ˈ[؞\ȜݜY\ȘH�[KY�ܛYY؝]؞T�\]Y\ݎȘ�Z[[�țݝۙX[�H\�B�ˈ]�ڙȘH\Q\��܈ۈ�\K��]ҙXY\�؈Y\\�[�H\[[�K��Y�
+\�\O˜�]ҙXY\�ʈ�]\��\��ܔ�\ܛۜي�X[�ܛYY�\]Y\ݎ�Z\ܚ[�ȚXY\�ȊNB��Y�
+\Лۙ�Xݚ[�Н]XY\�ʜ�\K��]ҙXY\�ʊH�]\��\��ܔ�\ܛۜي���ۛ��Xݚ[�Ș]][�X؝[ۈXY\�Έٛ�Z]\�X\KZٞH܈]]ܚ^�][ۋ�݈�ݚ��
+NB��ˈ�[Y]H^Xڝ�ݚY\�ݜݜ�X[HٛXݚ[ۈ�Y�ܙHۘ\ڋڙKXژ[��[�ˈۛ\Xݚ[ۋ[�Y]H��[�ڙ\Ș؛�Zو[\��]H]ˈ\Ȝ�\ۛ�\�\ˈޛ�ڜ�ۛݜȘ[�\��ܛ\ț�ț�]ۜ�ȒKӋ���H�\ۛ�T�\]Y\ݕ\ݜ�X[T�ݝJ�\Kۛ��YʎH؝ڈ
+\��܊H�]\��\��ܔ�\ܛۜي��\��܈[�ݘ[�ٛو\��܈ș\��܋�Y\ܘYو��[��[Y\ݜ�X[H�ݝH��
+NB��ˈ�\ٜ��HH�ؙ\܋Yؘۛ[YؘވܙY[�X[ۛH�܈Hؘ[�ˈXY\�[\܈�\]Y\݈ȝH^X݈ۛ��Yݜ�Y�ݚY\��\ً��ۛ�݈X\�P]]H^�Xݐ]]
+�\K��]ҙXY\�ʎY�
+X\�P]]
+H؜\�SYؘޑؘۛ[]]
+�\Kۛ��YˈX\�P]]
+NB��ˈKKH]ZXڈY\�LHٜܚ[ۈۚݜ�܈ݜ�Xݝ\�[ۛ\Xݚ[ۈ]Xݚ[ۈKKB�ˈʌJHXY\�
+țX\ۚݜ8�%]ȝ\Șۛ\\�HY\ܘYو۝[�Ș�Y�ܙH�ݝ[�˂�ۛ�݈�[ܔݘ]HHXݚ]�Tٜܚ[ۑ�ܒۛݛ�XY\��\Kٜܚ[ۜˈۛ��Yʎ�ˈKKH؜و�ۘ\ڈۛ[X[�[�\�ٜ[ۈ
+ۛܙN��HKKB�ˈ[ۛܙN��ۛ[X[�Ș\�H[�\�ٜY\�H[��]�\��ܝ؜�Y\ݜ�X[K��ۛ�݈ۘ\ڔ�\ݛH]ؚ][�SܙTۘ\ڐۛ[X[�
+��\K�ٜܚ[ۜ˂�ۛ��Y˂�ۘZ[Tٜܚ[ۋ�
+NY�
+ۘ\ڔ�\ݛ
+H�]\��ۘ\ڔ�\ݛ�ˈKKH؜و�N�ۘ]YHۙHڙKXژ[��[8����ܝ؜�\ݜ�X[H[�ݘڙYKKB�ˈ]]˛[ٙH\�Z\ܚ[ۈۘ\ܚY�Y\�]KݛܚXșٛ�\�][ۋ[�ݘ�Yٛ��ˈ�[Y\�ܝ[[X\�H؛Ș؜��HH]�Hٜܚ[ۉ܈Xۘ]YKXۙK\ٜܚ[ۋZY�ˈ�]�Șۙ[�Ȝޜݙ[H�ۜ
+ښ\ޜݙ[T�ۜ�Y�^
+K�^H]\݈�]�\��ˈ[�\�H\[[�N��[��[�ȝ[H�ݙڈ][��XݜȓKٚ\ݚ[Y�ˈ�Y�^\ț܈
+ۜ�يHZ\˜�ݝ\ȝ[HȘۛ\Xݚ[ۈ8�%ۜ��\[�ȝB�ˈ]]˛[ٙHۘ\ܚY�Y\��\�X݈[��\[�Ȑۘ]YHۙI܈˜ݜ�Zو�[�Xڂ�ˈ]�ܜȘ]]ț[ٙH�XڈȜ�ۜ[�ș�܈]�\�HXݚ[ۋ�\ȘڙXڈUTՂ�ˈݘ^HZXYوHݜ�Xݝ\�[Xۛ\Xݚ[ۈ]Xݚ[ۈ�[݋��Y�
+\Л]YPۙTڙPژ[��[
+�\JJHً�[��ʂ�ۘ]YKXۙHڙKXژ[��[�\ܝ�ݙڈ
+Y\ܘYٜωܙ\K�Y\ܘYٜ˛[�ݚHۛωܙ\K�ۛ˛[�ݚHX^ڙ[�ωܙ\K�X^ڙ[�ߊX�
+N�]\��]ؚ][�T\ܝ�ݙڊ�\Kۛ��YʎB��ˈKKH؜وN�ۛ\Xݚ[ۈ�\]Y\݈8���[�\�ٜKKB�ˈݜ�Xݝ\�[]Xݚ[ۈ
+ٜܚ[ۋX]؜�JH�\�݋]\��X]ښ[�Ș\ș�[�Xڋ��ˈݘ�XYٛ�ț�݈ٝZ\�ݛ�ٜܚ[ۜȊٜ\�]H\ٜܚ[ۋXY��[�]HˈXۘ]YKXۙKXYٛ�ZY
+Kۈ�[ܔݘ]H\ȝHݘ�XYٛ�	܈ݛ�ݘ]H8�%�ˈݜ�Xݝ\�[]Xݚ[ۈ\Ȝؙ�K��˂�ˈSTԕS��Hۘ]YHۙHݘ�XYٛ�ݚ[ژ\�\ȝH\�[�	܂�ˈXۘ]YKXۙK\ٜܚ[ۋZY��Y�ܙHXۘ]YKXۙKXYٛ�ZY؜ȘYYȝB�ˈۛݛ�ZXY\��[ܚ]H
+ٙHܙY[�X[ZXY\�˝ʋXݚ]�Tٜܚ[ۑ�ܒۛݛ�XY\��ˈ�\ۛ�Y]ȝHT�S�ٜܚ[ۋڛܙH\�وY\ܘYو۝[�XYHB�ˈݘ�XYٛ�	܈ڛܝ�\�݈�\]Y\݈
+H\ٜ�Y\ܘYو
+ȝۛ\ؚ[XH]XڛY[�ʂ�ˈۚțZوHݜ�Xݝ\�[ۛ\Xݚ[ۋ�H؝]؞H[�[�\�ٜY][��ˈ�]\��YHٙ�[�H�Ȕٜܚ[ۈݛ[X\�H��ؚȘ\ȝHݘ�XYٛ�	܂�ˈ\ڗܙ\ݛ�ݘ\�[�Ȝݜ�Xݝ\�[]Xݚ[ۈۈHݘ�XYٛ�ڙۘ[ۛܙ\ˈ]ۙH�Y؜�\܈وښXڈXY\��\ۛ�YHٜܚ[ۋ��ۛ�݈\Л]YTݘ�Yٛ�H\Л]YPۙTݘ�Yٛ�
+�\K��]ҙXY\�ʎۛ�݈ݜ�Xݝ\�[ۛ\Xݚ[ۈB�Z\Л]YTݘ�Yٛ�	��\ԝ�Xݝ\�[ۛ\Xݚ[ۊ�\K�[ܔݘ]JNۛ�݈]\��]Xݚ[ۈHݜ�Xݝ\�[ۛ\Xݚ[ۂ�ȝ[�Y�[�Y��]Xݐۛ\Xݚ[۔�\]Y\݊�\JNY�
+ݜ�Xݝ\�[ۛ\Xݚ[ۈ]\��]Xݚ[ۏ˙]XݙY
+Hۛ�݈�X\ۛ�Hݜ�Xݝ\�[ۛ\Xݚ[ۂ�Șݜ�Xݝ\�[
+�[܏Iܜ�[ܔݘ]O˛Y\ܘYِ۝[�ψ�ȟHݜ��Iܙ\K�Y\ܘYٜ˛[�ݚJX��]\��]Xݚ[ۏ˙]XݙY�Ȝ]\��]Xݚ[ۋ��X\ۛ�OOH�ޜݙ[K\�ۜ��Ș]\���ޜݙ[K\�ۜX]ڈ�ܘ]\��]Xݚ[ۋ�]\��H���]\��]Xݚ[ۋ��X\ۛ�OOH�\ٜ�Zٞ]ۜ�Ȃ�Ș]\���\ٜ�Zٞ]ۜ�X]ڈ�ܘ]\��]Xݚ[ۋ�]\��H���]\���[\]K\٘ݚ[ۜȊ	ܘ]\��]Xݚ[ۋ�X]ڐ۝[�HX]ڙ\ʘ���[�ۛݛ��ً�[��ʂ�ۛ\Xݚ[ۈ]XݙY�	ܙX\ۛ�HY\ܘYٜωܙ\K�Y\ܘYٜ˛[�ݚHۛωܙ\K�ۛ˛[�ݚX�
+N�]\��]ؚ][�Pۛ\Xݚ[ۊ��\K�ۛ��Y˂��\]Y\ݑٛ�\�][ۋ��Xړܙ\�][ۋ�ۘZ[Tٜܚ[ۋ�
+NB��ˈKKH؜و��Y]H�\]Y\݈
+]Hٛ�ݛ[X\�K؝Yۜ�^�][ۋ]ˊH8���\ܝ�ݙڈKKB�Y�
+\ә]T�\]Y\݊�\JJHً�[��ʂ�Y]H�\]Y\݈]XݙY�Y\ܘYٜωܙ\K�Y\ܘYٜ˛[�ݚHۛωܙ\K�ۛ˛[�ݚX
+X^ڙ[�ωܙ\K�X^ڙ[�߈Yٛ�Iܙ\K��]ҙXY\�֓ԑWБѓ�ґPQT�Hψ��ۙH�X�
+N�]\��]ؚ][�T\ܝ�ݙڊ�\Kۛ��YʎB��ˈKKH؜وΈ�ܛX[ۛ��\�؝[ۈ\��8����[\[[�HKKB��]\��]ؚ][�Pۛ��\�؝[ە\����\K�ۛ��Y˂��\]Y\ݓܙ\���\]Y\ݑٛ�\�][ۋ�ݛ�ݜ�X[TٝY�ݛ�ݜ�X[U؜И[�ٛY�ۘZ[Tٜܚ[ۋ�
+NH؝ڈ
+\��HˈۚY[�\؛ۛ�X݈ȘX�ܝ\Ș�[�Yۈ8�%ݛ�ܘYH��ۈ\��܈Ț[��˂�ۛ�݈\И�ܝH\��[�ݘ[�ٛوӑ^ٜ[ۈ	��\����[YHOOH�X�ܝ\��܈�Y�
+\И�ܝ
+Hً�[��ʈ�\[[�HX�ܝY
+ۚY[�\؛ۛ�X݊H�NˈۛHݜ��XٜȝȔٛ��HY�Hܝ؜ȝ[�\��\ܝ\�H]X�ܝ[YK��؜\�PۚY[�X�ܝ[�\��\ܝ\�Jݘ\�\Έ�\]Y\ݔݘ\�\˂��ݝN���\]Y\݈��JNH[وˈۛHو�^Y[�\��[�Z[\�\ˈ\��]�\�H\�ٜ�ٙ]ڈY\ܘYٜȘ؛��ˈۛ�Z[�\ݜ�X[H�\ܛۜوۛ�[�ښXڈ]\݈�]�\��XXڈHً��ۛ�݈]Z[B�\��[�ݘ[�ٛوܙ[�RTݜ�X[U�[Y][ۑ\��܂�Șۛ��Y˙^ܙT�ݚY\�XYۛܝX܂�Ș�	ٜ���Y\ܘYٟH
+�[OIٜ����[_JX���	ٜ���Y\ܘYٟX��\��[�ݘ[�ٛو\��܈	�����]ڈ�Z[Y���Z\ܚ[�ȓܙ[�RH�[�\ڗܙX\ۛ�\�Z[�[���Z\ܚ[�ȓܙ[�RHѓӑWH\�Z[�[���\ݜ�X[H�\ܛۜو\ț�Ș�ٞH��K�[�۝Y\ʙ\���Y\ܘYيB�Ș�	ٜ���Y\ܘYٟX����ً�\��܊\[[�H�\]Y\݈�Z[Y	ٙ]Z[X
+NB��]\��\��ܔ�\ܛۜيL��؝]؞H�\]Y\݈�Z[Y�NB�B��^ܝ\ޛ�ș�[�ݚ[ۈ[�T�\]Y\݊��\N�؝]؞T�\]Y\݋�ۛ��YΈ؝]؞Pۛ��Y˂�N��ۚ\ُ�\ܛُۜ�Y�
+\�\O˜�]ҙXY\�ʈ�]\��[�T�\]Y\ݑ�ܕ[�[�
+�\Kۛ��Yʎ�]\��ڝ�\]Y\ݔݛܘYٕ[�[�
+�\K��]ҙXY\�ˈۛ��Yˈ
+
+HO��[�T�\]Y\ݑ�ܕ[�[�
+�\Kۛ��Yʋ�
+NB
