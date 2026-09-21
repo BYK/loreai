@@ -509,6 +509,45 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
   });
 
+  test("merges raw signed text deltas without truncating egress", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: "Hel", thoughtSignature: "signature-1" }],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: "lo", thoughtSignature: "signature-2" }],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "text",
+        text: "Hello",
+        raw: {
+          text: "Hello",
+          thoughtSignature: "signature-2",
+        },
+      },
+    ]);
+  });
+
   test("thought deltas stay out of visible text (separate thinking block)", async () => {
     const res = sse([
       {
