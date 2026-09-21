@@ -25,11 +25,14 @@ import { statusOf, type KeyStatus } from "./status";
 export const ENTITY_PAGE_SIZE = 50;
 const LIST_SCOPE = "all";
 
+/** Code-unit comparison: the gateway sorts with `<`, not a locale collation. */
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 /** Matches the gateway's `(entity_type, canonical_name, id)` keyset order. */
 const LIST_ORDER = (a: EntityListItem, b: EntityListItem) =>
-  a.entity_type.localeCompare(b.entity_type) ||
-  a.canonical_name.localeCompare(b.canonical_name) ||
-  a.id.localeCompare(b.id);
+  cmp(a.entity_type, b.entity_type) ||
+  cmp(a.canonical_name, b.canonical_name) ||
+  cmp(a.id, b.id);
 
 export interface EntityListSource {
   type: string | null;

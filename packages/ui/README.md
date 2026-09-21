@@ -1004,8 +1004,8 @@ top of `/api/v1`. Status:
   budget set/disable, worker breakdown
 - [ ] Warming — global enable/disable, circuit-breaker reset, per-session
   keep/stop/auto, histograms
-- [x] Import history — intentionally not a screen; it exists only as the
-  `GET /api/v1/import/history` API (no legacy page existed)
+- [ ] Import history — no legacy page existed (API only,
+  `GET /api/v1/import/history`); #1823 adds a screen for it
 
 Already covered by earlier slices: project overview (UI-04), knowledge
 list/document (UI-04/05), session reader (UI-06), search (UI-04). The
