@@ -110,6 +110,7 @@ import {
 
 import type {
   GatewayRequest,
+  GatewayProtocol,
   GatewayResponse,
   GatewayMessage,
   GatewayContentBlock,
@@ -17838,7 +17839,11 @@ async function handleConversationTurn(
   const transformedMessages = loreMessagesToGateway(
     result.messages,
     provenanceByMessageId,
-    shouldPreserveResponsesProvenance(previousTransformLayer, result.layer),
+    shouldPreserveResponsesProvenance(previousTransformLayer, result.layer) &&
+      canReplayRequestProvenance(
+        req.protocol,
+        requestUpstreamRoute.effectiveProtocol,
+      ),
   );
   removeOrphanedToolResults(transformedMessages);
 
@@ -19283,6 +19288,27 @@ export function shouldPreserveResponsesProvenance(
     currentLayer < 4 &&
     (previousLayer === null || previousLayer === currentLayer)
   );
+}
+
+/**
+ * Provider-native thinking/encrypted blocks are opaque and valid only on the
+ * same wire family that produced them. A cross-protocol request keeps its
+ * visible projection but drops request-only provenance rather than sending
+ * Anthropic blocks to Gemini, Gemini signatures to Anthropic, or Responses
+ * reasoning items to Chat Completions.
+ *
+ * Vertex and Bedrock use the Anthropic Messages body, so they share the
+ * Anthropic provenance family.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function canReplayRequestProvenance(
+  ingressProtocol: GatewayProtocol,
+  effectiveProtocol: GatewayProtocol,
+): boolean {
+  const family = (protocol: GatewayProtocol): string =>
+    protocol === "vertex" ? "anthropic" : protocol;
+  return family(ingressProtocol) === family(effectiveProtocol);
 }
 
 // ---------------------------------------------------------------------------
