@@ -509,6 +509,44 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
   });
 
+  test("ignores premature thought signatures before the terminal frame", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "rea",
+                    thought: true,
+                    thoughtSignature: "premature-signature",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: "son", thought: true }],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      { type: "thinking", thinking: "reason" },
+    ]);
+  });
+
   test("merges raw signed text deltas without truncating egress", async () => {
     const response = await accumulateGeminiSSEStream(
       sse([
