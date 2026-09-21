@@ -696,11 +696,11 @@ describe("buildGeminiResponseBody — thinking + block reason", () => {
     });
 
     const body = buildGeminiResponseBody(response);
-    const parts = (
-      (body.candidates as Array<Record<string, unknown>>)[0]?.content as {
-        parts: unknown[];
-      }
-    ).parts;
+    const firstCandidate = (
+      body.candidates as Array<Record<string, unknown>>
+    )[0];
+    if (!firstCandidate) throw new Error("missing Gemini candidate");
+    const parts = (firstCandidate.content as { parts: unknown[] }).parts;
     expect(parts).toEqual([{ text: "answer" }]);
 
     const stream = await buildGeminiResponse(response, true).text();
