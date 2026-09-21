@@ -41,7 +41,7 @@ const GEMINI_API_VERSION = "v1beta";
 /** Default max output tokens when a request omits `generationConfig.maxOutputTokens`. */
 const DEFAULT_GEMINI_MAX_TOKENS = 8192;
 
-type GeminiPart = Record<string, unknown>;
+export type GeminiPart = Record<string, unknown>;
 
 export interface GeminiFunctionCall {
   id?: string;
@@ -121,7 +121,11 @@ export function validateGeminiCandidateToolIdentities(
       if (
         (text !== undefined && typeof text !== "string") ||
         (thought !== undefined && typeof thought !== "boolean") ||
-        (text !== undefined && functionCall !== undefined)
+        (text !== undefined && functionCall !== undefined) ||
+        ((part as Record<string, unknown>).thoughtSignature !== undefined &&
+          typeof (part as Record<string, unknown>).thoughtSignature !== "string") ||
+        ((part as Record<string, unknown>).thought_signature !== undefined &&
+          typeof (part as Record<string, unknown>).thought_signature !== "string")
       ) {
         throw new Error(diagnostic);
       }
@@ -150,15 +154,32 @@ function partsText(container: unknown): string {
     .join("");
 }
 
+/** Return either spelling used by Gemini native/compatibility APIs. */
+export function geminiPartThoughtSignature(
+  part: GeminiPart,
+): string | undefined {
+  if (typeof part.thoughtSignature === "string") return part.thoughtSignature;
+  if (typeof part.thought_signature === "string")
+    return part.thought_signature;
+  return undefined;
+}
+
 /** Map a single Gemini content part to a gateway content block. */
-function partToBlock(part: GeminiPart): GatewayContentBlock | null {
+export function geminiPartToBlock(
+  part: GeminiPart,
+): GatewayContentBlock | null {
+  const signature = geminiPartThoughtSignature(part);
   if (typeof part.text === "string") {
     // A `thought: true` part is the model's private reasoning summary
     // (thinkingConfig.includeThoughts). It must NOT be concatenated with the
     // visible answer — map it to a distinct thinking block so egress can keep
     // the `thought` flag and clients can tell reasoning from answer.
     if (part.thought === true) {
-      return { type: "thinking", thinking: part.text };
+      return {
+        type: "thinking",
+        thinking: part.text,
+        ...(signature !== undefined ? { signature } : {}),
+      };
     }
     return { type: "text", text: part.text };
   }
@@ -174,6 +195,7 @@ function partToBlock(part: GeminiPart): GatewayContentBlock | null {
       id: asString(fc.id) || name,
       name,
       input: fc.args ?? {},
+      ...(signature !== undefined ? { raw: part } : {}),
     };
   }
   if (part.functionResponse && typeof part.functionResponse === "object") {
@@ -207,12 +229,40 @@ export function createGeminiContentsBuilder(): StreamedItemsBuilder<
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
-      const blocks: GatewayContentBlock[] = [];
+      const visible: GatewayContentBlock[] = [];
+      const provenance: GatewayContentBlock[] = [];
+      const provenancePositions: number[] = [];
+      let hasRequestOnlyProvenance = false;
       for (const part of parts) {
-        const block = partToBlock(part);
-        if (block) blocks.push(block);
+        // Gemini thought summaries are request-only provenance. Native thought
+        // signatures on otherwise-visible parts are also retained verbatim so
+        // stable-layer replay can satisfy the provider's integrity check.
+        const thoughtOnly =
+          part.thought === true && typeof part.text === "string";
+        const block = geminiPartToBlock(part);
+        if (!block) continue;
+        if (thoughtOnly) {
+          hasRequestOnlyProvenance = true;
+          provenance.push({ type: "opaque", raw: part });
+          continue;
+        }
+        const signature = geminiPartThoughtSignature(part);
+        provenancePositions.push(provenance.length);
+        visible.push(block);
+        if (signature !== undefined) {
+          hasRequestOnlyProvenance = true;
+          provenance.push({ type: "opaque", raw: part });
+        } else {
+          provenance.push(block);
+        }
       }
-      messages.push({ role, content: blocks });
+      messages.push({
+        role,
+        content: visible,
+        ...(hasRequestOnlyProvenance
+          ? { provenanceContent: provenance, provenancePositions }
+          : {}),
+      });
     },
     finish() {
       return messages;
@@ -342,18 +392,31 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
     case "thinking":
       // Re-emit as a Gemini thought part (`text` + `thought: true`) so a
       // reasoning summary round-trips as reasoning — never merged into the
-      // visible answer text.
-      return block.thinking ? [{ text: block.thinking, thought: true }] : [];
+      // visible answer text. The signature is provider integrity metadata and
+      // must travel with the thought part unchanged.
+      return block.thinking
+        ? [
+            {
+              text: block.thinking,
+              thought: true,
+              ...(block.signature !== undefined
+                ? { thoughtSignature: block.signature }
+                : {}),
+            },
+          ]
+        : [];
     case "tool_use":
-      return [
-        {
-          functionCall: {
-            id: block.id,
-            name: block.name,
-            args: block.input ?? {},
-          },
-        },
-      ];
+      return block.raw
+        ? [block.raw]
+        : [
+            {
+              functionCall: {
+                id: block.id,
+                name: block.name,
+                args: block.input ?? {},
+              },
+            },
+          ];
     case "tool_result": {
       const text = blocksToText(block.content);
       let response: unknown;
@@ -406,7 +469,8 @@ export function buildGeminiUpstreamRequest(
   for (const msg of req.messages) {
     const role = msg.role === "assistant" ? "model" : "user";
     const parts: GeminiPart[] = [];
-    for (const block of msg.content) parts.push(...blockToGeminiParts(block));
+    for (const block of msg.provenanceContent ?? msg.content)
+      parts.push(...blockToGeminiParts(block));
     if (parts.length > 0) contents.push({ role, parts });
   }
 
@@ -552,7 +616,7 @@ export function parseGeminiResponseJSON(
   const blocks: GatewayContentBlock[] = [];
   let hasToolCall = false;
   for (const p of parts) {
-    const block = partToBlock(p);
+    const block = geminiPartToBlock(p);
     if (!block) continue;
     if (block.type === "tool_use") {
       hasToolCall = true;
