@@ -408,6 +408,36 @@ describe("resolveToolResults", () => {
     expect(estimateMessages(messages)).toBeGreaterThan(1_000);
   });
 
+  test("excludes native thinking from Lore while retaining hidden accounting", () => {
+    const messages = gatewayMessagesToLore(
+      [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "visible answer" }],
+          provenanceContent: [
+            {
+              type: "opaque",
+              raw: {
+                text: "x".repeat(16_000),
+                thought: true,
+                thoughtSignature: "signed",
+              },
+            },
+            { type: "text", text: "visible answer" },
+          ],
+          provenancePositions: [1],
+        },
+      ],
+      "sess-provider-thinking",
+    );
+
+    expect(messages[0]?.parts).toHaveLength(1);
+    expect(messages[0]?.parts.some((part) => part.type === "reasoning")).toBe(
+      false,
+    );
+    expect(messages[0]?.hiddenInputTokens).toBeGreaterThan(1_000);
+  });
+
   test("preserves distinct Gemini call id and name through Lore and egress", () => {
     const parsed = parseGeminiRequest(
       {
