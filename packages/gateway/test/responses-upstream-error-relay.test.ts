@@ -186,6 +186,7 @@ describe("Responses upstream error relay", () => {
     const sessionID = "responses-synthetic-boundary";
     const config = localConfig();
     config.remoteGateway = true;
+    config.callerUpstreamAllowlist = ["https://api.openai.com"];
     let calls = 0;
     setUpstreamInterceptor(async () => {
       calls++;
