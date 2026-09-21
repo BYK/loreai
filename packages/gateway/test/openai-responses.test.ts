@@ -34,6 +34,7 @@ import {
   resolveToolResults,
 } from "../src/temporal-adapter";
 import { RECALL_GATEWAY_TOOL } from "../src/recall";
+import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
 import type {
   GatewayResponse,
   GatewayContentBlock,
@@ -1493,6 +1494,35 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(text).toContain("event: response.function_call_arguments.delta");
     expect(text).toContain('"delta":"{\\\"query\\\":\\\"cats\\\"}"');
     expect(text).toContain("event: response.function_call_arguments.done");
+  });
+
+  test("streaming: emits a valid lifecycle for apply_patch_call", async () => {
+    const rawApplyPatchCall = {
+      type: "apply_patch_call",
+      id: "patch_1",
+      status: "completed",
+      call_id: "call_patch_1",
+    };
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, rawOutputItems: [rawApplyPatchCall] },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain(
+      '"type":"apply_patch_call","id":"patch_1","status":"in_progress"',
+    );
+    await expect(
+      accumulateResponsesSSEStream(
+        new Response(text, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+        {
+          validation: "public",
+          stopAtTerminal: true,
+        },
+      ),
+    ).resolves.toMatchObject({ rawOutputItems: [rawApplyPatchCall] });
   });
 
   test("non-streaming: max_tokens maps to incomplete status", async () => {
