@@ -44,7 +44,9 @@ afterEach(async () => {
   await resetPipelineState();
 });
 
-function requestWithMessages(messages: GatewayRequest["messages"]): GatewayRequest {
+function requestWithMessages(
+  messages: GatewayRequest["messages"],
+): GatewayRequest {
   return { ...request(), stream: false, messages };
 }
 
@@ -56,7 +58,8 @@ function activeSessionID(headerSessionID: string): string {
   const state = [...getActiveSessions().values()].find(
     (candidate) => candidate.headerSessionId === headerSessionID,
   );
-  if (!state) throw new Error(`active session not found for ${headerSessionID}`);
+  if (!state)
+    throw new Error(`active session not found for ${headerSessionID}`);
   return state.sessionID;
 }
 
@@ -116,15 +119,21 @@ describe("Responses upstream error relay", () => {
     await accepted.text();
 
     const internalSessionID = activeSessionID(sessionID);
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
     setForceMinLayer(1, internalSessionID);
     const transition = requestWithMessages(messages);
     transition.rawHeaders["x-lore-session-id"] = sessionID;
     const failed = await handleRequest(transition, localConfig());
     expect(failed.status).toBe(502);
     await failed.text();
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
 
     setForceMinLayer(1, internalSessionID);
     const retry = requestWithMessages(messages);
@@ -135,8 +144,12 @@ describe("Responses upstream error relay", () => {
 
     expect(JSON.stringify(bodies[1])).not.toContain("encrypted_retry_test");
     expect(JSON.stringify(bodies[2])).not.toContain("encrypted_retry_test");
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(1);
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(1);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(1);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(1);
   });
 
   it("does not advance the accepted layer on a transport error", async () => {
@@ -157,7 +170,9 @@ describe("Responses upstream error relay", () => {
     await accepted.text();
 
     const internalSessionID = activeSessionID(sessionID);
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
     setForceMinLayer(1, internalSessionID);
 
     const failed = requestWithMessages([
@@ -167,8 +182,12 @@ describe("Responses upstream error relay", () => {
     const response = await handleRequest(failed, localConfig());
     expect(response.status).toBe(502);
     expect(await response.text()).toContain("Gateway request failed");
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
   });
 
   it("returns a gateway failure before committing a stream on transport errors", async () => {
@@ -203,7 +222,9 @@ describe("Responses upstream error relay", () => {
     await accepted.text();
 
     const internalSessionID = activeSessionID(sessionID);
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
     setForceMinLayer(1, internalSessionID);
 
     const synthetic = requestWithTools([
@@ -216,8 +237,12 @@ describe("Responses upstream error relay", () => {
     await response.text();
 
     expect(calls).toBe(1);
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
   });
 
   it("does not replay provenance across a restart before an accepted layer transition", async () => {
@@ -255,7 +280,9 @@ describe("Responses upstream error relay", () => {
     await accepted.text();
 
     const internalSessionID = activeSessionID(sessionID);
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(0);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(0);
 
     await resetPipelineState();
     setUpstreamInterceptor(async (body) => {
@@ -271,8 +298,12 @@ describe("Responses upstream error relay", () => {
     await response.text();
 
     expect(JSON.stringify(bodies[1])).not.toContain("encrypted_restart_test");
-    expect(loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(1);
-    expect(getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer).toBe(1);
+    expect(
+      loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(1);
+    expect(
+      getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+    ).toBe(1);
   });
 
   it("preserves a rate-limit response status and retry delay before streaming", async () => {
