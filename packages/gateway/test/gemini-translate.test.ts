@@ -61,9 +61,7 @@ describe("parseGeminiRequest", () => {
         contents: [
           {
             role: "model",
-            parts: [
-              { functionCall: { name: "get_weather", args: { city: "SF" } } },
-            ],
+            parts: [{ functionCall: { name: "get_weather", args: { city: "SF" } } }],
           },
           {
             role: "user",
@@ -92,9 +90,7 @@ describe("parseGeminiRequest", () => {
     expect(tr.type).toBe("tool_result");
     if (tr.type === "tool_result") {
       expect(tr.toolUseId).toBe("get_weather");
-      expect(tr.content).toEqual([
-        { type: "text", text: JSON.stringify({ temp: 72 }) },
-      ]);
+      expect(tr.content).toEqual([{ type: "text", text: JSON.stringify({ temp: 72 }) }]);
     }
   });
 
@@ -163,11 +159,7 @@ describe("parseGeminiRequest", () => {
 describe("buildGeminiUpstreamUrl", () => {
   test("non-stream → :generateContent", () => {
     expect(
-      buildGeminiUpstreamUrl(
-        "https://generativelanguage.googleapis.com",
-        "gemini-2.5-pro",
-        false,
-      ),
+      buildGeminiUpstreamUrl("https://generativelanguage.googleapis.com", "gemini-2.5-pro", false),
     ).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
     );
@@ -175,11 +167,7 @@ describe("buildGeminiUpstreamUrl", () => {
 
   test("stream → :streamGenerateContent?alt=sse", () => {
     expect(
-      buildGeminiUpstreamUrl(
-        "https://generativelanguage.googleapis.com",
-        "gemini-2.5-flash",
-        true,
-      ),
+      buildGeminiUpstreamUrl("https://generativelanguage.googleapis.com", "gemini-2.5-flash", true),
     ).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
     );
@@ -244,9 +232,7 @@ describe("buildGeminiUpstreamRequest", () => {
     ]);
     expect(b.tools).toEqual([
       {
-        functionDeclarations: [
-          { name: "f", description: "d", parameters: { type: "object" } },
-        ],
+        functionDeclarations: [{ name: "f", description: "d", parameters: { type: "object" } }],
       },
     ]);
     expect(b.generationConfig).toEqual({ maxOutputTokens: 555 });
@@ -261,10 +247,7 @@ describe("buildGeminiUpstreamRequest", () => {
   });
 
   test("omits systemInstruction when there is no system prompt", () => {
-    const { body } = buildGeminiUpstreamRequest(
-      { ...base, system: "" },
-      "https://x",
-    );
+    const { body } = buildGeminiUpstreamRequest({ ...base, system: "" }, "https://x");
     expect((body as Record<string, unknown>).systemInstruction).toBeUndefined();
   });
 });
@@ -314,16 +297,12 @@ describe("parseGeminiResponseJSON", () => {
       candidates: [
         {
           content: {
-            parts: [
-              { functionCall: { id: "shared", name: "lookup", args: {} } },
-            ],
+            parts: [{ functionCall: { id: "shared", name: "lookup", args: {} } }],
           },
         },
         {
           content: {
-            parts: [
-              { functionCall: { id: "shared", name: "lookup", args: {} } },
-            ],
+            parts: [{ functionCall: { id: "shared", name: "lookup", args: {} } }],
           },
         },
       ],
@@ -350,10 +329,7 @@ describe("parseGeminiResponseJSON", () => {
   ])("rejects malformed non-projected Gemini candidate %#", (candidate) => {
     expect(() =>
       parseGeminiResponseJSON({
-        candidates: [
-          { content: { parts: [{ text: "projected" }] } },
-          candidate,
-        ],
+        candidates: [{ content: { parts: [{ text: "projected" }] } }, candidate],
       }),
     ).toThrow("malformed Gemini response tool identity");
   });
@@ -395,17 +371,13 @@ describe("parseGeminiResponseJSON", () => {
         },
       ],
     });
-    expect(resp.content).toEqual([
-      { type: "tool_use", id: "f", name: "f", input: { x: 1 } },
-    ]);
+    expect(resp.content).toEqual([{ type: "tool_use", id: "f", name: "f", input: { x: 1 } }]);
     expect(resp.stopReason).toBe("tool_use");
   });
 
   test("MAX_TOKENS finishReason → max_tokens", () => {
     const resp = parseGeminiResponseJSON({
-      candidates: [
-        { content: { parts: [{ text: "x" }] }, finishReason: "MAX_TOKENS" },
-      ],
+      candidates: [{ content: { parts: [{ text: "x" }] }, finishReason: "MAX_TOKENS" }],
     });
     expect(resp.stopReason).toBe("max_tokens");
   });
@@ -423,10 +395,7 @@ describe("parseGeminiResponseJSON", () => {
         {
           content: {
             role: "model",
-            parts: [
-              { text: "secret reasoning", thought: true },
-              { text: "visible answer" },
-            ],
+            parts: [{ text: "secret reasoning", thought: true }, { text: "visible answer" }],
           },
           finishReason: "STOP",
         },
@@ -483,9 +452,7 @@ test("Gemini request round-trip preserves distinct function ID and name", () => 
       contents: [
         {
           role: "model",
-          parts: [
-            { functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } },
-          ],
+          parts: [{ functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } }],
         },
         {
           role: "user",
@@ -505,14 +472,13 @@ test("Gemini request round-trip preserves distinct function ID and name", () => 
     "gemini-test",
     false,
   );
-  const rebuilt = buildGeminiUpstreamRequest(parsed, "https://example.test")
-    .body as { contents: Array<{ parts: unknown[] }> };
+  const rebuilt = buildGeminiUpstreamRequest(parsed, "https://example.test").body as {
+    contents: Array<{ parts: unknown[] }>;
+  };
   expect(rebuilt.contents).toEqual([
     {
       role: "model",
-      parts: [
-        { functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } },
-      ],
+      parts: [{ functionCall: { id: "call-1", name: "lookup", args: { q: 1 } } }],
     },
     {
       role: "user",
@@ -554,11 +520,7 @@ describe("Gemini thinking provenance", () => {
           { role: "user", parts: [{ text: "look up x" }] },
           {
             role: "model",
-            parts: [
-              thought,
-              { text: "visible answer" },
-              signedCall,
-            ],
+            parts: [thought, { text: "visible answer" }, signedCall],
           },
         ],
       },
@@ -586,13 +548,12 @@ describe("Gemini thinking provenance", () => {
       provenancePositions: [1, 2],
     });
 
-    const built = buildGeminiUpstreamRequest(
-      request,
-      "https://generativelanguage.googleapis.com",
-    );
-    const contents = (built.body as {
-      contents: Array<{ parts: unknown[] }>;
-    }).contents;
+    const built = buildGeminiUpstreamRequest(request, "https://generativelanguage.googleapis.com");
+    const contents = (
+      built.body as {
+        contents: Array<{ parts: unknown[] }>;
+      }
+    ).contents;
     expect(contents[1]?.parts).toEqual([thought, { text: "visible answer" }, signedCall]);
   });
 
@@ -637,9 +598,11 @@ describe("Gemini thinking provenance", () => {
       raw: signedCall,
     });
     expect(
-      (buildGeminiResponseBody(response).candidates as Array<{
-        content: { parts: unknown[] };
-      }>)[0]?.content.parts,
+      (
+        buildGeminiResponseBody(response).candidates as Array<{
+          content: { parts: unknown[] };
+        }>
+      )[0]?.content.parts,
     ).toEqual([thought, signedCall]);
   });
 });
@@ -658,10 +621,7 @@ describe("buildGeminiResponseBody — thinking + block reason", () => {
     });
     const cand = (b.candidates as Array<Record<string, unknown>>)[0];
     const parts = (cand.content as { parts: unknown[] }).parts;
-    expect(parts).toEqual([
-      { text: "reasoning", thought: true },
-      { text: "answer" },
-    ]);
+    expect(parts).toEqual([{ text: "reasoning", thought: true }, { text: "answer" }]);
   });
 
   test("preserved block reason echoes verbatim on egress finishReason", () => {
@@ -699,10 +659,7 @@ describe("buildGeminiResponse", () => {
       {
         content: {
           role: "model",
-          parts: [
-            { text: "hello" },
-            { functionCall: { id: "f", name: "f", args: { a: 1 } } },
-          ],
+          parts: [{ text: "hello" }, { functionCall: { id: "f", name: "f", args: { a: 1 } } }],
         },
         finishReason: "STOP",
         index: 0,
@@ -744,10 +701,7 @@ describe("buildGeminiResponse", () => {
       cachedContentTokenCount: 90,
     });
     expect(() =>
-      validateGeminiUsageMetadata(
-        body.usageMetadata,
-        "invalid translated usage",
-      ),
+      validateGeminiUsageMetadata(body.usageMetadata, "invalid translated usage"),
     ).not.toThrow();
   });
 });
@@ -763,9 +717,7 @@ describe("Gemini round-trip", () => {
       contents: [{ role: "user", parts: [{ text: "hi" }] }],
       tools: [
         {
-          functionDeclarations: [
-            { name: "f", description: "d", parameters: { type: "object" } },
-          ],
+          functionDeclarations: [{ name: "f", description: "d", parameters: { type: "object" } }],
         },
       ],
       generationConfig: { maxOutputTokens: 100, temperature: 0.2 },
