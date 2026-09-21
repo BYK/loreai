@@ -215,6 +215,10 @@
 <td>Whether to log requests. Default: false. Env: LORE_DEBUG</td>
 </tr>
 <tr>
+<td><code dir="auto">LORE_EXPOSE_PROVIDER_DIAGNOSTICS</code></td>
+<td>Allow fixed provider-frame validation rules in internal error logs. Enabled by default; set LORE_EXPOSE_PROVIDER_DIAGNOSTICS to false or 0 to disable. Never includes provider content.</td>
+</tr>
+<tr>
 <td><code dir="auto">LORE_IDLE_TIMEOUT</code><br><strong>Default:</strong> <code dir="auto">parsePositiveInt(60)</code><br><strong>Parser:</strong> <code dir="auto">parsePositiveInt</code></td>
 <td>Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: <code dir="auto">LORE_IDLE_TIMEOUT</code>.</td>
 </tr>
