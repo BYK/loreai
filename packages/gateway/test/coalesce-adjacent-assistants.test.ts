@@ -10,7 +10,10 @@
  */
 import { describe, test, expect } from "vitest";
 import { coalesceAdjacentAssistants } from "../src/pipeline";
-import { buildAnthropicRequest, parseAnthropicRequest } from "../src/translate/anthropic";
+import {
+  buildAnthropicRequest,
+  parseAnthropicRequest,
+} from "../src/translate/anthropic";
 import type { GatewayMessage } from "../src/translate/types";
 
 const asst = (content: GatewayMessage["content"]): GatewayMessage => ({
