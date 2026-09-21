@@ -18,6 +18,7 @@ function waitForFile(path: string): Promise<void> {
       resolve();
     };
     watcher.on("change", resolveIfPresent);
+    watcher.on("rename", resolveIfPresent);
     watcher.once("error", (error) => {
       clearTimeout(timeout);
       watcher.close();

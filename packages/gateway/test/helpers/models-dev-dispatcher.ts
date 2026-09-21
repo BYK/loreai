@@ -48,11 +48,19 @@ export const CANNED_MODELS_DEV = Object.freeze({
 
 let requestCount = 0;
 let dispatcher: Dispatcher | undefined;
+let mockAgent: InstanceType<(typeof import("undici"))["MockAgent"]> | undefined;
+let previousDispatcher: Dispatcher | null = null;
+let installationCount = 0;
 
 export async function installOfflineModelsDevDispatcher(): Promise<void> {
-  if (!dispatcher) {
+  if (dispatcher) {
+    installationCount++;
+    return;
+  }
+
+  {
     const { MockAgent } = await import("undici");
-    const mockAgent = new MockAgent();
+    mockAgent = new MockAgent();
     mockAgent.disableNetConnect();
     mockAgent
       .get("https://models.dev")
@@ -67,9 +75,31 @@ export async function installOfflineModelsDevDispatcher(): Promise<void> {
       })
       .persist();
     dispatcher = mockAgent;
+    const { setUpstreamDispatcherForTest } = await import("../../src/fetch");
+    previousDispatcher = setUpstreamDispatcherForTest(dispatcher);
+    installationCount = 1;
   }
-  const { setUpstreamDispatcherForTest } = await import("../../src/fetch");
-  setUpstreamDispatcherForTest(dispatcher);
+}
+
+export async function uninstallOfflineModelsDevDispatcher(): Promise<void> {
+  if (installationCount > 1) {
+    installationCount--;
+    return;
+  }
+  installationCount = 0;
+  const activeDispatcher = dispatcher;
+  const activeMockAgent = mockAgent;
+  const restoreDispatcher = previousDispatcher;
+  dispatcher = undefined;
+  mockAgent = undefined;
+  previousDispatcher = null;
+
+  if (activeDispatcher) {
+    const { restoreUpstreamDispatcherForTest } =
+      await import("../../src/fetch");
+    restoreUpstreamDispatcherForTest(activeDispatcher, restoreDispatcher);
+  }
+  await activeMockAgent?.close();
 }
 
 export function offlineModelsDevResponse(

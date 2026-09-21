@@ -12,12 +12,11 @@
  *   bun packages/core/eval/run.ts --output results/eval-2025-05-16.jsonl
  */
 import { existsSync, readFileSync } from "node:fs";
-import { lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { EvalConfig, EvalResult, Dimension, BaselineMode } from "./types";
 import { ALL_DIMENSIONS } from "./types";
+import { withOwnedDatabaseRoot } from "./owned-root";
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -170,50 +169,6 @@ if (config.inflateTokens)
 console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");
-
-async function withOwnedDatabaseRoot(run: () => Promise<void>): Promise<void> {
-  const runRoot = await mkdtemp(join(tmpdir(), "lore-eval-run-"));
-  const createdRoot = await lstat(runRoot, { bigint: true });
-  const rootIdentity = Object.freeze({
-    dev: createdRoot.dev,
-    ino: createdRoot.ino,
-  });
-  const databaseRoot = join(runRoot, "database");
-  await mkdir(databaseRoot);
-  const previousEnvironment = Object.freeze({
-    LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
-    LORE_DB_PATH: process.env.LORE_DB_PATH,
-    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-  });
-  process.env.LORE_TEST_DB_ROOT = databaseRoot;
-  process.env.LORE_DB_PATH = join(databaseRoot, "test.db");
-  process.env.XDG_DATA_HOME = join(databaseRoot, "xdg");
-
-  try {
-    await run();
-  } finally {
-    for (const [key, value] of Object.entries(previousEnvironment)) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-    const currentRoot = await lstat(runRoot, { bigint: true }).catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return undefined;
-        throw error;
-      },
-    );
-    if (
-      currentRoot?.isDirectory() &&
-      currentRoot.dev === rootIdentity.dev &&
-      currentRoot.ino === rootIdentity.ino
-    ) {
-      await rm(runRoot, { recursive: true });
-    }
-  }
-}
 
 await withOwnedDatabaseRoot(async () => {
   const { printSummary, runEval } = await import("./harness");

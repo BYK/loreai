@@ -6,7 +6,7 @@ test("exits after handing an inherited pipe to a descendant", () => {
   const descendant = spawn(
     process.execPath,
     ["-e", "setInterval(() => {}, 1_000)"],
-    { stdio: "inherit" },
+    { detached: true, stdio: "ignore" },
   );
   if (!descendant.pid) throw new Error("descendant PID is unavailable");
   descendant.unref();

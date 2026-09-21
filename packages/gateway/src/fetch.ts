@@ -87,8 +87,20 @@ const NODE_HTTP_BODY_QUEUE_BYTES = 64 * 1024;
 /** Inject (or clear, with `null`) the upstream dispatcher. Tests only. */
 export function setUpstreamDispatcherForTest(
   dispatcher: Dispatcher | null,
-): void {
+): Dispatcher | null {
+  const previous = dispatcherOverride;
   dispatcherOverride = dispatcher;
+  return previous;
+}
+
+/** Restore a dispatcher only while the expected test owner is still active. */
+export function restoreUpstreamDispatcherForTest(
+  expected: Dispatcher,
+  replacement: Dispatcher | null,
+): boolean {
+  if (dispatcherOverride !== expected) return false;
+  dispatcherOverride = replacement;
+  return true;
 }
 
 /**

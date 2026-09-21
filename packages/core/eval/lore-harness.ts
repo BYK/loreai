@@ -8,9 +8,8 @@
  * distilled context.
  */
 import { createHarness } from "vitest-evals";
-import { join } from "node:path";
 import type { ScenarioDefinition } from "./types";
-import type { GatewayHandle } from "./harness";
+import { startLiveGateway, type GatewayHandle } from "./harness";
 import { QA_SYSTEM } from "./baselines";
 
 // ---------------------------------------------------------------------------
@@ -63,65 +62,7 @@ const STANDARD_TOOLS = [
 // ---------------------------------------------------------------------------
 
 export async function startGateway(): Promise<GatewayHandle> {
-  const { unlinkSync, existsSync } = await import("node:fs");
-
-  const testDatabaseRoot = process.env.LORE_TEST_DB_ROOT;
-  if (!testDatabaseRoot) throw new Error("LORE_TEST_DB_ROOT is not set");
-  const dbPath = join(
-    testDatabaseRoot,
-    `eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
-  );
-  process.env.LORE_DB_PATH = dbPath;
-
-  const port = 20000 + Math.floor(Math.random() * 30000);
-  process.env.LORE_LISTEN_PORT = String(port);
-  process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
-  process.env.LORE_BATCH_DISABLED = "1";
-  if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
-
-  const { startServer } = await import("../../gateway/src/server");
-  const { loadConfig } = await import("../../gateway/src/config");
-  const { close: closeDB } = await import("@loreai/core");
-  const { resetPipelineState } = await import("../../gateway/src/pipeline");
-
-  closeDB();
-  await resetPipelineState();
-
-  const config = loadConfig();
-  const server = await startServer(config);
-  const baseURL = `http://127.0.0.1:${server.port}`;
-
-  console.log(`  Gateway started at ${baseURL} (db: ${dbPath})`);
-
-  return {
-    baseURL,
-    isReal: true,
-    async chat(requestBody, headers) {
-      return fetch(`${baseURL}/v1/messages`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": process.env.ANTHROPIC_API_KEY ?? "eval-key",
-          "anthropic-version": "2023-06-01",
-          ...headers,
-        },
-        body: JSON.stringify(requestBody),
-      });
-    },
-    async teardown() {
-      await server.stop();
-      closeDB();
-      await resetPipelineState();
-      for (const suffix of ["", "-shm", "-wal"]) {
-        const file = `${dbPath}${suffix}`;
-        try {
-          if (existsSync(file)) unlinkSync(file);
-        } catch {
-          /* best-effort */
-        }
-      }
-    },
-  };
+  return startLiveGateway();
 }
 
 // ---------------------------------------------------------------------------

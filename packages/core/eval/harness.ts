@@ -12,7 +12,7 @@
  *   - fixture: deterministic replay via UpstreamInterceptor, no real API calls
  *   - live: real API calls through the gateway, LLM-as-judge scoring
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -43,6 +43,10 @@ import { judge } from "./judge";
 import { scoreRetrieval } from "./recall-score";
 import type { EvalLLMClient } from "./llm-backend";
 import { createEvalLLMClient, resolveBackend } from "./llm-backend";
+import {
+  createOwnedRoot,
+  removeOwnedPathSync,
+} from "../test/helpers/owned-path";
 
 // ---------------------------------------------------------------------------
 // Gateway connection
@@ -61,6 +65,20 @@ export interface GatewayHandle {
   isReal?: boolean;
 }
 
+type LiveStartServer = typeof import("../../gateway/src/server").startServer;
+
+interface LiveServer {
+  port: number;
+  stop(): Promise<void>;
+}
+
+export interface LiveGatewayDependencies {
+  startServer?: (config: unknown) => Promise<LiveServer>;
+  loadConfig?: () => unknown;
+  closeDB?: () => void;
+  resetPipelineState?: () => Promise<void>;
+}
+
 /**
  * Connect to a running gateway or start an isolated one.
  *
@@ -73,10 +91,26 @@ export async function connectGateway(
   config: EvalConfig,
 ): Promise<GatewayHandle> {
   if (config.mode === "fixture") {
-    const { installOfflineModelsDevDispatcher } =
-      await import("../../gateway/test/helpers/models-dev-dispatcher");
+    const {
+      installOfflineModelsDevDispatcher,
+      uninstallOfflineModelsDevDispatcher,
+    } = await import("../../gateway/test/helpers/models-dev-dispatcher");
     await installOfflineModelsDevDispatcher();
-    return startFixtureGateway();
+    try {
+      const gateway = await startFixtureGateway();
+      const teardown = gateway.teardown;
+      gateway.teardown = async () => {
+        try {
+          await teardown?.();
+        } finally {
+          await uninstallOfflineModelsDevDispatcher();
+        }
+      };
+      return gateway;
+    } catch (error) {
+      await uninstallOfflineModelsDevDispatcher();
+      throw error;
+    }
   }
 
   // Live mode with explicit gateway: connect to it
@@ -186,49 +220,135 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
  * Uses the same harness infrastructure but does NOT wire in a replay
  * interceptor, so requests go to the real upstream (Anthropic, OpenAI, etc).
  */
-async function startLiveGateway(): Promise<GatewayHandle> {
-  const { unlinkSync, existsSync } = await import("node:fs");
-
-  // Create an isolated temp DB
-  const testDatabaseRoot = process.env.LORE_TEST_DB_ROOT;
-  if (!testDatabaseRoot) throw new Error("LORE_TEST_DB_ROOT is not set");
-  const dbPath = join(
-    testDatabaseRoot,
-    `eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
-  );
+export async function startLiveGateway(
+  dependencies: LiveGatewayDependencies = {},
+): Promise<GatewayHandle> {
+  const previousEnvironment = {
+    LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
+    LORE_DB_PATH: process.env.LORE_DB_PATH,
+    LORE_LISTEN_PORT: process.env.LORE_LISTEN_PORT,
+    LORE_IDLE_TIMEOUT: process.env.LORE_IDLE_TIMEOUT,
+    LORE_BATCH_DISABLED: process.env.LORE_BATCH_DISABLED,
+    LORE_DEBUG: process.env.LORE_DEBUG,
+  };
+  const configuredRoot = previousEnvironment.LORE_TEST_DB_ROOT;
+  if (configuredRoot) mkdirSync(configuredRoot, { recursive: true });
+  const configuredRootIdentity = configuredRoot
+    ? lstatSync(configuredRoot, { bigint: true })
+    : undefined;
+  const ownedRoot = await createOwnedRoot({
+    prefix: "lore-eval-live-",
+    parent: configuredRoot,
+  });
+  if (configuredRoot && configuredRootIdentity) {
+    ownedRoot.parent = {
+      path: configuredRoot,
+      identity: {
+        dev: configuredRootIdentity.dev,
+        ino: configuredRootIdentity.ino,
+      },
+      cleaned: false,
+    };
+  }
+  const dbPath = join(ownedRoot.path, "test.db");
+  process.env.LORE_TEST_DB_ROOT = ownedRoot.path;
   process.env.LORE_DB_PATH = dbPath;
-
-  // Random port
-  const port = 20000 + Math.floor(Math.random() * 30000);
-  process.env.LORE_LISTEN_PORT = String(port);
-
-  // Short idle timeout so curation/distillation fires quickly after replay.
+  process.env.LORE_LISTEN_PORT = "0";
   process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
-  // Disable batch queue — eval needs synchronous LLM calls for /lore:curate.
   process.env.LORE_BATCH_DISABLED = "1";
+  if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
 
-  if (!process.env.LORE_DEBUG) {
-    process.env.LORE_DEBUG = "false";
+  let server: LiveServer | undefined;
+  let closeDB: (() => void) | undefined;
+  let resetPipelineState: (() => Promise<void>) | undefined;
+  let teardownPromise: Promise<void> | undefined;
+
+  const restoreEnvironment = (): void => {
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  const teardown = async (): Promise<void> => {
+    const failures: unknown[] = [];
+    try {
+      await server?.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      closeDB?.();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await resetPipelineState?.();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      removeOwnedPathSync(ownedRoot);
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      restoreEnvironment();
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "live eval gateway teardown failed");
+    }
+  };
+  const runTeardown = (): Promise<void> => {
+    if (!teardownPromise) {
+      teardownPromise = teardown().catch((error) => {
+        teardownPromise = undefined;
+        throw error;
+      });
+    }
+    return teardownPromise;
+  };
+
+  try {
+    const importedServer = dependencies.startServer
+      ? undefined
+      : await import("../../gateway/src/server");
+    const importedConfig = dependencies.loadConfig
+      ? undefined
+      : await import("../../gateway/src/config");
+    const importedCore = dependencies.closeDB
+      ? undefined
+      : await import("@loreai/core");
+    const importedPipeline = dependencies.resetPipelineState
+      ? undefined
+      : await import("../../gateway/src/pipeline");
+    const startServer =
+      dependencies.startServer ??
+      ((config: unknown) =>
+        importedServer!.startServer(config as Parameters<LiveStartServer>[0]));
+    const loadConfig = dependencies.loadConfig ?? importedConfig!.loadConfig;
+    closeDB = dependencies.closeDB ?? importedCore!.close;
+    resetPipelineState =
+      dependencies.resetPipelineState ?? importedPipeline!.resetPipelineState;
+
+    closeDB();
+    await resetPipelineState();
+    server = await startServer(loadConfig());
+  } catch (error) {
+    try {
+      await teardown();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "live eval gateway startup and cleanup failed",
+      );
+    }
+    throw error;
   }
 
-  // Dynamic imports so env vars take effect
-  const { startServer } = await import("../../gateway/src/server");
-  const { loadConfig } = await import("../../gateway/src/config");
-  const { close: closeDB } = await import("@loreai/core");
-  const { resetPipelineState } = await import("../../gateway/src/pipeline");
-
-  closeDB();
-  await resetPipelineState();
-
-  // NO replay interceptor — requests go to real upstream
-  const config = loadConfig();
-  const server = await startServer(config);
   const baseURL = `http://127.0.0.1:${server.port}`;
-
   console.log(`  Live gateway started at ${baseURL} (db: ${dbPath})`);
-
   return {
     baseURL,
+    isReal: true,
     async chat(requestBody, headers) {
       return fetch(`${baseURL}/v1/messages`, {
         method: "POST",
@@ -241,20 +361,7 @@ async function startLiveGateway(): Promise<GatewayHandle> {
         body: JSON.stringify(requestBody),
       });
     },
-    async teardown() {
-      await server.stop();
-      closeDB();
-      await resetPipelineState();
-      // Clean up DB files
-      for (const suffix of ["", "-shm", "-wal"]) {
-        const file = `${dbPath}${suffix}`;
-        try {
-          if (existsSync(file)) unlinkSync(file);
-        } catch {
-          // best-effort
-        }
-      }
-    },
+    teardown: runTeardown,
   };
 }
 

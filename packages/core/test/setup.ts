@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, rmSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, inject, vi } from "vitest";
 import { close, invalidateProjectIdCache } from "../src/db";
 import { silenceStderr } from "../src/log";
+import { removeOwnedPath, type OwnedPath } from "./helpers/owned-path";
 
 vi.mock("../../gateway/src/fetch", async (importOriginal) => {
   const original =
@@ -23,19 +24,40 @@ vi.mock("../../gateway/src/fetch", async (importOriginal) => {
 });
 
 // Reserve a unique path beneath the run-owned root without creating its
-// directory. A wholly skipped file therefore leaves no per-file residue.
+// directory. A wholly skipped file therefore leaves no per-file root.
 const runRoot = inject("loreTestRoot");
-const createdRunRoot = lstatSync(runRoot, { bigint: true });
-const runRootIdentity = Object.freeze({
-  dev: createdRunRoot.dev,
-  ino: createdRunRoot.ino,
-});
+const runRootStats = lstatSync(runRoot, { bigint: true });
+const runRootOwner: OwnedPath = {
+  path: runRoot,
+  identity: { dev: runRootStats.dev, ino: runRootStats.ino },
+  markerName: ".lore-owned-root",
+  markerValue: readFileSync(join(runRoot, ".lore-owned-root"), "utf8"),
+  cleaned: false,
+};
 const tmp = join(runRoot, randomUUID());
 const testDatabasePath = join(tmp, "test.db");
 const testDataHome = join(tmp, "xdg");
 process.env.LORE_TEST_DB_ROOT = tmp;
 process.env.LORE_DB_PATH = testDatabasePath;
 process.env.XDG_DATA_HOME = testDataHome;
+let ownedFileRoot: OwnedPath | undefined;
+let testStarted = false;
+
+function captureFileRoot(): void {
+  if (ownedFileRoot) return;
+  try {
+    const current = lstatSync(tmp, { bigint: true });
+    if (!current.isDirectory()) return;
+    ownedFileRoot = {
+      path: tmp,
+      identity: { dev: current.dev, ino: current.ino },
+      parent: runRootOwner,
+      cleaned: false,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
 
 // The Pi/OpenCode plugins flip `log.silenceStderr()` when they activate inside
 // their TUI host. A force-active plugin test (LORE_*_FORCE_ACTIVE=1) would
@@ -45,6 +67,7 @@ process.env.XDG_DATA_HOME = testDataHome;
 // file-local teardown that runs after this setup hook under list ordering; the
 // exit reset protects the ordinary stack-ordered path.
 const resetIsolationState = () => {
+  testStarted = true;
   process.env.NODE_ENV = "test";
   process.env.LORE_TEST_DB_ROOT = tmp;
   process.env.LORE_DB_PATH = testDatabasePath;
@@ -57,22 +80,27 @@ const resetIsolationState = () => {
   invalidateProjectIdCache();
 };
 beforeEach(resetIsolationState);
-afterEach(resetIsolationState);
+afterEach(() => {
+  captureFileRoot();
+  resetIsolationState();
+});
 
-afterAll(() => {
-  close();
+afterAll(async () => {
+  const failures: unknown[] = [];
   try {
-    const currentRunRoot = lstatSync(runRoot, { bigint: true });
-    if (
-      !currentRunRoot.isDirectory() ||
-      currentRunRoot.dev !== runRootIdentity.dev ||
-      currentRunRoot.ino !== runRootIdentity.ino
-    ) {
-      return;
-    }
+    close();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
+    failures.push(error);
   }
-  rmSync(tmp, { recursive: true, force: true });
+  if (ownedFileRoot === undefined && !testStarted) captureFileRoot();
+  if (ownedFileRoot !== undefined) {
+    try {
+      await removeOwnedPath(ownedFileRoot);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "test database cleanup failed");
+  }
 });

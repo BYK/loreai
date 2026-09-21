@@ -349,6 +349,25 @@ async function killFixtureTree(
   }
 
   if (process.platform !== "win32") {
+    const descendantKillResults = await Promise.allSettled(
+      [...knownDescendants].map(async (pid) => {
+        if (!processExists(pid)) return;
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }),
+    );
+    const descendantKillFailures = descendantKillResults.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (descendantKillFailures.length > 0) {
+      throw new AggregateError(
+        descendantKillFailures,
+        "failed to stop every owned Unix descendant",
+      );
+    }
     await Promise.all([...knownDescendants].map(waitForProcessExit));
   }
 }
@@ -495,6 +514,7 @@ function waitForFile(path: string): Promise<void> {
       resolveFile();
     };
     watcher.on("change", resolveIfPresent);
+    watcher.on("rename", resolveIfPresent);
     watcher.once("error", (error) => {
       clearTimeout(timeout);
       watcher.close();

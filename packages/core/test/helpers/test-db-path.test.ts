@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { isAbsolute, relative } from "node:path";
 import {
   createTestDatabaseDirectory,
   createTestDatabasePath,
@@ -19,8 +20,12 @@ describe("test database path labels", () => {
   });
 
   test("accepts a plain diagnostic label", () => {
-    expect(createTestDatabasePath("gateway-harness")).toMatch(
-      /gateway-harness-[0-9a-f-]{36}[/\\]test\.db$/,
-    );
+    const path = createTestDatabasePath("gateway-harness");
+    expect(path).toMatch(/gateway-harness-[0-9a-f-]{36}[/\\]test\.db$/);
+    const root = process.env.LORE_TEST_DB_ROOT;
+    if (!root) throw new Error("LORE_TEST_DB_ROOT is not set");
+    const relativePath = relative(root, path);
+    expect(isAbsolute(relativePath)).toBe(false);
+    expect(/^\.\.(?:[/\\]|$)/u.test(relativePath)).toBe(false);
   });
 });

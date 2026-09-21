@@ -15,7 +15,9 @@ interface RootSnapshot {
 async function inspectRoot(
   path: string,
 ): Promise<RootSnapshot["roots"][number]> {
-  const entries = existsSync(path) ? await readdir(path) : [];
+  const entries = existsSync(path)
+    ? (await readdir(path)).filter((entry) => entry !== ".lore-owned-root")
+    : [];
   return { path, entries: entries.sort() };
 }
 

@@ -8,8 +8,10 @@ import { resetPipelineState } from "../src/pipeline";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeConversationFixtures } from "./helpers/fixtures";
 import {
+  installOfflineModelsDevDispatcher,
   offlineModelsDevRequestCount,
   resetOfflineModelsDevRequestCount,
+  uninstallOfflineModelsDevDispatcher,
 } from "./helpers/models-dev-dispatcher";
 
 describe("models.dev test isolation", () => {
@@ -64,6 +66,46 @@ describe("models.dev test isolation", () => {
     } finally {
       setUpstreamDispatcherForTest(null);
       await mock.close();
+    }
+  });
+
+  test("dispatcher teardown does not replace a newer route owner", async () => {
+    await installOfflineModelsDevDispatcher();
+    const replacement = new MockAgent();
+    replacement.disableNetConnect();
+    replacement
+      .get("https://upstream.example")
+      .intercept({ path: "/models", method: "GET" })
+      .reply(200, { data: [{ id: "replacement-model" }] });
+    const { setUpstreamDispatcherForTest } = await import("../src/fetch");
+    setUpstreamDispatcherForTest(replacement);
+
+    try {
+      await uninstallOfflineModelsDevDispatcher();
+      const response = await upstreamFetch("https://upstream.example/models");
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        data: [{ id: "replacement-model" }],
+      });
+    } finally {
+      setUpstreamDispatcherForTest(null);
+      await replacement.close();
+    }
+  });
+
+  test("nested models.dev installations keep the shared owner alive", async () => {
+    await installOfflineModelsDevDispatcher();
+    await installOfflineModelsDevDispatcher();
+
+    try {
+      await uninstallOfflineModelsDevDispatcher();
+      const response = await upstreamFetch("https://models.dev/api.json");
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        anthropic: { models: { "offline-isolation-model": expect.anything() } },
+      });
+    } finally {
+      await uninstallOfflineModelsDevDispatcher();
     }
   });
 

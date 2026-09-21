@@ -1,5 +1,4 @@
 import { describe, test, expect, afterAll } from "vitest";
-import { fileURLToPath } from "node:url";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -16,9 +15,9 @@ import {
   resolveMem0Doc,
 } from "../../src/import/sources/mem0";
 import { MAX_IMPORT_CONTENT_LENGTH } from "../../src/import/schema";
+import { createTestDatabaseDirectory } from "../helpers/test-db-path";
 
-const TMP = join(fileURLToPath(new URL(".", import.meta.url)), "__tmp_mem0__");
-mkdirSync(TMP, { recursive: true });
+const TMP = createTestDatabaseDirectory("mem0");
 afterAll(() => rmSync(TMP, { recursive: true, force: true }));
 
 // Pickle blobs captured from CPython pickle.dumps(..., protocol=4). No Python at
