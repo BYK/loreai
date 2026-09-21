@@ -10,6 +10,7 @@ import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import {
   loreMessagesToGateway,
   removeOrphanedToolResults,
+  shouldPreserveResponsesProvenance,
 } from "../src/pipeline";
 import {
   gatewayMessagesToLore,
@@ -168,6 +169,93 @@ function pendingToolPart(
     state: { status: "pending", input },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Responses encrypted reasoning provenance
+// ---------------------------------------------------------------------------
+
+describe("Responses encrypted reasoning provenance", () => {
+  function renderWithPrefix(allowProvenance: boolean): GatewayMessage[] {
+    const visible: GatewayContentBlock = { type: "text", text: "answer" };
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_stable",
+        encrypted_content: "ciphertext",
+        summary: [],
+      },
+    };
+    const source = [
+      makeUserMsg("u1", [textPart("question")]),
+      makeAssistantMsg("a1", [textPart("answer")]),
+    ];
+    const provenance = new Map([
+      [
+        "a1",
+        {
+          content: [visible],
+          provenanceContent: [reasoning, visible],
+          provenancePositions: [1],
+        },
+      ],
+    ]);
+    const prefix = [
+      makeUserMsg("prefix-user", [textPart("memory")]),
+      makeAssistantMsg("prefix-assistant", [textPart("memory")]),
+    ];
+    return loreMessagesToGateway(
+      [...prefix, ...source],
+      provenance,
+      allowProvenance,
+    );
+  }
+
+  test("keeps encrypted reasoning in place on a stable compressed layer", () => {
+    const rendered = renderWithPrefix(
+      shouldPreserveResponsesProvenance(1, 1),
+    );
+    const answer = rendered.find((message) =>
+      message.content.some(
+        (block) => block.type === "text" && block.text === "answer",
+      ),
+    );
+
+    expect(answer?.provenanceContent).toEqual([
+      {
+        type: "opaque",
+        responsesItem: true,
+        raw: {
+          type: "reasoning",
+          id: "rs_stable",
+          encrypted_content: "ciphertext",
+          summary: [],
+        },
+      },
+      { type: "text", text: "answer" },
+    ]);
+    expect(answer?.provenancePositions).toEqual([1]);
+  });
+
+  test("drops request-only provenance at a layer transition", () => {
+    const rendered = renderWithPrefix(
+      shouldPreserveResponsesProvenance(0, 1),
+    );
+    const answer = rendered.find((message) =>
+      message.content.some(
+        (block) => block.type === "text" && block.text === "answer",
+      ),
+    );
+
+    expect(answer?.provenanceContent).toBeUndefined();
+    expect(answer?.provenancePositions).toBeUndefined();
+  });
+
+  test("never replays provenance from emergency Layer 4", () => {
+    expect(shouldPreserveResponsesProvenance(4, 4)).toBe(false);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // loreMessagesToGateway: tool_result reconstruction
