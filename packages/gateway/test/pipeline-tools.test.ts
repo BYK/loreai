@@ -8,6 +8,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import {
+  canReplayRequestProvenance,
   loreMessagesToGateway,
   removeOrphanedToolResults,
   shouldPreserveResponsesProvenance,
@@ -283,6 +284,20 @@ describe("Responses encrypted reasoning provenance", () => {
 
   test("never replays provenance from emergency Layer 4", () => {
     expect(shouldPreserveResponsesProvenance(4, 4)).toBe(false);
+  });
+
+  test("replays provenance only within the same provider wire family", () => {
+    expect(canReplayRequestProvenance("anthropic", "anthropic")).toBe(true);
+    expect(canReplayRequestProvenance("anthropic", "vertex")).toBe(true);
+    expect(canReplayRequestProvenance("vertex", "anthropic")).toBe(true);
+    expect(canReplayRequestProvenance("gemini", "gemini")).toBe(true);
+    expect(canReplayRequestProvenance("openai-responses", "openai-responses")).toBe(
+      true,
+    );
+    expect(canReplayRequestProvenance("gemini", "anthropic")).toBe(false);
+    expect(canReplayRequestProvenance("openai-responses", "anthropic")).toBe(
+      false,
+    );
   });
 });
 
