@@ -30,6 +30,11 @@ export { isCredentialHeaderName } from "../credential-headers";
 export type GatewayTextBlock = {
   type: "text";
   text: string;
+  /**
+   * Provider-native text part retained for response egress when it carries
+   * opaque metadata such as a Gemini thought signature.
+   */
+  raw?: Record<string, unknown>;
 };
 
 export type GatewayThinkingBlock = {
