@@ -562,6 +562,12 @@ export type SessionState = {
   /** Completion time of the last accepted response, for tool-continuation
    *  retention. A slow response must not consume the client's tool grace. */
   lastResponseTime?: number;
+  /**
+   * Gradient layer of the last request accepted by upstream. Unlike core's
+   * transform-attempt layer, this only advances after a successful upstream
+   * response so failed or synthetic turns cannot consume a provenance boundary.
+   */
+  lastAcceptedProvenanceLayer?: number;
   /** Unix timestamp (ms) of the request before the current one — used by budget
    *  throttle to compute elapsed time since the previous turn for cache TTL safety. */
   prevRequestTime?: number;
