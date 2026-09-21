@@ -261,7 +261,13 @@ export async function accumulateGeminiSSEStream(
           const previous = contentBlocks.at(-1);
           if (previous?.type === "text") {
             previous.text += block.text;
-            if (block.raw !== undefined) previous.raw = block.raw;
+            if (previous.raw !== undefined || block.raw !== undefined) {
+              previous.raw = {
+                ...previous.raw,
+                ...block.raw,
+                text: previous.text,
+              };
+            }
           } else {
             contentBlocks.push(block);
           }
