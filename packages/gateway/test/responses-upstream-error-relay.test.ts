@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GatewayRequest } from "../src/translate/types";
+import { setForceMinLayer } from "@loreai/core";
+import type {
+  GatewayRequest,
+  GatewayResponse,
+} from "../src/translate/types";
 import { loadConfig } from "../src/config";
+import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
 import {
+  getActiveSessions,
   handleRequest,
   resetPipelineState,
   setForegroundErrorBodyTimeoutForTest,
@@ -41,7 +47,91 @@ afterEach(async () => {
   await resetPipelineState();
 });
 
+function requestWithMessages(
+  messages: GatewayRequest["messages"],
+): GatewayRequest {
+  return { ...request(), stream: false, messages };
+}
+
+function successfulResponsesResponse(): Response {
+  const response: GatewayResponse = {
+    id: "resp_retry_test",
+    model: "gpt-5.6-terra",
+    content: [{ type: "text", text: "ok" }],
+    stopReason: "end_turn",
+    usage: { inputTokens: 10, outputTokens: 1 },
+  };
+  return buildOpenAIResponsesResponse(response, false);
+}
+
 describe("Responses upstream error relay", () => {
+  it("does not consume an unsent layer transition's provenance boundary", async () => {
+    const sessionID = "responses-upstream-error-retry";
+    const reasoning = {
+      type: "opaque" as const,
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_retry_test",
+        encrypted_content: "encrypted_retry_test",
+        summary: [],
+      },
+    };
+    const messages: GatewayRequest["messages"] = [
+      { role: "user", content: [{ type: "text", text: "question" }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "answer" }],
+        provenanceContent: [reasoning, { type: "text", text: "answer" }],
+        provenancePositions: [1],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ];
+    let calls = 0;
+    const bodies: unknown[] = [];
+    setUpstreamInterceptor(async (body) => {
+      bodies.push(body);
+      calls++;
+      return calls === 2
+        ? new Response(JSON.stringify({ error: { message: "retry" } }), {
+            status: 502,
+            headers: { "content-type": "application/json" },
+          })
+        : successfulResponsesResponse();
+    });
+
+    const first = requestWithMessages([
+      { role: "user", content: [{ type: "text", text: "start" }] },
+    ]);
+    first.rawHeaders["x-lore-session-id"] = sessionID;
+    const accepted = await handleRequest(first, localConfig());
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+
+    setForceMinLayer(1, sessionID);
+    const transition = requestWithMessages(messages);
+    transition.rawHeaders["x-lore-session-id"] = sessionID;
+    const failed = await handleRequest(transition, localConfig());
+    expect(failed.status).toBe(502);
+    await failed.text();
+    expect(getActiveSessions().get(sessionID)?.lastAcceptedProvenanceLayer).toBe(
+      0,
+    );
+
+    setForceMinLayer(1, sessionID);
+    const retry = requestWithMessages(messages);
+    retry.rawHeaders["x-lore-session-id"] = sessionID;
+    const recovered = await handleRequest(retry, localConfig());
+    expect(recovered.status).toBe(200);
+    await recovered.text();
+
+    expect(JSON.stringify(bodies[1])).not.toContain("encrypted_retry_test");
+    expect(JSON.stringify(bodies[2])).not.toContain("encrypted_retry_test");
+    expect(getActiveSessions().get(sessionID)?.lastAcceptedProvenanceLayer).toBe(
+      1,
+    );
+  });
+
   it("returns a gateway failure before committing a stream on transport errors", async () => {
     setUpstreamInterceptor(async () => {
       throw new TypeError("fetch failed");
