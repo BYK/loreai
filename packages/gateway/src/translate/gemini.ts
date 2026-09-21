@@ -30,10 +30,7 @@ import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
 import { asString } from "@loreai/core";
 import { extractAuth } from "../auth";
 import { safeTokenSum, validateGeminiUsageMetadata } from "../usage-validation";
-import {
-  parseStreamedRequest,
-  type StreamedItemsBuilder,
-} from "./streaming-request";
+import { parseStreamedRequest, type StreamedItemsBuilder } from "./streaming-request";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -61,8 +58,7 @@ export function validateGeminiFunctionCallIdentity(
   if (
     typeof call.name !== "string" ||
     call.name.length === 0 ||
-    (call.id !== undefined &&
-      (typeof call.id !== "string" || call.id.length === 0)) ||
+    (call.id !== undefined && (typeof call.id !== "string" || call.id.length === 0)) ||
     (call.args !== undefined &&
       (!call.args || typeof call.args !== "object" || Array.isArray(call.args)))
   ) {
@@ -81,18 +77,13 @@ export function validateGeminiCandidateToolIdentities(
   for (const candidate of candidates) {
     // Tool identities are local to each independent candidate.
     const identities = new Set<string>();
-    if (
-      !candidate ||
-      typeof candidate !== "object" ||
-      Array.isArray(candidate)
-    ) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       throw new Error(diagnostic);
     }
     const typedCandidate = candidate as Record<string, unknown>;
     if (
       (typedCandidate.index !== undefined &&
-        (!Number.isSafeInteger(typedCandidate.index) ||
-          (typedCandidate.index as number) < 0)) ||
+        (!Number.isSafeInteger(typedCandidate.index) || (typedCandidate.index as number) < 0)) ||
       (typedCandidate.finishReason !== undefined &&
         typedCandidate.finishReason !== null &&
         typeof typedCandidate.finishReason !== "string")
@@ -130,11 +121,7 @@ export function validateGeminiCandidateToolIdentities(
         throw new Error(diagnostic);
       }
       if (functionCall !== undefined) {
-        validateGeminiFunctionCallIdentity(
-          functionCall,
-          identities,
-          diagnostic,
-        );
+        validateGeminiFunctionCallIdentity(functionCall, identities, diagnostic);
       }
     }
   }
@@ -155,19 +142,14 @@ function partsText(container: unknown): string {
 }
 
 /** Return either spelling used by Gemini native/compatibility APIs. */
-export function geminiPartThoughtSignature(
-  part: GeminiPart,
-): string | undefined {
+export function geminiPartThoughtSignature(part: GeminiPart): string | undefined {
   if (typeof part.thoughtSignature === "string") return part.thoughtSignature;
-  if (typeof part.thought_signature === "string")
-    return part.thought_signature;
+  if (typeof part.thought_signature === "string") return part.thought_signature;
   return undefined;
 }
 
 /** Map a single Gemini content part to a gateway content block. */
-export function geminiPartToBlock(
-  part: GeminiPart,
-): GatewayContentBlock | null {
+export function geminiPartToBlock(part: GeminiPart): GatewayContentBlock | null {
   const signature = geminiPartThoughtSignature(part);
   if (typeof part.text === "string") {
     // A `thought: true` part is the model's private reasoning summary
@@ -215,19 +197,14 @@ export function geminiPartToBlock(
   return { type: "opaque", raw: part };
 }
 
-export function createGeminiContentsBuilder(): StreamedItemsBuilder<
-  GatewayMessage[]
-> {
+export function createGeminiContentsBuilder(): StreamedItemsBuilder<GatewayMessage[]> {
   const messages: GatewayMessage[] = [];
   return {
     add(item) {
       const content = item as Record<string, unknown>;
       const geminiRole = asString(content.role, "user");
-      const role: "user" | "assistant" =
-        geminiRole === "model" ? "assistant" : "user";
-      const parts = Array.isArray(content.parts)
-        ? (content.parts as GeminiPart[])
-        : [];
+      const role: "user" | "assistant" = geminiRole === "model" ? "assistant" : "user";
+      const parts = Array.isArray(content.parts) ? (content.parts as GeminiPart[]) : [];
       const visible: GatewayContentBlock[] = [];
       const provenance: GatewayContentBlock[] = [];
       const provenancePositions: number[] = [];
@@ -236,8 +213,7 @@ export function createGeminiContentsBuilder(): StreamedItemsBuilder<
         // Gemini thought summaries are request-only provenance. Native thought
         // signatures on otherwise-visible parts are also retained verbatim so
         // stable-layer replay can satisfy the provider's integrity check.
-        const thoughtOnly =
-          part.thought === true && typeof part.text === "string";
+        const thoughtOnly = part.thought === true && typeof part.text === "string";
         const block = geminiPartToBlock(part);
         if (!block) continue;
         if (thoughtOnly) {
@@ -258,9 +234,7 @@ export function createGeminiContentsBuilder(): StreamedItemsBuilder<
       messages.push({
         role,
         content: visible,
-        ...(hasRequestOnlyProvenance
-          ? { provenanceContent: provenance, provenancePositions }
-          : {}),
+        ...(hasRequestOnlyProvenance ? { provenanceContent: provenance, provenancePositions } : {}),
       });
     },
     finish() {
@@ -372,11 +346,7 @@ export function parseGeminiRequestChunks(
 // ---------------------------------------------------------------------------
 
 /** Build the Gemini `:generateContent` / `:streamGenerateContent` URL. */
-export function buildGeminiUpstreamUrl(
-  base: string,
-  model: string,
-  stream: boolean,
-): string {
+export function buildGeminiUpstreamUrl(base: string, model: string, stream: boolean): string {
   const verb = stream ? "streamGenerateContent" : "generateContent";
   const encodedModel = encodeURIComponent(model);
   const url = `${base}/${GEMINI_API_VERSION}/models/${encodedModel}:${verb}`;
@@ -387,11 +357,7 @@ export function buildGeminiUpstreamUrl(
 function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
   switch (block.type) {
     case "text":
-      return block.raw
-        ? [block.raw]
-        : block.text
-          ? [{ text: block.text }]
-          : [];
+      return block.raw ? [block.raw] : block.text ? [{ text: block.text }] : [];
     case "thinking":
       // Re-emit as a Gemini thought part (`text` + `thought: true`) so a
       // reasoning summary round-trips as reasoning — never merged into the
@@ -402,9 +368,7 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
             {
               text: block.thinking,
               thought: true,
-              ...(block.signature !== undefined
-                ? { thoughtSignature: block.signature }
-                : {}),
+              ...(block.signature !== undefined ? { thoughtSignature: block.signature } : {}),
             },
           ]
         : [];
@@ -425,8 +389,7 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       let response: unknown;
       try {
         const parsed = JSON.parse(text);
-        response =
-          parsed && typeof parsed === "object" ? parsed : { output: text };
+        response = parsed && typeof parsed === "object" ? parsed : { output: text };
       } catch {
         response = { output: text };
       }
@@ -503,11 +466,9 @@ export function buildGeminiUpstreamRequest(
   if (req.maxTokens) genConfig.maxOutputTokens = req.maxTokens;
   if (Object.keys(genConfig).length > 0) body.generationConfig = genConfig;
 
-  if (req.metadata.safetySettings)
-    body.safetySettings = req.metadata.safetySettings;
+  if (req.metadata.safetySettings) body.safetySettings = req.metadata.safetySettings;
   if (req.metadata.toolConfig) body.toolConfig = req.metadata.toolConfig;
-  if (req.metadata.cachedContent)
-    body.cachedContent = req.metadata.cachedContent;
+  if (req.metadata.cachedContent) body.cachedContent = req.metadata.cachedContent;
 
   return {
     url: buildGeminiUpstreamUrl(upstreamBase, req.model, req.stream),
@@ -530,16 +491,10 @@ export function buildGeminiUpstreamRequest(
  * the truly-normal reasons are normalized to the internal model. A block reason
  * takes precedence over `hasToolCall` (a filtered turn is not a tool turn).
  */
-export function mapGeminiFinishReason(
-  reason: unknown,
-  hasToolCall: boolean,
-): string {
+export function mapGeminiFinishReason(reason: unknown, hasToolCall: boolean): string {
   const r = asString(reason);
   const isNormal =
-    r === "" ||
-    r === "STOP" ||
-    r === "MAX_TOKENS" ||
-    r === "FINISH_REASON_UNSPECIFIED";
+    r === "" || r === "STOP" || r === "MAX_TOKENS" || r === "FINISH_REASON_UNSPECIFIED";
   if (!isNormal) return r; // preserve verbatim
   if (hasToolCall) return "tool_use";
   if (r === "MAX_TOKENS") return "max_tokens";
@@ -555,34 +510,18 @@ export function mapGeminiFinishReason(
  * cost-aware routing and understates the client's total.
  */
 export function geminiUsageFromMetadata(value: unknown): GatewayUsage {
-  const um = validateGeminiUsageMetadata(
-    value,
-    "malformed Gemini usage metadata",
-  );
+  const um = validateGeminiUsageMetadata(value, "malformed Gemini usage metadata");
   if (!um) return { ...ZERO_USAGE };
-  const candidates =
-    typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0;
-  const thoughts =
-    typeof um.thoughtsTokenCount === "number" ? um.thoughtsTokenCount : 0;
-  const cached =
-    typeof um.cachedContentTokenCount === "number"
-      ? um.cachedContentTokenCount
-      : 0;
+  const candidates = typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0;
+  const thoughts = typeof um.thoughtsTokenCount === "number" ? um.thoughtsTokenCount : 0;
+  const cached = typeof um.cachedContentTokenCount === "number" ? um.cachedContentTokenCount : 0;
   const toolPrompt =
-    typeof um.toolUsePromptTokenCount === "number"
-      ? um.toolUsePromptTokenCount
-      : 0;
+    typeof um.toolUsePromptTokenCount === "number" ? um.toolUsePromptTokenCount : 0;
   const usage: GatewayUsage = {
     inputTokens:
-      Math.max(
-        0,
-        (typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0) -
-          cached,
-      ) + toolPrompt,
-    outputTokens: safeTokenSum(
-      [candidates, thoughts],
-      "malformed Gemini usage metadata",
-    ),
+      Math.max(0, (typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0) - cached) +
+      toolPrompt,
+    outputTokens: safeTokenSum([candidates, thoughts], "malformed Gemini usage metadata"),
   };
   if (typeof um.cachedContentTokenCount === "number") {
     usage.cacheReadInputTokens = cached;
@@ -599,22 +538,15 @@ function parseGeminiUsage(json: Record<string, unknown>): GatewayUsage {
  * Parse a Gemini `generateContent` response JSON into a `GatewayResponse`.
  * Mirrors `parseAnthropicResponseJSON`, over `candidates[0].content.parts[]`.
  */
-export function parseGeminiResponseJSON(
-  json: Record<string, unknown>,
-): GatewayResponse {
+export function parseGeminiResponseJSON(json: Record<string, unknown>): GatewayResponse {
   const candidates = Array.isArray(json.candidates) ? json.candidates : [];
-  validateGeminiCandidateToolIdentities(
-    candidates,
-    "malformed Gemini response tool identity",
-  );
+  validateGeminiCandidateToolIdentities(candidates, "malformed Gemini response tool identity");
   // LIMITATION: the internal model holds a single response, so when a client
   // requests `candidateCount > 1` only candidates[0] is surfaced. Multi-candidate
   // fan-out is a documented follow-up, not currently supported.
   const first = (candidates[0] ?? {}) as Record<string, unknown>;
   const content = (first.content ?? {}) as Record<string, unknown>;
-  const parts = Array.isArray(content.parts)
-    ? (content.parts as GeminiPart[])
-    : [];
+  const parts = Array.isArray(content.parts) ? (content.parts as GeminiPart[]) : [];
 
   const blocks: GatewayContentBlock[] = [];
   let hasToolCall = false;
@@ -626,8 +558,7 @@ export function parseGeminiResponseJSON(
     }
     const signature = geminiPartThoughtSignature(p);
     blocks.push(
-      signature !== undefined &&
-        (block.type === "text" || block.type === "tool_use")
+      signature !== undefined && (block.type === "text" || block.type === "tool_use")
         ? { ...block, raw: p }
         : block,
     );
@@ -636,9 +567,7 @@ export function parseGeminiResponseJSON(
   // Prompt-level block: Gemini returns NO candidates plus
   // `promptFeedback.blockReason`. Surface that reason as the stop reason instead
   // of laundering it into a fake `end_turn`/STOP, so the client sees the block.
-  const promptFeedback = json.promptFeedback as
-    | { blockReason?: unknown }
-    | undefined;
+  const promptFeedback = json.promptFeedback as { blockReason?: unknown } | undefined;
   const stopReason =
     candidates.length === 0 && promptFeedback?.blockReason
       ? asString(promptFeedback.blockReason)
@@ -676,16 +605,10 @@ function toGeminiFinishReason(stopReason: string): string {
 }
 
 /** Build the Gemini non-streaming JSON body from a `GatewayResponse`. */
-export function buildGeminiResponseBody(
-  resp: GatewayResponse,
-): Record<string, unknown> {
+export function buildGeminiResponseBody(resp: GatewayResponse): Record<string, unknown> {
   const usage = resp.usage ?? ZERO_USAGE;
   const inclusiveInputTokens = safeTokenSum(
-    [
-      usage.inputTokens,
-      usage.cacheReadInputTokens,
-      usage.cacheCreationInputTokens,
-    ],
+    [usage.inputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens],
     "Gemini response usage overflow",
   );
   const parts: GeminiPart[] = [];
@@ -722,10 +645,7 @@ export function buildGeminiResponseBody(
  * plain JSON body. Used when the gateway accumulated internally and must
  * re-emit in the Gemini wire format.
  */
-export function buildGeminiResponse(
-  resp: GatewayResponse,
-  stream: boolean,
-): Response {
+export function buildGeminiResponse(resp: GatewayResponse, stream: boolean): Response {
   const bodyJson = buildGeminiResponseBody(resp);
   if (stream) {
     const sse = `data: ${JSON.stringify(bodyJson)}\n\n`;
