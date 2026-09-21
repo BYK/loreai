@@ -238,7 +238,9 @@ export function gatewayMessagesToLore(
     // defensive filter here as the final storage boundary so a provider parser
     // or a response path can never turn encrypted/native reasoning into Lore
     // parts, temporal text, embeddings, or distillation input.
-    const visibleContent = m.content.filter((block) => block.type !== "thinking");
+    const visibleContent = m.content.filter(
+      (block) => !(block.type === "thinking" || block.requestOnly === true),
+    );
     const id = deterministicID(
       sessionID,
       m.role,
