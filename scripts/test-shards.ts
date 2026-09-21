@@ -40,7 +40,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -136,8 +136,13 @@ type JsonReport = {
   testResults: Array<{ name: string; startTime: number; endTime: number }>;
 };
 
-function record(reportPaths: string[]): void {
+export function record(reportPaths: string[]): void {
   if (!reportPaths.length) throw new Error("record: no report files given");
+  if (reportPaths.length !== 4) {
+    throw new Error(
+      `record: expected 4 shard reports, got ${reportPaths.length}`,
+    );
+  }
   const manifest: Manifest = {};
   for (const p of reportPaths) {
     const report = JSON.parse(readFileSync(p, "utf8")) as JsonReport;
@@ -159,14 +164,23 @@ function fmt(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+export function assertNonEmptyShards(assignment: string[][]): void {
+  const emptyShards = assignment.flatMap((files, index) =>
+    files.length ? [] : [index + 1],
+  );
+  if (emptyShards.length) {
+    throw new Error(
+      `test-shards: empty shard(s): ${emptyShards.join(", ")}; ` +
+        "reduce the shard count or add more test files",
+    );
+  }
+}
+
 function runShard(shardSpec: string | undefined, extra: string[]): void {
   const { index, count } = parseShard(shardSpec);
   const { assignment } = pack(listTestFiles(), readManifest(), count);
+  assertNonEmptyShards(assignment);
   const files = assignment[index - 1];
-  if (!files.length) {
-    console.error(`test-shards: shard ${index}/${count} plan is empty`);
-    process.exit(1);
-  }
   const result = spawnSync(
     "pnpm",
     ["exec", "vitest", "run", ...files, ...extra],
@@ -252,6 +266,7 @@ function main(argv: string[]): void {
         readManifest(),
         count,
       );
+      assertNonEmptyShards(assignment);
       if (unknown.length) {
         console.error(
           `test-shards: ${unknown.length} file(s) not in manifest, using median:\n  ${unknown.join("\n  ")}`,
@@ -294,4 +309,9 @@ function main(argv: string[]): void {
   }
 }
 
-main(process.argv.slice(2));
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1])
+) {
+  main(process.argv.slice(2));
+}

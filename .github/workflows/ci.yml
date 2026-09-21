@@ -313,6 +313,7 @@ jobs:
 
       - name: Refresh shard manifest
         run: |
+          test "$(find .vitest-durations -maxdepth 1 -type f -name 'shard-*.json' | wc -l)" -eq 4
           pnpm exec tsx scripts/test-shards.ts record .vitest-durations/shard-*.json
           {
             echo '### Shard balance (from this run)'
