@@ -92,6 +92,11 @@ export type GatewayOpaqueBlock = {
   raw: Record<string, unknown>;
   /** Raw is a complete top-level Responses item, not a message content part. */
   responsesItem?: boolean;
+  /**
+   * Provider-native encrypted reasoning that is response-visible to the
+   * client but must not become a Lore/temporal part.
+   */
+  requestOnly?: boolean;
 };
 
 export type GatewayContentBlock =
