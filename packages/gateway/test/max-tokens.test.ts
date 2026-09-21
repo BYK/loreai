@@ -412,7 +412,10 @@ describe("requestHasThinking", () => {
       { type: "text", text: "answer" },
     ]);
     expect(request.messages[0]?.provenanceContent).toEqual([
-      { type: "opaque", raw: { type: "redacted_thinking", data: "ciphertext" } },
+      {
+        type: "opaque",
+        raw: { type: "redacted_thinking", data: "ciphertext" },
+      },
       { type: "text", text: "answer" },
     ]);
     expect(requestHasThinking(request.messages)).toBe(true);
