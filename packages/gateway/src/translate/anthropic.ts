@@ -561,9 +561,9 @@ export function buildAnthropicRequest(
     const lastBlock = [...(lastMsg?.content ?? [])]
       .reverse()
       .find(
-          (block) =>
-            block.type !== "thinking" && block.type !== "redacted_thinking",
-        );
+        (block) =>
+          block.type !== "thinking" && block.type !== "redacted_thinking",
+      );
     if (lastBlock) {
       // Use configured TTL: "1h" for extended cache tier (2× write cost but
       // 12× longer eviction window), bare ephemeral (5m) otherwise.
