@@ -8,6 +8,7 @@ import {
   temporal,
   withTenant,
   LOCAL_TENANT_ID,
+  type LorePart,
 } from "@loreai/core";
 import {
   storeTurnTemporal,
@@ -274,6 +275,118 @@ describe("storeTurnTemporal (#1084)", () => {
       "DISTINCTIVE_TOOL_OUTPUT_XYZ",
     );
   });
+
+  it.each(["session-scoped", "pre-v82"] as const)(
+    "reuses one temporal row when a thinking-bearing identity is upgraded (%s)",
+    (layout) => {
+      const projectPath = `/test/store-turn-temporal/thinking-bridge-${layout}`;
+      const sessionID = `thinking-bridge-${layout}`;
+      const thinking = {
+        type: "thinking" as const,
+        thinking: "private reasoning",
+        signature: "sig-private",
+      };
+      const text = { type: "text" as const, text: "visible answer" };
+      const oldMessage: GatewayMessage = {
+        role: "assistant",
+        content: [thinking, text],
+      };
+      const currentMessage: GatewayMessage = {
+        role: "assistant",
+        content: [text],
+        provenanceContent: [{ type: "opaque", raw: { ...thinking } }, text],
+        provenancePositions: [1],
+      };
+      const oldModernSourceID = deterministicID(
+        sessionID,
+        "assistant",
+        0,
+        oldMessage.content,
+      );
+      const oldLegacySourceID = legacyDeterministicID(
+        "assistant",
+        0,
+        oldMessage.content,
+      );
+      const oldLore = gatewayMessagesToLore([oldMessage], sessionID)[0];
+      const currentLore = gatewayMessagesToLore([currentMessage], sessionID)[0];
+      if (!oldLore || !currentLore) throw new Error("missing test message");
+      expect(currentLore.legacySourceIDs).toEqual(
+        expect.arrayContaining([oldModernSourceID, oldLegacySourceID]),
+      );
+
+      const reasoningPart: LorePart = {
+        id: "old-reasoning-part",
+        sessionID,
+        messageID: oldModernSourceID,
+        type: "reasoning",
+        text: thinking.thinking,
+      };
+      const oldParts = [reasoningPart, ...oldLore.parts];
+      const projectID = ensureProject(projectPath);
+      if (layout === "session-scoped") {
+        temporal.store({
+          projectPath,
+          info: { ...oldLore.info, id: oldModernSourceID },
+          parts: oldParts,
+        });
+      } else {
+        db()
+          .query(
+            `INSERT INTO temporal_messages
+               (id, source_id, project_id, session_id, role, content, tokens,
+                distilled, created_at, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, '{}')`,
+          )
+          .run(
+            oldLegacySourceID,
+            oldLegacySourceID,
+            projectID,
+            sessionID,
+            "assistant",
+            temporal.partsToText(oldParts),
+            Date.now(),
+          );
+      }
+
+      temporal.store({
+        projectPath,
+        info: currentLore.info,
+        parts: currentLore.parts,
+        legacySourceID: currentLore.legacySourceID,
+        legacySourceIDs: currentLore.legacySourceIDs,
+      });
+
+      const rows = identityRows(projectID, sessionID);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.content).toBe("visible answer");
+      expect(
+        temporal.storedMessageId({
+          projectPath,
+          sessionID,
+          sourceID: currentLore.info.id,
+          legacySourceID: currentLore.legacySourceID,
+          legacySourceIDs: currentLore.legacySourceIDs,
+        }),
+      ).toBe(rows[0]?.id);
+      expect(
+        temporal
+          .storedMessageIds({
+            projectPath,
+            sessionID,
+            messages: [
+              {
+                sourceID: currentLore.info.id,
+                legacySourceID: currentLore.legacySourceID,
+                legacySourceIDs: currentLore.legacySourceIDs,
+              },
+            ],
+            readOnly: true,
+          })
+          .get(currentLore.info.id),
+      ).toBe(rows[0]?.id);
+    },
+  );
 
   it.each(["fresh-first", "legacy-first"] as const)(
     "bridges pre-v82 gateway rows through the production path (%s)",

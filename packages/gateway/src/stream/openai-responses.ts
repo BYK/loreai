@@ -995,7 +995,10 @@ function validatePublicResponsesEvent(
     case "response.output_item.added": {
       const addedItem = parsed.item as Record<string, unknown> | undefined;
       const addedCallID =
-        typeof addedItem?.call_id === "string" ? addedItem.call_id : undefined;
+        addedItem?.type === "function_call" &&
+        typeof addedItem.call_id === "string"
+          ? addedItem.call_id
+          : undefined;
       if (
         !validOutputIndex ||
         !addedItem ||
@@ -1077,7 +1080,8 @@ function validatePublicResponsesEvent(
         !responsesDoneItemMatchesAdded(doneItem, addedItem) ||
         (typeof doneItem.id === "string" &&
           state.itemIndexById.get(doneItem.id) !== outputIndex) ||
-        (typeof doneItem.call_id === "string" &&
+        (doneItem.type === "function_call" &&
+          typeof doneItem.call_id === "string" &&
           state.callIndexById.get(doneItem.call_id) !== outputIndex)
       ) {
         malformed();

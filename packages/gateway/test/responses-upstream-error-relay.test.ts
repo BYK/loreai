@@ -74,6 +74,32 @@ function successfulResponsesResponse(): Response {
   return buildOpenAIResponsesResponse(response, false);
 }
 
+function failedResponsesStreamResponse(): Response {
+  const events = [
+    `event: response.created\ndata: ${JSON.stringify({
+      type: "response.created",
+      response: {
+        id: "resp_failed_stream",
+        model: "gpt-5.6-terra",
+        status: "in_progress",
+      },
+    })}\n\n`,
+    `event: response.failed\ndata: ${JSON.stringify({
+      type: "response.failed",
+      response: {
+        id: "resp_failed_stream",
+        model: "gpt-5.6-terra",
+        status: "failed",
+        output: [],
+        error: { type: "server_error", message: "provider failed" },
+      },
+    })}\n\n`,
+  ];
+  return new Response(events.join(""), {
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
 describe("Responses upstream error relay", () => {
   it("does not consume an unsent layer transition's provenance boundary", async () => {
     const sessionID = "responses-upstream-error-retry";
@@ -200,6 +226,64 @@ describe("Responses upstream error relay", () => {
     expect(response.status).toBe(502);
     expect(await response.text()).toContain("Gateway request failed");
   });
+
+  it.each([true, false])(
+    "does not advance the accepted layer after a 2xx response.failed terminal (stream=%s)",
+    async (stream) => {
+      const sessionID = `responses-failed-terminal-boundary-${stream ? "stream" : "buffered"}`;
+      let calls = 0;
+      setUpstreamInterceptor(async () => {
+        calls++;
+        if (calls === 2) return failedResponsesStreamResponse();
+        return successfulResponsesResponse();
+      });
+
+      const first = requestWithMessages([
+        { role: "user", content: [{ type: "text", text: "start" }] },
+      ]);
+      first.rawHeaders["x-lore-session-id"] = sessionID;
+      const accepted = await handleRequest(first, localConfig());
+      expect(accepted.status).toBe(200);
+      await accepted.text();
+
+      const internalSessionID = activeSessionID(sessionID);
+      expect(
+        getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+      ).toBe(0);
+      setForceMinLayer(1, internalSessionID);
+
+      const failed = stream
+        ? request()
+        : requestWithMessages([
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+          ]);
+      failed.rawHeaders["x-lore-session-id"] = sessionID;
+      const response = await handleRequest(failed, localConfig());
+      expect(response.status).toBe(stream ? 200 : 502);
+      await response.text();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(
+        getActiveSessions().get(internalSessionID)?.lastAcceptedProvenanceLayer,
+      ).toBe(0);
+      expect(
+        loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+      ).toBe(0);
+
+      setForceMinLayer(1, internalSessionID);
+      const retry = requestWithMessages([
+        { role: "user", content: [{ type: "text", text: "retry" }] },
+      ]);
+      retry.rawHeaders["x-lore-session-id"] = sessionID;
+      const recovered = await handleRequest(retry, localConfig());
+      expect(recovered.status).toBe(200);
+      await recovered.text();
+      expect(
+        loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
+      ).toBe(1);
+    },
+  );
 
   it("does not advance the accepted layer on synthetic resolution", async () => {
     const sessionID = "responses-synthetic-boundary";

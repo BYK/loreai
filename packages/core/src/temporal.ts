@@ -119,13 +119,32 @@ function derivedMessageId(
 
 // Keep the scalar lookup shared with the batch ambiguity fallback. LIMIT 1
 // historically has no ordering: its choice depends on SQLite's query plan.
-const MESSAGE_ID_LOOKUP = `SELECT t.id FROM temporal_messages t
+function messageIDLookup(additionalSourceCount = 0): string {
+  const additionalSources =
+    additionalSourceCount > 0
+      ? `\n               OR t.source_id IN (${Array.from(
+          { length: additionalSourceCount },
+          () => "?",
+        ).join(", ")})`
+      : "";
+  return `SELECT t.id FROM temporal_messages t
         JOIN projects p ON p.id = t.project_id
         WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
           AND (t.source_id = ?
                OR (t.source_id = t.id AND t.source_id = ?)
-               OR (t.source_id IS NULL AND t.id = ?))
+               OR (t.source_id IS NULL AND t.id = ?)${additionalSources})
         LIMIT 1`;
+}
+
+function additionalSourceIDs(
+  sourceID: string,
+  legacySourceID: string | undefined,
+  legacySourceIDs: readonly string[] | undefined,
+): string[] {
+  return [...new Set(legacySourceIDs ?? [])].filter(
+    (id) => id.length > 0 && id !== sourceID && id !== legacySourceID,
+  );
+}
 
 /** Resolve a source ID to an existing legacy/restored row or its v82 key. */
 function resolveMessageId(
@@ -133,10 +152,16 @@ function resolveMessageId(
   sessionId: string,
   sourceId: string,
   legacySourceId?: string,
+  legacySourceIds?: readonly string[],
 ): string {
   const derivedId = derivedMessageId(projectId, sessionId, sourceId);
+  const additionalIDs = additionalSourceIDs(
+    sourceId,
+    legacySourceId,
+    legacySourceIds,
+  );
   const existing = db()
-    .query(MESSAGE_ID_LOOKUP)
+    .query(messageIDLookup(additionalIDs.length))
     .get(
       projectId,
       currentTenantId(),
@@ -144,6 +169,7 @@ function resolveMessageId(
       sourceId,
       legacySourceId ?? sourceId,
       derivedId,
+      ...additionalIDs,
     ) as { id: string } | null;
   return existing?.id ?? derivedId;
 }
@@ -158,12 +184,15 @@ export function storedMessageId(input: {
   sourceID: string;
   /** Pre-v82 gateway source ID, used only to resolve persisted local rows. */
   legacySourceID?: string;
+  /** Additional source IDs from older provenance-aware identity algorithms. */
+  legacySourceIDs?: readonly string[];
 }): string {
   return resolveMessageId(
     ensureProject(input.projectPath),
     input.sessionID,
     input.sourceID,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
 }
 
@@ -176,7 +205,11 @@ export function storedMessageId(input: {
 export function storedMessageIds(input: {
   projectPath: string;
   sessionID: string;
-  messages: ReadonlyArray<{ sourceID: string; legacySourceID?: string }>;
+  messages: ReadonlyArray<{
+    sourceID: string;
+    legacySourceID?: string;
+    legacySourceIDs?: readonly string[];
+  }>;
   /** Never creates/backfills a project; an absent project returns an empty map. */
   readOnly?: boolean;
 }): Map<string, string> {
@@ -194,6 +227,7 @@ export function storedMessageIds(input: {
     const chunk: Array<{
       sourceID: string;
       legacySourceID?: string;
+      legacySourceIDs?: readonly string[];
       derivedID: string;
     }> = messages.slice(offset, offset + 100).map((message) => ({
       ...message,
@@ -201,7 +235,11 @@ export function storedMessageIds(input: {
     }));
     const sources = [
       ...new Set(
-        chunk.flatMap((m) => [m.sourceID, m.legacySourceID ?? m.sourceID]),
+        chunk.flatMap((m) => [
+          m.sourceID,
+          ...(m.legacySourceID ? [m.legacySourceID] : []),
+          ...(m.legacySourceIDs ?? []),
+        ]),
       ),
     ];
     // Materialize PK candidates before filtering NULL source IDs. Otherwise
@@ -248,6 +286,9 @@ export function storedMessageIds(input: {
       const ids = new Set(bySource.get(message.sourceID));
       const old = legacy.get(message.legacySourceID ?? message.sourceID);
       if (old !== undefined) ids.add(old);
+      for (const sourceID of message.legacySourceIDs ?? []) {
+        for (const id of bySource.get(sourceID) ?? []) ids.add(id);
+      }
       if (restored.has(message.derivedID)) ids.add(message.derivedID);
       if (ids.size > 1) ambiguous.push(message);
       else
@@ -263,19 +304,34 @@ export function storedMessageIds(input: {
       const matches = db()
         .query(
           ambiguous
-            .map(() => `SELECT ? AS source_id, (${MESSAGE_ID_LOOKUP}) AS id`)
+            .map((m) => {
+              const additionalIDs = additionalSourceIDs(
+                m.sourceID,
+                m.legacySourceID,
+                m.legacySourceIDs,
+              );
+              return `SELECT ? AS source_id, (${messageIDLookup(additionalIDs.length)}) AS id`;
+            })
             .join(" UNION ALL "),
         )
         .all(
-          ...ambiguous.flatMap((m) => [
-            m.sourceID,
-            pid,
-            tenant,
-            input.sessionID,
-            m.sourceID,
-            m.legacySourceID ?? m.sourceID,
-            m.derivedID,
-          ]),
+          ...ambiguous.flatMap((m) => {
+            const additionalIDs = additionalSourceIDs(
+              m.sourceID,
+              m.legacySourceID,
+              m.legacySourceIDs,
+            );
+            return [
+              m.sourceID,
+              pid,
+              tenant,
+              input.sessionID,
+              m.sourceID,
+              m.legacySourceID ?? m.sourceID,
+              m.derivedID,
+              ...additionalIDs,
+            ];
+          }),
         ) as Array<{ source_id: string; id: string | null }>;
       for (const match of matches)
         result.set(
@@ -293,6 +349,7 @@ export function storedMessageIdIfProjectExists(input: {
   sessionID: string;
   sourceID: string;
   legacySourceID?: string;
+  legacySourceIDs?: readonly string[];
 }): string | undefined {
   const pid = projectId(input.projectPath);
   if (!pid) return undefined;
@@ -301,6 +358,7 @@ export function storedMessageIdIfProjectExists(input: {
     input.sessionID,
     input.sourceID,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
 }
 
@@ -309,6 +367,7 @@ export function store(input: {
   info: LoreMessage;
   parts: LorePart[];
   legacySourceID?: string;
+  legacySourceIDs?: readonly string[];
 }): string | undefined {
   const pid = ensureProject(input.projectPath);
   const content = partsToText(input.parts);
@@ -319,6 +378,7 @@ export function store(input: {
     input.info.sessionID,
     input.info.id,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
   withSavepoint("store_temporal_message", () => {
     const existing = db()
@@ -399,6 +459,7 @@ export function recordToolCalls(input: {
   info: LoreMessage;
   parts: LorePart[];
   legacySourceID?: string;
+  legacySourceIDs?: readonly string[];
 }): void {
   const toolParts = input.parts.filter(isToolPart);
   if (!toolParts.length) return;
@@ -410,6 +471,7 @@ export function recordToolCalls(input: {
     input.info.sessionID,
     input.info.id,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
 
   // Split into the two phases up front so the seed (tool_use) phase can be

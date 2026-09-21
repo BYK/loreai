@@ -198,7 +198,11 @@ export async function prepareSemanticMessages(input: {
       provenance.set(id, value);
     return provenance;
   });
-  const candidates: Array<{ sourceID: string; legacySourceID?: string }> = [];
+  const candidates: Array<{
+    sourceID: string;
+    legacySourceID?: string;
+    legacySourceIDs?: readonly string[];
+  }> = [];
   timing.counts.messages = loreMessages.length;
   for (const [index, message] of loreMessages.entries()) {
     timing.counts.parts += message.parts.length;
@@ -220,6 +224,7 @@ export async function prepareSemanticMessages(input: {
       candidates.push({
         sourceID: message.info.id,
         legacySourceID: message.legacySourceID,
+        legacySourceIDs: message.legacySourceIDs,
       });
     }
   }

@@ -259,6 +259,8 @@ import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
+  legacyContentForMessage,
+  visibleContentForMessage,
 } from "./temporal-adapter";
 import {
   canonicalWorkerProviderID,
@@ -5892,21 +5894,28 @@ async function adoptByFingerprint(input: {
       : incomingProjectId;
     if (!overlapProjectId) continue;
     const probeIDs = probeMessages.map(({ index, message }) => {
+      const visibleContent = visibleContentForMessage(message);
+      const legacyContent = legacyContentForMessage(message);
       const sourceID = deterministicID(
         c.session_id,
         message.role,
         index,
-        message.content,
+        visibleContent,
+      );
+      const legacySourceID = legacyDeterministicID(
+        message.role,
+        index,
+        visibleContent,
       );
       return temporal.storedMessageId({
         projectPath: overlapProjectPath,
         sessionID: c.session_id,
         sourceID,
-        legacySourceID: legacyDeterministicID(
-          message.role,
-          index,
-          message.content,
-        ),
+        legacySourceID,
+        legacySourceIDs: [
+          deterministicID(c.session_id, message.role, index, legacyContent),
+          legacyDeterministicID(message.role, index, legacyContent),
+        ],
       });
     });
     const overlap = countMatchingTemporalIds(
@@ -18467,13 +18476,19 @@ async function handleConversationTurn(
     return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
   }
 
-  // The upstream accepted this transformed request. Commit the provenance
-  // boundary only now; transform() itself is speculative and can be followed
-  // by a synthetic response, transport error, or non-2xx response.
-  sessionState.lastAcceptedProvenanceLayer = result.layer;
-  saveSessionTracking(sessionID, {
-    lastAcceptedProvenanceLayer: result.layer,
-  });
+  // The provenance boundary is committed by the successful-response
+  // finalizers below, after the provider body has accumulated and durable
+  // response bookkeeping has succeeded. A 2xx status alone is not acceptance:
+  // streamed Responses can still end in `response.failed` or disconnect.
+  let acceptedProvenanceLayerCommitted = false;
+  const commitAcceptedProvenanceLayer = (): void => {
+    if (acceptedProvenanceLayerCommitted) return;
+    saveSessionTracking(sessionID, {
+      lastAcceptedProvenanceLayer: result.layer,
+    });
+    sessionState.lastAcceptedProvenanceLayer = result.layer;
+    acceptedProvenanceLayerCommitted = true;
+  };
 
   // Run the recall-interception loop over an already-accumulated
   // (internal Anthropic-format) GatewayResponse and return the client HTTP
@@ -18517,7 +18532,7 @@ async function handleConversationTurn(
         // finalizer, after downstream EOF, for buffered clients as well.
         finishStreaming(response);
       } else {
-        postResponse(
+        const persisted = postResponse(
           req,
           response,
           sessionState,
@@ -18528,6 +18543,7 @@ async function handleConversationTurn(
           suppressTemporalStorage,
           endGenAiSpan,
         );
+        if (persisted) commitAcceptedProvenanceLayer();
       }
     };
     const failRecall = (
@@ -18932,6 +18948,7 @@ async function handleConversationTurn(
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
+                commitAcceptedProvenanceLayer();
               }),
             );
             recallPersistenceTransaction = undefined;
