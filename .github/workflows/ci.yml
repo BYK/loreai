@@ -1484,7 +1484,7 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [changes, test, unit-test, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, install-script-bash-compat, install-script-portability, sync-integration, hermes-test, hermes-real-abc]
+    needs: [changes, test, unit-test, coverage, binary-smoke-native, check-docs, check-links, check-preview-links, check-social, check-patches, actionlint, install-script-bash-compat, install-script-portability, sync-integration, hermes-test, hermes-real-abc]
     runs-on: ubuntu-24.04
     steps:
       - name: Check CI result
@@ -1505,6 +1505,10 @@ jobs:
             fi
             if [ "${{ needs.unit-test.result }}" != "success" ]; then
               echo "::error::unit-test job did not succeed (result: ${{ needs.unit-test.result }})"
+              exit 1
+            fi
+            if [ "${{ needs.coverage.result }}" != "success" ]; then
+              echo "::error::coverage job did not succeed (result: ${{ needs.coverage.result }})"
               exit 1
             fi
             result="${{ needs.binary-smoke-native.result }}"
