@@ -995,7 +995,7 @@ function validatePublicResponsesEvent(
     case "response.output_item.added": {
       const addedItem = parsed.item as Record<string, unknown> | undefined;
       const addedCallID =
-        addedItem?.type === "function_call" ? addedItem.call_id : undefined;
+        typeof addedItem?.call_id === "string" ? addedItem.call_id : undefined;
       if (
         !validOutputIndex ||
         !addedItem ||
