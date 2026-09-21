@@ -844,6 +844,72 @@ describe("translateAnthropicStreamToGemini", () => {
     });
   }
 
+  function anthropicSSEWithRedactedThinking(): Response {
+    const events = [
+      [
+        "message_start",
+        {
+          type: "message_start",
+          message: {
+            id: "msg_redacted",
+            type: "message",
+            model: "claude-x",
+            role: "assistant",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        },
+      ],
+      [
+        "content_block_start",
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "redacted_thinking",
+            data: "encrypted-thinking",
+          },
+        },
+      ],
+      ["content_block_stop", { type: "content_block_stop", index: 0 }],
+      [
+        "content_block_start",
+        {
+          type: "content_block_start",
+          index: 1,
+          content_block: { type: "text", text: "" },
+        },
+      ],
+      [
+        "content_block_delta",
+        {
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "text_delta", text: "answer" },
+        },
+      ],
+      ["content_block_stop", { type: "content_block_stop", index: 1 }],
+      [
+        "message_delta",
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 1 },
+        },
+      ],
+      ["message_stop", { type: "message_stop" }],
+    ] as const;
+    const body = events
+      .map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`)
+      .join("");
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
   test("emits a Gemini SSE frame with the accumulated model-role content", async () => {
     const res = translateAnthropicStreamToGemini(anthropicSSE());
     expect(res.headers.get("content-type")).toBe("text/event-stream");
@@ -856,5 +922,18 @@ describe("translateAnthropicStreamToGemini", () => {
     const um = frame.usageMetadata as Record<string, number>;
     expect(um.promptTokenCount).toBe(3);
     expect(um.candidatesTokenCount).toBe(2);
+  });
+
+  test("omits redacted thinking from Anthropic-to-Gemini streaming egress", async () => {
+    const frame = await readGeminiSSEFrame(
+      translateAnthropicStreamToGemini(anthropicSSEWithRedactedThinking(), {
+        strict: true,
+      }),
+    );
+    const candidates = frame.candidates as Array<Record<string, unknown>>;
+    const content = candidates[0].content as { parts: unknown[] };
+    expect(content.parts).toEqual([{ text: "answer" }]);
+    expect(JSON.stringify(frame)).not.toContain("redacted_thinking");
+    expect(JSON.stringify(frame)).not.toContain("encrypted-thinking");
   });
 });
