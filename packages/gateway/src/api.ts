@@ -40,6 +40,7 @@ import {
   handleListKnowledgeFiltered,
   handleListSessionsCursor,
   handleKnowledgeVersions,
+  handleSearchSession,
   handleShowSessionCursor,
 } from "./api-lists";
 import { parseBooleanParam } from "./query-bool";
@@ -932,6 +933,20 @@ export async function handleAPIRequest(
     // GET /api/v1/sessions/:id
     params = matchRoute(pathname, "/api/v1/sessions/:id");
     if (params) return handleShowSession(url, params.id);
+
+    // GET /api/v1/sessions/:id/search
+    params = matchRoute(pathname, "/api/v1/sessions/:id/search");
+    if (params) {
+      const project = resolveProject(url);
+      if (!project) {
+        return errorResponse(
+          400,
+          "invalid_request",
+          "Session search requires ?git_remote or ?path to identify the project",
+        );
+      }
+      return handleSearchSession(url, project, params.id);
+    }
 
     // GET /api/v1/distillations/:id
     params = matchRoute(pathname, "/api/v1/distillations/:id");

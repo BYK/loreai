@@ -60,3 +60,36 @@ export const sessionPage = type({
 });
 
 export type SessionPage = typeof sessionPage.infer;
+
+/**
+ * `GET /api/v1/sessions/:id/search?path=…&q=…` hit — the id of a matching
+ * message (the `TemporalMessage.id` the reader keys its blocks by), when it
+ * was said, and a plain-text excerpt around the first match.
+ */
+export const sessionSearchHit = type({
+  message_id: nonEmptyString,
+  created_at: epochMs,
+  role: "string",
+  snippet: "string",
+  rank: "number",
+});
+
+export type SessionSearchHit = typeof sessionSearchHit.infer;
+
+/**
+ * One page of in-session finder hits, newest first across pages and
+ * chronological within one. `terms` is what the gateway actually matched
+ * (unicode61 tokens of `q`; empty when nothing in `q` was searchable);
+ * `mode` says whether hits contain the terms as one phrase or merely all of
+ * them somewhere; `total` is the matching-message count at query time.
+ */
+export const sessionSearchPage = type({
+  hits: sessionSearchHit.array(),
+  terms: "string[]",
+  mode: "'phrase' | 'terms'",
+  total: nonNegInt,
+  next_cursor: "string | null",
+});
+
+export type SessionSearchPage = typeof sessionSearchPage.infer;
+export type SessionSearchMode = SessionSearchPage["mode"];

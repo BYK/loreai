@@ -19,6 +19,10 @@
  *    slices — mounted or not — and walks hits with a distinct mark; the
  *    coverage declaration states what the view holds (captured / partial /
  *    native transcript not available) from what the server reported.
+ *  - Whole-session search (#1857) asks the server which *messages* match
+ *    beyond the loaded window, then pages older history until one is loaded
+ *    and lets the browser-side scan place the highlight — the server never
+ *    guesses displayed-text coordinates.
  */
 import type { Component, JSX } from "solid-js";
 import {
@@ -47,6 +51,7 @@ import { Button } from "~/components/ui/button";
 import type {
   DistillationDetail,
   DistillationSummary,
+  SessionSearchPage,
   TemporalMessage,
 } from "~/contracts";
 import { cn } from "~/lib/utils";
@@ -66,6 +71,7 @@ import {
   type MessageBlock,
   type ReaderBlock,
   buildBlocks,
+  messageBlockId,
   originLabel,
 } from "~/reader/blocks";
 import {
@@ -75,6 +81,17 @@ import {
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows } from "~/reader/rows";
 import { type SearchHit, queryMatcher, searchRows } from "~/reader/search";
+import {
+  type ReachState,
+  type WholeSearchState,
+  WHOLE_IDLE,
+  WHOLE_LOAD_PAGES,
+  WHOLE_SEARCH_PAGE,
+  nextOlderHit,
+  reachLabel,
+  searchWholeSession,
+  wholeSearchSummary,
+} from "~/reader/whole-search";
 import {
   anchorForReading,
   deepLinkFor,
@@ -113,6 +130,16 @@ export interface SessionViewProps {
   loadingOlder?: boolean;
   olderError?: unknown;
   onLoadOlder?: () => Promise<void>;
+  /**
+   * Server-side finder for the whole session (`GET /sessions/:id/search`);
+   * absent when the owner cannot reach it (e.g. a cached-only view).
+   */
+  onSearchWhole?: (
+    query: string,
+    cursor: string | null,
+    limit: number,
+    signal?: AbortSignal,
+  ) => Promise<SessionSearchPage>;
   status?: KeyStatus;
   /** Raw `?a=` value. */
   anchorParam: string | null;
@@ -531,6 +558,21 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   );
 
   // -- older history -------------------------------------------------------
+  /**
+   * Viewport to restore once the requested older page lands. The owner's
+   * promise may settle well after it applied the page (it writes the cache
+   * first), so the compensation keys off the rows, not the promise: by the
+   * time it settles, a search hit or deep link may already own the scroll.
+   * The page is recognised by the last mounted row moving down the list; the
+   * first row is no witness, a distillation older than the window stays put.
+   */
+  let prepend: {
+    top: number;
+    total: number;
+    anchor: { key: string; index: number } | null;
+    forLink: string | null;
+  } | null = null;
+
   async function loadOlder() {
     if (
       !props.onLoadOlder ||
@@ -540,30 +582,51 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     ) {
       return;
     }
-    const before = {
+    const last = virtualizer.getVirtualItems().at(-1);
+    prepend = {
       top: scrollEl.scrollTop,
       total: virtualizer.getTotalSize(),
-      count: rows().length,
-      forLink: scrollTarget !== null,
+      anchor: last ? { key: String(last.key), index: last.index } : null,
+      forLink: scrollTarget,
     };
     setOlderInFlight(true);
     try {
       await props.onLoadOlder();
     } catch {
-      return; // the owner reports the failure through `olderError`
+      // the owner reports the failure through `olderError`
     } finally {
+      prepend = null;
       setOlderInFlight(false);
     }
-    const added = rows().length - before.count;
-    if (added <= 0) return;
-    // A deep link that found its block in this page owns the scroll position.
-    if (before.forLink && scrollTarget === null) return;
-    // The prepended rows are unmeasured, so they enter at the estimate; the
-    // first-measure compensation in the virtualizer corrects the rest as
-    // they scroll into view.
-    const delta = virtualizer.getTotalSize() - before.total;
-    if (delta > 0) scrollEl.scrollTop = before.top + delta;
   }
+
+  createEffect(
+    on(
+      rows,
+      () => {
+        const before = prepend;
+        if (!before || !scrollEl || !before.anchor) return;
+        // Anything that is not a prepend keeps waiting.
+        if (rowIndexOf(before.anchor.key) <= before.anchor.index) return;
+        prepend = null;
+        // A deep link that found its block in this page owns the scroll position.
+        if (before.forLink !== null && rowIndexOf(before.forLink) >= 0) return;
+        // The prepended rows are unmeasured, so they enter at the estimate; the
+        // first-measure compensation in the virtualizer corrects the rest as
+        // they are measured.
+        const delta = virtualizer.getTotalSize() - before.total;
+        if (delta <= 0) return;
+        const target = before.top + delta;
+        virtualizer.scrollToOffset(target);
+        // The virtualizer learns the offset from the scroll event, a frame
+        // away. Until then it keeps the rows that sat at the old offset
+        // mounted, and their first measures would compensate against that
+        // offset and drag the viewport back; hand it the new one now.
+        virtualizer.scrollOffset = target;
+      },
+      { defer: true },
+    ),
+  );
 
   // -- focus ---------------------------------------------------------------
   const [focusKey, setFocusKey] = createSignal<string | null>(null);
@@ -803,6 +866,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     scanGeneration++;
     batch(() => {
       setQuery("");
+      resetWhole();
       setSearch(SEARCH_IDLE);
       setHitIndex(-1);
       setSearchHit(null);
@@ -824,6 +888,123 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       quote: text.slice(hit.start, hit.end),
     });
   }
+
+  // -- whole-session search (#1857) ----------------------------------------
+  // The server says which messages match; a hit becomes a highlight only
+  // once its message is loaded and the browser-side scan above finds the
+  // query in the displayed text.
+  const [whole, setWhole] = createSignal<WholeSearchState>(WHOLE_IDLE);
+  const [reach, setReach] = createSignal<ReachState | null>(null);
+  let wholeController: AbortController | null = null;
+  const isLoaded = (blockId: string) => blocks().byId.has(blockId);
+  const wholeAvailable = () =>
+    props.onSearchWhole !== undefined &&
+    queryMatcher(query()) !== null &&
+    coverage().kind !== "captured";
+
+  function resetWhole() {
+    wholeController?.abort();
+    wholeController = null;
+    batch(() => {
+      setWhole(WHOLE_IDLE);
+      setReach(null);
+    });
+  }
+  onCleanup(resetWhole);
+  // The server answer is for one query; typing invalidates it.
+  createEffect(on(query, resetWhole, { defer: true }));
+
+  async function searchWhole() {
+    const q = untrack(query);
+    const fetch = props.onSearchWhole;
+    if (!fetch || queryMatcher(q) === null) return;
+    wholeController?.abort();
+    const c = new AbortController();
+    wholeController = c;
+    batch(() => {
+      setWhole({ kind: "searching", query: q });
+      setReach(null);
+    });
+    try {
+      const result = await searchWholeSession(
+        q,
+        (cursor) => fetch(q, cursor, WHOLE_SEARCH_PAGE, c.signal),
+        (id) => untrack(() => isLoaded(id)),
+      );
+      if (c.signal.aborted) return;
+      setWhole({ kind: "done", result });
+    } catch (err) {
+      if (c.signal.aborted) return;
+      setWhole({ kind: "error", query: q, message: errorMessage(err) });
+    } finally {
+      if (wholeController === c) wholeController = null;
+    }
+  }
+
+  const olderHit = () => {
+    const state = whole();
+    return state.kind === "done" ? nextOlderHit(state.result, isLoaded) : null;
+  };
+
+  /** Page older history until the newest unloaded server hit is in the window. */
+  function reachOlderHit() {
+    const hit = olderHit();
+    if (!hit || reach()?.kind === "loading") return;
+    setReach({ kind: "loading", messageId: hit.message_id, pages: 0 });
+  }
+
+  createEffect(() => {
+    const state = reach();
+    if (state?.kind !== "loading") return;
+    const blockId = messageBlockId(state.messageId);
+    if (!isLoaded(blockId)) {
+      const busy = props.loadingOlder || olderInFlight();
+      if (busy || props.hasOlder === null) return; // wait for the page
+      if (props.hasOlder === false || props.olderError || !props.onLoadOlder) {
+        setReach({ kind: "unreachable", messageId: state.messageId });
+        return;
+      }
+      if (state.pages >= WHOLE_LOAD_PAGES) {
+        setReach({ ...state, kind: "exhausted" });
+        return;
+      }
+      setReach({ ...state, pages: state.pages + 1 });
+      void loadOlder();
+      return;
+    }
+    // Loaded: wait until the browser-side scan has covered the new rows, then
+    // step to the hit in that block — or say that there is none to show.
+    const scan = search();
+    const q = untrack(query);
+    if (scan.query !== q || !scan.done || scan.total !== rows().length) return;
+    const index = scan.hits.findIndex((h) => h.blockId === blockId);
+    if (index >= 0) {
+      setReach(null);
+      goToHit(index);
+      return;
+    }
+    const w = untrack(whole);
+    setReach({
+      kind: "inexact",
+      messageId: state.messageId,
+      mode: w.kind === "done" ? w.result.mode : "phrase",
+    });
+    scrollToBlock(blockId);
+  });
+
+  const wholeLine = (): string | null => {
+    const state = whole();
+    switch (state.kind) {
+      case "idle":
+        return null;
+      case "searching":
+        return "Searching the whole session…";
+      case "error":
+        return `Whole-session search unavailable · ${state.message}`;
+      case "done":
+        return wholeSearchSummary(state.result, isLoaded);
+    }
+  };
 
   const searchSummary = () => {
     const state = search();
@@ -1060,11 +1241,66 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                     </span>
                     <Show when={search().done && coverage().kind === "partial"}>
                       <span
-                        class="basis-full text-muted"
+                        class="flex basis-full flex-wrap items-center gap-2 text-muted"
                         data-testid="search-coverage"
                       >
-                        Searched the loaded history only · {coverage().detail}
+                        <span>
+                          Searched the loaded history only · {coverage().detail}
+                        </span>
+                        <Show
+                          when={
+                            wholeAvailable() &&
+                            (whole().kind === "idle" ||
+                              whole().kind === "error")
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="text-xs text-accent underline"
+                            data-testid="search-whole"
+                            onClick={() => void searchWhole()}
+                          >
+                            {whole().kind === "error"
+                              ? "Retry whole-session search"
+                              : "Search the whole session"}
+                          </button>
+                        </Show>
                       </span>
+                    </Show>
+                    <Show when={wholeLine()}>
+                      {(line) => (
+                        <span
+                          class="flex basis-full flex-wrap items-center gap-2 text-muted"
+                          data-testid="search-whole-summary"
+                          data-whole-state={whole().kind}
+                          role="status"
+                          aria-live="polite"
+                        >
+                          <span>{line()}</span>
+                          <Show
+                            when={olderHit() && reach()?.kind !== "loading"}
+                          >
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              data-testid="search-whole-next"
+                              onClick={reachOlderHit}
+                            >
+                              {reach()?.kind === "exhausted"
+                                ? "Keep loading"
+                                : "Go to the newest older match"}
+                            </Button>
+                          </Show>
+                          <Show when={reach()}>
+                            {(state) => (
+                              <span data-testid="search-reach">
+                                {reachLabel(state())}
+                              </span>
+                            )}
+                          </Show>
+                        </span>
+                      )}
                     </Show>
                   </>
                 )}

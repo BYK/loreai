@@ -10,6 +10,8 @@ import {
   knowledgeVersionHistory,
   listKnowledgePage,
   listSessionsPage,
+  searchSessionMessagesPage,
+  sessionSearchTerms,
   type KnowledgeKeyset,
   type KnowledgeSort,
 } from "../src/list-query";
@@ -565,6 +567,309 @@ describe("listSessionsPage", () => {
     const p2 = listSessionsPage(project, { limit: 2, after: p1.next! });
     expect(p2.items.map((s) => s.session_id)).toEqual(["x2", "x1"]);
     expect(p2.next).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session search
+// ---------------------------------------------------------------------------
+
+describe("sessionSearchTerms", () => {
+  test("tokenises like unicode61: letters/digits only, lower-cased, keeps short tokens and stop words", () => {
+    expect(sessionSearchTerms("Needle-5")).toEqual(["needle", "5"]);
+    expect(sessionSearchTerms("the store")).toEqual(["the", "store"]);
+    expect(sessionSearchTerms('a "quoted" NEAR(x) term* -not')).toEqual([
+      "a",
+      "quoted",
+      "near",
+      "x",
+      "term",
+      "not",
+    ]);
+    expect(sessionSearchTerms("  \t\n")).toEqual([]);
+    expect(sessionSearchTerms('*** "" ---')).toEqual([]);
+    expect(sessionSearchTerms("café Ünïcode 日本語")).toEqual([
+      "café",
+      "ünïcode",
+      "日本語",
+    ]);
+    expect(sessionSearchTerms("snake_case")).toEqual(["snake", "case"]);
+  });
+
+  test("caps the number of terms", () => {
+    const many = Array.from({ length: 50 }, (_, i) => `t${i}`).join(" ");
+    expect(sessionSearchTerms(many)).toHaveLength(32);
+  });
+});
+
+describe("searchSessionMessagesPage", () => {
+  function seedSearch(tag: string) {
+    const project = freshProject(`search-${tag}`);
+    const other = freshProject(`search-other-${tag}`);
+    const texts: Array<[string, number, string]> = [
+      ["k3", 3000, "the third message mentions needle-3 and SQLite stays"],
+      ["k1", 1000, "first: needle-1 lives here"],
+      ["k5", 3000, "a tie at 3000 with needle-5 and the store"],
+      ["k2", 2000, "second, needle-2; portability is a requirement"],
+      ["k4", 3000, "another tie at 3000: needle-4, sqlite stays the store"],
+      ["k6", 6000, "needle-6 has \u001fmultiple\u001f parts and the store"],
+      ["k7", 7000, "fifty is 50; the shop closes"],
+    ];
+    for (const [id, t, text] of texts) {
+      temporal.store({
+        projectPath: project,
+        info: msg("s", id, t),
+        parts: [
+          {
+            id: `part-${id}`,
+            sessionID: "s",
+            messageID: id,
+            type: "text",
+            text,
+            time: { start: 0, end: 0 },
+          },
+        ],
+      });
+    }
+    // Same words in another session of the project and in another project.
+    temporal.store({
+      projectPath: project,
+      info: msg("s2", "z1", 5000),
+      parts: [
+        {
+          id: "part-z1",
+          sessionID: "s2",
+          messageID: "z1",
+          type: "text",
+          text: "needle-3 in a different session, sqlite stays",
+          time: { start: 0, end: 0 },
+        },
+      ],
+    });
+    temporal.store({
+      projectPath: other,
+      info: msg("s", "o1", 5000),
+      parts: [
+        {
+          id: "part-o1",
+          sessionID: "s",
+          messageID: "o1",
+          type: "text",
+          text: "needle-3 in a different project, sqlite stays",
+          time: { start: 0, end: 0 },
+        },
+      ],
+    });
+    // stored row id → the source message id the seed used above.
+    const stored = new Map<string, string>();
+    for (const m of temporal.bySession(project, "s")) {
+      if (m.source_id) stored.set(m.id, m.source_id);
+    }
+    return { project, stored };
+  }
+  const sources = (items: { id: string }[], stored: Map<string, string>) =>
+    items.map((h) => stored.get(h.id));
+  const sorted = (xs: (string | undefined)[]) =>
+    [...xs].sort((a, b) => (a ?? "").localeCompare(b ?? ""));
+
+  test("a literal phrase with a short token and a stop word finds exactly its message, scoped to the session", () => {
+    const { project, stored } = seedSearch("phrase");
+    const page = searchSessionMessagesPage(project, "s", {
+      query: "Needle-3",
+      limit: 10,
+    });
+    expect(page.terms).toEqual(["needle", "3"]);
+    expect(page.mode).toBe("phrase");
+    expect(page.total).toBe(1);
+    expect(sources(page.items, stored)).toEqual(["k3"]);
+    expect(page.items[0].role).toBe("user");
+    expect(page.items[0].created_at).toBe(3000);
+    expect(page.items[0].snippet).toContain("needle-3");
+    expect(typeof page.items[0].rank).toBe("number");
+    expect(page.next).toBeNull();
+
+    const stop = searchSessionMessagesPage(project, "s", {
+      query: "the store",
+      limit: 10,
+    });
+    expect(stop.mode).toBe("phrase");
+    expect(sorted(sources(stop.items, stored))).toEqual(["k4", "k5", "k6"]);
+  });
+
+  test("phrase order, prefix on the last term only, case/separator-insensitive", () => {
+    const { project, stored } = seedSearch("prefix");
+    // "sqlite stays" is a phrase in k3, k4; "stays sqlite" is not.
+    expect(
+      sorted(
+        sources(
+          searchSessionMessagesPage(project, "s", {
+            query: "SQLITE  stays",
+            limit: 10,
+          }).items,
+          stored,
+        ),
+      ),
+    ).toEqual(["k3", "k4"]);
+    // Last term is a prefix: "sqlite sta" → same two; "sql stays" is not.
+    expect(
+      searchSessionMessagesPage(project, "s", {
+        query: "sqlite sta",
+        limit: 10,
+      }).total,
+    ).toBe(2);
+    const notPrefix = searchSessionMessagesPage(project, "s", {
+      query: "stays sql",
+      limit: 10,
+    });
+    // No phrase → falls back to every term anywhere, still with only the
+    // last term a prefix ("sql"* matches sqlite).
+    expect(notPrefix.mode).toBe("terms");
+    expect(sorted(sources(notPrefix.items, stored))).toEqual(["k3", "k4"]);
+    const innerNotPrefix = searchSessionMessagesPage(project, "s", {
+      query: "sql stays",
+      limit: 10,
+    });
+    expect(innerNotPrefix.mode).toBe("terms");
+    expect(innerNotPrefix.total).toBe(0);
+  });
+
+  test("a short token is a whole token unless it is the last term (`5` is not every `50`)", () => {
+    const { project, stored } = seedSearch("short");
+    // As the last term `5`* is a prefix, like a finder matching what was
+    // typed so far: k7 ("50").
+    const trailing = searchSessionMessagesPage(project, "s", {
+      query: "shop 5",
+      limit: 10,
+    });
+    expect(trailing.mode).toBe("terms");
+    expect(sources(trailing.items, stored)).toEqual(["k7"]);
+    // As an inner term `5` must be the token `5`; `50` does not count.
+    const inner = searchSessionMessagesPage(project, "s", {
+      query: "5 shop",
+      limit: 10,
+    });
+    expect(inner.mode).toBe("terms");
+    expect(inner.total).toBe(0);
+    // In a phrase it is adjacency that bounds it: only needle-5, never
+    // needle-1 … needle-6 or the 50.
+    const phrase = searchSessionMessagesPage(project, "s", {
+      query: "needle-5",
+      limit: 10,
+    });
+    expect(phrase.mode).toBe("phrase");
+    expect(sources(phrase.items, stored)).toEqual(["k5"]);
+  });
+
+  test("falls back to all-terms-anywhere only for multi-term queries, and says so", () => {
+    const { project, stored } = seedSearch("terms");
+    const p = searchSessionMessagesPage(project, "s", {
+      query: "store needle",
+      limit: 10,
+    });
+    expect(p.mode).toBe("terms");
+    expect(p.total).toBe(3);
+    expect(sorted(sources(p.items, stored))).toEqual(["k4", "k5", "k6"]);
+
+    const none = searchSessionMessagesPage(project, "s", {
+      query: "zzzz",
+      limit: 10,
+    });
+    expect(none).toEqual({
+      terms: ["zzzz"],
+      mode: "phrase",
+      items: [],
+      next: null,
+      total: 0,
+    });
+    const noneMulti = searchSessionMessagesPage(project, "s", {
+      query: "needle zzzz",
+      limit: 10,
+    });
+    expect(noneMulti.mode).toBe("terms");
+    expect(noneMulti.total).toBe(0);
+  });
+
+  test("FTS5 syntax in the query is literal, never an operator, and never throws", () => {
+    const { project } = seedSearch("syntax");
+    for (const q of [
+      'needle-3 OR "needle-1"',
+      "needle NEAR(3)",
+      "needle* -3",
+      "needle:3",
+      '""""',
+      "(needle) AND {3}",
+      "^needle",
+    ]) {
+      expect(() =>
+        searchSessionMessagesPage(project, "s", { query: q, limit: 10 }),
+      ).not.toThrow();
+    }
+    // `OR` is just another word: as a phrase it matches nothing, as terms
+    // "or" is absent from every message → 0, not a boolean union.
+    const or = searchSessionMessagesPage(project, "s", {
+      query: "needle-3 OR needle-1",
+      limit: 10,
+    });
+    expect(or.mode).toBe("terms");
+    expect(or.total).toBe(0);
+    // Operator-only input is unsearchable, not an error.
+    expect(
+      searchSessionMessagesPage(project, "s", {
+        query: '* " ( ) -',
+        limit: 10,
+      }),
+    ).toEqual({ terms: [], mode: "phrase", items: [], next: null, total: 0 });
+    // "near" as a word.
+    expect(
+      searchSessionMessagesPage(project, "s", { query: "NEAR", limit: 10 })
+        .total,
+    ).toBe(0);
+  });
+
+  test("pages newest-first with (created_at, id) keyset through a tie, chronological within a page, and pins the mode", () => {
+    const { project, stored } = seedSearch("paging");
+    // "needle" alone matches all six; ties k3/k4/k5 at 3000.
+    const walk = (mode?: "phrase" | "terms") => {
+      const out: string[][] = [];
+      let before: { created_at: number; id: string } | undefined;
+      for (;;) {
+        const p = searchSessionMessagesPage(project, "s", {
+          query: "needle",
+          limit: 2,
+          before,
+          mode,
+        });
+        expect(p.total).toBe(6);
+        out.push(sources(p.items, stored).map((src) => src ?? "?"));
+        if (!p.next) break;
+        before = p.next;
+      }
+      return out;
+    };
+    const pages = walk();
+    expect(pages.flat()).toHaveLength(6);
+    expect(new Set(pages.flat()).size).toBe(6);
+    expect(pages[0]).toHaveLength(2);
+    expect(pages[0][1]).toBe("k6");
+    // Chronological within each page: created_at never decreases.
+    for (const page of pages) {
+      const ts = page.map(
+        (src) =>
+          temporal.bySession(project, "s").find((m) => m.source_id === src)!
+            .created_at,
+      );
+      expect(ts).toEqual([...ts].sort((a, b) => a - b));
+    }
+    // The oldest is served last.
+    expect(pages.at(-1)?.[0]).toBe("k1");
+    // A pinned mode is honoured even where the first page would pick phrase.
+    const pinned = searchSessionMessagesPage(project, "s", {
+      query: "needle 6",
+      limit: 10,
+      mode: "terms",
+    });
+    expect(pinned.mode).toBe("terms");
+    expect(pinned.total).toBe(1);
   });
 });
 

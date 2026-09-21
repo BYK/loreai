@@ -141,6 +141,37 @@ test.describe("session reader", () => {
     );
   });
 
+  test("loading older history twice keeps the row under the eye where it was", async ({
+    page,
+  }) => {
+    // The distillation over messages 0–9 is the first row throughout: the
+    // prepended pages land after it, so a first-row witness would never see
+    // them. The rows arrive unmeasured and are measured against the scroll
+    // offset the virtualiser holds at that moment. Measured from the sticky
+    // toolbar's edge, which the row is read against.
+    await openReader(page);
+    await revealRow(page, "needle-140 ");
+    const rowTop = () =>
+      rowWith(page, "needle-140 ").evaluate(
+        (row) =>
+          row.getBoundingClientRect().top -
+          document
+            .querySelector('[data-testid="reader-toolbar"]')!
+            .getBoundingClientRect().bottom,
+      );
+    const before = await rowTop();
+    await page.getByTestId("load-older").click();
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "200 of 230",
+    );
+    await page.waitForTimeout(250);
+    expect(Math.abs((await rowTop()) - before)).toBeLessThan(2);
+    await page.getByTestId("load-older").click();
+    await expect(page.getByTestId("history-start")).toBeVisible();
+    await page.waitForTimeout(250);
+    expect(Math.abs((await rowTop()) - before)).toBeLessThan(2);
+  });
+
   test("a distillation is labelled compressed context, placed after its sources and never a search hit", async ({
     page,
   }) => {
@@ -262,6 +293,69 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("selection-quote")).toContainText(
       "needle-225",
     );
+  });
+
+  test("whole-session search reaches a hit two older pages back, highlights it and its link survives reload", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openReader(page);
+    // Message 8 is on the oldest page; "needle-8 and" is a literal nothing on
+    // the loaded page contains (needle-18x carries a different digit run).
+    const query = "needle-8 and";
+    await page.getByTestId("search-input").fill(query);
+    await expect(page.getByTestId("search-summary")).toContainText(
+      "No matches in loaded history",
+    );
+    await expect(page.locator("mark.passage-search")).toHaveCount(0);
+
+    await page.getByTestId("search-whole").click();
+    const whole = page.getByTestId("search-whole-summary");
+    await expect(whole).toHaveAttribute("data-whole-state", "done");
+    await expect(whole).toContainText(
+      "1 matching message in the whole session · 1 in older history",
+    );
+    // Still nothing on screen: a server hit is not a highlight until loaded.
+    await expect(page.locator("mark.passage-search")).toHaveCount(0);
+
+    await page.getByTestId("search-whole-next").click();
+    await expect(page.getByTestId("search-summary")).toContainText(
+      "1 of 1 in loaded history",
+    );
+    const hit = page.locator("mark.passage-search");
+    await expect(hit).toHaveText(query);
+    await expect(hit).toBeInViewport();
+    await expect(rowWith(page, "needle-8 and")).toBeVisible();
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "230 messages, complete as captured",
+    );
+    await expect(whole).toContainText("nothing more in older history");
+    await expect(page.getByTestId("search-whole-next")).toHaveCount(0);
+    await expect(page.getByTestId("search-reach")).toHaveCount(0);
+
+    // The hit becomes an addressable passage like any other selection.
+    await page.getByTestId("search-select").click();
+    await expect(page.getByTestId("selection-quote")).toContainText(query);
+    await page.getByTestId("copy-with-source").click();
+    await expect(page.getByTestId("copy-with-source")).toContainText("Copied");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    const copiedLink = copied.trim().split("\n").at(-1)!;
+
+    // A fresh document (not a same-page fragment hop): the passage is three
+    // pages back, so the reader pages through the real API again. The cached
+    // window may show the passage first ("completeness unknown"); the server's
+    // newest page then restarts the window and the link search re-pages to it.
+    await page.goto("about:blank");
+    await page.goto(copiedLink);
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "230 messages, complete as captured",
+    );
+    await expect(page.getByTestId("stale-indicator")).toHaveCount(0);
+    const marks = page.locator("mark.passage-target");
+    await expect(marks).toHaveText([query]);
+    // Viewport position after reload is #1863 (mobile lands under the panel).
+    await expect(page.getByTestId("link-state")).toHaveCount(0);
   });
 
   test("keyboard: rows are focusable and Enter selects a whole block", async ({
