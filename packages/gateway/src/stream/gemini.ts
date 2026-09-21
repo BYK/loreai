@@ -237,8 +237,14 @@ export async function accumulateGeminiSSEStream(
         ? (content.parts as GeminiPart[])
         : [];
       for (const p of parts) {
-        const block = geminiPartToBlock(p);
-        if (!block) continue;
+        const parsedBlock = geminiPartToBlock(p);
+        if (!parsedBlock) continue;
+        const signature = geminiPartThoughtSignature(p);
+        const block =
+          signature !== undefined &&
+          (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
+            ? { ...parsedBlock, raw: p }
+            : parsedBlock;
         if (
           block.type === "text" ||
           block.type === "thinking" ||
@@ -255,6 +261,7 @@ export async function accumulateGeminiSSEStream(
           const previous = contentBlocks.at(-1);
           if (previous?.type === "text") {
             previous.text += block.text;
+            if (block.raw !== undefined) previous.raw = block.raw;
           } else {
             contentBlocks.push(block);
           }
