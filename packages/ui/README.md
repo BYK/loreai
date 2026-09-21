@@ -599,6 +599,12 @@ virtualiser's total-size delta, so the passage under the reader's eye does
 not move; the restore runs when the rows land (the store's promise settles
 only after its cache write, by which time a search hit or deep link may own
 the scroll), and yields to a deep link that found its block in that page.
+The page is recognised by the last mounted row's index growing — the first
+row is no witness, since a distillation older than the loaded window stays
+first — and the virtualiser is handed the new offset directly, because the
+prepended rows enter at the estimate and their first measures would
+otherwise compensate against the offset it still holds from before the
+scroll event.
 Focus is logical (`focusKey`): arrow keys move it across rows
 that may not be mounted; the DOM focus lands when the virtualiser mounts
 the row.
@@ -909,7 +915,8 @@ bound / empty page, next-hit choice, every summary and reach label).
 
 Playwright (`e2e/reader.spec.ts`, against the built gateway seeded by
 `e2e/seed.mjs` — 230 messages + one gen-0 distillation — desktop + mobile
-projects): load older history twice → `history-start` + coverage
+projects): load older history twice keeps the row under the eye at the
+same distance from the toolbar; load older history twice → `history-start` + coverage
 `captured` / `complete as captured`; select → link → reload → same
 highlight (UX-01); changed source → honest state (UX-02); search over
 unmounted history → select as anchor; whole-session search for text

@@ -563,11 +563,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    * promise may settle well after it applied the page (it writes the cache
    * first), so the compensation keys off the rows, not the promise: by the
    * time it settles, a search hit or deep link may already own the scroll.
+   * The page is recognised by the last mounted row moving down the list; the
+   * first row is no witness, a distillation older than the window stays put.
    */
   let prepend: {
     top: number;
     total: number;
-    firstKey: string | undefined;
+    anchor: { key: string; index: number } | null;
     forLink: string | null;
   } | null = null;
 
@@ -580,10 +582,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     ) {
       return;
     }
+    const last = virtualizer.getVirtualItems().at(-1);
     prepend = {
       top: scrollEl.scrollTop,
       total: virtualizer.getTotalSize(),
-      firstKey: rows()[0]?.key,
+      anchor: last ? { key: String(last.key), index: last.index } : null,
       forLink: scrollTarget,
     };
     setOlderInFlight(true);
@@ -600,18 +603,26 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   createEffect(
     on(
       rows,
-      (current) => {
+      () => {
         const before = prepend;
-        // Only a prepend moves the first row; anything else keeps waiting.
-        if (!before || !scrollEl || current[0]?.key === before.firstKey) return;
+        if (!before || !scrollEl || !before.anchor) return;
+        // Anything that is not a prepend keeps waiting.
+        if (rowIndexOf(before.anchor.key) <= before.anchor.index) return;
         prepend = null;
         // A deep link that found its block in this page owns the scroll position.
         if (before.forLink !== null && rowIndexOf(before.forLink) >= 0) return;
         // The prepended rows are unmeasured, so they enter at the estimate; the
         // first-measure compensation in the virtualizer corrects the rest as
-        // they scroll into view.
+        // they are measured.
         const delta = virtualizer.getTotalSize() - before.total;
-        if (delta > 0) scrollEl.scrollTop = before.top + delta;
+        if (delta <= 0) return;
+        const target = before.top + delta;
+        virtualizer.scrollToOffset(target);
+        // The virtualizer learns the offset from the scroll event, a frame
+        // away. Until then it keeps the rows that sat at the old offset
+        // mounted, and their first measures would compensate against that
+        // offset and drag the viewport back; hand it the new one now.
+        virtualizer.scrollOffset = target;
       },
       { defer: true },
     ),
