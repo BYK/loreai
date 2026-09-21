@@ -21,6 +21,9 @@ import {
   cursorPage,
   distillationDetail,
   distillationList,
+  entityDetail,
+  entityListPage,
+  entityRebuildStatus,
   knowledgeEntry,
   knowledgeList,
   knowledgeVersionHistory,
@@ -53,6 +56,7 @@ const SEEDED = {
   knowledgeId: "",
   secondKnowledgeId: "",
   sessionId: "",
+  entityId: "",
 };
 
 beforeAll(async () => {
@@ -63,7 +67,7 @@ beforeAll(async () => {
 
   const { startServer } = await import("../src/server");
   const { loadConfig } = await import("../src/config");
-  const { close, ensureProject, ltm, temporal, db } =
+  const { close, ensureProject, entities, ltm, temporal, db } =
     await import("@loreai/core");
   closeDB = close;
   close();
@@ -122,6 +126,17 @@ beforeAll(async () => {
       "distilled observations",
       '["msg-0","msg-1"]',
     );
+
+  SEEDED.entityId = entities.create({
+    projectPath: SEEDED.projectPath,
+    entityType: "person",
+    canonicalName: "Ada Contract",
+    aliases: [
+      { type: "email", value: "ada.lovelace@analytical-engines.example.com" },
+    ],
+    metadata: { role: "engineer", notes: "Writes the contract fixtures." },
+  }).id;
+  entities.linkKnowledge(SEEDED.knowledgeId, SEEDED.entityId);
 
   const config = loadConfig();
   config.remoteGateway = false;
@@ -423,6 +438,33 @@ describe("ui contracts against the real gateway", () => {
       `/projects/${SEEDED.projectId}/sharing`,
       `/api/v1/projects/${SEEDED.projectId}/sharing`,
       sharingStatus,
+    );
+  });
+
+  it("GET /entities", async () => {
+    await contractRoute(
+      "entities-list.json",
+      "/entities",
+      "/api/v1/entities",
+      entityListPage,
+    );
+  });
+
+  it("GET /entities/:id", async () => {
+    await contractRoute(
+      "entity-detail.json",
+      `/entities/${SEEDED.entityId}`,
+      `/api/v1/entities/${SEEDED.entityId}`,
+      entityDetail,
+    );
+  });
+
+  it("GET /entities/rebuild", async () => {
+    await contractRoute(
+      "entity-rebuild-status.json",
+      "/entities/rebuild",
+      "/api/v1/entities/rebuild",
+      entityRebuildStatus,
     );
   });
 

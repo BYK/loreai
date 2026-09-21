@@ -15,6 +15,9 @@ import {
   cursorPage,
   distillationDetail,
   distillationList,
+  entityDetail,
+  entityListPage,
+  entityRebuildStatus,
   isApiError,
   isContractError,
   knowledgeEntry,
@@ -69,6 +72,12 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "folk-sharing.json": {
     route: "/projects/p/sharing",
     schema: sharingStatus,
+  },
+  "entities-list.json": { route: "/entities", schema: entityListPage },
+  "entity-detail.json": { route: "/entities/e", schema: entityDetail },
+  "entity-rebuild-status.json": {
+    route: "/entities/rebuild",
+    schema: entityRebuildStatus,
   },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {

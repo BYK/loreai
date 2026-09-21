@@ -1,0 +1,18 @@
+{
+  "entities": [
+    {
+      "id": "<uuid-0>",
+      "entity_type": "person",
+      "canonical_name": "Ada Contract",
+      "project_id": "<uuid-1>",
+      "cross_project": true,
+      "aliases": [
+        "ada.lovelace@analytical-engines.example.com"
+      ],
+      "created_at": 1700000000000,
+      "updated_at": 1700000001000
+    }
+  ],
+  "next_cursor": null,
+  "total": 1
+}

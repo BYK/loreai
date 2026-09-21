@@ -8,5 +8,6 @@ export * from "./distillation";
 export * from "./page";
 export * from "./folk";
 export * from "./parse";
+export * from "./entities";
 export * from "./recall";
 export * from "./knowledge-query";

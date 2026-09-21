@@ -1,6 +1,6 @@
 import type { Component, JSX } from "solid-js";
 import { For, Match, Show, Switch } from "solid-js";
-import { A } from "@solidjs/router";
+import { A, useLocation } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
 import type { ProjectSummary } from "~/contracts";
@@ -95,6 +95,7 @@ export interface NavProps {
 
 export const Nav: Component<NavProps> = (props) => {
   const conn = useConnection();
+  const location = useLocation();
   return (
     <nav
       aria-label="Workspace"
@@ -178,6 +179,13 @@ export const Nav: Component<NavProps> = (props) => {
       </Switch>
 
       <NavHeading>Memory</NavHeading>
+      <NavItem
+        href="/entities"
+        active={location.pathname.startsWith("/entities")}
+        testId="nav-entities"
+      >
+        Entities
+      </NavItem>
       <div class="my-0.5 flex items-center justify-between gap-2 px-3 py-2.25 text-sm text-muted">
         <span>Sessions</span>
         <span class="text-[10px] uppercase tracking-wider">UI-05</span>

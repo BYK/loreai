@@ -604,6 +604,11 @@ async function handleImportExtract(
  */
 let activeRebuildAbort: AbortController | null = null;
 
+/** True while an entity rebuild POST is in flight (dashboard status poll). */
+export function isEntityRebuildActive(): boolean {
+  return activeRebuildAbort !== null;
+}
+
 /**
  * POST /api/v1/entities/rebuild — re-derive entities from distillation history.
  *

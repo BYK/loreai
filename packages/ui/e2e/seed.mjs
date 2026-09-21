@@ -226,6 +226,30 @@ for (let k = 0; k < MESSAGES; k++) {
   });
 }
 
+// Entities for the UI-08 screens: a person with aliases + metadata, an org
+// linked by a relation, and a repo. `entities.create` is the same API the
+// rebuild pipeline uses.
+const ada = core.entities.create({
+  projectPath: lore,
+  entityType: "person",
+  canonicalName: "Ada Lovelace",
+  aliases: [{ type: "email", value: "ada@example.com" }],
+  metadata: { role: "engineer", notes: "First programmer." },
+});
+const analyticalEngines = core.entities.create({
+  projectPath: lore,
+  entityType: "org",
+  canonicalName: "Analytical Engines Ltd",
+});
+const loreRepo = core.entities.create({
+  projectPath: lore,
+  entityType: "repo",
+  canonicalName: "loreai",
+});
+core.entities.addRelation(ada.id, analyticalEngines.id, "colleague");
+core.entities.linkKnowledge(firstKnowledgeId, ada.id);
+void loreRepo;
+
 core.close();
 
 // One gen-0 distillation over the first ten messages, written the way

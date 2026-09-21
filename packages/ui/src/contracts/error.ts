@@ -20,6 +20,7 @@ export type ApiErrorBody = typeof apiErrorBody.infer;
 export type ApiErrorKind =
   | "unreachable"
   | "unauthorized"
+  | "forbidden"
   | "not_found"
   | "invalid"
   | "http";

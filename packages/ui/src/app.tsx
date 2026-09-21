@@ -75,6 +75,20 @@ const devOnlyRoutes: RouteDefinition[] = import.meta.env.DEV
 export const routes: RouteDefinition[] = [
   { path: "/", component: () => <Browse view="welcome" /> },
   {
+    path: "/entities",
+    component: lazy(() =>
+      import("./routes/Entities").then((m) => ({ default: m.EntitiesList })),
+    ),
+  },
+  {
+    path: "/entities/:entityId",
+    component: lazy(() =>
+      import("./routes/Entities").then((m) => ({
+        default: m.EntityDetailRoute,
+      })),
+    ),
+  },
+  {
     path: "/projects/:projectId/knowledge/:knowledgeId",
     component: () => <Browse view="entry" />,
   },

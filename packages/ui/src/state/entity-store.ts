@@ -61,6 +61,17 @@ export function createEntityStore<T>(keyOf: (value: T) => string) {
         partial: !meta.complete,
       }));
     },
+    /** Drop a record and strip it from every scope list. */
+    remove(key: string) {
+      setState("byKey", key, undefined as never);
+      setState("lists", (lists) => {
+        const next: Record<string, string[]> = {};
+        for (const [scope, ids] of Object.entries(lists)) {
+          next[scope] = ids.filter((id) => id !== key);
+        }
+        return next;
+      });
+    },
     setStatus(key: string, patch: Partial<KeyStatus>) {
       setState("status", key, (prev) => ({
         ...(prev ?? IDLE_STATUS),

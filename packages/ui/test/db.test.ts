@@ -62,7 +62,7 @@ async function open(f: IDBFactory) {
 }
 
 describe("openLoreDb", () => {
-  it("creates a v2 database with every store", async () => {
+  it("creates a v3 database with every store", async () => {
     const f = factory();
     const db = await open(f);
     expect(db).not.toBeNull();
@@ -72,6 +72,7 @@ describe("openLoreDb", () => {
       "projects",
       "knowledge",
       "sessions",
+      "entities",
       "messageBlocks",
       "collections",
       "drafts",
@@ -105,9 +106,10 @@ describe("openLoreDb", () => {
 
     const db = await open(f);
     expect(db).not.toBeNull();
-    expect(db!.version).toBe(2);
+    expect(db!.version).toBe(3);
     expect(await getMeta(db, "pref")).toEqual({ theme: "dark" });
     expect(db!.objectStoreNames.contains("knowledge")).toBe(true);
+    expect(db!.objectStoreNames.contains("entities")).toBe(true);
   });
 
   it("resets a corrupted database missing stores and reopens", async () => {
@@ -129,21 +131,21 @@ describe("openLoreDb", () => {
     expect(db!.objectStoreNames.contains("collections")).toBe(true);
   });
 
-  it("resets when a higher version exists (VersionError) and reopens at v2", async () => {
+  it("resets when a higher version exists (VersionError) and reopens at v3", async () => {
     const f = factory();
-    const v3 = await new Promise<IDBDatabase>((resolve, reject) => {
-      const req = f.open(LORE_DB_NAME, 3);
+    const v4 = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = f.open(LORE_DB_NAME, 4);
       req.onupgradeneeded = () => {
         req.result.createObjectStore("meta", { keyPath: "key" });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
-    v3.close();
+    v4.close();
 
     const db = await open(f);
     expect(db).not.toBeNull();
-    expect(db!.version).toBe(2);
+    expect(db!.version).toBe(3);
   });
 
   it("resolves null when open keeps failing", async () => {

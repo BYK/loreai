@@ -30,6 +30,7 @@ const CACHED_STORES = [
   "projects",
   "knowledge",
   "sessions",
+  "entities",
   "messageBlocks",
 ] as const;
 
@@ -56,7 +57,8 @@ function upgrade(db: IDBDatabase, oldVersion: number) {
     db.createObjectStore("meta", { keyPath: "key" });
   }
   if (oldVersion < 2) {
-    for (const name of CACHED_STORES) {
+    // v2's original set — `entities` joined in v3 below.
+    for (const name of ["projects", "knowledge", "sessions", "messageBlocks"]) {
       const store = db.createObjectStore(name, { keyPath: "key" });
       store.createIndex("by-scope", "scope");
       store.createIndex("by-accessed", "accessedAt");
@@ -67,6 +69,12 @@ function upgrade(db: IDBDatabase, oldVersion: number) {
     drafts.createIndex("by-updated", "updatedAt");
     const pending = db.createObjectStore("pendingChanges", { keyPath: "key" });
     pending.createIndex("by-created", "createdAt");
+  }
+  if (oldVersion < 3) {
+    const entities = db.createObjectStore("entities", { keyPath: "key" });
+    entities.createIndex("by-scope", "scope");
+    entities.createIndex("by-accessed", "accessedAt");
+    entities.createIndex("by-stored", "storedAt");
   }
 }
 

@@ -3,6 +3,7 @@ import { createSignal } from "solid-js";
 import type { ApiClient } from "~/lib/api";
 import {
   closeLoreDb,
+  createEntitiesRepo,
   createKnowledgeRepo,
   createMessageBlocksRepo,
   createProjectsRepo,
@@ -14,6 +15,7 @@ import {
   type Repository,
 } from "~/db";
 
+import { createEntitiesState } from "./entities";
 import { createKnowledgeState } from "./knowledge";
 import { createProjectsState } from "./projects";
 import { createSessionsState } from "./sessions";
@@ -77,6 +79,10 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     () => current,
     (h) => createKnowledgeRepo(h),
   );
+  const entitiesRepo = lazyRepo(
+    () => current,
+    (h) => createEntitiesRepo(h),
+  );
   const sessionsRepo = lazyRepo(
     () => current,
     (h) => createSessionsRepo(h),
@@ -96,6 +102,11 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     repo: knowledgeRepo,
     tracked,
   });
+  const entities = createEntitiesState({
+    client,
+    repo: entitiesRepo,
+    tracked,
+  });
   const sessions = createSessionsState({
     client,
     repos: { sessions: sessionsRepo, messageBlocks: messageBlocksRepo },
@@ -107,6 +118,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
   return {
     projects,
     knowledge,
+    entities,
     sessions,
     recall,
     cache: {
