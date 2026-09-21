@@ -933,7 +933,8 @@ Knowledge provenance is session-level: a document links to the recorded source
 session, not to an inferred message or a similar session. When original
 messages expire, the detail page retains the session identifier and reports
 the retained summary or unavailable state; it never redirects to another
-source.
+source. Retained-summary evidence lazily loads the distillation text from
+`GET /api/v1/distillations/:id` on expand (read-only, no LLM).
 
 ## UX → component mapping
 

@@ -1,14 +1,18 @@
 import { createSignal } from "solid-js";
 import { MemoryRouter } from "@solidjs/router";
 import { Route } from "@solidjs/router";
-import { render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   authorOf,
   KnowledgeDocument,
 } from "~/components/lore/KnowledgeDocument";
-import type { KnowledgeEntry, KnowledgeVersionHistory } from "~/contracts";
+import type {
+  DistillationDetail,
+  KnowledgeEntry,
+  KnowledgeVersionHistory,
+} from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import type { EvidenceResult } from "~/state/sessions";
 import { ApiError } from "~/lib/api";
@@ -92,6 +96,7 @@ function renderDocument(
     versions?: Loader<KnowledgeVersionHistory>;
     evidence?: Loader<EvidenceResult>;
     project?: typeof project;
+    loadDistillation?: (id: string) => Promise<DistillationDetail>;
   } = {},
 ) {
   return render(() => (
@@ -116,6 +121,7 @@ function renderDocument(
               })
             }
             evidence={overrides.evidence}
+            loadDistillation={overrides.loadDistillation}
           />
         )}
       />
@@ -220,6 +226,146 @@ describe("KnowledgeDocument", () => {
     } else {
       expect(screen.getByText(text)).toBeInTheDocument();
     }
+  });
+
+  it("loads retained summary text only when its details open", async () => {
+    const loadDistillation = vi.fn(async (id: string) => ({
+      id,
+      session_id: "s-1",
+      project_id: "p",
+      generation: 0,
+      token_count: 2,
+      r_compression: 0.5,
+      c_norm: 0.5,
+      archived: 1,
+      created_at: 1,
+      observations: "The retained summary text.",
+      source_ids: "[]",
+    }));
+    const view = renderDocument({
+      evidence: loader({
+        state: "summary_only" as const,
+        detail: {
+          messages: [],
+          distillations: [
+            {
+              id: "d1",
+              session_id: "s-1",
+              generation: 0,
+              token_count: 2,
+              r_compression: 0.5,
+              c_norm: 0.5,
+              archived: 1,
+              created_at: 1,
+              call_type: "observer",
+            },
+          ],
+        },
+      }),
+      loadDistillation,
+    });
+    const details = view.getByTestId(
+      "retained-summary-d1",
+    ) as HTMLDetailsElement;
+    expect(loadDistillation).not.toHaveBeenCalled();
+
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await waitFor(() => expect(loadDistillation).toHaveBeenCalledWith("d1"));
+    await waitFor(() =>
+      expect(
+        screen.getByText("The retained summary text."),
+      ).toBeInTheDocument(),
+    );
+    fireEvent(details, new Event("toggle"));
+    expect(loadDistillation).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders retained observations as inert text", async () => {
+    const view = renderDocument({
+      evidence: loader({
+        state: "summary_only" as const,
+        detail: {
+          messages: [],
+          distillations: [
+            {
+              id: "d1",
+              session_id: "s-1",
+              generation: 0,
+              token_count: 2,
+              r_compression: 0.5,
+              c_norm: 0.5,
+              archived: 1,
+              created_at: 1,
+              call_type: "observer",
+            },
+          ],
+        },
+      }),
+      loadDistillation: async (id) => ({
+        id,
+        session_id: "s-1",
+        project_id: "p",
+        generation: 0,
+        token_count: 2,
+        r_compression: 0.5,
+        c_norm: 0.5,
+        archived: 1,
+        created_at: 1,
+        observations: "<img src=x onerror=alert(1)>",
+        source_ids: "[]",
+      }),
+    });
+    const details = view.getByTestId(
+      "retained-summary-d1",
+    ) as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await waitFor(() =>
+      expect(
+        screen.getByText("<img src=x onerror=alert(1)>"),
+      ).toBeInTheDocument(),
+    );
+    expect(details.querySelector("img")).toBeNull();
+  });
+
+  it("renders retained summary load errors without a summary", async () => {
+    const view = renderDocument({
+      evidence: loader({
+        state: "summary_only" as const,
+        detail: {
+          messages: [],
+          distillations: [
+            {
+              id: "d1",
+              session_id: "s-1",
+              generation: 0,
+              token_count: 2,
+              r_compression: 0.5,
+              c_norm: 0.5,
+              archived: 1,
+              created_at: 1,
+              call_type: "observer",
+            },
+          ],
+        },
+      }),
+      loadDistillation: vi
+        .fn()
+        .mockRejectedValue(new Error("distillation failed")),
+    });
+    const details = view.getByTestId(
+      "retained-summary-d1",
+    ) as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    await waitFor(() =>
+      expect(screen.getByText("distillation failed")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(/Lore's summary of the expired messages/),
+    ).toBeNull();
+    expect(screen.queryByText("The retained summary text.")).toBeNull();
   });
 
   it("labels linked source sessions when the exact message is unavailable", () => {
