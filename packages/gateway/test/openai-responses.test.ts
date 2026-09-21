@@ -1437,6 +1437,29 @@ describe("buildOpenAIResponsesResponse", () => {
     expect(body.output).toEqual(rawOutputItems);
   });
 
+  test("streaming: preserves native reasoning output items", async () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_abc",
+      status: "completed",
+      summary: [],
+      encrypted_content: "encrypted-reasoning",
+    };
+    const response = buildOpenAIResponsesResponse(
+      {
+        ...baseResponse,
+        rawOutputItems: [reasoning],
+      },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.output_item.added");
+    expect(text).toContain("event: response.output_item.done");
+    expect(text).toContain('"encrypted_content":"encrypted-reasoning"');
+    expect(text).toContain('"output":[{"type":"reasoning"');
+  });
+
   test("non-streaming: max_tokens maps to incomplete status", async () => {
     const resp: GatewayResponse = {
       ...baseResponse,
