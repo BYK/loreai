@@ -330,10 +330,19 @@ pnpm --filter @loreai/ui test           # Vitest, jsdom
 pnpm --filter @loreai/ui build          # -> packages/ui/dist (hashed assets)
 pnpm --filter @loreai/ui preview        # serve dist locally
 pnpm --filter @loreai/ui test:e2e       # Playwright against the BUILT gateway (see below)
+pnpm --filter @loreai/ui measure:p1     # reproducible UI-07 startup, latency, bundle and scroll measurements
 node scripts/ui-deep-link-smoke.mjs     # browser-free deep-link smoke against the built gateway
 
 pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm test && pnpm run build   # root flows include this package
 ```
+
+### Measurements
+
+`packages/ui/scripts/measure-p1.mjs` runs the reproducible UI-07 P1 probes
+against throw-away gateway data. Use `--runs` and `--requests` to control
+sample counts, `--baseline <commit>` for an isolated worktree comparison,
+`--json` or `--markdown` for artifacts, and `--write-readme` to replace the
+generated measurements block below.
 
 ### Development workflow
 
@@ -1012,6 +1021,86 @@ The SPA is staged next to the bundle (or as SEA assets) and loaded lazily on
 the first `/ui` request; the proxy path is unchanged. (The bundle size above
 predates the move from an embedded module to staged files, which took
 `dist/index.cjs` back to ≈17.45 MB.)
+
+<!-- p1-measurements:start -->
+### UI-07 P1 measurements
+
+Command: `/opt/hostedtoolcache/node/22.23.2/x64/bin/node /home/ubuntu/repos/loreai/packages/ui/scripts/measure-p1.mjs --runs 5 --requests 200 --baseline a4e6af5b --json /home/ubuntu/measure-p1.json --write-readme`
+
+Machine: INTEL(R) XEON(R) PLATINUM 8559C × 8; 31.3 GiB; Node v22.23.2; linux 6.8.0-1061-aws x64.
+
+Git SHA: `095d3f1b`; measured 2026-09-21T09:16:31.431Z.
+
+| Metric | Current | Baseline |
+|---|---:|---:|
+| Startup → first 200 `/health` (median of 5 runs) | p50 1180.11 ms | p50 1134.74 ms |
+| RSS after start | p50 346.95 MB | p50 348.21 MB |
+| RSS after serving UI | p50 353.38 MB | — |
+
+Latency summaries use 200 warmed requests per endpoint; each value is the median of per-run percentiles.
+
+| Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 |
+|---|---:|---:|
+| `POST /v1/messages` | 31.96 / 131.79 / 212.51 ms | 30.06 / 123.8 / 224.25 ms |
+| `GET /health` | 0.57 / 21.22 / 102.04 ms | 0.52 / 28.47 / 77.87 ms |
+| `GET /api/v1/projects` | 0.58 / 19.78 / 94.09 ms | 0.53 / 26.11 / 74.56 ms |
+| `GET /ui/` | 0.57 / 23.02 / 86.92 ms | — |
+| `GET /ui/assets/index-CurzdKYW.js` | 2.32 / 3.1 / 4.93 ms | — |
+
+| Bundle asset | Raw | gzip-9 | Brotli-11 |
+|---|---:|---:|---:|
+| `assets/dm-sans-latin-ext-wght-italic-DUE6_iCb.woff2` | 20,808 B | 20,836 B | 20,807 B |
+| `assets/dm-sans-latin-ext-wght-normal-BOFOeGcA.woff2` | 18,228 B | 18,256 B | 18,227 B |
+| `assets/dm-sans-latin-wght-italic-Cz4n9dED.woff2` | 39,712 B | 39,644 B | 39,716 B |
+| `assets/dm-sans-latin-wght-normal-Xz1IZZA0.woff2` | 36,932 B | 36,852 B | 36,936 B |
+| `assets/index-CGG3gk1z.css` | 44,504 B | 9,214 B | 8,037 B |
+| `assets/index-CGG3gk1z.css.br` | 8,037 B | 8,060 B | 8,041 B |
+| `assets/index-CGG3gk1z.css.gz` | 9,214 B | 9,237 B | 9,218 B |
+| `assets/index-CurzdKYW.js` | 450,352 B | 139,102 B | 120,053 B |
+| `assets/index-CurzdKYW.js.br` | 120,053 B | 120,111 B | 120,058 B |
+| `assets/index-CurzdKYW.js.gz` | 139,102 B | 139,165 B | 139,107 B |
+| `assets/loreai-BYyO8ZaX.svg` | 11,885 B | 4,931 B | 4,352 B |
+| `assets/loreai-BYyO8ZaX.svg.br` | 4,352 B | 4,375 B | 4,356 B |
+| `assets/loreai-BYyO8ZaX.svg.gz` | 4,931 B | 4,954 B | 4,935 B |
+| `assets/loreai-dark-BoECdKok.svg` | 11,902 B | 4,934 B | 4,340 B |
+| `assets/loreai-dark-BoECdKok.svg.br` | 4,340 B | 4,363 B | 4,344 B |
+| `assets/loreai-dark-BoECdKok.svg.gz` | 4,934 B | 4,957 B | 4,938 B |
+| `assets/marked.esm-DFH_7NNB.js` | 43,074 B | 12,727 B | 11,627 B |
+| `assets/marked.esm-DFH_7NNB.js.br` | 11,627 B | 11,650 B | 11,631 B |
+| `assets/marked.esm-DFH_7NNB.js.gz` | 12,727 B | 12,750 B | 12,731 B |
+| `assets/playfair-display-latin-400-italic-LeeEXsx5.woff2` | 21,884 B | 21,912 B | 21,884 B |
+| `assets/playfair-display-latin-400-normal-CFtfchNt.woff2` | 21,856 B | 21,829 B | 21,791 B |
+| `assets/playfair-display-latin-ext-400-italic-zVOgzDMq.woff2` | 13,668 B | 13,691 B | 13,672 B |
+| `assets/playfair-display-latin-ext-400-normal-BxlSGspa.woff2` | 12,336 B | 12,359 B | 12,337 B |
+| `assets/recall-text-B0O2pagn.js` | 1,747 B | 779 B | 699 B |
+| `assets/recall-text-B0O2pagn.js.br` | 699 B | 722 B | 703 B |
+| `assets/recall-text-B0O2pagn.js.gz` | 779 B | 802 B | 783 B |
+| `assets/Session-CI-EMvNK.js` | 160,640 B | 54,061 B | 47,612 B |
+| `assets/Session-CI-EMvNK.js.br` | 47,612 B | 47,645 B | 47,616 B |
+| `assets/Session-CI-EMvNK.js.gz` | 54,061 B | 54,099 B | 54,065 B |
+| `favicon.svg` | 11,922 B | 4,987 B | 4,383 B |
+| `favicon.svg.br` | 4,383 B | 4,406 B | 4,387 B |
+| `favicon.svg.gz` | 4,987 B | 5,010 B | 4,991 B |
+| `index.html` | 515 B | 305 B | 186 B |
+| `index.html.br` | 186 B | 209 B | 190 B |
+| `index.html.gz` | 305 B | 328 B | 309 B |
+| `ui-manifest.json` | 2,559 B | 648 B | 558 B |
+| **Total staged UI** | **1,356,853 B** | **849,910 B** | **819,620 B** |
+| `dist/index.cjs` | 17,502,679 B | — | — |
+
+| First render (5 fresh contexts) | Median |
+|---|---:|
+| domContentLoadedEventEnd | 111.8 ms |
+| loadEventEnd | 137.6 ms |
+| firstPaint | 20 ms |
+| firstContentfulPaint | 144 ms |
+| firstUsefulContentMs | 171.5 ms |
+
+| Long-history scroll | Frame p50 / p95 / max | Frames >50 ms | Long tasks (count / total / max) | Fixture frame p95 / max |
+|---|---:|---:|---:|---:|
+| desktop (1280×800) | 16.7 / 16.7 / 16.8 ms | 0 | 2 / 263 / 191 ms | 16.700000000000273 / 16.800000000000182 ms |
+| mobile (393×852, DPR 3) | 16.7 / 16.8 / 33.4 ms | 0 | 2 / 255 / 184 ms | 16.799999999999727 / 33.399999999999864 ms |
+<!-- p1-measurements:end -->
 
 ## Data authority
 
