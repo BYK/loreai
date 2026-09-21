@@ -1,9 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setForceMinLayer } from "@loreai/core";
-import type {
-  GatewayRequest,
-  GatewayResponse,
-} from "../src/translate/types";
+import type { GatewayRequest, GatewayResponse } from "../src/translate/types";
 import { loadConfig } from "../src/config";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
 import {
@@ -47,9 +44,7 @@ afterEach(async () => {
   await resetPipelineState();
 });
 
-function requestWithMessages(
-  messages: GatewayRequest["messages"],
-): GatewayRequest {
+function requestWithMessages(messages: GatewayRequest["messages"]): GatewayRequest {
   return { ...request(), stream: false, messages };
 }
 
@@ -114,9 +109,7 @@ describe("Responses upstream error relay", () => {
     const failed = await handleRequest(transition, localConfig());
     expect(failed.status).toBe(502);
     await failed.text();
-    expect(getActiveSessions().get(sessionID)?.lastAcceptedProvenanceLayer).toBe(
-      0,
-    );
+    expect(getActiveSessions().get(sessionID)?.lastAcceptedProvenanceLayer).toBe(0);
 
     setForceMinLayer(1, sessionID);
     const retry = requestWithMessages(messages);
@@ -127,9 +120,7 @@ describe("Responses upstream error relay", () => {
 
     expect(JSON.stringify(bodies[1])).not.toContain("encrypted_retry_test");
     expect(JSON.stringify(bodies[2])).not.toContain("encrypted_retry_test");
-    expect(getActiveSessions().get(sessionID)?.lastAcceptedProvenanceLayer).toBe(
-      1,
-    );
+    expect(getActiveSessions().get(sessionID)?.lastAcceptedProvenanceLayer).toBe(1);
   });
 
   it("returns a gateway failure before committing a stream on transport errors", async () => {
