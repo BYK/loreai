@@ -28,20 +28,13 @@ import {
 } from "./types";
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
-import {
-  parseStreamedRequest,
-  type StreamingRequestSpec,
-} from "./streaming-request";
+import { parseStreamedRequest, type StreamingRequestSpec } from "./streaming-request";
 
 export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
 
 function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
   const inclusiveInputTokens = safeTokenSum(
-    [
-      usage.inputTokens,
-      usage.cacheReadInputTokens,
-      usage.cacheCreationInputTokens,
-    ],
+    [usage.inputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens],
     "Responses usage overflow",
   );
   const result: Record<string, unknown> = {
@@ -52,10 +45,7 @@ function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
       "Responses usage overflow",
     ),
   };
-  if (
-    usage.cacheReadInputTokens != null ||
-    usage.cacheCreationInputTokens != null
-  ) {
+  if (usage.cacheReadInputTokens != null || usage.cacheCreationInputTokens != null) {
     result.input_tokens_details = {
       cached_tokens: usage.cacheReadInputTokens ?? 0,
       cache_write_tokens: usage.cacheCreationInputTokens ?? 0,
@@ -78,8 +68,7 @@ export function parseOpenAIResponsesRequest(
   const stream = raw.stream === true;
 
   // max_output_tokens defaults to 4096 if not specified
-  const maxTokens =
-    typeof raw.max_output_tokens === "number" ? raw.max_output_tokens : 4096;
+  const maxTokens = typeof raw.max_output_tokens === "number" ? raw.max_output_tokens : 4096;
 
   // System prompt comes from `instructions`
   const system = typeof raw.instructions === "string" ? raw.instructions : "";
@@ -168,10 +157,7 @@ const CODEX_TOP_LEVEL_KEYS = new Set([
   "service_tier",
 ]);
 
-function addCodexControls(
-  req: GatewayRequest,
-  raw: Record<string, unknown>,
-): GatewayRequest {
+function addCodexControls(req: GatewayRequest, raw: Record<string, unknown>): GatewayRequest {
   req.codex = true;
   if (!req.extras) req.extras = {};
   const extras = req.extras;
@@ -202,9 +188,7 @@ const responsesSpec = (
     : RESPONSES_TOP_LEVEL_KEYS,
   createItemsBuilder: createInputItemsBuilder,
   parseSync: (raw) =>
-    codex
-      ? parseOpenAICodexRequest(raw, headers)
-      : parseOpenAIResponsesRequest(raw, headers),
+    codex ? parseOpenAICodexRequest(raw, headers) : parseOpenAIResponsesRequest(raw, headers),
   assemble(raw, streamed) {
     const req = parseOpenAIResponsesRequest(raw, headers);
     if (streamed) req.messages = streamed;
@@ -289,9 +273,7 @@ function createInputItemsBuilder(): {
       pendingReasoning = [];
     } else if (pendingReasoning.length > 0) {
       message.provenanceContent = [...pendingReasoning, ...content];
-      message.provenancePositions = content.map(
-        (_block, index) => pendingReasoning.length + index,
-      );
+      message.provenancePositions = content.map((_block, index) => pendingReasoning.length + index);
       pendingReasoning = [];
     }
     messages.push(message);
@@ -306,9 +288,7 @@ function createInputItemsBuilder(): {
     if (itemType === "message" || (!itemType && role)) {
       // Message item — has role + content
       const msgRole =
-        role === "assistant" || role === "developer" || role === "system"
-          ? role
-          : "user";
+        role === "assistant" || role === "developer" || role === "system" ? role : "user";
 
       const content = parseMessageContent(raw.content);
 
@@ -320,11 +300,7 @@ function createInputItemsBuilder(): {
         }
       } else if (msgRole === "assistant") {
         const parsed = parseAssistantMessageContent(raw);
-        appendAssistant(
-          parsed.content,
-          parsed.provenanceContent,
-          parsed.provenancePositions,
-        );
+        appendAssistant(parsed.content, parsed.provenanceContent, parsed.provenancePositions);
       } else {
         if (content.length > 0) {
           messages.push({ role: "user", content });
@@ -359,9 +335,7 @@ function createInputItemsBuilder(): {
         last.content.every((b) => b.type === "tool_use");
       if (lastIsToolUseMessage) {
         const provenance = last.provenanceContent ?? [...last.content];
-        const positions =
-          last.provenancePositions ??
-          last.content.map((_block, index) => index);
+        const positions = last.provenancePositions ?? last.content.map((_block, index) => index);
         const position = provenance.length + pendingReasoning.length;
         provenance.push(...pendingReasoning, toolUseBlock);
         positions.push(position);
@@ -461,11 +435,7 @@ function parseMessageContent(content: unknown): GatewayContentBlock[] {
 
   const blocks: GatewayContentBlock[] = [];
   for (const part of content as Array<Record<string, unknown>>) {
-    if (
-      part.type === "input_text" ||
-      part.type === "output_text" ||
-      part.type === "text"
-    ) {
+    if (part.type === "input_text" || part.type === "output_text" || part.type === "text") {
       const text = asString(part.text);
       if (text) blocks.push({ type: "text", text });
     } else {
@@ -483,9 +453,7 @@ function parseAssistantMessageContent(item: Record<string, unknown>): {
   provenancePositions: number[];
 } {
   if (typeof item.content === "string") {
-    const content = item.content
-      ? [{ type: "text" as const, text: item.content }]
-      : [];
+    const content = item.content ? [{ type: "text" as const, text: item.content }] : [];
     return {
       content,
       provenanceContent: [...content],
@@ -541,9 +509,7 @@ function buildStrictRecallParameters(
   const schema = { ...inputSchema };
   delete schema.anyOf;
   const sourceProperties =
-    schema.properties &&
-    typeof schema.properties === "object" &&
-    !Array.isArray(schema.properties)
+    schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
       ? (schema.properties as Record<string, unknown>)
       : {};
   const properties = Object.fromEntries(
@@ -558,13 +524,8 @@ function buildStrictRecallParameters(
           ? [property.type]
           : [];
       const nonNullTypes = sourceTypes.filter((item) => item !== "null");
-      if (
-        nonNullTypes.length === 0 ||
-        nonNullTypes.some((item) => typeof item !== "string")
-      ) {
-        throw new Error(
-          `Recall schema property "${name}" must declare a non-null type`,
-        );
+      if (nonNullTypes.length === 0 || nonNullTypes.some((item) => typeof item !== "string")) {
+        throw new Error(`Recall schema property "${name}" must declare a non-null type`);
       }
       const type = [...nonNullTypes, "null"];
       return [
@@ -574,9 +535,7 @@ function buildStrictRecallParameters(
           type,
           ...(Array.isArray(property.enum)
             ? {
-                enum: property.enum.includes(null)
-                  ? property.enum
-                  : [...property.enum, null],
+                enum: property.enum.includes(null) ? property.enum : [...property.enum, null],
               }
             : {}),
         },
@@ -697,11 +656,7 @@ export function buildOpenAIResponsesUpstreamRequest(
   }
 
   const providerRouting = providerRoutingValue(req);
-  if (
-    !req.codex &&
-    providerRouting.present &&
-    requestTargetsOpenRouter(req, upstreamBase)
-  ) {
+  if (!req.codex && providerRouting.present && requestTargetsOpenRouter(req, upstreamBase)) {
     body.provider = providerRouting.value;
   }
 
@@ -731,10 +686,7 @@ export function buildOpenAIResponsesUpstreamRequest(
  *    (`include`, `prompt_cache_key`, `text`, `tool_choice`,
  *    `parallel_tool_calls`, `service_tier`).
  */
-function applyCodexResponsesDelta(
-  body: Record<string, unknown>,
-  req: GatewayRequest,
-): void {
+function applyCodexResponsesDelta(body: Record<string, unknown>, req: GatewayRequest): void {
   // ChatGPT Codex rejects the request if this parameter is present
   // ("Unsupported parameter: max_output_tokens"). There is no per-request cap
   // to send instead — Codex enforces its own server-side output limits.
@@ -759,9 +711,7 @@ function applyCodexResponsesDelta(
   }
 }
 
-function buildResponsesInput(
-  messages: GatewayMessage[],
-): Array<Record<string, unknown>> {
+function buildResponsesInput(messages: GatewayMessage[]): Array<Record<string, unknown>> {
   const items: Array<Record<string, unknown>> = [];
   const appendItem = (item: Record<string, unknown>): void => {
     const previous = items[items.length - 1];
@@ -845,9 +795,7 @@ export function buildOpenAIResponsesResponse(
   return buildOpenAIResponsesNonStreamResponse(resp);
 }
 
-function buildOpenAIResponsesNonStreamResponse(
-  resp: GatewayResponse,
-): Response {
+function buildOpenAIResponsesNonStreamResponse(resp: GatewayResponse): Response {
   const usage = resp.usage ?? ZERO_USAGE;
   const output: Array<Record<string, unknown>> = resp.rawOutputItems
     ? [...resp.rawOutputItems]
@@ -897,9 +845,7 @@ function buildOpenAIResponsesNonStreamResponse(
     created_at: Math.floor(Date.now() / 1000),
     model: resp.model,
     status,
-    ...(status === "incomplete"
-      ? { incomplete_details: incompleteDetails(resp.stopReason) }
-      : {}),
+    ...(status === "incomplete" ? { incomplete_details: incompleteDetails(resp.stopReason) } : {}),
     output,
     usage: responsesUsage(usage),
   };
@@ -929,8 +875,7 @@ function mapStopReasonToStatus(reason: string): string {
 
 function incompleteDetails(stopReason: string): { reason: string } {
   return {
-    reason:
-      stopReason === "content_filter" ? "content_filter" : "max_output_tokens",
+    reason: stopReason === "content_filter" ? "content_filter" : "max_output_tokens",
   };
 }
 
@@ -945,9 +890,7 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
       function emit(eventType: string, data: Record<string, unknown>) {
         controller.enqueue(
-          encoder.encode(
-            `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`,
-          ),
+          encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`),
         );
       }
 
@@ -1027,146 +970,145 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
           outputIndex++;
         }
       } else {
-      for (const block of resp.content) {
-        if (block.type === "text") {
-          const itemId = `msg_${respId}_${outputIndex}`;
+        for (const block of resp.content) {
+          if (block.type === "text") {
+            const itemId = `msg_${respId}_${outputIndex}`;
 
-          // output_item.added
-          emit("response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: outputIndex,
-            item: {
-              type: "message",
-              id: itemId,
-              role: "assistant",
-              status: "in_progress",
-              content: [],
-            },
-          });
+            // output_item.added
+            emit("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: itemId,
+                role: "assistant",
+                status: "in_progress",
+                content: [],
+              },
+            });
 
-          // content_part.added
-          emit("response.content_part.added", {
-            type: "response.content_part.added",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: { type: "output_text", text: "", annotations: [] },
-          });
-
-          // output_text.delta — emit text in chunks
-          const text = block.text;
-          let pos = 0;
-          while (pos < text.length) {
-            const chunk = text.slice(pos, pos + 50);
-            emit("response.output_text.delta", {
-              type: "response.output_text.delta",
+            // content_part.added
+            emit("response.content_part.added", {
+              type: "response.content_part.added",
               item_id: itemId,
               output_index: outputIndex,
               content_index: 0,
-              delta: chunk,
+              part: { type: "output_text", text: "", annotations: [] },
             });
-            pos += 50;
-          }
 
-          // output_text.done
-          emit("response.output_text.done", {
-            type: "response.output_text.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            text: block.text,
-          });
+            // output_text.delta — emit text in chunks
+            const text = block.text;
+            let pos = 0;
+            while (pos < text.length) {
+              const chunk = text.slice(pos, pos + 50);
+              emit("response.output_text.delta", {
+                type: "response.output_text.delta",
+                item_id: itemId,
+                output_index: outputIndex,
+                content_index: 0,
+                delta: chunk,
+              });
+              pos += 50;
+            }
 
-          // content_part.done
-          emit("response.content_part.done", {
-            type: "response.content_part.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: {
-              type: "output_text",
+            // output_text.done
+            emit("response.output_text.done", {
+              type: "response.output_text.done",
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: 0,
               text: block.text,
-              annotations: [],
-            },
-          });
+            });
 
-          // output_item.done
-          emit("response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: outputIndex,
-            item: {
-              type: "message",
-              id: itemId,
-              role: "assistant",
-              status: "completed",
-              content: [
-                {
-                  type: "output_text",
-                  text: block.text,
-                  annotations: [],
-                },
-              ],
-            },
-          });
+            // content_part.done
+            emit("response.content_part.done", {
+              type: "response.content_part.done",
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: 0,
+              part: {
+                type: "output_text",
+                text: block.text,
+                annotations: [],
+              },
+            });
 
-          outputIndex++;
-        } else if (block.type === "tool_use") {
-          const callId = block.id;
-          const itemId = `fc_${callId}`;
-          const args = JSON.stringify(block.input);
+            // output_item.done
+            emit("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: itemId,
+                role: "assistant",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: block.text,
+                    annotations: [],
+                  },
+                ],
+              },
+            });
 
-          // output_item.added
-          emit("response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: callId,
-              name: block.name,
-              arguments: "",
-              status: "in_progress",
-            },
-          });
+            outputIndex++;
+          } else if (block.type === "tool_use") {
+            const callId = block.id;
+            const itemId = `fc_${callId}`;
+            const args = JSON.stringify(block.input);
 
-          // function_call_arguments.delta
-          emit("response.function_call_arguments.delta", {
-            type: "response.function_call_arguments.delta",
-            item_id: itemId,
-            output_index: outputIndex,
-            delta: args,
-          });
+            // output_item.added
+            emit("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: {
+                type: "function_call",
+                id: itemId,
+                call_id: callId,
+                name: block.name,
+                arguments: "",
+                status: "in_progress",
+              },
+            });
 
-          // function_call_arguments.done
-          emit("response.function_call_arguments.done", {
-            type: "response.function_call_arguments.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            arguments: args,
-          });
+            // function_call_arguments.delta
+            emit("response.function_call_arguments.delta", {
+              type: "response.function_call_arguments.delta",
+              item_id: itemId,
+              output_index: outputIndex,
+              delta: args,
+            });
 
-          // output_item.done
-          emit("response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: callId,
-              name: block.name,
+            // function_call_arguments.done
+            emit("response.function_call_arguments.done", {
+              type: "response.function_call_arguments.done",
+              item_id: itemId,
+              output_index: outputIndex,
               arguments: args,
-              status: "completed",
-            },
-          });
+            });
 
-          outputIndex++;
+            // output_item.done
+            emit("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: {
+                type: "function_call",
+                id: itemId,
+                call_id: callId,
+                name: block.name,
+                arguments: args,
+                status: "completed",
+              },
+            });
+
+            outputIndex++;
+          }
         }
-      }
       }
 
       const status = mapStopReasonToStatus(resp.stopReason);
-      const terminalEvent =
-        status === "incomplete" ? "response.incomplete" : "response.completed";
+      const terminalEvent = status === "incomplete" ? "response.incomplete" : "response.completed";
       emit(terminalEvent, {
         type: terminalEvent,
         response: {
