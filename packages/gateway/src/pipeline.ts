@@ -5274,6 +5274,15 @@ function getOrCreateSession(
       !!persisted?.projectPath && persisted.projectPathProvisional === false;
     const persistedProvisional =
       !!persisted?.projectPath && persisted.projectPathProvisional === true;
+    const persistedAcceptedProvenanceLayer =
+      persisted?.lastAcceptedProvenanceLayer;
+    const acceptedProvenanceLayer =
+      persistedAcceptedProvenanceLayer !== undefined &&
+      Number.isInteger(persistedAcceptedProvenanceLayer) &&
+      persistedAcceptedProvenanceLayer >= -1 &&
+      persistedAcceptedProvenanceLayer <= 4
+        ? persistedAcceptedProvenanceLayer
+        : -1;
     state = {
       sessionID,
       // A freshly-seeded path from the cwd fallback is NOT a confident binding.
@@ -5294,6 +5303,9 @@ function getOrCreateSession(
         persisted?.credentialFingerprint || credentialFingerprint,
       storageTenantId,
       lastRequestTime: Date.now(),
+      ...(persisted
+        ? { lastAcceptedProvenanceLayer: acceptedProvenanceLayer }
+        : {}),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
@@ -18322,6 +18334,9 @@ async function handleConversationTurn(
   // boundary only now; transform() itself is speculative and can be followed
   // by a synthetic response, transport error, or non-2xx response.
   sessionState.lastAcceptedProvenanceLayer = result.layer;
+  saveSessionTracking(sessionID, {
+    lastAcceptedProvenanceLayer: result.layer,
+  });
 
   // Run the recall-interception loop over an already-accumulated
   // (internal Anthropic-format) GatewayResponse and return the client HTTP
@@ -19253,8 +19268,10 @@ async function handleConversationTurn(
  * Encrypted reasoning is deliberately not part of Lore messages, temporal
  * storage, or embeddings. It is replayed only while the gradient layer is
  * stable; a layer transition is a compaction boundary and intentionally drops
- * the old wire provenance. Unknown previous state fails open because there is
- * no evidence of a transition, while emergency Layer 4 never replays it.
+ * the old wire provenance. A fresh in-memory session has no prior boundary
+ * (`null`) and may replay its supplied history; persisted sessions with the
+ * v89 `-1` sentinel fail closed until an upstream turn establishes one.
+ * Emergency Layer 4 never replays it.
  *
  * @internal Exported for focused policy tests.
  */
