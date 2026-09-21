@@ -464,7 +464,7 @@ describe("resolveToolResults", () => {
     const lore = gatewayMessagesToLore(parsed.messages, "sess-gemini-thinking");
     const provenance = new Map([
       [
-        lore[0]!.info.id,
+        lore[0].info.id,
         {
           content: original.content,
           provenanceContent: original.provenanceContent,
