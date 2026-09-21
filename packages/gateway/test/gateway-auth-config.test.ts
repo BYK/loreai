@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "LORE_ALLOW_REMOTE_MANAGEMENT",
   "LORE_REMOTE_GATEWAY",
   "LORE_UPSTREAM_EXTRA_HEADERS",
+  "LORE_EXPOSE_PROVIDER_DIAGNOSTICS",
 ] as const;
 
 describe("gateway access configuration", () => {
@@ -99,6 +100,16 @@ describe("gateway access configuration", () => {
     process.env.LORE_ALLOW_REMOTE_MANAGEMENT = "1";
     const enabled = loadConfig();
     expect(enabled.allowRemoteManagement).toBe(true);
+  });
+
+  test("exposes provider-frame diagnostics unless explicitly disabled", () => {
+    expect(loadConfig().exposeProviderDiagnostics).toBe(true);
+
+    process.env.LORE_EXPOSE_PROVIDER_DIAGNOSTICS = "false";
+    expect(loadConfig().exposeProviderDiagnostics).toBe(false);
+
+    process.env.LORE_EXPOSE_PROVIDER_DIAGNOSTICS = "0";
+    expect(loadConfig().exposeProviderDiagnostics).toBe(false);
   });
 
   test("rejects a weak token supplied through a programmatic config", () => {

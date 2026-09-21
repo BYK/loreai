@@ -8,6 +8,7 @@
 import { describe, test, expect } from "vitest";
 import {
   accumulateOpenAISSEStream,
+  OpenAIStreamValidationError,
   translateAnthropicStreamToOpenAI,
 } from "../src/stream/openai";
 import { validateOpenAIUsage } from "../src/usage-validation";
@@ -153,15 +154,16 @@ describe("accumulateOpenAISSEStream", () => {
   });
 
   test("rejects malformed JSON before a valid terminal", async () => {
-    await expect(
-      accumulateOpenAISSEStream(
-        sse([
-          "data: {not-json}",
-          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
-        ]),
-        { stopAtTerminal: true, strict: true },
-      ),
-    ).rejects.toThrow("malformed OpenAI stream event");
+    const failure = await accumulateOpenAISSEStream(
+      sse([
+        "data: {not-json}",
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      ]),
+      { stopAtTerminal: true, strict: true },
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OpenAIStreamValidationError);
+    expect(failure).toMatchObject({ rule: "invalid-json" });
+    expect((failure as Error).message).toBe("malformed OpenAI stream event");
   });
 
   test("rejects malformed consumed fields in strict worker mode", async () => {

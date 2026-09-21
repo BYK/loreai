@@ -50,6 +50,54 @@ type InflightToolCall = {
   headerEmitted: boolean;
 };
 
+/** Fixed categories for strict upstream-frame validation diagnostics. */
+export type OpenAIStreamValidationRule =
+  | "invalid-json"
+  | "invalid-choices"
+  | "invalid-usage"
+  | "response-identity-mismatch"
+  | "duplicate-choice-index"
+  | "tool-identity-mismatch"
+  | "post-terminal-frame"
+  | "choice-index-mismatch"
+  | "missing-tool-identity"
+  | "missing-finish-terminal"
+  | "missing-done-terminal";
+
+const OPENAI_STREAM_VALIDATION_MESSAGES: Record<
+  OpenAIStreamValidationRule,
+  string
+> = {
+  "invalid-json": "malformed OpenAI stream event",
+  "invalid-choices": "malformed OpenAI stream event",
+  "invalid-usage": "malformed OpenAI stream event",
+  "response-identity-mismatch": "malformed OpenAI stream event",
+  "duplicate-choice-index": "malformed OpenAI stream event",
+  "tool-identity-mismatch": "malformed OpenAI stream event",
+  "post-terminal-frame": "malformed OpenAI stream event",
+  "choice-index-mismatch": "malformed OpenAI stream event",
+  "missing-tool-identity": "malformed OpenAI stream event",
+  "missing-finish-terminal": "missing OpenAI finish_reason terminal",
+  "missing-done-terminal": "missing OpenAI [DONE] terminal",
+};
+
+/** Internal validation failure with a provider-content-free diagnostic rule. */
+export class OpenAIStreamValidationError extends Error {
+  readonly rule: OpenAIStreamValidationRule;
+
+  constructor(rule: OpenAIStreamValidationRule) {
+    super(OPENAI_STREAM_VALIDATION_MESSAGES[rule]);
+    this.name = "OpenAIStreamValidationError";
+    this.rule = rule;
+  }
+}
+
+function malformedOpenAIStream(
+  rule: OpenAIStreamValidationRule,
+): OpenAIStreamValidationError {
+  return new OpenAIStreamValidationError(rule);
+}
+
 // ---------------------------------------------------------------------------
 // Stop reason mapping
 // ---------------------------------------------------------------------------
@@ -632,7 +680,7 @@ export async function accumulateOpenAISSEStream(
       try {
         parsed = JSON.parse(data) as Record<string, unknown>;
       } catch {
-        if (opts.strict) throw new Error("malformed OpenAI stream event");
+        if (opts.strict) throw malformedOpenAIStream("invalid-json");
         continue;
       }
 
@@ -643,7 +691,11 @@ export async function accumulateOpenAISSEStream(
           choices.some(malformedChoice) ||
           malformedUsage(parsed.usage))
       ) {
-        throw new Error("malformed OpenAI stream event");
+        throw malformedOpenAIStream(
+          !Array.isArray(choices) || choices.some(malformedChoice)
+            ? "invalid-choices"
+            : "invalid-usage",
+        );
       }
 
       if (
@@ -653,7 +705,7 @@ export async function accumulateOpenAISSEStream(
           (parsed.model !== undefined && typeof parsed.model !== "string") ||
           (model && typeof parsed.model === "string" && parsed.model !== model))
       ) {
-        throw new Error("malformed OpenAI stream event");
+        throw malformedOpenAIStream("response-identity-mismatch");
       }
       if (typeof parsed.id === "string") id = parsed.id;
       if (typeof parsed.model === "string") model = parsed.model;
@@ -672,7 +724,7 @@ export async function accumulateOpenAISSEStream(
           const currentChoiceIndex =
             typeof choice.index === "number" ? choice.index : position;
           if (frameChoiceIndices.has(currentChoiceIndex)) {
-            throw new Error("malformed OpenAI stream event");
+            throw malformedOpenAIStream("duplicate-choice-index");
           }
           frameChoiceIndices.add(currentChoiceIndex);
           const delta = choice.delta as Record<string, unknown>;
@@ -690,7 +742,7 @@ export async function accumulateOpenAISSEStream(
               (existing?.id && id && existing.id !== id) ||
               (existing?.name && name && existing.name !== name)
             ) {
-              throw new Error("malformed OpenAI stream event");
+              throw malformedOpenAIStream("tool-identity-mismatch");
             }
             const effectiveId = id || existing?.id || "";
             const effectiveName = name || existing?.name || "";
@@ -698,7 +750,7 @@ export async function accumulateOpenAISSEStream(
               const identity = `${currentChoiceIndex}:${effectiveId}`;
               const owner = validatedToolOwnerByChoiceAndId.get(identity);
               if (owner !== undefined && owner !== slot) {
-                throw new Error("malformed OpenAI stream event");
+                throw malformedOpenAIStream("tool-identity-mismatch");
               }
               validatedToolOwnerByChoiceAndId.set(identity, slot);
             }
@@ -711,7 +763,7 @@ export async function accumulateOpenAISSEStream(
       }
       const firstChoice = normalizedChoices?.[0];
       if (opts.strict && terminalSeen && normalizedChoices?.length) {
-        throw new Error("malformed OpenAI stream event");
+        throw malformedOpenAIStream("post-terminal-frame");
       }
       if (firstChoice) {
         if (opts.strict) {
@@ -721,7 +773,7 @@ export async function accumulateOpenAISSEStream(
             choiceIndex !== undefined &&
             choiceIndex !== projectedChoiceIndex
           ) {
-            throw new Error("malformed OpenAI stream event");
+            throw malformedOpenAIStream("choice-index-mismatch");
           }
           choiceIndex = projectedChoiceIndex;
         }
@@ -757,7 +809,7 @@ export async function accumulateOpenAISSEStream(
               if (opts.strict && typeof tc.id === "string" && tc.id) {
                 const existingIndex = toolCallIndexById.get(tc.id);
                 if (existingIndex !== undefined && existingIndex !== idx) {
-                  throw new Error("malformed OpenAI stream event");
+                  throw malformedOpenAIStream("tool-identity-mismatch");
                 }
                 toolCallIndexById.set(tc.id, idx);
               }
@@ -777,7 +829,7 @@ export async function accumulateOpenAISSEStream(
                       existing.name &&
                       fnName !== existing.name))
                 ) {
-                  throw new Error("malformed OpenAI stream event");
+                  throw malformedOpenAIStream("tool-identity-mismatch");
                 }
                 if (!existing.id && typeof tc.id === "string") {
                   existing.id = tc.id;
@@ -833,19 +885,19 @@ export async function accumulateOpenAISSEStream(
   }
 
   if (opts.stopAtTerminal && !terminalSeen) {
-    throw new Error("missing OpenAI finish_reason terminal");
+    throw malformedOpenAIStream("missing-finish-terminal");
   }
   if (opts.consumeUntilDone && !doneSeen) {
-    throw new Error("missing OpenAI [DONE] terminal");
+    throw malformedOpenAIStream("missing-done-terminal");
   }
   if (opts.strict && Array.from(toolCalls.values()).some((tc) => !tc.id)) {
-    throw new Error("malformed OpenAI stream event");
+    throw malformedOpenAIStream("missing-tool-identity");
   }
   if (
     opts.strict &&
     Array.from(validatedToolCalls.values()).some((call) => !call.id)
   ) {
-    throw new Error("malformed OpenAI stream event");
+    throw malformedOpenAIStream("missing-tool-identity");
   }
 
   const content: GatewayContentBlock[] = [];
