@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "FSL-1.1-Apache-2.0",
-  "description": "Monorepo root for Lore \u2014 three-tier memory architecture",
+  "description": "Monorepo root for Lore — three-tier memory architecture",
   "main": "./packages/opencode/src/index.ts",
   "exports": {
     ".": "./packages/opencode/src/index.ts"
