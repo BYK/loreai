@@ -236,6 +236,39 @@ describe("Responses encrypted reasoning provenance", () => {
     expect(answer?.provenancePositions).toEqual([1]);
   });
 
+  test("drops provenance when visible content changes on a stable layer", () => {
+    const visible: GatewayContentBlock = { type: "text", text: "answer" };
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_changed",
+        encrypted_content: "ciphertext_changed",
+        summary: [],
+      },
+    };
+    const provenance = new Map([
+      [
+        "a1",
+        {
+          content: [visible],
+          provenanceContent: [reasoning, visible],
+          provenancePositions: [1],
+        },
+      ],
+    ]);
+
+    const rendered = loreMessagesToGateway(
+      [makeAssistantMsg("a1", [textPart("changed")])],
+      provenance,
+      shouldPreserveResponsesProvenance(1, 1),
+    );
+
+    expect(rendered[0]?.provenanceContent).toBeUndefined();
+    expect(rendered[0]?.provenancePositions).toBeUndefined();
+  });
+
   test("drops request-only provenance at a layer transition", () => {
     const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(0, 1));
     const answer = rendered.find((message) =>
