@@ -635,6 +635,35 @@ describe("buildGeminiResponseBody — thinking + block reason", () => {
     const cand = (b.candidates as Array<Record<string, unknown>>)[0];
     expect(cand.finishReason).toBe("SAFETY");
   });
+
+  test("drops request-only redacted thinking from Gemini egress", async () => {
+    const response = {
+      id: "r",
+      model: "gemini-2.5-pro",
+      content: [
+        {
+          type: "opaque" as const,
+          requestOnly: true,
+          raw: { type: "redacted_thinking", data: "encrypted" },
+        },
+        { type: "text" as const, text: "answer" },
+      ],
+      stopReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+
+    const body = buildGeminiResponseBody(response);
+    const parts = (
+      (body.candidates as Array<Record<string, unknown>>)[0]?.content as {
+        parts: unknown[];
+      }
+    ).parts;
+    expect(parts).toEqual([{ text: "answer" }]);
+
+    const stream = await buildGeminiResponse(response, true).text();
+    expect(stream).not.toContain("redacted_thinking");
+    expect(stream).toContain('"text":"answer"');
+  });
 });
 
 // ---------------------------------------------------------------------------
