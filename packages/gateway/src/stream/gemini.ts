@@ -262,8 +262,8 @@ export async function accumulateGeminiSSEStream(
               ? blockWithoutSignature
               : parsedBlock;
         if (
-          block.type === "text" ||
-          block.type === "thinking" ||
+          (block.type === "text" && block.text.length > 0) ||
+          (block.type === "thinking" && block.thinking.length > 0) ||
           block.type === "tool_use"
         ) {
           opts.onSemanticContent?.();
