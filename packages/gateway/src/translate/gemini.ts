@@ -181,7 +181,11 @@ export function geminiPartToBlock(
         ...(signature !== undefined ? { signature } : {}),
       };
     }
-    return { type: "text", text: part.text };
+    return {
+      type: "text",
+      text: part.text,
+      ...(signature !== undefined ? { raw: part } : {}),
+    };
   }
   if (part.functionCall && typeof part.functionCall === "object") {
     const fc = part.functionCall as {
@@ -388,7 +392,11 @@ export function buildGeminiUpstreamUrl(
 function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
   switch (block.type) {
     case "text":
-      return block.text ? [{ text: block.text }] : [];
+      return block.raw
+        ? [block.raw]
+        : block.text
+          ? [{ text: block.text }]
+          : [];
     case "thinking":
       // Re-emit as a Gemini thought part (`text` + `thought: true`) so a
       // reasoning summary round-trips as reasoning — never merged into the
