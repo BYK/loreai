@@ -18,7 +18,11 @@ export async function handleAnthropicMessages(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseAnthropicRequestChunks(
-      decodedRequestChunks(req, req.signal, requestBodyLimitsForConfig(config)),
+      decodedRequestChunks(
+        req,
+        req.signal,
+        requestBodyLimitsForConfig(config, "anthropic"),
+      ),
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;

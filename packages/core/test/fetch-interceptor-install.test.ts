@@ -440,6 +440,85 @@ describe("context continuation", () => {
     expect(calls[2].body).toMatchObject({ input: [...prefix, suffix] });
   });
 
+  test("recovers when an older response reaches EOF after a newer boundary", async () => {
+    const first = { type: "message", role: "user", content: "first" };
+    const second = { type: "message", role: "user", content: "second" };
+    const third = { type: "message", role: "user", content: "third" };
+    const boundary = (items: unknown[]) =>
+      encodeContextBoundary({
+        v: 1,
+        protocol: "openai-responses",
+        inputItems: items.length,
+        inputDigest: digestChain(items),
+        retainedItems: 0,
+        sourceMessages: items.length,
+        sourceDigest: digestChain(items),
+      });
+    const olderBoundary = boundary([first]);
+    const newerBoundary = boundary([first, second]);
+    const finalBoundary = boundary([first, second, third]);
+    const calls: Array<{ headers: Headers; body: Record<string, unknown> }> =
+      [];
+    globalThis.fetch = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (typeof init?.body !== "string") {
+          throw new Error("expected a JSON string body");
+        }
+        calls.push({
+          headers: new Headers(init.headers),
+          body: JSON.parse(init.body) as Record<string, unknown>,
+        });
+        switch (calls.length) {
+          case 1:
+            return new Response("older", {
+              headers: { "x-lore-context-boundary": olderBoundary },
+            });
+          case 2:
+            return new Response("newer", {
+              headers: { "x-lore-context-boundary": newerBoundary },
+            });
+          case 3:
+            return new Response("boundary mismatch", {
+              status: 409,
+              headers: { "x-lore-context-boundary-mismatch": "true" },
+            });
+          default:
+            return new Response("replayed", {
+              headers: { "x-lore-context-boundary": finalBoundary },
+            });
+        }
+      },
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-out-of-order" }),
+    });
+    const url = "https://api.openai.com/v1/responses";
+
+    const olderResponse = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt", input: [first] }),
+    });
+    const newerResponse = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt", input: [first, second] }),
+    });
+    await newerResponse.text();
+    await olderResponse.text();
+    await (
+      await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt", input: [first, second, third] }),
+      })
+    ).text();
+
+    expect(calls).toHaveLength(4);
+    expect(calls[2].headers.get("x-lore-context-boundary")).toBe(olderBoundary);
+    expect(calls[2].body.input).toEqual([second, third]);
+    expect(calls[3].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[3].body.input).toEqual([first, second, third]);
+  });
+
   test.each([
     {
       name: "Anthropic",
@@ -554,6 +633,70 @@ describe("context continuation", () => {
     ]);
   });
 
+  test("never attaches a generation boundary to Responses compaction", async () => {
+    const prefix = [{ type: "message", role: "user", content: "old" }];
+    const suffix = { type: "message", role: "user", content: "new" };
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai-responses",
+      inputItems: prefix.length,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([{ role: "user", content: "old" }]),
+    });
+    const calls: Array<{
+      url: string;
+      headers: Headers;
+      body: Record<string, unknown>;
+    }> = [];
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (typeof init?.body !== "string") {
+          throw new Error("expected a JSON string body");
+        }
+        calls.push({
+          url:
+            typeof input === "string"
+              ? input
+              : input instanceof URL
+                ? input.href
+                : input.url,
+          headers: new Headers(init.headers),
+          body: JSON.parse(init.body) as Record<string, unknown>,
+        });
+        return new Response("ok", {
+          headers:
+            calls.length === 1
+              ? { "x-lore-context-boundary": boundary }
+              : undefined,
+        });
+      },
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-responses-compact" }),
+    });
+
+    await (
+      await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt", input: prefix }),
+      })
+    ).text();
+    const fullInput = [...prefix, suffix];
+    await (
+      await fetch("https://api.openai.com/v1/responses/compact", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt", input: fullInput }),
+      })
+    ).text();
+
+    expect(calls[1].url).toBe(`${GATEWAY}/v1/responses/compact`);
+    expect(calls[1].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[1].body.input).toEqual(fullInput);
+  });
+
   test("sends the full body when the cached prefix was edited", async () => {
     const prefix = [{ role: "user", content: "original" }];
     const boundary = encodeContextBoundary({
@@ -650,6 +793,105 @@ describe("context continuation", () => {
     ).text();
 
     expect(headers[1].get("x-lore-context-boundary")).toBeNull();
+  });
+
+  test("does not await non-settling upstream cleanup when cancelling", async () => {
+    const prefix = [{ role: "user", content: "old" }];
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: 1,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([]),
+    });
+    let releaseUpstreamCancel!: () => void;
+    const upstreamCancelBlocked = new Promise<void>((resolve) => {
+      releaseUpstreamCancel = resolve;
+    });
+    let upstreamCancelCalled = false;
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("partial"));
+          },
+          cancel() {
+            upstreamCancelCalled = true;
+            return upstreamCancelBlocked;
+          },
+        }),
+        { headers: { "x-lore-context-boundary": boundary } },
+      );
+    });
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-hostile-cancel" }),
+    });
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude", messages: prefix }),
+    });
+    const responseBody = response.body;
+    if (!responseBody) throw new Error("missing response body");
+    let cancelSettled = false;
+    const cancel = responseBody.cancel().then(() => {
+      cancelSettled = true;
+    });
+
+    try {
+      await vi.waitFor(() => expect(upstreamCancelCalled).toBe(true));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(cancelSettled).toBe(true);
+    } finally {
+      releaseUpstreamCancel();
+      await cancel;
+    }
+  });
+
+  test("preserves fetch-managed response metadata and clone metadata", async () => {
+    const prefix = [{ role: "user", content: "old" }];
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: 1,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([]),
+    });
+    globalThis.fetch = vi.fn(async () => {
+      const response = new Response("ok", {
+        headers: { "x-lore-context-boundary": boundary },
+      });
+      Object.defineProperties(response, {
+        url: { configurable: true, value: "https://provider.test/final" },
+        redirected: { configurable: true, value: true },
+        type: { configurable: true, value: "cors" },
+      });
+      return response;
+    });
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-response-metadata" }),
+    });
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude", messages: prefix }),
+    });
+    const clone = response.clone();
+
+    for (const candidate of [response, clone]) {
+      expect(candidate.url).toBe("https://provider.test/final");
+      expect(candidate.redirected).toBe(true);
+      expect(candidate.type).toBe("cors");
+    }
+    await expect(Promise.all([response.text(), clone.text()])).resolves.toEqual(
+      ["ok", "ok"],
+    );
   });
 
   test("preserves fetch(Request) and does not attach an unreplayable boundary", async () => {

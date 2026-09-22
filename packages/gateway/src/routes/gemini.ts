@@ -41,7 +41,11 @@ export async function handleGeminiGenerateContent(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseGeminiRequestChunks(
-      decodedRequestChunks(req, req.signal, requestBodyLimitsForConfig(config)),
+      decodedRequestChunks(
+        req,
+        req.signal,
+        requestBodyLimitsForConfig(config, "gemini"),
+      ),
       headers,
       model,
       stream,

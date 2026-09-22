@@ -29,8 +29,12 @@ import {
   HttpRequestBodyTooLargeError,
   MAX_HTTP_REQUEST_COMPRESSED_BYTES,
   MAX_HTTP_REQUEST_DECOMPRESSED_BYTES,
+  EMBEDDED_REQUEST_BODY_LIMITS,
 } from "../src/http-body";
-import { invalidStreamedBody } from "../src/routes/shared";
+import {
+  invalidStreamedBody,
+  requestBodyLimitsForConfig,
+} from "../src/routes/shared";
 
 const SAMPLE = JSON.stringify({
   model: "gpt-5-codex",
@@ -279,6 +283,38 @@ describe("decodeRequestBody", () => {
       if (mode === "deadline") vi.useRealTimers();
     },
   );
+});
+
+describe("requestBodyLimitsForConfig", () => {
+  const local = { hostedMode: false, remoteGateway: false };
+
+  test("raises the local limit only for the Codex ingress", () => {
+    expect(requestBodyLimitsForConfig(local, "openai-codex")).toEqual(
+      EMBEDDED_REQUEST_BODY_LIMITS,
+    );
+  });
+
+  test.each(["anthropic", "openai", "openai-responses", "gemini"] as const)(
+    "keeps the standard limit for local %s requests",
+    (protocol) => {
+      expect(requestBodyLimitsForConfig(local, protocol)).toBeUndefined();
+    },
+  );
+
+  test("keeps the standard Codex limit for remote and hosted gateways", () => {
+    expect(
+      requestBodyLimitsForConfig(
+        { hostedMode: false, remoteGateway: true },
+        "openai-codex",
+      ),
+    ).toBeUndefined();
+    expect(
+      requestBodyLimitsForConfig(
+        { hostedMode: true, remoteGateway: true },
+        "openai-codex",
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe("decodedRequestChunks", () => {

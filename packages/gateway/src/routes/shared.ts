@@ -1,5 +1,9 @@
 /** Helpers shared by the data-plane route modules. */
-import { CONTEXT_BOUNDARY_MISMATCH_HEADER, log } from "@loreai/core";
+import {
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
+  log,
+  type ContextBoundaryProtocol,
+} from "@loreai/core";
 import type { GatewayConfig } from "../config";
 import type { GatewayRequest } from "../translate/types";
 import { handleRequest } from "../pipeline";
@@ -73,13 +77,17 @@ function formatByteLimit(bytes: number): string {
 }
 
 /**
- * In-process callers already own the request body, so they can use the larger
- * embedded limit. Hosted and remote gateways retain the smaller public cap.
+ * Local Codex resumes can exceed the standard cap before the first boundary is
+ * established. Keep the larger allowance scoped to that ingress; every other
+ * protocol still uses the streamed parser but retains the public 32 MiB cap.
  */
 export function requestBodyLimitsForConfig(
-  config: GatewayConfig,
+  config: Pick<GatewayConfig, "hostedMode" | "remoteGateway">,
+  protocol: ContextBoundaryProtocol,
 ): RequestBodyLimits | undefined {
-  return config.hostedMode === false && config.remoteGateway === false
+  return protocol === "openai-codex" &&
+    config.hostedMode === false &&
+    config.remoteGateway === false
     ? EMBEDDED_REQUEST_BODY_LIMITS
     : undefined;
 }

@@ -17840,6 +17840,11 @@ async function handleConversationTurn(
     });
   }
   checkpoint?.finish(result.messages);
+  // This header is deliberately optimistic: the candidate checkpoint is not
+  // published until accepted-response bookkeeping succeeds after downstream
+  // EOF. The interceptor therefore caches only at EOF, and a follow-up that
+  // races or outlives publication must take the 409/full-replay path. Never
+  // treat possession of this token as proof that durable state already exists.
   const contextBoundaryHeader =
     req.sourceInput &&
     req.sourceInput.boundarySafe &&

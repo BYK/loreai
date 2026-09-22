@@ -341,16 +341,18 @@ function pruneContextBoundaries(now = Date.now()): void {
 }
 
 function boundaryEndpoint(pathname: string): BoundaryEndpoint | undefined {
-  if (/\/codex\/responses(?:\/.*)?$/.test(pathname)) {
+  // Only generation endpoints reconstruct source checkpoints. Auxiliary
+  // children such as `/responses/compact` must always receive the full body.
+  if (/\/codex\/responses\/?$/.test(pathname)) {
     return { protocol: "openai-codex", streamKey: "input" };
   }
-  if (/\/chat\/completions(?:\/.*)?$/.test(pathname)) {
+  if (/\/chat\/completions\/?$/.test(pathname)) {
     return { protocol: "openai", streamKey: "messages" };
   }
-  if (/\/responses(?:\/.*)?$/.test(pathname)) {
+  if (/\/responses\/?$/.test(pathname)) {
     return { protocol: "openai-responses", streamKey: "input" };
   }
-  if (/\/messages(?:\/.*)?$/.test(pathname)) {
+  if (/\/messages\/?$/.test(pathname)) {
     return { protocol: "anthropic", streamKey: "messages" };
   }
   if (/\/models\/[^/:]+:(?:stream)?generateContent$/.test(pathname)) {
@@ -454,9 +456,12 @@ function updateContextBoundary(
     return response;
   }
 
-  // The gateway publishes its source checkpoint while finalizing the body.
-  // Cache the corresponding boundary only after the caller reaches EOF; a
-  // cancelled or failed response must never become a continuation anchor.
+  // The header is an optimistic token: gateway checkpoint persistence runs in
+  // its accepted-response finalizer and may trail network EOF by one event-loop
+  // turn. Cache only after caller-visible EOF. If a follow-up wins that narrow
+  // race (or persistence failed), the gateway returns the dedicated mismatch
+  // and the interceptor replays the full transcript once. A cancelled or
+  // failed response must never become a continuation anchor.
   const reader = response.body.getReader();
   const body = new ReadableStream<Uint8Array>(
     {
@@ -474,18 +479,49 @@ function updateContextBoundary(
           controller.error(error);
         }
       },
-      async cancel(reason) {
+      cancel(reason) {
         contextBoundaries.delete(boundaryKey);
-        await reader.cancel(reason);
+        // Upstream cleanup is hostile I/O: a provider-backed cancel may never
+        // settle. Relinquish caller ownership immediately and detach cleanup.
+        try {
+          void reader.cancel(reason).catch(() => {});
+        } catch {
+          // Best-effort cleanup must not make downstream cancellation fail.
+        }
       },
     },
     { highWaterMark: 0 },
   );
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: response.headers,
+  return preserveFetchResponseMetadata(
+    new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+    response,
+  );
+}
+
+/**
+ * A Response constructor cannot initialize fetch-managed metadata. Decorate
+ * the body replacement (and every clone) with the immutable values from the
+ * provider response so interception remains observationally transparent.
+ */
+function preserveFetchResponseMetadata(
+  target: Response,
+  source: Response,
+): Response {
+  const clone = target.clone.bind(target);
+  Object.defineProperties(target, {
+    url: { configurable: true, value: source.url },
+    redirected: { configurable: true, value: source.redirected },
+    type: { configurable: true, value: source.type },
+    clone: {
+      configurable: true,
+      value: () => preserveFetchResponseMetadata(clone(), source),
+    },
   });
+  return target;
 }
 
 function canReplayRequestBody(

@@ -1209,7 +1209,7 @@ describe("streamed Responses ingress", () => {
     expect(response.status, await response.text()).toBe(200);
   });
 
-  test("recovers a stale checkpoint and publishes the next continuation", async () => {
+  test("orders EOF publication across stale replay and the next continuation", async () => {
     const projectPath = process.cwd();
     const sessionID = "codex-boundary-lifecycle";
     harness = await createHarness({
@@ -1328,8 +1328,8 @@ describe("streamed Responses ingress", () => {
     });
 
     const codexURL = "https://chatgpt.com/backend-api/codex/responses";
-    const send = async (input: unknown[]) => {
-      const response = await fetch(codexURL, {
+    const start = (input: unknown[]) =>
+      fetch(codexURL, {
         method: "POST",
         headers: {
           authorization: "Bearer test-key",
@@ -1342,6 +1342,7 @@ describe("streamed Responses ingress", () => {
           input,
         }),
       });
+    const consume = async (response: Response) => {
       const responseText = await response.text();
       expect(response.status, responseText).toBe(200);
     };
@@ -1368,7 +1369,14 @@ describe("streamed Responses ingress", () => {
       { type: "message", role: "assistant", content: "older answer" },
       { type: "message", role: "user", content: "first" },
     ];
-    await send(firstInput);
+    const firstResponse = await start(firstInput);
+    expect(firstResponse.headers.get("x-lore-context-boundary")).toEqual(
+      expect.any(String),
+    );
+    // The optimistic header is visible before the durable checkpoint exists.
+    // Neither the gateway nor the interceptor may publish it until body EOF.
+    expect(checkpoint()).toBeUndefined();
+    await consume(firstResponse);
     await waitForCheckpoint(3);
     const firstBoundary = gatewayCalls[0]?.boundary;
     expect(firstBoundary).toBeNull();
@@ -1381,7 +1389,7 @@ describe("streamed Responses ingress", () => {
       { type: "message", role: "user", content: "second" },
     ];
     const secondCallStart = gatewayCalls.length;
-    await send(secondInput);
+    await consume(await start(secondInput));
     await waitForCheckpoint(5);
     expect(
       gatewayCalls.slice(secondCallStart).map((call) => call.boundary),
@@ -1389,6 +1397,12 @@ describe("streamed Responses ingress", () => {
     expect(
       gatewayCalls.slice(secondCallStart).map((call) => call.inputItems),
     ).toEqual([2, 5]);
+    expect(
+      gatewayCalls.slice(secondCallStart).map((call) => call.status),
+    ).toEqual([409, 200]);
+    expect(gatewayCalls[secondCallStart]?.error).toContain(
+      "retained Lore context no longer matches",
+    );
     const freshBoundaryValue = gatewayCalls.at(-1)?.responseBoundary;
     expect(freshBoundaryValue).toEqual(expect.any(String));
     const freshBoundary = JSON.parse(
@@ -1407,7 +1421,7 @@ describe("streamed Responses ingress", () => {
       { type: "message", role: "user", content: "third" },
     ];
     const thirdCallStart = gatewayCalls.length;
-    await send(thirdInput);
+    await consume(await start(thirdInput));
     await waitForCheckpoint(7);
     expect(gatewayCalls.slice(thirdCallStart)).toHaveLength(1);
     expect(gatewayCalls[thirdCallStart]).toMatchObject({
