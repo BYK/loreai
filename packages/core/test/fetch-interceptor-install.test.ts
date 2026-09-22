@@ -956,6 +956,63 @@ describe("context continuation", () => {
     );
   });
 
+  test("preserves byte-stream BYOB reads for a boundary response and its clone", async () => {
+    const prefix = [{ role: "user", content: "old" }];
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: 1,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([]),
+    });
+    const calls: Headers[] = [];
+    globalThis.fetch = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(new Headers(init?.headers));
+        return new Response(new TextEncoder().encode("byte-stream"), {
+          headers: { "x-lore-context-boundary": boundary },
+        });
+      },
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-byob" }),
+    });
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: JSON.stringify({ model: "claude", messages: prefix }),
+    });
+    const clone = response.clone();
+    const readByob = async (candidate: Response): Promise<string> => {
+      if (!candidate.body) throw new Error("missing response body");
+      const reader = candidate.body.getReader({ mode: "byob" });
+      const bytes: number[] = [];
+      for (;;) {
+        const { done, value } = await reader.read(new Uint8Array(4));
+        if (done) break;
+        bytes.push(...value);
+      }
+      return new TextDecoder().decode(Uint8Array.from(bytes));
+    };
+
+    await expect(
+      Promise.all([readByob(response), readByob(clone)]),
+    ).resolves.toEqual(["byte-stream", "byte-stream"]);
+    await (
+      await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "claude",
+          messages: [...prefix, { role: "user", content: "new" }],
+        }),
+      })
+    ).text();
+    expect(calls[1].get("x-lore-context-boundary")).toBe(boundary);
+  });
+
   test("preserves fetch(Request) and does not attach an unreplayable boundary", async () => {
     const calls: Array<{
       method: string | undefined;

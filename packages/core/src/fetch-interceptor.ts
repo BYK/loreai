@@ -480,35 +480,37 @@ function updateContextBoundary(
   // and the interceptor replays the full transcript once. A cancelled or
   // failed response must never become a continuation anchor.
   const reader = response.body.getReader();
-  const body = new ReadableStream<Uint8Array>(
-    {
-      async pull(controller) {
-        try {
-          const chunk = await reader.read();
-          if (chunk.done) {
-            publish();
-            controller.close();
-          } else {
-            controller.enqueue(chunk.value);
-          }
-        } catch (error) {
-          contextBoundaries.delete(boundaryKey);
-          controller.error(error);
+  const boundaryBodySource: UnderlyingByteSource = {
+    type: "bytes",
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          controller.close();
+          // Node's byte-stream implementation leaves a pending BYOB read
+          // unsettled unless its zero-byte EOF is explicitly acknowledged.
+          controller.byobRequest?.respond(0);
+          publish();
+        } else {
+          controller.enqueue(chunk.value);
         }
-      },
-      cancel(reason) {
+      } catch (error) {
         contextBoundaries.delete(boundaryKey);
-        // Upstream cleanup is hostile I/O: a provider-backed cancel may never
-        // settle. Relinquish caller ownership immediately and detach cleanup.
-        try {
-          void reader.cancel(reason).catch(() => {});
-        } catch {
-          // Best-effort cleanup must not make downstream cancellation fail.
-        }
-      },
+        controller.error(error);
+      }
     },
-    { highWaterMark: 0 },
-  );
+    cancel(reason) {
+      contextBoundaries.delete(boundaryKey);
+      // Upstream cleanup is hostile I/O: a provider-backed cancel may never
+      // settle. Relinquish caller ownership immediately and detach cleanup.
+      try {
+        void reader.cancel(reason).catch(() => {});
+      } catch {
+        // Best-effort cleanup must not make downstream cancellation fail.
+      }
+    },
+  };
+  const body = new ReadableStream(boundaryBodySource);
   return preserveFetchResponseMetadata(
     new Response(body, {
       status: response.status,

@@ -196,6 +196,29 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
     });
   });
 
+  test("header auth wins without forwarding a conflicting Gemini ?key=", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const target =
+      "/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=query-key&alt=sse&k%65y=encoded-key&callback=https%3A%2F%2Fexample.com%2Fdone";
+    const { upstreamUrl, upstreamHeaders, clientJson } = await sendGemini(
+      harness,
+      target,
+      {
+        "x-goog-api-key": "header-key",
+        "x-lore-upstream-url": "https://generativelanguage.googleapis.com",
+        "x-lore-upstream-path": target,
+      },
+    );
+
+    expect(upstreamUrl).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&callback=https%3A%2F%2Fexample.com%2Fdone",
+    );
+    expect(upstreamHeaders?.["x-goog-api-key"]).toBe("header-key");
+    expect(clientJson).toMatchObject({
+      candidates: [{ content: { parts: [{ text: "ok" }] } }],
+    });
+  });
+
   test("preserves ?alt=sse through interceptor, gateway, and upstream dispatch", async () => {
     harness = await createHarness({ fixtures: [] });
     const { setUpstreamInterceptor } = await import("../src/pipeline");
@@ -303,6 +326,7 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
         | undefined
     )?.headers;
     expect(headers?.["x-goog-api-key"]).toBe("qkey123");
+    expect(fetchArgUrl(mockFetch.mock.calls[0][0])).not.toContain("key=");
   });
 
   test("opencode/pi shape: X-Lore-Provider: google stays native gemini (not openai-compat)", async () => {

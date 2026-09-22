@@ -21,6 +21,36 @@ import {
 export const GEMINI_PATH_RE =
   /\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
 
+/**
+ * Remove query-form Gemini auth without reserializing the rest of the request
+ * target. Header auth has explicit precedence, while byte-preserving all other
+ * query segments keeps response selectors such as `alt=sse` intact.
+ */
+function stripGeminiQueryKey(target: string): string {
+  const queryIndex = target.indexOf("?");
+  if (queryIndex === -1) return target;
+
+  const path = target.slice(0, queryIndex);
+  const segments = target.slice(queryIndex + 1).split("&");
+  const retained = segments.filter((segment) => {
+    const separator = segment.indexOf("=");
+    const encodedName =
+      separator === -1 ? segment : segment.slice(0, separator);
+    try {
+      return decodeURIComponent(encodedName) !== "key";
+    } catch {
+      // A malformed escape cannot decode to the exact auth field name; leave
+      // it byte-for-byte unchanged with the rest of the non-auth query.
+      return true;
+    }
+  });
+  return retained.length === segments.length
+    ? target
+    : retained.length > 0
+      ? `${path}?${retained.join("&")}`
+      : path;
+}
+
 export async function handleGeminiGenerateContent(
   req: Request,
   config: GatewayConfig,
@@ -36,6 +66,11 @@ export async function handleGeminiGenerateContent(
   if (!headers["x-goog-api-key"]) {
     const key = new URL(req.url).searchParams.get("key");
     if (key) headers["x-goog-api-key"] = key;
+  }
+  if (headers["x-goog-api-key"] && headers["x-lore-upstream-path"]) {
+    headers["x-lore-upstream-path"] = stripGeminiQueryKey(
+      headers["x-lore-upstream-path"],
+    );
   }
 
   let gatewayReq: GatewayRequest;

@@ -466,7 +466,7 @@ function requestCheckpointProtocol(req: GatewayRequest): string {
   return sourceCheckpointProtocol(requestContextBoundaryProtocol(req));
 }
 
-function requestContextBoundaryProtocol(
+export function requestContextBoundaryProtocol(
   req: GatewayRequest,
 ): ContextBoundaryProtocol {
   if (req.codex === true) return "openai-codex";
@@ -476,6 +476,11 @@ function requestContextBoundaryProtocol(
     case "openai-responses":
     case "gemini":
       return req.protocol;
+    case "vertex":
+      // Vertex Claude ingress uses the Anthropic request shape. Checkpoints
+      // therefore digest and validate the source transcript as Anthropic even
+      // though dispatch uses Vertex's :rawPredict transport.
+      return "anthropic";
     default:
       throw new Error("Unsupported context-boundary protocol");
   }
