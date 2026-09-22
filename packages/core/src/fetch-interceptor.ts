@@ -67,6 +67,15 @@ const NON_STANDARD_PATH_REWRITES: Record<string, string> = {
 type BodyProtocol = "anthropic" | "openai" | "openai-responses";
 
 /**
+ * Internal Codex context-continuation headers. These are deliberately scoped
+ * to the Codex Responses route; ordinary Responses/Chat/Anthropic callers do
+ * not participate in the boundary handshake.
+ */
+export const CODEX_CONTEXT_BOUNDARY_HEADER = "x-lore-codex-context-boundary";
+export const CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER =
+  "x-lore-codex-context-boundary-mismatch";
+
+/**
  * Canonical gateway endpoint for each protocol. When a request is intercepted
  * via body-shape detection (the URL path is non-standard), we route it to the
  * gateway endpoint that matches the detected protocol. The gateway parses the
@@ -266,6 +275,89 @@ export function interceptUrlForProtocol(
  * log spam on every request to a non-intercepted LLM endpoint).
  */
 const warnedPaths = new Set<string>();
+
+type CodexBoundary = {
+  value: string;
+  updatedAt: number;
+};
+
+/**
+ * Boundaries are process-local hints, not durable identity. The gateway still
+ * validates the source checkpoint before accepting a delta, and a failed
+ * validation causes a full-body retry. Keeping only the opaque token here
+ * avoids retaining the conversation itself in the interceptor.
+ */
+const codexBoundaries = new Map<string, CodexBoundary>();
+const CODEX_BOUNDARY_TTL_MS = 60 * 60 * 1000;
+const MAX_CODEX_BOUNDARIES = 1024;
+
+function codexBoundaryKey(gatewayBase: string, sessionID: string): string {
+  return `${gatewayBase}\x1f${sessionID}`;
+}
+
+function pruneCodexBoundaries(now = Date.now()): void {
+  for (const [key, boundary] of codexBoundaries) {
+    if (now - boundary.updatedAt > CODEX_BOUNDARY_TTL_MS)
+      codexBoundaries.delete(key);
+  }
+  if (codexBoundaries.size <= MAX_CODEX_BOUNDARIES) return;
+  const oldest = [...codexBoundaries.entries()]
+    .sort(([, a], [, b]) => a.updatedAt - b.updatedAt)
+    .slice(0, codexBoundaries.size - MAX_CODEX_BOUNDARIES);
+  for (const [key] of oldest) codexBoundaries.delete(key);
+}
+
+function isCodexResponsesPath(pathname: string): boolean {
+  return pathname.endsWith("/codex/responses");
+}
+
+function applyCodexBoundaryHeader(
+  headers: Headers,
+  gatewayBase: string,
+  pathname: string,
+): string | undefined {
+  if (!isCodexResponsesPath(pathname)) return undefined;
+  const sessionID = headers.get("x-lore-session-id");
+  if (!sessionID) return undefined;
+  pruneCodexBoundaries();
+  const key = codexBoundaryKey(gatewayBase, sessionID);
+  const boundary = codexBoundaries.get(key);
+  if (!boundary) return key;
+  headers.set(CODEX_CONTEXT_BOUNDARY_HEADER, boundary.value);
+  return key;
+}
+
+function updateCodexBoundary(
+  response: Response,
+  boundaryKey: string | undefined,
+): void {
+  if (!boundaryKey) return;
+  const value = response.headers.get(CODEX_CONTEXT_BOUNDARY_HEADER);
+  if (response.ok) {
+    if (value) {
+      codexBoundaries.set(boundaryKey, { value, updatedAt: Date.now() });
+    } else {
+      // A successful response without a checkpoint (for example no-store or
+      // a session that has just been reset) invalidates the previous hint.
+      codexBoundaries.delete(boundaryKey);
+    }
+  } else if (response.status >= 400) {
+    // A failed request may have changed neither the source checkpoint nor the
+    // client transcript. Keep the old hint only for the dedicated mismatch
+    // retry below; other failures should force the next request to be full.
+    codexBoundaries.delete(boundaryKey);
+  }
+  pruneCodexBoundaries();
+}
+
+function canReplayRequestBody(init: RequestInit | undefined): boolean {
+  const body = init?.body;
+  return (
+    typeof body === "string" ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body)
+  );
+}
 
 /**
  * Determine whether a fetch request should be intercepted and rerouted
@@ -509,11 +601,43 @@ export function installFetchInterceptor(
         rewrite.upstreamPath,
         config,
       );
+      const boundaryKey = applyCodexBoundaryHeader(
+        headers,
+        gatewayBase,
+        upstream.pathname,
+      );
       observeRequestHeaders(headers, config);
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
-      return originalFetch(rewrite.gatewayUrl, { ...init, headers });
+      const response = await originalFetch(rewrite.gatewayUrl, {
+        ...init,
+        headers,
+      });
+      if (
+        boundaryKey &&
+        response.headers.get(CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER) ===
+          "true" &&
+        canReplayRequestBody(init)
+      ) {
+        // The gateway could not prove that its retained Lore checkpoint still
+        // matches this prefix (restart, edited history, or a stale client
+        // boundary). Replay once without the hint so the normal full-body
+        // parser can recover. The response is deliberately not exposed to the
+        // provider, which otherwise sees an opaque 409 instead of recovering.
+        codexBoundaries.delete(boundaryKey);
+        void response.body?.cancel().catch(() => {});
+        const fullHeaders = new Headers(headers);
+        fullHeaders.delete(CODEX_CONTEXT_BOUNDARY_HEADER);
+        const retry = await originalFetch(rewrite.gatewayUrl, {
+          ...init,
+          headers: fullHeaders,
+        });
+        updateCodexBoundary(retry, boundaryKey);
+        return retry;
+      }
+      updateCodexBoundary(response, boundaryKey);
+      return response;
     }
 
     // ---- Path 2: URL didn't match, but the body shape may reveal an LLM call ----
@@ -533,11 +657,21 @@ export function installFetchInterceptor(
           rewrite.upstreamPath,
           config,
         );
+        const boundaryKey = applyCodexBoundaryHeader(
+          headers,
+          gatewayBase,
+          upstream.pathname,
+        );
         observeRequestHeaders(headers, config);
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
-        return originalFetch(rewrite.gatewayUrl, { ...init, headers });
+        const response = await originalFetch(rewrite.gatewayUrl, {
+          ...init,
+          headers,
+        });
+        updateCodexBoundary(response, boundaryKey);
+        return response;
       }
 
       // LLM-looking path we couldn't intercept (no body, or unrecognized
@@ -563,5 +697,8 @@ export function installFetchInterceptor(
   return () => {
     globalThis.fetch = originalFetch;
     writeOriginalFetchSlot(null);
+    for (const key of codexBoundaries.keys()) {
+      if (key.startsWith(`${gatewayBase}\x1f`)) codexBoundaries.delete(key);
+    }
   };
 }
