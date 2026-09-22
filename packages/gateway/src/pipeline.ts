@@ -21,14 +21,28 @@ export { storeTurnTemporal } from "./turn-temporal";
 export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
+import type {
+  ContextBoundaryProtocol,
+  LoreMessageWithParts,
+  LLMClient,
+} from "@loreai/core";
 import {
+  CONTEXT_BOUNDARY_HEADER,
   FullSourceRequired,
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
   asString,
   estimateTokens as coreEstimateTokens,
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
+import {
+  encodeContextBoundary,
+  supportsContextBoundary,
+} from "./context-boundary";
+import {
+  SourceDeltaUnavailableError,
+  sourceCheckpointProtocol,
+} from "./source-checkpoint";
 import {
   load,
   config as loreConfig,
@@ -426,6 +440,51 @@ import {
   parseResolveProjectResult,
   type ResolveProjectResult,
 } from "./synthetic-tools";
+
+function requestSourceMessageCount(req: GatewayRequest): number {
+  return (
+    (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + req.messages.length
+  );
+}
+
+function requestSourcePrefix(
+  req: GatewayRequest,
+): { sourceCount: number; sourceDigest: string } | undefined {
+  const prefix = req.sourceInput?.sourcePrefix;
+  return prefix
+    ? {
+        sourceCount: prefix.messageCount,
+        sourceDigest: prefix.sourceDigest,
+      }
+    : undefined;
+}
+
+function requestCheckpointProtocol(req: GatewayRequest): string {
+  if (!req.sourceInput || !supportsContextBoundary(req.rawHeaders)) {
+    return req.protocol;
+  }
+  return sourceCheckpointProtocol(requestContextBoundaryProtocol(req));
+}
+
+export function requestContextBoundaryProtocol(
+  req: GatewayRequest,
+): ContextBoundaryProtocol {
+  if (req.codex === true) return "openai-codex";
+  switch (req.protocol) {
+    case "anthropic":
+    case "openai":
+    case "openai-responses":
+    case "gemini":
+      return req.protocol;
+    case "vertex":
+      // Vertex Claude ingress uses the Anthropic request shape. Checkpoints
+      // therefore digest and validate the source transcript as Anthropic even
+      // though dispatch uses Vertex's :rawPredict transport.
+      return "anthropic";
+    default:
+      throw new Error("Unsupported context-boundary protocol");
+  }
+}
 
 /** Reserve the largest source set this untrusted recall input can expose. */
 function recallItemReservation(input: unknown): number {
@@ -6206,7 +6265,7 @@ async function identifySession(
       projectPath,
       gitRemote: trustedAdoptionRemote(projectPath, headers),
       known,
-      msgCount: req.messages.length,
+      msgCount: requestSourceMessageCount(req),
       requestGeneration,
       config,
       credentialFingerprint,
@@ -6289,7 +6348,7 @@ async function identifySession(
   if (requestGeneration !== undefined) {
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
   }
-  const msgCount = req.messages.length;
+  const msgCount = requestSourceMessageCount(req);
 
   // Find the best matching session: same fingerprint + closest message count
   let bestMatch: { sid: string; countDiff: number } | null = null;
@@ -6407,6 +6466,19 @@ type ResolvedRequestUpstreamRoute = {
   effectiveUpstreamBase: string;
   bedrockMantle: boolean;
 };
+
+/** OpenCode Zen may append an empty choice frame after finish_reason. */
+function isOpenCodeZenOpenAIStream(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  if (route.effectiveProtocol !== "openai") return false;
+  try {
+    const url = new URL(route.effectiveUpstreamBase);
+    return url.hostname === "opencode.ai" && url.pathname.startsWith("/zen");
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Preserve the legacy process-global credential only for a local, unambiguous
@@ -6805,10 +6877,11 @@ async function forwardToUpstream(
   }
 
   // Verbatim endpoint passthrough (#1052): when the fetch interceptor preserved
-  // the client's original endpoint path (x-lore-upstream-path) AND we are a pure
+  // the client's original request target (pathname + query, carried under the
+  // wire-compatible x-lore-upstream-path name) AND we are a pure
   // passthrough — same host (headerUpstream is the highest-priority base, so it
   // equals effectiveUpstreamBase) and same wire protocol (no translation) — POST
-  // to the exact original endpoint instead of the reconstructed canonical path.
+  // to the exact original endpoint instead of the reconstructed canonical URL.
   // This is what lets providers whose endpoint omits `/v1` (GitHub Copilot's
   // `/chat/completions`) or uses a non-standard prefix work without an allowlist.
   // No-ops for the standard `/v1/...` case (verbatim == reconstructed), and the
@@ -14342,6 +14415,11 @@ async function handleCompaction(
   trackOperation: (operation: Promise<unknown>) => void,
   claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before compaction.",
+    );
+  }
   const abortScope = createForegroundAbortScope(req.signal);
   try {
     const run = (signal: AbortSignal) => {
@@ -15297,7 +15375,8 @@ export async function passthroughResponsesCompact(
     );
   }
   const upstreamPath = extractUpstreamPathHeader(rawHeaders);
-  const compactPath = upstreamPath?.endsWith("/responses/compact")
+  const compactPathname = upstreamPath?.split("?", 1)[0];
+  const compactPath = compactPathname?.endsWith("/responses/compact")
     ? upstreamPath
     : undefined;
   const upstreamUrl = compactPath
@@ -15814,6 +15893,11 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation cannot be forwarded without its retained prefix; retrying with the full conversation.",
+    );
+  }
   setSentryLightContext({ model: req.model });
 
   const abortScope = createForegroundAbortScope(req.signal);
@@ -16004,6 +16088,11 @@ async function handleProvisionalConversationTurn(
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before confirming a provisional session.",
+    );
+  }
   // Resolve and validate route intent once, but keep it private until the
   // provisional identity is confirmed by a complete response and client EOF.
   const requestUpstream = prepareRequestUpstream(req, config);
@@ -16050,6 +16139,9 @@ async function handleProvisionalConversationTurn(
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
+              allowPostTerminalNoop: isOpenCodeZenOpenAIStream(
+                requestUpstream.route,
+              ),
             })
           : forwarded.effectiveProtocol === "gemini"
             ? await accumulateGeminiSSEStream(upstreamResponse, {
@@ -16199,15 +16291,17 @@ async function handleProvisionalConversationTurn(
     const userIndex = req.messages.findLastIndex(
       (message) => message.role === "user",
     );
+    const absoluteUserIndex =
+      (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + userIndex;
     const temporalInput: TurnTemporalInput = {
-      assistantIndex: req.messages.length,
+      assistantIndex: requestSourceMessageCount(req),
       ...(userIndex >= 0
         ? {
             latestUser: gatewayMessagesToLore(
               [req.messages[userIndex]],
               identified.sessionID,
-              userIndex,
-              userIndex,
+              absoluteUserIndex,
+              absoluteUserIndex,
             )[0],
           }
         : {}),
@@ -16272,7 +16366,7 @@ async function handleProvisionalConversationTurn(
         noStore,
       });
       saveSessionTracking(identified.sessionID, {
-        messageCount: req.messages.length,
+        messageCount: requestSourceMessageCount(req),
         turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
         consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
         projectPath,
@@ -16330,7 +16424,7 @@ async function handleProvisionalConversationTurn(
       state.fingerprint = identified.adoptionFingerprint;
     }
     if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
-    state.messageCount = req.messages.length;
+    state.messageCount = requestSourceMessageCount(req);
     state._dirty = true;
     if (credential) {
       captureLegacyGlobalAuth(req, config, credential);
@@ -16906,7 +17000,7 @@ async function handleConversationTurn(
   // Skip for sub-agent sessions (small context by design) and tool-less
   // requests (title-gen, summarization agents that resume with fresh context).
   const prevMsgCount = sessionState.messageCount;
-  const currMsgCount = req.messages.length;
+  const currMsgCount = requestSourceMessageCount(req);
   if (
     prevMsgCount > 10 &&
     currMsgCount < prevMsgCount * 0.5 &&
@@ -17023,7 +17117,7 @@ async function handleConversationTurn(
   // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
   const preparationTiming = new PreparationTiming(req);
   log.info(
-    `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
+    `turn: session=${sessionID.slice(0, 16)} messages=${currMsgCount} ` +
       `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
       `subagent=${!!sessionState.isSubagent} ` +
       `source=${pathResult.source} ` +
@@ -17265,6 +17359,9 @@ async function handleConversationTurn(
     projectPath,
     noStore: suppressTemporalStorage,
     protocol: req.protocol,
+    checkpointProtocol: requestCheckpointProtocol(req),
+    checkpointBoundarySafe: req.sourceInput?.boundarySafe,
+    sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
   });
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -17740,7 +17837,10 @@ async function handleConversationTurn(
       projectPath,
       noStore: suppressTemporalStorage,
       protocol: req.protocol,
+      checkpointProtocol: requestCheckpointProtocol(req),
+      checkpointBoundarySafe: req.sourceInput?.boundarySafe,
       forceFull: true,
+      sourcePrefix: requestSourcePrefix(req),
       timing: preparationTiming,
     }));
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -17752,6 +17852,28 @@ async function handleConversationTurn(
     });
   }
   checkpoint?.finish(result.messages);
+  // This header is deliberately optimistic: the candidate checkpoint is not
+  // published until accepted-response bookkeeping succeeds after downstream
+  // EOF. The interceptor therefore caches only at EOF, and a follow-up that
+  // races or outlives publication must take the 409/full-replay path. Never
+  // treat possession of this token as proof that durable state already exists.
+  const contextBoundaryHeader =
+    req.sourceInput &&
+    supportsContextBoundary(req.rawHeaders) &&
+    req.sourceInput.boundarySafe &&
+    checkpoint &&
+    checkpoint.hasPendingPublication &&
+    !suppressTemporalStorage
+      ? encodeContextBoundary({
+          v: 1,
+          protocol: requestContextBoundaryProtocol(req),
+          inputItems: req.sourceInput.itemCount,
+          inputDigest: req.sourceInput.inputDigest,
+          retainedItems: req.sourceInput.retainedItems,
+          sourceMessages: requestSourceMessageCount(req),
+          sourceDigest: checkpoint.digest,
+        })
+      : undefined;
 
   // Drop trailing pure-text assistant messages to prevent prefill errors
   for (;;) {
@@ -18456,6 +18578,9 @@ async function handleConversationTurn(
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
     copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
+    if (contextBoundaryHeader && response.ok) {
+      response.headers.set(CONTEXT_BOUNDARY_HEADER, contextBoundaryHeader);
+    }
     return wrapBodyWithCleanup(
       response,
       releaseForeground,
@@ -19368,6 +19493,8 @@ async function handleConversationTurn(
           strict: true,
           stopAtTerminal: true,
           consumeUntilDone: true,
+          allowPostTerminalNoop:
+            isOpenCodeZenOpenAIStream(requestUpstreamRoute),
         }),
       );
       return finishWithRecall(resp);
@@ -19842,6 +19969,11 @@ async function handleLoreSlashCommand(
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (!text.toLowerCase().startsWith("/lore:")) return null;
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before running a slash command.",
+    );
+  }
 
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
@@ -20428,14 +20560,22 @@ async function handleRequestInner(
     // task_result. Guarding structural detection on the sub-agent signal closes
     // that hole regardless of which header resolved the session.
     const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
+    // A checkpointed continuation deliberately contains only the new suffix. Its
+    // small request-local message count must not look like a large session
+    // suddenly compacting. Pattern-based detection remains enabled because a
+    // suffix can still explicitly request compaction.
+    const isCheckpointContinuation =
+      req.sourceInput?.sourcePrefix !== undefined;
     const structuralCompaction =
-      !isClaudeSubagent && isStructuralCompaction(req, priorState);
+      !isClaudeSubagent &&
+      !isCheckpointContinuation &&
+      isStructuralCompaction(req, priorState);
     const patternDetection = structuralCompaction
       ? undefined
       : detectCompactionRequest(req);
     if (structuralCompaction || patternDetection?.detected) {
       const reason = structuralCompaction
-        ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length})`
+        ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${requestSourceMessageCount(req)})`
         : patternDetection?.detected
           ? patternDetection.reason === "system-prompt"
             ? `pattern: system-prompt match "${patternDetection.pattern}"`
@@ -20444,7 +20584,7 @@ async function handleRequestInner(
               : `pattern: template-sections (${patternDetection.matchCount} matches)`
           : "unknown";
       log.info(
-        `compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`,
+        `compaction detected: ${reason} messages=${requestSourceMessageCount(req)} tools=${req.tools.length}`,
       );
       return await handleCompaction(
         req,
@@ -20456,7 +20596,7 @@ async function handleRequestInner(
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
-    if (isMetaRequest(req)) {
+    if (isMetaRequest(req, requestSourceMessageCount(req))) {
       log.info(
         `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
           ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
@@ -20475,10 +20615,19 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    if (err instanceof SourceDeltaUnavailableError) {
+      const response = errorResponse(
+        409,
+        "The retained Lore context no longer matches the request prefix; retrying with the full conversation.",
+      );
+      response.headers.set(CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
+      return response;
+    }
     // Client disconnect / abort is benign — downgrade from error to info.
     const isAbort = err instanceof DOMException && err.name === "AbortError";
     if (isAbort) {
-      log.info("pipeline aborted (client disconnect)");
+      const reason = err.message ? `: ${err.message}` : "";
+      log.info(`pipeline aborted (client disconnect${reason})`);
       // Only surfaces to Sentry if the host was under pressure at abort time.
       captureClientAbortUnderPressure({
         startMs: requestStartMs,

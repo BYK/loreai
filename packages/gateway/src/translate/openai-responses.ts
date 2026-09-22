@@ -10,7 +10,13 @@
  *   - System prompt is in the `instructions` field
  *   - Tools use `parameters` directly (not wrapped in `function`)
  */
-import { asString, log } from "@loreai/core";
+import {
+  CHAIN_DIGEST_SEED,
+  asString,
+  digestChain,
+  log,
+  type ContextBoundary,
+} from "@loreai/core";
 import type {
   GatewayContentBlock,
   GatewayMessage,
@@ -29,11 +35,21 @@ import {
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
 import {
+  parseContextBoundary,
+  type ContextBoundaryProtocol,
+} from "../context-boundary";
+import {
   parseStreamedRequest,
+  StreamedRequestBoundaryMismatchError,
   type StreamingRequestSpec,
 } from "./streaming-request";
 
 export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
+
+type ParsedInputItems = {
+  messages: GatewayMessage[];
+  boundarySafe: boolean;
+};
 
 function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
   const inclusiveInputTokens = safeTokenSum(
@@ -72,6 +88,19 @@ export function parseOpenAIResponsesRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
+  const boundary = parseContextBoundary(headers, "openai-responses");
+  const input = rawInput(body);
+  const parsed = parseInputItems(input);
+  const req = parseOpenAIResponsesRequestInternal(body, headers, parsed);
+  attachDirectSourceInput(req, input, parsed, boundary);
+  return req;
+}
+
+function parseOpenAIResponsesRequestInternal(
+  body: unknown,
+  headers: Record<string, string>,
+  parsedInput?: ParsedInputItems,
+): GatewayRequest {
   const raw = (body ?? {}) as Record<string, unknown>;
 
   const model = asString(raw.model);
@@ -85,7 +114,7 @@ export function parseOpenAIResponsesRequest(
   const system = typeof raw.instructions === "string" ? raw.instructions : "";
 
   // Parse input items into normalized messages
-  const messages = parseInputItems(raw.input);
+  const messages = (parsedInput ?? parseInputItems(raw.input)).messages;
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
@@ -195,23 +224,34 @@ function addCodexControls(
 const responsesSpec = (
   headers: Record<string, string>,
   codex: boolean,
-): StreamingRequestSpec<GatewayMessage[]> => ({
-  streamKey: "input",
-  captureKeys: codex
-    ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
-    : RESPONSES_TOP_LEVEL_KEYS,
-  createItemsBuilder: createInputItemsBuilder,
-  parseSync: (raw) =>
-    codex
-      ? parseOpenAICodexRequest(raw, headers)
-      : parseOpenAIResponsesRequest(raw, headers),
-  assemble(raw, streamed) {
-    const req = parseOpenAIResponsesRequest(raw, headers);
-    if (streamed) req.messages = streamed;
-    else if ("input" in raw) req.messages = parseInputItems(raw.input);
-    return codex ? addCodexControls(req, raw) : req;
-  },
-});
+): StreamingRequestSpec<ParsedInputItems> => {
+  const protocol: ContextBoundaryProtocol = codex
+    ? "openai-codex"
+    : "openai-responses";
+  const boundary = parseContextBoundary(headers, protocol);
+  return {
+    streamKey: "input",
+    captureKeys: codex
+      ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
+      : RESPONSES_TOP_LEVEL_KEYS,
+    contextBoundary: boundary,
+    describeBoundary: (parsed) => ({
+      boundarySafe: parsed.boundarySafe,
+      retainedItems: 0,
+    }),
+    createItemsBuilder: createInputItemsBuilder,
+    parseSync: (raw) =>
+      codex
+        ? parseOpenAICodexRequest(raw, headers)
+        : parseOpenAIResponsesRequest(raw, headers),
+    assemble(raw, streamed) {
+      const parsed = streamed ?? parseInputItems(raw.input);
+      const req = parseOpenAIResponsesRequestInternal(raw, headers, parsed);
+      if (codex) addCodexControls(req, raw);
+      return req;
+    },
+  };
+};
 
 /** Parse a streamed OpenAI Responses request. */
 export function parseOpenAIResponsesRequestChunks(
@@ -236,8 +276,11 @@ export function parseOpenAICodexRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
-  const req = parseOpenAIResponsesRequest(body, headers);
+  const boundary = parseContextBoundary(headers, "openai-codex");
+  const parsed = parseInputItems(rawInput(body));
+  const req = parseOpenAIResponsesRequestInternal(body, headers, parsed);
   const raw = (body ?? {}) as Record<string, unknown>;
+  attachDirectSourceInput(req, raw.input, parsed, boundary);
   return addCodexControls(req, raw);
 }
 
@@ -253,13 +296,24 @@ export function parseOpenAICodexRequestChunks(
 // Input item parsing
 // ---------------------------------------------------------------------------
 
-function parseInputItems(input: unknown): GatewayMessage[] {
+function rawInput(body: unknown): unknown {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  return raw.input;
+}
+
+function parseInputItems(input: unknown): ParsedInputItems {
   // String shorthand: single user message
   if (typeof input === "string") {
-    return [{ role: "user", content: [{ type: "text", text: input }] }];
+    return {
+      messages: [{ role: "user", content: [{ type: "text", text: input }] }],
+      // String shorthand cannot be suffix-elided as an item array.
+      boundarySafe: false,
+    };
   }
 
-  if (!Array.isArray(input)) return [];
+  if (!Array.isArray(input)) {
+    return { messages: [], boundarySafe: false };
+  }
 
   const builder = createInputItemsBuilder();
   for (const item of input) {
@@ -268,12 +322,43 @@ function parseInputItems(input: unknown): GatewayMessage[] {
   return builder.finish();
 }
 
+function attachDirectSourceInput(
+  req: GatewayRequest,
+  input: unknown,
+  parsed: ParsedInputItems,
+  boundary?: ContextBoundary,
+): void {
+  if (!Array.isArray(input)) {
+    if (!boundary) return;
+    throw new StreamedRequestBoundaryMismatchError(
+      "The checkpointed input suffix is not an array; retrying with the full conversation.",
+    );
+  }
+  req.sourceInput = {
+    itemCount: (boundary?.inputItems ?? 0) + input.length,
+    inputDigest: digestChain(input, boundary?.inputDigest ?? CHAIN_DIGEST_SEED),
+    boundarySafe: input.length > 0 && parsed.boundarySafe,
+    retainedItems: 0,
+    ...(boundary
+      ? {
+          sourcePrefix: {
+            messageCount: boundary.sourceMessages,
+            sourceDigest: boundary.sourceDigest,
+          },
+        }
+      : {}),
+  };
+}
+
 function createInputItemsBuilder(): {
   add(item: unknown): void;
-  finish(): GatewayMessage[];
+  finish(): ParsedInputItems;
 } {
   const messages: GatewayMessage[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
+  let sawItem = false;
+  let seamKind: "none" | "other" | "tool-call" | "tool-result" = "none";
+  let seamHasPendingReasoning = false;
 
   const appendAssistant = (
     content: GatewayContentBlock[],
@@ -299,10 +384,28 @@ function createInputItemsBuilder(): {
   };
 
   const add = (item: unknown): void => {
+    sawItem = true;
     const raw = item as Record<string, unknown>;
     const itemType = raw.type as string | undefined;
     const role = raw.role as string | undefined;
 
+    // Track only the state that can affect normalization across an item seam.
+    if (itemType === "message" || (!itemType && role)) {
+      const content = parseMessageContent(raw.content);
+      if (role === "assistant") {
+        seamHasPendingReasoning = false;
+        seamKind = "other";
+      } else if (content.length > 0) {
+        seamKind = "other";
+      }
+    } else if (itemType === "function_call") {
+      seamHasPendingReasoning = false;
+      seamKind = "tool-call";
+    } else if (itemType === "function_call_output") {
+      seamKind = "tool-result";
+    } else {
+      seamHasPendingReasoning = true;
+    }
     if (itemType === "message" || (!itemType && role)) {
       // Message item — has role + content
       const msgRole =
@@ -435,7 +538,12 @@ function createInputItemsBuilder(): {
     pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
   };
 
-  const finish = (): GatewayMessage[] => {
+  const finish = (): ParsedInputItems => {
+    const boundarySafe =
+      sawItem &&
+      !seamHasPendingReasoning &&
+      seamKind !== "tool-call" &&
+      seamKind !== "tool-result";
     if (pendingReasoning.length > 0) {
       messages.push({
         role: "assistant",
@@ -446,7 +554,7 @@ function createInputItemsBuilder(): {
       pendingReasoning = [];
     }
 
-    return messages;
+    return { messages, boundarySafe };
   };
 
   return { add, finish };

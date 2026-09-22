@@ -1,8 +1,29 @@
 import { TokenParser, TokenType, Tokenizer } from "@streamparser/json";
 import type { ParsedElementInfo, ParsedTokenInfo } from "@streamparser/json";
+import {
+  CHAIN_DIGEST_SEED,
+  extendChainDigest,
+  type ContextBoundary,
+} from "@loreai/core";
 import type { GatewayRequest } from "./types";
 
 export const STREAMING_PARSE_SPOOL_BYTES = 256 * 1024;
+
+/** Errors that must survive the generic JSON-parser error boundary. */
+export class StreamedRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StreamedRequestError";
+  }
+}
+
+/** The caller's continuation hint cannot be proven against this body. */
+export class StreamedRequestBoundaryMismatchError extends StreamedRequestError {
+  constructor(message = "Context boundary does not match the request") {
+    super(message);
+    this.name = "StreamedRequestBoundaryMismatchError";
+  }
+}
 
 export interface StreamedItemsBuilder<M> {
   add(item: unknown): void;
@@ -12,12 +33,29 @@ export interface StreamedItemsBuilder<M> {
 export interface StreamingRequestSpec<M> {
   streamKey: string;
   captureKeys: ReadonlySet<string> | "*";
+  /** A verified-prefix hint. The body then contains retained preamble + suffix. */
+  contextBoundary?: ContextBoundary;
+  /** Validate protocol-specific items repeated ahead of an elided suffix. */
+  isRetainedItem?(item: unknown, index: number): boolean;
+  /** Describe whether a new boundary can safely restart normalization. */
+  describeBoundary?(
+    streamed: M,
+    boundary: ContextBoundary | undefined,
+  ): { boundarySafe: boolean; retainedItems: number };
   createItemsBuilder(): StreamedItemsBuilder<M>;
   parseSync(raw: unknown): GatewayRequest;
   assemble(
     raw: Record<string, unknown>,
     streamed: M | undefined,
   ): GatewayRequest;
+}
+
+interface TrackedItems<M> {
+  value: M;
+  itemCount: number;
+  inputDigest: string;
+  boundarySafe: boolean;
+  retainedItems: number;
 }
 
 interface TopLevelCapture {
@@ -31,7 +69,7 @@ interface ActiveTopLevelValue<M> {
   key: string;
   nesting: number;
   capture?: TopLevelCapture;
-  streamBuilder?: StreamedItemsBuilder<M>;
+  streamBuilder?: StreamedItemsBuilder<TrackedItems<M>>;
   streamItem?: TopLevelCapture;
 }
 
@@ -78,6 +116,112 @@ function finishCapture(capture: TopLevelCapture): unknown {
   return capture.value;
 }
 
+function createTrackedItemsBuilder<M>(
+  spec: StreamingRequestSpec<M>,
+): StreamedItemsBuilder<TrackedItems<M>> {
+  const builder = spec.createItemsBuilder();
+  const boundary = spec.contextBoundary;
+  let itemCount = boundary?.inputItems ?? 0;
+  let inputDigest = boundary?.inputDigest ?? CHAIN_DIGEST_SEED;
+  let receivedItems = 0;
+
+  return {
+    add(item) {
+      const receivedIndex = receivedItems++;
+      if (boundary && receivedIndex < boundary.retainedItems) {
+        if (!spec.isRetainedItem?.(item, receivedIndex)) {
+          throw new StreamedRequestBoundaryMismatchError(
+            "The retained context preamble no longer matches this protocol; retrying with the full conversation.",
+          );
+        }
+        builder.add(item);
+        return;
+      }
+      itemCount++;
+      inputDigest = extendChainDigest(inputDigest, item);
+      builder.add(item);
+    },
+    finish() {
+      if (boundary && receivedItems < boundary.retainedItems) {
+        throw new StreamedRequestBoundaryMismatchError(
+          "The request ended before its retained context preamble; retrying with the full conversation.",
+        );
+      }
+      const value = builder.finish();
+      const suffixItems = receivedItems - (boundary?.retainedItems ?? 0);
+      if (boundary && suffixItems === 0) {
+        throw new StreamedRequestBoundaryMismatchError(
+          "The checkpointed request contains no new context items; retrying with the full conversation.",
+        );
+      }
+      const description = spec.describeBoundary?.(value, boundary) ?? {
+        boundarySafe: true,
+        retainedItems: 0,
+      };
+      return {
+        value,
+        itemCount,
+        inputDigest,
+        boundarySafe: itemCount > 0 && description.boundarySafe,
+        retainedItems: description.retainedItems,
+      };
+    },
+  };
+}
+
+function assembleTrackedRequest<M>(
+  spec: StreamingRequestSpec<M>,
+  raw: Record<string, unknown>,
+  streamed: TrackedItems<M> | undefined,
+): GatewayRequest {
+  if (spec.contextBoundary && !streamed) {
+    throw new StreamedRequestBoundaryMismatchError(
+      `The checkpointed ${spec.streamKey} suffix is missing; retrying with the full conversation.`,
+    );
+  }
+  const req = spec.assemble(raw, streamed?.value);
+  if (streamed) {
+    req.sourceInput = {
+      itemCount: streamed.itemCount,
+      inputDigest: streamed.inputDigest,
+      boundarySafe: streamed.boundarySafe,
+      retainedItems: streamed.retainedItems,
+      ...(spec.contextBoundary
+        ? {
+            sourcePrefix: {
+              messageCount: spec.contextBoundary.sourceMessages,
+              sourceDigest: spec.contextBoundary.sourceDigest,
+            },
+          }
+        : {}),
+    };
+  }
+  return req;
+}
+
+function parseBufferedRequest<M>(
+  raw: unknown,
+  spec: StreamingRequestSpec<M>,
+): GatewayRequest {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    const items = record[spec.streamKey];
+    if (Array.isArray(items)) {
+      const builder = createTrackedItemsBuilder(spec);
+      for (const item of items) builder.add(item);
+      const envelope = { ...record };
+      delete envelope[spec.streamKey];
+      return assembleTrackedRequest(spec, envelope, builder.finish());
+    }
+  }
+  if (spec.contextBoundary) {
+    throw new StreamedRequestBoundaryMismatchError(
+      `The checkpointed ${spec.streamKey} is not an array; retrying with the full conversation.`,
+    );
+  }
+  return spec.parseSync(raw);
+}
+
 async function parseStreamedRequestInternal<M>(
   chunks: AsyncIterable<Uint8Array>,
   spec: StreamingRequestSpec<M>,
@@ -85,6 +229,12 @@ async function parseStreamedRequestInternal<M>(
 ): Promise<GatewayRequest> {
   const raw: Record<string, unknown> = {};
   const tokenizer = new Tokenizer();
+  // Tokenizer validates lexical tokens only. A TokenParser is still required
+  // to enforce the JSON grammar between those tokens (colon/comma placement,
+  // object keys, and a single root value). Keep no values: endpoint-specific
+  // captures below own materialization.
+  const validator = new TokenParser({ paths: [], keepStack: false });
+  validator.onValue = (): void => {};
   const textDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let inString = false;
   let escapingStringCharacter = false;
@@ -95,7 +245,7 @@ async function parseStreamedRequestInternal<M>(
   let sawToken = false;
   let rootKey: string | undefined;
   let active: ActiveTopLevelValue<M> | undefined;
-  let streamed: M | undefined;
+  let streamed: TrackedItems<M> | undefined;
   let sawStreamKey = false;
 
   const finishActive = (): void => {
@@ -189,7 +339,9 @@ async function parseStreamedRequestInternal<M>(
         active = {
           key,
           nesting: isOpeningToken(token.token) ? 1 : 0,
-          streamBuilder: streamArray ? spec.createItemsBuilder() : undefined,
+          streamBuilder: streamArray
+            ? createTrackedItemsBuilder(spec)
+            : undefined,
           capture:
             !streamArray && shouldCapture
               ? createTopLevelCapture(key)
@@ -214,6 +366,7 @@ async function parseStreamedRequestInternal<M>(
   };
 
   tokenizer.onToken = (token): void => {
+    validator.write(token);
     if (rootComplete) throw new Error("Invalid JSON body");
     sawToken = true;
     consumeTopLevelToken(token);
@@ -283,22 +436,27 @@ async function parseStreamedRequestInternal<M>(
     try {
       write(new Uint8Array(), false);
       tokenizer.end();
+      if (!validator.isEnded) validator.end();
     } catch (error) {
       parseError =
         error instanceof Error ? error : new Error("Invalid JSON body");
     }
   }
+  if (parseError instanceof StreamedRequestError) throw parseError;
   if (parseError || !sawToken || active || !tokenizer.isEnded) {
     throw new Error("Invalid JSON body");
   }
   if (rootIsObject && !rootComplete) throw new Error("Invalid JSON body");
-  return spec.assemble(rootIsObject ? raw : {}, streamed);
+  return assembleTrackedRequest(spec, rootIsObject ? raw : {}, streamed);
 }
 
 export async function parseStreamedRequest<M>(
   chunks: AsyncIterable<Uint8Array>,
   spec: StreamingRequestSpec<M>,
 ): Promise<GatewayRequest> {
+  if (spec.contextBoundary) {
+    return parseStreamedRequestInternal(chunks, spec, () => {});
+  }
   const iterator = chunks[Symbol.asyncIterator]();
   const spool: Uint8Array[] = [];
   let total = 0;
@@ -309,7 +467,7 @@ export async function parseStreamedRequest<M>(
       const next = await iterator.next();
       if (next.done) {
         const raw = JSON.parse(Buffer.concat(spool, total).toString("utf8"));
-        return spec.parseSync(raw);
+        return parseBufferedRequest(raw, spec);
       }
       total += next.value.byteLength;
       spool.push(next.value);

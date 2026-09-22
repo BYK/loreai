@@ -381,6 +381,23 @@ export {
 } from "./tokenize";
 export { SemanticTokenCache } from "./semantic-token-cache";
 export {
+  CHAIN_DIGEST_SEED,
+  digestChain,
+  extendChainDigest,
+} from "./chain-digest";
+export {
+  CONTEXT_BOUNDARY_CAPABILITY_HEADER,
+  CONTEXT_BOUNDARY_CAPABILITY_VALUE,
+  CONTEXT_BOUNDARY_HEADER,
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
+  decodeContextBoundary,
+  encodeContextBoundary,
+  type ContextBoundary,
+  type ContextBoundaryProtocol,
+} from "./context-boundary";
+export {
+  CODEX_CONTEXT_BOUNDARY_HEADER,
+  CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER,
   installFetchInterceptor,
   shouldIntercept,
   type FetchInterceptorConfig,

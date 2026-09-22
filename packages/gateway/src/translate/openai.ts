@@ -20,20 +20,29 @@ import {
   ZERO_USAGE,
 } from "./types";
 import type { AnthropicCacheOptions } from "./anthropic";
-import { asString } from "@loreai/core";
+import { asString, digestChain } from "@loreai/core";
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
 import {
   parseStreamedRequest,
   type StreamedItemsBuilder,
 } from "./streaming-request";
+import { parseContextBoundary } from "../context-boundary";
 
-export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<{
+type OpenAIMessages = {
   system: string;
   messages: GatewayMessage[];
-}> {
+  boundarySafe: boolean;
+  retainedItems: number;
+};
+
+export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<OpenAIMessages> {
   let system = "";
   const messages: GatewayMessage[] = [];
+  let leadingSystemItems = 0;
+  let sawConversationItem = false;
+  let systemAfterConversation = false;
+  let seamKind: "none" | "other" | "tool-result" = "none";
   return {
     add(item) {
       const msg = item as Record<string, unknown>;
@@ -41,6 +50,8 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<{
       const content = msg.content;
 
       if (role === "system" || role === "developer") {
+        if (sawConversationItem) systemAfterConversation = true;
+        else leadingSystemItems++;
         let text = "";
         if (typeof content === "string") {
           text = content;
@@ -58,12 +69,15 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<{
         return;
       }
 
+      sawConversationItem = true;
+
       if (role === "user") {
         const blocks = parseUserContent(
           content,
           msg.tool_calls as Array<Record<string, unknown>> | undefined,
         );
         messages.push({ role: "user", content: blocks });
+        seamKind = "other";
         return;
       }
 
@@ -73,6 +87,7 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<{
           msg.tool_calls as Array<Record<string, unknown>> | undefined,
         );
         messages.push({ role: "assistant", content: blocks });
+        seamKind = "other";
         return;
       }
 
@@ -90,11 +105,17 @@ export function createOpenAIMessagesBuilder(): StreamedItemsBuilder<{
           } else {
             messages.push({ role: "user", content: toolResultBlocks });
           }
+          seamKind = "tool-result";
         }
       }
     },
     finish() {
-      return { system, messages };
+      return {
+        system,
+        messages,
+        boundarySafe: !systemAfterConversation && seamKind === "other",
+        retainedItems: leadingSystemItems,
+      };
     },
   };
 }
@@ -184,7 +205,8 @@ export function parseOpenAIRequest(
   for (const msg of rawMessages as Array<Record<string, unknown>>) {
     messageBuilder.add(msg);
   }
-  const { system, messages } = messageBuilder.finish();
+  const { system, messages, boundarySafe, retainedItems } =
+    messageBuilder.finish();
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
@@ -208,6 +230,12 @@ export function parseOpenAIRequest(
     metadata: {},
     rawHeaders: { ...headers },
     extras,
+    sourceInput: {
+      itemCount: rawMessages.length,
+      inputDigest: digestChain(rawMessages),
+      boundarySafe: rawMessages.length > 0 && boundarySafe,
+      retainedItems,
+    },
   };
 }
 
@@ -231,9 +259,22 @@ export function parseOpenAIRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
+  const boundary = parseContextBoundary(headers, "openai");
   return parseStreamedRequest(chunks, {
     streamKey: "messages",
     captureKeys: OPENAI_STREAM_CAPTURE_KEYS,
+    contextBoundary: boundary,
+    isRetainedItem: (item) => {
+      const role = (item as Record<string, unknown>)?.role;
+      return role === "system" || role === "developer";
+    },
+    describeBoundary: (streamed, sourceBoundary) => ({
+      boundarySafe:
+        streamed.boundarySafe &&
+        (!sourceBoundary ||
+          streamed.retainedItems === sourceBoundary.retainedItems),
+      retainedItems: streamed.retainedItems,
+    }),
     createItemsBuilder: createOpenAIMessagesBuilder,
     parseSync: (raw) => parseOpenAIRequest(raw, headers),
     assemble(raw, streamed) {

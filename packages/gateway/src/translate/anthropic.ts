@@ -13,7 +13,7 @@ import type {
   GatewayTool,
 } from "./types";
 import { forwardClientHeaders, ZERO_USAGE } from "./types";
-import { asString } from "@loreai/core";
+import { asString, digestChain } from "@loreai/core";
 import { extractAuth, authHeaders } from "../auth";
 import {
   normalizeAnthropicStopReason,
@@ -24,6 +24,7 @@ import {
   parseStreamedRequest,
   type StreamedItemsBuilder,
 } from "./streaming-request";
+import { parseContextBoundary } from "../context-boundary";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -302,6 +303,12 @@ export function parseAnthropicRequest(
     maxTokens,
     metadata,
     rawHeaders: headers,
+    sourceInput: {
+      itemCount: rawMessages.length,
+      inputDigest: digestChain(rawMessages),
+      boundarySafe: rawMessages.length > 0,
+      retainedItems: 0,
+    },
   };
 }
 
@@ -309,9 +316,15 @@ export function parseAnthropicRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
+  const boundary = parseContextBoundary(headers, "anthropic");
   return parseStreamedRequest(chunks, {
     streamKey: "messages",
     captureKeys: "*",
+    contextBoundary: boundary,
+    describeBoundary: (messages) => ({
+      boundarySafe: messages.length > 0,
+      retainedItems: 0,
+    }),
     createItemsBuilder: createAnthropicMessagesBuilder,
     parseSync: (raw) => parseAnthropicRequest(raw, headers),
     assemble(raw, streamed) {

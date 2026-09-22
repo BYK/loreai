@@ -1,4 +1,7 @@
-import { SourceCheckpoint } from "./source-checkpoint";
+import {
+  SourceCheckpoint,
+  SourceDeltaUnavailableError,
+} from "./source-checkpoint";
 import * as Sentry from "@sentry/bun";
 import {
   isToolPart,
@@ -147,7 +150,14 @@ export async function prepareSemanticMessages(input: {
   noStore: boolean;
   timing: PreparationTiming;
   protocol?: string;
+  checkpointProtocol?: string;
+  /** Whether the raw protocol item seam is safe for a future suffix. */
+  checkpointBoundarySafe?: boolean;
   forceFull?: boolean;
+  sourcePrefix?: {
+    sourceCount: number;
+    sourceDigest: string;
+  };
 }) {
   const { timing } = input;
   for (const key of Object.keys(timing.counts) as Array<
@@ -157,15 +167,31 @@ export async function prepareSemanticMessages(input: {
   const started = performance.now();
   const cpu = process.cpuUsage();
   const memory = process.memoryUsage();
+  if (input.sourcePrefix && (input.noStore || !input.protocol)) {
+    throw new SourceDeltaUnavailableError(
+      "A context suffix cannot be prepared without its retained Lore checkpoint; retrying with the full conversation.",
+    );
+  }
   const checkpoint =
     input.protocol && !input.noStore
-      ? new SourceCheckpoint({ ...input, protocol: input.protocol })
+      ? new SourceCheckpoint({
+          ...input,
+          protocol: input.checkpointProtocol ?? input.protocol,
+          boundarySafe: input.checkpointBoundarySafe,
+        })
       : undefined;
   const tokenCache = new SemanticTokenCache({
     ...input,
     retainUnused: !!checkpoint?.base,
   });
-  const convertedFrom = checkpoint?.convertedFrom ?? 0;
+  const convertedFrom =
+    checkpoint?.convertedFrom ?? input.sourcePrefix?.sourceCount ?? 0;
+  const sourceCount =
+    (input.sourcePrefix?.sourceCount ?? 0) + input.messages.length;
+  const suffixMessages = input.sourcePrefix
+    ? input.messages
+    : input.messages.slice(convertedFrom);
+  const suffixStart = input.sourcePrefix?.sourceCount ?? convertedFrom;
   const offset = checkpoint?.offset ?? 0;
   // An immediate queued before synchronous preparation observes its event-loop
   // delay. Await it before the next stage so LTM work cannot pollute the sample.
@@ -175,24 +201,24 @@ export async function prepareSemanticMessages(input: {
   );
   const suffix = timing.measure("conversion", () =>
     gatewayMessagesToLore(
-      input.messages.slice(convertedFrom),
+      suffixMessages,
       input.sessionID,
-      convertedFrom,
-      convertedFrom,
+      suffixStart,
+      suffixStart,
       (visible, provenance) => tokenCache.count(visible, provenance),
     ),
   );
   const raw = checkpoint?.base ? [...checkpoint.base.raw, ...suffix] : suffix;
   const loreMessages = checkpoint ? structuredClone(raw) : raw;
   const temporalInput = timing.measure("temporal_input", () =>
-    captureTurnTemporalInput(raw, input.messages.length, checkpoint),
+    captureTurnTemporalInput(raw, sourceCount, checkpoint),
   );
   timing.metric("source_converted_messages", suffix.length);
-  timing.metric("source_total_messages", input.messages.length);
+  timing.metric("source_total_messages", sourceCount);
   const provenanceByMessageId = timing.measure("provenance", () => {
     const provenance = checkpoint?.storedProvenance ?? new Map();
     for (const [id, value] of responsesProvenanceByMessageId(
-      input.messages.slice(convertedFrom),
+      suffixMessages,
       suffix,
     ))
       provenance.set(id, value);

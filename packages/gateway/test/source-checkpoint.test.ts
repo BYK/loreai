@@ -40,6 +40,8 @@ import type {
   RecallStore,
 } from "../src/translate/types";
 import { semanticHistory } from "./fixtures/semantic-history";
+import { digestChain } from "../src/chain-digest";
+import { sourceCheckpointProtocol } from "../src/source-checkpoint";
 const projectPath = "/test/source-checkpoint";
 const sessionID = "source-checkpoint";
 const storage = {
@@ -70,7 +72,12 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
-async function prepare(source: GatewayMessage[], forceFull = false) {
+async function prepare(
+  source: GatewayMessage[],
+  forceFull = false,
+  checkpointProtocol?: string,
+  checkpointBoundarySafe?: boolean,
+) {
   const timing = new PreparationTiming({
     protocol: "openai-responses",
     stream: true,
@@ -83,6 +90,10 @@ async function prepare(source: GatewayMessage[], forceFull = false) {
       sessionID,
       noStore: false,
       protocol: "openai-responses",
+      ...(checkpointProtocol ? { checkpointProtocol } : {}),
+      ...(checkpointBoundarySafe !== undefined
+        ? { checkpointBoundarySafe }
+        : {}),
       forceFull,
       timing,
     }),
@@ -142,6 +153,95 @@ it("converts only the appended suffix after warm and database-reopen resumes", a
     );
   }
 });
+
+it("accepts a suffix against the retained Lore checkpoint", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const prefix = semanticHistory(6).messages;
+  const checkpointProtocol = sourceCheckpointProtocol("openai-codex");
+  accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
+  const suffix: GatewayMessage[] = [
+    { role: "user", content: [{ type: "text", text: "continue" }] },
+  ];
+  const timing = new PreparationTiming({
+    protocol: "openai-responses",
+    codex: true,
+    stream: true,
+  });
+  const delta = await prepareSemanticMessages({
+    messages: suffix,
+    projectPath,
+    sessionID,
+    noStore: false,
+    protocol: "openai-responses",
+    checkpointProtocol,
+    checkpointBoundarySafe: true,
+    sourcePrefix: {
+      sourceCount: prefix.length,
+      sourceDigest: digestChain(prefix),
+    },
+    timing,
+  });
+  expect(timing.observations.source_checkpoint_hit).toBe(1);
+  expect(timing.observations.source_converted_messages).toBe(1);
+  expect(delta.temporalInput.assistantIndex).toBe(prefix.length + 1);
+  expect(delta.loreMessages).toHaveLength(prefix.length + 1);
+});
+
+it("refuses a suffix when its retained checkpoint is unavailable", async () => {
+  const timing = new PreparationTiming({
+    protocol: "openai-responses",
+    codex: true,
+    stream: true,
+  });
+  await expect(
+    prepareSemanticMessages({
+      messages: [{ role: "user", content: [{ type: "text", text: "suffix" }] }],
+      projectPath,
+      sessionID,
+      noStore: false,
+      protocol: "openai-responses",
+      checkpointProtocol: sourceCheckpointProtocol("openai-codex"),
+      checkpointBoundarySafe: true,
+      sourcePrefix: {
+        sourceCount: 1,
+        sourceDigest: "0".repeat(64),
+      },
+      timing,
+    }),
+  ).rejects.toThrow("retained Lore context");
+});
+
+it("refuses a forged suffix after an unsafe normalization seam", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const prefix = semanticHistory(6).messages;
+  const checkpointProtocol = sourceCheckpointProtocol("openai-responses");
+  accept((await prepare(prefix, false, checkpointProtocol, false)).prepared);
+  const timing = new PreparationTiming({
+    protocol: "openai-responses",
+    stream: true,
+  });
+
+  await expect(
+    prepareSemanticMessages({
+      messages: [{ role: "user", content: [{ type: "text", text: "suffix" }] }],
+      projectPath,
+      sessionID,
+      noStore: false,
+      protocol: "openai-responses",
+      checkpointProtocol,
+      checkpointBoundarySafe: true,
+      sourcePrefix: {
+        sourceCount: prefix.length,
+        sourceDigest: digestChain(prefix),
+      },
+      timing,
+    }),
+  ).rejects.toThrow("retained Lore context");
+  expect(timing.observations.source_delta_unavailable_unsafe_boundary).toBe(1);
+});
+
 it.each([false, true])(
   "reuses and advances a complete checkpoint with offset zero (restart=%s)",
   async (restart) => {

@@ -658,6 +658,7 @@ function safeWorkerBodyErrorDetail(error: unknown): string {
     /^missing terminal response status$/,
     /^missing Responses compatibility terminal status$/,
     /^malformed (?:Anthropic|OpenAI|Responses|Gemini) (?:stream event|response body|usage|terminal event)$/,
+    /^OpenAI stream emitted a non-empty frame after finish_reason terminal$/,
     /^worker JSON response root must be an object$/,
     /^non-success Responses response status$/,
     /^response\.failed terminal$/,

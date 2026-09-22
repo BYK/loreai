@@ -481,23 +481,51 @@ export function bindNodeIngressAbort(
     if (!controller.signal.aborted) controller.abort(reason);
   };
   const onRequestAborted = (): void =>
-    abort(new DOMException("client request aborted", "AbortError"));
+    abort(
+      new DOMException(
+        "client disconnected before the request body was completely received",
+        "AbortError",
+      ),
+    );
   const onRequestClose = (): void => {
     if (!nodeReq.complete) onRequestAborted();
   };
-  const onRequestError = (error: Error): void => abort(error);
+  const onRequestError = (error: Error): void => {
+    const detail =
+      error.message === "Parse Error"
+        ? "HTTP parser rejected an incomplete or malformed request body (Parse Error)"
+        : `request transport failed while reading the body (${error.message})`;
+    abort(
+      new DOMException(
+        `client request could not be read: ${detail}`,
+        "AbortError",
+      ),
+    );
+  };
   const onResponseClose = (): void => {
     if (!nodeRes.writableEnded) {
       abort(new DOMException("client response closed", "AbortError"));
     }
   };
-  const onResponseError = (error: Error): void => abort(error);
+  const onResponseError = (error: Error): void =>
+    abort(
+      new DOMException(
+        `client response could not be written: ${error.message}`,
+        "AbortError",
+      ),
+    );
   const onSocketClose = (): void => {
     if (!nodeRes.writableEnded) {
       abort(new DOMException("client socket closed", "AbortError"));
     }
   };
-  const onSocketError = (error: Error): void => abort(error);
+  const onSocketError = (error: Error): void =>
+    abort(
+      new DOMException(
+        `client socket transport failed: ${error.message}`,
+        "AbortError",
+      ),
+    );
   const socket = nodeReq.socket;
   nodeReq.on("aborted", onRequestAborted);
   nodeReq.on("close", onRequestClose);
