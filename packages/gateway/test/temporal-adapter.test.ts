@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import {
   deterministicID,
   gatewayMessagesToLore,
+  legacyContentForMessage,
   legacyDeterministicID,
   resolveToolResults,
 } from "../src/temporal-adapter";
@@ -543,6 +544,25 @@ describe("resolveToolResults", () => {
         legacyDeterministicID("assistant", 0, original.content),
       ]),
     );
+  });
+
+  test("filters request-only opaque content from the legacy fallback", () => {
+    const requestOnly: GatewayMessage["content"][number] = {
+      type: "opaque",
+      requestOnly: true,
+      raw: { type: "reasoning", encrypted_content: "ciphertext" },
+    };
+    const visible: GatewayMessage["content"][number] = {
+      type: "text",
+      text: "visible answer",
+    };
+
+    expect(
+      legacyContentForMessage({
+        role: "assistant",
+        content: [requestOnly, visible],
+      }),
+    ).toEqual([visible]);
   });
 
   test("preserves distinct Gemini call id and name through Lore and egress", () => {

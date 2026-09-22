@@ -237,7 +237,10 @@ function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
 
     case "opaque":
       // Re-emit the original block verbatim.
-      return block.raw;
+      // Return a fresh envelope because conversation caching annotates the
+      // serialized block with `cache_control`; mutating `raw` would mutate
+      // request-only provenance retained on the GatewayMessage.
+      return { ...block.raw };
   }
 }
 

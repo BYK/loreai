@@ -717,22 +717,31 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
             ),
         );
         if (
-          provenanceIndex !== undefined &&
-          msg.provenanceContent &&
-          msg.provenancePositions &&
-          (isMatchingProvenance ||
-            (provenanceBlock?.type === "opaque" && rawHasWarning))
+          provenanceIndex === undefined ||
+          !msg.provenanceContent ||
+          !msg.provenancePositions ||
+          !(
+            isMatchingProvenance ||
+            (provenanceBlock?.type === "opaque" && rawHasWarning)
+          )
         ) {
-          msg.provenanceContent.splice(provenanceIndex, 1);
-          msg.provenancePositions = msg.provenancePositions
-            .filter((_position, visibleIndex) => visibleIndex !== i)
-            .map((position) =>
-              position > provenanceIndex ? position - 1 : position,
-            );
-          if (msg.provenanceContent?.length === 0) {
-            delete msg.provenanceContent;
-            delete msg.provenancePositions;
-          }
+          // Removing a visible warning without removing its matching
+          // provenance block leaves the position map shifted. A malformed or
+          // mismatched legacy message must fail closed instead of letting
+          // recall mutate the wrong provider-native block later.
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
+        msg.provenanceContent.splice(provenanceIndex, 1);
+        msg.provenancePositions = msg.provenancePositions
+          .filter((_position, visibleIndex) => visibleIndex !== i)
+          .map((position) =>
+            position > provenanceIndex ? position - 1 : position,
+          );
+        if (msg.provenanceContent.length === 0) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
         }
       }
       break; // only check the first non-thinking block

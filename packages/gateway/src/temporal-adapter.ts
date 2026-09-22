@@ -127,13 +127,16 @@ export function legacyContentForMessage(
   message: GatewayMessage,
 ): GatewayContentBlock[] {
   const provenance = message.provenanceContent;
+  const content = message.content.filter(
+    (block) => !(block.type === "opaque" && block.requestOnly === true),
+  );
   if (
     !provenance ||
     provenance.some(
       (block) => block.type === "opaque" && block.responsesItem === true,
     )
   ) {
-    return message.content;
+    return content;
   }
 
   return provenance.map((block) => {
