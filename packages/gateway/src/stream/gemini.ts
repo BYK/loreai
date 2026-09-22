@@ -245,10 +245,12 @@ export async function accumulateGeminiSSEStream(
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
-      const frameContentStart = contentBlocks.length;
+      let frameHasValidPart = false;
       for (const p of parts) {
         const parsedBlock = geminiPartToBlock(p);
         if (!parsedBlock) continue;
+        const isFirstValidPart = !frameHasValidPart;
+        frameHasValidPart = true;
         const signature = geminiPartThoughtSignature(p);
         const block: GatewayContentBlock =
           signature !== undefined &&
@@ -273,7 +275,7 @@ export async function accumulateGeminiSSEStream(
           const previous = contentBlocks.at(-1);
           if (
             previous?.type === "text" &&
-            contentBlocks.length === frameContentStart &&
+            isFirstValidPart &&
             !hasGeminiThoughtSignature(block)
           ) {
             previous.text += block.text;
@@ -307,7 +309,7 @@ export async function accumulateGeminiSSEStream(
           const previous = contentBlocks.at(-1);
           if (
             previous?.type === "thinking" &&
-            contentBlocks.length === frameContentStart &&
+            isFirstValidPart &&
             !hasGeminiThoughtSignature(block)
           ) {
             previous.thinking += block.thinking;

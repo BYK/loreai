@@ -556,6 +556,52 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
   });
 
+  test("does not merge multiple unsigned parts after a signed continuation", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "A",
+                    thought: true,
+                    thoughtSignature: "signature-a",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "B", thought: true },
+                  { text: "C", thought: true },
+                ],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "AB",
+        signature: "signature-a",
+      },
+      { type: "thinking", thinking: "C" },
+    ]);
+  });
+
   test("retains an early thought signature when the terminal frame has no parts", async () => {
     const response = await accumulateGeminiSSEStream(
       sse([
