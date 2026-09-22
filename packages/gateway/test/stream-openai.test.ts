@@ -88,6 +88,25 @@ describe("accumulateOpenAISSEStream", () => {
     expect(result.content).toEqual([{ type: "text", text: "done" }]);
   });
 
+  test("does not erase response identity on an empty post-terminal trailer", async () => {
+    const result = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"id":"chatcmpl-kept","model":"gpt-kept","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}',
+        'data: {"id":"","model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}',
+        "data: [DONE]",
+      ]),
+      {
+        strict: true,
+        stopAtTerminal: true,
+        consumeUntilDone: true,
+        allowPostTerminalNoop: true,
+      },
+    );
+
+    expect(result.id).toBe("chatcmpl-kept");
+    expect(result.model).toBe("gpt-kept");
+  });
+
   test("rejects an empty post-terminal choice trailer by default", async () => {
     await expect(
       accumulateOpenAISSEStream(

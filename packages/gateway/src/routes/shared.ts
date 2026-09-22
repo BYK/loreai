@@ -1,5 +1,5 @@
 /** Helpers shared by the data-plane route modules. */
-import { CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER, log } from "@loreai/core";
+import { CONTEXT_BOUNDARY_MISMATCH_HEADER, log } from "@loreai/core";
 import type { GatewayConfig } from "../config";
 import type { GatewayRequest } from "../translate/types";
 import { handleRequest } from "../pipeline";
@@ -35,7 +35,7 @@ export function invalidStreamedBody(e?: unknown): Response {
       "context_boundary_mismatch",
       e.message,
     );
-    response.headers.set(CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
+    response.headers.set(CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
     return response;
   }
   if (e instanceof HttpRequestBodyTooLargeError) {

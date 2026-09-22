@@ -41,6 +41,7 @@ import type {
 } from "../src/translate/types";
 import { semanticHistory } from "./fixtures/semantic-history";
 import { digestChain } from "../src/chain-digest";
+import { sourceCheckpointProtocol } from "../src/source-checkpoint";
 const projectPath = "/test/source-checkpoint";
 const sessionID = "source-checkpoint";
 const storage = {
@@ -75,6 +76,7 @@ async function prepare(
   source: GatewayMessage[],
   forceFull = false,
   checkpointProtocol?: string,
+  checkpointBoundarySafe?: boolean,
 ) {
   const timing = new PreparationTiming({
     protocol: "openai-responses",
@@ -89,6 +91,9 @@ async function prepare(
       noStore: false,
       protocol: "openai-responses",
       ...(checkpointProtocol ? { checkpointProtocol } : {}),
+      ...(checkpointBoundarySafe !== undefined
+        ? { checkpointBoundarySafe }
+        : {}),
       forceFull,
       timing,
     }),
@@ -149,11 +154,12 @@ it("converts only the appended suffix after warm and database-reopen resumes", a
   }
 });
 
-it("accepts a Codex suffix against the retained Lore checkpoint", async () => {
+it("accepts a suffix against the retained Lore checkpoint", async () => {
   setModelLimits({ context: 1_000_000, output: 2_000 });
   setMaxLayer0Tokens(500_000);
   const prefix = semanticHistory(6).messages;
-  accept((await prepare(prefix, false, "openai-responses:codex")).prepared);
+  const checkpointProtocol = sourceCheckpointProtocol("openai-codex");
+  accept((await prepare(prefix, false, checkpointProtocol, true)).prepared);
   const suffix: GatewayMessage[] = [
     { role: "user", content: [{ type: "text", text: "continue" }] },
   ];
@@ -168,7 +174,8 @@ it("accepts a Codex suffix against the retained Lore checkpoint", async () => {
     sessionID,
     noStore: false,
     protocol: "openai-responses",
-    checkpointProtocol: "openai-responses:codex",
+    checkpointProtocol,
+    checkpointBoundarySafe: true,
     sourcePrefix: {
       sourceCount: prefix.length,
       sourceDigest: digestChain(prefix),
@@ -181,7 +188,7 @@ it("accepts a Codex suffix against the retained Lore checkpoint", async () => {
   expect(delta.loreMessages).toHaveLength(prefix.length + 1);
 });
 
-it("refuses a Codex suffix when its retained checkpoint is unavailable", async () => {
+it("refuses a suffix when its retained checkpoint is unavailable", async () => {
   const timing = new PreparationTiming({
     protocol: "openai-responses",
     codex: true,
@@ -194,7 +201,8 @@ it("refuses a Codex suffix when its retained checkpoint is unavailable", async (
       sessionID,
       noStore: false,
       protocol: "openai-responses",
-      checkpointProtocol: "openai-responses:codex",
+      checkpointProtocol: sourceCheckpointProtocol("openai-codex"),
+      checkpointBoundarySafe: true,
       sourcePrefix: {
         sourceCount: 1,
         sourceDigest: "0".repeat(64),
@@ -203,6 +211,37 @@ it("refuses a Codex suffix when its retained checkpoint is unavailable", async (
     }),
   ).rejects.toThrow("retained Lore context");
 });
+
+it("refuses a forged suffix after an unsafe normalization seam", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(500_000);
+  const prefix = semanticHistory(6).messages;
+  const checkpointProtocol = sourceCheckpointProtocol("openai-responses");
+  accept((await prepare(prefix, false, checkpointProtocol, false)).prepared);
+  const timing = new PreparationTiming({
+    protocol: "openai-responses",
+    stream: true,
+  });
+
+  await expect(
+    prepareSemanticMessages({
+      messages: [{ role: "user", content: [{ type: "text", text: "suffix" }] }],
+      projectPath,
+      sessionID,
+      noStore: false,
+      protocol: "openai-responses",
+      checkpointProtocol,
+      checkpointBoundarySafe: true,
+      sourcePrefix: {
+        sourceCount: prefix.length,
+        sourceDigest: digestChain(prefix),
+      },
+      timing,
+    }),
+  ).rejects.toThrow("retained Lore context");
+  expect(timing.observations.source_delta_unavailable_unsafe_boundary).toBe(1);
+});
+
 it.each([false, true])(
   "reuses and advances a complete checkpoint with offset zero (restart=%s)",
   async (restart) => {

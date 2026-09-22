@@ -10,6 +10,20 @@
  * gateway while preserving all original headers.
  */
 import * as log from "./log";
+import { digestChain } from "./chain-digest";
+import {
+  CONTEXT_BOUNDARY_HEADER,
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
+  decodeContextBoundary,
+  type ContextBoundary,
+  type ContextBoundaryProtocol,
+} from "./context-boundary";
+
+/** @deprecated Use CONTEXT_BOUNDARY_HEADER. */
+export const CODEX_CONTEXT_BOUNDARY_HEADER = CONTEXT_BOUNDARY_HEADER;
+/** @deprecated Use CONTEXT_BOUNDARY_MISMATCH_HEADER. */
+export const CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER =
+  CONTEXT_BOUNDARY_MISMATCH_HEADER;
 
 /** Configuration for the fetch interceptor. */
 export type FetchInterceptorConfig = {
@@ -34,12 +48,12 @@ export type FetchInterceptorConfig = {
  *  - `/api/...` — older / non-standard providers
  *  - `/openai/v1/...`, `/anthropic/v1/...` — proxy providers
  *
- * Each pattern matches the path suffix `/messages`, `/chat/completions`,
- * or `/responses` (the canonical LLM API endpoints). The leading prefix
- * is intentionally permissive — the URL's hostname already restricts which
- * providers we can see, and an over-narrow pattern here is what caused
- * the Onur "lore-config" bug to recur for some users whose providers
- * used a non-standard path prefix.
+ * Each pattern matches a canonical LLM endpoint: `/messages`,
+ * `/chat/completions`, `/responses`, or Gemini's `:generateContent` verbs.
+ * The leading prefix is intentionally permissive — the URL's hostname already
+ * restricts which providers we can see, and an over-narrow pattern here is
+ * what caused the Onur "lore-config" bug to recur for some users whose
+ * providers used a non-standard path prefix.
  */
 const LLM_API_PATH_PATTERNS: RegExp[] = [
   // Standard: /v1/{messages,chat/completions,responses}[/...]
@@ -52,6 +66,8 @@ const LLM_API_PATH_PATTERNS: RegExp[] = [
   /\/(?:openai|anthropic)\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
   // Codex (ChatGPT) — uses /backend-api/codex/responses, no /v1/ prefix
   /\/codex\/responses(\/.*)?$/,
+  // Native Gemini generateContent endpoints (v1beta, v1, or proxy-prefixed).
+  /\/(?:v1beta|v1)?\/?models\/[^/:]+:(?:stream)?generateContent$/,
 ];
 
 /**
@@ -65,15 +81,6 @@ const NON_STANDARD_PATH_REWRITES: Record<string, string> = {
 
 /** Internal protocol identifiers the gateway routes on. */
 type BodyProtocol = "anthropic" | "openai" | "openai-responses";
-
-/**
- * Internal Codex context-continuation headers. These are deliberately scoped
- * to the Codex Responses route; ordinary Responses/Chat/Anthropic callers do
- * not participate in the boundary handshake.
- */
-export const CODEX_CONTEXT_BOUNDARY_HEADER = "x-lore-codex-context-boundary";
-export const CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER =
-  "x-lore-codex-context-boundary-mismatch";
 
 /**
  * Canonical gateway endpoint for each protocol. When a request is intercepted
@@ -110,7 +117,10 @@ function matchesLLMApiPath(pathname: string): boolean {
 
 /** True when the pathname looks like an LLM API endpoint (for warning/fallback). */
 function pathLooksLLMLike(pathname: string): boolean {
-  return /\/(messages|chat\/completions|responses)(\/|$)/.test(pathname);
+  return (
+    /\/(messages|chat\/completions|responses)(\/|$)/.test(pathname) ||
+    /\/models\/[^/:]+:(?:stream)?generateContent$/.test(pathname)
+  );
 }
 
 /**
@@ -211,12 +221,25 @@ type Rewrite = {
  * mapped to a canonical gateway endpoint from the URL alone.
  */
 function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
-  // Try /v1/ extraction first (most common)
-  const v1Idx = upstream.pathname.lastIndexOf("/v1/");
-  if (v1Idx >= 0) {
+  // Preserve standard versioned paths. Gemini commonly uses /v1beta/ while
+  // OpenAI and Anthropic use /v1/.
+  const versionedMatches = ["/v1/", "/v1beta/"]
+    .map((segment) => upstream.pathname.lastIndexOf(segment))
+    .filter((index) => index >= 0);
+  const versionedIdx = versionedMatches.length
+    ? Math.max(...versionedMatches)
+    : -1;
+  if (versionedIdx >= 0) {
     return {
-      gatewayUrl: `${gateway.origin}${upstream.pathname.slice(v1Idx)}${upstream.search}`,
-      upstreamBase: upstream.origin + upstream.pathname.slice(0, v1Idx),
+      gatewayUrl: `${gateway.origin}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
+      upstreamBase: upstream.origin + upstream.pathname.slice(0, versionedIdx),
+      upstreamPath: upstream.pathname,
+    };
+  }
+  if (/^\/models\/[^/:]+:(?:stream)?generateContent$/.test(upstream.pathname)) {
+    return {
+      gatewayUrl: `${gateway.origin}${upstream.pathname}${upstream.search}`,
+      upstreamBase: upstream.origin,
       upstreamPath: upstream.pathname,
     };
   }
@@ -276,9 +299,15 @@ export function interceptUrlForProtocol(
  */
 const warnedPaths = new Set<string>();
 
-type CodexBoundary = {
+type CachedBoundary = {
+  boundary: ContextBoundary;
   value: string;
   updatedAt: number;
+};
+
+type BoundaryEndpoint = {
+  protocol: ContextBoundaryProtocol;
+  streamKey: "messages" | "input" | "contents";
 };
 
 /**
@@ -287,76 +316,202 @@ type CodexBoundary = {
  * validation causes a full-body retry. Keeping only the opaque token here
  * avoids retaining the conversation itself in the interceptor.
  */
-const codexBoundaries = new Map<string, CodexBoundary>();
-const CODEX_BOUNDARY_TTL_MS = 60 * 60 * 1000;
-const MAX_CODEX_BOUNDARIES = 1024;
+const contextBoundaries = new Map<string, CachedBoundary>();
+const CONTEXT_BOUNDARY_TTL_MS = 60 * 60 * 1000;
+const MAX_CONTEXT_BOUNDARIES = 1024;
 
-function codexBoundaryKey(gatewayBase: string, sessionID: string): string {
-  return `${gatewayBase}\x1f${sessionID}`;
+function contextBoundaryKey(
+  gatewayBase: string,
+  sessionID: string,
+  protocol: ContextBoundaryProtocol,
+): string {
+  return `${gatewayBase}\x1f${sessionID}\x1f${protocol}`;
 }
 
-function pruneCodexBoundaries(now = Date.now()): void {
-  for (const [key, boundary] of codexBoundaries) {
-    if (now - boundary.updatedAt > CODEX_BOUNDARY_TTL_MS)
-      codexBoundaries.delete(key);
+function pruneContextBoundaries(now = Date.now()): void {
+  for (const [key, boundary] of contextBoundaries) {
+    if (now - boundary.updatedAt > CONTEXT_BOUNDARY_TTL_MS)
+      contextBoundaries.delete(key);
   }
-  if (codexBoundaries.size <= MAX_CODEX_BOUNDARIES) return;
-  const oldest = [...codexBoundaries.entries()]
+  if (contextBoundaries.size <= MAX_CONTEXT_BOUNDARIES) return;
+  const oldest = [...contextBoundaries.entries()]
     .sort(([, a], [, b]) => a.updatedAt - b.updatedAt)
-    .slice(0, codexBoundaries.size - MAX_CODEX_BOUNDARIES);
-  for (const [key] of oldest) codexBoundaries.delete(key);
+    .slice(0, contextBoundaries.size - MAX_CONTEXT_BOUNDARIES);
+  for (const [key] of oldest) contextBoundaries.delete(key);
 }
 
-function isCodexResponsesPath(pathname: string): boolean {
-  return pathname.endsWith("/codex/responses");
+function boundaryEndpoint(pathname: string): BoundaryEndpoint | undefined {
+  if (/\/codex\/responses(?:\/.*)?$/.test(pathname)) {
+    return { protocol: "openai-codex", streamKey: "input" };
+  }
+  if (/\/chat\/completions(?:\/.*)?$/.test(pathname)) {
+    return { protocol: "openai", streamKey: "messages" };
+  }
+  if (/\/responses(?:\/.*)?$/.test(pathname)) {
+    return { protocol: "openai-responses", streamKey: "input" };
+  }
+  if (/\/messages(?:\/.*)?$/.test(pathname)) {
+    return { protocol: "anthropic", streamKey: "messages" };
+  }
+  if (/\/models\/[^/:]+:(?:stream)?generateContent$/.test(pathname)) {
+    return { protocol: "gemini", streamKey: "contents" };
+  }
+  return undefined;
 }
 
-function applyCodexBoundaryHeader(
+type PreparedBoundaryRequest = {
+  boundaryKey?: string;
+  attached: boolean;
+  init: RequestInit;
+};
+
+/**
+ * Verify the cached prefix against the caller's current full transcript, then
+ * transmit only the protocol's retained preamble plus newly appended items.
+ */
+function prepareBoundaryRequest(
   headers: Headers,
   gatewayBase: string,
   pathname: string,
-): string | undefined {
-  if (!isCodexResponsesPath(pathname)) return undefined;
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): PreparedBoundaryRequest {
+  // Only process-local, gateway-issued boundaries participate in elision.
+  headers.delete(CONTEXT_BOUNDARY_HEADER);
+  const fullInit: RequestInit = { ...init, headers };
+  const endpoint = boundaryEndpoint(pathname);
+  if (!endpoint) return { attached: false, init: fullInit };
   const sessionID = headers.get("x-lore-session-id");
-  if (!sessionID) return undefined;
-  pruneCodexBoundaries();
-  const key = codexBoundaryKey(gatewayBase, sessionID);
-  const boundary = codexBoundaries.get(key);
-  if (!boundary) return key;
-  headers.set(CODEX_CONTEXT_BOUNDARY_HEADER, boundary.value);
-  return key;
+  if (!sessionID) return { attached: false, init: fullInit };
+  pruneContextBoundaries();
+  const key = contextBoundaryKey(gatewayBase, sessionID, endpoint.protocol);
+  const cached = contextBoundaries.get(key);
+  if (!cached || !canReplayRequestBody(input, init)) {
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+  if (headers.has("content-encoding")) {
+    contextBoundaries.delete(key);
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+  const bodyString = extractBodyString(input, init);
+  if (!bodyString) {
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+  try {
+    const body = JSON.parse(bodyString) as Record<string, unknown>;
+    const items = body?.[endpoint.streamKey];
+    const { boundary } = cached;
+    if (
+      boundary.protocol !== endpoint.protocol ||
+      !Array.isArray(items) ||
+      items.length <= boundary.inputItems ||
+      digestChain(items.slice(0, boundary.inputItems)) !== boundary.inputDigest
+    ) {
+      contextBoundaries.delete(key);
+      return { boundaryKey: key, attached: false, init: fullInit };
+    }
+    body[endpoint.streamKey] = [
+      ...items.slice(0, boundary.retainedItems),
+      ...items.slice(boundary.inputItems),
+    ];
+    const elidedHeaders = new Headers(headers);
+    elidedHeaders.delete("content-length");
+    elidedHeaders.set(CONTEXT_BOUNDARY_HEADER, cached.value);
+    return {
+      boundaryKey: key,
+      attached: true,
+      init: { ...init, headers: elidedHeaders, body: JSON.stringify(body) },
+    };
+  } catch {
+    contextBoundaries.delete(key);
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
 }
 
-function updateCodexBoundary(
+function updateContextBoundary(
   response: Response,
   boundaryKey: string | undefined,
-): void {
-  if (!boundaryKey) return;
-  const value = response.headers.get(CODEX_CONTEXT_BOUNDARY_HEADER);
-  if (response.ok) {
-    if (value) {
-      codexBoundaries.set(boundaryKey, { value, updatedAt: Date.now() });
-    } else {
-      // A successful response without a checkpoint (for example no-store or
-      // a session that has just been reset) invalidates the previous hint.
-      codexBoundaries.delete(boundaryKey);
-    }
-  } else if (response.status >= 400) {
-    // A failed request may have changed neither the source checkpoint nor the
-    // client transcript. Keep the old hint only for the dedicated mismatch
-    // retry below; other failures should force the next request to be full.
-    codexBoundaries.delete(boundaryKey);
+  protocol: ContextBoundaryProtocol | undefined,
+): Response {
+  if (!boundaryKey || !protocol) return response;
+  const encoded = response.headers.get(CONTEXT_BOUNDARY_HEADER);
+  const boundary = encoded ? decodeContextBoundary(encoded) : undefined;
+  if (!response.ok || !encoded || !boundary || boundary.protocol !== protocol) {
+    contextBoundaries.delete(boundaryKey);
+    pruneContextBoundaries();
+    return response;
   }
-  pruneCodexBoundaries();
+  const publish = (): void => {
+    contextBoundaries.set(boundaryKey, {
+      boundary,
+      value: encoded,
+      updatedAt: Date.now(),
+    });
+    pruneContextBoundaries();
+  };
+  if (!response.body) {
+    publish();
+    return response;
+  }
+
+  // The gateway publishes its source checkpoint while finalizing the body.
+  // Cache the corresponding boundary only after the caller reaches EOF; a
+  // cancelled or failed response must never become a continuation anchor.
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            publish();
+            controller.close();
+          } else {
+            controller.enqueue(chunk.value);
+          }
+        } catch (error) {
+          contextBoundaries.delete(boundaryKey);
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        contextBoundaries.delete(boundaryKey);
+        await reader.cancel(reason);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
-function canReplayRequestBody(init: RequestInit | undefined): boolean {
+function canReplayRequestBody(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): boolean {
+  // A Request body is a one-shot stream. Cloning it before dispatch would tee
+  // and potentially buffer the entire long transcript, defeating the bounded
+  // memory goal. Send it without a continuation hint instead.
+  if (typeof input !== "string" && !(input instanceof URL)) return false;
   const body = init?.body;
   return (
     typeof body === "string" ||
     body instanceof ArrayBuffer ||
     ArrayBuffer.isView(body)
   );
+}
+
+/** Preserve a Request's method/body while replacing only its destination. */
+function rewrittenFetchInput(
+  input: RequestInfo | URL,
+  gatewayUrl: string,
+): RequestInfo | URL {
+  return typeof input !== "string" && !(input instanceof URL)
+    ? new Request(gatewayUrl, input)
+    : gatewayUrl;
 }
 
 /**
@@ -547,7 +702,8 @@ export function installFetchInterceptor(
     if (
       !url.includes("/messages") &&
       !url.includes("/completions") &&
-      !url.includes("/responses")
+      !url.includes("/responses") &&
+      !url.includes("generateContent")
     ) {
       return originalFetch(input, init);
     }
@@ -601,43 +757,54 @@ export function installFetchInterceptor(
         rewrite.upstreamPath,
         config,
       );
-      const boundaryKey = applyCodexBoundaryHeader(
+      const boundaryPathname = new URL(rewrite.gatewayUrl).pathname;
+      const prepared = prepareBoundaryRequest(
         headers,
         gatewayBase,
-        upstream.pathname,
+        boundaryPathname,
+        input,
+        init,
       );
-      observeRequestHeaders(headers, config);
+      observeRequestHeaders(new Headers(prepared.init.headers), config);
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
-      const response = await originalFetch(rewrite.gatewayUrl, {
-        ...init,
-        headers,
-      });
+      const response = await originalFetch(
+        rewrittenFetchInput(input, rewrite.gatewayUrl),
+        prepared.init,
+      );
       if (
-        boundaryKey &&
-        response.headers.get(CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER) ===
-          "true" &&
-        canReplayRequestBody(init)
+        prepared.attached &&
+        prepared.boundaryKey &&
+        response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
       ) {
         // The gateway could not prove that its retained Lore checkpoint still
         // matches this prefix (restart, edited history, or a stale client
         // boundary). Replay once without the hint so the normal full-body
         // parser can recover. The response is deliberately not exposed to the
         // provider, which otherwise sees an opaque 409 instead of recovering.
-        codexBoundaries.delete(boundaryKey);
+        contextBoundaries.delete(prepared.boundaryKey);
         void response.body?.cancel().catch(() => {});
         const fullHeaders = new Headers(headers);
-        fullHeaders.delete(CODEX_CONTEXT_BOUNDARY_HEADER);
-        const retry = await originalFetch(rewrite.gatewayUrl, {
-          ...init,
-          headers: fullHeaders,
-        });
-        updateCodexBoundary(retry, boundaryKey);
-        return retry;
+        fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
+        const retry = await originalFetch(
+          rewrittenFetchInput(input, rewrite.gatewayUrl),
+          {
+            ...init,
+            headers: fullHeaders,
+          },
+        );
+        return updateContextBoundary(
+          retry,
+          prepared.boundaryKey,
+          boundaryEndpoint(boundaryPathname)?.protocol,
+        );
       }
-      updateCodexBoundary(response, boundaryKey);
-      return response;
+      return updateContextBoundary(
+        response,
+        prepared.boundaryKey,
+        boundaryEndpoint(boundaryPathname)?.protocol,
+      );
     }
 
     // ---- Path 2: URL didn't match, but the body shape may reveal an LLM call ----
@@ -657,21 +824,44 @@ export function installFetchInterceptor(
           rewrite.upstreamPath,
           config,
         );
-        const boundaryKey = applyCodexBoundaryHeader(
+        const boundaryPathname = new URL(rewrite.gatewayUrl).pathname;
+        const prepared = prepareBoundaryRequest(
           headers,
           gatewayBase,
-          upstream.pathname,
+          boundaryPathname,
+          input,
+          init,
         );
-        observeRequestHeaders(headers, config);
+        observeRequestHeaders(new Headers(prepared.init.headers), config);
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
-        const response = await originalFetch(rewrite.gatewayUrl, {
-          ...init,
-          headers,
-        });
-        updateCodexBoundary(response, boundaryKey);
-        return response;
+        const response = await originalFetch(
+          rewrittenFetchInput(input, rewrite.gatewayUrl),
+          prepared.init,
+        );
+        if (
+          prepared.attached &&
+          prepared.boundaryKey &&
+          response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
+        ) {
+          contextBoundaries.delete(prepared.boundaryKey);
+          void response.body?.cancel().catch(() => {});
+          const retry = await originalFetch(
+            rewrittenFetchInput(input, rewrite.gatewayUrl),
+            { ...init, headers },
+          );
+          return updateContextBoundary(
+            retry,
+            prepared.boundaryKey,
+            boundaryEndpoint(boundaryPathname)?.protocol,
+          );
+        }
+        return updateContextBoundary(
+          response,
+          prepared.boundaryKey,
+          boundaryEndpoint(boundaryPathname)?.protocol,
+        );
       }
 
       // LLM-looking path we couldn't intercept (no body, or unrecognized
@@ -697,8 +887,8 @@ export function installFetchInterceptor(
   return () => {
     globalThis.fetch = originalFetch;
     writeOriginalFetchSlot(null);
-    for (const key of codexBoundaries.keys()) {
-      if (key.startsWith(`${gatewayBase}\x1f`)) codexBoundaries.delete(key);
+    for (const key of contextBoundaries.keys()) {
+      if (key.startsWith(`${gatewayBase}\x1f`)) contextBoundaries.delete(key);
     }
   };
 }

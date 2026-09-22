@@ -5,7 +5,11 @@ import { parseGeminiRequestChunks } from "../translate/gemini";
 import { decodedRequestChunks } from "../http-body";
 import { headersToRecord } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
-import { invalidStreamedBody, runPipeline } from "./shared";
+import {
+  invalidStreamedBody,
+  requestBodyLimitsForConfig,
+  runPipeline,
+} from "./shared";
 
 /**
  * Matches a native Gemini `generateContent` endpoint path, capturing the model
@@ -37,7 +41,7 @@ export async function handleGeminiGenerateContent(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseGeminiRequestChunks(
-      decodedRequestChunks(req, req.signal),
+      decodedRequestChunks(req, req.signal, requestBodyLimitsForConfig(config)),
       headers,
       model,
       stream,

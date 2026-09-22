@@ -11,6 +11,8 @@ import {
   installFetchInterceptor,
   interceptUrlForProtocol,
 } from "../src/fetch-interceptor";
+import { digestChain } from "../src/chain-digest";
+import { encodeContextBoundary } from "../src/context-boundary";
 
 const GATEWAY = "http://127.0.0.1:3207";
 
@@ -347,7 +349,7 @@ describe("interceptUrlForProtocol", () => {
   });
 });
 
-describe("Codex context continuation", () => {
+describe("context continuation", () => {
   let cleanup: (() => void) | undefined;
 
   afterEach(() => {
@@ -356,7 +358,30 @@ describe("Codex context continuation", () => {
   });
 
   test("reuses the gateway boundary and retries once after a mismatch", async () => {
-    const calls: Array<{ url: string; headers: Headers }> = [];
+    const prefix = [{ type: "message", role: "user", content: "old" }];
+    const suffix = { type: "message", role: "user", content: "new" };
+    const oldBoundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai-codex",
+      inputItems: prefix.length,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([{ role: "user", content: "old" }]),
+    });
+    const freshBoundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai-codex",
+      inputItems: 2,
+      inputDigest: digestChain([...prefix, suffix]),
+      retainedItems: 0,
+      sourceMessages: 2,
+      sourceDigest: digestChain([
+        { role: "user", content: "old" },
+        { role: "user", content: "new" },
+      ]),
+    });
+    const calls: Array<{ url: string; headers: Headers; body?: unknown }> = [];
     let call = 0;
     const original = vi.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -368,18 +393,20 @@ describe("Codex context continuation", () => {
                 ? input.href
                 : input.url,
           headers: new Headers(init?.headers),
+          body:
+            typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
         });
         call++;
         if (call === 2) {
           return new Response("boundary mismatch", {
             status: 409,
-            headers: { "x-lore-codex-context-boundary-mismatch": "true" },
+            headers: { "x-lore-context-boundary-mismatch": "true" },
           });
         }
         return new Response("ok", {
           status: 200,
           headers: {
-            "x-lore-codex-context-boundary": call === 1 ? "old" : "fresh",
+            "x-lore-context-boundary": call === 1 ? oldBoundary : freshBoundary,
           },
         });
       },
@@ -391,17 +418,306 @@ describe("Codex context continuation", () => {
     });
 
     const url = "https://chatgpt.com/backend-api/codex/responses";
-    const init = {
+    const firstInit = {
       method: "POST",
-      body: JSON.stringify({ model: "gpt-5.6-codex", input: [] }),
+      body: JSON.stringify({ model: "gpt-5.6-codex", input: prefix }),
     };
-    await fetch(url, init);
-    const response = await fetch(url, init);
+    await (await fetch(url, firstInit)).text();
+    const response = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({
+        model: "gpt-5.6-codex",
+        input: [...prefix, suffix],
+      }),
+    });
 
     expect(response.status).toBe(200);
     expect(calls).toHaveLength(3);
-    expect(calls[0].headers.get("x-lore-codex-context-boundary")).toBeNull();
-    expect(calls[1].headers.get("x-lore-codex-context-boundary")).toBe("old");
-    expect(calls[2].headers.get("x-lore-codex-context-boundary")).toBeNull();
+    expect(calls[0].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[1].headers.get("x-lore-context-boundary")).toBe(oldBoundary);
+    expect(calls[2].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[1].body).toMatchObject({ input: [suffix] });
+    expect(calls[2].body).toMatchObject({ input: [...prefix, suffix] });
+  });
+
+  test.each([
+    {
+      name: "Anthropic",
+      url: "https://api.anthropic.com/v1/messages",
+      protocol: "anthropic" as const,
+      key: "messages" as const,
+      prefix: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" },
+      ],
+      suffix: { role: "user", content: "new question" },
+      retainedItems: 0,
+    },
+    {
+      name: "OpenAI Chat",
+      url: "https://api.openai.com/v1/chat/completions",
+      protocol: "openai" as const,
+      key: "messages" as const,
+      prefix: [
+        { role: "system", content: "stable system" },
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" },
+      ],
+      suffix: { role: "user", content: "new question" },
+      retainedItems: 1,
+    },
+    {
+      name: "OpenAI Responses",
+      url: "https://api.openai.com/v1/responses",
+      protocol: "openai-responses" as const,
+      key: "input" as const,
+      prefix: [
+        { type: "message", role: "user", content: "old question" },
+        { type: "message", role: "assistant", content: "old answer" },
+      ],
+      suffix: {
+        type: "message",
+        role: "user",
+        content: "new question",
+      },
+      retainedItems: 0,
+    },
+    {
+      name: "Gemini",
+      url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+      protocol: "gemini" as const,
+      key: "contents" as const,
+      prefix: [
+        { role: "user", parts: [{ text: "old question" }] },
+        { role: "model", parts: [{ text: "old answer" }] },
+      ],
+      suffix: { role: "user", parts: [{ text: "new question" }] },
+      retainedItems: 0,
+    },
+  ])("elides the verified $name prefix", async (fixture) => {
+    const calls: Array<{ headers: Headers; body: Record<string, unknown> }> =
+      [];
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: fixture.protocol,
+      inputItems: fixture.prefix.length,
+      inputDigest: digestChain(fixture.prefix),
+      retainedItems: fixture.retainedItems,
+      sourceMessages: fixture.prefix.length - fixture.retainedItems,
+      sourceDigest: digestChain([]),
+    });
+    globalThis.fetch = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (typeof init?.body !== "string") {
+          throw new Error("expected a JSON string body");
+        }
+        calls.push({
+          headers: new Headers(init?.headers),
+          body: JSON.parse(init.body) as Record<string, unknown>,
+        });
+        return new Response("ok", {
+          headers: { "x-lore-context-boundary": boundary },
+        });
+      },
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({
+        "x-lore-session-id": `sess-${fixture.protocol}`,
+      }),
+    });
+
+    await (
+      await fetch(fixture.url, {
+        method: "POST",
+        body: JSON.stringify({
+          model: "model",
+          [fixture.key]: fixture.prefix,
+        }),
+      })
+    ).text();
+    await (
+      await fetch(fixture.url, {
+        method: "POST",
+        body: JSON.stringify({
+          model: "model",
+          [fixture.key]: [...fixture.prefix, fixture.suffix],
+        }),
+      })
+    ).text();
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].headers.get("x-lore-context-boundary")).toBe(boundary);
+    expect(calls[1].body[fixture.key]).toEqual([
+      ...fixture.prefix.slice(0, fixture.retainedItems),
+      fixture.suffix,
+    ]);
+  });
+
+  test("sends the full body when the cached prefix was edited", async () => {
+    const prefix = [{ role: "user", content: "original" }];
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: 1,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([]),
+    });
+    const calls: Array<{ headers: Headers; body: unknown }> = [];
+    globalThis.fetch = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (typeof init?.body !== "string") {
+          throw new Error("expected a JSON string body");
+        }
+        calls.push({
+          headers: new Headers(init?.headers),
+          body: JSON.parse(init.body),
+        });
+        return new Response("ok", {
+          headers:
+            calls.length === 1
+              ? { "x-lore-context-boundary": boundary }
+              : undefined,
+        });
+      },
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-edited" }),
+    });
+    const url = "https://api.anthropic.com/v1/messages";
+    await (
+      await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({ model: "claude", messages: prefix }),
+      })
+    ).text();
+    const edited = [
+      { role: "user", content: "edited" },
+      { role: "user", content: "new" },
+    ];
+    await (
+      await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({ model: "claude", messages: edited }),
+      })
+    ).text();
+
+    expect(calls[1].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[1].body).toMatchObject({ messages: edited });
+  });
+
+  test("does not cache a boundary from a cancelled response", async () => {
+    const prefix = [{ role: "user", content: "old" }];
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: 1,
+      inputDigest: digestChain(prefix),
+      retainedItems: 0,
+      sourceMessages: 1,
+      sourceDigest: digestChain([]),
+    });
+    const headers: Headers[] = [];
+    globalThis.fetch = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        headers.push(new Headers(init?.headers));
+        return new Response("not consumed", {
+          headers: { "x-lore-context-boundary": boundary },
+        });
+      },
+    );
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-cancelled" }),
+    });
+    const url = "https://api.anthropic.com/v1/messages";
+    const first = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ model: "claude", messages: prefix }),
+    });
+    await first.body?.cancel();
+    await (
+      await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({
+          model: "claude",
+          messages: [...prefix, { role: "user", content: "new" }],
+        }),
+      })
+    ).text();
+
+    expect(headers[1].get("x-lore-context-boundary")).toBeNull();
+  });
+
+  test("preserves fetch(Request) and does not attach an unreplayable boundary", async () => {
+    const calls: Array<{
+      method: string | undefined;
+      body: string | undefined;
+      boundary: string | null;
+    }> = [];
+    let call = 0;
+    const original = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        calls.push({
+          method: request.method,
+          body: request.body ? await request.text() : undefined,
+          boundary: request.headers.get("x-lore-context-boundary"),
+        });
+        call++;
+        return new Response("ok", {
+          status: 200,
+          headers:
+            call === 1
+              ? {
+                  "x-lore-context-boundary": encodeContextBoundary({
+                    v: 1,
+                    protocol: "openai-codex",
+                    inputItems: 0,
+                    inputDigest: digestChain([]),
+                    retainedItems: 0,
+                    sourceMessages: 0,
+                    sourceDigest: digestChain([]),
+                  }),
+                }
+              : undefined,
+        });
+      },
+    );
+    globalThis.fetch = original;
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-request" }),
+    });
+
+    const url = "https://chatgpt.com/backend-api/codex/responses";
+    await (
+      await fetch(url, {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-codex", input: [] }),
+      })
+    ).text();
+    const requestBody = JSON.stringify({
+      model: "gpt-5.6-codex",
+      input: [{ type: "message", role: "user", content: "continue" }],
+    });
+    await (
+      await fetch(
+        new Request(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: requestBody,
+        }),
+      )
+    ).text();
+
+    expect(calls[1]).toEqual({
+      method: "POST",
+      body: requestBody,
+      boundary: null,
+    });
   });
 });

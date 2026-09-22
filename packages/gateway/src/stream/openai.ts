@@ -656,16 +656,11 @@ export async function accumulateOpenAISSEStream(
       );
     });
   };
-  const isPostTerminalNoop = (
-    choice: unknown,
-  ): boolean => {
+  const isPostTerminalNoop = (choice: unknown): boolean => {
     if (!choice || typeof choice !== "object" || Array.isArray(choice))
       return false;
     const record = choice as Record<string, unknown>;
-    if (
-      record.finish_reason !== undefined &&
-      record.finish_reason !== null
-    )
+    if (record.finish_reason !== undefined && record.finish_reason !== null)
       return false;
     const delta = record.delta;
     return (
@@ -746,8 +741,16 @@ export async function accumulateOpenAISSEStream(
       ) {
         throw malformedOpenAIStream("response-identity-mismatch");
       }
-      if (typeof parsed.id === "string") id = parsed.id;
-      if (typeof parsed.model === "string") model = parsed.model;
+      if (
+        typeof parsed.id === "string" &&
+        !(postTerminalNoop && parsed.id === "")
+      )
+        id = parsed.id;
+      if (
+        typeof parsed.model === "string" &&
+        !(postTerminalNoop && parsed.model === "")
+      )
+        model = parsed.model;
 
       if (opts.strict && normalizedChoices) {
         const frameChoiceIndices = new Set<number>();

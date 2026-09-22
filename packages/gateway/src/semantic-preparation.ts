@@ -151,6 +151,8 @@ export async function prepareSemanticMessages(input: {
   timing: PreparationTiming;
   protocol?: string;
   checkpointProtocol?: string;
+  /** Whether the raw protocol item seam is safe for a future suffix. */
+  checkpointBoundarySafe?: boolean;
   forceFull?: boolean;
   sourcePrefix?: {
     sourceCount: number;
@@ -167,7 +169,7 @@ export async function prepareSemanticMessages(input: {
   const memory = process.memoryUsage();
   if (input.sourcePrefix && (input.noStore || !input.protocol)) {
     throw new SourceDeltaUnavailableError(
-      "A Codex context suffix cannot be prepared without its retained Lore checkpoint; retrying with the full conversation.",
+      "A context suffix cannot be prepared without its retained Lore checkpoint; retrying with the full conversation.",
     );
   }
   const checkpoint =
@@ -175,6 +177,7 @@ export async function prepareSemanticMessages(input: {
       ? new SourceCheckpoint({
           ...input,
           protocol: input.checkpointProtocol ?? input.protocol,
+          boundarySafe: input.checkpointBoundarySafe,
         })
       : undefined;
   const tokenCache = new SemanticTokenCache({

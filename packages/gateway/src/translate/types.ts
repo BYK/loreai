@@ -305,13 +305,17 @@ export type GatewayRequest = {
    */
   codex?: boolean;
   /**
-   * Internal Codex continuation metadata. `messages` contains only the
+   * Internal source-continuation metadata. `messages` contains only the
    * unverified suffix when a valid boundary was supplied; the source prefix
    * is checked against the retained Lore checkpoint before preparation.
    */
-  codexInput?: {
+  sourceInput?: {
     itemCount: number;
     inputDigest: string;
+    /** True only when normalization can restart after this raw item. */
+    boundarySafe: boolean;
+    /** Leading source items repeated in a suffix-only body (OpenAI system). */
+    retainedItems: number;
     sourcePrefix?: {
       messageCount: number;
       sourceDigest: string;

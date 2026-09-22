@@ -29,7 +29,7 @@ export async function handleOpenAIChatCompletions(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseOpenAIRequestChunks(
-      decodedRequestChunks(req, req.signal),
+      decodedRequestChunks(req, req.signal, requestBodyLimitsForConfig(config)),
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
@@ -51,7 +51,7 @@ export async function handleOpenAIResponses(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseOpenAIResponsesRequestChunks(
-      decodedRequestChunks(req, req.signal),
+      decodedRequestChunks(req, req.signal, requestBodyLimitsForConfig(config)),
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;

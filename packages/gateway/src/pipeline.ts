@@ -21,20 +21,24 @@ export { storeTurnTemporal } from "./turn-temporal";
 export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
+import type {
+  ContextBoundaryProtocol,
+  LoreMessageWithParts,
+  LLMClient,
+} from "@loreai/core";
 import {
-  CODEX_CONTEXT_BOUNDARY_HEADER,
+  CONTEXT_BOUNDARY_HEADER,
   FullSourceRequired,
-  CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER,
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
   asString,
   estimateTokens as coreEstimateTokens,
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
-import { encodeCodexContextBoundary } from "./codex-boundary";
+import { encodeContextBoundary } from "./context-boundary";
 import {
-  CODEX_SOURCE_CHECKPOINT_PROTOCOL,
   SourceDeltaUnavailableError,
+  sourceCheckpointProtocol,
 } from "./source-checkpoint";
 import {
   load,
@@ -436,14 +440,14 @@ import {
 
 function requestSourceMessageCount(req: GatewayRequest): number {
   return (
-    (req.codexInput?.sourcePrefix?.messageCount ?? 0) + req.messages.length
+    (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + req.messages.length
   );
 }
 
 function requestSourcePrefix(
   req: GatewayRequest,
 ): { sourceCount: number; sourceDigest: string } | undefined {
-  const prefix = req.codexInput?.sourcePrefix;
+  const prefix = req.sourceInput?.sourcePrefix;
   return prefix
     ? {
         sourceCount: prefix.messageCount,
@@ -453,7 +457,23 @@ function requestSourcePrefix(
 }
 
 function requestCheckpointProtocol(req: GatewayRequest): string {
-  return req.codex === true ? CODEX_SOURCE_CHECKPOINT_PROTOCOL : req.protocol;
+  if (!req.sourceInput) return req.protocol;
+  return sourceCheckpointProtocol(requestContextBoundaryProtocol(req));
+}
+
+function requestContextBoundaryProtocol(
+  req: GatewayRequest,
+): ContextBoundaryProtocol {
+  if (req.codex === true) return "openai-codex";
+  switch (req.protocol) {
+    case "anthropic":
+    case "openai":
+    case "openai-responses":
+    case "gemini":
+      return req.protocol;
+    default:
+      throw new Error("Unsupported context-boundary protocol");
+  }
 }
 
 /** Reserve the largest source set this untrusted recall input can expose. */
@@ -14384,6 +14404,11 @@ async function handleCompaction(
   trackOperation: (operation: Promise<unknown>) => void,
   claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before compaction.",
+    );
+  }
   const abortScope = createForegroundAbortScope(req.signal);
   try {
     const run = (signal: AbortSignal) => {
@@ -15856,6 +15881,11 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation cannot be forwarded without its retained prefix; retrying with the full conversation.",
+    );
+  }
   setSentryLightContext({ model: req.model });
 
   const abortScope = createForegroundAbortScope(req.signal);
@@ -16046,6 +16076,11 @@ async function handleProvisionalConversationTurn(
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before confirming a provisional session.",
+    );
+  }
   // Resolve and validate route intent once, but keep it private until the
   // provisional identity is confirmed by a complete response and client EOF.
   const requestUpstream = prepareRequestUpstream(req, config);
@@ -16244,6 +16279,8 @@ async function handleProvisionalConversationTurn(
     const userIndex = req.messages.findLastIndex(
       (message) => message.role === "user",
     );
+    const absoluteUserIndex =
+      (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + userIndex;
     const temporalInput: TurnTemporalInput = {
       assistantIndex: requestSourceMessageCount(req),
       ...(userIndex >= 0
@@ -16251,8 +16288,8 @@ async function handleProvisionalConversationTurn(
             latestUser: gatewayMessagesToLore(
               [req.messages[userIndex]],
               identified.sessionID,
-              userIndex,
-              userIndex,
+              absoluteUserIndex,
+              absoluteUserIndex,
             )[0],
           }
         : {}),
@@ -17311,6 +17348,7 @@ async function handleConversationTurn(
     noStore: suppressTemporalStorage,
     protocol: req.protocol,
     checkpointProtocol: requestCheckpointProtocol(req),
+    checkpointBoundarySafe: req.sourceInput?.boundarySafe,
     sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
   });
@@ -17788,6 +17826,7 @@ async function handleConversationTurn(
       noStore: suppressTemporalStorage,
       protocol: req.protocol,
       checkpointProtocol: requestCheckpointProtocol(req),
+      checkpointBoundarySafe: req.sourceInput?.boundarySafe,
       forceFull: true,
       sourcePrefix: requestSourcePrefix(req),
       timing: preparationTiming,
@@ -17801,15 +17840,18 @@ async function handleConversationTurn(
     });
   }
   checkpoint?.finish(result.messages);
-  const codexBoundaryHeader =
-    req.codex === true &&
-    req.codexInput &&
+  const contextBoundaryHeader =
+    req.sourceInput &&
+    req.sourceInput.boundarySafe &&
     checkpoint &&
+    checkpoint.hasPendingPublication &&
     !suppressTemporalStorage
-      ? encodeCodexContextBoundary({
+      ? encodeContextBoundary({
           v: 1,
-          inputItems: req.codexInput.itemCount,
-          inputDigest: req.codexInput.inputDigest,
+          protocol: requestContextBoundaryProtocol(req),
+          inputItems: req.sourceInput.itemCount,
+          inputDigest: req.sourceInput.inputDigest,
+          retainedItems: req.sourceInput.retainedItems,
           sourceMessages: requestSourceMessageCount(req),
           sourceDigest: checkpoint.digest,
         })
@@ -18518,8 +18560,8 @@ async function handleConversationTurn(
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
     copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
-    if (codexBoundaryHeader && response.ok) {
-      response.headers.set(CODEX_CONTEXT_BOUNDARY_HEADER, codexBoundaryHeader);
+    if (contextBoundaryHeader && response.ok) {
+      response.headers.set(CONTEXT_BOUNDARY_HEADER, contextBoundaryHeader);
     }
     return wrapBodyWithCleanup(
       response,
@@ -19433,9 +19475,8 @@ async function handleConversationTurn(
           strict: true,
           stopAtTerminal: true,
           consumeUntilDone: true,
-          allowPostTerminalNoop: isOpenCodeZenOpenAIStream(
-            requestUpstreamRoute,
-          ),
+          allowPostTerminalNoop:
+            isOpenCodeZenOpenAIStream(requestUpstreamRoute),
         }),
       );
       return finishWithRecall(resp);
@@ -19910,6 +19951,11 @@ async function handleLoreSlashCommand(
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (!text.toLowerCase().startsWith("/lore:")) return null;
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before running a slash command.",
+    );
+  }
 
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
@@ -20496,15 +20542,15 @@ async function handleRequestInner(
     // task_result. Guarding structural detection on the sub-agent signal closes
     // that hole regardless of which header resolved the session.
     const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
-    // A Codex continuation deliberately contains only the new suffix. Its
+    // A checkpointed continuation deliberately contains only the new suffix. Its
     // small request-local message count must not look like a large session
     // suddenly compacting. Pattern-based detection remains enabled because a
     // suffix can still explicitly request compaction.
-    const isCodexContinuation =
-      req.codex === true && req.codexInput?.sourcePrefix !== undefined;
+    const isCheckpointContinuation =
+      req.sourceInput?.sourcePrefix !== undefined;
     const structuralCompaction =
       !isClaudeSubagent &&
-      !isCodexContinuation &&
+      !isCheckpointContinuation &&
       isStructuralCompaction(req, priorState);
     const patternDetection = structuralCompaction
       ? undefined
@@ -20532,7 +20578,7 @@ async function handleRequestInner(
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
-    if (isMetaRequest(req)) {
+    if (isMetaRequest(req, requestSourceMessageCount(req))) {
       log.info(
         `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
           ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
@@ -20554,9 +20600,9 @@ async function handleRequestInner(
     if (err instanceof SourceDeltaUnavailableError) {
       const response = errorResponse(
         409,
-        "The retained Lore context no longer matches the Codex request prefix; retrying with the full conversation.",
+        "The retained Lore context no longer matches the request prefix; retrying with the full conversation.",
       );
-      response.headers.set(CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
+      response.headers.set(CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
       return response;
     }
     // Client disconnect / abort is benign — downgrade from error to info.

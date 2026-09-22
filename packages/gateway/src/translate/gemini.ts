@@ -27,13 +27,14 @@ import type {
   GatewayUsage,
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
-import { asString } from "@loreai/core";
+import { asString, digestChain } from "@loreai/core";
 import { extractAuth } from "../auth";
 import { safeTokenSum, validateGeminiUsageMetadata } from "../usage-validation";
 import {
   parseStreamedRequest,
   type StreamedItemsBuilder,
 } from "./streaming-request";
+import { parseContextBoundary } from "../context-boundary";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -336,6 +337,12 @@ export function parseGeminiRequest(
     maxTokens,
     metadata,
     rawHeaders: { ...headers },
+    sourceInput: {
+      itemCount: rawContents.length,
+      inputDigest: digestChain(rawContents),
+      boundarySafe: rawContents.length > 0,
+      retainedItems: 0,
+    },
   };
 }
 
@@ -355,9 +362,15 @@ export function parseGeminiRequestChunks(
   model: string,
   stream: boolean,
 ): Promise<GatewayRequest> {
+  const boundary = parseContextBoundary(headers, "gemini");
   return parseStreamedRequest(chunks, {
     streamKey: "contents",
     captureKeys: GEMINI_STREAM_CAPTURE_KEYS,
+    contextBoundary: boundary,
+    describeBoundary: (messages) => ({
+      boundarySafe: messages.length > 0,
+      retainedItems: 0,
+    }),
     createItemsBuilder: createGeminiContentsBuilder,
     parseSync: (raw) => parseGeminiRequest(raw, headers, model, stream),
     assemble(raw, streamed) {
