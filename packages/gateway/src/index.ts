@@ -23,6 +23,7 @@ export { startServer } from "./server";
 export { handleRequest, resetPipelineState } from "./pipeline";
 export { readPortFile } from "./portfile";
 export { readGatewayProcessFile } from "./pidfile";
+export { prepareSourceUiAssets, type UiBootstrapResult } from "./ui-bootstrap";
 export {
   startGateway,
   probeGateway,

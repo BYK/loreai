@@ -13,8 +13,8 @@
  * Request paths are only ever matched against the manifest's key set — the
  * source is asked for manifest keys (and their fixed variant suffixes), never
  * for anything derived from a URL — so there is no path-traversal surface.
- * The manifest is parsed once and bodies are read lazily on first use, then
- * kept in memory (the whole SPA is ~1 MB).
+ * The manifest is parsed once per generation and bodies are read lazily on
+ * first use, then kept in memory (the whole SPA is ~1 MB).
  *
  *   /ui, /ui/                  → index.html (no-cache)
  *   /ui/assets/<hashed file>   → immutable, one-year cache (Vite content-hashes
@@ -85,6 +85,8 @@ export const UI_ENCODING_PREFERENCE: readonly UiEncoding[] = [
 export interface UiAssetSource {
   /** Human-readable origin for diagnostics (a directory, or "SEA assets"). */
   readonly description: string;
+  /** True when a source can publish a newer manifest during this process. */
+  readonly mutable?: boolean;
   /**
    * Bytes of a staged file by its manifest-relative path (POSIX separators),
    * or null when the file does not exist there.
@@ -119,6 +121,7 @@ function seaSource(): UiAssetSource | null {
 function directorySource(dir: string): UiAssetSource {
   return {
     description: dir,
+    mutable: true,
     read(path) {
       try {
         // Copy into a standalone ArrayBuffer (readFileSync may hand out a
@@ -161,9 +164,16 @@ interface LoadedUi {
   missing: Set<string>;
 }
 
-/** undefined = not resolved yet; null = no usable UI (memoized). */
+/** undefined = not resolved yet; null = no usable UI. */
 let loaded: LoadedUi | null | undefined;
 let sourceOverride: UiAssetSource | null = null;
+/**
+ * A source checkout may be staged after the gateway has already answered its
+ * first /ui request (for example, while the OpenCode plugin is starting).
+ * Do not permanently cache that transient absence. SEA assets are immutable,
+ * but disk and embedding sources can become available after initialization.
+ */
+let retryUnavailableSource = false;
 
 /**
  * Point the handler at an explicit source (tests, embedding hosts), or pass
@@ -173,11 +183,57 @@ let sourceOverride: UiAssetSource | null = null;
 export function setUiAssetSource(source: UiAssetSource | null): void {
   sourceOverride = source;
   loaded = undefined;
+  retryUnavailableSource = false;
 }
 
 function load(): LoadedUi | null {
-  if (loaded !== undefined) return loaded;
-  const source = sourceOverride ?? seaSource() ?? diskSource();
+  if (loaded !== undefined) {
+    if (loaded !== null && loaded.source.mutable) {
+      // Source-checkout staging publishes a new directory beneath the same
+      // path. Re-read its manifest so a running gateway switches generations
+      // instead of retaining old hashed asset names and body caches.
+      const currentSource = sourceOverride ?? diskSource();
+      if (currentSource) {
+        const raw = currentSource.read(UI_MANIFEST_FILE);
+        if (raw) {
+          try {
+            const manifest = parseUiManifest(Buffer.from(raw).toString("utf8"));
+            if (manifest.buildId !== loaded.manifest.buildId) {
+              loaded = {
+                manifest,
+                source: currentSource,
+                bodies: new Map(),
+                missing: new Set(),
+              };
+            }
+          } catch {
+            // Keep serving the last complete generation while a replacement
+            // is being published or if its manifest is temporarily invalid.
+          }
+        }
+      }
+      return loaded;
+    }
+    if (loaded !== null || !retryUnavailableSource) return loaded;
+    loaded = undefined;
+  }
+
+  let source: UiAssetSource | null;
+  if (sourceOverride) {
+    retryUnavailableSource = true;
+    source = sourceOverride;
+  } else {
+    const sea = seaSource();
+    if (sea) {
+      retryUnavailableSource = false;
+      source = sea;
+    } else {
+      // A source checkout can stage dist/ui after this module has already
+      // been loaded, so retry automatic disk discovery when it is unavailable.
+      retryUnavailableSource = true;
+      source = diskSource();
+    }
+  }
   if (!source) {
     loaded = null;
     return loaded;
@@ -431,7 +487,7 @@ export function handleUIRequest(req: Request, url: URL): Response {
     return jsonError(
       503,
       "ui_unavailable",
-      "The Lore UI was not built into this gateway (run `pnpm --filter @loreai/gateway build`)",
+      "The Lore UI assets are unavailable in this gateway. A source-loaded OpenCode/Pi plugin normally stages them automatically; restart the plugin after pulling UI changes, or run `pnpm --filter @loreai/ui build && pnpm --filter @loreai/gateway build` from the Lore repository root.",
     );
   }
 

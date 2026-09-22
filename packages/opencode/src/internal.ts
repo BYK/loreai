@@ -63,7 +63,7 @@ export function installEmbeddedGatewaySigtermHandler(
   };
 }
 
-function isLoopbackUrl(value: string): boolean {
+export function isLoopbackUrl(value: string): boolean {
   try {
     const hostname = new URL(value).hostname
       .replace(/^\[/, "")
@@ -196,6 +196,44 @@ export async function probeGateway(
     return false;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Prepare the UI before probing local gateways.
+ *
+ * A source-loaded OpenCode plugin can start or reuse a gateway before the
+ * workspace build hook has ever run. The gateway owns the actual staging
+ * implementation; this small bridge keeps the published plugin compatible
+ * with older gateway packages where the development helper does not exist.
+ */
+export async function prepareLocalUiAssets(): Promise<void> {
+  try {
+    const gw = "@loreai/gateway";
+    const gateway = (await import(/* webpackIgnore: true */ gw)) as {
+      prepareSourceUiAssets?: () => Promise<{
+        attempted: boolean;
+        files: number;
+        buildId: string | null;
+        error?: string;
+      }>;
+    };
+    if (!gateway.prepareSourceUiAssets) return;
+    const result = await gateway.prepareSourceUiAssets();
+    if (!result.attempted) return;
+    if (result.error) {
+      log.warn(`source UI preparation failed: ${result.error}`);
+    } else if (result.files === 0) {
+      log.warn("source UI preparation produced no assets");
+    } else {
+      log.info(
+        `source UI staged: ${result.files} files` +
+          (result.buildId ? `, build ${result.buildId}` : ""),
+      );
+    }
+  } catch {
+    // The gateway is optional from the plugin's point of view. Its normal
+    // startup path reports a useful error if it cannot be imported.
   }
 }
 

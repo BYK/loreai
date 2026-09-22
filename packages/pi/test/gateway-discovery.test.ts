@@ -1,7 +1,18 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import { vi } from "vitest";
 import { probeGateway, resolveGatewayUrl } from "../src/internal";
+
+const gatewayMock = vi.hoisted(() => ({
+  prepareSourceUiAssets: vi.fn(async () => ({
+    attempted: true,
+    files: 17,
+    buildId: "build-a",
+  })),
+}));
+
+vi.mock("@loreai/gateway", () => gatewayMock);
 
 /**
  * Unit coverage for the Pi extension's gateway discovery: `probeGateway` and
@@ -46,6 +57,7 @@ describe("pi gateway discovery", () => {
 
   afterEach(() => {
     process.env = { ...savedEnv };
+    gatewayMock.prepareSourceUiAssets.mockClear();
   });
 
   describe("probeGateway", () => {
@@ -65,12 +77,14 @@ describe("pi gateway discovery", () => {
       process.env.LORE_REMOTE_URL = `${healthyUrl}/`;
       delete process.env.LORE_GATEWAY_URL;
       expect(await resolveGatewayUrl()).toBe(healthyUrl);
+      expect(gatewayMock.prepareSourceUiAssets).not.toHaveBeenCalled();
     });
 
     test("falls through to LORE_GATEWAY_URL when reachable", async () => {
       delete process.env.LORE_REMOTE_URL;
       process.env.LORE_GATEWAY_URL = healthyUrl;
       expect(await resolveGatewayUrl()).toBe(healthyUrl);
+      expect(gatewayMock.prepareSourceUiAssets).toHaveBeenCalledOnce();
     });
   });
 });
