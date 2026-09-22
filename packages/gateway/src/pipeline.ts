@@ -629,6 +629,34 @@ function injectContextWarning(
   };
 }
 
+function hasAlignedGatewayProvenance(
+  message: GatewayMessage,
+  contentLength = message.content.length,
+): boolean {
+  const { provenanceContent, provenancePositions } = message;
+  if (provenanceContent === undefined && provenancePositions === undefined) {
+    return true;
+  }
+  if (provenanceContent === undefined || provenancePositions === undefined) {
+    return false;
+  }
+  if (provenancePositions.length !== contentLength) return false;
+
+  let previous = -1;
+  return provenancePositions.every((position) => {
+    if (
+      !Number.isSafeInteger(position) ||
+      position < 0 ||
+      position >= provenanceContent.length ||
+      position <= previous
+    ) {
+      return false;
+    }
+    previous = position;
+    return true;
+  });
+}
+
 /**
  * Strip context warning markers from assistant messages in an incoming request.
  * Restores the message content to what the API originally generated, preserving
@@ -651,7 +679,18 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
         block.type === "text" &&
         block.text.startsWith(CONTEXT_WARNING_MARKER)
       ) {
+        const hasAlignedProvenance = hasAlignedGatewayProvenance(msg);
         msg.content.splice(i, 1);
+        // Request-only provenance is safe to replay only when its visible
+        // index mapping is complete. A malformed/legacy message may contain
+        // fewer positions than visible blocks; fail closed by retaining the
+        // visible transcript and dropping the opaque provenance rather than
+        // forwarding mismatched arrays to recall or an upstream translator.
+        if (!hasAlignedProvenance) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
         const provenanceIndex = msg.provenancePositions?.[i];
         const provenanceBlock =
           provenanceIndex === undefined

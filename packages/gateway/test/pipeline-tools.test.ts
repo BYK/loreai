@@ -374,6 +374,31 @@ describe("Responses context-warning cleanup", () => {
     expect(JSON.stringify(input)).not.toContain(CONTEXT_WARNING_MARKER);
     expect(input).toEqual([reasoning.raw, answerItem.raw]);
   });
+
+  test("drops malformed provenance instead of leaving positions misaligned", () => {
+    const warning = `${CONTEXT_WARNING_MARKER} workers are degraded\n\n---\n\n`;
+    const message: GatewayMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: warning },
+        { type: "text", text: "answer" },
+      ],
+      provenanceContent: [
+        {
+          type: "opaque",
+          raw: { type: "reasoning", encrypted_content: "ciphertext" },
+        },
+      ],
+      // The legacy message has no position for the warning or answer.
+      provenancePositions: [],
+    };
+
+    stripContextWarnings([message]);
+
+    expect(message.content).toEqual([{ type: "text", text: "answer" }]);
+    expect(message.provenanceContent).toBeUndefined();
+    expect(message.provenancePositions).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
