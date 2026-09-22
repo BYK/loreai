@@ -71,6 +71,73 @@ describe("accumulateOpenAISSEStream", () => {
     expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
   });
 
+  test("allows an explicitly enabled empty post-terminal choice trailer", async () => {
+    const result = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":null}]}',
+        "data: [DONE]",
+      ]),
+      {
+        strict: true,
+        stopAtTerminal: true,
+        consumeUntilDone: true,
+        allowPostTerminalNoop: true,
+      },
+    );
+    expect(result.content).toEqual([{ type: "text", text: "done" }]);
+  });
+
+  test("does not erase response identity on an empty post-terminal trailer", async () => {
+    const result = await accumulateOpenAISSEStream(
+      sse([
+        'data: {"id":"chatcmpl-kept","model":"gpt-kept","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}',
+        'data: {"id":"","model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}',
+        "data: [DONE]",
+      ]),
+      {
+        strict: true,
+        stopAtTerminal: true,
+        consumeUntilDone: true,
+        allowPostTerminalNoop: true,
+      },
+    );
+
+    expect(result.id).toBe("chatcmpl-kept");
+    expect(result.model).toBe("gpt-kept");
+  });
+
+  test("rejects an empty post-terminal choice trailer by default", async () => {
+    await expect(
+      accumulateOpenAISSEStream(
+        sse([
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+          'data: {"choices":[{"delta":{},"finish_reason":null}]}',
+          "data: [DONE]",
+        ]),
+        { strict: true, stopAtTerminal: true, consumeUntilDone: true },
+      ),
+    ).rejects.toMatchObject({ rule: "post-terminal-frame" });
+  });
+
+  test("still rejects post-terminal content when the compatibility option is enabled", async () => {
+    await expect(
+      accumulateOpenAISSEStream(
+        sse([
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+          'data: {"choices":[{"delta":{"content":"late"},"finish_reason":null}]}',
+          "data: [DONE]",
+        ]),
+        {
+          strict: true,
+          stopAtTerminal: true,
+          consumeUntilDone: true,
+          allowPostTerminalNoop: true,
+        },
+      ),
+    ).rejects.toMatchObject({ rule: "post-terminal-frame" });
+  });
+
   test("consumeUntilDone rejects truncation after finish_reason", async () => {
     await expect(
       accumulateOpenAISSEStream(

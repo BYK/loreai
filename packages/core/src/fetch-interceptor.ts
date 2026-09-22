@@ -10,6 +10,22 @@
  * gateway while preserving all original headers.
  */
 import * as log from "./log";
+import { digestChain } from "./chain-digest";
+import {
+  CONTEXT_BOUNDARY_CAPABILITY_HEADER,
+  CONTEXT_BOUNDARY_CAPABILITY_VALUE,
+  CONTEXT_BOUNDARY_HEADER,
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
+  decodeContextBoundary,
+  type ContextBoundary,
+  type ContextBoundaryProtocol,
+} from "./context-boundary";
+
+/** @deprecated Use CONTEXT_BOUNDARY_HEADER. */
+export const CODEX_CONTEXT_BOUNDARY_HEADER = CONTEXT_BOUNDARY_HEADER;
+/** @deprecated Use CONTEXT_BOUNDARY_MISMATCH_HEADER. */
+export const CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER =
+  CONTEXT_BOUNDARY_MISMATCH_HEADER;
 
 /** Configuration for the fetch interceptor. */
 export type FetchInterceptorConfig = {
@@ -34,13 +50,16 @@ export type FetchInterceptorConfig = {
  *  - `/api/...` — older / non-standard providers
  *  - `/openai/v1/...`, `/anthropic/v1/...` — proxy providers
  *
- * Each pattern matches the path suffix `/messages`, `/chat/completions`,
- * or `/responses` (the canonical LLM API endpoints). The leading prefix
- * is intentionally permissive — the URL's hostname already restricts which
- * providers we can see, and an over-narrow pattern here is what caused
- * the Onur "lore-config" bug to recur for some users whose providers
- * used a non-standard path prefix.
+ * Each pattern matches a canonical LLM endpoint: `/messages`,
+ * `/chat/completions`, `/responses`, or Gemini's `:generateContent` verbs.
+ * The leading prefix is intentionally permissive — the URL's hostname already
+ * restricts which providers we can see, and an over-narrow pattern here is
+ * what caused the Onur "lore-config" bug to recur for some users whose
+ * providers used a non-standard path prefix.
  */
+const GEMINI_GENERATE_CONTENT_PATH_RE =
+  /\/models\/[^/:]+:(?:generateContent|streamGenerateContent)$/;
+
 const LLM_API_PATH_PATTERNS: RegExp[] = [
   // Standard: /v1/{messages,chat/completions,responses}[/...]
   /\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
@@ -52,6 +71,8 @@ const LLM_API_PATH_PATTERNS: RegExp[] = [
   /\/(?:openai|anthropic)\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
   // Codex (ChatGPT) — uses /backend-api/codex/responses, no /v1/ prefix
   /\/codex\/responses(\/.*)?$/,
+  // Native Gemini generateContent endpoints (v1beta, v1, or proxy-prefixed).
+  GEMINI_GENERATE_CONTENT_PATH_RE,
 ];
 
 /**
@@ -101,7 +122,10 @@ function matchesLLMApiPath(pathname: string): boolean {
 
 /** True when the pathname looks like an LLM API endpoint (for warning/fallback). */
 function pathLooksLLMLike(pathname: string): boolean {
-  return /\/(messages|chat\/completions|responses)(\/|$)/.test(pathname);
+  return (
+    /\/(messages|chat\/completions|responses)(\/|$)/.test(pathname) ||
+    GEMINI_GENERATE_CONTENT_PATH_RE.test(pathname)
+  );
 }
 
 /**
@@ -183,17 +207,22 @@ type Rewrite = {
   gatewayUrl: string;
   upstreamBase: string;
   /**
-   * The client's ORIGINAL upstream endpoint pathname (e.g. `/chat/completions`,
-   * `/v1/messages`, or a prefixed `/api/v1/chat/completions`). Forwarded to the
-   * gateway as `x-lore-upstream-path` so it can POST to the exact endpoint the
-   * SDK intended instead of synthesizing a canonical `/v1/...` path. This is the
-   * full pathname (NOT the post-base suffix) so the gateway can reconstruct the
-   * original URL as `origin(base) + pathname` regardless of any base prefix —
-   * required for providers whose endpoint omits `/v1` (GitHub Copilot's
-   * `/chat/completions`, issue #1052) or uses a non-standard prefix.
+   * The client's ORIGINAL upstream request target: full pathname plus query
+   * (e.g. `/chat/completions`, `/v1/messages?beta=...`, or Gemini's
+   * `:streamGenerateContent?alt=sse`). Forwarded under the legacy wire name
+   * `x-lore-upstream-path` so the gateway can POST to the exact endpoint the SDK
+   * intended instead of synthesizing a canonical `/v1/...` URL. This is NOT the
+   * post-base suffix: the gateway reconstructs `origin(base) + requestTarget`
+   * regardless of any base prefix. Keeping the query is required whenever it
+   * selects upstream response semantics, as Gemini's `alt=sse` does.
    */
   upstreamPath: string;
 };
+
+/** HTTP request target preserved for exact same-protocol upstream replay. */
+function upstreamRequestTarget(upstream: URL): string {
+  return upstream.pathname + upstream.search;
+}
 
 /**
  * Rewrite an intercepted URL to the gateway, handling both standard /v1/...
@@ -202,13 +231,26 @@ type Rewrite = {
  * mapped to a canonical gateway endpoint from the URL alone.
  */
 function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
-  // Try /v1/ extraction first (most common)
-  const v1Idx = upstream.pathname.lastIndexOf("/v1/");
-  if (v1Idx >= 0) {
+  // Preserve standard versioned paths. Gemini commonly uses /v1beta/ while
+  // OpenAI and Anthropic use /v1/.
+  const versionedMatches = ["/v1/", "/v1beta/"]
+    .map((segment) => upstream.pathname.lastIndexOf(segment))
+    .filter((index) => index >= 0);
+  const versionedIdx = versionedMatches.length
+    ? Math.max(...versionedMatches)
+    : -1;
+  if (versionedIdx >= 0) {
     return {
-      gatewayUrl: `${gateway.origin}${upstream.pathname.slice(v1Idx)}${upstream.search}`,
-      upstreamBase: upstream.origin + upstream.pathname.slice(0, v1Idx),
-      upstreamPath: upstream.pathname,
+      gatewayUrl: `${gateway.origin}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
+      upstreamBase: upstream.origin + upstream.pathname.slice(0, versionedIdx),
+      upstreamPath: upstreamRequestTarget(upstream),
+    };
+  }
+  if (GEMINI_GENERATE_CONTENT_PATH_RE.test(upstream.pathname)) {
+    return {
+      gatewayUrl: `${gateway.origin}${upstream.pathname}${upstream.search}`,
+      upstreamBase: upstream.origin,
+      upstreamPath: upstreamRequestTarget(upstream),
     };
   }
   // Try non-standard path rewrites (e.g. /codex/responses → /v1/codex/responses)
@@ -220,7 +262,7 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
         gatewayUrl: `${gateway.origin}${canonical}${upstream.search}`,
         upstreamBase:
           upstream.origin + upstream.pathname.slice(0, -suffix.length),
-        upstreamPath: upstream.pathname,
+        upstreamPath: upstreamRequestTarget(upstream),
       };
     }
   }
@@ -257,7 +299,7 @@ export function interceptUrlForProtocol(
   return {
     gatewayUrl: `${gateway.origin}${gatewayPath}${upstream.search}`,
     upstreamBase,
-    upstreamPath: upstream.pathname,
+    upstreamPath: upstreamRequestTarget(upstream),
   };
 }
 
@@ -266,6 +308,266 @@ export function interceptUrlForProtocol(
  * log spam on every request to a non-intercepted LLM endpoint).
  */
 const warnedPaths = new Set<string>();
+
+type CachedBoundary = {
+  boundary: ContextBoundary;
+  value: string;
+  updatedAt: number;
+};
+
+type BoundaryEndpoint = {
+  protocol: ContextBoundaryProtocol;
+  streamKey: "messages" | "input" | "contents";
+};
+
+/**
+ * Boundaries are process-local hints, not durable identity. The gateway still
+ * validates the source checkpoint before accepting a delta, and a failed
+ * validation causes a full-body retry. Keeping only the opaque token here
+ * avoids retaining the conversation itself in the interceptor.
+ */
+const contextBoundaries = new Map<string, CachedBoundary>();
+const CONTEXT_BOUNDARY_TTL_MS = 60 * 60 * 1000;
+const MAX_CONTEXT_BOUNDARIES = 1024;
+
+function contextBoundaryKey(
+  gatewayBase: string,
+  sessionID: string,
+  protocol: ContextBoundaryProtocol,
+): string {
+  return `${gatewayBase}\x1f${sessionID}\x1f${protocol}`;
+}
+
+function pruneContextBoundaries(now = Date.now()): void {
+  for (const [key, boundary] of contextBoundaries) {
+    if (now - boundary.updatedAt > CONTEXT_BOUNDARY_TTL_MS)
+      contextBoundaries.delete(key);
+  }
+  if (contextBoundaries.size <= MAX_CONTEXT_BOUNDARIES) return;
+  const oldest = [...contextBoundaries.entries()]
+    .sort(([, a], [, b]) => a.updatedAt - b.updatedAt)
+    .slice(0, contextBoundaries.size - MAX_CONTEXT_BOUNDARIES);
+  for (const [key] of oldest) contextBoundaries.delete(key);
+}
+
+function boundaryEndpoint(pathname: string): BoundaryEndpoint | undefined {
+  // Only generation endpoints reconstruct source checkpoints. Auxiliary
+  // children such as `/responses/compact` must always receive the full body.
+  if (/\/codex\/responses\/?$/.test(pathname)) {
+    return { protocol: "openai-codex", streamKey: "input" };
+  }
+  if (/\/chat\/completions\/?$/.test(pathname)) {
+    return { protocol: "openai", streamKey: "messages" };
+  }
+  if (/\/responses\/?$/.test(pathname)) {
+    return { protocol: "openai-responses", streamKey: "input" };
+  }
+  if (/\/messages\/?$/.test(pathname)) {
+    return { protocol: "anthropic", streamKey: "messages" };
+  }
+  if (GEMINI_GENERATE_CONTENT_PATH_RE.test(pathname)) {
+    return { protocol: "gemini", streamKey: "contents" };
+  }
+  return undefined;
+}
+
+type PreparedBoundaryRequest = {
+  boundaryKey?: string;
+  attached: boolean;
+  init: RequestInit;
+};
+
+/**
+ * Verify the cached prefix against the caller's current full transcript, then
+ * transmit only the protocol's retained preamble plus newly appended items.
+ */
+function prepareBoundaryRequest(
+  headers: Headers,
+  gatewayBase: string,
+  pathname: string,
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): PreparedBoundaryRequest {
+  // Only process-local, gateway-issued boundaries participate in elision.
+  headers.delete(CONTEXT_BOUNDARY_HEADER);
+  // Do not let caller-provided capability claims opt auxiliary endpoints into
+  // the source-checkpoint namespace reserved for generation requests.
+  headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
+  const endpoint = boundaryEndpoint(pathname);
+  if (!endpoint) return { attached: false, init: { ...init, headers } };
+  const sessionID = headers.get("x-lore-session-id");
+  if (!sessionID) return { attached: false, init: { ...init, headers } };
+  headers.set(
+    CONTEXT_BOUNDARY_CAPABILITY_HEADER,
+    CONTEXT_BOUNDARY_CAPABILITY_VALUE,
+  );
+  const fullInit: RequestInit = { ...init, headers };
+  pruneContextBoundaries();
+  const key = contextBoundaryKey(gatewayBase, sessionID, endpoint.protocol);
+  const cached = contextBoundaries.get(key);
+  if (!cached || !canReplayRequestBody(input, init)) {
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+  if (headers.has("content-encoding")) {
+    contextBoundaries.delete(key);
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+  const bodyString = extractBodyString(input, init);
+  if (!bodyString) {
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+  try {
+    const body = JSON.parse(bodyString) as Record<string, unknown>;
+    const items = body?.[endpoint.streamKey];
+    const { boundary } = cached;
+    if (
+      boundary.protocol !== endpoint.protocol ||
+      !Array.isArray(items) ||
+      items.length <= boundary.inputItems ||
+      digestChain(items.slice(0, boundary.inputItems)) !== boundary.inputDigest
+    ) {
+      contextBoundaries.delete(key);
+      return { boundaryKey: key, attached: false, init: fullInit };
+    }
+    body[endpoint.streamKey] = [
+      ...items.slice(0, boundary.retainedItems),
+      ...items.slice(boundary.inputItems),
+    ];
+    const elidedHeaders = new Headers(headers);
+    elidedHeaders.delete("content-length");
+    elidedHeaders.set(CONTEXT_BOUNDARY_HEADER, cached.value);
+    return {
+      boundaryKey: key,
+      attached: true,
+      init: { ...init, headers: elidedHeaders, body: JSON.stringify(body) },
+    };
+  } catch {
+    contextBoundaries.delete(key);
+    return { boundaryKey: key, attached: false, init: fullInit };
+  }
+}
+
+function updateContextBoundary(
+  response: Response,
+  boundaryKey: string | undefined,
+  protocol: ContextBoundaryProtocol | undefined,
+): Response {
+  if (!boundaryKey || !protocol) return response;
+  const encoded = response.headers.get(CONTEXT_BOUNDARY_HEADER);
+  const boundary = encoded ? decodeContextBoundary(encoded) : undefined;
+  if (!response.ok || !encoded || !boundary || boundary.protocol !== protocol) {
+    contextBoundaries.delete(boundaryKey);
+    pruneContextBoundaries();
+    return response;
+  }
+  const publish = (): void => {
+    contextBoundaries.set(boundaryKey, {
+      boundary,
+      value: encoded,
+      updatedAt: Date.now(),
+    });
+    pruneContextBoundaries();
+  };
+  if (!response.body) {
+    publish();
+    return response;
+  }
+
+  // The header is an optimistic token: gateway checkpoint persistence runs in
+  // its accepted-response finalizer and may trail network EOF by one event-loop
+  // turn. Cache only after caller-visible EOF. If a follow-up wins that narrow
+  // race (or persistence failed), the gateway returns the dedicated mismatch
+  // and the interceptor replays the full transcript once. A cancelled or
+  // failed response must never become a continuation anchor.
+  const reader = response.body.getReader();
+  const boundaryBodySource: UnderlyingByteSource = {
+    type: "bytes",
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          controller.close();
+          // Node's byte-stream implementation leaves a pending BYOB read
+          // unsettled unless its zero-byte EOF is explicitly acknowledged.
+          controller.byobRequest?.respond(0);
+          publish();
+        } else {
+          controller.enqueue(chunk.value);
+        }
+      } catch (error) {
+        contextBoundaries.delete(boundaryKey);
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      contextBoundaries.delete(boundaryKey);
+      // Upstream cleanup is hostile I/O: a provider-backed cancel may never
+      // settle. Relinquish caller ownership immediately and detach cleanup.
+      try {
+        void reader.cancel(reason).catch(() => {});
+      } catch {
+        // Best-effort cleanup must not make downstream cancellation fail.
+      }
+    },
+  };
+  const body = new ReadableStream(boundaryBodySource);
+  return preserveFetchResponseMetadata(
+    new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+    response,
+  );
+}
+
+/**
+ * A Response constructor cannot initialize fetch-managed metadata. Decorate
+ * the body replacement (and every clone) with the immutable values from the
+ * provider response so interception remains observationally transparent.
+ */
+function preserveFetchResponseMetadata(
+  target: Response,
+  source: Response,
+): Response {
+  const clone = target.clone.bind(target);
+  Object.defineProperties(target, {
+    url: { configurable: true, value: source.url },
+    redirected: { configurable: true, value: source.redirected },
+    type: { configurable: true, value: source.type },
+    clone: {
+      configurable: true,
+      value: () => preserveFetchResponseMetadata(clone(), source),
+    },
+  });
+  return target;
+}
+
+function canReplayRequestBody(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): boolean {
+  // A Request body is a one-shot stream. Cloning it before dispatch would tee
+  // and potentially buffer the entire long transcript, defeating the bounded
+  // memory goal. Send it without a continuation hint instead.
+  if (typeof input !== "string" && !(input instanceof URL)) return false;
+  const body = init?.body;
+  return (
+    typeof body === "string" ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body)
+  );
+}
+
+/** Preserve a Request's method/body while replacing only its destination. */
+function rewrittenFetchInput(
+  input: RequestInfo | URL,
+  gatewayUrl: string,
+): RequestInfo | URL {
+  return typeof input !== "string" && !(input instanceof URL)
+    ? new Request(gatewayUrl, input)
+    : gatewayUrl;
+}
 
 /**
  * Determine whether a fetch request should be intercepted and rerouted
@@ -360,7 +662,8 @@ function writeOriginalFetchSlot(fn: typeof globalThis.fetch | null): void {
  * Build the gateway-bound headers for an intercepted request: preserve all
  * original headers (auth, content-type, etc.), set `X-Lore-Upstream-URL` to
  * the resolved upstream base, `X-Lore-Upstream-Path` to the original endpoint
- * pathname, and inject dynamic `X-Lore-*` context headers.
+ * request target (pathname + query), and inject dynamic `X-Lore-*` context
+ * headers. The header name remains stable for wire compatibility.
  *
  * Shared by both the URL-matched path (Path 1) and the body-detected path
  * (Path 2) so header handling can never drift between them.
@@ -384,11 +687,12 @@ function buildGatewayHeaders(
   // The gateway uses this as the highest-priority routing signal.
   headers.set("x-lore-upstream-url", upstreamBase);
 
-  // Pass the client's ORIGINAL endpoint pathname so the gateway can forward
-  // verbatim instead of synthesizing a canonical `/v1/...` path. This is what
-  // lets providers whose endpoint omits `/v1` (GitHub Copilot's
-  // `/chat/completions`, issue #1052) or uses a non-standard prefix work as a
-  // pure passthrough. Only set when it's a sane absolute path.
+  // Pass the client's ORIGINAL endpoint request target so the gateway can
+  // forward pathname + query verbatim instead of synthesizing a canonical
+  // `/v1/...` URL. This covers both non-standard paths (GitHub Copilot's bare
+  // `/chat/completions`) and query-selected semantics (Gemini's `?alt=sse`).
+  // Only set when it starts with an absolute path; the gateway performs the
+  // authoritative validation before using it.
   if (upstreamPath.startsWith("/")) {
     headers.set("x-lore-upstream-path", upstreamPath);
   }
@@ -455,7 +759,9 @@ export function installFetchInterceptor(
     if (
       !url.includes("/messages") &&
       !url.includes("/completions") &&
-      !url.includes("/responses")
+      !url.includes("/responses") &&
+      !url.includes("generateContent") &&
+      !url.includes("streamGenerateContent")
     ) {
       return originalFetch(input, init);
     }
@@ -509,11 +815,54 @@ export function installFetchInterceptor(
         rewrite.upstreamPath,
         config,
       );
-      observeRequestHeaders(headers, config);
+      const boundaryPathname = new URL(rewrite.gatewayUrl).pathname;
+      const prepared = prepareBoundaryRequest(
+        headers,
+        gatewayBase,
+        boundaryPathname,
+        input,
+        init,
+      );
+      observeRequestHeaders(new Headers(prepared.init.headers), config);
       log.info(
         `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway`,
       );
-      return originalFetch(rewrite.gatewayUrl, { ...init, headers });
+      const response = await originalFetch(
+        rewrittenFetchInput(input, rewrite.gatewayUrl),
+        prepared.init,
+      );
+      if (
+        prepared.attached &&
+        prepared.boundaryKey &&
+        response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
+      ) {
+        // The gateway could not prove that its retained Lore checkpoint still
+        // matches this prefix (restart, edited history, or a stale client
+        // boundary). Replay once without the hint so the normal full-body
+        // parser can recover. The response is deliberately not exposed to the
+        // provider, which otherwise sees an opaque 409 instead of recovering.
+        contextBoundaries.delete(prepared.boundaryKey);
+        void response.body?.cancel().catch(() => {});
+        const fullHeaders = new Headers(headers);
+        fullHeaders.delete(CONTEXT_BOUNDARY_HEADER);
+        const retry = await originalFetch(
+          rewrittenFetchInput(input, rewrite.gatewayUrl),
+          {
+            ...init,
+            headers: fullHeaders,
+          },
+        );
+        return updateContextBoundary(
+          retry,
+          prepared.boundaryKey,
+          boundaryEndpoint(boundaryPathname)?.protocol,
+        );
+      }
+      return updateContextBoundary(
+        response,
+        prepared.boundaryKey,
+        boundaryEndpoint(boundaryPathname)?.protocol,
+      );
     }
 
     // ---- Path 2: URL didn't match, but the body shape may reveal an LLM call ----
@@ -533,11 +882,44 @@ export function installFetchInterceptor(
           rewrite.upstreamPath,
           config,
         );
-        observeRequestHeaders(headers, config);
+        const boundaryPathname = new URL(rewrite.gatewayUrl).pathname;
+        const prepared = prepareBoundaryRequest(
+          headers,
+          gatewayBase,
+          boundaryPathname,
+          input,
+          init,
+        );
+        observeRequestHeaders(new Headers(prepared.init.headers), config);
         log.info(
           `fetch-interceptor: ${upstream.host}${upstream.pathname} → gateway (body-detected ${detected})`,
         );
-        return originalFetch(rewrite.gatewayUrl, { ...init, headers });
+        const response = await originalFetch(
+          rewrittenFetchInput(input, rewrite.gatewayUrl),
+          prepared.init,
+        );
+        if (
+          prepared.attached &&
+          prepared.boundaryKey &&
+          response.headers.get(CONTEXT_BOUNDARY_MISMATCH_HEADER) === "true"
+        ) {
+          contextBoundaries.delete(prepared.boundaryKey);
+          void response.body?.cancel().catch(() => {});
+          const retry = await originalFetch(
+            rewrittenFetchInput(input, rewrite.gatewayUrl),
+            { ...init, headers },
+          );
+          return updateContextBoundary(
+            retry,
+            prepared.boundaryKey,
+            boundaryEndpoint(boundaryPathname)?.protocol,
+          );
+        }
+        return updateContextBoundary(
+          response,
+          prepared.boundaryKey,
+          boundaryEndpoint(boundaryPathname)?.protocol,
+        );
       }
 
       // LLM-looking path we couldn't intercept (no body, or unrecognized
@@ -563,5 +945,8 @@ export function installFetchInterceptor(
   return () => {
     globalThis.fetch = originalFetch;
     writeOriginalFetchSlot(null);
+    for (const key of contextBoundaries.keys()) {
+      if (key.startsWith(`${gatewayBase}\x1f`)) contextBoundaries.delete(key);
+    }
   };
 }

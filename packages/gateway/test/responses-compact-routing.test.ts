@@ -67,7 +67,10 @@ describe("Responses compact fallback routing", () => {
     let capturedHeaders: Record<string, string> = {};
     mock
       .get("https://compact.corp.example")
-      .intercept({ path: "/custom/responses/compact", method: "POST" })
+      .intercept({
+        path: "/custom/responses/compact?api-version=2026-09-01",
+        method: "POST",
+      })
       .reply((opts) => {
         capturedHeaders = opts.headers as Record<string, string>;
         return {
@@ -97,7 +100,8 @@ describe("Responses compact fallback routing", () => {
           "content-type": "application/json",
           "x-lore-provider": "openai",
           "x-lore-upstream-url": "https://compact.corp.example/custom",
-          "x-lore-upstream-path": "/custom/responses/compact",
+          "x-lore-upstream-path":
+            "/custom/responses/compact?api-version=2026-09-01",
           "x-lore-project": "/tmp/lore-compact-custom-routing",
         },
         body: JSON.stringify({

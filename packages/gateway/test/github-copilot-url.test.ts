@@ -12,7 +12,11 @@
  *     no original request (background workers / env-var providers).
  */
 import { describe, test, expect } from "vitest";
-import { extractUpstreamPathHeader, verbatimUpstreamUrl } from "../src/config";
+import {
+  extractUpstreamPathHeader,
+  isUpstreamWithinBase,
+  verbatimUpstreamUrl,
+} from "../src/config";
 import {
   buildOpenAIChatCompletionsUrl,
   buildOpenAIUpstreamRequest,
@@ -48,6 +52,32 @@ describe("extractUpstreamPathHeader", () => {
     ).toBe("/api/v1/chat/completions");
   });
 
+  test("accepts an absolute request target with an encoded query", () => {
+    expect(
+      extractUpstreamPathHeader({
+        "x-lore-upstream-path":
+          "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&callback=https%3A%2F%2Fexample.com%2Fdone",
+      }),
+    ).toBe(
+      "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&callback=https%3A%2F%2Fexample.com%2Fdone",
+    );
+  });
+
+  test("accepts a request target above the former pathname-only limit", () => {
+    const target = `/v1/messages?cursor=${"a".repeat(600)}`;
+    expect(extractUpstreamPathHeader({ "x-lore-upstream-path": target })).toBe(
+      target,
+    );
+  });
+
+  test("treats literal dot segments in the query as opaque data", () => {
+    expect(
+      extractUpstreamPathHeader({
+        "x-lore-upstream-path": "/v1/messages?relative=../next-page",
+      }),
+    ).toBe("/v1/messages?relative=../next-page");
+  });
+
   test("rejects non-absolute paths", () => {
     expect(
       extractUpstreamPathHeader({ "x-lore-upstream-path": "chat/completions" }),
@@ -72,10 +102,18 @@ describe("extractUpstreamPathHeader", () => {
     ).toBeUndefined();
   });
 
+  test("rejects fragments, which are never part of an HTTP request target", () => {
+    expect(
+      extractUpstreamPathHeader({
+        "x-lore-upstream-path": "/v1/messages?ok=true#not-forwarded",
+      }),
+    ).toBeUndefined();
+  });
+
   test("rejects over-length values", () => {
     expect(
       extractUpstreamPathHeader({
-        "x-lore-upstream-path": `/${"a".repeat(600)}`,
+        "x-lore-upstream-path": `/${"a".repeat(2100)}`,
       }),
     ).toBeUndefined();
   });
@@ -136,6 +174,53 @@ describe("verbatimUpstreamUrl", () => {
     ).toBe("https://api.openai.com/v1/chat/completions");
   });
 
+  test.each([
+    {
+      provider: "Anthropic",
+      protocol: "anthropic" as const,
+      origin: "https://api.anthropic.com",
+      target: "/v1/messages?beta=tools%2Ccomputer-use",
+    },
+    {
+      provider: "OpenAI Chat Completions",
+      protocol: "openai" as const,
+      origin: "https://api.openai.com",
+      target: "/v1/chat/completions?api-version=2026-09-01",
+    },
+    {
+      provider: "OpenAI Responses",
+      protocol: "openai-responses" as const,
+      origin: "https://api.openai.com",
+      target: "/v1/responses?include=reasoning.encrypted_content",
+    },
+    {
+      provider: "Codex",
+      protocol: "openai-responses" as const,
+      origin: "https://chatgpt.com",
+      target: "/backend-api/codex/responses?conversation_id=conv-1",
+    },
+    {
+      provider: "Gemini",
+      protocol: "gemini" as const,
+      origin: "https://generativelanguage.googleapis.com",
+      target: "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+    },
+  ])(
+    "preserves $provider's pathname + query",
+    ({ protocol, origin, target }) => {
+      expect(
+        verbatimUpstreamUrl({
+          reconstructedUrl: `${origin}/canonical-fallback`,
+          effectiveUpstreamBase: origin,
+          headerUpstream: origin,
+          upstreamPath: target,
+          effectiveProtocol: protocol,
+          ingressProtocol: protocol,
+        }),
+      ).toBe(`${origin}${target}`);
+    },
+  );
+
   test("does NOT forward verbatim when translating protocols", () => {
     // anthropic ingress → openai egress: the original path is for the wrong wire.
     expect(
@@ -174,6 +259,26 @@ describe("verbatimUpstreamUrl", () => {
     expect(
       verbatimUpstreamUrl({ ...base, effectiveUpstreamBase: "not a url" }),
     ).toBe(base.reconstructedUrl);
+  });
+});
+
+describe("isUpstreamWithinBase", () => {
+  test("checks the destination path while allowing an opaque query", () => {
+    expect(
+      isUpstreamWithinBase(
+        "https://api.example.com/tenant-a/v1/messages?callback=https%3A%2F%2Fexample.net%2Fdone",
+        "https://api.example.com/tenant-a",
+      ),
+    ).toBe(true);
+  });
+
+  test("does not let a query disguise a path outside the configured base", () => {
+    expect(
+      isUpstreamWithinBase(
+        "https://api.example.com/tenant-ab/v1/messages?base=%2Ftenant-a",
+        "https://api.example.com/tenant-a",
+      ),
+    ).toBe(false);
   });
 });
 

@@ -438,7 +438,10 @@ const META_KEYWORDS = [
  * Biased toward false negatives (letting meta requests through to full pipeline)
  * over false positives (incorrectly skipping a real conversation turn).
  */
-export function isMetaRequest(req: GatewayRequest): boolean {
+export function isMetaRequest(
+  req: GatewayRequest,
+  sourceMessageCount = req.messages.length,
+): boolean {
   // Compaction requests are handled separately
   if (isCompactionRequest(req)) return false;
 
@@ -455,7 +458,7 @@ export function isMetaRequest(req: GatewayRequest): boolean {
   let score = 0;
 
   if (req.tools.length <= META_MAX_TOOLS) score += SCORE_FEW_TOOLS;
-  if (req.messages.length <= META_MAX_MESSAGES) score += SCORE_FEW_MESSAGES;
+  if (sourceMessageCount <= META_MAX_MESSAGES) score += SCORE_FEW_MESSAGES;
   if (req.system.length < META_MAX_SYSTEM_LENGTH) score += SCORE_SHORT_SYSTEM;
   if (req.maxTokens > 0 && req.maxTokens <= META_MAX_TOKENS)
     score += SCORE_LOW_MAX_TOKENS;
