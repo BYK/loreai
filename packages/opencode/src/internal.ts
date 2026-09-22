@@ -63,7 +63,7 @@ export function installEmbeddedGatewaySigtermHandler(
   };
 }
 
-function isLoopbackUrl(value: string): boolean {
+export function isLoopbackUrl(value: string): boolean {
   try {
     const hostname = new URL(value).hostname
       .replace(/^\[/, "")

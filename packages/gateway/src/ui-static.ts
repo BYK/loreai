@@ -13,8 +13,8 @@
  * Request paths are only ever matched against the manifest's key set — the
  * source is asked for manifest keys (and their fixed variant suffixes), never
  * for anything derived from a URL — so there is no path-traversal surface.
- * The manifest is parsed once and bodies are read lazily on first use, then
- * kept in memory (the whole SPA is ~1 MB).
+ * The manifest is parsed once per generation and bodies are read lazily on
+ * first use, then kept in memory (the whole SPA is ~1 MB).
  *
  *   /ui, /ui/                  → index.html (no-cache)
  *   /ui/assets/<hashed file>   → immutable, one-year cache (Vite content-hashes
@@ -85,6 +85,8 @@ export const UI_ENCODING_PREFERENCE: readonly UiEncoding[] = [
 export interface UiAssetSource {
   /** Human-readable origin for diagnostics (a directory, or "SEA assets"). */
   readonly description: string;
+  /** True when a source can publish a newer manifest during this process. */
+  readonly mutable?: boolean;
   /**
    * Bytes of a staged file by its manifest-relative path (POSIX separators),
    * or null when the file does not exist there.
@@ -119,6 +121,7 @@ function seaSource(): UiAssetSource | null {
 function directorySource(dir: string): UiAssetSource {
   return {
     description: dir,
+    mutable: true,
     read(path) {
       try {
         // Copy into a standalone ArrayBuffer (readFileSync may hand out a
@@ -185,6 +188,32 @@ export function setUiAssetSource(source: UiAssetSource | null): void {
 
 function load(): LoadedUi | null {
   if (loaded !== undefined) {
+    if (loaded !== null && loaded.source.mutable) {
+      // Source-checkout staging publishes a new directory beneath the same
+      // path. Re-read its manifest so a running gateway switches generations
+      // instead of retaining old hashed asset names and body caches.
+      const currentSource = sourceOverride ?? diskSource();
+      if (currentSource) {
+        const raw = currentSource.read(UI_MANIFEST_FILE);
+        if (raw) {
+          try {
+            const manifest = parseUiManifest(Buffer.from(raw).toString("utf8"));
+            if (manifest.buildId !== loaded.manifest.buildId) {
+              loaded = {
+                manifest,
+                source: currentSource,
+                bodies: new Map(),
+                missing: new Set(),
+              };
+            }
+          } catch {
+            // Keep serving the last complete generation while a replacement
+            // is being published or if its manifest is temporarily invalid.
+          }
+        }
+      }
+      return loaded;
+    }
     if (loaded !== null || !retryUnavailableSource) return loaded;
     loaded = undefined;
   }

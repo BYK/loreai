@@ -217,6 +217,8 @@ export async function prepareLocalUiAssets(): Promise<void> {
  * found.
  */
 export async function resolveGatewayUrl(): Promise<string | null> {
+  let preparedLocalUi = false;
+
   // 0. Remote gateway — skip local discovery/startup entirely.
   if (process.env.LORE_REMOTE_URL) {
     const url = gatewayUrlForLog(
@@ -233,6 +235,10 @@ export async function resolveGatewayUrl(): Promise<string | null> {
     const url = gatewayUrlForLog(
       process.env.LORE_GATEWAY_URL.replace(/\/$/, ""),
     );
+    if (isLoopbackUrl(url)) {
+      await prepareLocalUiAssets();
+      preparedLocalUi = true;
+    }
     if (url !== "invalid" && (await probeGateway(url))) return url;
     // env var set but gateway unreachable — fall through to discovery
   }
@@ -240,7 +246,7 @@ export async function resolveGatewayUrl(): Promise<string | null> {
   // Prepare the source checkout before probing/reusing a local gateway. This
   // also lets an already-running source gateway see a manifest staged by this
   // extension process.
-  await prepareLocalUiAssets();
+  if (!preparedLocalUi) await prepareLocalUiAssets();
 
   // 2. Build probe list: port file first (handles random port), then known defaults.
   const probePorts = new Set<number>();

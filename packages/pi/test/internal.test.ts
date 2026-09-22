@@ -6,10 +6,17 @@ import {
   gatewayAccessHeadersForRemote,
   GATEWAY_PROVIDERS,
   OPENAI_PROVIDERS,
+  prepareLocalUiAssets,
   resolveGatewayUrl,
   runCompaction,
   sessionIDFor,
 } from "../src/internal";
+
+const gatewayMock = vi.hoisted(() => ({
+  prepareSourceUiAssets: vi.fn(),
+}));
+
+vi.mock("@loreai/gateway", () => gatewayMock);
 
 const GW = "http://127.0.0.1:31234";
 
@@ -23,6 +30,42 @@ const silentSink = {
 afterEach(() => {
   log.registerSink(silentSink);
   vi.restoreAllMocks();
+  gatewayMock.prepareSourceUiAssets.mockReset();
+});
+
+describe("source UI adapter bridge", () => {
+  test("forwards a successful source staging result without throwing", async () => {
+    gatewayMock.prepareSourceUiAssets.mockResolvedValue({
+      attempted: true,
+      files: 17,
+      buildId: "build-a",
+    });
+
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+    expect(gatewayMock.prepareSourceUiAssets).toHaveBeenCalledOnce();
+  });
+
+  test("swallows bridge failures and unavailable UI results", async () => {
+    gatewayMock.prepareSourceUiAssets.mockResolvedValueOnce({
+      attempted: true,
+      files: 0,
+      buildId: null,
+      error: "temporary failure",
+    });
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+
+    gatewayMock.prepareSourceUiAssets.mockResolvedValueOnce({
+      attempted: false,
+      files: 0,
+      buildId: null,
+    });
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+
+    gatewayMock.prepareSourceUiAssets.mockRejectedValueOnce(
+      new Error("bridge unavailable"),
+    );
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+  });
 });
 
 describe("buildProviderRegistrations", () => {

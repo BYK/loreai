@@ -49,13 +49,14 @@ function errorMessage(error: unknown): string {
  * Stage the UI when the gateway is running from the Lore workspace.
  *
  * The promise is process-wide so concurrent plugin instances cannot race on
- * the shared dist/ui directory. Source-loaded plugins rebuild the UI by
- * default, so a restart picks up the checkout's current UI source. Set
- * LORE_UI_BUILD_ON_START=if-missing to reuse an existing packages/ui/dist
- * build when startup speed matters more than freshness.
+ * the shared dist/ui directory. Startup only stages an existing
+ * packages/ui/dist build; the explicit workspace build command remains
+ * responsible for compiling the UI.
  */
 export function prepareSourceUiAssets(): Promise<UiBootstrapResult> {
-  preparation ??= (async (): Promise<UiBootstrapResult> => {
+  if (preparation) return preparation;
+
+  const attempt = (async (): Promise<UiBootstrapResult> => {
     const script = sourceStagerUrl();
     if (!script) {
       return { attempted: false, files: 0, buildId: null };
@@ -63,11 +64,7 @@ export function prepareSourceUiAssets(): Promise<UiBootstrapResult> {
 
     try {
       const stager = (await import(script.href)) as UiAssetStager;
-      const mode =
-        process.env.LORE_UI_BUILD_ON_START === "if-missing"
-          ? "if-missing"
-          : "always";
-      const result = await stager.stageUiAssets({ build: mode });
+      const result = await stager.stageUiAssets({ build: "never" });
       return {
         attempted: true,
         files: result.files,
@@ -82,5 +79,21 @@ export function prepareSourceUiAssets(): Promise<UiBootstrapResult> {
       };
     }
   })();
+
+  // Successful preparation is process-wide, but a failed attempt must not
+  // strand a source-loaded plugin until the process restarts. The inner
+  // operation normally converts staging errors into a result so callers can
+  // continue without a UI; the rejection branch also covers unexpected
+  // loader/runtime failures.
+  preparation = attempt.then(
+    (result) => {
+      if (result.error) preparation = undefined;
+      return result;
+    },
+    (error: unknown) => {
+      preparation = undefined;
+      throw error;
+    },
+  );
   return preparation;
 }
