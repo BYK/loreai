@@ -346,3 +346,62 @@ describe("interceptUrlForProtocol", () => {
     expect(r.upstreamBase).toBe("https://api.example.com");
   });
 });
+
+describe("Codex context continuation", () => {
+  let cleanup: (() => void) | undefined;
+
+  afterEach(() => {
+    cleanup?.();
+    cleanup = undefined;
+  });
+
+  test("reuses the gateway boundary and retries once after a mismatch", async () => {
+    const calls: Array<{ url: string; headers: Headers }> = [];
+    let call = 0;
+    const original = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          url:
+            typeof input === "string"
+              ? input
+              : input instanceof URL
+                ? input.href
+                : input.url,
+          headers: new Headers(init?.headers),
+        });
+        call++;
+        if (call === 2) {
+          return new Response("boundary mismatch", {
+            status: 409,
+            headers: { "x-lore-codex-context-boundary-mismatch": "true" },
+          });
+        }
+        return new Response("ok", {
+          status: 200,
+          headers: {
+            "x-lore-codex-context-boundary": call === 1 ? "old" : "fresh",
+          },
+        });
+      },
+    );
+    globalThis.fetch = original;
+    cleanup = installFetchInterceptor({
+      gatewayBase: GATEWAY,
+      getHeaders: () => ({ "x-lore-session-id": "sess-boundary" }),
+    });
+
+    const url = "https://chatgpt.com/backend-api/codex/responses";
+    const init = {
+      method: "POST",
+      body: JSON.stringify({ model: "gpt-5.6-codex", input: [] }),
+    };
+    await fetch(url, init);
+    const response = await fetch(url, init);
+
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(3);
+    expect(calls[0].headers.get("x-lore-codex-context-boundary")).toBeNull();
+    expect(calls[1].headers.get("x-lore-codex-context-boundary")).toBe("old");
+    expect(calls[2].headers.get("x-lore-codex-context-boundary")).toBeNull();
+  });
+});
