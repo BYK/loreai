@@ -11,6 +11,7 @@
  *     is native Gemini (`candidates`).
  */
 import { describe, test, expect, afterEach, vi } from "vitest";
+import { installFetchInterceptor } from "@loreai/core";
 import { fetchArgUrl } from "./helpers/fetch-url";
 import { loopbackRequest } from "./helpers/loopback-request";
 
@@ -100,7 +101,15 @@ async function sendGemini(
       contents: [{ role: "user", parts: [{ text: "hi" }] }],
     }),
   });
-  const clientJson = await res.json().catch(() => undefined);
+  const clientText = await res.text();
+  const clientPayload = /^data:\s*(.+)$/m.exec(clientText)?.[1] ?? clientText;
+  const clientJson = (() => {
+    try {
+      return JSON.parse(clientPayload) as unknown;
+    } catch {
+      return undefined;
+    }
+  })();
 
   expect(mockFetch).toHaveBeenCalled();
   const call = mockFetch.mock.calls[0];
@@ -116,8 +125,14 @@ async function sendGemini(
 
 describe("native Gemini ingress → generativelanguage upstream (full pipeline)", () => {
   let harness: Harness | undefined;
+  let interceptorCleanup: (() => void) | undefined;
+  let originalFetch: typeof globalThis.fetch | undefined;
 
   afterEach(async () => {
+    interceptorCleanup?.();
+    interceptorCleanup = undefined;
+    if (originalFetch) globalThis.fetch = originalFetch;
+    originalFetch = undefined;
     if (harness) await harness.teardown();
     harness = undefined;
   });
@@ -163,6 +178,88 @@ describe("native Gemini ingress → generativelanguage upstream (full pipeline)"
     expect(upstreamUrl).toContain(
       "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
     );
+  });
+
+  test("intercepted stream preserves the original ?alt=sse request target", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const target =
+      "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse";
+    const { upstreamUrl, clientJson } = await sendGemini(harness, target, {
+      "x-lore-upstream-url": "https://generativelanguage.googleapis.com",
+      "x-lore-upstream-path": target,
+    });
+    expect(upstreamUrl).toBe(
+      `https://generativelanguage.googleapis.com${target}`,
+    );
+    expect(clientJson).toMatchObject({
+      candidates: [{ content: { parts: [{ text: "ok" }] } }],
+    });
+  });
+
+  test("preserves ?alt=sse through interceptor, gateway, and upstream dispatch", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(geminiUpstreamStreamResponse());
+
+    // Bridge the interceptor's rewritten loopback fetch into the real harness
+    // server while leaving the final provider dispatch on the mocked
+    // upstreamFetch seam. This composes the complete production ownership path:
+    // original provider URL → interceptor headers → gateway route → upstream URL.
+    const activeHarness = harness;
+    const fallbackFetch = globalThis.fetch;
+    originalFetch = fallbackFetch;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (!url.href.startsWith(activeHarness.baseURL)) {
+          return fallbackFetch(input, init);
+        }
+        const body = request.body
+          ? new Uint8Array(await request.arrayBuffer())
+          : undefined;
+        return activeHarness.request(`${url.pathname}${url.search}`, {
+          method: request.method,
+          headers: request.headers,
+          body,
+        });
+      },
+    ) as unknown as typeof globalThis.fetch;
+    interceptorCleanup = installFetchInterceptor({
+      gatewayBase: activeHarness.baseURL,
+      getHeaders: () => ({
+        "x-lore-session-id": "gemini-verbatim-e2e",
+        "x-lore-project": "/tmp/gemini-verbatim-e2e",
+      }),
+    });
+
+    const target =
+      "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse";
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com${target}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": "test-key",
+        },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "hi" }] }],
+        }),
+      },
+    );
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(200);
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(fetchArgUrl(mockFetch.mock.calls[0][0])).toBe(
+      `https://generativelanguage.googleapis.com${target}`,
+    );
+    expect(responseText).toContain('"text":"ok"');
   });
 
   test("version-prefix-agnostic: /v1/models/... (@ai-sdk/google shape) is matched", async () => {

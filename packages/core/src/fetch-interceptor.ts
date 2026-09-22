@@ -57,6 +57,9 @@ export type FetchInterceptorConfig = {
  * what caused the Onur "lore-config" bug to recur for some users whose
  * providers used a non-standard path prefix.
  */
+const GEMINI_GENERATE_CONTENT_PATH_RE =
+  /\/models\/[^/:]+:(?:generateContent|streamGenerateContent)$/;
+
 const LLM_API_PATH_PATTERNS: RegExp[] = [
   // Standard: /v1/{messages,chat/completions,responses}[/...]
   /\/v1\/(messages|chat\/completions|responses)(\/.*)?$/,
@@ -69,7 +72,7 @@ const LLM_API_PATH_PATTERNS: RegExp[] = [
   // Codex (ChatGPT) — uses /backend-api/codex/responses, no /v1/ prefix
   /\/codex\/responses(\/.*)?$/,
   // Native Gemini generateContent endpoints (v1beta, v1, or proxy-prefixed).
-  /\/(?:v1beta|v1)?\/?models\/[^/:]+:(?:stream)?generateContent$/,
+  GEMINI_GENERATE_CONTENT_PATH_RE,
 ];
 
 /**
@@ -121,7 +124,7 @@ function matchesLLMApiPath(pathname: string): boolean {
 function pathLooksLLMLike(pathname: string): boolean {
   return (
     /\/(messages|chat\/completions|responses)(\/|$)/.test(pathname) ||
-    /\/models\/[^/:]+:(?:stream)?generateContent$/.test(pathname)
+    GEMINI_GENERATE_CONTENT_PATH_RE.test(pathname)
   );
 }
 
@@ -204,17 +207,22 @@ type Rewrite = {
   gatewayUrl: string;
   upstreamBase: string;
   /**
-   * The client's ORIGINAL upstream endpoint pathname (e.g. `/chat/completions`,
-   * `/v1/messages`, or a prefixed `/api/v1/chat/completions`). Forwarded to the
-   * gateway as `x-lore-upstream-path` so it can POST to the exact endpoint the
-   * SDK intended instead of synthesizing a canonical `/v1/...` path. This is the
-   * full pathname (NOT the post-base suffix) so the gateway can reconstruct the
-   * original URL as `origin(base) + pathname` regardless of any base prefix —
-   * required for providers whose endpoint omits `/v1` (GitHub Copilot's
-   * `/chat/completions`, issue #1052) or uses a non-standard prefix.
+   * The client's ORIGINAL upstream request target: full pathname plus query
+   * (e.g. `/chat/completions`, `/v1/messages?beta=...`, or Gemini's
+   * `:streamGenerateContent?alt=sse`). Forwarded under the legacy wire name
+   * `x-lore-upstream-path` so the gateway can POST to the exact endpoint the SDK
+   * intended instead of synthesizing a canonical `/v1/...` URL. This is NOT the
+   * post-base suffix: the gateway reconstructs `origin(base) + requestTarget`
+   * regardless of any base prefix. Keeping the query is required whenever it
+   * selects upstream response semantics, as Gemini's `alt=sse` does.
    */
   upstreamPath: string;
 };
+
+/** HTTP request target preserved for exact same-protocol upstream replay. */
+function upstreamRequestTarget(upstream: URL): string {
+  return upstream.pathname + upstream.search;
+}
 
 /**
  * Rewrite an intercepted URL to the gateway, handling both standard /v1/...
@@ -235,14 +243,14 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
     return {
       gatewayUrl: `${gateway.origin}${upstream.pathname.slice(versionedIdx)}${upstream.search}`,
       upstreamBase: upstream.origin + upstream.pathname.slice(0, versionedIdx),
-      upstreamPath: upstream.pathname,
+      upstreamPath: upstreamRequestTarget(upstream),
     };
   }
-  if (/^\/models\/[^/:]+:(?:stream)?generateContent$/.test(upstream.pathname)) {
+  if (GEMINI_GENERATE_CONTENT_PATH_RE.test(upstream.pathname)) {
     return {
       gatewayUrl: `${gateway.origin}${upstream.pathname}${upstream.search}`,
       upstreamBase: upstream.origin,
-      upstreamPath: upstream.pathname,
+      upstreamPath: upstreamRequestTarget(upstream),
     };
   }
   // Try non-standard path rewrites (e.g. /codex/responses → /v1/codex/responses)
@@ -254,7 +262,7 @@ function interceptUrl(upstream: URL, gateway: URL): Rewrite | null {
         gatewayUrl: `${gateway.origin}${canonical}${upstream.search}`,
         upstreamBase:
           upstream.origin + upstream.pathname.slice(0, -suffix.length),
-        upstreamPath: upstream.pathname,
+        upstreamPath: upstreamRequestTarget(upstream),
       };
     }
   }
@@ -291,7 +299,7 @@ export function interceptUrlForProtocol(
   return {
     gatewayUrl: `${gateway.origin}${gatewayPath}${upstream.search}`,
     upstreamBase,
-    upstreamPath: upstream.pathname,
+    upstreamPath: upstreamRequestTarget(upstream),
   };
 }
 
@@ -357,7 +365,7 @@ function boundaryEndpoint(pathname: string): BoundaryEndpoint | undefined {
   if (/\/messages\/?$/.test(pathname)) {
     return { protocol: "anthropic", streamKey: "messages" };
   }
-  if (/\/models\/[^/:]+:(?:stream)?generateContent$/.test(pathname)) {
+  if (GEMINI_GENERATE_CONTENT_PATH_RE.test(pathname)) {
     return { protocol: "gemini", streamKey: "contents" };
   }
   return undefined;
@@ -652,7 +660,8 @@ function writeOriginalFetchSlot(fn: typeof globalThis.fetch | null): void {
  * Build the gateway-bound headers for an intercepted request: preserve all
  * original headers (auth, content-type, etc.), set `X-Lore-Upstream-URL` to
  * the resolved upstream base, `X-Lore-Upstream-Path` to the original endpoint
- * pathname, and inject dynamic `X-Lore-*` context headers.
+ * request target (pathname + query), and inject dynamic `X-Lore-*` context
+ * headers. The header name remains stable for wire compatibility.
  *
  * Shared by both the URL-matched path (Path 1) and the body-detected path
  * (Path 2) so header handling can never drift between them.
@@ -676,11 +685,12 @@ function buildGatewayHeaders(
   // The gateway uses this as the highest-priority routing signal.
   headers.set("x-lore-upstream-url", upstreamBase);
 
-  // Pass the client's ORIGINAL endpoint pathname so the gateway can forward
-  // verbatim instead of synthesizing a canonical `/v1/...` path. This is what
-  // lets providers whose endpoint omits `/v1` (GitHub Copilot's
-  // `/chat/completions`, issue #1052) or uses a non-standard prefix work as a
-  // pure passthrough. Only set when it's a sane absolute path.
+  // Pass the client's ORIGINAL endpoint request target so the gateway can
+  // forward pathname + query verbatim instead of synthesizing a canonical
+  // `/v1/...` URL. This covers both non-standard paths (GitHub Copilot's bare
+  // `/chat/completions`) and query-selected semantics (Gemini's `?alt=sse`).
+  // Only set when it starts with an absolute path; the gateway performs the
+  // authoritative validation before using it.
   if (upstreamPath.startsWith("/")) {
     headers.set("x-lore-upstream-path", upstreamPath);
   }
@@ -748,7 +758,8 @@ export function installFetchInterceptor(
       !url.includes("/messages") &&
       !url.includes("/completions") &&
       !url.includes("/responses") &&
-      !url.includes("generateContent")
+      !url.includes("generateContent") &&
+      !url.includes("streamGenerateContent")
     ) {
       return originalFetch(input, init);
     }

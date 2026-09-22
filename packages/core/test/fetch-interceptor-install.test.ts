@@ -222,7 +222,7 @@ describe("installFetchInterceptor — end-to-end routing", () => {
     });
   });
 
-  describe("x-lore-upstream-path — original endpoint preservation (#1052)", () => {
+  describe("x-lore-upstream-path — original request-target preservation (#1052)", () => {
     test("GitHub Copilot /chat/completions (no /v1) preserves the bare path", async () => {
       // Body-detected (Path 2): Copilot's endpoint has no /v1/ segment, so the
       // URL patterns miss and we fall back to body-shape detection.
@@ -267,6 +267,48 @@ describe("installFetchInterceptor — end-to-end routing", () => {
         "/backend-api/codex/responses",
       );
     });
+
+    test.each([
+      {
+        provider: "Anthropic",
+        url: "https://api.anthropic.com/v1/messages?beta=tools%2Ccomputer-use",
+        body: { model: "claude", messages: [] },
+        target: "/v1/messages?beta=tools%2Ccomputer-use",
+      },
+      {
+        provider: "OpenAI Chat Completions",
+        url: "https://api.openai.com/v1/chat/completions?api-version=2026-09-01",
+        body: { model: "gpt-5", messages: [] },
+        target: "/v1/chat/completions?api-version=2026-09-01",
+      },
+      {
+        provider: "OpenAI Responses",
+        url: "https://api.openai.com/v1/responses?include=reasoning.encrypted_content",
+        body: { model: "gpt-5", input: [] },
+        target: "/v1/responses?include=reasoning.encrypted_content",
+      },
+      {
+        provider: "Codex",
+        url: "https://chatgpt.com/backend-api/codex/responses?conversation_id=conv-1",
+        body: { model: "gpt-5", input: [] },
+        target: "/backend-api/codex/responses?conversation_id=conv-1",
+      },
+      {
+        provider: "Gemini",
+        url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+        body: { contents: [] },
+        target: "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+      },
+    ])(
+      "$provider preserves pathname + query exactly",
+      async ({ url, body, target }) => {
+        await fetch(url, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        expect(headerVal("x-lore-upstream-path")).toBe(target);
+      },
+    );
   });
 
   describe("non-interception cases", () => {
@@ -337,6 +379,7 @@ describe("interceptUrlForProtocol", () => {
       "openai",
     );
     expect(r.gatewayUrl).toBe(`${GATEWAY}/v1/chat/completions?stream=true`);
+    expect(r.upstreamPath).toBe("/v2/chat/completions?stream=true");
   });
 
   test("falls back to origin when no known endpoint suffix is present", () => {
