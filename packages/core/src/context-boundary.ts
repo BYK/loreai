@@ -1,4 +1,7 @@
 export const CONTEXT_BOUNDARY_HEADER = "x-lore-context-boundary";
+export const CONTEXT_BOUNDARY_CAPABILITY_HEADER =
+  "x-lore-context-boundary-capability";
+export const CONTEXT_BOUNDARY_CAPABILITY_VALUE = "v1";
 export const CONTEXT_BOUNDARY_MISMATCH_HEADER =
   "x-lore-context-boundary-mismatch";
 

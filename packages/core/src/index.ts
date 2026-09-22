@@ -386,6 +386,8 @@ export {
   extendChainDigest,
 } from "./chain-digest";
 export {
+  CONTEXT_BOUNDARY_CAPABILITY_HEADER,
+  CONTEXT_BOUNDARY_CAPABILITY_VALUE,
   CONTEXT_BOUNDARY_HEADER,
   CONTEXT_BOUNDARY_MISMATCH_HEADER,
   decodeContextBoundary,

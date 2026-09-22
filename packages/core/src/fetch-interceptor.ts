@@ -12,6 +12,8 @@
 import * as log from "./log";
 import { digestChain } from "./chain-digest";
 import {
+  CONTEXT_BOUNDARY_CAPABILITY_HEADER,
+  CONTEXT_BOUNDARY_CAPABILITY_VALUE,
   CONTEXT_BOUNDARY_HEADER,
   CONTEXT_BOUNDARY_MISMATCH_HEADER,
   decodeContextBoundary,
@@ -380,11 +382,18 @@ function prepareBoundaryRequest(
 ): PreparedBoundaryRequest {
   // Only process-local, gateway-issued boundaries participate in elision.
   headers.delete(CONTEXT_BOUNDARY_HEADER);
-  const fullInit: RequestInit = { ...init, headers };
+  // Do not let caller-provided capability claims opt auxiliary endpoints into
+  // the source-checkpoint namespace reserved for generation requests.
+  headers.delete(CONTEXT_BOUNDARY_CAPABILITY_HEADER);
   const endpoint = boundaryEndpoint(pathname);
-  if (!endpoint) return { attached: false, init: fullInit };
+  if (!endpoint) return { attached: false, init: { ...init, headers } };
   const sessionID = headers.get("x-lore-session-id");
-  if (!sessionID) return { attached: false, init: fullInit };
+  if (!sessionID) return { attached: false, init: { ...init, headers } };
+  headers.set(
+    CONTEXT_BOUNDARY_CAPABILITY_HEADER,
+    CONTEXT_BOUNDARY_CAPABILITY_VALUE,
+  );
+  const fullInit: RequestInit = { ...init, headers };
   pruneContextBoundaries();
   const key = contextBoundaryKey(gatewayBase, sessionID, endpoint.protocol);
   const cached = contextBoundaries.get(key);

@@ -35,7 +35,10 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
-import { encodeContextBoundary } from "./context-boundary";
+import {
+  encodeContextBoundary,
+  supportsContextBoundary,
+} from "./context-boundary";
 import {
   SourceDeltaUnavailableError,
   sourceCheckpointProtocol,
@@ -457,7 +460,9 @@ function requestSourcePrefix(
 }
 
 function requestCheckpointProtocol(req: GatewayRequest): string {
-  if (!req.sourceInput) return req.protocol;
+  if (!req.sourceInput || !supportsContextBoundary(req.rawHeaders)) {
+    return req.protocol;
+  }
   return sourceCheckpointProtocol(requestContextBoundaryProtocol(req));
 }
 
@@ -17847,6 +17852,7 @@ async function handleConversationTurn(
   // treat possession of this token as proof that durable state already exists.
   const contextBoundaryHeader =
     req.sourceInput &&
+    supportsContextBoundary(req.rawHeaders) &&
     req.sourceInput.boundarySafe &&
     checkpoint &&
     checkpoint.hasPendingPublication &&

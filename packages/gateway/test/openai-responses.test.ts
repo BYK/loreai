@@ -1209,6 +1209,101 @@ describe("streamed Responses ingress", () => {
     expect(response.status, await response.text()).toBe(200);
   });
 
+  test("keeps OpenAI clients without boundary capability on the legacy checkpoint namespace", async () => {
+    const projectPath = process.cwd();
+    const sessionID = "openai-legacy-checkpoint";
+    harness = await createHarness({
+      fixtures: [],
+      projectPath,
+    });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      const sequence = ++upstreamCall;
+      return new Response(
+        JSON.stringify({
+          id: `chatcmpl_legacy_${sequence}`,
+          object: "chat.completion",
+          created: 1,
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: `answer ${sequence}`,
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 5,
+            total_tokens: 105,
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const start = (messages: Array<{ role: string; content: string }>) =>
+      harness!.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": projectPath,
+          "x-lore-session-id": sessionID,
+          "x-lore-upstream-url": "https://api.openai.com",
+        },
+        body: JSON.stringify({ model: "gpt-4o", stream: false, messages }),
+      });
+    const checkpoint = () => {
+      const row = harness!.queryDB<{ payload: Uint8Array | null }>(
+        "SELECT payload FROM source_windows ORDER BY updated_at DESC LIMIT 1",
+      )[0];
+      if (!row?.payload) return undefined;
+      return JSON.parse(inflateSync(row.payload).toString("utf8")) as {
+        protocol: string;
+        sourceCount: number;
+      };
+    };
+
+    const firstMessages = [
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "older answer" },
+      { role: "user", content: "first" },
+    ];
+    const response = await start(firstMessages);
+
+    expect(response.headers.get("x-lore-context-boundary")).toBeNull();
+    expect(response.status, await response.text()).toBe(200);
+    await vi.waitFor(() => {
+      expect(checkpoint()).toMatchObject({
+        protocol: "openai",
+        sourceCount: firstMessages.length,
+      });
+    });
+
+    const metric = vi.spyOn(PreparationTiming.prototype, "metric");
+    const secondMessages = [
+      ...firstMessages,
+      { role: "assistant", content: "answer 1" },
+      { role: "user", content: "second" },
+    ];
+    const continuation = await start(secondMessages);
+    expect(continuation.headers.get("x-lore-context-boundary")).toBeNull();
+    expect(continuation.status, await continuation.text()).toBe(200);
+    await vi.waitFor(() => {
+      expect(checkpoint()).toMatchObject({
+        protocol: "openai",
+        sourceCount: secondMessages.length,
+      });
+    });
+    expect(metric).toHaveBeenCalledWith("source_checkpoint_hit", 1);
+    expect(metric).toHaveBeenCalledWith("source_converted_messages", 2);
+  });
+
   test("orders EOF publication across stale replay and the next continuation", async () => {
     const projectPath = process.cwd();
     const sessionID = "codex-boundary-lifecycle";
@@ -1274,6 +1369,7 @@ describe("streamed Responses ingress", () => {
 
     const gatewayCalls: Array<{
       boundary: string | null;
+      capability: string | null;
       status?: number;
       error?: string;
       responseBoundary?: string | null;
@@ -1289,6 +1385,7 @@ describe("streamed Responses ingress", () => {
         }
         const gatewayCall: (typeof gatewayCalls)[number] = {
           boundary: request.headers.get("x-lore-context-boundary"),
+          capability: request.headers.get("x-lore-context-boundary-capability"),
           status: undefined as number | undefined,
         };
         gatewayCalls.push(gatewayCall);
@@ -1380,6 +1477,7 @@ describe("streamed Responses ingress", () => {
     await waitForCheckpoint(3);
     const firstBoundary = gatewayCalls[0]?.boundary;
     expect(firstBoundary).toBeNull();
+    expect(gatewayCalls[0]?.capability).toBe("v1");
 
     // Make the cached client boundary stale after it has been accepted once.
     db().exec("DELETE FROM source_windows");

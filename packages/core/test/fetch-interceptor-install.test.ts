@@ -434,8 +434,17 @@ describe("context continuation", () => {
     expect(response.status).toBe(200);
     expect(calls).toHaveLength(3);
     expect(calls[0].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[0].headers.get("x-lore-context-boundary-capability")).toBe(
+      "v1",
+    );
     expect(calls[1].headers.get("x-lore-context-boundary")).toBe(oldBoundary);
+    expect(calls[1].headers.get("x-lore-context-boundary-capability")).toBe(
+      "v1",
+    );
     expect(calls[2].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(calls[2].headers.get("x-lore-context-boundary-capability")).toBe(
+      "v1",
+    );
     expect(calls[1].body).toMatchObject({ input: [suffix] });
     expect(calls[2].body).toMatchObject({ input: [...prefix, suffix] });
   });
@@ -626,7 +635,13 @@ describe("context continuation", () => {
     ).text();
 
     expect(calls).toHaveLength(2);
+    expect(calls[0].headers.get("x-lore-context-boundary-capability")).toBe(
+      "v1",
+    );
     expect(calls[1].headers.get("x-lore-context-boundary")).toBe(boundary);
+    expect(calls[1].headers.get("x-lore-context-boundary-capability")).toBe(
+      "v1",
+    );
     expect(calls[1].body[fixture.key]).toEqual([
       ...fixture.prefix.slice(0, fixture.retainedItems),
       fixture.suffix,
@@ -688,12 +703,16 @@ describe("context continuation", () => {
     await (
       await fetch("https://api.openai.com/v1/responses/compact", {
         method: "POST",
+        headers: { "x-lore-context-boundary-capability": "v1" },
         body: JSON.stringify({ model: "gpt", input: fullInput }),
       })
     ).text();
 
     expect(calls[1].url).toBe(`${GATEWAY}/v1/responses/compact`);
     expect(calls[1].headers.get("x-lore-context-boundary")).toBeNull();
+    expect(
+      calls[1].headers.get("x-lore-context-boundary-capability"),
+    ).toBeNull();
     expect(calls[1].body.input).toEqual(fullInput);
   });
 
