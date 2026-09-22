@@ -8,9 +8,16 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import {
+  canReplayRequestProvenance,
+  CONTEXT_WARNING_MARKER,
   loreMessagesToGateway,
   removeOrphanedToolResults,
+  shouldPreserveResponsesProvenance,
+  stripContextWarnings,
 } from "../src/pipeline";
+import { buildOpenAIResponsesUpstreamRequest } from "../src/translate/openai-responses";
+import { buildAnthropicRequest } from "../src/translate/anthropic";
+import { buildGeminiUpstreamRequest } from "../src/translate/gemini";
 import {
   gatewayMessagesToLore,
   resolveToolResults,
@@ -168,6 +175,258 @@ function pendingToolPart(
     state: { status: "pending", input },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Responses encrypted reasoning provenance
+// ---------------------------------------------------------------------------
+
+describe("Responses encrypted reasoning provenance", () => {
+  function renderWithPrefix(allowProvenance: boolean): GatewayMessage[] {
+    const visible: GatewayContentBlock = { type: "text", text: "answer" };
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_stable",
+        encrypted_content: "ciphertext",
+        summary: [],
+      },
+    };
+    const source = [
+      makeUserMsg("u1", [textPart("question")]),
+      makeAssistantMsg("a1", [textPart("answer")]),
+    ];
+    const provenance = new Map([
+      [
+        "a1",
+        {
+          content: [visible],
+          provenanceContent: [reasoning, visible],
+          provenancePositions: [1],
+        },
+      ],
+    ]);
+    const prefix = [
+      makeUserMsg("prefix-user", [textPart("memory")]),
+      makeAssistantMsg("prefix-assistant", [textPart("memory")]),
+    ];
+    return loreMessagesToGateway(
+      [...prefix, ...source],
+      provenance,
+      allowProvenance,
+    );
+  }
+
+  test("keeps encrypted reasoning in place on a stable compressed layer", () => {
+    const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(1, 1));
+    const answer = rendered.find((message) =>
+      message.content.some(
+        (block) => block.type === "text" && block.text === "answer",
+      ),
+    );
+
+    expect(answer?.provenanceContent).toEqual([
+      {
+        type: "opaque",
+        responsesItem: true,
+        raw: {
+          type: "reasoning",
+          id: "rs_stable",
+          encrypted_content: "ciphertext",
+          summary: [],
+        },
+      },
+      { type: "text", text: "answer" },
+    ]);
+    expect(answer?.provenancePositions).toEqual([1]);
+  });
+
+  test("drops provenance when visible content changes on a stable layer", () => {
+    const visible: GatewayContentBlock = { type: "text", text: "answer" };
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_changed",
+        encrypted_content: "ciphertext_changed",
+        summary: [],
+      },
+    };
+    const provenance = new Map([
+      [
+        "a1",
+        {
+          content: [visible],
+          provenanceContent: [reasoning, visible],
+          provenancePositions: [1],
+        },
+      ],
+    ]);
+
+    const rendered = loreMessagesToGateway(
+      [makeAssistantMsg("a1", [textPart("changed")])],
+      provenance,
+      shouldPreserveResponsesProvenance(1, 1),
+    );
+
+    expect(rendered[0]?.provenanceContent).toBeUndefined();
+    expect(rendered[0]?.provenancePositions).toBeUndefined();
+  });
+
+  test("drops request-only provenance at a layer transition", () => {
+    const rendered = renderWithPrefix(shouldPreserveResponsesProvenance(0, 1));
+    const answer = rendered.find((message) =>
+      message.content.some(
+        (block) => block.type === "text" && block.text === "answer",
+      ),
+    );
+
+    expect(answer?.provenanceContent).toBeUndefined();
+    expect(answer?.provenancePositions).toBeUndefined();
+  });
+
+  test("never replays provenance from emergency Layer 4", () => {
+    expect(shouldPreserveResponsesProvenance(4, 4)).toBe(false);
+  });
+
+  test("replays provenance only within the same provider wire family", () => {
+    expect(canReplayRequestProvenance("anthropic", "anthropic")).toBe(true);
+    expect(canReplayRequestProvenance("anthropic", "vertex")).toBe(true);
+    expect(canReplayRequestProvenance("vertex", "anthropic")).toBe(true);
+    expect(canReplayRequestProvenance("gemini", "gemini")).toBe(true);
+    expect(
+      canReplayRequestProvenance("openai-responses", "openai-responses"),
+    ).toBe(true);
+    expect(canReplayRequestProvenance("gemini", "anthropic")).toBe(false);
+    expect(canReplayRequestProvenance("openai-responses", "anthropic")).toBe(
+      false,
+    );
+  });
+});
+
+describe("Responses context-warning cleanup", () => {
+  test("removes the raw warning item without dropping encrypted reasoning", () => {
+    const warning = `${CONTEXT_WARNING_MARKER} workers are degraded\n\n---\n\n`;
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_stable",
+        status: "completed",
+        summary: [],
+        encrypted_content: "ciphertext",
+      },
+    };
+    const warningItem: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: warning, annotations: [] }],
+      },
+    };
+    const answerItem: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      },
+    };
+    const message: GatewayMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: warning },
+        { type: "text", text: "answer" },
+      ],
+      provenanceContent: [reasoning, warningItem, answerItem],
+      provenancePositions: [1, 2],
+    };
+
+    stripContextWarnings([message]);
+
+    expect(message.content).toEqual([{ type: "text", text: "answer" }]);
+    expect(message.provenanceContent).toEqual([reasoning, answerItem]);
+    expect(message.provenancePositions).toEqual([1]);
+
+    const built = buildOpenAIResponsesUpstreamRequest(
+      {
+        protocol: "openai-responses",
+        model: "gpt-5",
+        system: "",
+        messages: [message],
+        tools: [],
+        stream: false,
+        maxTokens: 1024,
+        metadata: {},
+        rawHeaders: {},
+      },
+      "https://api.openai.com",
+    );
+    const input = (built.body as { input: unknown[] }).input;
+    expect(JSON.stringify(input)).not.toContain(CONTEXT_WARNING_MARKER);
+    expect(input).toEqual([reasoning.raw, answerItem.raw]);
+  });
+
+  test("drops malformed provenance instead of leaving positions misaligned", () => {
+    const warning = `${CONTEXT_WARNING_MARKER} workers are degraded\n\n---\n\n`;
+    const message: GatewayMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: warning },
+        { type: "text", text: "answer" },
+      ],
+      provenanceContent: [
+        {
+          type: "opaque",
+          raw: { type: "reasoning", encrypted_content: "ciphertext" },
+        },
+      ],
+      // The legacy message has no position for the warning or answer.
+      provenancePositions: [],
+    };
+
+    stripContextWarnings([message]);
+
+    expect(message.content).toEqual([{ type: "text", text: "answer" }]);
+    expect(message.provenanceContent).toBeUndefined();
+    expect(message.provenancePositions).toBeUndefined();
+  });
+
+  test("drops mismatched provenance when the warning block is not mapped", () => {
+    const warning = `${CONTEXT_WARNING_MARKER} workers are degraded\n\n---\n\n`;
+    const message: GatewayMessage = {
+      role: "assistant",
+      content: [
+        { type: "text", text: warning },
+        { type: "text", text: "answer" },
+      ],
+      provenanceContent: [
+        {
+          type: "opaque",
+          raw: { type: "reasoning", encrypted_content: "ciphertext" },
+        },
+        { type: "text", text: "answer" },
+        { type: "opaque", raw: { type: "metadata" } },
+      ],
+      // The warning's visible position points to the answer instead.
+      provenancePositions: [1, 2],
+    };
+
+    stripContextWarnings([message]);
+
+    expect(message.content).toEqual([{ type: "text", text: "answer" }]);
+    expect(message.provenanceContent).toBeUndefined();
+    expect(message.provenancePositions).toBeUndefined();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // loreMessagesToGateway: tool_result reconstruction
@@ -558,6 +817,80 @@ describe("removeOrphanedToolResults", () => {
     removeOrphanedToolResults(messages);
     expect(JSON.stringify(messages)).toBe(before);
   });
+
+  test("clears request provenance when orphan cleanup changes tool content", () => {
+    const reasoning: GatewayContentBlock = {
+      type: "opaque",
+      responsesItem: true,
+      raw: {
+        type: "reasoning",
+        id: "rs_orphan",
+        status: "completed",
+        summary: [],
+        encrypted_content: "ciphertext",
+      },
+    };
+    const toolUse: GatewayContentBlock = {
+      type: "tool_use",
+      id: "toolu_orphan",
+      name: "read",
+      input: { path: "missing" },
+    };
+    const messages: GatewayMessage[] = [
+      {
+        role: "assistant",
+        content: [toolUse],
+        provenanceContent: [reasoning, toolUse],
+        provenancePositions: [1],
+      },
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+    ];
+
+    removeOrphanedToolResults(messages);
+
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "[assistant response]" },
+    ]);
+    expect(messages[0]?.provenanceContent).toBeUndefined();
+    expect(messages[0]?.provenancePositions).toBeUndefined();
+
+    const request = {
+      protocol: "openai-responses" as const,
+      model: "gpt-5",
+      system: "",
+      messages,
+      tools: [],
+      stream: false,
+      maxTokens: 1024,
+      metadata: {},
+      rawHeaders: {},
+    };
+    const responsesInput = (
+      buildOpenAIResponsesUpstreamRequest(request, "https://api.openai.com")
+        .body as { input: unknown[] }
+    ).input;
+    expect(JSON.stringify(responsesInput)).not.toContain("encrypted_content");
+    expect(JSON.stringify(responsesInput)).not.toContain("toolu_orphan");
+
+    const anthropicBody = buildAnthropicRequest(request).body as {
+      messages: Array<{ content: unknown }>;
+    };
+    expect(JSON.stringify(anthropicBody.messages)).not.toContain(
+      "encrypted_content",
+    );
+    expect(JSON.stringify(anthropicBody.messages)).not.toContain(
+      "toolu_orphan",
+    );
+
+    const geminiBody = buildGeminiUpstreamRequest(
+      request,
+      "https://example.test",
+    ).body as { contents: unknown[] };
+    expect(JSON.stringify(geminiBody.contents)).not.toContain(
+      "encrypted_content",
+    );
+    expect(JSON.stringify(geminiBody.contents)).not.toContain("toolu_orphan");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -673,7 +1006,9 @@ test("BUG-006: OpenAI translator preserves tool_result as role:tool message", ()
   ]);
 
   const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
-    .body as { messages: OpenAIUpstreamMessage[] };
+    .body as {
+    messages: OpenAIUpstreamMessage[];
+  };
   const toolMsg = body.messages.find((m) => m.role === "tool");
   expect(toolMsg).toBeDefined();
   expect(toolMsg?.tool_call_id).toBe("call_123");
@@ -696,7 +1031,9 @@ test("BUG-006: mixed text + tool_result in same message emits both", () => {
   ]);
 
   const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
-    .body as { messages: OpenAIUpstreamMessage[] };
+    .body as {
+    messages: OpenAIUpstreamMessage[];
+  };
   // Should have system + tool + user messages
   const toolMsg = body.messages.find((m) => m.role === "tool");
   const userMsg = body.messages.find((m) => m.role === "user");
@@ -731,7 +1068,9 @@ test("BUG-006: multiple tool_results in one message are all preserved", () => {
   ]);
 
   const body = buildOpenAIUpstreamRequest(req, "https://api.openai.com")
-    .body as { messages: OpenAIUpstreamMessage[] };
+    .body as {
+    messages: OpenAIUpstreamMessage[];
+  };
   const toolMsgs = body.messages.filter((m) => m.role === "tool");
   expect(toolMsgs).toHaveLength(3);
   expect(toolMsgs[0]?.tool_call_id).toBe("call_1");

@@ -90,6 +90,14 @@ function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
 
 const TEMPORAL_ID_PREFIX = "lore_tm_v1_";
 
+// Keep every dynamically-built temporal lookup comfortably below SQLite's
+// historical 999-variable ceiling. The current bundled SQLite permits more,
+// but the temporal API is also used with restored databases and alternate
+// SQLite builds. All callers must use this budget when expanding compatibility
+// identities supplied by a provider adapter.
+const MAX_TEMPORAL_BIND_PARAMS = 900;
+const MESSAGE_ID_LOOKUP_FIXED_PARAMS = 6;
+
 /**
  * Derive the globally unique storage key for a caller-supplied message ID.
  *
@@ -117,15 +125,81 @@ function derivedMessageId(
   return `${TEMPORAL_ID_PREFIX}${digest}`;
 }
 
-// Keep the scalar lookup shared with the batch ambiguity fallback. LIMIT 1
-// historically has no ordering: its choice depends on SQLite's query plan.
-const MESSAGE_ID_LOOKUP = `SELECT t.id FROM temporal_messages t
+// Keep the scalar lookup shared with the batch ambiguity fallback. Candidate
+// rank is encoded in the query so ordered compatibility IDs do not depend on
+// SQLite's query plan when more than one historical row matches.
+function messageIDLookup(additionalSourceCount = 0): string {
+  const candidates = [
+    "(?, NULL, 0, 0)",
+    "(?, NULL, 1, 1)",
+    "(NULL, ?, 2, 2)",
+    ...Array.from(
+      { length: additionalSourceCount },
+      (_, index) => `(?, NULL, 3, ${index + 3})`,
+    ),
+  ].join(", ");
+  return `WITH candidates(source_id, row_id, kind, rank) AS (VALUES ${candidates})
+        SELECT t.id FROM candidates c
+        JOIN temporal_messages t ON (
+          (c.kind = 0 AND t.source_id = c.source_id)
+          OR (c.kind = 1 AND t.source_id = t.id AND t.source_id = c.source_id)
+          OR (c.kind = 2 AND t.source_id IS NULL AND t.id = c.row_id)
+          OR (c.kind = 3 AND t.source_id = c.source_id)
+        )
         JOIN projects p ON p.id = t.project_id
         WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
-          AND (t.source_id = ?
-               OR (t.source_id = t.id AND t.source_id = ?)
-               OR (t.source_id IS NULL AND t.id = ?))
+        ORDER BY c.rank, t.id
         LIMIT 1`;
+}
+
+function additionalSourceIDs(
+  sourceID: string,
+  legacySourceID: string | undefined,
+  legacySourceIDs: readonly string[] | undefined,
+): string[] {
+  return [...new Set(legacySourceIDs ?? [])].filter(
+    (id) => id.length > 0 && id !== sourceID && id !== legacySourceID,
+  );
+}
+
+function queryExistingMessageId(
+  projectId: string,
+  sessionId: string,
+  sourceId: string,
+  legacySourceId: string | undefined,
+  derivedId: string,
+  additionalIDs: readonly string[],
+): string | undefined {
+  // A provider adapter normally contributes only a couple of historical
+  // identities, but this is an exported boundary and callers can supply an
+  // arbitrary list. Query compatibility IDs in bounded slices instead of
+  // interpolating an unbounded number of SQLite placeholders. The slices
+  // follow caller order, so the first matching historical ID wins; this makes
+  // precedence explicit instead of inheriting the query-plan-dependent choice
+  // of an unbounded LIMIT 1 query.
+  const maxAdditionalIDs =
+    MAX_TEMPORAL_BIND_PARAMS - MESSAGE_ID_LOOKUP_FIXED_PARAMS;
+  for (
+    let offset = 0;
+    offset === 0 || offset < additionalIDs.length;
+    offset += maxAdditionalIDs
+  ) {
+    const ids = additionalIDs.slice(offset, offset + maxAdditionalIDs);
+    const existing = db()
+      .query(messageIDLookup(ids.length))
+      .get(
+        sourceId,
+        legacySourceId ?? sourceId,
+        derivedId,
+        ...ids,
+        projectId,
+        currentTenantId(),
+        sessionId,
+      ) as { id: string } | null;
+    if (existing) return existing.id;
+  }
+  return undefined;
+}
 
 /** Resolve a source ID to an existing legacy/restored row or its v82 key. */
 function resolveMessageId(
@@ -133,19 +207,24 @@ function resolveMessageId(
   sessionId: string,
   sourceId: string,
   legacySourceId?: string,
+  legacySourceIds?: readonly string[],
 ): string {
   const derivedId = derivedMessageId(projectId, sessionId, sourceId);
-  const existing = db()
-    .query(MESSAGE_ID_LOOKUP)
-    .get(
+  const additionalIDs = additionalSourceIDs(
+    sourceId,
+    legacySourceId,
+    legacySourceIds,
+  );
+  return (
+    queryExistingMessageId(
       projectId,
-      currentTenantId(),
       sessionId,
       sourceId,
-      legacySourceId ?? sourceId,
+      legacySourceId,
       derivedId,
-    ) as { id: string } | null;
-  return existing?.id ?? derivedId;
+      additionalIDs,
+    ) ?? derivedId
+  );
 }
 
 /**
@@ -158,25 +237,33 @@ export function storedMessageId(input: {
   sourceID: string;
   /** Pre-v82 gateway source ID, used only to resolve persisted local rows. */
   legacySourceID?: string;
+  /** Additional source IDs from older provenance-aware identity algorithms. */
+  legacySourceIDs?: readonly string[];
 }): string {
   return resolveMessageId(
     ensureProject(input.projectPath),
     input.sessionID,
     input.sourceID,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
 }
 
 /**
  * Batch the compatibility reads needed for recall placeholders. Source IDs
  * are unique within a request; repeated keys use the last supplied identity.
- * At most three statements per 100 messages, each below 999 bind parameters.
- * No cache/marker can go stale after restore, migration or project merging.
+ * Every generated statement stays below the conservative SQLite bind budget,
+ * including when a caller supplies a large historical-identity list. No
+ * cache/marker can go stale after restore, migration or project merging.
  */
 export function storedMessageIds(input: {
   projectPath: string;
   sessionID: string;
-  messages: ReadonlyArray<{ sourceID: string; legacySourceID?: string }>;
+  messages: ReadonlyArray<{
+    sourceID: string;
+    legacySourceID?: string;
+    legacySourceIDs?: readonly string[];
+  }>;
   /** Never creates/backfills a project; an absent project returns an empty map. */
   readOnly?: boolean;
 }): Map<string, string> {
@@ -194,6 +281,7 @@ export function storedMessageIds(input: {
     const chunk: Array<{
       sourceID: string;
       legacySourceID?: string;
+      legacySourceIDs?: readonly string[];
       derivedID: string;
     }> = messages.slice(offset, offset + 100).map((message) => ({
       ...message,
@@ -201,46 +289,65 @@ export function storedMessageIds(input: {
     }));
     const sources = [
       ...new Set(
-        chunk.flatMap((m) => [m.sourceID, m.legacySourceID ?? m.sourceID]),
+        chunk.flatMap((m) => [
+          m.sourceID,
+          ...(m.legacySourceID ? [m.legacySourceID] : []),
+          ...(m.legacySourceIDs ?? []),
+        ]),
       ),
     ];
-    // Materialize PK candidates before filtering NULL source IDs. Otherwise
-    // SQLite can scan EVERY restored row in the session once per chunk through
-    // idx_temporal_source_identity(project_id, session_id, source_id=NULL).
-    const rows = db()
-      .query(`WITH restored AS MATERIALIZED (
-        SELECT id, source_id, project_id, session_id FROM temporal_messages
-        WHERE id IN (${chunk.map(() => "?").join(",")})
-      )
-      SELECT t.id, t.source_id FROM temporal_messages t
-      JOIN projects p ON p.id = t.project_id
-      WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
-        AND t.source_id IN (${sources.map(() => "?").join(",")})
-      UNION ALL
-      SELECT t.id, t.source_id FROM restored t
-      JOIN projects p ON p.id = t.project_id
-      WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
-        AND t.source_id IS NULL`)
-      .all(
-        ...chunk.map((m) => m.derivedID),
-        pid,
-        tenant,
-        input.sessionID,
-        ...sources,
-        pid,
-        tenant,
-        input.sessionID,
-      ) as Array<{ id: string; source_id: string | null }>;
     const bySource = new Map<string, Set<string>>();
     const legacy = new Map<string, string>();
     const restored = new Set<string>();
-    for (const row of rows) {
-      if (row.source_id === null) restored.add(row.id);
-      else {
-        let ids = bySource.get(row.source_id);
-        if (!ids) bySource.set(row.source_id, (ids = new Set()));
-        ids.add(row.id);
-        if (row.source_id === row.id) legacy.set(row.source_id, row.id);
+
+    // Materialize PK candidates before filtering NULL source IDs. Otherwise
+    // SQLite can scan EVERY restored row in the session once per chunk through
+    // idx_temporal_source_identity(project_id, session_id, source_id=NULL).
+    // Split by the actual source bind count as well as message count: provider
+    // compatibility metadata is normally tiny, but the exported API accepts
+    // arbitrary historical identity lists.
+    const sourceChunkSize = Math.max(
+      1,
+      MAX_TEMPORAL_BIND_PARAMS - chunk.length - MESSAGE_ID_LOOKUP_FIXED_PARAMS,
+    );
+    for (let sourceOffset = 0; sourceOffset < sources.length;) {
+      const sourceChunk = sources.slice(
+        sourceOffset,
+        sourceOffset + sourceChunkSize,
+      );
+      sourceOffset += sourceChunk.length;
+      const rows = db()
+        .query(`WITH restored AS MATERIALIZED (
+          SELECT id, source_id, project_id, session_id FROM temporal_messages
+          WHERE id IN (${chunk.map(() => "?").join(",")})
+        )
+        SELECT t.id, t.source_id FROM temporal_messages t
+        JOIN projects p ON p.id = t.project_id
+        WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
+          AND t.source_id IN (${sourceChunk.map(() => "?").join(",")})
+        UNION ALL
+        SELECT t.id, t.source_id FROM restored t
+        JOIN projects p ON p.id = t.project_id
+        WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
+          AND t.source_id IS NULL`)
+        .all(
+          ...chunk.map((m) => m.derivedID),
+          pid,
+          tenant,
+          input.sessionID,
+          ...sourceChunk,
+          pid,
+          tenant,
+          input.sessionID,
+        ) as Array<{ id: string; source_id: string | null }>;
+      for (const row of rows) {
+        if (row.source_id === null) restored.add(row.id);
+        else {
+          let ids = bySource.get(row.source_id);
+          if (!ids) bySource.set(row.source_id, (ids = new Set()));
+          ids.add(row.id);
+          if (row.source_id === row.id) legacy.set(row.source_id, row.id);
+        }
       }
     }
     const ambiguous: typeof chunk = [];
@@ -248,6 +355,9 @@ export function storedMessageIds(input: {
       const ids = new Set(bySource.get(message.sourceID));
       const old = legacy.get(message.legacySourceID ?? message.sourceID);
       if (old !== undefined) ids.add(old);
+      for (const sourceID of message.legacySourceIDs ?? []) {
+        for (const id of bySource.get(sourceID) ?? []) ids.add(id);
+      }
       if (restored.has(message.derivedID)) ids.add(message.derivedID);
       if (ids.size > 1) ambiguous.push(message);
       else
@@ -258,30 +368,80 @@ export function storedMessageIds(input: {
     }
     if (ambiguous.length > 0) {
       // A fixed modern/legacy priority would silently change existing recall
-      // IDs. Only genuinely ambiguous rows use the identical scalar subquery;
-      // UNION ALL keeps even this rare path bounded by batch chunks.
-      const matches = db()
-        .query(
-          ambiguous
-            .map(() => `SELECT ? AS source_id, (${MESSAGE_ID_LOOKUP}) AS id`)
-            .join(" UNION ALL "),
-        )
-        .all(
-          ...ambiguous.flatMap((m) => [
-            m.sourceID,
-            pid,
-            tenant,
-            input.sessionID,
-            m.sourceID,
-            m.legacySourceID ?? m.sourceID,
-            m.derivedID,
-          ]),
-        ) as Array<{ source_id: string; id: string | null }>;
-      for (const match of matches)
-        result.set(
-          match.source_id,
-          match.id ?? derivedMessageId(pid, input.sessionID, match.source_id),
+      // IDs. Only genuinely ambiguous rows use the identical scalar subquery.
+      // Keep the UNION ALL fast path for ordinary inputs, but split it by its
+      // actual bind count and fall back to the chunked scalar helper for a
+      // single message whose compatibility list is itself oversized.
+      let fallback: Array<{
+        message: (typeof ambiguous)[number];
+        additionalIDs: string[];
+      }> = [];
+      let fallbackBindCount = 0;
+      const flushFallback = () => {
+        if (fallback.length === 0) return;
+        const matches = db()
+          .query(
+            fallback
+              .map(
+                ({ additionalIDs }) =>
+                  `SELECT ? AS source_id, (${messageIDLookup(additionalIDs.length)}) AS id`,
+              )
+              .join(" UNION ALL "),
+          )
+          .all(
+            ...fallback.flatMap(({ message, additionalIDs }) => [
+              message.sourceID,
+              message.sourceID,
+              message.legacySourceID ?? message.sourceID,
+              message.derivedID,
+              ...additionalIDs,
+              pid,
+              tenant,
+              input.sessionID,
+            ]),
+          ) as Array<{ source_id: string; id: string | null }>;
+        for (const match of matches)
+          result.set(
+            match.source_id,
+            match.id ?? derivedMessageId(pid, input.sessionID, match.source_id),
+          );
+        fallback = [];
+        fallbackBindCount = 0;
+      };
+
+      for (const message of ambiguous) {
+        const additionalIDs = additionalSourceIDs(
+          message.sourceID,
+          message.legacySourceID,
+          message.legacySourceIDs,
         );
+        // One projected source_id plus the six scalar lookup parameters.
+        const bindCount =
+          1 + MESSAGE_ID_LOOKUP_FIXED_PARAMS + additionalIDs.length;
+        if (bindCount > MAX_TEMPORAL_BIND_PARAMS) {
+          flushFallback();
+          result.set(
+            message.sourceID,
+            queryExistingMessageId(
+              pid,
+              input.sessionID,
+              message.sourceID,
+              message.legacySourceID,
+              message.derivedID,
+              additionalIDs,
+            ) ?? message.derivedID,
+          );
+          continue;
+        }
+        if (
+          fallback.length > 0 &&
+          fallbackBindCount + bindCount > MAX_TEMPORAL_BIND_PARAMS
+        )
+          flushFallback();
+        fallback.push({ message, additionalIDs });
+        fallbackBindCount += bindCount;
+      }
+      flushFallback();
     }
   }
   return result;
@@ -293,6 +453,7 @@ export function storedMessageIdIfProjectExists(input: {
   sessionID: string;
   sourceID: string;
   legacySourceID?: string;
+  legacySourceIDs?: readonly string[];
 }): string | undefined {
   const pid = projectId(input.projectPath);
   if (!pid) return undefined;
@@ -301,6 +462,7 @@ export function storedMessageIdIfProjectExists(input: {
     input.sessionID,
     input.sourceID,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
 }
 
@@ -309,6 +471,7 @@ export function store(input: {
   info: LoreMessage;
   parts: LorePart[];
   legacySourceID?: string;
+  legacySourceIDs?: readonly string[];
 }): string | undefined {
   const pid = ensureProject(input.projectPath);
   const content = partsToText(input.parts);
@@ -319,6 +482,7 @@ export function store(input: {
     input.info.sessionID,
     input.info.id,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
   withSavepoint("store_temporal_message", () => {
     const existing = db()
@@ -399,6 +563,7 @@ export function recordToolCalls(input: {
   info: LoreMessage;
   parts: LorePart[];
   legacySourceID?: string;
+  legacySourceIDs?: readonly string[];
 }): void {
   const toolParts = input.parts.filter(isToolPart);
   if (!toolParts.length) return;
@@ -410,6 +575,7 @@ export function recordToolCalls(input: {
     input.info.sessionID,
     input.info.id,
     input.legacySourceID,
+    input.legacySourceIDs,
   );
 
   // Split into the two phases up front so the seed (tool_use) phase can be

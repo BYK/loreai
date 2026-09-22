@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import {
   deterministicID,
   gatewayMessagesToLore,
+  legacyContentForMessage,
   legacyDeterministicID,
   resolveToolResults,
 } from "../src/temporal-adapter";
@@ -406,6 +407,162 @@ describe("resolveToolResults", () => {
     expect(messages[0].parts).toHaveLength(1);
     expect(messages[0].hiddenInputTokens).toBeGreaterThan(1_000);
     expect(estimateMessages(messages)).toBeGreaterThan(1_000);
+  });
+
+  test("excludes native thinking from Lore while retaining hidden accounting", () => {
+    const messages = gatewayMessagesToLore(
+      [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "visible answer" }],
+          provenanceContent: [
+            {
+              type: "opaque",
+              raw: {
+                text: "x".repeat(16_000),
+                thought: true,
+                thoughtSignature: "signed",
+              },
+            },
+            { type: "text", text: "visible answer" },
+          ],
+          provenancePositions: [1],
+        },
+      ],
+      "sess-provider-thinking",
+    );
+
+    expect(messages[0]?.parts).toHaveLength(1);
+    expect(messages[0]?.parts.some((part) => part.type === "reasoning")).toBe(
+      false,
+    );
+    expect(messages[0]?.hiddenInputTokens).toBeGreaterThan(1_000);
+  });
+
+  test("replays Gemini thought provenance only on a stable layer", () => {
+    const parsed = parseGeminiRequest(
+      {
+        contents: [
+          {
+            role: "model",
+            parts: [
+              {
+                text: "private summary",
+                thought: true,
+                thoughtSignature: "sig",
+              },
+              { text: "visible answer" },
+            ],
+          },
+        ],
+      },
+      {},
+      "gemini-test",
+      false,
+    );
+    const original = parsed.messages[0];
+    if (!original) throw new Error("missing parsed Gemini message");
+    const lore = gatewayMessagesToLore(parsed.messages, "sess-gemini-thinking");
+    const provenance = new Map([
+      [
+        lore[0].info.id,
+        {
+          content: original.content,
+          provenanceContent: original.provenanceContent,
+          provenancePositions: original.provenancePositions,
+        },
+      ],
+    ]);
+
+    const stable = loreMessagesToGateway(lore, provenance, true);
+    expect(stable[0]?.provenanceContent).toEqual(original.provenanceContent);
+    expect(
+      (
+        buildGeminiUpstreamRequest(
+          { ...parsed, messages: stable },
+          "https://generativelanguage.googleapis.com",
+        ).body as { contents: Array<{ parts: unknown[] }> }
+      ).contents[0]?.parts,
+    ).toEqual([
+      {
+        text: "private summary",
+        thought: true,
+        thoughtSignature: "sig",
+      },
+      { text: "visible answer" },
+    ]);
+
+    const boundary = loreMessagesToGateway(lore, provenance, false);
+    expect(
+      (
+        buildGeminiUpstreamRequest(
+          { ...parsed, messages: boundary },
+          "https://generativelanguage.googleapis.com",
+        ).body as { contents: Array<{ parts: unknown[] }> }
+      ).contents[0]?.parts,
+    ).toEqual([{ text: "visible answer" }]);
+  });
+
+  test("redacts legacy reasoning without mutating identity metadata", () => {
+    const thinking = {
+      type: "thinking" as const,
+      thinking: "legacy private reasoning",
+      signature: "legacy-signature",
+    };
+    const visible = { type: "text" as const, text: "visible answer" };
+    const original: GatewayMessage = {
+      role: "assistant",
+      content: [thinking, visible],
+    };
+    const converted = gatewayMessagesToLore([original], "legacy-replay")[0];
+    if (!converted) throw new Error("missing converted message");
+
+    // A persisted pre-boundary Lore row may still carry a reasoning part even
+    // though current ingress conversion excludes it from visible parts.
+    const legacyReasoning: LorePart = {
+      id: "legacy-reasoning-part",
+      sessionID: converted.info.sessionID,
+      messageID: converted.info.id,
+      type: "reasoning",
+      text: thinking.thinking,
+      signature: thinking.signature,
+    };
+    const replay = {
+      ...converted,
+      parts: [legacyReasoning, ...converted.parts],
+    };
+    const before = structuredClone(replay);
+
+    const reconstructed = loreMessagesToGateway([replay]);
+
+    expect(reconstructed[0]?.content).toEqual([visible]);
+    expect(replay).toEqual(before);
+    expect(replay.legacySourceIDs).toEqual(before.legacySourceIDs);
+    expect(replay.legacySourceIDs).toEqual(
+      expect.arrayContaining([
+        deterministicID("legacy-replay", "assistant", 0, original.content),
+        legacyDeterministicID("assistant", 0, original.content),
+      ]),
+    );
+  });
+
+  test("filters request-only opaque content from the legacy fallback", () => {
+    const requestOnly: GatewayMessage["content"][number] = {
+      type: "opaque",
+      requestOnly: true,
+      raw: { type: "reasoning", encrypted_content: "ciphertext" },
+    };
+    const visible: GatewayMessage["content"][number] = {
+      type: "text",
+      text: "visible answer",
+    };
+
+    expect(
+      legacyContentForMessage({
+        role: "assistant",
+        content: [requestOnly, visible],
+      }),
+    ).toEqual([visible]);
   });
 
   test("preserves distinct Gemini call id and name through Lore and egress", () => {

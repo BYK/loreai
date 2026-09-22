@@ -10,6 +10,10 @@
  */
 import { describe, test, expect } from "vitest";
 import { coalesceAdjacentAssistants } from "../src/pipeline";
+import {
+  buildAnthropicRequest,
+  parseAnthropicRequest,
+} from "../src/translate/anthropic";
 import type { GatewayMessage } from "../src/translate/types";
 
 const asst = (content: GatewayMessage["content"]): GatewayMessage => ({
@@ -69,6 +73,63 @@ describe("coalesceAdjacentAssistants", () => {
     ]);
   });
 
+  test("preserves parsed redacted reasoning through Anthropic serialization", () => {
+    const parsed = parseAnthropicRequest(
+      {
+        model: "claude-test",
+        max_tokens: 1024,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "redacted_thinking", data: "ciphertext" },
+              {
+                type: "tool_use",
+                id: "tool-1",
+                name: "read",
+                input: {},
+              },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const merged = coalesceAdjacentAssistants([
+      asst([{ type: "text", text: "memory delta" }]),
+      parsed.messages[0],
+    ]);
+
+    expect(merged[0].provenancePositions).toEqual([1, 2]);
+    const built = buildAnthropicRequest(
+      {
+        protocol: "anthropic",
+        model: "claude-test",
+        system: "",
+        messages: merged,
+        tools: [],
+        stream: false,
+        maxTokens: 1024,
+        metadata: {},
+        rawHeaders: {},
+      },
+      {},
+    );
+    const body = built.body as {
+      messages: Array<{ content: Array<Record<string, unknown>> }>;
+    };
+    expect(body.messages[0]?.content).toEqual([
+      { type: "redacted_thinking", data: "ciphertext" },
+      { type: "text", text: "memory delta" },
+      {
+        type: "tool_use",
+        id: "tool-1",
+        name: "read",
+        input: {},
+      },
+    ]);
+  });
+
   test("preserves multiple leading reasoning blocks in order", () => {
     const merged = coalesceAdjacentAssistants([
       asst([{ type: "text", text: "payload" }]),
@@ -84,6 +145,79 @@ describe("coalesceAdjacentAssistants", () => {
       "text",
       "text",
     ]);
+  });
+
+  test("offsets synthesized earlier positions after later provenance reasoning", () => {
+    const laterReasoning: GatewayMessage["content"][number] = {
+      type: "opaque",
+      raw: { type: "redacted_thinking", data: "ciphertext" },
+    };
+    const laterTool: GatewayMessage["content"][number] = {
+      type: "tool_use",
+      id: "t2",
+      name: "write",
+      input: {},
+    };
+    const merged = coalesceAdjacentAssistants([
+      asst([{ type: "text", text: "injected" }]),
+      {
+        role: "assistant",
+        content: [laterTool],
+        provenanceContent: [laterReasoning, laterTool],
+        provenancePositions: [1],
+      },
+    ]);
+
+    expect(merged[0].content).toEqual([
+      { type: "text", text: "injected" },
+      laterTool,
+    ]);
+    expect(merged[0].provenanceContent).toEqual([
+      laterReasoning,
+      { type: "text", text: "injected" },
+      laterTool,
+    ]);
+    expect(merged[0].provenancePositions).toEqual([1, 2]);
+  });
+
+  test("keeps positions aligned when content redundantly includes reasoning", () => {
+    const reasoning: GatewayMessage["content"][number] = {
+      type: "opaque",
+      raw: { type: "redacted_thinking", data: "ciphertext" },
+    };
+    const firstVisible: GatewayMessage["content"][number] = {
+      type: "text",
+      text: "first",
+    };
+    const secondVisible: GatewayMessage["content"][number] = {
+      type: "tool_use",
+      id: "t3",
+      name: "write",
+      input: {},
+    };
+    const merged = coalesceAdjacentAssistants([
+      asst([{ type: "text", text: "injected" }]),
+      {
+        role: "assistant",
+        content: [reasoning, firstVisible, secondVisible],
+        provenanceContent: [reasoning, firstVisible, secondVisible],
+        // Positions describe visible blocks only; reasoning has no entry.
+        provenancePositions: [1, 2],
+      },
+    ]);
+
+    expect(merged[0].content).toEqual([
+      { type: "text", text: "injected" },
+      firstVisible,
+      secondVisible,
+    ]);
+    expect(merged[0].provenanceContent).toEqual([
+      reasoning,
+      { type: "text", text: "injected" },
+      firstVisible,
+      secondVisible,
+    ]);
+    expect(merged[0].provenancePositions).toEqual([1, 2, 3]);
   });
 
   test("does not merge across a user boundary", () => {

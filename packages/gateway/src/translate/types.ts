@@ -30,6 +30,11 @@ export { isCredentialHeaderName } from "../credential-headers";
 export type GatewayTextBlock = {
   type: "text";
   text: string;
+  /**
+   * Provider-native text part retained for response egress when it carries
+   * opaque metadata such as a Gemini thought signature.
+   */
+  raw?: Record<string, unknown>;
 };
 
 export type GatewayThinkingBlock = {
@@ -45,6 +50,12 @@ export type GatewayToolUseBlock = {
   id: string;
   name: string;
   input: unknown;
+  /**
+   * Provider-native tool-call part retained for response egress when it carries
+   * opaque reasoning/signature metadata (for example Gemini thoughtSignature).
+   * Request replay uses GatewayMessage.provenanceContent instead.
+   */
+  raw?: Record<string, unknown>;
 };
 
 export type GatewayToolResultBlock = {
@@ -81,6 +92,11 @@ export type GatewayOpaqueBlock = {
   raw: Record<string, unknown>;
   /** Raw is a complete top-level Responses item, not a message content part. */
   responsesItem?: boolean;
+  /**
+   * Provider-native encrypted reasoning that is response-visible to the
+   * client but must not become a Lore/temporal part.
+   */
+  requestOnly?: boolean;
 };
 
 export type GatewayContentBlock =
@@ -183,9 +199,10 @@ export type GatewayMessage = {
   role: "user" | "assistant";
   content: GatewayContentBlock[];
   /**
-   * Request-only content used to fingerprint recall-anchor provenance. It may
-   * include Responses wire items (notably encrypted reasoning) that must bind a
-   * replay anchor but must never enter normal content or temporal storage.
+   * Request-only provider-native content used to fingerprint recall-anchor
+   * provenance. It may include encrypted reasoning/thinking/signature blocks
+   * that must bind a replay anchor but must never enter normal content or
+   * temporal storage.
    */
   provenanceContent?: GatewayContentBlock[];
   /** Index of each visible `content` block inside `provenanceContent`. */
@@ -562,6 +579,12 @@ export type SessionState = {
   /** Completion time of the last accepted response, for tool-continuation
    *  retention. A slow response must not consume the client's tool grace. */
   lastResponseTime?: number;
+  /**
+   * Gradient layer of the last request accepted by upstream. Unlike core's
+   * transform-attempt layer, this only advances after a successful upstream
+   * response so failed or synthetic turns cannot consume a provenance boundary.
+   */
+  lastAcceptedProvenanceLayer?: number;
   /** Unix timestamp (ms) of the request before the current one — used by budget
    *  throttle to compute elapsed time since the previous turn for cache TTL safety. */
   prevRequestTime?: number;

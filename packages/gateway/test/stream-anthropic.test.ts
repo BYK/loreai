@@ -796,6 +796,48 @@ describe("accumulateSSEResponse", () => {
     expect(response.body?.locked).toBe(false);
   });
 
+  test("preserves streamed redacted thinking for replay but not storage", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      formatSSEEvent(type, JSON.stringify({ type, ...data }));
+    const wire =
+      buildSSEMessageStart({
+        id: "redacted-thinking",
+        model: "claude-x",
+        content: [],
+        stopReason: "end_turn",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }) +
+      event("content_block_start", {
+        index: 0,
+        content_block: {
+          type: "redacted_thinking",
+          data: "encrypted-streamed-thinking",
+        },
+      }) +
+      event("content_block_stop", { index: 0 }) +
+      event("message_delta", {
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 1 },
+      }) +
+      event("message_stop", {});
+
+    const result = await accumulateSSEResponse(new Response(wire), {
+      stopAtTerminal: true,
+      strict: true,
+    });
+
+    expect(result.content).toEqual([
+      {
+        type: "opaque",
+        raw: {
+          type: "redacted_thinking",
+          data: "encrypted-streamed-thinking",
+        },
+        requestOnly: true,
+      },
+    ]);
+  });
+
   test("rejects EOF before message_stop in strict worker mode", async () => {
     const truncated = buildSSETextResponse(
       "id_truncated",

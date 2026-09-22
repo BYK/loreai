@@ -27,6 +27,7 @@ import type {
   GatewayUsage,
 } from "./translate/types";
 import { blocksToText } from "./translate/types";
+import { geminiPartToBlock } from "./translate/gemini";
 
 // ---------------------------------------------------------------------------
 // Deterministic ID generation
@@ -100,6 +101,72 @@ function hashBlocks(
       }
     }
   }
+}
+
+/** The content projection that the current storage boundary hashes. */
+export function visibleContentForMessage(
+  message: GatewayMessage,
+): GatewayContentBlock[] {
+  return message.content.filter(
+    (block) =>
+      block.type !== "thinking" &&
+      !(block.type === "opaque" && block.requestOnly === true),
+  );
+}
+
+/**
+ * Reconstruct the block projection used by the pre-provenance adapter.
+ *
+ * Provider parsers now keep native reasoning/signature bytes in an opaque
+ * provenance array. Before this PR those same bytes were represented as typed
+ * thinking/text/tool blocks and therefore produced different historical IDs.
+ * Responses top-level items are excluded because that parser already kept
+ * them out of `content` before the provenance change.
+ */
+export function legacyContentForMessage(
+  message: GatewayMessage,
+): GatewayContentBlock[] {
+  const provenance = message.provenanceContent;
+  const content = message.content.filter(
+    (block) => !(block.type === "opaque" && block.requestOnly === true),
+  );
+  if (
+    !provenance ||
+    provenance.some(
+      (block) => block.type === "opaque" && block.responsesItem === true,
+    )
+  ) {
+    return content;
+  }
+
+  return provenance.map((block) => {
+    if (block.type !== "opaque") return block;
+    const raw = block.raw;
+    if (raw.type === "thinking" && typeof raw.thinking === "string") {
+      return {
+        type: "thinking",
+        thinking: raw.thinking,
+        ...(typeof raw.signature === "string"
+          ? { signature: raw.signature }
+          : undefined),
+      };
+    }
+    if (
+      (typeof raw.text === "string" || raw.thought === true) &&
+      (raw.thought === true ||
+        typeof raw.thoughtSignature === "string" ||
+        typeof raw.thought_signature === "string")
+    ) {
+      return geminiPartToBlock(raw) ?? block;
+    }
+    if (raw.functionCall && typeof raw.functionCall === "object") {
+      return geminiPartToBlock(raw) ?? block;
+    }
+    if (raw.functionResponse && typeof raw.functionResponse === "object") {
+      return geminiPartToBlock(raw) ?? block;
+    }
+    return block;
+  });
 }
 
 /**
@@ -234,7 +301,18 @@ export function gatewayMessagesToLore(
 
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
-    const id = deterministicID(sessionID, m.role, startIndex + i, m.content);
+    // Provider-native thinking blocks are request-only provenance. Keep this
+    // defensive filter here as the final storage boundary so a provider parser
+    // or a response path can never turn encrypted/native reasoning into Lore
+    // parts, temporal text, embeddings, or distillation input.
+    const visibleContent = visibleContentForMessage(m);
+    const legacyContent = legacyContentForMessage(m);
+    const id = deterministicID(
+      sessionID,
+      m.role,
+      startIndex + i,
+      visibleContent,
+    );
     // The old adapter hashed the index within the array passed to this call.
     // Keep that exact invocation-relative index: full request histories use
     // absolute indexes (startIndex=0); narrow request slices supply legacyStartIndex.
@@ -243,9 +321,18 @@ export function gatewayMessagesToLore(
     const legacySourceID = legacyDeterministicID(
       m.role,
       legacyStartIndex + i,
-      m.content,
+      visibleContent,
     );
-    const parts: LorePart[] = m.content.map((block, pi) =>
+    const legacySourceIDs = [
+      deterministicID(sessionID, m.role, startIndex + i, legacyContent),
+      legacyDeterministicID(m.role, legacyStartIndex + i, legacyContent),
+    ].filter(
+      (candidate, index, candidates) =>
+        candidate !== id &&
+        candidate !== legacySourceID &&
+        candidates.indexOf(candidate) === index,
+    );
+    const parts: LorePart[] = visibleContent.map((block, pi) =>
       contentBlockToPart(block, sessionID, id, pi),
     );
     const hiddenInputTokens = m.provenanceContent
@@ -257,7 +344,7 @@ export function gatewayMessagesToLore(
               coreEstimateTokens(provenanceJson) -
                 coreEstimateTokens(visibleJson),
             ))
-        )(JSON.stringify(m.content), JSON.stringify(m.provenanceContent))
+        )(JSON.stringify(visibleContent), JSON.stringify(m.provenanceContent))
       : 0;
 
     if (m.role === "user") {
@@ -273,6 +360,7 @@ export function gatewayMessagesToLore(
         info,
         parts,
         legacySourceID,
+        ...(legacySourceIDs.length ? { legacySourceIDs } : {}),
         ...(hiddenInputTokens ? { hiddenInputTokens } : {}),
       });
     } else {
@@ -298,6 +386,7 @@ export function gatewayMessagesToLore(
         info,
         parts,
         legacySourceID,
+        ...(legacySourceIDs.length ? { legacySourceIDs } : {}),
         ...(hiddenInputTokens ? { hiddenInputTokens } : {}),
       });
     }

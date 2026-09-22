@@ -387,6 +387,7 @@ export function cancelAndReleaseReader(
 type AccumulatingBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; raw: Record<string, unknown> }
   | { type: "tool_use"; id: string; name: string; partialJson: string };
 
 /** State machine that processes Anthropic SSE events and builds a GatewayResponse. */
@@ -630,6 +631,9 @@ export function createStreamAccumulator(options?: {
           signature: "",
         });
         break;
+      case "redacted_thinking":
+        blocks.set(index, { type: "redacted_thinking", raw: { ...block } });
+        break;
       case "tool_use":
         blocks.set(index, {
           type: "tool_use",
@@ -702,6 +706,13 @@ export function createStreamAccumulator(options?: {
         content.push(thinkingBlock);
         break;
       }
+      case "redacted_thinking":
+        content.push({
+          type: "opaque",
+          raw: block.raw,
+          requestOnly: true,
+        });
+        break;
       case "tool_use": {
         let input: unknown = {};
         if (block.partialJson) {
@@ -753,6 +764,13 @@ export function createStreamAccumulator(options?: {
               type: "thinking",
               thinking: block.thinking,
               ...(block.signature ? { signature: block.signature } : {}),
+            });
+            break;
+          case "redacted_thinking":
+            content.push({
+              type: "opaque",
+              raw: block.raw,
+              requestOnly: true,
             });
             break;
           case "tool_use": {

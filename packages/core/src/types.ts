@@ -201,6 +201,8 @@ export type LoreMessageWithParts = {
    * row under the same tenant/project/session, then persists the modern ID.
    */
   legacySourceID?: string;
+  /** Additional historical source IDs used during provider-provenance migration. */
+  legacySourceIDs?: readonly string[];
   /** Transient provider bytes omitted from parts but counted by gradient. */
   hiddenInputTokens?: number;
 };

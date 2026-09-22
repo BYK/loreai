@@ -934,6 +934,191 @@ function incompleteDetails(stopReason: string): { reason: string } {
   };
 }
 
+type ResponsesEventEmitter = (
+  eventType: string,
+  data: Record<string, unknown>,
+) => void;
+
+function emitRawResponsesOutputItemLifecycle(
+  emit: ResponsesEventEmitter,
+  item: Record<string, unknown>,
+  outputIndex: number,
+): void {
+  const itemType = String(item.type);
+  if (itemType === "message") {
+    const itemId =
+      typeof item.id === "string" && item.id
+        ? item.id
+        : `msg_lore_${outputIndex}`;
+    const addedItem: Record<string, unknown> = {
+      ...item,
+      status: "in_progress",
+      content: [],
+    };
+    emit("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: addedItem,
+    });
+
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const [contentIndex, rawPart] of content.entries()) {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+        continue;
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (part.type === "output_text" && typeof part.text === "string") {
+        emit("response.content_part.added", {
+          type: "response.content_part.added",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part: {
+            type: "output_text",
+            text: "",
+            annotations: Array.isArray(part.annotations)
+              ? part.annotations
+              : [],
+          },
+        });
+        for (let offset = 0; offset < part.text.length; offset += 50) {
+          emit("response.output_text.delta", {
+            type: "response.output_text.delta",
+            item_id: itemId,
+            output_index: outputIndex,
+            content_index: contentIndex,
+            delta: part.text.slice(offset, offset + 50),
+          });
+        }
+        emit("response.output_text.done", {
+          type: "response.output_text.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          text: part.text,
+        });
+        emit("response.content_part.done", {
+          type: "response.content_part.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part,
+        });
+      } else if (part.type === "refusal" && typeof part.refusal === "string") {
+        emit("response.content_part.added", {
+          type: "response.content_part.added",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part: {
+            type: "refusal",
+            refusal: "",
+          },
+        });
+        for (let offset = 0; offset < part.refusal.length; offset += 50) {
+          emit("response.refusal.delta", {
+            type: "response.refusal.delta",
+            item_id: itemId,
+            output_index: outputIndex,
+            content_index: contentIndex,
+            delta: part.refusal.slice(offset, offset + 50),
+          });
+        }
+        emit("response.refusal.done", {
+          type: "response.refusal.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          refusal: part.refusal,
+        });
+        emit("response.content_part.done", {
+          type: "response.content_part.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part,
+        });
+      }
+    }
+
+    emit("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item,
+    });
+    return;
+  }
+
+  if (itemType === "function_call") {
+    const callId = typeof item.call_id === "string" ? item.call_id : "";
+    const itemId =
+      typeof item.id === "string" && item.id
+        ? item.id
+        : `fc_${callId || outputIndex}`;
+    const args = typeof item.arguments === "string" ? item.arguments : "";
+    emit("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: {
+        ...item,
+        status: "in_progress",
+        arguments: "",
+      },
+    });
+    if (args) {
+      emit("response.function_call_arguments.delta", {
+        type: "response.function_call_arguments.delta",
+        item_id: itemId,
+        output_index: outputIndex,
+        delta: args,
+      });
+    }
+    emit("response.function_call_arguments.done", {
+      type: "response.function_call_arguments.done",
+      item_id: itemId,
+      output_index: outputIndex,
+      arguments: args,
+    });
+    emit("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item,
+    });
+    return;
+  }
+
+  const addedItem = { ...item };
+  if (
+    [
+      "reasoning",
+      "web_search_call",
+      "file_search_call",
+      "tool_search_call",
+      "computer_call",
+      "computer_tool_call",
+      "code_interpreter_call",
+      "image_generation_call",
+      "local_shell_call",
+      "shell_call",
+      "mcp_call",
+      "custom_tool_call",
+      "apply_patch_call",
+    ].includes(itemType)
+  ) {
+    addedItem.status = "in_progress";
+  }
+  emit("response.output_item.added", {
+    type: "response.output_item.added",
+    output_index: outputIndex,
+    item: addedItem,
+  });
+  emit("response.output_item.done", {
+    type: "response.output_item.done",
+    output_index: outputIndex,
+    item,
+  });
+}
+
 function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
   const usage = resp.usage ?? ZERO_USAGE;
   const encoder = new TextEncoder();
@@ -987,140 +1172,150 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
       let outputIndex = 0;
 
-      // Process content blocks
-      for (const block of resp.content) {
-        if (block.type === "text") {
-          const itemId = `msg_${respId}_${outputIndex}`;
+      // Rebuild native Responses output items when the accumulator has
+      // them. This includes opaque reasoning items with encrypted_content;
+      // reducing them to GatewayResponse.content would silently drop the
+      // provider's continuation state from buffered client streams.
+      if (resp.rawOutputItems) {
+        for (const item of resp.rawOutputItems) {
+          emitRawResponsesOutputItemLifecycle(emit, item, outputIndex);
+          outputIndex++;
+        }
+      } else {
+        for (const block of resp.content) {
+          if (block.type === "text") {
+            const itemId = `msg_${respId}_${outputIndex}`;
 
-          // output_item.added
-          emit("response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: outputIndex,
-            item: {
-              type: "message",
-              id: itemId,
-              role: "assistant",
-              status: "in_progress",
-              content: [],
-            },
-          });
+            // output_item.added
+            emit("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: itemId,
+                role: "assistant",
+                status: "in_progress",
+                content: [],
+              },
+            });
 
-          // content_part.added
-          emit("response.content_part.added", {
-            type: "response.content_part.added",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: { type: "output_text", text: "", annotations: [] },
-          });
-
-          // output_text.delta — emit text in chunks
-          const text = block.text;
-          let pos = 0;
-          while (pos < text.length) {
-            const chunk = text.slice(pos, pos + 50);
-            emit("response.output_text.delta", {
-              type: "response.output_text.delta",
+            // content_part.added
+            emit("response.content_part.added", {
+              type: "response.content_part.added",
               item_id: itemId,
               output_index: outputIndex,
               content_index: 0,
-              delta: chunk,
+              part: { type: "output_text", text: "", annotations: [] },
             });
-            pos += 50;
-          }
 
-          // output_text.done
-          emit("response.output_text.done", {
-            type: "response.output_text.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            text: block.text,
-          });
+            // output_text.delta — emit text in chunks
+            const text = block.text;
+            let pos = 0;
+            while (pos < text.length) {
+              const chunk = text.slice(pos, pos + 50);
+              emit("response.output_text.delta", {
+                type: "response.output_text.delta",
+                item_id: itemId,
+                output_index: outputIndex,
+                content_index: 0,
+                delta: chunk,
+              });
+              pos += 50;
+            }
 
-          // content_part.done
-          emit("response.content_part.done", {
-            type: "response.content_part.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: {
-              type: "output_text",
+            // output_text.done
+            emit("response.output_text.done", {
+              type: "response.output_text.done",
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: 0,
               text: block.text,
-              annotations: [],
-            },
-          });
+            });
 
-          // output_item.done
-          emit("response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: outputIndex,
-            item: {
-              type: "message",
-              id: itemId,
-              role: "assistant",
-              status: "completed",
-              content: [
-                {
-                  type: "output_text",
-                  text: block.text,
-                  annotations: [],
-                },
-              ],
-            },
-          });
+            // content_part.done
+            emit("response.content_part.done", {
+              type: "response.content_part.done",
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: 0,
+              part: {
+                type: "output_text",
+                text: block.text,
+                annotations: [],
+              },
+            });
 
-          outputIndex++;
-        } else if (block.type === "tool_use") {
-          const callId = block.id;
-          const itemId = `fc_${callId}`;
-          const args = JSON.stringify(block.input);
+            // output_item.done
+            emit("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: itemId,
+                role: "assistant",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: block.text,
+                    annotations: [],
+                  },
+                ],
+              },
+            });
 
-          // output_item.added
-          emit("response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: callId,
-              name: block.name,
-              arguments: "",
-              status: "in_progress",
-            },
-          });
+            outputIndex++;
+          } else if (block.type === "tool_use") {
+            const callId = block.id;
+            const itemId = `fc_${callId}`;
+            const args = JSON.stringify(block.input);
 
-          // function_call_arguments.delta
-          emit("response.function_call_arguments.delta", {
-            type: "response.function_call_arguments.delta",
-            item_id: itemId,
-            output_index: outputIndex,
-            delta: args,
-          });
+            // output_item.added
+            emit("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: {
+                type: "function_call",
+                id: itemId,
+                call_id: callId,
+                name: block.name,
+                arguments: "",
+                status: "in_progress",
+              },
+            });
 
-          // function_call_arguments.done
-          emit("response.function_call_arguments.done", {
-            type: "response.function_call_arguments.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            arguments: args,
-          });
+            // function_call_arguments.delta
+            emit("response.function_call_arguments.delta", {
+              type: "response.function_call_arguments.delta",
+              item_id: itemId,
+              output_index: outputIndex,
+              delta: args,
+            });
 
-          // output_item.done
-          emit("response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: callId,
-              name: block.name,
+            // function_call_arguments.done
+            emit("response.function_call_arguments.done", {
+              type: "response.function_call_arguments.done",
+              item_id: itemId,
+              output_index: outputIndex,
               arguments: args,
-              status: "completed",
-            },
-          });
+            });
 
-          outputIndex++;
+            // output_item.done
+            emit("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: {
+                type: "function_call",
+                id: itemId,
+                call_id: callId,
+                name: block.name,
+                arguments: args,
+                status: "completed",
+              },
+            });
+
+            outputIndex++;
+          }
         }
       }
 
@@ -1138,32 +1333,38 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
           ...(status === "incomplete"
             ? { incomplete_details: incompleteDetails(resp.stopReason) }
             : {}),
-          output: resp.content
-            .map((block, i) => {
-              if (block.type === "text") {
-                return {
-                  type: "message",
-                  id: `msg_${respId}_${i}`,
-                  role: "assistant",
-                  status: "completed",
-                  content: [
-                    { type: "output_text", text: block.text, annotations: [] },
-                  ],
-                };
-              }
-              if (block.type === "tool_use") {
-                return {
-                  type: "function_call",
-                  id: `fc_${block.id}`,
-                  call_id: block.id,
-                  name: block.name,
-                  arguments: JSON.stringify(block.input),
-                  status: "completed",
-                };
-              }
-              return null;
-            })
-            .filter(Boolean),
+          output:
+            resp.rawOutputItems ??
+            resp.content
+              .map((block, i) => {
+                if (block.type === "text") {
+                  return {
+                    type: "message",
+                    id: `msg_${respId}_${i}`,
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      {
+                        type: "output_text",
+                        text: block.text,
+                        annotations: [],
+                      },
+                    ],
+                  };
+                }
+                if (block.type === "tool_use") {
+                  return {
+                    type: "function_call",
+                    id: `fc_${block.id}`,
+                    call_id: block.id,
+                    name: block.name,
+                    arguments: JSON.stringify(block.input),
+                    status: "completed",
+                  };
+                }
+                return null;
+              })
+              .filter(Boolean),
           usage: responsesUsage(usage),
         },
       });

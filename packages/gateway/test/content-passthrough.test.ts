@@ -335,6 +335,149 @@ describe("Anthropic lossless content passthrough", () => {
 // OpenAI Chat Completions protocol
 // ---------------------------------------------------------------------------
 
+describe("Provider thinking provenance", () => {
+  test("keeps Anthropic thinking request-only and re-emits original positions", () => {
+    const thinking = {
+      type: "thinking",
+      thinking: "private summary",
+      signature: "anthropic-signature",
+    };
+    const body = {
+      model: "claude-sonnet",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            thinking,
+            { type: "text", text: "visible answer" },
+            {
+              type: "tool_use",
+              id: "call-1",
+              name: "lookup",
+              input: { query: "x" },
+            },
+          ],
+        },
+      ],
+    };
+
+    const request = parseAnthropicRequest(body, {});
+    expect(request.messages[0]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "text", text: "visible answer" },
+        {
+          type: "tool_use",
+          id: "call-1",
+          name: "lookup",
+          input: { query: "x" },
+        },
+      ],
+      provenanceContent: [
+        { type: "opaque", raw: thinking, requestOnly: true },
+        { type: "text", text: "visible answer" },
+        {
+          type: "tool_use",
+          id: "call-1",
+          name: "lookup",
+          input: { query: "x" },
+        },
+      ],
+      provenancePositions: [1, 2],
+    });
+
+    const built = buildAnthropicRequest(request);
+    expect(
+      (built.body as { messages: Array<{ content: unknown }> }).messages[0]
+        ?.content,
+    ).toEqual([
+      thinking,
+      { type: "text", text: "visible answer" },
+      {
+        type: "tool_use",
+        id: "call-1",
+        name: "lookup",
+        input: { query: "x" },
+      },
+    ]);
+
+    const lore = gatewayMessagesToLore(request.messages, "thinking-session");
+    expect(lore[0]?.parts.some((part) => part.type === "reasoning")).toBe(
+      false,
+    );
+    expect(lore[0]?.parts).toHaveLength(2);
+  });
+
+  test("keeps redacted thinking request-only and out of Lore parts", () => {
+    const redacted = {
+      type: "redacted_thinking",
+      data: "encrypted-anthropic-thinking",
+    };
+    const request = parseAnthropicRequest(
+      {
+        model: "claude-sonnet",
+        max_tokens: 128,
+        messages: [
+          {
+            role: "assistant",
+            content: [redacted, { type: "text", text: "visible" }],
+          },
+        ],
+      },
+      {},
+    );
+
+    expect(request.messages[0]?.content).toEqual([
+      { type: "text", text: "visible" },
+    ]);
+    expect(request.messages[0]?.provenanceContent).toEqual([
+      { type: "opaque", raw: redacted, requestOnly: true },
+      { type: "text", text: "visible" },
+    ]);
+    expect(
+      (
+        buildAnthropicRequest(request).body as {
+          messages: Array<{ content: unknown }>;
+        }
+      ).messages[0]?.content,
+    ).toEqual([redacted, { type: "text", text: "visible" }]);
+
+    const lore = gatewayMessagesToLore(
+      request.messages,
+      "redacted-thinking-session",
+    );
+    expect(lore[0]?.parts).toHaveLength(1);
+    expect(lore[0]?.parts.some((part) => part.type === "opaque")).toBe(false);
+    expect(lore[0]?.hiddenInputTokens).toBeGreaterThan(0);
+  });
+
+  test("drops Anthropic thinking at a layer boundary", () => {
+    const request = parseAnthropicRequest(
+      {
+        model: "claude-sonnet",
+        max_tokens: 128,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "private", signature: "sig" },
+              { type: "text", text: "visible" },
+            ],
+          },
+        ],
+      },
+      {},
+    );
+    const lore = gatewayMessagesToLore(request.messages, "boundary-session");
+    const replay = loreMessagesToGateway(lore, new Map(), false);
+    expect(replay[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "visible" }],
+    });
+  });
+});
+
 describe("OpenAI Chat lossless content passthrough", () => {
   test("image_url user content preserved as opaque", () => {
     const imageUrlBlock = {

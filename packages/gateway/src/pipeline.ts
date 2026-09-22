@@ -110,6 +110,7 @@ import {
 
 import type {
   GatewayRequest,
+  GatewayProtocol,
   GatewayResponse,
   GatewayMessage,
   GatewayContentBlock,
@@ -258,6 +259,8 @@ import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
+  legacyContentForMessage,
+  visibleContentForMessage,
 } from "./temporal-adapter";
 import {
   canonicalWorkerProviderID,
@@ -598,7 +601,60 @@ function injectContextWarning(
     type: "text" as const,
     text,
   });
-  return { ...resp, content };
+
+  // Buffered Responses egress rebuilds from raw output items so encrypted
+  // reasoning stays byte-identical. Carry this gateway-owned warning into that
+  // same item list; otherwise the raw branch would silently discard it.
+  const rawOutputItems = resp.rawOutputItems
+    ? [...resp.rawOutputItems]
+    : undefined;
+  if (rawOutputItems) {
+    let rawInsertIdx = 0;
+    while (rawOutputItems[rawInsertIdx]?.type === "reasoning") {
+      rawInsertIdx++;
+    }
+    rawOutputItems.splice(rawInsertIdx, 0, {
+      type: "message",
+      id: `msg_${resp.id}_lore_context_warning`,
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text, annotations: [] }],
+    });
+  }
+
+  return {
+    ...resp,
+    content,
+    ...(rawOutputItems ? { rawOutputItems } : {}),
+  };
+}
+
+function hasAlignedGatewayProvenance(
+  message: GatewayMessage,
+  contentLength = message.content.length,
+): boolean {
+  const { provenanceContent, provenancePositions } = message;
+  if (provenanceContent === undefined && provenancePositions === undefined) {
+    return true;
+  }
+  if (provenanceContent === undefined || provenancePositions === undefined) {
+    return false;
+  }
+  if (provenancePositions.length !== contentLength) return false;
+
+  let previous = -1;
+  return provenancePositions.every((position) => {
+    if (
+      !Number.isSafeInteger(position) ||
+      position < 0 ||
+      position >= provenanceContent.length ||
+      position <= previous
+    ) {
+      return false;
+    }
+    previous = position;
+    return true;
+  });
 }
 
 /**
@@ -623,7 +679,70 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
         block.type === "text" &&
         block.text.startsWith(CONTEXT_WARNING_MARKER)
       ) {
+        const hasAlignedProvenance = hasAlignedGatewayProvenance(msg);
         msg.content.splice(i, 1);
+        // Request-only provenance is safe to replay only when its visible
+        // index mapping is complete. A malformed/legacy message may contain
+        // fewer positions than visible blocks; fail closed by retaining the
+        // visible transcript and dropping the opaque provenance rather than
+        // forwarding mismatched arrays to recall or an upstream translator.
+        if (!hasAlignedProvenance) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
+        const provenanceIndex = msg.provenancePositions?.[i];
+        const provenanceBlock =
+          provenanceIndex === undefined
+            ? undefined
+            : msg.provenanceContent?.[provenanceIndex];
+        const isMatchingProvenance =
+          provenanceBlock?.type === "text" &&
+          provenanceBlock.text.startsWith(CONTEXT_WARNING_MARKER);
+        const rawContent =
+          provenanceBlock?.type === "opaque" &&
+          provenanceBlock.raw.type === "message" &&
+          Array.isArray(provenanceBlock.raw.content)
+            ? provenanceBlock.raw.content
+            : undefined;
+        const rawHasWarning = rawContent?.some(
+          (part) =>
+            part &&
+            typeof part === "object" &&
+            !Array.isArray(part) &&
+            (part as Record<string, unknown>).type === "output_text" &&
+            typeof (part as Record<string, unknown>).text === "string" &&
+            ((part as Record<string, unknown>).text as string).startsWith(
+              CONTEXT_WARNING_MARKER,
+            ),
+        );
+        if (
+          provenanceIndex === undefined ||
+          !msg.provenanceContent ||
+          !msg.provenancePositions ||
+          !(
+            isMatchingProvenance ||
+            (provenanceBlock?.type === "opaque" && rawHasWarning)
+          )
+        ) {
+          // Removing a visible warning without removing its matching
+          // provenance block leaves the position map shifted. A malformed or
+          // mismatched legacy message must fail closed instead of letting
+          // recall mutate the wrong provider-native block later.
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
+        msg.provenanceContent.splice(provenanceIndex, 1);
+        msg.provenancePositions = msg.provenancePositions
+          .filter((_position, visibleIndex) => visibleIndex !== i)
+          .map((position) =>
+            position > provenanceIndex ? position - 1 : position,
+          );
+        if (msg.provenanceContent.length === 0) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+        }
       }
       break; // only check the first non-thinking block
     }
@@ -2622,6 +2741,87 @@ export function captureToolPairing400(input: {
  *
  * @internal Exported for tests.
  */
+function mergeAdjacentAssistantMessages(
+  earlier: GatewayMessage,
+  later: GatewayMessage,
+): GatewayMessage {
+  let visibleLead = 0;
+  while (
+    visibleLead < later.content.length &&
+    isReasoningBlock(later.content[visibleLead])
+  ) {
+    visibleLead++;
+  }
+
+  const hasProvenance =
+    earlier.provenanceContent !== undefined ||
+    later.provenanceContent !== undefined;
+
+  // `content` is the visible projection when provenance is present. A legacy
+  // or hand-built message may still carry the leading reasoning blocks in
+  // both arrays; keep those blocks in provenance only so the visible content
+  // and its position map have the same cardinality.
+  const content = hasProvenance
+    ? [...earlier.content, ...later.content.slice(visibleLead)]
+    : [
+        ...later.content.slice(0, visibleLead),
+        ...earlier.content,
+        ...later.content.slice(visibleLead),
+      ];
+  if (!hasProvenance) return { role: "assistant", content };
+
+  const earlierProvenance = [...(earlier.provenanceContent ?? earlier.content)];
+  const laterProvenance = [...(later.provenanceContent ?? later.content)];
+  const earlierPositions =
+    earlier.provenancePositions ??
+    earlier.content.map((_block, index) => index);
+  const laterPositions =
+    later.provenancePositions ?? later.content.map((_block, index) => index);
+
+  let provenanceInsertAt = 0;
+  while (
+    provenanceInsertAt < laterProvenance.length &&
+    isReasoningBlock(laterProvenance[provenanceInsertAt])
+  ) {
+    provenanceInsertAt++;
+  }
+
+  const provenanceContent = [
+    ...laterProvenance.slice(0, provenanceInsertAt),
+    ...earlierProvenance,
+    ...laterProvenance.slice(provenanceInsertAt),
+  ];
+
+  // Positions contain one entry per visible block, not one entry per
+  // leading reasoning block. Find the first position at or after the first
+  // visible provenance item instead of using `visibleLead` as an array
+  // offset. If a legacy message redundantly included reasoning in `content`,
+  // `laterPositions` still starts at the first visible block and must not
+  // consume that block as though it described the reasoning item.
+  const firstVisibleLaterPosition = laterPositions.findIndex(
+    (position) => position >= provenanceInsertAt,
+  );
+  const laterVisiblePositions =
+    firstVisibleLaterPosition === -1
+      ? []
+      : laterPositions.slice(firstVisibleLaterPosition);
+  const provenancePositions = [
+    ...earlierPositions.map((position) => provenanceInsertAt + position),
+    ...laterVisiblePositions.map((position) =>
+      position >= provenanceInsertAt
+        ? position + earlierProvenance.length
+        : position,
+    ),
+  ];
+
+  return {
+    role: "assistant",
+    content,
+    provenanceContent,
+    provenancePositions,
+  };
+}
+
 export function coalesceAdjacentAssistants(
   messages: GatewayMessage[],
 ): GatewayMessage[] {
@@ -2657,18 +2857,7 @@ export function coalesceAdjacentAssistants(
       // injectContextWarning insertion rule. `last` is the earlier message and
       // never itself leads with reasoning (it is the synthetic delta payload),
       // so only `m`'s leading run needs to be protected.
-      let lead = 0;
-      while (lead < m.content.length && isReasoningBlock(m.content[lead])) {
-        lead++;
-      }
-      merged[merged.length - 1] = {
-        role: "assistant",
-        content: [
-          ...m.content.slice(0, lead),
-          ...last.content,
-          ...m.content.slice(lead),
-        ],
-      };
+      merged[merged.length - 1] = mergeAdjacentAssistantMessages(last, m);
     } else {
       merged.push(m);
     }
@@ -2684,7 +2873,11 @@ export function coalesceAdjacentAssistants(
 function isReasoningBlock(block: GatewayContentBlock): boolean {
   return (
     block.type === "thinking" ||
-    (block.type === "opaque" && block.raw.type === "redacted_thinking")
+    (block.type === "opaque" &&
+      (block.raw.type === "thinking" ||
+        block.raw.type === "redacted_thinking" ||
+        block.raw.type === "reasoning" ||
+        block.raw.thought === true))
   );
 }
 
@@ -3943,9 +4136,16 @@ export function requestHasThinking(messages: GatewayMessage[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    for (const block of msg.content) {
+    const blocks = [...msg.content, ...(msg.provenanceContent ?? [])];
+    for (const block of blocks) {
       if (block.type === "thinking") return true;
-      if (block.type === "opaque" && block.raw.type === "redacted_thinking") {
+      if (block.type !== "opaque") continue;
+      if (
+        block.raw.type === "thinking" ||
+        block.raw.type === "redacted_thinking" ||
+        block.raw.type === "reasoning" ||
+        block.raw.thought === true
+      ) {
         return true;
       }
     }
@@ -5274,6 +5474,15 @@ function getOrCreateSession(
       !!persisted?.projectPath && persisted.projectPathProvisional === false;
     const persistedProvisional =
       !!persisted?.projectPath && persisted.projectPathProvisional === true;
+    const persistedAcceptedProvenanceLayer =
+      persisted?.lastAcceptedProvenanceLayer;
+    const acceptedProvenanceLayer =
+      persistedAcceptedProvenanceLayer !== undefined &&
+      Number.isInteger(persistedAcceptedProvenanceLayer) &&
+      persistedAcceptedProvenanceLayer >= -1 &&
+      persistedAcceptedProvenanceLayer <= 4
+        ? persistedAcceptedProvenanceLayer
+        : -1;
     state = {
       sessionID,
       // A freshly-seeded path from the cwd fallback is NOT a confident binding.
@@ -5294,6 +5503,9 @@ function getOrCreateSession(
         persisted?.credentialFingerprint || credentialFingerprint,
       storageTenantId,
       lastRequestTime: Date.now(),
+      ...(persisted
+        ? { lastAcceptedProvenanceLayer: acceptedProvenanceLayer }
+        : {}),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
@@ -5747,21 +5959,28 @@ async function adoptByFingerprint(input: {
       : incomingProjectId;
     if (!overlapProjectId) continue;
     const probeIDs = probeMessages.map(({ index, message }) => {
+      const visibleContent = visibleContentForMessage(message);
+      const legacyContent = legacyContentForMessage(message);
       const sourceID = deterministicID(
         c.session_id,
         message.role,
         index,
-        message.content,
+        visibleContent,
+      );
+      const legacySourceID = legacyDeterministicID(
+        message.role,
+        index,
+        visibleContent,
       );
       return temporal.storedMessageId({
         projectPath: overlapProjectPath,
         sessionID: c.session_id,
         sourceID,
-        legacySourceID: legacyDeterministicID(
-          message.role,
-          index,
-          message.content,
-        ),
+        legacySourceID,
+        legacySourceIDs: [
+          deterministicID(c.session_id, message.role, index, legacyContent),
+          legacyDeterministicID(message.role, index, legacyContent),
+        ],
       });
     });
     const overlap = countMatchingTemporalIds(
@@ -17492,6 +17711,11 @@ async function handleConversationTurn(
     req.signal,
   );
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  // transform() updates core's attempted layer before dispatch. Use the
+  // last layer whose request was accepted upstream instead: a synthetic
+  // response or failed request must not consume a compaction boundary.
+  const previousTransformLayer =
+    sessionState.lastAcceptedProvenanceLayer ?? null;
   let result;
   try {
     result = transform({
@@ -17821,10 +18045,10 @@ async function handleConversationTurn(
   const transformedMessages = loreMessagesToGateway(
     result.messages,
     provenanceByMessageId,
-    !sourceWindow &&
-      result.messages.length === loreMessages.length &&
-      result.messages.every(
-        (message, index) => message.info.id === loreMessages[index]?.info.id,
+    shouldPreserveResponsesProvenance(previousTransformLayer, result.layer) &&
+      canReplayRequestProvenance(
+        req.protocol,
+        requestUpstreamRoute.effectiveProtocol,
       ),
   );
   removeOrphanedToolResults(transformedMessages);
@@ -18317,6 +18541,20 @@ async function handleConversationTurn(
     return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
   }
 
+  // The provenance boundary is committed by the successful-response
+  // finalizers below, after the provider body has accumulated and durable
+  // response bookkeeping has succeeded. A 2xx status alone is not acceptance:
+  // streamed Responses can still end in `response.failed` or disconnect.
+  let acceptedProvenanceLayerCommitted = false;
+  const commitAcceptedProvenanceLayer = (): void => {
+    if (acceptedProvenanceLayerCommitted) return;
+    saveSessionTracking(sessionID, {
+      lastAcceptedProvenanceLayer: result.layer,
+    });
+    sessionState.lastAcceptedProvenanceLayer = result.layer;
+    acceptedProvenanceLayerCommitted = true;
+  };
+
   // Run the recall-interception loop over an already-accumulated
   // (internal Anthropic-format) GatewayResponse and return the client HTTP
   // response. Shared by the non-streaming path AND the OpenAI/openai-responses
@@ -18359,7 +18597,7 @@ async function handleConversationTurn(
         // finalizer, after downstream EOF, for buffered clients as well.
         finishStreaming(response);
       } else {
-        postResponse(
+        const persisted = postResponse(
           req,
           response,
           sessionState,
@@ -18370,6 +18608,7 @@ async function handleConversationTurn(
           suppressTemporalStorage,
           endGenAiSpan,
         );
+        if (persisted) commitAcceptedProvenanceLayer();
       }
     };
     const failRecall = (
@@ -18774,6 +19013,7 @@ async function handleConversationTurn(
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
+                commitAcceptedProvenanceLayer();
               }),
             );
             recallPersistenceTransaction = undefined;
@@ -19241,6 +19481,50 @@ async function handleConversationTurn(
   return finishWithRecall(captured.response);
 }
 
+/**
+ * Decide whether request-only Responses provenance may cross this transform.
+ *
+ * Encrypted reasoning is deliberately not part of Lore messages, temporal
+ * storage, or embeddings. It is replayed only while the gradient layer is
+ * stable; a layer transition is a compaction boundary and intentionally drops
+ * the old wire provenance. A fresh in-memory session has no prior boundary
+ * (`null`) and may replay its supplied history; persisted sessions with the
+ * v89 `-1` sentinel fail closed until an upstream turn establishes one.
+ * Emergency Layer 4 never replays it.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function shouldPreserveResponsesProvenance(
+  previousLayer: number | null,
+  currentLayer: number,
+): boolean {
+  return (
+    currentLayer < 4 &&
+    (previousLayer === null || previousLayer === currentLayer)
+  );
+}
+
+/**
+ * Provider-native thinking/encrypted blocks are opaque and valid only on the
+ * same wire family that produced them. A cross-protocol request keeps its
+ * visible projection but drops request-only provenance rather than sending
+ * Anthropic blocks to Gemini, Gemini signatures to Anthropic, or Responses
+ * reasoning items to Chat Completions.
+ *
+ * Vertex and Bedrock use the Anthropic Messages body, so they share the
+ * Anthropic provenance family.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function canReplayRequestProvenance(
+  ingressProtocol: GatewayProtocol,
+  effectiveProtocol: GatewayProtocol,
+): boolean {
+  const family = (protocol: GatewayProtocol): string =>
+    protocol === "vertex" ? "anthropic" : protocol;
+  return family(ingressProtocol) === family(effectiveProtocol);
+}
+
 // ---------------------------------------------------------------------------
 // Lore message → Gateway message conversion
 // ---------------------------------------------------------------------------
@@ -19324,13 +19608,10 @@ export function loreMessagesToGateway(
           });
           break;
         case "reasoning":
-          content.push({
-            type: "thinking",
-            thinking: (part as { text: string }).text ?? "",
-            ...((part as { signature?: string }).signature != null
-              ? { signature: (part as { signature?: string }).signature }
-              : undefined),
-          });
+          // Native/encrypted reasoning is request-only provenance. Older
+          // temporal rows may still contain a reasoning part from before that
+          // boundary existed; never promote it back into visible request
+          // content on replay.
           break;
         case "tool": {
           const toolPart = part as {
@@ -19440,12 +19721,13 @@ export function loreMessagesToGateway(
  * introduces orphaned references, this catches them before they reach the API.
  */
 /** @internal Exported for tests. */
-export function removeOrphanedToolResults(
-  messages: Array<{
-    role: "user" | "assistant";
-    content: GatewayContentBlock[];
-  }>,
-): void {
+function clearGatewayMessageProvenance(message: GatewayMessage): void {
+  delete message.provenanceContent;
+  delete message.provenancePositions;
+}
+
+/** @internal Exported for tests. */
+export function removeOrphanedToolResults(messages: GatewayMessage[]): void {
   // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -19467,6 +19749,11 @@ export function removeOrphanedToolResults(
       (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
     );
     if (msg.content.length < before) {
+      // Provenance is serialized in preference to visible content by every
+      // same-family request builder. Once cleanup changes the visible tool
+      // sequence, retaining the old provider-native sequence could resurrect
+      // an orphaned tool call (and its encrypted reasoning) on the wire.
+      clearGatewayMessageProvenance(msg);
       log.warn(
         `removed ${before - msg.content.length} orphaned tool_result block(s) from message ${i}`,
       );
@@ -19504,6 +19791,7 @@ export function removeOrphanedToolResults(
       (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
     );
     if (msg.content.length < before) {
+      clearGatewayMessageProvenance(msg);
       log.warn(
         `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
       );

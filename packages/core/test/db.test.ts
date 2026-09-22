@@ -2566,6 +2566,7 @@ describe("db", () => {
     expect(names).toContain("ltm_pin_text");
     expect(names).toContain("ltm_pin_tokens");
     expect(names).toContain("consecutive_text_only_turns");
+    expect(names).toContain("last_accepted_provenance_layer");
   });
 
   test("session_state has ltm_pin_keys column (migration v39)", () => {
@@ -2592,6 +2593,7 @@ describe("db", () => {
       amnesia: true,
       dedupDecisions: JSON.stringify([["m1:p1", true]]),
       lastKnownMessageCount: 137,
+      lastAcceptedProvenanceLayer: 1,
       lastUpstream: JSON.stringify({ model: "gpt-test" }),
     });
     const loaded = loadSessionTracking(sid);
@@ -2613,6 +2615,7 @@ describe("db", () => {
     expect(loaded?.dedupDecisions).toBe(JSON.stringify([["m1:p1", true]]));
     // v43: persisted for accurate calibrated-delta estimation after restart.
     expect(loaded?.lastKnownMessageCount).toBe(137);
+    expect(loaded?.lastAcceptedProvenanceLayer).toBe(1);
     expect(loaded?.lastUpstream).toBe(JSON.stringify({ model: "gpt-test" }));
   });
 
@@ -2783,6 +2786,7 @@ describe("db", () => {
     expect(loaded?.lastKnownInput).toBe(0);
     expect(loaded?.lastTurnAt).toBe(0);
     expect(loaded?.lastBustAt).toBe(0);
+    expect(loaded?.lastAcceptedProvenanceLayer).toBe(-1);
   });
 
   // -------------------------------------------------------------------------

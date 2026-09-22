@@ -34,6 +34,7 @@ import {
   resolveToolResults,
 } from "../src/temporal-adapter";
 import { RECALL_GATEWAY_TOOL } from "../src/recall";
+import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
 import type {
   GatewayResponse,
   GatewayContentBlock,
@@ -1435,6 +1436,93 @@ describe("buildOpenAIResponsesResponse", () => {
     const body = (await response.json()) as Record<string, unknown>;
 
     expect(body.output).toEqual(rawOutputItems);
+  });
+
+  test("streaming: preserves native reasoning output items", async () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_abc",
+      status: "completed",
+      summary: [],
+      encrypted_content: "encrypted-reasoning",
+    };
+    const response = buildOpenAIResponsesResponse(
+      {
+        ...baseResponse,
+        rawOutputItems: [reasoning],
+      },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.output_item.added");
+    expect(text).toContain("event: response.output_item.done");
+    expect(text).toContain('"encrypted_content":"encrypted-reasoning"');
+    expect(text).toContain('"output":[{"type":"reasoning"');
+  });
+
+  test("streaming: rebuilds delta lifecycles for raw visible output items", async () => {
+    const response = buildOpenAIResponsesResponse(
+      {
+        ...baseResponse,
+        rawOutputItems: [
+          {
+            type: "message",
+            id: "msg_raw",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "Done", annotations: [] }],
+          },
+          {
+            type: "function_call",
+            id: "fc_raw",
+            call_id: "call_raw",
+            name: "search",
+            arguments: '{"query":"cats"}',
+            status: "completed",
+          },
+        ],
+      },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.output_text.delta");
+    expect(text).toContain('"delta":"Done"');
+    expect(text).toContain("event: response.output_text.done");
+    expect(text).toContain("event: response.content_part.done");
+    expect(text).toContain("event: response.function_call_arguments.delta");
+    expect(text).toContain('"delta":"{\\\"query\\\":\\\"cats\\\"}"');
+    expect(text).toContain("event: response.function_call_arguments.done");
+  });
+
+  test("streaming: emits a valid lifecycle for apply_patch_call", async () => {
+    const rawApplyPatchCall = {
+      type: "apply_patch_call",
+      id: "patch_1",
+      status: "completed",
+      call_id: "call_patch_1",
+    };
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, rawOutputItems: [rawApplyPatchCall] },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain(
+      '"type":"apply_patch_call","id":"patch_1","status":"in_progress"',
+    );
+    await expect(
+      accumulateResponsesSSEStream(
+        new Response(text, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+        {
+          validation: "public",
+          stopAtTerminal: true,
+        },
+      ),
+    ).resolves.toMatchObject({ rawOutputItems: [rawApplyPatchCall] });
   });
 
   test("non-streaming: max_tokens maps to incomplete status", async () => {
