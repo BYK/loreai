@@ -105,16 +105,24 @@ function seaSource(): UiAssetSource | null {
   } catch {
     return null;
   }
-  const { getRawAsset } = sea;
+  const read = (path: string): Uint8Array<ArrayBuffer> | null => {
+    try {
+      return new Uint8Array(sea.getRawAsset(`${UI_SEA_ASSET_PREFIX}${path}`));
+    } catch {
+      return null;
+    }
+  };
+
+  // The gateway can be loaded inside another Node SEA executable (notably
+  // OpenCode's server binary). `node:sea` then reports isSea() === true even
+  // though the host binary does not contain Lore's UI assets. Only claim the
+  // SEA source when its manifest is actually embedded; otherwise diskSource()
+  // must get a chance to find a source-checkout dist/ui tree.
+  if (!read(UI_MANIFEST_FILE)) return null;
+
   return {
     description: "SEA assets",
-    read(path) {
-      try {
-        return new Uint8Array(getRawAsset(`${UI_SEA_ASSET_PREFIX}${path}`));
-      } catch {
-        return null;
-      }
-    },
+    read,
   };
 }
 
