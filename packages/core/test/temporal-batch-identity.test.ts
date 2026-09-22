@@ -188,6 +188,8 @@ describe("batched temporal identity resolution", () => {
       { length: 33_000 },
       (_, i) => `historical-${i}`,
     );
+    legacySourceIDs[0] = "z-old";
+    legacySourceIDs[legacySourceIDs.length - 1] = "a-old";
     const lateMatch = legacySourceIDs[legacySourceIDs.length - 1];
     if (lateMatch === undefined) throw new Error("expected a late match");
     const earlyMatch = legacySourceIDs[0];

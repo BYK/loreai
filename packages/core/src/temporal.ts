@@ -125,22 +125,30 @@ function derivedMessageId(
   return `${TEMPORAL_ID_PREFIX}${digest}`;
 }
 
-// Keep the scalar lookup shared with the batch ambiguity fallback. LIMIT 1
-// historically has no ordering: its choice depends on SQLite's query plan.
+// Keep the scalar lookup shared with the batch ambiguity fallback. Candidate
+// rank is encoded in the query so ordered compatibility IDs do not depend on
+// SQLite's query plan when more than one historical row matches.
 function messageIDLookup(additionalSourceCount = 0): string {
-  const additionalSources =
-    additionalSourceCount > 0
-      ? `\n               OR t.source_id IN (${Array.from(
-          { length: additionalSourceCount },
-          () => "?",
-        ).join(", ")})`
-      : "";
-  return `SELECT t.id FROM temporal_messages t
+  const candidates = [
+    "(?, NULL, 0, 0)",
+    "(?, NULL, 1, 1)",
+    "(NULL, ?, 2, 2)",
+    ...Array.from(
+      { length: additionalSourceCount },
+      (_, index) => `(?, NULL, 3, ${index + 3})`,
+    ),
+  ].join(", ");
+  return `WITH candidates(source_id, row_id, kind, rank) AS (VALUES ${candidates})
+        SELECT t.id FROM candidates c
+        JOIN temporal_messages t ON (
+          (c.kind = 0 AND t.source_id = c.source_id)
+          OR (c.kind = 1 AND t.source_id = t.id AND t.source_id = c.source_id)
+          OR (c.kind = 2 AND t.source_id IS NULL AND t.id = c.row_id)
+          OR (c.kind = 3 AND t.source_id = c.source_id)
+        )
         JOIN projects p ON p.id = t.project_id
         WHERE t.project_id = ? AND p.tenant_id = ? AND t.session_id = ?
-          AND (t.source_id = ?
-               OR (t.source_id = t.id AND t.source_id = ?)
-               OR (t.source_id IS NULL AND t.id = ?)${additionalSources})
+        ORDER BY c.rank, t.id
         LIMIT 1`;
 }
 
@@ -180,13 +188,13 @@ function queryExistingMessageId(
     const existing = db()
       .query(messageIDLookup(ids.length))
       .get(
-        projectId,
-        currentTenantId(),
-        sessionId,
         sourceId,
         legacySourceId ?? sourceId,
         derivedId,
         ...ids,
+        projectId,
+        currentTenantId(),
+        sessionId,
       ) as { id: string } | null;
     if (existing) return existing.id;
   }
@@ -383,13 +391,13 @@ export function storedMessageIds(input: {
           .all(
             ...fallback.flatMap(({ message, additionalIDs }) => [
               message.sourceID,
-              pid,
-              tenant,
-              input.sessionID,
               message.sourceID,
               message.legacySourceID ?? message.sourceID,
               message.derivedID,
               ...additionalIDs,
+              pid,
+              tenant,
+              input.sessionID,
             ]),
           ) as Array<{ source_id: string; id: string | null }>;
         for (const match of matches)
