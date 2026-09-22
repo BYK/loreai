@@ -14,6 +14,7 @@ import {
   applyLoreProviderConfig,
   gatewayAccessHeadersForRemote,
   installEmbeddedGatewaySigtermHandler,
+  prepareLocalUiAssets,
   probeGateway,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
@@ -58,6 +59,12 @@ async function resolveGatewayUrl(): Promise<string | null> {
     if (await probeGateway(url)) return url;
     // env var set but gateway unreachable — fall through to discovery
   }
+
+  // A source-loaded plugin may be running before the workspace's postinstall
+  // build has staged packages/ui/dist into the gateway. Prepare it before
+  // probing/reusing a local gateway, so an already-running source gateway can
+  // discover the newly staged manifest as well.
+  await prepareLocalUiAssets();
 
   // 2. Build probe list: port file first (handles random port), then known defaults.
   const probePorts = new Set<number>();

@@ -161,9 +161,16 @@ interface LoadedUi {
   missing: Set<string>;
 }
 
-/** undefined = not resolved yet; null = no usable UI (memoized). */
+/** undefined = not resolved yet; null = no usable UI. */
 let loaded: LoadedUi | null | undefined;
 let sourceOverride: UiAssetSource | null = null;
+/**
+ * A source checkout may be staged after the gateway has already answered its
+ * first /ui request (for example, while the OpenCode plugin is starting).
+ * Do not permanently cache that transient absence. SEA assets are immutable,
+ * but disk and embedding sources can become available after initialization.
+ */
+let retryUnavailableSource = false;
 
 /**
  * Point the handler at an explicit source (tests, embedding hosts), or pass
@@ -173,11 +180,31 @@ let sourceOverride: UiAssetSource | null = null;
 export function setUiAssetSource(source: UiAssetSource | null): void {
   sourceOverride = source;
   loaded = undefined;
+  retryUnavailableSource = false;
 }
 
 function load(): LoadedUi | null {
-  if (loaded !== undefined) return loaded;
-  const source = sourceOverride ?? seaSource() ?? diskSource();
+  if (loaded !== undefined) {
+    if (loaded !== null || !retryUnavailableSource) return loaded;
+    loaded = undefined;
+  }
+
+  let source: UiAssetSource | null;
+  if (sourceOverride) {
+    retryUnavailableSource = true;
+    source = sourceOverride;
+  } else {
+    const sea = seaSource();
+    if (sea) {
+      retryUnavailableSource = false;
+      source = sea;
+    } else {
+      // A source checkout can stage dist/ui after this module has already
+      // been loaded, so retry automatic disk discovery when it is unavailable.
+      retryUnavailableSource = true;
+      source = diskSource();
+    }
+  }
   if (!source) {
     loaded = null;
     return loaded;
@@ -431,7 +458,7 @@ export function handleUIRequest(req: Request, url: URL): Response {
     return jsonError(
       503,
       "ui_unavailable",
-      "The Lore UI was not built into this gateway (run `pnpm --filter @loreai/gateway build`)",
+      "The Lore UI assets are unavailable in this gateway. A source-loaded OpenCode/Pi plugin normally stages them automatically; restart the plugin after pulling UI changes, or run `pnpm --filter @loreai/ui build && pnpm --filter @loreai/gateway build` from the Lore repository root.",
     );
   }
 

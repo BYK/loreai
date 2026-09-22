@@ -864,6 +864,21 @@ describe("asset sources (SEA-style in-memory source vs. disk)", () => {
     });
   });
 
+  test("retries a source that becomes available after an initial 503", async () => {
+    const files: Record<string, Uint8Array | string> = {
+      "index.html": html,
+    };
+    setUiAssetSource(memorySource(files));
+
+    expect(direct("/ui").status).toBe(503);
+
+    // This is the source-checkout startup race: the gateway can answer its
+    // first request before the build/staging step has finished.
+    files[UI_MANIFEST_FILE] = JSON.stringify(validManifest);
+    expect(direct("/ui").status).toBe(200);
+    await expect(direct("/ui").text()).resolves.toBe(html);
+  });
+
   test.each<[string, string]>([
     ["truncated JSON", '{"version":1,"buildId":"x","files":{'],
     ["wrong version", JSON.stringify({ ...validManifest, version: 2 })],

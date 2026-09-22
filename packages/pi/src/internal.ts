@@ -172,6 +172,44 @@ export async function probeGateway(
 }
 
 /**
+ * Prepare the UI before probing local gateways.
+ *
+ * A source-loaded Pi extension can start or reuse a gateway before the
+ * workspace build hook has ever run. The gateway owns the actual staging
+ * implementation; this bridge stays a no-op for published gateway packages
+ * that do not ship the development helper.
+ */
+export async function prepareLocalUiAssets(): Promise<void> {
+  try {
+    const gw = "@loreai/gateway";
+    const gateway = (await import(/* webpackIgnore: true */ gw)) as {
+      prepareSourceUiAssets?: () => Promise<{
+        attempted: boolean;
+        files: number;
+        buildId: string | null;
+        error?: string;
+      }>;
+    };
+    if (!gateway.prepareSourceUiAssets) return;
+    const result = await gateway.prepareSourceUiAssets();
+    if (!result.attempted) return;
+    if (result.error) {
+      log.warn(`source UI preparation failed: ${result.error}`);
+    } else if (result.files === 0) {
+      log.warn("source UI preparation produced no assets");
+    } else {
+      log.info(
+        `source UI staged: ${result.files} files` +
+          (result.buildId ? `, build ${result.buildId}` : ""),
+      );
+    }
+  } catch {
+    // The gateway is optional from the extension's point of view. Its normal
+    // startup path reports a useful error if it cannot be imported.
+  }
+}
+
+/**
  * Resolve the gateway URL by probing known ports and reading the port file.
  *
  * Order: LORE_REMOTE_URL → LORE_GATEWAY_URL → port file → known default
@@ -198,6 +236,11 @@ export async function resolveGatewayUrl(): Promise<string | null> {
     if (url !== "invalid" && (await probeGateway(url))) return url;
     // env var set but gateway unreachable — fall through to discovery
   }
+
+  // Prepare the source checkout before probing/reusing a local gateway. This
+  // also lets an already-running source gateway see a manifest staged by this
+  // extension process.
+  await prepareLocalUiAssets();
 
   // 2. Build probe list: port file first (handles random port), then known defaults.
   const probePorts = new Set<number>();
