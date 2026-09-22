@@ -245,31 +245,16 @@ export async function accumulateGeminiSSEStream(
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
-      const frameFinishReason = first.finishReason;
-      const frameIsTerminal =
-        typeof frameFinishReason === "string" &&
-        frameFinishReason !== "" &&
-        frameFinishReason !== "FINISH_REASON_UNSPECIFIED";
+      const frameContentStart = contentBlocks.length;
       for (const p of parts) {
         const parsedBlock = geminiPartToBlock(p);
         if (!parsedBlock) continue;
         const signature = geminiPartThoughtSignature(p);
-        // Gemini thought signatures belong to the completed thought/tool
-        // part. A malformed or future stream may expose one before the
-        // terminal candidate frame; do not let that premature metadata bind
-        // the accumulated block as if it were final.
-        const acceptedSignature = frameIsTerminal ? signature : undefined;
-        const blockWithoutSignature =
-          parsedBlock.type === "thinking"
-            ? { type: "thinking" as const, thinking: parsedBlock.thinking }
-            : parsedBlock;
         const block: GatewayContentBlock =
-          acceptedSignature !== undefined &&
+          signature !== undefined &&
           (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
             ? { ...parsedBlock, raw: p }
-            : signature !== undefined && !frameIsTerminal
-              ? blockWithoutSignature
-              : parsedBlock;
+            : parsedBlock;
         if (
           (block.type === "text" && block.text.length > 0) ||
           (block.type === "thinking" && block.thinking.length > 0) ||
@@ -278,16 +263,17 @@ export async function accumulateGeminiSSEStream(
           opts.onSemanticContent?.();
         }
 
-        // Preserve the provider's part order. Text/thinking deltas for the same
-        // part are adjacent in Gemini streams, so coalesce only with the
-        // immediately preceding unsigned block of the same kind; a signature
-        // binds to one provider part and must never be replaced by a later
-        // adjacent part's signature.
+        // Preserve the provider's part order. Only the first valid part in a
+        // frame can be a continuation of the preceding frame's part. Keep
+        // same-frame parts distinct, and never merge a newly signed part into
+        // an earlier block: each signature belongs to its own provider part.
+        // An unsigned part may continue an earlier signed part, retaining the
+        // signature on the accumulated block.
         if (block.type === "text") {
           const previous = contentBlocks.at(-1);
           if (
             previous?.type === "text" &&
-            !hasGeminiThoughtSignature(previous) &&
+            contentBlocks.length === frameContentStart &&
             !hasGeminiThoughtSignature(block)
           ) {
             previous.text += block.text;
@@ -321,7 +307,7 @@ export async function accumulateGeminiSSEStream(
           const previous = contentBlocks.at(-1);
           if (
             previous?.type === "thinking" &&
-            !hasGeminiThoughtSignature(previous) &&
+            contentBlocks.length === frameContentStart &&
             !hasGeminiThoughtSignature(block)
           ) {
             previous.thinking += block.thinking;

@@ -503,6 +503,7 @@ describe("accumulateGeminiSSEStream", () => {
       {
         type: "thinking",
         thinking: "rea",
+        signature: "signature-1",
       },
       {
         type: "thinking",
@@ -513,7 +514,7 @@ describe("accumulateGeminiSSEStream", () => {
     ]);
   });
 
-  test("ignores premature thought signatures before the terminal frame", async () => {
+  test("retains early thought signatures through later deltas", async () => {
     const response = await accumulateGeminiSSEStream(
       sse([
         {
@@ -547,7 +548,45 @@ describe("accumulateGeminiSSEStream", () => {
     );
 
     expect(response.content).toEqual([
-      { type: "thinking", thinking: "reason" },
+      {
+        type: "thinking",
+        thinking: "reason",
+        signature: "premature-signature",
+      },
+    ]);
+  });
+
+  test("retains an early thought signature when the terminal frame has no parts", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "reasoning",
+                    thought: true,
+                    thoughtSignature: "signature-early",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "reasoning",
+        signature: "signature-early",
+      },
     ]);
   });
 
@@ -582,6 +621,10 @@ describe("accumulateGeminiSSEStream", () => {
       {
         type: "text",
         text: "Hel",
+        raw: {
+          text: "Hel",
+          thoughtSignature: "signature-1",
+        },
       },
       {
         type: "text",
@@ -639,6 +682,7 @@ describe("accumulateGeminiSSEStream", () => {
         {
           type: "text",
           text: "Hel",
+          raw: { text: "Hel", ...firstSignature },
         },
         {
           type: "text",
