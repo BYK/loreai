@@ -28,12 +28,24 @@ import {
 } from "./types";
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
+import { CHAIN_DIGEST_SEED, extendChainDigest } from "../chain-digest";
+import {
+  parseCodexContextBoundary,
+  type CodexContextBoundary,
+} from "../codex-boundary";
 import {
   parseStreamedRequest,
+  StreamedRequestBoundaryMismatchError,
   type StreamingRequestSpec,
 } from "./streaming-request";
 
 export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
+
+type ParsedInputItems = {
+  messages: GatewayMessage[];
+  itemCount: number;
+  inputDigest: string;
+};
 
 function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
   const inclusiveInputTokens = safeTokenSum(
@@ -72,6 +84,14 @@ export function parseOpenAIResponsesRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
+  return parseOpenAIResponsesRequestInternal(body, headers);
+}
+
+function parseOpenAIResponsesRequestInternal(
+  body: unknown,
+  headers: Record<string, string>,
+  parsedInput?: ParsedInputItems,
+): GatewayRequest {
   const raw = (body ?? {}) as Record<string, unknown>;
 
   const model = asString(raw.model);
@@ -85,7 +105,8 @@ export function parseOpenAIResponsesRequest(
   const system = typeof raw.instructions === "string" ? raw.instructions : "";
 
   // Parse input items into normalized messages
-  const messages = parseInputItems(raw.input);
+  const messages = (parsedInput ?? parseInputItemsWithMetadata(raw.input))
+    .messages;
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
@@ -195,23 +216,45 @@ function addCodexControls(
 const responsesSpec = (
   headers: Record<string, string>,
   codex: boolean,
-): StreamingRequestSpec<GatewayMessage[]> => ({
-  streamKey: "input",
-  captureKeys: codex
-    ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
-    : RESPONSES_TOP_LEVEL_KEYS,
-  createItemsBuilder: createInputItemsBuilder,
-  parseSync: (raw) =>
-    codex
-      ? parseOpenAICodexRequest(raw, headers)
-      : parseOpenAIResponsesRequest(raw, headers),
-  assemble(raw, streamed) {
-    const req = parseOpenAIResponsesRequest(raw, headers);
-    if (streamed) req.messages = streamed;
-    else if ("input" in raw) req.messages = parseInputItems(raw.input);
-    return codex ? addCodexControls(req, raw) : req;
-  },
-});
+): StreamingRequestSpec<ParsedInputItems> => {
+  const boundary = codex ? parseCodexContextBoundary(headers) : undefined;
+  return {
+    streamKey: "input",
+    captureKeys: codex
+      ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
+      : RESPONSES_TOP_LEVEL_KEYS,
+    preferStreaming: codex && boundary !== undefined,
+    createItemsBuilder: () => createInputItemsBuilder(boundary),
+    parseSync: (raw) =>
+      codex
+        ? parseOpenAICodexRequest(raw, headers)
+        : parseOpenAIResponsesRequest(raw, headers),
+    assemble(raw, streamed) {
+      const parsed =
+        streamed ??
+        (codex && boundary
+          ? parseCodexInputItems(raw.input, boundary)
+          : parseInputItemsWithMetadata(raw.input));
+      const req = parseOpenAIResponsesRequestInternal(raw, headers, parsed);
+      if (codex) {
+        req.codexInput = {
+          itemCount: parsed.itemCount,
+          inputDigest: parsed.inputDigest,
+          ...(boundary
+            ? {
+                sourcePrefix: {
+                  messageCount: boundary.sourceMessages,
+                  sourceDigest: boundary.sourceDigest,
+                },
+              }
+            : {}),
+        };
+        addCodexControls(req, raw);
+      }
+      return req;
+    },
+  };
+};
 
 /** Parse a streamed OpenAI Responses request. */
 export function parseOpenAIResponsesRequestChunks(
@@ -236,8 +279,24 @@ export function parseOpenAICodexRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
-  const req = parseOpenAIResponsesRequest(body, headers);
+  const boundary = parseCodexContextBoundary(headers);
+  const parsed = boundary
+    ? parseCodexInputItems(rawInput(body), boundary)
+    : parseInputItemsWithMetadata(rawInput(body));
+  const req = parseOpenAIResponsesRequestInternal(body, headers, parsed);
   const raw = (body ?? {}) as Record<string, unknown>;
+  req.codexInput = {
+    itemCount: parsed.itemCount,
+    inputDigest: parsed.inputDigest,
+    ...(boundary
+      ? {
+          sourcePrefix: {
+            messageCount: boundary.sourceMessages,
+            sourceDigest: boundary.sourceDigest,
+          },
+        }
+      : {}),
+  };
   return addCodexControls(req, raw);
 }
 
@@ -253,13 +312,24 @@ export function parseOpenAICodexRequestChunks(
 // Input item parsing
 // ---------------------------------------------------------------------------
 
-function parseInputItems(input: unknown): GatewayMessage[] {
+function rawInput(body: unknown): unknown {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  return raw.input;
+}
+
+function parseInputItemsWithMetadata(input: unknown): ParsedInputItems {
   // String shorthand: single user message
   if (typeof input === "string") {
-    return [{ role: "user", content: [{ type: "text", text: input }] }];
+    return {
+      messages: [{ role: "user", content: [{ type: "text", text: input }] }],
+      itemCount: 1,
+      inputDigest: extendChainDigest(CHAIN_DIGEST_SEED, input),
+    };
   }
 
-  if (!Array.isArray(input)) return [];
+  if (!Array.isArray(input)) {
+    return { messages: [], itemCount: 0, inputDigest: CHAIN_DIGEST_SEED };
+  }
 
   const builder = createInputItemsBuilder();
   for (const item of input) {
@@ -268,12 +338,45 @@ function parseInputItems(input: unknown): GatewayMessage[] {
   return builder.finish();
 }
 
-function createInputItemsBuilder(): {
+function parseCodexInputItems(
+  input: unknown,
+  boundary: CodexContextBoundary,
+): ParsedInputItems {
+  if (Array.isArray(input)) {
+    const builder = createInputItemsBuilder(boundary);
+    for (const item of input) builder.add(item);
+    return builder.finish();
+  }
+  const digest =
+    input === undefined
+      ? CHAIN_DIGEST_SEED
+      : extendChainDigest(CHAIN_DIGEST_SEED, input);
+  const itemCount = input === undefined ? 0 : 1;
+  if (boundary.inputItems !== itemCount || boundary.inputDigest !== digest) {
+    throw new StreamedRequestBoundaryMismatchError(
+      "The Codex context boundary no longer matches the request prefix; retrying with the full conversation.",
+    );
+  }
+  return { messages: [], itemCount, inputDigest: digest };
+}
+
+function createInputItemsBuilder(boundary?: CodexContextBoundary): {
   add(item: unknown): void;
-  finish(): GatewayMessage[];
+  finish(): ParsedInputItems;
 } {
   const messages: GatewayMessage[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
+  let itemCount = 0;
+  let inputDigest = CHAIN_DIGEST_SEED;
+  if (
+    boundary &&
+    boundary.inputItems === 0 &&
+    boundary.inputDigest !== CHAIN_DIGEST_SEED
+  ) {
+    throw new StreamedRequestBoundaryMismatchError(
+      "The Codex context boundary no longer matches the request prefix; retrying with the full conversation.",
+    );
+  }
 
   const appendAssistant = (
     content: GatewayContentBlock[],
@@ -299,6 +402,19 @@ function createInputItemsBuilder(): {
   };
 
   const add = (item: unknown): void => {
+    itemCount++;
+    inputDigest = extendChainDigest(inputDigest, item);
+    if (boundary && itemCount <= boundary.inputItems) {
+      if (
+        itemCount === boundary.inputItems &&
+        inputDigest !== boundary.inputDigest
+      ) {
+        throw new StreamedRequestBoundaryMismatchError(
+          "The Codex context boundary no longer matches the request prefix; retrying with the full conversation.",
+        );
+      }
+      return;
+    }
     const raw = item as Record<string, unknown>;
     const itemType = raw.type as string | undefined;
     const role = raw.role as string | undefined;
@@ -435,7 +551,12 @@ function createInputItemsBuilder(): {
     pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
   };
 
-  const finish = (): GatewayMessage[] => {
+  const finish = (): ParsedInputItems => {
+    if (boundary && itemCount < boundary.inputItems) {
+      throw new StreamedRequestBoundaryMismatchError(
+        "The Codex request ended before the retained context boundary; retrying with the full conversation.",
+      );
+    }
     if (pendingReasoning.length > 0) {
       messages.push({
         role: "assistant",
@@ -446,7 +567,7 @@ function createInputItemsBuilder(): {
       pendingReasoning = [];
     }
 
-    return messages;
+    return { messages, itemCount, inputDigest };
   };
 
   return { add, finish };

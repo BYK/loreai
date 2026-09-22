@@ -177,6 +177,115 @@ describe("batched temporal identity resolution", () => {
     expect(queries).toBeLessThanOrEqual(3 * Math.ceil(5580 / 100));
   });
 
+  it("keeps oversized compatibility identity lists below SQLite bind limits", () => {
+    const oversizedProject = `/test/batch-identities/oversized-${crypto.randomUUID()}`;
+    const oversizedSession = `oversized-${crypto.randomUUID()}`;
+    const sourceID = `oversized-source-${crypto.randomUUID()}`;
+    // Modern SQLite builds allow 32,766 variables per statement. Keep this
+    // above that ceiling so the regression fails against the old unbounded
+    // scalar/ambiguous lookup rather than merely exercising a large input.
+    const legacySourceIDs = Array.from(
+      { length: 33_000 },
+      (_, i) => `historical-${i}`,
+    );
+    legacySourceIDs[0] = "z-old";
+    legacySourceIDs[legacySourceIDs.length - 1] = "a-old";
+    const lateMatch = legacySourceIDs[legacySourceIDs.length - 1];
+    if (lateMatch === undefined) throw new Error("expected a late match");
+    const earlyMatch = legacySourceIDs[0];
+    if (earlyMatch === undefined) throw new Error("expected an early match");
+    const pid = ensureProject(oversizedProject);
+    const insert = db().query(`INSERT INTO temporal_messages
+        (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+        VALUES (?, ?, ?, ?, 'user', 'fixture', 1, 0, 1, '{}')`);
+    insert.run(earlyMatch, earlyMatch, pid, oversizedSession);
+    insert.run(lateMatch, lateMatch, pid, oversizedSession);
+
+    const message = { sourceID, legacySourceIDs };
+    expect(
+      temporal.storedMessageId({
+        projectPath: oversizedProject,
+        sessionID: oversizedSession,
+        ...message,
+      }),
+    ).toBe(earlyMatch);
+    expect(
+      temporal
+        .storedMessageIds({
+          projectPath: oversizedProject,
+          sessionID: oversizedSession,
+          messages: [message],
+        })
+        .get(sourceID),
+    ).toBe(earlyMatch);
+
+    // The batch path must also keep its ambiguous-row scalar fallback bounded.
+    // The current row makes the input ambiguous with the historical rows; the
+    // fallback must still agree with the scalar lookup's normal precedence.
+    const ambiguousSourceID = `ambiguous-source-${crypto.randomUUID()}`;
+    db()
+      .query(`INSERT INTO temporal_messages
+        (id, source_id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+        VALUES (?, ?, ?, ?, 'user', 'fixture', 1, 0, 1, '{}')`)
+      .run(ambiguousSourceID, ambiguousSourceID, pid, oversizedSession);
+    const scalarAmbiguousID = temporal.storedMessageId({
+      projectPath: oversizedProject,
+      sessionID: oversizedSession,
+      sourceID: ambiguousSourceID,
+      legacySourceIDs,
+    });
+    expect(
+      temporal
+        .storedMessageIds({
+          projectPath: oversizedProject,
+          sessionID: oversizedSession,
+          messages: [{ sourceID: ambiguousSourceID, legacySourceIDs }],
+        })
+        .get(ambiguousSourceID),
+    ).toBe(scalarAmbiguousID);
+
+    // A chunk can contain many ordinary ambiguous rows. Their combined UNION
+    // fallback must be split by total binds, not only by message count.
+    const combinedFallbackMessages = Array.from({ length: 100 }, (_, i) => ({
+      sourceID: `combined-current-${i}`,
+      legacySourceID: `combined-legacy-${i}`,
+      legacySourceIDs: [
+        `combined-extra-${i}-a`,
+        `combined-extra-${i}-b`,
+        `combined-extra-${i}-c`,
+      ],
+    }));
+    for (const fallbackMessage of combinedFallbackMessages) {
+      insert.run(
+        fallbackMessage.sourceID,
+        fallbackMessage.sourceID,
+        pid,
+        oversizedSession,
+      );
+      insert.run(
+        fallbackMessage.legacySourceID,
+        fallbackMessage.legacySourceID,
+        pid,
+        oversizedSession,
+      );
+    }
+    let fallbackQueries = 0;
+    log.registerSink({
+      ...sink,
+      withDbSpan(sql, fn) {
+        if (sql.startsWith("SELECT ? AS source_id")) fallbackQueries++;
+        return fn();
+      },
+    });
+    const fallbackResult = temporal.storedMessageIds({
+      projectPath: oversizedProject,
+      sessionID: oversizedSession,
+      messages: combinedFallbackMessages,
+    });
+    expect(fallbackResult.size).toBe(combinedFallbackMessages.length);
+    expect(fallbackQueries).toBe(2);
+  });
+
   it("isolates tenant/project/session owners and never claims a current row through its legacy source", () => {
     const pid = ensureProject(projectPath);
     db()

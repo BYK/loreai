@@ -138,7 +138,7 @@ function normalizeMessageContent(content: unknown): {
   for (const rawBlock of content as Array<Record<string, unknown>>) {
     if (rawBlock.type === "thinking" || rawBlock.type === "redacted_thinking") {
       hasRequestOnlyProvenance = true;
-      provenance.push({ type: "opaque", raw: rawBlock });
+      provenance.push({ type: "opaque", raw: rawBlock, requestOnly: true });
       continue;
     }
 
@@ -237,7 +237,10 @@ function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
 
     case "opaque":
       // Re-emit the original block verbatim.
-      return block.raw;
+      // Return a fresh envelope because conversation caching annotates the
+      // serialized block with `cache_control`; mutating `raw` would mutate
+      // request-only provenance retained on the GatewayMessage.
+      return { ...block.raw };
   }
 }
 

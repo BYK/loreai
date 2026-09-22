@@ -304,6 +304,19 @@ export type GatewayRequest = {
    * preservation of Codex control fields in the upstream body.
    */
   codex?: boolean;
+  /**
+   * Internal Codex continuation metadata. `messages` contains only the
+   * unverified suffix when a valid boundary was supplied; the source prefix
+   * is checked against the retained Lore checkpoint before preparation.
+   */
+  codexInput?: {
+    itemCount: number;
+    inputDigest: string;
+    sourcePrefix?: {
+      messageCount: number;
+      sourceDigest: string;
+    };
+  };
 };
 
 // ---------------------------------------------------------------------------

@@ -35,12 +35,24 @@ import {
 } from "../src/temporal-adapter";
 import { RECALL_GATEWAY_TOOL } from "../src/recall";
 import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
+import { digestChain } from "../src/chain-digest";
+import { encodeCodexContextBoundary } from "../src/codex-boundary";
+import { StreamedRequestBoundaryMismatchError } from "../src/translate/streaming-request";
 import type {
   GatewayResponse,
   GatewayContentBlock,
   GatewayToolUseBlock,
   GatewayToolResultBlock,
 } from "../src/translate/types";
+
+async function* byteChunks(
+  bytes: Uint8Array,
+  size = 31,
+): AsyncGenerator<Uint8Array> {
+  for (let offset = 0; offset < bytes.byteLength; offset += size) {
+    yield bytes.subarray(offset, offset + size);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // parseOpenAIResponsesRequest
@@ -283,6 +295,82 @@ describe("parseOpenAIResponsesRequest", () => {
     await expect(
       parseOpenAICodexRequestChunks(chunks(), headers),
     ).resolves.toEqual(parseOpenAICodexRequest(body, headers));
+  });
+
+  test("discards a verified Codex prefix while streaming", async () => {
+    const prefix = [
+      { type: "message", role: "user", content: "old question" },
+      { type: "message", role: "assistant", content: "old answer" },
+    ];
+    const first = parseOpenAICodexRequest(
+      { model: "gpt-5.6-codex", input: prefix },
+      headers,
+    );
+    const firstCodexInput = first.codexInput;
+    if (!firstCodexInput) throw new Error("missing Codex input metadata");
+    const boundary = encodeCodexContextBoundary({
+      v: 1,
+      inputItems: firstCodexInput.itemCount,
+      inputDigest: firstCodexInput.inputDigest,
+      sourceMessages: first.messages.length,
+      sourceDigest: digestChain(first.messages),
+    });
+    const nextBody = {
+      model: "gpt-5.6-codex",
+      input: [
+        ...prefix,
+        { type: "message", role: "user", content: "new question" },
+      ],
+    };
+    const next = await parseOpenAICodexRequestChunks(
+      byteChunks(Buffer.from(JSON.stringify(nextBody)), 7),
+      { ...headers, "x-lore-codex-context-boundary": boundary },
+    );
+
+    expect(next.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "new question" }] },
+    ]);
+    expect(next.codexInput?.sourcePrefix).toEqual({
+      messageCount: first.messages.length,
+      sourceDigest: digestChain(first.messages),
+    });
+    expect(next.codexInput?.itemCount).toBe(3);
+  });
+
+  test("rejects a Codex boundary when the retained prefix was edited", async () => {
+    const first = parseOpenAICodexRequest(
+      {
+        model: "gpt-5.6-codex",
+        input: [{ type: "message", role: "user", content: "original" }],
+      },
+      headers,
+    );
+    const firstCodexInput = first.codexInput;
+    if (!firstCodexInput) throw new Error("missing Codex input metadata");
+    const boundary = encodeCodexContextBoundary({
+      v: 1,
+      inputItems: firstCodexInput.itemCount,
+      inputDigest: firstCodexInput.inputDigest,
+      sourceMessages: first.messages.length,
+      sourceDigest: digestChain(first.messages),
+    });
+    const body = {
+      model: "gpt-5.6-codex",
+      input: [
+        { type: "message", role: "user", content: "edited" },
+        { type: "message", role: "user", content: "new" },
+      ],
+    };
+
+    await expect(
+      parseOpenAICodexRequestChunks(
+        byteChunks(Buffer.from(JSON.stringify(body))),
+        {
+          ...headers,
+          "x-lore-codex-context-boundary": boundary,
+        },
+      ),
+    ).rejects.toBeInstanceOf(StreamedRequestBoundaryMismatchError);
   });
 
   test("parses string input as single user message", () => {

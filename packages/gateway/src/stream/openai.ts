@@ -74,7 +74,8 @@ const OPENAI_STREAM_VALIDATION_MESSAGES: Record<
   "response-identity-mismatch": "malformed OpenAI stream event",
   "duplicate-choice-index": "malformed OpenAI stream event",
   "tool-identity-mismatch": "malformed OpenAI stream event",
-  "post-terminal-frame": "malformed OpenAI stream event",
+  "post-terminal-frame":
+    "OpenAI stream emitted a non-empty frame after finish_reason terminal",
   "choice-index-mismatch": "malformed OpenAI stream event",
   "missing-tool-identity": "malformed OpenAI stream event",
   "missing-finish-terminal": "missing OpenAI finish_reason terminal",
@@ -532,6 +533,8 @@ export async function accumulateOpenAISSEStream(
     maxFrames?: number;
     onSemanticContent?: () => void;
     consumeUntilDone?: boolean;
+    /** Allow OpenCode Zen's empty choice trailer before [DONE]. */
+    allowPostTerminalNoop?: boolean;
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
   } = {},
 ): Promise<GatewayResponse> {
@@ -653,6 +656,32 @@ export async function accumulateOpenAISSEStream(
       );
     });
   };
+  const isPostTerminalNoop = (
+    choice: unknown,
+  ): boolean => {
+    if (!choice || typeof choice !== "object" || Array.isArray(choice))
+      return false;
+    const record = choice as Record<string, unknown>;
+    if (
+      record.finish_reason !== undefined &&
+      record.finish_reason !== null
+    )
+      return false;
+    const delta = record.delta;
+    return (
+      !!delta &&
+      typeof delta === "object" &&
+      !Array.isArray(delta) &&
+      Object.keys(delta).length === 0
+    );
+  };
+  const isPostTerminalNoopFrame = (
+    choices: Array<Record<string, unknown>> | undefined,
+  ): boolean =>
+    terminalSeen === true &&
+    opts.allowPostTerminalNoop === true &&
+    !!choices?.length &&
+    choices.every(isPostTerminalNoop);
 
   if (!upstreamResponse.body) {
     throw new Error("Upstream response has no body");
@@ -685,6 +714,10 @@ export async function accumulateOpenAISSEStream(
       }
 
       const choices = parsed.choices;
+      const normalizedChoices = parsed.choices as
+        | Array<Record<string, unknown>>
+        | undefined;
+      const postTerminalNoop = isPostTerminalNoopFrame(normalizedChoices);
       if (
         opts.strict &&
         (!Array.isArray(choices) ||
@@ -701,18 +734,21 @@ export async function accumulateOpenAISSEStream(
       if (
         opts.strict &&
         ((parsed.id !== undefined && typeof parsed.id !== "string") ||
-          (id && typeof parsed.id === "string" && parsed.id !== id) ||
+          (id &&
+            typeof parsed.id === "string" &&
+            parsed.id !== id &&
+            !(postTerminalNoop && parsed.id === "")) ||
           (parsed.model !== undefined && typeof parsed.model !== "string") ||
-          (model && typeof parsed.model === "string" && parsed.model !== model))
+          (model &&
+            typeof parsed.model === "string" &&
+            parsed.model !== model &&
+            !(postTerminalNoop && parsed.model === "")))
       ) {
         throw malformedOpenAIStream("response-identity-mismatch");
       }
       if (typeof parsed.id === "string") id = parsed.id;
       if (typeof parsed.model === "string") model = parsed.model;
 
-      const normalizedChoices = parsed.choices as
-        | Array<Record<string, unknown>>
-        | undefined;
       if (opts.strict && normalizedChoices) {
         const frameChoiceIndices = new Set<number>();
         for (
@@ -763,7 +799,8 @@ export async function accumulateOpenAISSEStream(
       }
       const firstChoice = normalizedChoices?.[0];
       if (opts.strict && terminalSeen && normalizedChoices?.length) {
-        throw malformedOpenAIStream("post-terminal-frame");
+        if (!postTerminalNoop)
+          throw malformedOpenAIStream("post-terminal-frame");
       }
       if (firstChoice) {
         if (opts.strict) {

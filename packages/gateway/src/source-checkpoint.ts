@@ -9,8 +9,16 @@ import {
 } from "@loreai/core";
 import type { GatewayMessage } from "./translate/types";
 import type { PreparationTiming } from "./semantic-preparation";
+import {
+  CHAIN_DIGEST_SEED,
+  digestChain,
+  extendChainDigest,
+} from "./chain-digest";
 
-const VERSION = `gateway-source-window-v1:${TOKEN_ESTIMATE_CACHE_VERSION}`;
+const LEGACY_VERSION = `gateway-source-window-v1:${TOKEN_ESTIMATE_CACHE_VERSION}`;
+const CODEX_VERSION = `gateway-source-window-codex-v1:${TOKEN_ESTIMATE_CACHE_VERSION}`;
+/** Separate checkpoint namespace so ordinary providers keep their v1 digest contract. */
+export const CODEX_SOURCE_CHECKPOINT_PROTOCOL = "openai-responses:codex";
 export const SOURCE_WINDOW_MAX_MESSAGES = 2048;
 const PREFIX_COUNTS = 4096;
 const BLOOM_BYTES = 65_536;
@@ -39,6 +47,16 @@ type Reason =
   | "tool_boundary"
   | "forced"
   | "hit";
+
+/** A Codex suffix cannot be safely prepared without its retained prefix. */
+export class SourceDeltaUnavailableError extends Error {
+  constructor(
+    message = "The retained Lore context does not match the request",
+  ) {
+    super(message);
+    this.name = "SourceDeltaUnavailableError";
+  }
+}
 
 function validPart(part: LoreMessageWithParts["parts"][number]): boolean {
   if (!part || typeof part.id !== "string") return false;
@@ -85,7 +103,7 @@ function valid(value: unknown, sessionID: string): value is Payload {
   if (!value || typeof value !== "object") return false;
   const v = value as Payload;
   return (
-    v.version === VERSION &&
+    (v.version === LEGACY_VERSION || v.version === CODEX_VERSION) &&
     typeof v.protocol === "string" &&
     Number.isSafeInteger(v.sourceCount) &&
     v.sourceCount > 0 &&
@@ -155,7 +173,20 @@ function valid(value: unknown, sessionID: string): value is Payload {
  * supplied head IDs cannot prove that an earlier message was not edited. This
  * pass constructs no Lore objects, pairs no tools and performs no tokenization.
  */
-function sourceDigests(messages: GatewayMessage[], previousCount?: number) {
+function sourceDigests(
+  messages: GatewayMessage[],
+  previousCount?: number,
+  chained = false,
+) {
+  if (chained) {
+    let digest = CHAIN_DIGEST_SEED;
+    let previous: string | undefined;
+    for (let i = 0; i < messages.length; i++) {
+      digest = extendChainDigest(digest, messages[i]);
+      if (i + 1 === previousCount) previous = digest;
+    }
+    return { previous, current: digest };
+  }
   const hash = createHash("sha256");
   let previous: string | undefined;
   for (let i = 0; i < messages.length; i++) {
@@ -164,6 +195,25 @@ function sourceDigests(messages: GatewayMessage[], previousCount?: number) {
     if (i + 1 === previousCount) previous = hash.copy().digest("hex");
   }
   return { previous, current: hash.digest("hex") };
+}
+
+function crossesToolBoundary(
+  candidate: Payload,
+  suffix: GatewayMessage[],
+): boolean {
+  const toolIds = new ToolIds(candidate.toolIds);
+  return (
+    candidate.raw.some((m) =>
+      m.parts.some((p) => isToolPart(p) && toolIds.has(p.callID)),
+    ) ||
+    suffix.some((m) =>
+      m.content.some(
+        (b) =>
+          (b.type === "tool_use" && toolIds.has(b.id)) ||
+          (b.type === "tool_result" && toolIds.has(b.toolUseId)),
+      ),
+    )
+  );
 }
 
 export class SourceCheckpoint {
@@ -183,6 +233,7 @@ export class SourceCheckpoint {
     timing: PreparationTiming;
     sourceCount: number;
   };
+  private readonly version: string;
 
   constructor(input: {
     messages: GatewayMessage[];
@@ -191,19 +242,68 @@ export class SourceCheckpoint {
     noStore: boolean;
     protocol: string;
     forceFull?: boolean;
+    sourcePrefix?: {
+      sourceCount: number;
+      sourceDigest: string;
+    };
     timing: PreparationTiming;
   }) {
+    this.version =
+      input.protocol === CODEX_SOURCE_CHECKPOINT_PROTOCOL
+        ? CODEX_VERSION
+        : LEGACY_VERSION;
+    const sourcePrefixCount = input.sourcePrefix?.sourceCount ?? 0;
     this.scope = {
       protocol: input.protocol,
       noStore: input.noStore,
       timing: input.timing,
-      sourceCount: input.messages.length,
+      sourceCount: sourcePrefixCount + input.messages.length,
     };
     this.store = new SourceWindowStore(input);
     const loaded = this.store.load();
     const candidate = valid(loaded, input.sessionID) ? loaded : undefined;
+
+    if (input.sourcePrefix) {
+      if (input.protocol !== CODEX_SOURCE_CHECKPOINT_PROTOCOL) {
+        throw new SourceDeltaUnavailableError(
+          "A Codex context suffix requires a Codex source checkpoint; retrying with the full conversation.",
+        );
+      }
+      this.digest = digestChain(
+        input.messages,
+        input.sourcePrefix.sourceDigest,
+      );
+      const unavailable =
+        input.noStore ||
+        input.forceFull ||
+        !candidate ||
+        candidate.protocol !== input.protocol ||
+        candidate.sourceCount !== input.sourcePrefix.sourceCount ||
+        candidate.sourceDigest !== input.sourcePrefix.sourceDigest;
+      if (unavailable) {
+        input.timing.metric("source_delta_unavailable", 1);
+        throw new SourceDeltaUnavailableError(
+          "The retained Lore context no longer matches the Codex request prefix; retrying with the full conversation.",
+        );
+      }
+      if (crossesToolBoundary(candidate, input.messages)) {
+        input.timing.metric("source_delta_unavailable", 1);
+        throw new SourceDeltaUnavailableError(
+          "The Codex request crosses a retained tool-call boundary; retrying with the full conversation.",
+        );
+      }
+      this.base = candidate;
+      this.reason = "hit";
+      input.timing.metric("source_checkpoint_hit", 1);
+      return;
+    }
+
     const hashes = input.timing.measure("source_validation", () =>
-      sourceDigests(input.messages, candidate?.sourceCount),
+      sourceDigests(
+        input.messages,
+        candidate?.sourceCount,
+        input.protocol === CODEX_SOURCE_CHECKPOINT_PROTOCOL,
+      ),
     );
     this.digest = hashes.current;
     let reason: Reason = input.noStore
@@ -221,22 +321,12 @@ export class SourceCheckpoint {
                 ? "history"
                 : "hit";
     if (reason === "hit" && candidate) {
-      const toolIds = new ToolIds(candidate.toolIds);
       // Check both directions: the adapter pairs all results with all calls,
       // including an old result reused by a newly appended call.
-      const crossing =
-        candidate.raw.some((m) =>
-          m.parts.some((p) => isToolPart(p) && toolIds.has(p.callID)),
-        ) ||
-        input.messages
-          .slice(candidate.sourceCount)
-          .some((m) =>
-            m.content.some(
-              (b) =>
-                (b.type === "tool_use" && toolIds.has(b.id)) ||
-                (b.type === "tool_result" && toolIds.has(b.toolUseId)),
-            ),
-          );
+      const crossing = crossesToolBoundary(
+        candidate,
+        input.messages.slice(candidate.sourceCount),
+      );
       if (crossing) reason = "tool_boundary";
       else this.base = candidate;
     }
@@ -359,7 +449,7 @@ export class SourceCheckpoint {
     }
     const keep = new Set(retained.map((m) => m.info.id));
     this.next = {
-      version: VERSION,
+      version: this.version,
       protocol: this.scope.protocol,
       sourceCount: this.scope.sourceCount,
       sourceDigest: this.digest,

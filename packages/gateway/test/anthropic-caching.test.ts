@@ -236,6 +236,38 @@ describe("buildAnthropicRequest — conversation caching", () => {
     });
   });
 
+  test("does not mutate opaque provenance when adding a breakpoint", () => {
+    const raw = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "answer" }],
+    };
+    const req = makeRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "answer" }],
+          provenanceContent: [{ type: "opaque", raw }],
+          provenancePositions: [0],
+        },
+      ],
+    });
+
+    const body = getBody(req, { cacheConversation: true });
+    const messages = body.messages as Array<{
+      content: Array<Record<string, unknown>>;
+    }>;
+
+    expect(messages[0]?.content[0]?.cache_control).toEqual({
+      type: "ephemeral",
+    });
+    expect(raw).toEqual({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "answer" }],
+    });
+  });
+
   test("durable knowledge-delta message before the tail does not take the breakpoint", () => {
     const req = makeRequest({
       messages: [

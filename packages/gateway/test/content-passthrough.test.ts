@@ -375,7 +375,7 @@ describe("Provider thinking provenance", () => {
         },
       ],
       provenanceContent: [
-        { type: "opaque", raw: thinking },
+        { type: "opaque", raw: thinking, requestOnly: true },
         { type: "text", text: "visible answer" },
         {
           type: "tool_use",
@@ -432,7 +432,7 @@ describe("Provider thinking provenance", () => {
       { type: "text", text: "visible" },
     ]);
     expect(request.messages[0]?.provenanceContent).toEqual([
-      { type: "opaque", raw: redacted },
+      { type: "opaque", raw: redacted, requestOnly: true },
       { type: "text", text: "visible" },
     ]);
     expect(

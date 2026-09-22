@@ -4,6 +4,22 @@ import type { GatewayRequest } from "./types";
 
 export const STREAMING_PARSE_SPOOL_BYTES = 256 * 1024;
 
+/** Errors that must survive the generic JSON-parser error boundary. */
+export class StreamedRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StreamedRequestError";
+  }
+}
+
+/** The caller's continuation hint cannot be proven against this body. */
+export class StreamedRequestBoundaryMismatchError extends StreamedRequestError {
+  constructor(message = "Codex context boundary does not match the request") {
+    super(message);
+    this.name = "StreamedRequestBoundaryMismatchError";
+  }
+}
+
 export interface StreamedItemsBuilder<M> {
   add(item: unknown): void;
   finish(): M;
@@ -12,6 +28,8 @@ export interface StreamedItemsBuilder<M> {
 export interface StreamingRequestSpec<M> {
   streamKey: string;
   captureKeys: ReadonlySet<string> | "*";
+  /** Force the tokenizer path even when the body is smaller than the spool. */
+  preferStreaming?: boolean;
   createItemsBuilder(): StreamedItemsBuilder<M>;
   parseSync(raw: unknown): GatewayRequest;
   assemble(
@@ -288,6 +306,7 @@ async function parseStreamedRequestInternal<M>(
         error instanceof Error ? error : new Error("Invalid JSON body");
     }
   }
+  if (parseError instanceof StreamedRequestError) throw parseError;
   if (parseError || !sawToken || active || !tokenizer.isEnded) {
     throw new Error("Invalid JSON body");
   }
@@ -299,6 +318,9 @@ export async function parseStreamedRequest<M>(
   chunks: AsyncIterable<Uint8Array>,
   spec: StreamingRequestSpec<M>,
 ): Promise<GatewayRequest> {
+  if (spec.preferStreaming) {
+    return parseStreamedRequestInternal(chunks, spec, () => {});
+  }
   const iterator = chunks[Symbol.asyncIterator]();
   const spool: Uint8Array[] = [];
   let total = 0;

@@ -454,7 +454,7 @@ describe("accumulateGeminiSSEStream", () => {
     expect(resp.usage?.cacheReadInputTokens).toBe(6);
   });
 
-  test("preserves thought signatures and native part order", async () => {
+  test("preserves signed thought part boundaries and native order", async () => {
     const response = await accumulateGeminiSSEStream(
       sse([
         {
@@ -502,14 +502,19 @@ describe("accumulateGeminiSSEStream", () => {
     expect(response.content).toEqual([
       {
         type: "thinking",
-        thinking: "reason",
+        thinking: "rea",
+        signature: "signature-1",
+      },
+      {
+        type: "thinking",
+        thinking: "son",
         signature: "signature-2",
       },
       { type: "text", text: "visible answer" },
     ]);
   });
 
-  test("ignores premature thought signatures before the terminal frame", async () => {
+  test("retains early thought signatures through later deltas", async () => {
     const response = await accumulateGeminiSSEStream(
       sse([
         {
@@ -543,11 +548,95 @@ describe("accumulateGeminiSSEStream", () => {
     );
 
     expect(response.content).toEqual([
-      { type: "thinking", thinking: "reason" },
+      {
+        type: "thinking",
+        thinking: "reason",
+        signature: "premature-signature",
+      },
     ]);
   });
 
-  test("merges raw signed text deltas without truncating egress", async () => {
+  test("does not merge multiple unsigned parts after a signed continuation", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "A",
+                    thought: true,
+                    thoughtSignature: "signature-a",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "B", thought: true },
+                  { text: "C", thought: true },
+                ],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "AB",
+        signature: "signature-a",
+      },
+      { type: "thinking", thinking: "C" },
+    ]);
+  });
+
+  test("retains an early thought signature when the terminal frame has no parts", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "reasoning",
+                    thought: true,
+                    thoughtSignature: "signature-early",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "reasoning",
+        signature: "signature-early",
+      },
+    ]);
+  });
+
+  test("preserves signed text part boundaries without truncating egress", async () => {
     const response = await accumulateGeminiSSEStream(
       sse([
         {
@@ -577,9 +666,17 @@ describe("accumulateGeminiSSEStream", () => {
     expect(response.content).toEqual([
       {
         type: "text",
-        text: "Hello",
+        text: "Hel",
         raw: {
-          text: "Hello",
+          text: "Hel",
+          thoughtSignature: "signature-1",
+        },
+      },
+      {
+        type: "text",
+        text: "lo",
+        raw: {
+          text: "lo",
           thoughtSignature: "signature-2",
         },
       },
@@ -591,16 +688,16 @@ describe("accumulateGeminiSSEStream", () => {
       "camel-to-snake",
       { thoughtSignature: "signature-1" },
       { thought_signature: "signature-2" },
-      { text: "Hello", thought_signature: "signature-2" },
+      { text: "lo", thought_signature: "signature-2" },
     ],
     [
       "snake-to-camel",
       { thought_signature: "signature-1" },
       { thoughtSignature: "signature-2" },
-      { text: "Hello", thoughtSignature: "signature-2" },
+      { text: "lo", thoughtSignature: "signature-2" },
     ],
   ])(
-    "canonicalizes signed text aliases during %s merges",
+    "preserves signed text aliases at part boundaries during %s",
     async (_name, firstSignature, secondSignature, expectedRaw) => {
       const response = await accumulateGeminiSSEStream(
         sse([
@@ -630,12 +727,51 @@ describe("accumulateGeminiSSEStream", () => {
       expect(response.content).toEqual([
         {
           type: "text",
-          text: "Hello",
+          text: "Hel",
+          raw: { text: "Hel", ...firstSignature },
+        },
+        {
+          type: "text",
+          text: "lo",
           raw: expectedRaw,
         },
       ]);
     },
   );
+
+  test("does not collapse adjacent signed thought parts in one frame", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "A",
+                    thought: true,
+                    thoughtSignature: "signature-a",
+                  },
+                  {
+                    text: "B",
+                    thought: true,
+                    thoughtSignature: "signature-b",
+                  },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      { type: "thinking", thinking: "A", signature: "signature-a" },
+      { type: "thinking", thinking: "B", signature: "signature-b" },
+    ]);
+  });
 
   test("thought deltas stay out of visible text (separate thinking block)", async () => {
     const res = sse([

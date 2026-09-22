@@ -415,6 +415,7 @@ describe("requestHasThinking", () => {
       {
         type: "opaque",
         raw: { type: "redacted_thinking", data: "ciphertext" },
+        requestOnly: true,
       },
       { type: "text", text: "answer" },
     ]);

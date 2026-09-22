@@ -382,6 +382,8 @@ export {
 export { SemanticTokenCache } from "./semantic-token-cache";
 export {
   installFetchInterceptor,
+  CODEX_CONTEXT_BOUNDARY_HEADER,
+  CODEX_CONTEXT_BOUNDARY_MISMATCH_HEADER,
   shouldIntercept,
   type FetchInterceptorConfig,
 } from "./fetch-interceptor";

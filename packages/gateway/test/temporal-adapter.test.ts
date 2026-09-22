@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import {
   deterministicID,
   gatewayMessagesToLore,
+  legacyContentForMessage,
   legacyDeterministicID,
   resolveToolResults,
 } from "../src/temporal-adapter";
@@ -500,6 +501,68 @@ describe("resolveToolResults", () => {
         ).body as { contents: Array<{ parts: unknown[] }> }
       ).contents[0]?.parts,
     ).toEqual([{ text: "visible answer" }]);
+  });
+
+  test("redacts legacy reasoning without mutating identity metadata", () => {
+    const thinking = {
+      type: "thinking" as const,
+      thinking: "legacy private reasoning",
+      signature: "legacy-signature",
+    };
+    const visible = { type: "text" as const, text: "visible answer" };
+    const original: GatewayMessage = {
+      role: "assistant",
+      content: [thinking, visible],
+    };
+    const converted = gatewayMessagesToLore([original], "legacy-replay")[0];
+    if (!converted) throw new Error("missing converted message");
+
+    // A persisted pre-boundary Lore row may still carry a reasoning part even
+    // though current ingress conversion excludes it from visible parts.
+    const legacyReasoning: LorePart = {
+      id: "legacy-reasoning-part",
+      sessionID: converted.info.sessionID,
+      messageID: converted.info.id,
+      type: "reasoning",
+      text: thinking.thinking,
+      signature: thinking.signature,
+    };
+    const replay = {
+      ...converted,
+      parts: [legacyReasoning, ...converted.parts],
+    };
+    const before = structuredClone(replay);
+
+    const reconstructed = loreMessagesToGateway([replay]);
+
+    expect(reconstructed[0]?.content).toEqual([visible]);
+    expect(replay).toEqual(before);
+    expect(replay.legacySourceIDs).toEqual(before.legacySourceIDs);
+    expect(replay.legacySourceIDs).toEqual(
+      expect.arrayContaining([
+        deterministicID("legacy-replay", "assistant", 0, original.content),
+        legacyDeterministicID("assistant", 0, original.content),
+      ]),
+    );
+  });
+
+  test("filters request-only opaque content from the legacy fallback", () => {
+    const requestOnly: GatewayMessage["content"][number] = {
+      type: "opaque",
+      requestOnly: true,
+      raw: { type: "reasoning", encrypted_content: "ciphertext" },
+    };
+    const visible: GatewayMessage["content"][number] = {
+      type: "text",
+      text: "visible answer",
+    };
+
+    expect(
+      legacyContentForMessage({
+        role: "assistant",
+        content: [requestOnly, visible],
+      }),
+    ).toEqual([visible]);
   });
 
   test("preserves distinct Gemini call id and name through Lore and egress", () => {

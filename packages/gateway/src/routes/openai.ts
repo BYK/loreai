@@ -16,7 +16,11 @@ import { handleResponsesCompactEndpoint } from "../pipeline";
 import { decodedRequestChunks } from "../http-body";
 import { headersToRecord, withoutCors } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
-import { invalidStreamedBody, runPipeline } from "./shared";
+import {
+  invalidStreamedBody,
+  requestBodyLimitsForConfig,
+  runPipeline,
+} from "./shared";
 
 export async function handleOpenAIChatCompletions(
   req: Request,
@@ -51,8 +55,8 @@ export async function handleOpenAIResponses(
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
-  } catch {
-    return invalidStreamedBody();
+  } catch (e) {
+    return invalidStreamedBody(e);
   }
   return runPipeline(gatewayReq, config);
 }
@@ -71,12 +75,12 @@ export async function handleOpenAICodexResponses(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseOpenAICodexRequestChunks(
-      decodedRequestChunks(req, req.signal),
+      decodedRequestChunks(req, req.signal, requestBodyLimitsForConfig(config)),
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
-  } catch {
-    return invalidStreamedBody();
+  } catch (e) {
+    return invalidStreamedBody(e);
   }
   return runPipeline(gatewayReq, config);
 }

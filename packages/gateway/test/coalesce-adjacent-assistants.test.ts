@@ -180,6 +180,46 @@ describe("coalesceAdjacentAssistants", () => {
     expect(merged[0].provenancePositions).toEqual([1, 2]);
   });
 
+  test("keeps positions aligned when content redundantly includes reasoning", () => {
+    const reasoning: GatewayMessage["content"][number] = {
+      type: "opaque",
+      raw: { type: "redacted_thinking", data: "ciphertext" },
+    };
+    const firstVisible: GatewayMessage["content"][number] = {
+      type: "text",
+      text: "first",
+    };
+    const secondVisible: GatewayMessage["content"][number] = {
+      type: "tool_use",
+      id: "t3",
+      name: "write",
+      input: {},
+    };
+    const merged = coalesceAdjacentAssistants([
+      asst([{ type: "text", text: "injected" }]),
+      {
+        role: "assistant",
+        content: [reasoning, firstVisible, secondVisible],
+        provenanceContent: [reasoning, firstVisible, secondVisible],
+        // Positions describe visible blocks only; reasoning has no entry.
+        provenancePositions: [1, 2],
+      },
+    ]);
+
+    expect(merged[0].content).toEqual([
+      { type: "text", text: "injected" },
+      firstVisible,
+      secondVisible,
+    ]);
+    expect(merged[0].provenanceContent).toEqual([
+      reasoning,
+      { type: "text", text: "injected" },
+      firstVisible,
+      secondVisible,
+    ]);
+    expect(merged[0].provenancePositions).toEqual([1, 2, 3]);
+  });
+
   test("does not merge across a user boundary", () => {
     const merged = coalesceAdjacentAssistants([
       asst([{ type: "text", text: "a" }]),

@@ -37,6 +37,15 @@ import {
 } from "./anthropic";
 import { isRecord, validateGeminiUsageMetadata } from "../usage-validation";
 
+function hasGeminiThoughtSignature(block: GatewayContentBlock): boolean {
+  if (block.type === "thinking") return block.signature !== undefined;
+  if (block.type !== "text" && block.type !== "tool_use") return false;
+  return (
+    block.raw !== undefined &&
+    geminiPartThoughtSignature(block.raw) !== undefined
+  );
+}
+
 /**
  * Accumulate an upstream Gemini SSE (`?alt=sse`) response into a
  * `GatewayResponse`. Text parts arrive as deltas across frames and are
@@ -236,31 +245,18 @@ export async function accumulateGeminiSSEStream(
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
-      const frameFinishReason = first.finishReason;
-      const frameIsTerminal =
-        typeof frameFinishReason === "string" &&
-        frameFinishReason !== "" &&
-        frameFinishReason !== "FINISH_REASON_UNSPECIFIED";
+      let frameHasValidPart = false;
       for (const p of parts) {
         const parsedBlock = geminiPartToBlock(p);
         if (!parsedBlock) continue;
+        const isFirstValidPart = !frameHasValidPart;
+        frameHasValidPart = true;
         const signature = geminiPartThoughtSignature(p);
-        // Gemini thought signatures belong to the completed thought/tool
-        // part. A malformed or future stream may expose one before the
-        // terminal candidate frame; do not let that premature metadata bind
-        // the accumulated block as if it were final.
-        const acceptedSignature = frameIsTerminal ? signature : undefined;
-        const blockWithoutSignature =
-          parsedBlock.type === "thinking"
-            ? { type: "thinking" as const, thinking: parsedBlock.thinking }
-            : parsedBlock;
         const block: GatewayContentBlock =
-          acceptedSignature !== undefined &&
+          signature !== undefined &&
           (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
             ? { ...parsedBlock, raw: p }
-            : signature !== undefined && !frameIsTerminal
-              ? blockWithoutSignature
-              : parsedBlock;
+            : parsedBlock;
         if (
           (block.type === "text" && block.text.length > 0) ||
           (block.type === "thinking" && block.thinking.length > 0) ||
@@ -269,13 +265,19 @@ export async function accumulateGeminiSSEStream(
           opts.onSemanticContent?.();
         }
 
-        // Preserve the provider's part order. Text/thinking deltas for the same
-        // part are adjacent in Gemini streams, so coalesce only with the
-        // immediately preceding block of the same kind; never move thinking
-        // across visible text or tool calls.
+        // Preserve the provider's part order. Only the first valid part in a
+        // frame can be a continuation of the preceding frame's part. Keep
+        // same-frame parts distinct, and never merge a newly signed part into
+        // an earlier block: each signature belongs to its own provider part.
+        // An unsigned part may continue an earlier signed part, retaining the
+        // signature on the accumulated block.
         if (block.type === "text") {
           const previous = contentBlocks.at(-1);
-          if (previous?.type === "text") {
+          if (
+            previous?.type === "text" &&
+            isFirstValidPart &&
+            !hasGeminiThoughtSignature(block)
+          ) {
             previous.text += block.text;
             if (previous.raw !== undefined || block.raw !== undefined) {
               const mergedRaw: Record<string, unknown> = {
@@ -305,7 +307,11 @@ export async function accumulateGeminiSSEStream(
           }
         } else if (block.type === "thinking") {
           const previous = contentBlocks.at(-1);
-          if (previous?.type === "thinking") {
+          if (
+            previous?.type === "thinking" &&
+            isFirstValidPart &&
+            !hasGeminiThoughtSignature(block)
+          ) {
             previous.thinking += block.thinking;
             if (block.signature !== undefined) {
               previous.signature = block.signature;
