@@ -26,9 +26,11 @@ import {
   isSupportedEncoding,
   mayReencodeUpstream,
   normalizeRequestEncoding,
+  HttpRequestBodyTooLargeError,
   MAX_HTTP_REQUEST_COMPRESSED_BYTES,
   MAX_HTTP_REQUEST_DECOMPRESSED_BYTES,
 } from "../src/http-body";
+import { invalidStreamedBody } from "../src/routes/shared";
 
 const SAMPLE = JSON.stringify({
   model: "gpt-5-codex",
@@ -109,6 +111,31 @@ describe("compressBody / decompressBody round-trip", () => {
 });
 
 describe("decodeRequestBody", () => {
+  test("reports the limit and phase instead of a generic parse error", async () => {
+    const response = invalidStreamedBody(
+      new HttpRequestBodyTooLargeError("decompressed", 128 * 1024 * 1024),
+    );
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        type: "request_too_large",
+        message:
+          "Request body exceeded the 128 MiB decompressed limit. Reduce the conversation history or start a new session.",
+      },
+    });
+  });
+
+  test("explains an incomplete HTTP parser read", async () => {
+    const response = invalidStreamedBody(new Error("Parse Error"));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        message:
+          "Request body could not be read completely; the client may have closed the connection while uploading the conversation. Retry the request.",
+      },
+    });
+  });
+
   test.each(["zstd", "gzip", "br", "deflate"])(
     "decodes a %s-compressed body back to the original JSON text",
     async (enc) => {
