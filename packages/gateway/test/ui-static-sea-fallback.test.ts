@@ -14,7 +14,7 @@ describe("UI source selection inside a host SEA", () => {
           getRawAsset: () => {
             throw new Error("Lore UI is not embedded in the host SEA");
           },
-        } as never;
+        };
       }
       return undefined;
     });
@@ -25,7 +25,11 @@ describe("UI source selection inside a host SEA", () => {
   });
 
   test("falls back to source-checkout assets when the host has no UI", async () => {
-    if (!existsSync(join(UI_STAGE_DIR, UI_MANIFEST_FILE))) return;
+    if (!existsSync(join(UI_STAGE_DIR, UI_MANIFEST_FILE))) {
+      throw new Error(
+        "UI assets are not staged — run `pnpm --filter @loreai/gateway build` first",
+      );
+    }
 
     const { handleUIRequest } = await import("../src/ui-static");
     const url = new URL("http://127.0.0.1/ui");
