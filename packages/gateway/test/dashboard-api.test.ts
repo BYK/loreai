@@ -223,6 +223,14 @@ describe("GET /api/v1/entities/:id", () => {
     );
   });
 
+  it("rejects malformed URL encoding in an entity id", async () => {
+    const res = await api("/api/v1/entities/%E0%A4%A");
+    expect(res.status).toBe(400);
+    expect(
+      ((await res.json()) as { error: { type: string } }).error.type,
+    ).toBe("invalid_request");
+  });
+
   it("reports metadata:null for malformed stored JSON", async () => {
     const { db } = await import("@loreai/core");
     const e = await seedEntity({ entityType: "tool", canonicalName: "borked" });
@@ -318,6 +326,22 @@ describe("PATCH /api/v1/entities/:id", () => {
       body: "{oops",
     });
     expect(notJson.status).toBe(400);
+  });
+
+  it("rejects oversized metadata bodies before parsing them", async () => {
+    const e = await seedEntity({
+      entityType: "tool",
+      canonicalName: "large patch",
+    });
+    const res = await api(`/api/v1/entities/${e.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: " ".repeat(16 * 1024 + 1),
+    });
+    expect(res.status).toBe(413);
+    expect(
+      ((await res.json()) as { error: { type: string } }).error.type,
+    ).toBe("invalid_request");
   });
 
   it("404s when the entity was deleted between load and save", async () => {

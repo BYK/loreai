@@ -124,6 +124,21 @@ const RebuildCard: Component = () => {
             </>
           )}
         </Match>
+        <Match when={entities.rebuild().phase === "unknown"}>
+          <p class="mt-1.5 text-[13px] text-muted" role="alert">
+            Could not verify whether another entity rebuild is running. Rebuild
+            actions stay disabled until status is confirmed.
+          </p>
+          <div class="mt-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void entities.checkRebuildStatus()}
+            >
+              Retry status check
+            </Button>
+          </div>
+        </Match>
         <Match when={entities.rebuild().phase === "error"}>
           {errorStateFor(
             entities.rebuild().error,

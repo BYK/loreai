@@ -201,6 +201,16 @@ describe("api client: error classification", () => {
     expect(error.status).toBe(status);
   });
 
+  it("classifies a plain-text 403 as generic HTTP, not hosted mode", async () => {
+    const { client } = clientFor(
+      () => new Response("proxy access denied", { status: 403 }),
+    );
+    const error = await failure(client.listProjects());
+    expect(error.kind).toBe("http");
+    expect(error.status).toBe(403);
+    expect(error.message).toBe("proxy access denied");
+  });
+
   it("treats a JSON-bodied 403 as `forbidden` (hosted-mode refusal)", async () => {
     const { client } = clientFor(() =>
       json(

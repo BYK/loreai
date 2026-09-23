@@ -106,15 +106,27 @@ export interface ApiClientOptions {
   base?: string;
 }
 
-async function readErrorMessage(res: Response): Promise<string | null> {
+async function readErrorDetails(
+  res: Response,
+): Promise<{ message: string | null; isErrorEnvelope: boolean }> {
   const text = await res.text().catch(() => "");
-  if (!text) return null;
+  if (!text) return { message: null, isErrorEnvelope: false };
   try {
     const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
-    return parsed.ok ? parsed.value.error.message : text.slice(0, 200);
+    if (parsed.ok) {
+      return {
+        message: parsed.value.error.message,
+        isErrorEnvelope: true,
+      };
+    }
   } catch {
-    return text.slice(0, 200);
+    // Fall through to the bounded text diagnostic for generic HTTP errors.
   }
+  return { message: text.slice(0, 200), isErrorEnvelope: false };
+}
+
+async function readErrorMessage(res: Response): Promise<string | null> {
+  return (await readErrorDetails(res)).message;
 }
 
 export function createApiClient(options: ApiClientOptions = {}) {
@@ -157,18 +169,27 @@ export function createApiClient(options: ApiClientOptions = {}) {
     }
 
     if (res.status === 403) {
-      // A JSON-bodied 403 is a hosted-mode refusal; a bodyless one is the
-      // management-boundary denial and stays `unauthorized`.
-      const message = await readErrorMessage(res);
-      if (message !== null) {
-        throw new ApiError("forbidden", path, message, res.status);
+      // Only the gateway's JSON error envelope denotes a hosted-mode refusal.
+      // A bodyless 403 is the management-boundary denial; plain-text proxy
+      // responses stay generic HTTP errors instead of being mislabeled.
+      const details = await readErrorDetails(res);
+      if (details.isErrorEnvelope) {
+        throw new ApiError(
+          "forbidden",
+          path,
+          details.message ?? "Gateway refused this operation",
+          res.status,
+        );
       }
-      throw new ApiError(
-        "unauthorized",
-        path,
-        "Gateway refused this browser",
-        res.status,
-      );
+      if (details.message === null) {
+        throw new ApiError(
+          "unauthorized",
+          path,
+          "Gateway refused this browser",
+          res.status,
+        );
+      }
+      throw new ApiError("http", path, details.message, res.status);
     }
 
     if (res.status === 502 || res.status === 503 || res.status === 504) {

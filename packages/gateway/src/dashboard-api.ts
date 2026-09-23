@@ -8,6 +8,10 @@
  */
 import { entities, isHostedMode, ltm } from "@loreai/core";
 
+import {
+  decodeRequestBody,
+  HttpRequestBodyTooLargeError,
+} from "./http-body";
 import { errorResponse, jsonResponse } from "./management-access";
 
 type EntityWithAliases = NonNullable<
@@ -221,6 +225,7 @@ export function handleGetEntity(id: string): Response {
 
 const METADATA_KEYS = new Set(["role", "description", "notes"]);
 const METADATA_VALUE_MAX = 2000;
+const MAX_ENTITY_PATCH_BODY_BYTES = 16 * 1024;
 
 type MetadataPatch = { role?: string; description?: string; notes?: string };
 
@@ -293,8 +298,20 @@ export async function handlePatchEntity(
 
   let body: unknown;
   try {
-    body = await req.json();
-  } catch {
+    body = JSON.parse(
+      await decodeRequestBody(req, req.signal, {
+        compressedBytes: MAX_ENTITY_PATCH_BODY_BYTES,
+        decompressedBytes: MAX_ENTITY_PATCH_BODY_BYTES,
+      }),
+    );
+  } catch (error) {
+    if (error instanceof HttpRequestBodyTooLargeError) {
+      return errorResponse(
+        413,
+        "invalid_request",
+        `Metadata request body exceeds ${MAX_ENTITY_PATCH_BODY_BYTES} bytes`,
+      );
+    }
     return errorResponse(400, "invalid_request", "Invalid JSON body");
   }
   const patch = parseMetadataPatch(body);
@@ -345,7 +362,18 @@ export async function handleEntityRequest(
 ): Promise<Response> {
   const { pathname } = url;
   const match = /^\/api\/v1\/entities\/([^/]+)$/.exec(pathname);
-  const id = match ? decodeURIComponent(match[1]) : null;
+  let id: string | null = null;
+  if (match) {
+    try {
+      id = decodeURIComponent(match[1]);
+    } catch {
+      return errorResponse(
+        400,
+        "invalid_request",
+        "Entity id has malformed URL encoding",
+      );
+    }
+  }
   if (!id) {
     return errorResponse(404, "not_found", `No API route for ${pathname}`);
   }

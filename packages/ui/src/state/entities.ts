@@ -41,7 +41,14 @@ export interface EntityListSource {
 }
 
 export interface RebuildState {
-  phase: "idle" | "checking" | "running" | "cancelling" | "done" | "error";
+  phase:
+    | "idle"
+    | "checking"
+    | "running"
+    | "cancelling"
+    | "done"
+    | "error"
+    | "unknown";
   /** True when the running rebuild was started by this client (Cancel shown
    *  either way — the POST resolves when the rebuild settles). */
   dryRun: boolean;
@@ -218,18 +225,30 @@ export function createEntitiesState({ client, repo, tracked }: EntitiesDeps) {
               external: active,
             },
       );
-    } catch {
-      // A failed probe (offline, unauthorized) is not "idle" — surface it.
+    } catch (error) {
+      // An unknown status must keep paid actions unavailable until a retry
+      // confirms that no external rebuild is active.
       setRebuild((r) =>
         r.phase === "running" || r.phase === "cancelling"
           ? r
-          : { ...r, phase: "idle" },
+          : {
+              phase: "unknown",
+              dryRun: false,
+              external: false,
+              error,
+            },
       );
     }
   }
 
   async function startRebuild(dryRun: boolean): Promise<void> {
-    if (rebuild().phase === "running" || rebuild().phase === "cancelling") {
+    const phase = rebuild().phase;
+    if (
+      phase === "checking" ||
+      phase === "unknown" ||
+      phase === "running" ||
+      phase === "cancelling"
+    ) {
       return;
     }
     setRebuild({ phase: "running", dryRun, external: false });
@@ -277,6 +296,8 @@ export function createEntitiesState({ client, repo, tracked }: EntitiesDeps) {
               ? { phase: "idle", dryRun: false, external: false }
               : r,
           );
+          // An external run may have made partial progress before it stopped.
+          setListNonce((n) => n + 1);
           return;
         }
       } catch {

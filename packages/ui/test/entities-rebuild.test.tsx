@@ -114,6 +114,33 @@ describe("RebuildCard", () => {
     expect(await screen.findByText(/Rebuild complete/)).toBeInTheDocument();
   });
 
+  it(
+    "keeps rebuild actions unavailable when status cannot be checked",
+    async () => {
+      const getEntityRebuildStatus = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockResolvedValue({ active: false });
+      mount(clientWith({ getEntityRebuildStatus }));
+
+      const retry = await screen.findByRole("button", {
+        name: "Retry status check",
+      });
+      expect(
+        screen.queryByRole("button", { name: "Preview (dry run)" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId("rebuild-card")).toHaveTextContent(
+        "actions stay disabled until status is confirmed",
+      );
+
+      fireEvent.click(retry);
+      expect(
+        await screen.findByRole("button", { name: "Preview (dry run)" }),
+      ).toBeEnabled();
+      expect(getEntityRebuildStatus).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it("detects a rebuild started elsewhere", async () => {
     mount(
       clientWith({ getEntityRebuildStatus: async () => ({ active: true }) }),
@@ -146,6 +173,38 @@ describe("RebuildCard", () => {
     ).not.toBeInTheDocument();
     expect(getEntityRebuildStatus).toHaveBeenCalledTimes(2);
   });
+
+  it(
+    "refreshes the entity list after an external rebuild is cancelled",
+    async () => {
+      let active = true;
+      const listEntities = vi.fn(async () => ({
+        entities: [],
+        next_cursor: null,
+        total: 0,
+      }));
+      const getEntityRebuildStatus = vi.fn(async () => ({ active }));
+      const cancelEntityRebuild = vi.fn(async () => {
+        active = false;
+        return { cancelled: true };
+      });
+      mount(
+        clientWith({
+          listEntities,
+          getEntityRebuildStatus,
+          cancelEntityRebuild,
+        }),
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+      expect(
+        await screen.findByRole("button", { name: "Preview (dry run)" }),
+      ).toBeEnabled();
+      await waitFor(() =>
+        expect(listEntities.mock.calls.length).toBeGreaterThan(1),
+      );
+    },
+  );
 
   it("surfaces a hosted-mode refusal", async () => {
     mount(

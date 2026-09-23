@@ -601,8 +601,8 @@ async function handleImportExtract(
 
 /**
  * Tracks the in-flight entity rebuild so a separate cancel request can abort it
- * between batches/projects. Single active rebuild at a time (local dashboard);
- * a new rebuild supersedes any stale controller.
+ * between batches/projects. Only one rebuild may run at a time so status and
+ * cancellation always refer to the same operation.
  */
 let activeRebuildAbort: AbortController | null = null;
 
@@ -632,54 +632,64 @@ async function handleEntityRebuild(
       "Entity rebuild is not available in hosted mode (triggers LLM calls with cost).",
     );
   }
-  const body = await parseBody<{
-    git_remote?: string;
-    path?: string;
-    all?: boolean;
-    dryRun?: boolean;
-    model?: { providerID: string; modelID: string };
-  }>(req);
-
-  const cfg = loreConfig();
-  const defaultModel =
-    body.model ??
-    cfg.model ??
-    defaultModelForProvider(getLastSeenAuthProvider() ?? undefined);
-
-  let llm: LLMClient;
-  try {
-    llm = getAPILLMClient(config);
-  } catch {
+  if (activeRebuildAbort !== null) {
     return errorResponse(
-      503,
-      "service_unavailable",
-      "No LLM client available for entity rebuild",
+      409,
+      "conflict",
+      "An entity rebuild is already active.",
     );
   }
 
-  // Resolve the set of project paths to process.
-  let projectPaths: string[];
-  if (body.all) {
-    projectPaths = data
-      .listProjects()
-      .filter((p) => p.distillation_count > 0)
-      .map((p) => p.path);
-  } else {
-    const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
-    const projectPath = projectId ? getProjectPathById(projectId) : body.path;
-    if (!projectPath) {
-      return errorResponse(
-        404,
-        "not_found",
-        "Project not found. Provide git_remote, path, or all=true.",
-      );
-    }
-    projectPaths = [projectPath];
-  }
-
+  // Reserve the single-flight slot before the first await so overlapping POSTs
+  // cannot both pass the active check and launch paid model work.
   const abort = new AbortController();
   activeRebuildAbort = abort;
   try {
+    const body = await parseBody<{
+      git_remote?: string;
+      path?: string;
+      all?: boolean;
+      dryRun?: boolean;
+      model?: { providerID: string; modelID: string };
+    }>(req);
+
+    const cfg = loreConfig();
+    const defaultModel =
+      body.model ??
+      cfg.model ??
+      defaultModelForProvider(getLastSeenAuthProvider() ?? undefined);
+
+    let llm: LLMClient;
+    try {
+      llm = getAPILLMClient(config);
+    } catch {
+      return errorResponse(
+        503,
+        "service_unavailable",
+        "No LLM client available for entity rebuild",
+      );
+    }
+
+    // Resolve the set of project paths to process.
+    let projectPaths: string[];
+    if (body.all) {
+      projectPaths = data
+        .listProjects()
+        .filter((p) => p.distillation_count > 0)
+        .map((p) => p.path);
+    } else {
+      const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
+      const projectPath = projectId ? getProjectPathById(projectId) : body.path;
+      if (!projectPath) {
+        return errorResponse(
+          404,
+          "not_found",
+          "Project not found. Provide git_remote, path, or all=true.",
+        );
+      }
+      projectPaths = [projectPath];
+    }
+
     const results = [];
     for (const projectPath of projectPaths) {
       if (abort.signal.aborted) break;
