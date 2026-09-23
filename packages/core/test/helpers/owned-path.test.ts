@@ -74,6 +74,28 @@ describe("owned-path cleanup", () => {
     await expect(readFile(replacementFile, "utf8")).resolves.toBe("preserve");
   });
 
+  test("preserves a replacement of the detached path during cleanup", async () => {
+    const owned = await makeOwnedPath();
+    let replacementFile = "";
+
+    await expect(
+      removeOwnedPath(owned, {
+        beforeRemove: async (detached) => {
+          await rm(detached, { recursive: true, force: true });
+          await mkdir(detached);
+          replacementFile = join(detached, "replacement");
+          await writeFile(replacementFile, "preserve");
+        },
+      }),
+    ).rejects.toThrow("owned cleanup path changed during cleanup");
+
+    await expect(readFile(replacementFile, "utf8")).resolves.toBe("preserve");
+    expect(owned.cleaned).toBe(false);
+    const cleanupPath = owned.cleanupPath;
+    if (!cleanupPath) throw new Error("cleanup path was not retained");
+    await rm(cleanupPath, { recursive: true, force: true });
+  });
+
   test("removes a root when marker publication fails after allocation", async () => {
     let allocatedRoot = "";
     await expect(

@@ -56,6 +56,11 @@ export interface HarnessOptions {
   projectPath?: string;
   /** Test-only race hook: runs after selecting the port, before loadConfig(). */
   beforeConfigLoad?: () => void;
+  /** Test-only server seam for startup and cleanup failure paths. */
+  startServer?: (config: GatewayConfig) => Promise<{
+    port: number;
+    stop(): Promise<void>;
+  }>;
 }
 
 export interface Harness {
@@ -188,39 +193,51 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     stopServer?: () => Promise<void>,
   ): Promise<void> {
     const failures: unknown[] = [];
+    let serverStopped = stopServer === undefined;
     if (stopServer) {
       try {
         await stopServer();
+        serverStopped = true;
       } catch (error) {
         failures.push(error);
       }
     }
-    try {
-      closeDB();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      await resetPipelineState();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      _resetAuthForTest();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      setUpstreamInterceptor(undefined);
-    } catch (error) {
-      failures.push(error);
-    }
-    for (const suffix of ["", "-shm", "-wal"]) {
-      const file = `${dbPath}${suffix}`;
+    if (serverStopped) {
       try {
-        if (existsSync(file)) unlinkSync(file);
+        closeDB();
       } catch (error) {
         failures.push(error);
+      }
+      if (failures.length === 0) {
+        try {
+          await resetPipelineState();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length === 0) {
+        try {
+          _resetAuthForTest();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length === 0) {
+        try {
+          setUpstreamInterceptor(undefined);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length === 0) {
+        for (const suffix of ["", "-shm", "-wal"]) {
+          const file = `${dbPath}${suffix}`;
+          try {
+            if (existsSync(file)) unlinkSync(file);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
       }
     }
     if (failures.length > 0) {
@@ -245,7 +262,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
       // so pin the requested harness port on the config object itself.
       config.port = port;
       config.portExplicit = port !== 0;
-      return await startServer(config);
+      return await (opts.startServer ?? startServer)(config);
     } catch (startError) {
       try {
         await cleanupHarnessState();
@@ -258,9 +275,23 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
       throw startError;
     }
   })();
-  if (server.port <= 0) {
-    await server.stop();
-    throw new Error(`test gateway resolved invalid port ${server.port}`);
+  if (
+    !Number.isInteger(server.port) ||
+    server.port < 1 ||
+    server.port > 65_535
+  ) {
+    const invalidPortError = new Error(
+      `test gateway resolved invalid port ${server.port}`,
+    );
+    try {
+      await cleanupHarnessState(() => server.stop());
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [invalidPortError, cleanupError],
+        "test gateway startup and cleanup failed",
+      );
+    }
+    throw invalidPortError;
   }
 
   const baseURL = `http://127.0.0.1:${server.port}`;

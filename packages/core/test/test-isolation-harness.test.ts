@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, watch } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -53,6 +53,15 @@ interface ActiveFixture {
   result: Promise<ChildResult>;
   terminate: (error: Error) => Promise<void>;
 }
+
+interface FileWait {
+  promise: Promise<void>;
+  cancel: (error: Error) => void;
+}
+
+type DescendantTargets =
+  | ReadonlySet<number>
+  | ReadonlyMap<number, string | undefined>;
 
 interface BoundedCapture {
   chunks: Buffer[];
@@ -205,13 +214,14 @@ function startFixture(
     captureOutput(stderr, chunk);
   });
 
-  const knownDescendants = new Set<number>();
+  const knownDescendants = new Map<number, string | undefined>();
   const closeSignal = new Promise<void>((resolveClose) => {
     child.once("close", () => resolveClose());
   });
-  const readySignal = options.readyPath
-    ? waitForFile(options.readyPath)
-    : Promise.resolve();
+  const readyWatch = options.readyPath
+    ? watchForFile(options.readyPath)
+    : undefined;
+  const readySignal = readyWatch?.promise ?? Promise.resolve();
   const ready = readySignal.then(async () => {
     if (!options.descendantPidPath) return;
     const { pid } = await readJson<{ pid: number }>(options.descendantPidPath);
@@ -224,45 +234,55 @@ function startFixture(
   } = {};
   const result = new Promise<ChildResult>((resolveResult, reject) => {
     state.reject = reject;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const armTimeout = () => {
-      timeout = setTimeout(() => {
-        const error = new Error(`fixture ${fixtureLabel} did not exit`);
-        void terminate(error).catch(() => {});
-      }, options.timeoutMs ?? CHILD_TIMEOUT_MS);
-    };
-    void ready.then(armTimeout, (reason: unknown) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       const error = new Error(`fixture ${fixtureLabel} did not exit`);
-      if (reason instanceof Error) error.cause = reason;
       void terminate(error).catch(() => {});
-    });
+    }, options.timeoutMs ?? CHILD_TIMEOUT_MS);
     child.once("error", (error) => {
       if (timeout) clearTimeout(timeout);
+      readyWatch?.cancel(error);
       children.delete(child);
       reject(error);
     });
     child.once("close", (code, signal) => {
       if (timeout) clearTimeout(timeout);
-      if (state.termination) return;
-      if ([...knownDescendants].some(processExists)) {
-        void terminate(
-          new Error(`fixture ${fixtureLabel} exited with a live descendant`),
-        ).catch(() => {});
-        return;
+      if (options.readyPath && !existsSync(options.readyPath)) {
+        readyWatch?.cancel(
+          new Error(`fixture ${fixtureLabel} exited before readiness`),
+        );
       }
-      children.delete(child);
-      if (state.error) {
-        reject(state.error);
-      } else {
-        resolveResult({
-          code,
-          signal,
-          stdout: renderOutput(stdout),
-          stderr: renderOutput(stderr),
-          stdoutTruncated: stdout.truncated,
-          stderrTruncated: stderr.truncated,
-        });
-      }
+      void (async () => {
+        try {
+          await ready;
+        } catch (error) {
+          state.error ??=
+            error instanceof Error ? error : new Error(String(error));
+        }
+        if (state.termination) return;
+        if (
+          [...knownDescendants].some(([pid, token]) =>
+            descendantExists(pid, token),
+          )
+        ) {
+          void terminate(
+            new Error(`fixture ${fixtureLabel} exited with a live descendant`),
+          ).catch(() => {});
+          return;
+        }
+        children.delete(child);
+        if (state.error) {
+          reject(state.error);
+        } else {
+          resolveResult({
+            code,
+            signal,
+            stdout: renderOutput(stdout),
+            stderr: renderOutput(stderr),
+            stdoutTruncated: stdout.truncated,
+            stderrTruncated: stderr.truncated,
+          });
+        }
+      })();
     });
   });
   const terminate = (error: Error): Promise<void> => {
@@ -270,6 +290,7 @@ function startFixture(
     state.error = error;
     state.termination = (async () => {
       try {
+        readyWatch?.cancel(error);
         const killResult = killFixtureTree(child, knownDescendants);
         const [killOutcome, closeOutcome] = await Promise.all([
           settleWithin(killResult, KILL_GRACE_MS),
@@ -302,12 +323,17 @@ function startFixture(
     return state.termination;
   };
   children.set(child, { result, terminate });
+  void ready.catch((reason: unknown) => {
+    const error = new Error(`fixture ${fixtureLabel} readiness failed`);
+    if (reason instanceof Error) error.cause = reason;
+    return terminate(error);
+  });
 
   function registerDescendant(pid: number): void {
     if (!Number.isSafeInteger(pid) || pid <= 0) {
       throw new Error("fixture descendant PID must be a positive integer");
     }
-    knownDescendants.add(pid);
+    knownDescendants.set(pid, processStartToken(pid));
     if (child.exitCode !== null || child.signalCode !== null) {
       void terminate(
         new Error(`fixture ${fixtureLabel} exited with a live descendant`),
@@ -325,7 +351,7 @@ function startFixture(
 
 async function killFixtureTree(
   child: ChildProcess,
-  knownDescendants: ReadonlySet<number>,
+  knownDescendants: DescendantTargets,
 ): Promise<void> {
   if (process.platform !== "win32" && child.pid !== undefined) {
     try {
@@ -350,8 +376,8 @@ async function killFixtureTree(
 
   if (process.platform !== "win32") {
     const descendantKillResults = await Promise.allSettled(
-      [...knownDescendants].map(async (pid) => {
-        if (!processExists(pid)) return;
+      descendantEntries(knownDescendants).map(async ([pid, token]) => {
+        if (!descendantExists(pid, token)) return;
         try {
           process.kill(pid, "SIGKILL");
         } catch (error) {
@@ -368,7 +394,11 @@ async function killFixtureTree(
         "failed to stop every owned Unix descendant",
       );
     }
-    await Promise.all([...knownDescendants].map(waitForProcessExit));
+    await Promise.all(
+      descendantEntries(knownDescendants).map(([pid, token]) =>
+        waitForProcessExit(pid, token),
+      ),
+    );
   }
 }
 
@@ -409,18 +439,26 @@ async function runTaskkill(
 }
 
 async function killKnownWindowsDescendants(
-  knownDescendants: ReadonlySet<number>,
+  knownDescendants: DescendantTargets,
   taskkill: (pid: number) => Promise<void> = runTaskkill,
   exists: (pid: number) => boolean = processExists,
   waitForExit: (pid: number) => Promise<void> = waitForProcessExit,
 ): Promise<void> {
-  const pids = [...knownDescendants];
+  const pids = descendantEntries(knownDescendants);
   const killResults = await Promise.allSettled(
-    pids.map(async (pid) => {
-      if (exists(pid)) await taskkill(pid);
+    pids.map(async ([pid, token]) => {
+      if (descendantIdentityMatches(pid, token) && exists(pid)) {
+        await taskkill(pid);
+      }
     }),
   );
-  const exitResults = await Promise.allSettled(pids.map(waitForExit));
+  const exitResults = await Promise.allSettled(
+    pids.map(([pid, token]) =>
+      descendantIdentityMatches(pid, token)
+        ? waitForExit(pid)
+        : Promise.resolve(),
+    ),
+  );
   const failures = [...killResults, ...exitResults].flatMap((result) =>
     result.status === "rejected" ? [result.reason] : [],
   );
@@ -467,8 +505,40 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function waitForProcessExit(pid: number): Promise<void> {
+function descendantEntries(
+  targets: DescendantTargets,
+): Array<[number, string | undefined]> {
+  if (targets instanceof Map) return [...targets.entries()];
+  const pids = targets as ReadonlySet<number>;
+  return [...pids].map((pid): [number, string | undefined] => [pid, undefined]);
+}
+
+function processStartToken(pid: number): string | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(") ");
+    if (commandEnd < 0) return undefined;
+    return stat.slice(commandEnd + 2).split(" ")[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function descendantIdentityMatches(
+  pid: number,
+  token: string | undefined,
+): boolean {
+  return token === undefined || processStartToken(pid) === token;
+}
+
+function descendantExists(pid: number, token: string | undefined): boolean {
+  return descendantIdentityMatches(pid, token) && processExists(pid);
+}
+
+async function waitForProcessExit(pid: number, token?: string): Promise<void> {
   for (const delayMs of [0, 10, 25, 50, 100, 200, 400, 800]) {
+    if (token !== undefined && !descendantIdentityMatches(pid, token)) return;
     if (!processExists(pid)) return;
     await new Promise<void>((resolveDelay) =>
       setTimeout(resolveDelay, delayMs),
@@ -500,28 +570,40 @@ function required<T>(value: T | null | undefined, label: string): T {
 }
 
 function waitForFile(path: string): Promise<void> {
-  if (existsSync(path)) return Promise.resolve();
-  return new Promise((resolveFile, reject) => {
-    const watcher = watch(dirname(path));
-    const timeout = setTimeout(() => {
-      watcher.close();
-      reject(new Error(`timed out waiting for ${path}`));
-    }, CHILD_TIMEOUT_MS - 1_000);
-    const resolveIfPresent = () => {
-      if (!existsSync(path)) return;
-      clearTimeout(timeout);
-      watcher.close();
-      resolveFile();
-    };
-    watcher.on("change", resolveIfPresent);
-    watcher.on("rename", resolveIfPresent);
-    watcher.once("error", (error) => {
-      clearTimeout(timeout);
-      watcher.close();
-      reject(error);
-    });
-    resolveIfPresent();
+  return watchForFile(path).promise;
+}
+
+function watchForFile(path: string): FileWait {
+  if (existsSync(path)) return { promise: Promise.resolve(), cancel: () => {} };
+
+  let settled = false;
+  let resolveFile: () => void = () => {};
+  let rejectFile: (error: unknown) => void = () => {};
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolveFile = resolvePromise;
+    rejectFile = rejectPromise;
   });
+  const watcher = watch(dirname(path));
+  let timeout: ReturnType<typeof setTimeout>;
+  const finish = (error?: Error): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    watcher.close();
+    if (error) rejectFile(error);
+    else resolveFile();
+  };
+  timeout = setTimeout(() => {
+    finish(new Error(`timed out waiting for ${path}`));
+  }, CHILD_TIMEOUT_MS - 1_000);
+  const resolveIfPresent = (): void => {
+    if (existsSync(path)) finish();
+  };
+  watcher.on("change", resolveIfPresent);
+  watcher.on("rename", resolveIfPresent);
+  watcher.once("error", (error) => finish(error));
+  resolveIfPresent();
+  return { promise, cancel: finish };
 }
 
 describe("Vitest database isolation harness", () => {
@@ -592,7 +674,7 @@ describe("Vitest database isolation harness", () => {
     expect(fixture.directoryWasRemoved).toBe(true);
     expect(fixture.databaseExists).toBe(true);
     expect(snapshot.roots).toHaveLength(1);
-    expect(snapshot.roots[0]?.entries).toEqual([basename(directory)]);
+    expect(snapshot.roots[0]?.entries).toEqual([basename(dirname(directory))]);
     expect(existsSync(directory)).toBe(false);
     expect(existsSync(root)).toBe(false);
   });
@@ -734,6 +816,23 @@ describe("Vitest database isolation harness", () => {
 
     expect(outcome.status).toBe("rejected");
     await waitForProcessExit(pid);
+  });
+
+  test("readiness watchers are cancelled when a fixture exits early", async () => {
+    const parent = await makeParent();
+    const outcome = await settleWithin(
+      startFixture(
+        "early-exit.fixture.ts",
+        parent,
+        {},
+        {
+          readyPath: join(parent, "never-published.json"),
+        },
+      ).result,
+      5_000,
+    );
+
+    expect(outcome.status).toBe("rejected");
   });
 
   test("an exited coordinator cannot orphan its registered descendant", async () => {

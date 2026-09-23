@@ -58,6 +58,11 @@ let undiciHandles: UndiciHandles | null = null;
  * restore the default timeout-disabled Agent. No effect under Bun.
  */
 let dispatcherOverride: Dispatcher | null = null;
+type UpstreamFetchOverride = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Response | undefined | Promise<Response | undefined>;
+let upstreamFetchOverride: UpstreamFetchOverride | null = null;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
@@ -100,6 +105,25 @@ export function restoreUpstreamDispatcherForTest(
 ): boolean {
   if (dispatcherOverride !== expected) return false;
   dispatcherOverride = replacement;
+  return true;
+}
+
+/** Inject a runtime-neutral upstream response override for tests only. */
+export function setUpstreamFetchOverrideForTest(
+  override: UpstreamFetchOverride | null,
+): UpstreamFetchOverride | null {
+  const previous = upstreamFetchOverride;
+  upstreamFetchOverride = override;
+  return previous;
+}
+
+/** Restore an upstream response override only while its owner is active. */
+export function restoreUpstreamFetchOverrideForTest(
+  expected: UpstreamFetchOverride,
+  replacement: UpstreamFetchOverride | null,
+): boolean {
+  if (upstreamFetchOverride !== expected) return false;
+  upstreamFetchOverride = replacement;
   return true;
 }
 
@@ -337,6 +361,8 @@ export async function upstreamFetch(
   init?: RequestInit,
 ): Promise<Response> {
   const safeInit = { ...init, redirect: "manual" as const };
+  const overriddenResponse = await upstreamFetchOverride?.(input, safeInit);
+  if (overriddenResponse) return rejectRedirect(overriddenResponse);
 
   if (isBun) {
     // Bun: use node:https which has no hardcoded timeout cap under Bun's Node

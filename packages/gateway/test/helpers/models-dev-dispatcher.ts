@@ -50,56 +50,111 @@ let requestCount = 0;
 let dispatcher: Dispatcher | undefined;
 let mockAgent: InstanceType<(typeof import("undici"))["MockAgent"]> | undefined;
 let previousDispatcher: Dispatcher | null = null;
+let previousFetchOverride:
+  | ((
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => Response | undefined | Promise<Response | undefined>)
+  | null = null;
 let installationCount = 0;
+let dispatcherOperation = Promise.resolve();
+
+function serializeDispatcherOperation<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = dispatcherOperation;
+  let release: () => void = () => {};
+  dispatcherOperation = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return previous.then(operation).finally(release);
+}
 
 export async function installOfflineModelsDevDispatcher(): Promise<void> {
-  if (dispatcher) {
-    installationCount++;
-    return;
-  }
+  await serializeDispatcherOperation(async () => {
+    if (installationCount > 0) {
+      installationCount++;
+      return;
+    }
 
-  {
-    const { MockAgent } = await import("undici");
-    mockAgent = new MockAgent();
-    mockAgent.disableNetConnect();
-    mockAgent
-      .get("https://models.dev")
-      .intercept({ path: "/api.json", method: "GET" })
-      .reply(() => {
-        requestCount++;
-        return {
-          statusCode: 200,
-          data: JSON.stringify(CANNED_MODELS_DEV),
-          responseOptions: { headers: { "content-type": "application/json" } },
-        };
-      })
-      .persist();
-    dispatcher = mockAgent;
-    const { setUpstreamDispatcherForTest } = await import("../../src/fetch");
-    previousDispatcher = setUpstreamDispatcherForTest(dispatcher);
-    installationCount = 1;
-  }
+    const { setUpstreamDispatcherForTest, setUpstreamFetchOverrideForTest } =
+      await import("../../src/fetch");
+    if (typeof (globalThis as { Bun?: unknown }).Bun !== "undefined") {
+      previousFetchOverride = setUpstreamFetchOverrideForTest(
+        offlineModelsDevResponse,
+      );
+      installationCount = 1;
+      return;
+    }
+    let nextAgent:
+      | InstanceType<(typeof import("undici"))["MockAgent"]>
+      | undefined;
+    try {
+      const { MockAgent } = await import("undici");
+      nextAgent = new MockAgent();
+      nextAgent.disableNetConnect();
+      nextAgent
+        .get("https://models.dev")
+        .intercept({ path: "/api.json", method: "GET" })
+        .reply(() => {
+          requestCount++;
+          return {
+            statusCode: 200,
+            data: JSON.stringify(CANNED_MODELS_DEV),
+            responseOptions: {
+              headers: { "content-type": "application/json" },
+            },
+          };
+        })
+        .persist();
+      previousDispatcher = setUpstreamDispatcherForTest(nextAgent);
+      mockAgent = nextAgent;
+      dispatcher = nextAgent;
+      installationCount = 1;
+    } catch (error) {
+      const { restoreUpstreamFetchOverrideForTest } =
+        await import("../../src/fetch");
+      restoreUpstreamFetchOverrideForTest(
+        offlineModelsDevResponse,
+        previousFetchOverride,
+      );
+      previousFetchOverride = null;
+      await nextAgent?.close();
+      throw error;
+    }
+  });
 }
 
 export async function uninstallOfflineModelsDevDispatcher(): Promise<void> {
-  if (installationCount > 1) {
-    installationCount--;
-    return;
-  }
-  installationCount = 0;
-  const activeDispatcher = dispatcher;
-  const activeMockAgent = mockAgent;
-  const restoreDispatcher = previousDispatcher;
-  dispatcher = undefined;
-  mockAgent = undefined;
-  previousDispatcher = null;
+  await serializeDispatcherOperation(async () => {
+    if (installationCount > 1) {
+      installationCount--;
+      return;
+    }
+    if (installationCount === 0) return;
+    installationCount = 0;
+    const activeDispatcher = dispatcher;
+    const activeMockAgent = mockAgent;
+    const restoreDispatcher = previousDispatcher;
+    const restoreFetchOverride = previousFetchOverride;
+    dispatcher = undefined;
+    mockAgent = undefined;
+    previousDispatcher = null;
+    previousFetchOverride = null;
 
-  if (activeDispatcher) {
-    const { restoreUpstreamDispatcherForTest } =
-      await import("../../src/fetch");
-    restoreUpstreamDispatcherForTest(activeDispatcher, restoreDispatcher);
-  }
-  await activeMockAgent?.close();
+    const {
+      restoreUpstreamDispatcherForTest,
+      restoreUpstreamFetchOverrideForTest,
+    } = await import("../../src/fetch");
+    if (activeDispatcher) {
+      restoreUpstreamDispatcherForTest(activeDispatcher, restoreDispatcher);
+    }
+    restoreUpstreamFetchOverrideForTest(
+      offlineModelsDevResponse,
+      restoreFetchOverride,
+    );
+    await activeMockAgent?.close();
+  });
 }
 
 export function offlineModelsDevResponse(

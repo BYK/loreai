@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeEach, inject, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, inject, vi } from "vitest";
 import { close, invalidateProjectIdCache } from "../src/db";
 import { silenceStderr } from "../src/log";
 import { removeOwnedPath, type OwnedPath } from "./helpers/owned-path";
@@ -23,8 +23,9 @@ vi.mock("../../gateway/src/fetch", async (importOriginal) => {
   };
 });
 
-// Reserve a unique path beneath the run-owned root without creating its
-// directory. A wholly skipped file therefore leaves no per-file root.
+// Reserve a unique path beneath the run-owned root. Capture its identity at
+// the first lifecycle boundary that observes it, never after a pathname has
+// already been registered as owned.
 const runRoot = inject("loreTestRoot");
 const runRootStats = lstatSync(runRoot, { bigint: true });
 const runRootOwner: OwnedPath = {
@@ -35,13 +36,22 @@ const runRootOwner: OwnedPath = {
   cleaned: false,
 };
 const tmp = join(runRoot, randomUUID());
-const testDatabasePath = join(tmp, "test.db");
+const testDatabaseRoot = join(tmp, "database");
+const testDatabasePath = join(testDatabaseRoot, "test.db");
 const testDataHome = join(tmp, "xdg");
-process.env.LORE_TEST_DB_ROOT = tmp;
+process.env.LORE_TEST_DB_ROOT = testDatabaseRoot;
 process.env.LORE_DB_PATH = testDatabasePath;
 process.env.XDG_DATA_HOME = testDataHome;
 let ownedFileRoot: OwnedPath | undefined;
-let testStarted = false;
+
+function createFileRoot(): void {
+  try {
+    mkdirSync(tmp);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  captureFileRoot();
+}
 
 function captureFileRoot(): void {
   if (ownedFileRoot) return;
@@ -67,9 +77,9 @@ function captureFileRoot(): void {
 // file-local teardown that runs after this setup hook under list ordering; the
 // exit reset protects the ordinary stack-ordered path.
 const resetIsolationState = () => {
-  testStarted = true;
+  if (!ownedFileRoot) createFileRoot();
   process.env.NODE_ENV = "test";
-  process.env.LORE_TEST_DB_ROOT = tmp;
+  process.env.LORE_TEST_DB_ROOT = testDatabaseRoot;
   process.env.LORE_DB_PATH = testDatabasePath;
   process.env.XDG_DATA_HOME = testDataHome;
   silenceStderr(false);
@@ -79,6 +89,7 @@ const resetIsolationState = () => {
   // test must never be served to another test that reuses the same path.
   invalidateProjectIdCache();
 };
+beforeAll(createFileRoot);
 beforeEach(resetIsolationState);
 afterEach(() => {
   captureFileRoot();
@@ -87,13 +98,14 @@ afterEach(() => {
 
 afterAll(async () => {
   const failures: unknown[] = [];
+  let databaseClosed = false;
   try {
     close();
+    databaseClosed = true;
   } catch (error) {
     failures.push(error);
   }
-  if (ownedFileRoot === undefined && !testStarted) captureFileRoot();
-  if (ownedFileRoot !== undefined) {
+  if (databaseClosed && ownedFileRoot) {
     try {
       await removeOwnedPath(ownedFileRoot);
     } catch (error) {

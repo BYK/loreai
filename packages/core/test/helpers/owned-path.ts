@@ -1,13 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, renameSync, rmSync } from "node:fs";
-import {
-  lstat,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdtemp, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -73,25 +66,10 @@ function isOwnedAtSync(root: string, owned: OwnedPath): boolean {
   }
 }
 
-async function isOwnedAt(root: string, owned: OwnedPath): Promise<boolean> {
+function isPresentAtSync(path: string): boolean {
   try {
-    if (owned.parent && !(await isOwnedAt(owned.parent.path, owned.parent))) {
-      return false;
-    }
-    const current = await lstat(root, { bigint: true });
-    if (
-      !current.isDirectory() ||
-      current.dev !== owned.identity.dev ||
-      current.ino !== owned.identity.ino
-    ) {
-      return false;
-    }
-    const marker = markerPath(root, owned);
-    return (
-      owned.markerValue === undefined ||
-      (marker !== undefined &&
-        (await readFile(marker, "utf8")) === owned.markerValue)
-    );
+    lstatSync(path);
+    return true;
   } catch (error) {
     if (isMissing(error)) return false;
     throw error;
@@ -100,49 +78,6 @@ async function isOwnedAt(root: string, owned: OwnedPath): Promise<boolean> {
 
 function cleanupPath(path: string): string {
   return join(dirname(path), `.${basename(path)}.lore-cleanup-${randomUUID()}`);
-}
-
-function restoreDetachedPathSync(detached: string, original: string): void {
-  try {
-    lstatSync(original);
-    return;
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-  }
-
-  try {
-    renameSync(detached, original);
-  } catch (error) {
-    if (
-      !isMissing(error) &&
-      (error as NodeJS.ErrnoException).code !== "EEXIST"
-    ) {
-      throw error;
-    }
-  }
-}
-
-async function restoreDetachedPath(
-  detached: string,
-  original: string,
-): Promise<void> {
-  try {
-    await lstat(original);
-    return;
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-  }
-
-  try {
-    await rename(detached, original);
-  } catch (error) {
-    if (
-      !isMissing(error) &&
-      (error as NodeJS.ErrnoException).code !== "EEXIST"
-    ) {
-      throw error;
-    }
-  }
 }
 
 function removeOptions(_path: string): Parameters<typeof rmSync>[1] {
@@ -189,13 +124,23 @@ export function removeOwnedPathSync(
   const detached = owned.cleanupPath;
   if (detached === undefined) throw new Error("owned cleanup path is missing");
   if (!isOwnedAtSync(detached, owned)) {
-    restoreDetachedPathSync(detached, owned.path);
+    if (isPresentAtSync(detached)) {
+      throw new Error("owned cleanup path changed during cleanup");
+    }
     owned.cleanupPath = undefined;
     owned.cleaned = true;
     return;
   }
 
   options.beforeRemove?.(detached);
+  if (!isOwnedAtSync(detached, owned)) {
+    if (isPresentAtSync(detached)) {
+      throw new Error("owned cleanup path changed during cleanup");
+    }
+    owned.cleanupPath = undefined;
+    owned.cleaned = true;
+    return;
+  }
   (options.remove ?? ((path) => rmSync(path, removeOptions(path))))(detached);
   owned.cleanupPath = undefined;
   owned.cleaned = true;
@@ -208,13 +153,13 @@ export async function removeOwnedPath(
   if (owned.cleaned) return;
 
   if (owned.cleanupPath === undefined) {
-    if (!(await isOwnedAt(owned.path, owned))) {
+    if (!isOwnedAtSync(owned.path, owned)) {
       owned.cleaned = true;
       return;
     }
     const detached = cleanupPath(owned.path);
     try {
-      await rename(owned.path, detached);
+      renameSync(owned.path, detached);
     } catch (error) {
       if (isMissing(error)) {
         owned.cleaned = true;
@@ -227,15 +172,26 @@ export async function removeOwnedPath(
 
   const detached = owned.cleanupPath;
   if (detached === undefined) throw new Error("owned cleanup path is missing");
-  if (!(await isOwnedAt(detached, owned))) {
-    await restoreDetachedPath(detached, owned.path);
+  if (!isOwnedAtSync(detached, owned)) {
+    if (isPresentAtSync(detached)) {
+      throw new Error("owned cleanup path changed during cleanup");
+    }
     owned.cleanupPath = undefined;
     owned.cleaned = true;
     return;
   }
 
   await options.beforeRemove?.(detached);
-  await (options.remove ?? ((path) => rm(path, removeOptions(path))))(detached);
+  if (!isOwnedAtSync(detached, owned)) {
+    if (isPresentAtSync(detached)) {
+      throw new Error("owned cleanup path changed during cleanup");
+    }
+    owned.cleanupPath = undefined;
+    owned.cleaned = true;
+    return;
+  }
+  if (options.remove) await options.remove(detached);
+  else rmSync(detached, removeOptions(detached));
   owned.cleanupPath = undefined;
   owned.cleaned = true;
 }

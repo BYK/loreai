@@ -109,6 +109,26 @@ describe("models.dev test isolation", () => {
     }
   });
 
+  test("overlapping models.dev installations share one live owner", async () => {
+    await Promise.all([
+      installOfflineModelsDevDispatcher(),
+      installOfflineModelsDevDispatcher(),
+    ]);
+
+    try {
+      const response = await upstreamFetch("https://models.dev/api.json");
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        anthropic: { models: { "offline-isolation-model": expect.anything() } },
+      });
+    } finally {
+      await Promise.all([
+        uninstallOfflineModelsDevDispatcher(),
+        uninstallOfflineModelsDevDispatcher(),
+      ]);
+    }
+  });
+
   test("a fixture gateway connection failure closes and removes its database", async () => {
     await expect(
       createHarness({
@@ -127,5 +147,64 @@ describe("models.dev test isolation", () => {
     }
 
     harness = await createHarness({ fixtures: [] });
+  });
+
+  test("an invalid bound port uses the complete harness cleanup path", async () => {
+    let stopCalls = 0;
+    await expect(
+      createHarness({
+        fixtures: [],
+        beforeConfigLoad() {
+          db();
+        },
+        startServer: async () => ({
+          port: 0,
+          async stop() {
+            stopCalls++;
+          },
+        }),
+      }),
+    ).rejects.toThrow("resolved invalid port 0");
+    expect(stopCalls).toBe(1);
+  });
+
+  test("an invalid port reports stop failure without skipping cleanup", async () => {
+    let stopCalls = 0;
+    let failure: unknown;
+    try {
+      await createHarness({
+        fixtures: [],
+        beforeConfigLoad() {
+          db();
+        },
+        startServer: async () => ({
+          port: Number.NaN,
+          async stop() {
+            stopCalls++;
+            throw new Error("intentional invalid-port stop failure");
+          },
+        }),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    if (!(failure instanceof AggregateError))
+      throw new Error("missing failure");
+    const cleanupFailure = failure.errors.find(
+      (error): error is AggregateError => error instanceof AggregateError,
+    );
+    expect(cleanupFailure).toBeDefined();
+    expect(cleanupFailure?.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "intentional invalid-port stop failure",
+        }),
+      ]),
+    );
+    expect(stopCalls).toBe(1);
+    const failedDatabase = process.env.LORE_DB_PATH;
+    if (!failedDatabase) throw new Error("failed database path was not set");
+    expect(existsSync(failedDatabase)).toBe(true);
   });
 });

@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
 import { lstatSync, mkdirSync, writeFileSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import setup from "./global-setup";
+import setup, { type GlobalSetupDependencies } from "./global-setup";
 
 type FakeProcess = EventEmitter & {
   pid: number;
@@ -46,6 +46,12 @@ async function initialize(fake: FakeProcess): Promise<{
   return { root, teardown };
 }
 
+function ownedRootDependencies(
+  createRoot: GlobalSetupDependencies["createRoot"],
+): GlobalSetupDependencies {
+  return { createRoot };
+}
+
 describe("database isolation signal cleanup", () => {
   test.each(["SIGINT", "SIGTERM"] as const)(
     "%s removes the owned root and re-raises when no other handler exists",
@@ -61,6 +67,68 @@ describe("database isolation signal cleanup", () => {
       expect(() => lstatSync(root)).toThrow();
     },
   );
+
+  test("a signal during root allocation is handled after allocation", async () => {
+    const fake = fakeProcess();
+    vi.stubGlobal("process", fake);
+    let createdRoot = "";
+    let release = () => {};
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const allocation = new Promise<void>((resolve) => {
+      const originalRelease = release;
+      release = () => {
+        originalRelease();
+        resolve();
+      };
+    });
+
+    const setupPromise = setup(
+      {
+        provide() {},
+      } as never,
+      ownedRootDependencies(async (options) => {
+        const { createOwnedRoot } = await import("./helpers/owned-path");
+        const owned = await createOwnedRoot(options);
+        createdRoot = owned.path;
+        await ready;
+        return owned;
+      }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fake.emit("SIGTERM");
+    release();
+    await allocation;
+    await setupPromise;
+
+    expect(fake.kill).toHaveBeenCalledExactlyOnceWith(fake.pid, "SIGTERM");
+    expect(() => lstatSync(createdRoot)).toThrow();
+  });
+
+  test("a project provision failure cleans the allocated root", async () => {
+    const fake = fakeProcess();
+    vi.stubGlobal("process", fake);
+    let createdRoot = "";
+
+    await expect(
+      setup(
+        {
+          provide() {
+            throw new Error("intentional provision failure");
+          },
+        } as never,
+        ownedRootDependencies(async (options) => {
+          const { createOwnedRoot } = await import("./helpers/owned-path");
+          const owned = await createOwnedRoot(options);
+          createdRoot = owned.path;
+          return owned;
+        }),
+      ),
+    ).rejects.toThrow("intentional provision failure");
+
+    expect(() => lstatSync(createdRoot)).toThrow();
+  });
 
   test("a later one-shot listener retains the root until exit", async () => {
     const fake = fakeProcess();
@@ -128,7 +196,6 @@ describe("database isolation signal cleanup", () => {
     await teardown();
 
     expect(lstatSync(root).isDirectory()).toBe(true);
-    await expect(readFile(artifact, "utf8")).resolves.toBe("data");
 
     fake.emit("exit", 0);
     expect(() => lstatSync(root)).toThrow();

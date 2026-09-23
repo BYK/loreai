@@ -43,10 +43,7 @@ import { judge } from "./judge";
 import { scoreRetrieval } from "./recall-score";
 import type { EvalLLMClient } from "./llm-backend";
 import { createEvalLLMClient, resolveBackend } from "./llm-backend";
-import {
-  createOwnedRoot,
-  removeOwnedPathSync,
-} from "../test/helpers/owned-path";
+import { createOwnedRoot, removeOwnedPath } from "../test/helpers/owned-path";
 
 // ---------------------------------------------------------------------------
 // Gateway connection
@@ -226,6 +223,7 @@ export async function startLiveGateway(
   const previousEnvironment = {
     LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
     LORE_DB_PATH: process.env.LORE_DB_PATH,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     LORE_LISTEN_PORT: process.env.LORE_LISTEN_PORT,
     LORE_IDLE_TIMEOUT: process.env.LORE_IDLE_TIMEOUT,
     LORE_BATCH_DISABLED: process.env.LORE_BATCH_DISABLED,
@@ -236,61 +234,61 @@ export async function startLiveGateway(
   const configuredRootIdentity = configuredRoot
     ? lstatSync(configuredRoot, { bigint: true })
     : undefined;
-  const ownedRoot = await createOwnedRoot({
-    prefix: "lore-eval-live-",
-    parent: configuredRoot,
-  });
-  if (configuredRoot && configuredRootIdentity) {
-    ownedRoot.parent = {
-      path: configuredRoot,
-      identity: {
-        dev: configuredRootIdentity.dev,
-        ino: configuredRootIdentity.ino,
-      },
-      cleaned: false,
-    };
-  }
-  const dbPath = join(ownedRoot.path, "test.db");
-  process.env.LORE_TEST_DB_ROOT = ownedRoot.path;
-  process.env.LORE_DB_PATH = dbPath;
-  process.env.LORE_LISTEN_PORT = "0";
-  process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
-  process.env.LORE_BATCH_DISABLED = "1";
-  if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
-
+  let ownedRoot: Awaited<ReturnType<typeof createOwnedRoot>> | undefined;
+  let dbPath = "";
   let server: LiveServer | undefined;
   let closeDB: (() => void) | undefined;
   let resetPipelineState: (() => Promise<void>) | undefined;
   let teardownPromise: Promise<void> | undefined;
+  let serverStopped = false;
+  let databaseClosed = false;
+  let pipelineReset = false;
+  let rootRemoved = false;
+  let environmentRestored = false;
 
   const restoreEnvironment = (): void => {
+    if (environmentRestored) return;
     for (const [key, value] of Object.entries(previousEnvironment)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    environmentRestored = true;
   };
   const teardown = async (): Promise<void> => {
     const failures: unknown[] = [];
-    try {
-      await server?.stop();
-    } catch (error) {
-      failures.push(error);
+    if (server && !serverStopped) {
+      try {
+        await server.stop();
+        serverStopped = true;
+      } catch (error) {
+        failures.push(error);
+      }
     }
-    try {
-      closeDB?.();
-    } catch (error) {
-      failures.push(error);
+    if (failures.length === 0 && closeDB && !databaseClosed) {
+      try {
+        closeDB();
+        databaseClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
     }
-    try {
-      await resetPipelineState?.();
-    } catch (error) {
-      failures.push(error);
+    if (failures.length === 0 && resetPipelineState && !pipelineReset) {
+      try {
+        await resetPipelineState();
+        pipelineReset = true;
+      } catch (error) {
+        failures.push(error);
+      }
     }
-    try {
-      removeOwnedPathSync(ownedRoot);
-    } catch (error) {
-      failures.push(error);
-    } finally {
+    if (failures.length === 0 && ownedRoot && !rootRemoved) {
+      try {
+        await removeOwnedPath(ownedRoot);
+        rootRemoved = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 0) {
       restoreEnvironment();
     }
     if (failures.length > 0) {
@@ -308,6 +306,29 @@ export async function startLiveGateway(
   };
 
   try {
+    ownedRoot = await createOwnedRoot({
+      prefix: "lore-eval-live-",
+      parent: configuredRoot,
+    });
+    if (configuredRoot && configuredRootIdentity) {
+      ownedRoot.parent = {
+        path: configuredRoot,
+        identity: {
+          dev: configuredRootIdentity.dev,
+          ino: configuredRootIdentity.ino,
+        },
+        cleaned: false,
+      };
+    }
+    dbPath = join(ownedRoot.path, "test.db");
+    process.env.LORE_TEST_DB_ROOT = ownedRoot.path;
+    process.env.LORE_DB_PATH = dbPath;
+    process.env.XDG_DATA_HOME = join(ownedRoot.path, "xdg");
+    process.env.LORE_LISTEN_PORT = "0";
+    process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
+    process.env.LORE_BATCH_DISABLED = "1";
+    if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
+
     const importedServer = dependencies.startServer
       ? undefined
       : await import("../../gateway/src/server");
@@ -335,11 +356,20 @@ export async function startLiveGateway(
   } catch (error) {
     try {
       await teardown();
-    } catch (cleanupError) {
-      throw new AggregateError(
-        [error, cleanupError],
-        "live eval gateway startup and cleanup failed",
-      );
+    } catch (firstCleanupError) {
+      try {
+        await teardown();
+      } catch (secondCleanupError) {
+        const cleanupError = new AggregateError(
+          [firstCleanupError, secondCleanupError],
+          "live eval gateway cleanup retries failed",
+        );
+        throw new AggregateError(
+          [error, cleanupError],
+          "live eval gateway startup and cleanup failed",
+        );
+      }
+      throw error;
     }
     throw error;
   }

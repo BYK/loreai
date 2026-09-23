@@ -148,6 +148,7 @@ describe("standalone eval database ownership", () => {
     const previousEnvironment = {
       LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
       LORE_DB_PATH: process.env.LORE_DB_PATH,
+      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     };
     delete process.env.LORE_TEST_DB_ROOT;
     let ownedRoot = "";
@@ -165,6 +166,7 @@ describe("standalone eval database ownership", () => {
       const gateway = await startLiveGateway(dependencies);
       ownedRoot = process.env.LORE_TEST_DB_ROOT ?? "";
       expect(ownedRoot).toMatch(/\/lore-eval-live-/);
+      expect(process.env.XDG_DATA_HOME).toBe(join(ownedRoot, "xdg"));
       await gateway.teardown?.();
       await expect(lstat(ownedRoot)).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
@@ -177,6 +179,11 @@ describe("standalone eval database ownership", () => {
         delete process.env.LORE_DB_PATH;
       } else {
         process.env.LORE_DB_PATH = previousEnvironment.LORE_DB_PATH;
+      }
+      if (previousEnvironment.XDG_DATA_HOME === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = previousEnvironment.XDG_DATA_HOME;
       }
     }
   });
@@ -222,13 +229,18 @@ describe("standalone eval database ownership", () => {
           expect.objectContaining({ message: "intentional stop failure" }),
         ]),
       );
-      await expect(readdir(parent)).resolves.toEqual([]);
-      expect(process.env.LORE_TEST_DB_ROOT).toBe(parent);
-      expect(closeCalls).toBe(2);
-      expect(resetCalls).toBe(2);
+      await expect(readdir(parent)).resolves.toHaveLength(1);
+      expect(process.env.LORE_TEST_DB_ROOT).toMatch(
+        new RegExp(`^${parent}/lore-eval-live-`),
+      );
+      expect(closeCalls).toBe(1);
+      expect(resetCalls).toBe(1);
 
       await teardown();
       expect(stopCalls).toBe(2);
+      expect(closeCalls).toBe(2);
+      expect(resetCalls).toBe(2);
+      await expect(readdir(parent)).resolves.toEqual([]);
     } finally {
       if (previousRoot === undefined) delete process.env.LORE_TEST_DB_ROOT;
       else process.env.LORE_TEST_DB_ROOT = previousRoot;
