@@ -2417,6 +2417,7 @@ export function streamResponsesPassthrough(
   sessionID?: string,
   validation: ResponsesValidationMode = "public",
   signal?: AbortSignal,
+  inactivityMs?: number,
 ): Response {
   const state = makeResponsesAccState();
   const encoder = new TextEncoder();
@@ -2547,6 +2548,7 @@ export function streamResponsesPassthrough(
               validation,
               stopAtTerminal: true,
               signal: cancelController.signal,
+              inactivityMs,
               allowFailureTerminal: true,
               state,
               onReader: (reader) => {
@@ -2724,7 +2726,7 @@ function mapStatusToStopReason(status: string): string {
  */
 export function translateAnthropicStreamToResponses(
   anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal } = {},
+  opts: { strict?: boolean; signal?: AbortSignal; inactivityMs?: number } = {},
 ): Response {
   const encoder = new TextEncoder();
   // Reuse the Anthropic accumulator internally so we get a complete
@@ -2818,6 +2820,7 @@ export function translateAnthropicStreamToResponses(
 
           for await (const { event, data } of parseSSEStream(reader, {
             signal: opts.signal,
+            inactivityMs: opts.inactivityMs,
             requireEventTerminator: opts.strict,
             fatalUtf8: opts.strict,
             maxFrames: opts.strict ? DEFAULT_MAX_SSE_FRAMES : undefined,

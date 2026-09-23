@@ -15746,6 +15746,7 @@ export function validatedMetaStream(
   protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
   codex: boolean,
   signal?: AbortSignal,
+  inactivityMs = FOREGROUND_SSE_INACTIVITY_MS,
 ): Response {
   if (protocol === "openai-responses") {
     return streamResponsesPassthrough(
@@ -15754,6 +15755,7 @@ export function validatedMetaStream(
       undefined,
       codex ? "codex" : "public",
       signal,
+      inactivityMs,
     );
   }
   const abort = new AbortController();
@@ -15830,6 +15832,7 @@ export function validatedMetaStream(
             try {
               for await (const { event, data } of parseSSEStream(reader, {
                 signal: abort.signal,
+                inactivityMs,
                 requireEventTerminator: true,
                 fatalUtf8: true,
                 maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -15846,6 +15849,7 @@ export function validatedMetaStream(
           } else if (protocol === "openai") {
             await accumulateOpenAISSEStream(response, {
               signal: abort.signal,
+              inactivityMs,
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
@@ -15854,6 +15858,7 @@ export function validatedMetaStream(
           } else {
             await accumulateGeminiSSEStream(response, {
               signal: abort.signal,
+              inactivityMs,
               strict: true,
               stopAtTerminal: true,
               onValidatedEvent: forward,
@@ -15994,6 +15999,7 @@ async function handlePassthrough(
           translateAnthropicStreamToOpenAI(anthropicSSE, {
             strict: true,
             signal: abortScope.signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
           }),
         );
       }
@@ -16002,6 +16008,7 @@ async function handlePassthrough(
           translateAnthropicStreamToResponses(anthropicSSE, {
             strict: true,
             signal: abortScope.signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
           }),
         );
       }
@@ -16010,6 +16017,7 @@ async function handlePassthrough(
           translateAnthropicStreamToGemini(anthropicSSE, {
             strict: true,
             signal: abortScope.signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
           }),
         );
       }
@@ -16019,6 +16027,7 @@ async function handlePassthrough(
       wireProtocol === "openai"
         ? accumulateOpenAISSEStream(upstreamResponse, {
             signal: abortScope.signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
             strict: true,
             stopAtTerminal: true,
             consumeUntilDone: true,
@@ -16026,6 +16035,7 @@ async function handlePassthrough(
         : wireProtocol === "openai-responses"
           ? accumulateResponsesSSEStream(upstreamResponse, {
               signal: abortScope.signal,
+              inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
               validation: req.codex === true ? "codex" : "public",
               stopAtTerminal: true,
               requireCompletedTerminal: true,
@@ -16033,11 +16043,13 @@ async function handlePassthrough(
           : wireProtocol === "gemini"
             ? accumulateGeminiSSEStream(upstreamResponse, {
                 signal: abortScope.signal,
+                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
                 strict: true,
                 stopAtTerminal: true,
               })
             : accumulateSSEResponse(upstreamResponse, {
                 signal: abortScope.signal,
+                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
                 strict: true,
                 stopAtTerminal: true,
               }),
@@ -16130,6 +16142,7 @@ async function handleProvisionalConversationTurn(
       ? forwarded.effectiveProtocol === "openai-responses"
         ? await accumulateResponsesSSEStream(upstreamResponse, {
             signal: abortScope.signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -16137,6 +16150,7 @@ async function handleProvisionalConversationTurn(
         : forwarded.effectiveProtocol === "openai"
           ? await accumulateOpenAISSEStream(upstreamResponse, {
               signal: abortScope.signal,
+              inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
@@ -16147,11 +16161,13 @@ async function handleProvisionalConversationTurn(
           : forwarded.effectiveProtocol === "gemini"
             ? await accumulateGeminiSSEStream(upstreamResponse, {
                 signal: abortScope.signal,
+                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
                 strict: true,
                 stopAtTerminal: true,
               })
             : await accumulateSSEResponse(upstreamResponse, {
                 signal: abortScope.signal,
+                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
                 strict: true,
                 stopAtTerminal: true,
               })
@@ -18908,6 +18924,7 @@ async function handleConversationTurn(
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
             signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
             validation: currentModifiedReq.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -19450,6 +19467,7 @@ async function handleConversationTurn(
             sessionState.sessionID,
             req.codex ? "codex" : "public",
             foregroundAbort.signal,
+            FOREGROUND_SSE_INACTIVITY_MS,
           ),
         );
       }
@@ -19459,6 +19477,7 @@ async function handleConversationTurn(
         captureUnsuccessfulResponses(
           accumulateResponsesSSEStream(upstreamResponse, {
             signal: foregroundAbort.signal,
+            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -19491,6 +19510,7 @@ async function handleConversationTurn(
       const resp = await awaitForeground(
         accumulateOpenAISSEStream(upstreamResponse, {
           signal: foregroundAbort.signal,
+          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
           strict: true,
           stopAtTerminal: true,
           consumeUntilDone: true,
@@ -19507,6 +19527,7 @@ async function handleConversationTurn(
       const resp = await awaitForeground(
         accumulateGeminiSSEStream(upstreamResponse, {
           signal: foregroundAbort.signal,
+          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
           strict: true,
           stopAtTerminal: true,
         }),
@@ -19557,6 +19578,7 @@ async function handleConversationTurn(
       return finishForeground(
         translateAnthropicStreamToOpenAI(anthropicSSE, {
           signal: foregroundAbort.signal,
+          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
           propagateErrors: true,
         }),
       );
@@ -19565,6 +19587,7 @@ async function handleConversationTurn(
       return finishForeground(
         translateAnthropicStreamToResponses(anthropicSSE, {
           signal: foregroundAbort.signal,
+          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
         }),
       );
     }
@@ -19572,6 +19595,7 @@ async function handleConversationTurn(
       return finishForeground(
         translateAnthropicStreamToGemini(anthropicSSE, {
           signal: foregroundAbort.signal,
+          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
         }),
       );
     }

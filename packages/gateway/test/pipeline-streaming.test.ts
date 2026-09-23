@@ -699,21 +699,31 @@ const STALLED_META_CASES = [
   },
 ] as const;
 
-function stalledMetaUpstream(wire: string): {
+function stalledMetaUpstream(
+  wire: string,
+  heartbeatMs?: number,
+): {
   response: Response;
   cancelled: () => boolean;
 } {
   let cancelled = false;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   const response = new Response(
     new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode(wire));
+        if (heartbeatMs) {
+          heartbeatTimer = setInterval(() => {
+            controller.enqueue(new TextEncoder().encode(": keepalive\n\n"));
+          }, heartbeatMs);
+        }
       },
       pull() {
         return new Promise(() => {});
       },
       cancel() {
         cancelled = true;
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
         return new Promise<void>(() => {});
       },
     }),
@@ -810,6 +820,33 @@ describe("Pipeline — streaming responses", () => {
       }
       expect(cancelled).toBe(1);
       expect(upstream.body?.locked).toBe(false);
+    },
+  );
+
+  it.each([
+    ["OpenAI", translateAnthropicStreamToOpenAI],
+    ["Responses", translateAnthropicStreamToResponses],
+    ["Gemini", translateAnthropicStreamToGemini],
+  ] as const)(
+    "applies the inactivity deadline to Anthropic->%s translations",
+    async (_name, translate) => {
+      vi.useFakeTimers();
+      const source = stalledMetaUpstream(STALLED_META_CASES[0].wire);
+      try {
+        const downstream = translate(source.response, {
+          strict: true,
+          inactivityMs: 25,
+        });
+        const result = expect(downstream.text()).rejects.toThrow(
+          "SSE stream inactivity deadline exceeded",
+        );
+        await vi.advanceTimersByTimeAsync(25);
+        await result;
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 
@@ -6544,7 +6581,10 @@ describe("Pipeline — streaming responses", () => {
     "foreground deadline settles a stalled $protocol meta body",
     async ({ protocol, model, provider, upstream, wire }) => {
       vi.useFakeTimers();
-      const source = stalledMetaUpstream(wire);
+      const source = stalledMetaUpstream(
+        wire,
+        FOREGROUND_SSE_INACTIVITY_MS / 2,
+      );
       setUpstreamInterceptor(async () => source.response);
       try {
         const downstream = await handleRequest(
@@ -6577,6 +6617,51 @@ describe("Pipeline — streaming responses", () => {
         expect(source.response.body?.locked).toBe(false);
       } finally {
         setUpstreamInterceptor(undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(STALLED_META_CASES)(
+    "foreground inactivity deadline settles a stalled $protocol meta body",
+    async ({ protocol, wire }) => {
+      vi.useFakeTimers();
+      const source = stalledMetaUpstream(wire);
+      try {
+        const downstream = validatedMetaStream(
+          source.response,
+          protocol,
+          false,
+          undefined,
+          25,
+        );
+        const outcome = Promise.race([
+          downstream.text().then(
+            (body) => ({ body, error: undefined }),
+            (error: unknown) => ({ body: undefined, error }),
+          ),
+          new Promise<{ body: undefined; error: Error }>((resolve) => {
+            setTimeout(() => {
+              resolve({
+                body: undefined,
+                error: new Error("inactivity deadline was not enforced"),
+              });
+            }, 100);
+          }),
+        ]);
+        await vi.advanceTimersByTimeAsync(25);
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await outcome;
+        if (protocol === "openai-responses") {
+          expect(result.body).toContain("event: response.failed");
+        } else {
+          expect(result.error).toMatchObject({
+            message: "SSE stream inactivity deadline exceeded",
+          });
+        }
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+      } finally {
         vi.useRealTimers();
       }
     },

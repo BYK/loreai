@@ -373,7 +373,7 @@ export async function accumulateGeminiSSEStream(
  */
 export function translateAnthropicStreamToGemini(
   anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal } = {},
+  opts: { strict?: boolean; signal?: AbortSignal; inactivityMs?: number } = {},
 ): Response {
   const downstreamAbort = new AbortController();
   const signal = opts.signal
@@ -418,6 +418,7 @@ export function translateAnthropicStreamToGemini(
           try {
             const resp = await accumulateSSEResponse(anthropicResponse, {
               signal,
+              inactivityMs: opts.inactivityMs,
               strict: opts.strict,
               stopAtTerminal: opts.strict,
             });

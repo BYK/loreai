@@ -135,6 +135,7 @@ export function translateAnthropicStreamToOpenAI(
   opts: {
     strict?: boolean;
     signal?: AbortSignal;
+    inactivityMs?: number;
     /** Preserve failures from a validated source without revalidating generated SSE. */
     propagateErrors?: boolean;
   } = {},
@@ -238,6 +239,7 @@ export function translateAnthropicStreamToOpenAI(
 
           for await (const { event, data } of parseSSEStream(reader, {
             signal: opts.signal,
+            inactivityMs: opts.inactivityMs,
             requireEventTerminator: opts.strict,
             fatalUtf8: opts.strict,
             maxFrames: opts.strict ? DEFAULT_MAX_SSE_FRAMES : undefined,
