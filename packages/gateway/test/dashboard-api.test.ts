@@ -226,9 +226,9 @@ describe("GET /api/v1/entities/:id", () => {
   it("rejects malformed URL encoding in an entity id", async () => {
     const res = await api("/api/v1/entities/%E0%A4%A");
     expect(res.status).toBe(400);
-    expect(
-      ((await res.json()) as { error: { type: string } }).error.type,
-    ).toBe("invalid_request");
+    expect(((await res.json()) as { error: { type: string } }).error.type).toBe(
+      "invalid_request",
+    );
   });
 
   it("reports metadata:null for malformed stored JSON", async () => {
@@ -339,9 +339,9 @@ describe("PATCH /api/v1/entities/:id", () => {
       body: " ".repeat(16 * 1024 + 1),
     });
     expect(res.status).toBe(413);
-    expect(
-      ((await res.json()) as { error: { type: string } }).error.type,
-    ).toBe("invalid_request");
+    expect(((await res.json()) as { error: { type: string } }).error.type).toBe(
+      "invalid_request",
+    );
   });
 
   it("404s when the entity was deleted between load and save", async () => {
