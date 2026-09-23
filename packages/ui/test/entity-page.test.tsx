@@ -75,6 +75,9 @@ describe("EntityPage", () => {
     expect(screen.getByDisplayValue("engineer")).toBeInTheDocument();
     expect(screen.getByText("Charles Babbage")).toBeInTheDocument();
     expect(screen.getByText("Built the analytical engine")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Built the analytical engine" }),
+    ).toHaveAttribute("href", "/knowledge/k-1");
   });
 
   it("shows the not-found state for an unknown id", async () => {
