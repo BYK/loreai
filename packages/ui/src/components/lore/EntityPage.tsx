@@ -48,10 +48,12 @@ const MetadataForm: Component<{
   const [error, setError] = createSignal<unknown>();
   const [saved, setSaved] = createSignal(false);
 
+  const [baseline, setBaseline] = createSignal(props.detail);
+
   const dirty = () =>
-    role().trim() !== metaString(props.detail, "role") ||
-    description().trim() !== metaString(props.detail, "description") ||
-    notes().trim() !== metaString(props.detail, "notes");
+    role().trim() !== metaString(baseline(), "role") ||
+    description().trim() !== metaString(baseline(), "description") ||
+    notes().trim() !== metaString(baseline(), "notes");
 
   const save = async () => {
     setSaving(true);
@@ -62,6 +64,10 @@ const MetadataForm: Component<{
         props.detail.entity.id,
         { role: role(), description: description(), notes: notes() },
       );
+      setRole(metaString(updated, "role"));
+      setDescription(metaString(updated, "description"));
+      setNotes(metaString(updated, "notes"));
+      setBaseline(updated);
       setSaved(true);
       props.onSaved?.(updated);
     } catch (reason) {
