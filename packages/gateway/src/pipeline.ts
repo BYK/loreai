@@ -615,6 +615,8 @@ const KNOWLEDGE_DELTA_FRAMING_PREFIX = "[Lore knowledge update —";
 
 /** One-time initialization flag. */
 let initialized = false;
+/** Load the process-wide stream deadlines before the first request is routed. */
+let sseDeadlineConfigurationPromise: Promise<void> | undefined;
 
 // --- Response warning marker ---
 // Injected into the response (assistant message) so the user can see it.
@@ -1158,6 +1160,7 @@ async function resetPipelineStateInner(opts?: {
     inFlightBackground.clear();
   }
   initialized = false;
+  sseDeadlineConfigurationPromise = undefined;
   configureSSEInactivityDeadlines({});
   maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
   maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
@@ -4431,9 +4434,6 @@ async function initIfNeeded(
   }
 
   await load(projectPath);
-  configureSSEInactivityDeadlines(
-    config.hostedMode ? {} : loreConfig().timeouts,
-  );
   if (requestGeneration !== undefined) {
     assertCurrentPipelineGeneration(signal, requestGeneration);
   }
@@ -4577,6 +4577,34 @@ async function initIfNeeded(
   }
 
   log.info(`gateway pipeline initialized: ${projectPath}`);
+}
+
+/**
+ * Resolve the gateway's process-wide stream deadlines once, before routing
+ * creates any foreground abort scopes. Client-supplied project paths must not
+ * change these process-wide timers from one request to another, so local mode
+ * reads the gateway's launch directory and hosted mode uses environment values.
+ */
+async function ensureGatewaySSEDeadlineConfiguration(
+  config: GatewayConfig,
+): Promise<void> {
+  if (!sseDeadlineConfigurationPromise) {
+    sseDeadlineConfigurationPromise = (async () => {
+      if (config.hostedMode) {
+        enableHostedMode();
+        configureSSEInactivityDeadlines({});
+        return;
+      }
+      await load(process.cwd());
+      configureSSEInactivityDeadlines(loreConfig().timeouts);
+    })();
+  }
+  try {
+    await sseDeadlineConfigurationPromise;
+  } catch (error) {
+    sseDeadlineConfigurationPromise = undefined;
+    throw error;
+  }
 }
 
 function getLLMClient(config: GatewayConfig): LLMClient {
@@ -14897,6 +14925,7 @@ export async function handleCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
+    await ensureGatewaySSEDeadlineConfiguration(config);
     const preflight = preflightDirectCompactionSession(req, config);
     if (preflight) return preflight;
     streamingPostResponsesAccepting = true;
@@ -15174,6 +15203,7 @@ export async function handleResponsesCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
+    await ensureGatewaySSEDeadlineConfiguration(config);
     streamingPostResponsesAccepting = true;
     const requestGeneration = streamingPostResponseGeneration;
     const abortScope = createForegroundAbortScope(req.signal);
@@ -15220,6 +15250,7 @@ export async function passthroughResponsesCompact(
   trustedUpstreamBase?: string | null,
   parsedRequest?: GatewayRequest,
 ): Promise<Response> {
+  await ensureGatewaySSEDeadlineConfiguration(config);
   const abortScope = createForegroundAbortScope(callerSignal);
   if (hasConflictingAuthHeaders(rawHeaders)) {
     abortScope.dispose();
@@ -20457,6 +20488,7 @@ async function handleRequestForTenant(
   if (pipelineResetInProgress) {
     return errorResponse(503, "Gateway pipeline is resetting");
   }
+  await ensureGatewaySSEDeadlineConfiguration(config);
   streamingPostResponsesAccepting = true;
   const requestGeneration = streamingPostResponseGeneration;
   let resolveDownstreamSettled: (() => void) | undefined;

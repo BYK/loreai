@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "../src/config";
 import {
   getActiveSessions,
@@ -9,7 +12,10 @@ import {
   resetPipelineState,
   setUpstreamInterceptor,
 } from "../src/pipeline";
-import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
+import {
+  FOREGROUND_REQUEST_TIMEOUT_MS,
+  getSSEInactivityDeadlines,
+} from "../src/sse-inactivity";
 import type { GatewayRequest } from "../src/translate/types";
 import { handleModelsPassthrough, startServer } from "../src/server";
 import { upstreamFetch } from "../src/fetch";
@@ -116,6 +122,74 @@ afterEach(async () => {
 });
 
 describe("foreground passthrough route aborts", () => {
+  test("loads gateway cwd timeout config before the first meta passthrough", async () => {
+    const previousCwd = process.cwd();
+    const projectPath = mkdtempSync(join(tmpdir(), "lore-timeouts-"));
+    try {
+      writeFileSync(
+        join(projectPath, ".lore.json"),
+        JSON.stringify({
+          timeouts: {
+            foregroundSseInactivityMs: 700_000,
+            foregroundRequestTimeoutMs: 800_000,
+            workerResponseInactivityMs: 300_000,
+            workerRequestTimeoutMs: 400_000,
+          },
+        }),
+      );
+      process.chdir(projectPath);
+      await resetPipelineState({ fast: true });
+      mockedFetch.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            id: "msg_meta_timeout_config",
+            type: "message",
+            role: "assistant",
+            model: "claude-test",
+            content: [{ type: "text", text: "Title" }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const response = await handleRequest(
+        {
+          protocol: "anthropic",
+          model: "claude-test",
+          system: "",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "title" }] },
+          ],
+          tools: [],
+          stream: false,
+          maxTokens: 32,
+          metadata: {},
+          rawHeaders: {
+            authorization: "Bearer test-key",
+            "x-lore-session-id": "first-meta-timeout-config",
+            "x-lore-project": projectPath,
+            "x-lore-agent": "title",
+          },
+        },
+        config,
+      );
+      await response.text();
+
+      expect(getSSEInactivityDeadlines()).toEqual({
+        foregroundSseInactivityMs: 700_000,
+        foregroundRequestTimeoutMs: 800_000,
+        workerResponseInactivityMs: 300_000,
+        workerRequestTimeoutMs: 400_000,
+      });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   test.each(["compact", "responses-compact"] as const)(
     "applies the foreground deadline to a stalled %s upload",
     async (route) => {
@@ -357,14 +431,20 @@ describe("foreground passthrough route aborts", () => {
   test.each(ROUTES)(
     "caller abort settles $name when fetch ignores signal",
     async ({ invoke, target }) => {
-      mockedFetch.mockImplementation((url) =>
-        fetchUrl(url).endsWith(target)
-          ? new Promise(() => {})
-          : Promise.resolve(new Response("{}")),
-      );
+      let resolveFetchStarted!: () => void;
+      const fetchStarted = new Promise<void>((resolve) => {
+        resolveFetchStarted = resolve;
+      });
+      mockedFetch.mockImplementation((url) => {
+        if (fetchUrl(url).endsWith(target)) {
+          resolveFetchStarted();
+          return new Promise(() => {});
+        }
+        return Promise.resolve(new Response("{}"));
+      });
       const caller = new AbortController();
       const pending = invoke(caller.signal);
-      await Promise.resolve();
+      await fetchStarted;
       caller.abort(new DOMException("caller aborted", "AbortError"));
       const response = await pending;
       expect(response.status).toBe(502);
@@ -380,13 +460,19 @@ describe("foreground passthrough route aborts", () => {
     "300s deadline settles $name when fetch ignores signal",
     async ({ invoke, target }) => {
       vi.useFakeTimers();
-      mockedFetch.mockImplementation((url) =>
-        fetchUrl(url).endsWith(target)
-          ? new Promise(() => {})
-          : Promise.resolve(new Response("{}")),
-      );
+      let resolveFetchStarted!: () => void;
+      const fetchStarted = new Promise<void>((resolve) => {
+        resolveFetchStarted = resolve;
+      });
+      mockedFetch.mockImplementation((url) => {
+        if (fetchUrl(url).endsWith(target)) {
+          resolveFetchStarted();
+          return new Promise(() => {});
+        }
+        return Promise.resolve(new Response("{}"));
+      });
       const pending = invoke();
-      await Promise.resolve();
+      await fetchStarted;
       await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       const response = await pending;
       expect(response.status).toBe(502);
