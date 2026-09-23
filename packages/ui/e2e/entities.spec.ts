@@ -33,9 +33,7 @@ test.describe("entities (UI-08)", () => {
 
     // The write persisted — a reload re-reads the same notes from the server.
     await page.reload();
-    await expect(detail.getByTestId("entity-notes")).toHaveValue(
-      notesValue,
-    );
+    await expect(detail.getByTestId("entity-notes")).toHaveValue(notesValue);
   });
 
   test("unknown entity id shows the not-found state", async ({ page }) => {
