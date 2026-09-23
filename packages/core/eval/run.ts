@@ -170,9 +170,9 @@ console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");
 
-await withOwnedDatabaseRoot(async () => {
+await withOwnedDatabaseRoot(async (signal) => {
   const { printSummary, runEval } = await import("./harness");
-  const results = await runEval(config);
+  const results = await runEval({ ...config, signal });
   console.log("");
   printSummary(results);
 

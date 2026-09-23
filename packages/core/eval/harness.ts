@@ -55,6 +55,7 @@ export interface GatewayHandle {
   chat(
     requestBody: unknown,
     headers?: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<Response>;
   /** Stop the gateway (fixture mode only). */
   teardown?(): Promise<void>;
@@ -118,7 +119,7 @@ export async function connectGateway(
 
     // Verify the gateway is running
     try {
-      const resp = await fetch(`${baseURL}/health`);
+      const resp = await fetch(`${baseURL}/health`, { signal: config.signal });
       if (!resp.ok) {
         throw new Error(`Gateway health check failed: ${resp.status}`);
       }
@@ -132,7 +133,7 @@ export async function connectGateway(
 
     return {
       baseURL,
-      async chat(requestBody, headers) {
+      async chat(requestBody, headers, signal) {
         return fetch(`${baseURL}/v1/messages`, {
           method: "POST",
           headers: {
@@ -142,6 +143,7 @@ export async function connectGateway(
             ...headers,
           },
           body: JSON.stringify(requestBody),
+          signal,
         });
       },
     };
@@ -151,7 +153,7 @@ export async function connectGateway(
   // start an isolated gateway. Otherwise, skip the gateway entirely —
   // questions will be answered via direct LLM calls without Lore processing.
   if (process.env.ANTHROPIC_API_KEY) {
-    return startLiveGateway();
+    return startLiveGateway(undefined, config.signal);
   }
 
   // No gateway available — return a stub that logs warnings
@@ -192,7 +194,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
 
   return {
     baseURL: harness.baseURL,
-    async chat(requestBody, headers) {
+    async chat(requestBody, headers, signal) {
       return fetch(`${harness.baseURL}/v1/messages`, {
         method: "POST",
         headers: {
@@ -202,6 +204,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
           ...headers,
         },
         body: JSON.stringify(requestBody),
+        signal,
       });
     },
     async teardown() {
@@ -219,6 +222,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
  */
 export async function startLiveGateway(
   dependencies: LiveGatewayDependencies = {},
+  signal?: AbortSignal,
 ): Promise<GatewayHandle> {
   const previousEnvironment = {
     LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
@@ -306,6 +310,7 @@ export async function startLiveGateway(
   };
 
   try {
+    signal?.throwIfAborted();
     ownedRoot = await createOwnedRoot({
       prefix: "lore-eval-live-",
       parent: configuredRoot,
@@ -350,9 +355,11 @@ export async function startLiveGateway(
     resetPipelineState =
       dependencies.resetPipelineState ?? importedPipeline!.resetPipelineState;
 
+    signal?.throwIfAborted();
     closeDB();
     await resetPipelineState();
     server = await startServer(loadConfig());
+    signal?.throwIfAborted();
   } catch (error) {
     try {
       await teardown();
@@ -379,7 +386,7 @@ export async function startLiveGateway(
   return {
     baseURL,
     isReal: true,
-    async chat(requestBody, headers) {
+    async chat(requestBody, headers, signal) {
       return fetch(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: {
@@ -389,6 +396,7 @@ export async function startLiveGateway(
           ...headers,
         },
         body: JSON.stringify(requestBody),
+        signal,
       });
     },
     teardown: runTeardown,
@@ -491,6 +499,7 @@ export async function replaySession(
     stopAfterTurn?: number;
     sessionHeaders?: Record<string, string>;
     model?: string;
+    signal?: AbortSignal;
   },
 ): Promise<ReplayResult> {
   const turns = transcript.turns;
@@ -533,7 +542,7 @@ export async function replaySession(
       stream: false,
     };
 
-    const resp = await gateway.chat(requestBody, headers);
+    const resp = await gateway.chat(requestBody, headers, options?.signal);
     const data = (await resp.json()) as {
       id?: string;
       usage?: {
@@ -681,13 +690,14 @@ async function getBaselineContext(
   mode: BaselineMode,
   turns: ConversationTurn[],
   llm?: EvalLLMClient,
+  signal?: AbortSignal,
 ): Promise<string> {
   switch (mode) {
     case "tail-window":
       return tailWindowBaseline(turns);
     case "compaction": {
       if (!llm) return tailWindowBaseline(turns); // fallback in fixture mode
-      return compactionBaseline(turns, 80_000, llm);
+      return compactionBaseline(turns, 80_000, llm, 200_000, signal);
     }
     case "raw":
       return rawBaseline(turns);
@@ -720,7 +730,26 @@ async function askQuestionViaGateway(
   gateway: GatewayHandle,
   model: string,
   loreContext?: string,
+  signal?: AbortSignal,
 ): Promise<{ hypothesis: string; tokens: TokenUsage; recallInvoked: boolean }> {
+  const waitForDelay = (delayMs: number): Promise<void> => {
+    signal?.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        reject(signal?.reason);
+      };
+      timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, delayMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  };
+
   // When loreContext is provided, include it in the user message so the model
   // has the distillation observations and raw conversation context (mimicking
   // real Lore sessions where the gradient context manager provides these).
@@ -747,14 +776,17 @@ async function askQuestionViaGateway(
     // Anthropic's org limit is often 30K-80K tokens/min; each QA call
     // with LTM-injected system prompt can be 8K+ tokens.
     if (attempt > 0) {
+      signal?.throwIfAborted();
       const backoff = 30_000 * 2 ** (attempt - 1);
       console.warn(`  Gateway rate limited, retrying in ${backoff / 1000}s...`);
-      await new Promise((r) => setTimeout(r, backoff));
+      await waitForDelay(backoff);
     }
 
-    const resp = await gateway.chat(requestBody, {
-      "x-lore-no-store": "true",
-    });
+    const resp = await gateway.chat(
+      requestBody,
+      { "x-lore-no-store": "true" },
+      signal,
+    );
     const recallInvoked = resp.headers.get("x-lore-recall-invoked") === "true";
     const data = (await resp.json()) as {
       content?: Array<{ type: string; text?: string }>;
@@ -808,6 +840,7 @@ async function askQuestion(
   context: string,
   mode: BaselineMode,
   llm: EvalLLMClient,
+  signal?: AbortSignal,
 ): Promise<{ hypothesis: string; tokens: TokenUsage }> {
   const qaMode = mode.startsWith("lore") ? "lore" : "baseline";
   const prompt = buildQAPrompt(context, question, qaMode);
@@ -815,6 +848,7 @@ async function askQuestion(
   const result = await llm.prompt(QA_SYSTEM, prompt, {
     maxTokens: 2048,
     temperature: 0,
+    signal,
   });
 
   return {
@@ -882,7 +916,7 @@ async function replaySessionWithFixtures(
     if (interceptor) setUpstreamInterceptor(interceptor);
 
     try {
-      return await replaySession(session, gateway);
+      return await replaySession(session, gateway, { signal: config.signal });
     } finally {
       stopRecording();
       setUpstreamInterceptor(undefined);
@@ -914,7 +948,7 @@ async function replaySessionWithFixtures(
     setUpstreamInterceptor(getReplayInterceptor(fixtures));
 
     try {
-      return await replaySession(session, gateway);
+      return await replaySession(session, gateway, { signal: config.signal });
     } finally {
       setUpstreamInterceptor(undefined);
     }
@@ -934,7 +968,7 @@ async function replaySessionWithFixtures(
   setUpstreamInterceptor(scriptedInterceptor);
 
   try {
-    return await replaySession(session, gateway);
+    return await replaySession(session, gateway, { signal: config.signal });
   } finally {
     setUpstreamInterceptor(undefined);
   }
@@ -1026,6 +1060,7 @@ export async function runScenario(
   gateway: GatewayHandle,
   llm?: EvalLLMClient,
 ): Promise<EvalResult[]> {
+  config.signal?.throwIfAborted();
   const results: EvalResult[] = [];
   const baselines = config.baselines.filter((b) =>
     scenario.applicableBaselines.includes(b),
@@ -1045,26 +1080,32 @@ export async function runScenario(
     if (gateway.isReal !== false) {
       for (const session of scenario.sessions) {
         try {
+          config.signal?.throwIfAborted();
           await replaySessionWithFixtures(session, scenario, gateway, config);
 
           // Force synchronous curation via slash command.
           // This ensures knowledge entries are created/updated before
           // the next session starts — critical for preference evolution
           // where Session 2's curation must see Session 1's entries.
-          const curateResp = await gateway.chat({
-            model: config.model,
-            system: "",
-            messages: [{ role: "user", content: "/lore:curate" }],
-            tools: [],
-            max_tokens: 256,
-            stream: false,
-          });
+          const curateResp = await gateway.chat(
+            {
+              model: config.model,
+              system: "",
+              messages: [{ role: "user", content: "/lore:curate" }],
+              tools: [],
+              max_tokens: 256,
+              stream: false,
+            },
+            undefined,
+            config.signal,
+          );
           const curateData = (await curateResp.json()) as {
             content?: Array<{ text?: string }>;
           };
           const curateText = curateData.content?.[0]?.text ?? "";
           if (curateText) console.log(`  ${curateText}`);
         } catch (err) {
+          config.signal?.throwIfAborted();
           console.warn(
             `  Warning: replay failed for session ${session.id}: ${err instanceof Error ? err.message : err}`,
           );
@@ -1085,6 +1126,7 @@ export async function runScenario(
             ` (available=${embedding.isAvailable()})`,
         );
       } catch (err) {
+        config.signal?.throwIfAborted();
         console.warn("  Warning: post-replay embedding backfill failed:", err);
       }
     }
@@ -1094,6 +1136,7 @@ export async function runScenario(
 
     // Run each baseline — skip gateway-dependent baselines when no gateway
     for (const mode of baselines) {
+      config.signal?.throwIfAborted();
       // Gateway-based baselines require a real gateway with Lore processing.
       // Without it, distillation/LTM/recall haven't run, so testing "lore"
       // mode would just test an empty memory — not useful.
@@ -1109,7 +1152,12 @@ export async function runScenario(
         continue;
       }
 
-      const context = await getBaselineContext(mode, allTurns, llm);
+      const context = await getBaselineContext(
+        mode,
+        allTurns,
+        llm,
+        config.signal,
+      );
 
       // For gateway-based baselines, build the Lore context once per baseline
       // (distillation + raw tail), not per question — it's the same for all questions.
@@ -1124,6 +1172,7 @@ export async function runScenario(
 
       // Ask each question
       for (const q of scenario.questions) {
+        config.signal?.throwIfAborted();
         let hypothesis: string;
         let tokens: TokenUsage;
         let recallInvoked = false;
@@ -1146,19 +1195,29 @@ export async function runScenario(
             gateway,
             config.model,
             loreContext,
+            config.signal,
           );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
           recallInvoked = answer.recallInvoked;
         } else {
           // Non-gateway baselines: ask via direct LLM with rendered context
-          const answer = await askQuestion(q.question, context, mode, llm);
+          const answer = await askQuestion(
+            q.question,
+            context,
+            mode,
+            llm,
+            config.signal,
+          );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
         }
 
         // Score with the judge (end-task quality)
-        const judgeResult = await judge(q, hypothesis, llm, { recallInvoked });
+        const judgeResult = await judge(q, hypothesis, llm, {
+          recallInvoked,
+          signal: config.signal,
+        });
 
         // Score retrieval quality objectively (justifier-free), independent of
         // the judge. Present only when the question declares ground-truth

@@ -119,6 +119,43 @@ describe("standalone eval database ownership", () => {
     }
   });
 
+  test("aborts active eval work before it performs cleanup", async () => {
+    const realProcess = process;
+    const fakeProcess = new EventEmitter() as unknown as typeof process;
+    Object.assign(fakeProcess, {
+      env: realProcess.env,
+      pid: 1234,
+      kill: vi.fn(),
+    });
+    vi.stubGlobal("process", fakeProcess);
+
+    let signal: AbortSignal | undefined;
+    let release = () => {};
+    let running: Promise<void> | undefined;
+    const started = new Promise<void>((resolve) => {
+      running = withOwnedDatabaseRoot(async (abortSignal) => {
+        signal = abortSignal;
+        resolve();
+        await new Promise<void>((finish) => {
+          release = finish;
+        });
+        abortSignal.throwIfAborted();
+      });
+    });
+
+    try {
+      await started;
+      if (!running) throw new Error("eval did not start");
+      fakeProcess.emit("SIGTERM");
+      expect(signal?.aborted).toBe(true);
+      release();
+      await expect(running).rejects.toThrow("eval interrupted by SIGTERM");
+      expect(fakeProcess.kill).toHaveBeenCalledWith(1234, "SIGTERM");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   test("cleans the live root when gateway startup fails", async () => {
     const parent = await makeTemp(join(tmpdir(), "lore-live-gateway-test-"));
     roots.add(parent);

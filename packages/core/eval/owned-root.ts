@@ -52,10 +52,11 @@ function reportCleanupFailure(error: unknown): void {
  * an async pathname check between validation and removal.
  */
 export async function withOwnedDatabaseRoot(
-  run: () => Promise<void>,
+  run: (signal: AbortSignal) => Promise<void>,
   options: OwnedDatabaseRootOptions = {},
 ): Promise<void> {
   const previousEnvironment = captureEnvironment();
+  const abortController = new AbortController();
   let owned: OwnedPath | undefined;
   let pendingSignal: "SIGINT" | "SIGTERM" | undefined;
   let initializing = true;
@@ -80,6 +81,7 @@ export async function withOwnedDatabaseRoot(
   const onSignal = (signal: "SIGINT" | "SIGTERM"): void => {
     if (pendingSignal || cleanupComplete) return;
     pendingSignal = signal;
+    abortController.abort(new Error(`eval interrupted by ${signal}`));
     if (initializing || cleanupInProgress) return;
     process.exitCode = signal === "SIGINT" ? 130 : 143;
   };
@@ -108,7 +110,7 @@ export async function withOwnedDatabaseRoot(
     process.env.LORE_DB_PATH = `${databaseRoot}/test.db`;
     process.env.XDG_DATA_HOME = `${databaseRoot}/xdg`;
     initializing = false;
-    if (shouldRun) await run();
+    if (shouldRun) await run(abortController.signal);
   } catch (error) {
     runFailed = true;
     runError = error;
