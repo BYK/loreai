@@ -678,7 +678,10 @@ async function handleEntityRebuild(
         .filter((p) => p.distillation_count > 0)
         .map((p) => p.path);
     } else {
-      const projectId = resolveProjectByRemoteOrPath(body.git_remote, body.path);
+      const projectId = resolveProjectByRemoteOrPath(
+        body.git_remote,
+        body.path,
+      );
       const projectPath = projectId ? getProjectPathById(projectId) : body.path;
       if (!projectPath) {
         return errorResponse(
