@@ -130,32 +130,25 @@ const Fields: Component<{
   notes: [() => string, (v: string) => void];
 }> = (props) => (
   <div class="grid gap-3">
-    {/* Kobalte's composed handler plus a native listener cover mobile input events. */}
-    <TextField>
+    <TextField value={props.role[0]()} onChange={props.role[1]}>
       <TextFieldLabel>Role</TextFieldLabel>
       <TextFieldInput
-        value={props.role[0]()}
-        onInput={(e) => props.role[1](e.currentTarget.value)}
         on:input={(e) => props.role[1](e.currentTarget.value)}
         placeholder="e.g. colleague, maintainer"
         data-testid="entity-role"
       />
     </TextField>
-    <TextField>
+    <TextField value={props.description[0]()} onChange={props.description[1]}>
       <TextFieldLabel>Description</TextFieldLabel>
       <TextFieldInput
-        value={props.description[0]()}
-        onInput={(e) => props.description[1](e.currentTarget.value)}
         on:input={(e) => props.description[1](e.currentTarget.value)}
         data-testid="entity-description"
       />
     </TextField>
-    <TextField>
+    <TextField value={props.notes[0]()} onChange={props.notes[1]}>
       <TextFieldLabel>Notes</TextFieldLabel>
       <TextFieldTextArea
         rows={3}
-        value={props.notes[0]()}
-        onInput={(e) => props.notes[1](e.currentTarget.value)}
         on:input={(e) => props.notes[1](e.currentTarget.value)}
         data-testid="entity-notes"
       />
