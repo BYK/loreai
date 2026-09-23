@@ -319,7 +319,9 @@ export async function handlePatchEntity(
     if (value === null) delete metadata[key];
     else metadata[key] = value;
   }
-  entities.update(id, { metadata });
+  const updatedMetadata =
+    Object.keys(metadata).length > 0 ? metadata : null;
+  entities.update(id, { metadata: updatedMetadata });
   const updated = entities.getWithAliases(id);
   if (!updated) {
     return errorResponse(404, "not_found", `Entity not found: ${id}`);
