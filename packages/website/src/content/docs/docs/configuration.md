@@ -105,9 +105,9 @@ Foreground and background provider request deadlines, in milliseconds. Non-hoste
 
 | Field | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `foregroundSseInactivityMs` | number | — | min 1000, max 2147483647 | Foreground upstream SSE inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence. |
+| `foregroundSseInactivityMs` | number | — | min 1000, max 2147423647 | Foreground upstream SSE inactivity deadline in milliseconds. Capped at 2147423647ms to reserve 60000ms of request-timeout headroom. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence. |
 | `foregroundRequestTimeoutMs` | number | — | min 1000, max 2147483647 | Foreground whole-request deadline in milliseconds. Default: 900000. Automatically raised to at least 60000ms above foregroundSseInactivityMs. Environment variable LORE_FOREGROUND_REQUEST_TIMEOUT_MS takes precedence. |
-| `workerResponseInactivityMs` | number | — | min 1000, max 2147483647 | Background worker upstream response inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence. |
+| `workerResponseInactivityMs` | number | — | min 1000, max 2147423647 | Background worker upstream response inactivity deadline in milliseconds. Capped at 2147423647ms to reserve 60000ms of request-timeout headroom. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence. |
 | `workerRequestTimeoutMs` | number | — | min 1000, max 2147483647 | Background worker whole-request deadline in milliseconds. Default: 900000. Automatically raised to at least 60000ms above workerResponseInactivityMs. Environment variable LORE_WORKER_REQUEST_TIMEOUT_MS takes precedence. |
 
 

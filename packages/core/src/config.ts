@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { isHostedMode } from "./hosted";
 import { warn } from "./log";
 
+const MAX_SSE_INACTIVITY_MS = 2_147_483_647 - 60_000;
+
 /**
  * Strip JS-style comments from a JSON string, enabling JSONC support for
  * `.lore.json`. Preserves `//` and `/* ... *​/` inside quoted strings.
@@ -185,10 +187,10 @@ export const LoreConfig = z.object({
         .number()
         .int()
         .min(1_000)
-        .max(2_147_483_647)
+        .max(MAX_SSE_INACTIVITY_MS)
         .optional()
         .describe(
-          "Foreground upstream SSE inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence.",
+          "Foreground upstream SSE inactivity deadline in milliseconds. Capped at 2147423647ms to reserve 60000ms of request-timeout headroom. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence.",
         ),
       foregroundRequestTimeoutMs: z
         .number()
@@ -203,10 +205,10 @@ export const LoreConfig = z.object({
         .number()
         .int()
         .min(1_000)
-        .max(2_147_483_647)
+        .max(MAX_SSE_INACTIVITY_MS)
         .optional()
         .describe(
-          "Background worker upstream response inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence.",
+          "Background worker upstream response inactivity deadline in milliseconds. Capped at 2147423647ms to reserve 60000ms of request-timeout headroom. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence.",
         ),
       workerRequestTimeoutMs: z
         .number()

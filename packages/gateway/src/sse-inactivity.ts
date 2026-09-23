@@ -54,10 +54,11 @@ export function parseSseInactivityMs(
   fallback: number,
   maximum = MAX_DEADLINE_MS,
 ): number {
-  if (!raw) return fallback;
+  const safeFallback = Math.min(Math.max(fallback, MIN_DEADLINE_MS), maximum);
+  if (!raw) return safeFallback;
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_DEADLINE_MS) {
-    return fallback;
+    return safeFallback;
   }
   return Math.min(Math.max(value, MIN_DEADLINE_MS), maximum);
 }
@@ -67,10 +68,14 @@ export function resolveSSEInactivityDeadlines(
   config: SSEInactivityOverrides = {},
   env: NodeJS.ProcessEnv = process.env,
 ): SSEInactivityDeadlines {
-  const configured = (value: number | undefined, fallback: number): number =>
+  const configured = (
+    value: number | undefined,
+    fallback: number,
+    maximum = MAX_DEADLINE_MS,
+  ): number =>
     value === undefined
-      ? fallback
-      : parseSseInactivityMs(String(value), fallback);
+      ? parseSseInactivityMs(undefined, fallback, maximum)
+      : parseSseInactivityMs(String(value), fallback, maximum);
 
   const foregroundSseInactivityMs = parseSseInactivityMs(
     // How long the foreground relay tolerates upstream silence. Default:
@@ -80,6 +85,7 @@ export function resolveSSEInactivityDeadlines(
     configured(
       config.foregroundSseInactivityMs,
       DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
+      MAX_INACTIVITY_DEADLINE_MS,
     ),
     MAX_INACTIVITY_DEADLINE_MS,
   );
@@ -91,6 +97,7 @@ export function resolveSSEInactivityDeadlines(
     configured(
       config.workerResponseInactivityMs,
       DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
+      MAX_INACTIVITY_DEADLINE_MS,
     ),
     MAX_INACTIVITY_DEADLINE_MS,
   );

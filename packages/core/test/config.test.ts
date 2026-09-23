@@ -311,6 +311,19 @@ describe("load — reads config from .lore.json", () => {
     });
   });
 
+  test("caps configured inactivity deadlines to preserve timer headroom", () => {
+    const maxNodeDelay = 2_147_483_647;
+    const maxInactivity = maxNodeDelay - 60_000;
+    expect(
+      LoreConfig.safeParse({
+        timeouts: {
+          foregroundSseInactivityMs: maxInactivity + 1,
+          workerResponseInactivityMs: maxInactivity + 1,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("falls back to defaults when no config file exists", async () => {
     mkdirSync(TMP, { recursive: true });
     const cfg = await load(TMP);

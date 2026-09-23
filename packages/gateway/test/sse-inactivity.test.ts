@@ -64,6 +64,25 @@ describe("resolveSSEInactivityDeadlines", () => {
     });
   });
 
+  it("caps config-only inactivity values to leave request-timeout headroom", () => {
+    const maxNodeDelay = 2_147_483_647;
+    const headroom = 60_000;
+    const deadlines = resolveSSEInactivityDeadlines(
+      {
+        foregroundSseInactivityMs: maxNodeDelay,
+        foregroundRequestTimeoutMs: maxNodeDelay,
+        workerResponseInactivityMs: maxNodeDelay,
+        workerRequestTimeoutMs: maxNodeDelay,
+      },
+      {},
+    );
+
+    expect(deadlines.foregroundSseInactivityMs).toBe(maxNodeDelay - headroom);
+    expect(deadlines.workerResponseInactivityMs).toBe(maxNodeDelay - headroom);
+    expect(deadlines.foregroundRequestTimeoutMs).toBe(maxNodeDelay);
+    expect(deadlines.workerRequestTimeoutMs).toBe(maxNodeDelay);
+  });
+
   it("lets environment variables override .lore.json values", () => {
     const deadlines = resolveSSEInactivityDeadlines(
       {
@@ -96,6 +115,12 @@ describe("parseSseInactivityMs", () => {
   it("returns the fallback when unset or empty", () => {
     expect(parseSseInactivityMs(undefined, 600_000)).toBe(600_000);
     expect(parseSseInactivityMs("", 600_000)).toBe(600_000);
+  });
+
+  it("applies the maximum to an unset fallback", () => {
+    expect(parseSseInactivityMs(undefined, 2_147_483_647, 2_147_423_647)).toBe(
+      2_147_423_647,
+    );
   });
 
   it("parses a positive integer", () => {
