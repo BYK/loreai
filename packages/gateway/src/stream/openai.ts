@@ -30,6 +30,7 @@ import {
   createStreamAccumulator,
   cancelAndReleaseReader,
 } from "./anthropic";
+import type { SSEStreamOptions } from "./options";
 import { safeTokenSum, validateOpenAIUsage } from "../usage-validation";
 
 // ---------------------------------------------------------------------------
@@ -132,9 +133,8 @@ function mapStopReason(reason: string): string {
  */
 export function translateAnthropicStreamToOpenAI(
   anthropicResponse: Response,
-  opts: {
+  opts: SSEStreamOptions & {
     strict?: boolean;
-    signal?: AbortSignal;
     /** Preserve failures from a validated source without revalidating generated SSE. */
     propagateErrors?: boolean;
   } = {},
@@ -238,6 +238,7 @@ export function translateAnthropicStreamToOpenAI(
 
           for await (const { event, data } of parseSSEStream(reader, {
             signal: opts.signal,
+            inactivityMs: opts.inactivityMs,
             requireEventTerminator: opts.strict,
             fatalUtf8: opts.strict,
             maxFrames: opts.strict ? DEFAULT_MAX_SSE_FRAMES : undefined,
@@ -525,11 +526,9 @@ export function translateAnthropicStreamToOpenAI(
  */
 export async function accumulateOpenAISSEStream(
   upstreamResponse: Response,
-  opts: {
-    signal?: AbortSignal;
+  opts: SSEStreamOptions & {
     stopAtTerminal?: boolean;
     strict?: boolean;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
     consumeUntilDone?: boolean;

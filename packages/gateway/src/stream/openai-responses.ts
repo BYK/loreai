@@ -29,6 +29,7 @@ import {
   createStreamAccumulator,
   cancelAndReleaseReader,
 } from "./anthropic";
+import type { SSEStreamOptions } from "./options";
 import {
   isRecord as isUsageRecord,
   safeTokenSum,
@@ -1876,12 +1877,10 @@ function validateFailureTerminal(parsed: Record<string, unknown>): void {
  */
 export async function accumulateResponsesSSEStream(
   response: Response,
-  opts: {
+  opts: SSEStreamOptions & {
     /** Omit to preserve the legacy tolerant accumulator behavior. */
     validation?: ResponsesValidationMode;
     stopAtTerminal?: boolean;
-    signal?: AbortSignal;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
     /** Called only after the event has passed strict validation and mutation. */
@@ -2416,8 +2415,9 @@ export function streamResponsesPassthrough(
   onComplete: (response: GatewayResponse, successful: boolean) => void,
   sessionID?: string,
   validation: ResponsesValidationMode = "public",
-  signal?: AbortSignal,
+  streamOptions: SSEStreamOptions = {},
 ): Response {
+  const { signal, inactivityMs } = streamOptions;
   const state = makeResponsesAccState();
   const encoder = new TextEncoder();
 
@@ -2547,6 +2547,7 @@ export function streamResponsesPassthrough(
               validation,
               stopAtTerminal: true,
               signal: cancelController.signal,
+              inactivityMs,
               allowFailureTerminal: true,
               state,
               onReader: (reader) => {
@@ -2724,7 +2725,7 @@ function mapStatusToStopReason(status: string): string {
  */
 export function translateAnthropicStreamToResponses(
   anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal } = {},
+  opts: SSEStreamOptions & { strict?: boolean } = {},
 ): Response {
   const encoder = new TextEncoder();
   // Reuse the Anthropic accumulator internally so we get a complete
@@ -2818,6 +2819,7 @@ export function translateAnthropicStreamToResponses(
 
           for await (const { event, data } of parseSSEStream(reader, {
             signal: opts.signal,
+            inactivityMs: opts.inactivityMs,
             requireEventTerminator: opts.strict,
             fatalUtf8: opts.strict,
             maxFrames: opts.strict ? DEFAULT_MAX_SSE_FRAMES : undefined,

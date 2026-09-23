@@ -3994,7 +3994,7 @@ describe("streamResponsesPassthrough", () => {
       () => {},
       undefined,
       "public",
-      abort.signal,
+      { signal: abort.signal },
     );
     await expect(downstream.text()).rejects.toMatchObject({
       name: "TimeoutError",
@@ -4042,7 +4042,7 @@ describe("streamResponsesPassthrough", () => {
       () => {},
       undefined,
       "public",
-      abort.signal,
+      { signal: abort.signal },
     );
     await new Promise((resolve) => setImmediate(resolve));
     abort.abort(new DOMException("deadline", "TimeoutError"));

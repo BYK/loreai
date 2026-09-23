@@ -1,4 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fetchArgUrl } from "./helpers/fetch-url";
 
 // Mock the upstream fetch wrapper so the adapter's retry loop is driven by our
@@ -52,6 +55,13 @@ import {
   _resetTemperatureUnsupportedModels,
   _resetThinkingUnsupportedModels,
 } from "../src/llm-adapter";
+import {
+  WORKER_REQUEST_TIMEOUT_MS,
+  WORKER_RESPONSE_INACTIVITY_MS,
+  getSSEInactivityDeadlines,
+  resetSSEInactivityConfiguration,
+  setSSEDeadlineConfigurationPauseForTest,
+} from "../src/sse-inactivity";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import { workerModelCandidates } from "../src/worker-model";
 import {
@@ -871,6 +881,7 @@ describe("createGatewayLLMClient.prompt", () => {
     vi.mocked(recordEmptyWorkerResponse).mockClear();
     clearAllCosts();
     resetBackgroundLimiter();
+    resetSSEInactivityConfiguration();
   });
 
   function anthropicResponse() {
@@ -883,6 +894,79 @@ describe("createGatewayLLMClient.prompt", () => {
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }
+
+  test("loads workspace worker deadlines on the first direct worker call", async () => {
+    const previousCwd = process.cwd();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "lore-worker-deadlines-"));
+    const nestedPath = join(workspaceRoot, "packages", "app");
+    try {
+      mkdirSync(join(workspaceRoot, ".git"));
+      mkdirSync(nestedPath, { recursive: true });
+      writeFileSync(
+        join(workspaceRoot, ".lore.json"),
+        JSON.stringify({
+          timeouts: {
+            workerResponseInactivityMs: 320_000,
+            workerRequestTimeoutMs: 450_000,
+          },
+        }),
+      );
+      process.chdir(nestedPath);
+      resetSSEInactivityConfiguration();
+      mockFetch.mockResolvedValue(anthropicResponse());
+
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-test" },
+      );
+      await expect(
+        client.prompt("system", "user", { workerID: "lore-distill" }),
+      ).resolves.toBe("hello from worker");
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(getSSEInactivityDeadlines()).toMatchObject({
+        workerResponseInactivityMs: 320_000,
+        workerRequestTimeoutMs: 450_000,
+      });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      resetSSEInactivityConfiguration();
+    }
+  });
+
+  test("does not send a worker request when reset invalidates deadline initialization", async () => {
+    mockFetch.mockReset();
+    let releaseInitialization: (() => void) | undefined;
+    let signalInitializationPaused: (() => void) | undefined;
+    const initializationPaused = new Promise<void>((resolve) => {
+      signalInitializationPaused = resolve;
+    });
+    const initializationRelease = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    setSSEDeadlineConfigurationPauseForTest(initializationRelease, () =>
+      signalInitializationPaused?.(),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+      { hostedMode: false },
+    );
+    const pending = client.prompt("system", "user", {
+      workerID: "lore-distill",
+    });
+
+    await initializationPaused;
+    resetSSEInactivityConfiguration();
+    releaseInitialization?.();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 
   test("Anthropic success returns text and records worker cost", async () => {
     mockFetch.mockResolvedValue(anthropicResponse());
@@ -1549,11 +1633,13 @@ describe("createGatewayLLMClient.prompt", () => {
 
   test("aborting a stalled ChatGPT worker read cancels the source", async () => {
     const controller = new AbortController();
+    let pulled = false;
     let cancelled = false;
     mockFetch.mockResolvedValue(
       new Response(
         new ReadableStream<Uint8Array>({
           pull() {
+            pulled = true;
             return new Promise(() => {});
           },
           cancel() {
@@ -1577,8 +1663,9 @@ describe("createGatewayLLMClient.prompt", () => {
       protocol: "openai-responses",
       signal: controller.signal,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(pulled).toBe(true);
+    });
     controller.abort(new DOMException("client disconnected", "AbortError"));
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
@@ -2552,7 +2639,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
       await rejected;
       expect(mockFetch).not.toHaveBeenCalled();
     } finally {
@@ -2627,7 +2714,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
       await rejected;
       expect(tokenCalls).toBe(2);
     } finally {
@@ -6240,7 +6327,7 @@ describe("worker transport lifecycle remediation", () => {
       sessionID: "sess-inactivity-retry",
       workerID: "lore-distill",
     });
-    await vi.advanceTimersByTimeAsync(120_500);
+    await vi.advanceTimersByTimeAsync(WORKER_RESPONSE_INACTIVITY_MS + 500);
 
     await expect(pending).resolves.toBe("recovered");
     expect(cancelled).toBe(true);
@@ -6529,9 +6616,13 @@ describe("worker transport lifecycle remediation", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  test("one 300-second deadline covers fetch, retry delay, and every attempt", async () => {
+  test("one overall deadline covers fetch, retry delay, and every attempt", async () => {
     vi.useFakeTimers();
     let cancelled = false;
+    // Each attempt consumes almost the entire deadline, so only the first one
+    // can ever start: if the deadline were per-attempt rather than overall,
+    // the retry would launch and mockFetch would be called twice.
+    const attemptDurationMs = WORKER_REQUEST_TIMEOUT_MS - 1_000;
     mockFetch.mockImplementation(
       async () =>
         new Promise<Response>((resolve) => {
@@ -6547,7 +6638,7 @@ describe("worker transport lifecycle remediation", () => {
                   { status: 500, headers: { "retry-after": "32" } },
                 ),
               ),
-            299_000,
+            attemptDurationMs,
           );
         }),
     );
@@ -6559,7 +6650,7 @@ describe("worker transport lifecycle remediation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(299_000);
+    await vi.advanceTimersByTimeAsync(attemptDurationMs);
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(cancelled).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
@@ -6578,7 +6669,7 @@ describe("worker transport lifecycle remediation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });

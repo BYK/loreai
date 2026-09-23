@@ -35,6 +35,7 @@ import {
   accumulateSSEResponse,
   cancelAndReleaseReader,
 } from "./anthropic";
+import type { SSEStreamOptions } from "./options";
 import { isRecord, validateGeminiUsageMetadata } from "../usage-validation";
 
 function hasGeminiThoughtSignature(block: GatewayContentBlock): boolean {
@@ -54,11 +55,9 @@ function hasGeminiThoughtSignature(block: GatewayContentBlock): boolean {
  */
 export async function accumulateGeminiSSEStream(
   upstreamResponse: Response,
-  opts: {
-    signal?: AbortSignal;
+  opts: SSEStreamOptions & {
     stopAtTerminal?: boolean;
     strict?: boolean;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
@@ -373,7 +372,7 @@ export async function accumulateGeminiSSEStream(
  */
 export function translateAnthropicStreamToGemini(
   anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal } = {},
+  opts: SSEStreamOptions & { strict?: boolean } = {},
 ): Response {
   const downstreamAbort = new AbortController();
   const signal = opts.signal
@@ -418,6 +417,7 @@ export function translateAnthropicStreamToGemini(
           try {
             const resp = await accumulateSSEResponse(anthropicResponse, {
               signal,
+              inactivityMs: opts.inactivityMs,
               strict: opts.strict,
               stopAtTerminal: opts.strict,
             });

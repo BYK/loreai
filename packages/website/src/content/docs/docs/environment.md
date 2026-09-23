@@ -92,6 +92,15 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_SHUTDOWN_TIMEOUT_MS` | Environment variable: LORE_SHUTDOWN_TIMEOUT_MS overrides the single process-wide deadline shared by signal-driven and authenticated-control shutdown. Values are milliseconds and are clamped to the minimum safe deadline; invalid values use the default. |
 
+## sse-inactivity
+
+| Variable | Description |
+|---|---|
+| `LORE_FOREGROUND_REQUEST_TIMEOUT_MS` | Whole-request foreground ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.foregroundRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_FOREGROUND_SSE_INACTIVITY_MS` | How long the foreground relay tolerates upstream silence. Default: 600000ms. Also set as `timeouts.foregroundSseInactivityMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_WORKER_REQUEST_TIMEOUT_MS` | Whole-request worker ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.workerRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a worker tolerates upstream silence. Default: 600000ms. Also set as `timeouts.workerResponseInactivityMs` in `.lore.json`; this environment variable takes priority. |
+
 ## Memory engine (`@loreai/core`)
 
 | Variable | Description |

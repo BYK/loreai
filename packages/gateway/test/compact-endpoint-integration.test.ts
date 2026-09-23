@@ -18,6 +18,37 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeFixtureEntry } from "./helpers/fixtures";
+import { _setModelDataForTest, type ModelsDevEntry } from "../src/worker-model";
+
+function seedCompactionModelLimits(): void {
+  const anthropic = {
+    id: "claude-sonnet-4-6",
+    limit: { context: 1_000_000, output: 128_000 },
+  } satisfies ModelsDevEntry;
+  const openai = {
+    id: "gpt-4o-mini",
+    limit: { context: 128_000, output: 16_384 },
+  } satisfies ModelsDevEntry;
+  _setModelDataForTest(
+    {
+      // Distinct flat values make these integration tests fail if the
+      // endpoint loses the session's provider ID and falls back to the
+      // last-write-wins model entry.
+      "claude-sonnet-4-6": {
+        id: "claude-sonnet-4-6",
+        limit: { context: 1_000_000, output: 64_000 },
+      },
+      "gpt-4o-mini": {
+        id: "gpt-4o-mini",
+        limit: { context: 200_000, output: 16_384 },
+      },
+    },
+    {
+      "anthropic/claude-sonnet-4-6": anthropic,
+      "openai/gpt-4o-mini": openai,
+    },
+  );
+}
 
 async function postCompact(
   harness: Harness,
@@ -483,6 +514,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       ],
       projectPath: PROJECT_PATH,
     });
+    seedCompactionModelLimits();
 
     const sessionID = "test-session-cancel-overflow";
     const chatResp = await chatWithSession(
@@ -553,6 +585,7 @@ describe("POST /v1/compact — integration (real session populated via chat turn
       ],
       projectPath: PROJECT_PATH,
     });
+    seedCompactionModelLimits();
 
     const sessionID = "test-session-cancel-gpt-mini";
     const chatResp = await chatWithSession(

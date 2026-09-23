@@ -69,6 +69,11 @@ import {
   SSEStreamLimitError,
   SSEStreamTransportError,
 } from "./stream/anthropic";
+import {
+  ensureSSEInactivityConfiguration,
+  getSSEInactivityDeadlines,
+  workerSSEStreamOptions,
+} from "./sse-inactivity";
 import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
 import {
   ANTHROPIC_CONTENT_BLOCK_TYPES,
@@ -572,8 +577,6 @@ const MAX_WORKER_REQUEST_BYTES = 4 * 1024 * 1024;
 // `\u00xx` escape. Cap raw prompt bytes at the derived worst-case ratio so the
 // serializer itself cannot transiently allocate far beyond the wire cap.
 const MAX_WORKER_PROMPT_SOURCE_BYTES = Math.floor(MAX_WORKER_REQUEST_BYTES / 6);
-const WORKER_RESPONSE_INACTIVITY_MS = 120_000;
-const WORKER_REQUEST_TIMEOUT_MS = 300_000;
 
 /** Retain endpoint routing while stripping userinfo, query, and fragment. */
 function sanitizedWorkerOrigin(rawUrl: string): string {
@@ -837,8 +840,7 @@ export async function readWorkerResponseText(
   try {
     while (bytes < maxBytes) {
       const { done, value } = await readStreamChunk(reader, {
-        signal,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        ...workerSSEStreamOptions(signal),
       });
       if (done) break;
       if (!value) continue;
@@ -930,8 +932,7 @@ function replayWorkerStream(
             prefixIndex < prefix.length
               ? { done: false as const, value: prefix[prefixIndex++] }
               : await readStreamChunk(reader, {
-                  signal,
-                  inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+                  ...workerSSEStreamOptions(signal),
                 });
           signal?.throwIfAborted();
           if (result.done) {
@@ -989,8 +990,7 @@ async function readCompleteWorkerBody(
     }
     for (;;) {
       const { done, value } = await readStreamChunk(reader, {
-        signal,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        ...workerSSEStreamOptions(signal),
       });
       if (done) break;
       if (!value) continue;
@@ -1061,8 +1061,7 @@ async function inspectWorkerSuccessBody(
   try {
     while (prefixBytes < WORKER_RESPONSE_SNIFF_BYTES) {
       const { done, value } = await readStreamChunk(reader, {
-        signal,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        ...workerSSEStreamOptions(signal),
       });
       if (done) {
         if (prefixBytes > MAX_WORKER_RESPONSE_BYTES) {
@@ -2986,8 +2985,7 @@ function accumulateWorkerSSE(
       return accumulateResponsesSSEStream(response, {
         validation: "codex",
         stopAtTerminal: true,
-        signal,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        ...workerSSEStreamOptions(signal),
         onSemanticContent,
       });
     case "openai-responses":
@@ -2997,34 +2995,30 @@ function accumulateWorkerSSE(
       return accumulateResponsesSSEStream(response, {
         validation: "public",
         stopAtTerminal: true,
-        signal,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
+        ...workerSSEStreamOptions(signal),
         onSemanticContent,
       });
     case "gemini":
       return accumulateGeminiSSEStream(response, {
-        signal,
+        ...workerSSEStreamOptions(signal),
         stopAtTerminal: true,
         strict: true,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
         onSemanticContent,
       });
     case "openai":
       return accumulateOpenAISSEStream(response, {
-        signal,
+        ...workerSSEStreamOptions(signal),
         stopAtTerminal: true,
         strict: true,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
         onSemanticContent,
         consumeUntilDone: true,
       });
     default:
       // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
       return accumulateSSEResponse(response, {
-        signal,
+        ...workerSSEStreamOptions(signal),
         stopAtTerminal: true,
         strict: true,
-        inactivityMs: WORKER_RESPONSE_INACTIVITY_MS,
         onSemanticContent,
       });
   }
@@ -3406,6 +3400,8 @@ export function createGatewayLLMClient(
   defaultModel: { providerID: string; modelID: string },
   opts?: {
     dedicatedWorkerKey?: boolean;
+    /** Hosted gateways must keep config reads operator-controlled. */
+    hostedMode?: boolean;
     /** Keep protocol-specific proxies on the selected model. */
     disableModelFallbacks?: boolean;
     vertexProject?: string;
@@ -3414,6 +3410,7 @@ export function createGatewayLLMClient(
   },
 ): GatewayLLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
+  const factoryHostedMode = opts?.hostedMode;
   const disableModelFallbacks = opts?.disableModelFallbacks === true;
   // Configured GCP project for Vertex workers (else derived from ADC at call
   // time). Threaded so an explicit LORE_VERTEX_PROJECT (without GOOGLE_CLOUD_*)
@@ -3427,6 +3424,15 @@ export function createGatewayLLMClient(
       // non-thrown failure from THIS call, not a stale one from a prior
       // successful or different-failure call.
       lastWorkerError = undefined;
+      const deadlinesAreCurrent = await ensureSSEInactivityConfiguration({
+        hostedMode: factoryHostedMode,
+      });
+      if (!deadlinesAreCurrent) {
+        throw new DOMException(
+          "Gateway reset before worker request started",
+          "AbortError",
+        );
+      }
       // `model` is mutable: on a 400 model-not-supported the retry loop swaps
       // in a same-provider backup. Protocol is still model-dependent (Copilot
       // serves GPT-5.6 on Responses and gpt-5-mini on Chat Completions), so a
@@ -3719,7 +3725,7 @@ export function createGatewayLLMClient(
         deadlineController.abort(
           new DOMException("Worker request deadline exceeded", "TimeoutError"),
         );
-      }, WORKER_REQUEST_TIMEOUT_MS);
+      }, getSSEInactivityDeadlines().workerRequestTimeoutMs);
       const requestSignal = opts?.signal
         ? AbortSignal.any([opts.signal, deadlineController.signal])
         : deadlineController.signal;

@@ -29,6 +29,7 @@ import {
   toAnthropicStopReason,
 } from "../anthropic-protocol";
 import { isRecord, validateAnthropicUsage } from "../usage-validation";
+import type { SSEStreamOptions } from "./options";
 // NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
 // helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
 // legacy length/4 heuristic.
@@ -78,7 +79,7 @@ export class SSEStreamLimitError extends Error {}
 /** Read one stream chunk while making abort and inactivity independently fatal. */
 export async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  opts: { signal?: AbortSignal; inactivityMs?: number } = {},
+  opts: SSEStreamOptions = {},
 ): Promise<StreamChunkRead> {
   opts.signal?.throwIfAborted();
   const reads: Array<Promise<StreamChunkRead>> = [
@@ -149,12 +150,10 @@ export async function readStreamChunk(
  */
 export async function* parseSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  opts: {
+  opts: SSEStreamOptions & {
     maxEventBytes?: number;
     maxFrames?: number;
     frameCounter?: { count: number };
-    inactivityMs?: number;
-    signal?: AbortSignal;
     requireEventTerminator?: boolean;
     maxTotalBytes?: number;
     fatalUtf8?: boolean;
@@ -1979,11 +1978,9 @@ export class AnthropicSSEValidator {
  */
 export async function accumulateSSEResponse(
   response: Response,
-  opts: {
-    signal?: AbortSignal;
+  opts: SSEStreamOptions & {
     stopAtTerminal?: boolean;
     strict?: boolean;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
   } = {},

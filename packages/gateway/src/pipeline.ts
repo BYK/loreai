@@ -270,6 +270,13 @@ import {
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
+  ensureSSEInactivityConfiguration,
+  foregroundSSEStreamOptions,
+  getSSEInactivityDeadlines,
+  resetSSEInactivityConfiguration,
+} from "./sse-inactivity";
+import type { SSEStreamOptions } from "./stream/options";
+import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
@@ -1063,6 +1070,7 @@ export async function resetPipelineState(opts?: {
 }): Promise<void> {
   if (pipelineResetPromise) return pipelineResetPromise;
   pipelineResetInProgress = true;
+  resetSSEInactivityConfiguration();
   const reset = (async () => {
     try {
       await resetPipelineStateInner(opts);
@@ -4569,6 +4577,24 @@ async function initIfNeeded(
   log.info(`gateway pipeline initialized: ${projectPath}`);
 }
 
+/**
+ * Resolve the gateway's process-wide stream deadlines once, before routing
+ * creates any foreground abort scopes. Client-supplied project paths must not
+ * change these process-wide timers from one request to another, so local mode
+ * reads the gateway's launch directory and hosted mode uses environment values.
+ */
+async function ensureGatewaySSEDeadlineConfiguration(
+  config: GatewayConfig,
+  requestGeneration: number,
+): Promise<void> {
+  await ensureSSEInactivityConfiguration({
+    hostedMode: config.hostedMode,
+    isCurrent: () =>
+      !pipelineResetInProgress &&
+      requestGeneration === streamingPostResponseGeneration,
+  });
+}
+
 function getLLMClient(config: GatewayConfig): LLMClient {
   if (!llmClient) {
     const cfg = loreConfig();
@@ -4627,6 +4653,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       {
         dedicatedWorkerKey: !!workerApiKey,
         vertexProject: config.vertexProject,
+        hostedMode: config.hostedMode,
       },
     );
 
@@ -7230,7 +7257,7 @@ export function buildStreamingResponse(
       recallAbort.abort(
         new DOMException("recall stream deadline exceeded", "TimeoutError"),
       ),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
+    getSSEInactivityDeadlines().foregroundRequestTimeoutMs,
   );
   const clearRecallDeadline = (): void => clearTimeout(recallDeadline);
 
@@ -7326,8 +7353,7 @@ export function buildStreamingResponse(
           resetKeepalive();
           const validator = new AnthropicSSEValidator();
           const eventStream = parseSSEStream(reader, {
-            signal: streamSignal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(streamSignal),
             requireEventTerminator: true,
             fatalUtf8: true,
             maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -7852,8 +7878,7 @@ export function buildStreamingResponse(
                   event: contEvent,
                   data: contData,
                 } of parseSSEStream(contReader, {
-                  signal: streamSignal,
-                  inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                  ...foregroundSSEStreamOptions(streamSignal),
                   requireEventTerminator: true,
                   fatalUtf8: true,
                   maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -8406,7 +8431,9 @@ export function streamResponsesRecallAware(
   let streamBytes = 0;
   let hiddenRecallBytes = 0;
   const frameCounter = { count: 0 };
-  const sseInactivityMs = opts.sseInactivityMs ?? FOREGROUND_SSE_INACTIVITY_MS;
+  const sseInactivityMs =
+    opts.sseInactivityMs ??
+    getSSEInactivityDeadlines().foregroundSseInactivityMs;
   const maxPrincipalTransportRetries = 1;
   const maxRecallContinuationTransportRetries = 1;
 
@@ -12295,7 +12322,6 @@ export function streamResponsesRecallAware(
  */
 const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
-const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
 // A gateway-owned reason stays distinct from provider token-limit reasons and
 // maps to OpenCode's retryable `unknown` finish, preserving its agent loop.
 const PRINCIPAL_TRANSPORT_INCOMPLETE_REASON = "gateway_transport";
@@ -14888,10 +14914,17 @@ export async function handleCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
+    const requestGeneration = streamingPostResponseGeneration;
+    await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+    if (
+      pipelineResetInProgress ||
+      requestGeneration !== streamingPostResponseGeneration
+    ) {
+      return errorResponse(503, "Gateway pipeline generation changed");
+    }
     const preflight = preflightDirectCompactionSession(req, config);
     if (preflight) return preflight;
     streamingPostResponsesAccepting = true;
-    const requestGeneration = streamingPostResponseGeneration;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
       const response = await runActivePipelineRequest(
@@ -15165,8 +15198,15 @@ export async function handleResponsesCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
-    streamingPostResponsesAccepting = true;
     const requestGeneration = streamingPostResponseGeneration;
+    await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+    if (
+      pipelineResetInProgress ||
+      requestGeneration !== streamingPostResponseGeneration
+    ) {
+      return errorResponse(503, "Gateway pipeline generation changed");
+    }
+    streamingPostResponsesAccepting = true;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
       const response = await runActivePipelineRequest(
@@ -15211,6 +15251,14 @@ export async function passthroughResponsesCompact(
   trustedUpstreamBase?: string | null,
   parsedRequest?: GatewayRequest,
 ): Promise<Response> {
+  const requestGeneration = streamingPostResponseGeneration;
+  await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
   const abortScope = createForegroundAbortScope(callerSignal);
   if (hasConflictingAuthHeaders(rawHeaders)) {
     abortScope.dispose();
@@ -15452,8 +15500,6 @@ export async function passthroughResponsesCompact(
 // Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
 
-const FOREGROUND_REQUEST_TIMEOUT_MS = 300_000;
-
 export function abortAwareDelay(
   delayMs: number,
   signal?: AbortSignal,
@@ -15501,11 +15547,13 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   const onCallerAbort = () => abort(caller?.reason);
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
-  const deadlineAt = Date.now() + FOREGROUND_REQUEST_TIMEOUT_MS;
+  const requestTimeoutMs =
+    getSSEInactivityDeadlines().foregroundRequestTimeoutMs;
+  const deadlineAt = Date.now() + requestTimeoutMs;
   const timer = setTimeout(
     () =>
       abort(new DOMException("foreground request timed out", "TimeoutError")),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
+    requestTimeoutMs,
   );
   return {
     signal: controller.signal,
@@ -15744,15 +15792,19 @@ export function validatedMetaStream(
   response: Response,
   protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
   codex: boolean,
-  signal?: AbortSignal,
+  streamOptions: SSEStreamOptions = foregroundSSEStreamOptions(),
 ): Response {
+  const {
+    signal,
+    inactivityMs = getSSEInactivityDeadlines().foregroundSseInactivityMs,
+  } = streamOptions;
   if (protocol === "openai-responses") {
     return streamResponsesPassthrough(
       response,
       () => {},
       undefined,
       codex ? "codex" : "public",
-      signal,
+      { signal, inactivityMs },
     );
   }
   const abort = new AbortController();
@@ -15829,6 +15881,7 @@ export function validatedMetaStream(
             try {
               for await (const { event, data } of parseSSEStream(reader, {
                 signal: abort.signal,
+                inactivityMs,
                 requireEventTerminator: true,
                 fatalUtf8: true,
                 maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -15845,6 +15898,7 @@ export function validatedMetaStream(
           } else if (protocol === "openai") {
             await accumulateOpenAISSEStream(response, {
               signal: abort.signal,
+              inactivityMs,
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
@@ -15853,6 +15907,7 @@ export function validatedMetaStream(
           } else {
             await accumulateGeminiSSEStream(response, {
               signal: abort.signal,
+              inactivityMs,
               strict: true,
               stopAtTerminal: true,
               onValidatedEvent: forward,
@@ -15954,7 +16009,7 @@ async function handlePassthrough(
           upstreamResponse,
           wireProtocol,
           req.codex === true,
-          abortScope.signal,
+          foregroundSSEStreamOptions(abortScope.signal),
         ),
       );
     }
@@ -15992,7 +16047,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToOpenAI(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -16000,7 +16055,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToResponses(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -16008,7 +16063,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToGemini(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -16017,26 +16072,26 @@ async function handlePassthrough(
     const resp = await preserveIncompleteResponsesTerminal(
       wireProtocol === "openai"
         ? accumulateOpenAISSEStream(upstreamResponse, {
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
             strict: true,
             stopAtTerminal: true,
             consumeUntilDone: true,
           })
         : wireProtocol === "openai-responses"
           ? accumulateResponsesSSEStream(upstreamResponse, {
-              signal: abortScope.signal,
+              ...foregroundSSEStreamOptions(abortScope.signal),
               validation: req.codex === true ? "codex" : "public",
               stopAtTerminal: true,
               requireCompletedTerminal: true,
             })
           : wireProtocol === "gemini"
             ? accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
             : accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               }),
@@ -16128,14 +16183,14 @@ async function handleProvisionalConversationTurn(
     accumulated = req.stream
       ? forwarded.effectiveProtocol === "openai-responses"
         ? await accumulateResponsesSSEStream(upstreamResponse, {
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           })
         : forwarded.effectiveProtocol === "openai"
           ? await accumulateOpenAISSEStream(upstreamResponse, {
-              signal: abortScope.signal,
+              ...foregroundSSEStreamOptions(abortScope.signal),
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
@@ -16145,12 +16200,12 @@ async function handleProvisionalConversationTurn(
             })
           : forwarded.effectiveProtocol === "gemini"
             ? await accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
             : await accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
@@ -18906,7 +18961,7 @@ async function handleConversationTurn(
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
-            signal,
+            ...foregroundSSEStreamOptions(signal),
             validation: currentModifiedReq.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -19448,7 +19503,7 @@ async function handleConversationTurn(
             },
             sessionState.sessionID,
             req.codex ? "codex" : "public",
-            foregroundAbort.signal,
+            foregroundSSEStreamOptions(foregroundAbort.signal),
           ),
         );
       }
@@ -19457,7 +19512,7 @@ async function handleConversationTurn(
       const captured = await awaitForeground(
         captureUnsuccessfulResponses(
           accumulateResponsesSSEStream(upstreamResponse, {
-            signal: foregroundAbort.signal,
+            ...foregroundSSEStreamOptions(foregroundAbort.signal),
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -19489,7 +19544,7 @@ async function handleConversationTurn(
       // non-streaming Anthropic format (same pattern as non-stream path).
       const resp = await awaitForeground(
         accumulateOpenAISSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
           strict: true,
           stopAtTerminal: true,
           consumeUntilDone: true,
@@ -19505,7 +19560,7 @@ async function handleConversationTurn(
       // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
       const resp = await awaitForeground(
         accumulateGeminiSSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
           strict: true,
           stopAtTerminal: true,
         }),
@@ -19555,7 +19610,7 @@ async function handleConversationTurn(
     if (req.protocol === "openai") {
       return finishForeground(
         translateAnthropicStreamToOpenAI(anthropicSSE, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
           propagateErrors: true,
         }),
       );
@@ -19563,14 +19618,14 @@ async function handleConversationTurn(
     if (req.protocol === "openai-responses") {
       return finishForeground(
         translateAnthropicStreamToResponses(anthropicSSE, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
         }),
       );
     }
     if (req.protocol === "gemini") {
       return finishForeground(
         translateAnthropicStreamToGemini(anthropicSSE, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
         }),
       );
     }
@@ -20441,8 +20496,15 @@ async function handleRequestForTenant(
   if (pipelineResetInProgress) {
     return errorResponse(503, "Gateway pipeline is resetting");
   }
-  streamingPostResponsesAccepting = true;
   const requestGeneration = streamingPostResponseGeneration;
+  await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
+  streamingPostResponsesAccepting = true;
   let resolveDownstreamSettled: (() => void) | undefined;
   let downstreamCancelled = false;
   const downstreamSettled = new Promise<void>((resolve) => {
