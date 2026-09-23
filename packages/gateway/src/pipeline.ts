@@ -6507,6 +6507,258 @@ function isOpenCodeZenOpenAIStream(
   }
 }
 
+function safeDiagnosticToken(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$/.test(value)
+    ? value
+    : undefined;
+}
+
+function upstreamHostForDiagnostics(upstreamBase: string): string {
+  try {
+    const host = new URL(upstreamBase).host;
+    return /^[A-Za-z0-9.:[\]_-]{1,191}$/.test(host) ? host : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function readErrorField(error: unknown, field: string): unknown {
+  if (
+    error === null ||
+    (typeof error !== "object" && typeof error !== "function")
+  ) {
+    return undefined;
+  }
+  try {
+    return (error as Record<string, unknown>)[field];
+  } catch {
+    return undefined;
+  }
+}
+
+const SAFE_UPSTREAM_TRANSPORT_CODES = new Set([
+  "EAI_AGAIN",
+  "EADDRNOTAVAIL",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ERR_SOCKET_CLOSED",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function errorCauseChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<object>();
+  let current = error;
+  for (let depth = 0; depth < 4; depth++) {
+    if (
+      current === null ||
+      (typeof current !== "object" && typeof current !== "function") ||
+      seen.has(current)
+    ) {
+      break;
+    }
+    seen.add(current);
+    chain.push(current);
+    current = readErrorField(current, "cause");
+  }
+  return chain;
+}
+
+function isUpstreamTransportFailure(
+  error: unknown,
+  signal?: AbortSignal,
+): error is Error {
+  if (!(error instanceof Error) || signal?.aborted) return false;
+  const chain = errorCauseChain(error);
+  if (
+    chain.some((entry) => {
+      const name = readErrorField(entry, "name");
+      const code = readErrorField(entry, "code");
+      return (
+        name === "AbortError" ||
+        name === "RedirectError" ||
+        (typeof code === "string" &&
+          (code === "ABORT_ERR" ||
+            code === "ERR_ABORTED" ||
+            code === "UND_ERR_ABORTED" ||
+            code.includes("REDIRECT")))
+      );
+    })
+  ) {
+    return false;
+  }
+  return chain.some((entry) => {
+    const code = readErrorField(entry, "code");
+    return typeof code === "string" && SAFE_UPSTREAM_TRANSPORT_CODES.has(code);
+  });
+}
+
+/** Keep transport diagnostics to stable error codes; never log messages or URLs. */
+function fetchFailureCauseSummary(error: unknown): string {
+  const chain = errorCauseChain(error);
+  const name = error instanceof TypeError ? "TypeError" : "Error";
+  const codes = [
+    ...new Set(
+      chain
+        .map((entry) => readErrorField(entry, "code"))
+        .filter(
+          (code): code is string =>
+            typeof code === "string" && SAFE_UPSTREAM_TRANSPORT_CODES.has(code),
+        ),
+    ),
+  ];
+  const errno = chain
+    .map((entry) => readErrorField(entry, "errno"))
+    .find(
+      (value): value is number | string =>
+        (typeof value === "number" && Number.isSafeInteger(value)) ||
+        (typeof value === "string" && /^-?[0-9]{1,10}$/.test(value)),
+    );
+  const syscall = chain
+    .map((entry) => safeDiagnosticToken(readErrorField(entry, "syscall")))
+    .find(Boolean);
+
+  return [
+    name ? `type=${name}` : undefined,
+    `causeCodes=${codes.length ? codes.join(">") : "none"}`,
+    errno !== undefined ? `errno=${errno}` : undefined,
+    syscall ? `syscall=${syscall}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+const SAFE_UPSTREAM_ERROR_CATEGORIES = new Set([
+  "aborted",
+  "api_error",
+  "authentication_error",
+  "bad_request",
+  "cancelled",
+  "context_length_exceeded",
+  "data_loss",
+  "failed_precondition",
+  "insufficient_quota",
+  "internal",
+  "invalid_argument",
+  "invalid_request_error",
+  "model_not_found",
+  "not_found",
+  "not_found_error",
+  "out_of_range",
+  "overloaded_error",
+  "permission_denied",
+  "permission_error",
+  "rate_limit_error",
+  "resource_exhausted",
+  "server_error",
+  "unauthenticated",
+  "unavailable",
+  "unimplemented",
+  "unknown",
+  "upstream_error",
+]);
+
+function safeUpstreamErrorCategory(errorBody: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errorBody);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const payload = parsed as Record<string, unknown>;
+  const error =
+    payload.error && typeof payload.error === "object"
+      ? (payload.error as Record<string, unknown>)
+      : payload;
+  for (const value of [error.status, error.type, error.code]) {
+    if (
+      typeof value === "string" &&
+      SAFE_UPSTREAM_ERROR_CATEGORIES.has(value.toLowerCase())
+    ) {
+      return value;
+    }
+  }
+  const code = error.code;
+  if (
+    typeof code === "number" &&
+    Number.isInteger(code) &&
+    code >= 100 &&
+    code <= 599
+  ) {
+    return `HTTP_${code}`;
+  }
+  return undefined;
+}
+
+function safeUpstreamRequestId(headers: Headers): string | undefined {
+  for (const name of [
+    "x-request-id",
+    "request-id",
+    "x-github-request-id",
+    "x-openrouter-request-id",
+    "cf-ray",
+  ]) {
+    const value = headers.get(name)?.trim();
+    if (value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function logUpstreamFetchFailure(
+  error: unknown,
+  req: GatewayRequest,
+  route: ResolvedRequestUpstreamRoute,
+  signal?: AbortSignal,
+): void {
+  if (!isUpstreamTransportFailure(error, signal)) return;
+  const provider = safeDiagnosticToken(route.providerID) ?? "none";
+  const model = safeDiagnosticToken(req.model) ?? "redacted";
+  log.error(
+    `upstream fetch failed (provider=${provider} model=${model} ` +
+      `protocol=${route.effectiveProtocol} ` +
+      `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)} ` +
+      `${fetchFailureCauseSummary(error)})`,
+  );
+}
+
+function logUpstreamResponseFailure(
+  status: number,
+  errorBody: string,
+  headers: Headers,
+  req: GatewayRequest,
+  route: ResolvedRequestUpstreamRoute,
+  sessionID: string,
+): void {
+  const details = [
+    `provider=${safeDiagnosticToken(route.providerID) ?? "none"}`,
+    `model=${safeDiagnosticToken(req.model) ?? "redacted"}`,
+    `protocol=${route.effectiveProtocol}`,
+    `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)}`,
+    `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
+  ];
+  const category = safeUpstreamErrorCategory(errorBody);
+  if (category) details.push(`category=${category}`);
+  const requestId = safeUpstreamRequestId(headers);
+  if (requestId) details.push(`requestId=${requestId}`);
+  log.error(`upstream error: ${status} (${details.join(" ")})`);
+}
+
 /**
  * Preserve the legacy process-global credential only for a local, unambiguous
  * direct-provider request to the exact configured base. Remote/hosted gateways,
@@ -6996,34 +7248,32 @@ async function forwardToUpstream(
 
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
-  const dispatch = (dispatchSignal?: AbortSignal): Promise<Response> =>
-    effectiveInterceptor
+  const dispatchUpstream = (dispatchSignal?: AbortSignal): Promise<Response> =>
+    responseAgainstAbort(async () => {
+      try {
+        return await upstreamFetch(url, {
+          method: "POST",
+          headers,
+          body: upstreamBody,
+          signal: dispatchSignal,
+        });
+      } catch (error) {
+        logUpstreamFetchFailure(error, req, route, dispatchSignal);
+        throw error;
+      }
+    }, dispatchSignal);
+
+  const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
+    return effectiveInterceptor
       ? responseAgainstAbort(
           () =>
             effectiveInterceptor(body, req.model, req.stream, () =>
-              responseAgainstAbort(
-                () =>
-                  upstreamFetch(url, {
-                    method: "POST",
-                    headers,
-                    body: upstreamBody,
-                    signal: dispatchSignal,
-                  }),
-                dispatchSignal,
-              ),
+              dispatchUpstream(dispatchSignal),
             ),
           dispatchSignal,
         )
-      : responseAgainstAbort(
-          () =>
-            upstreamFetch(url, {
-              method: "POST",
-              headers,
-              body: upstreamBody,
-              signal: dispatchSignal,
-            }),
-          dispatchSignal,
-        );
+      : dispatchUpstream(dispatchSignal);
+  };
 
   const response = await dispatch(signal);
   return { response, retry: dispatch, serializedBody, effectiveProtocol };
@@ -18673,7 +18923,14 @@ async function handleConversationTurn(
       }
       log.warn("upstream error body read timed out");
     }
-    log.error(`upstream error: ${upstreamResponse.status}`);
+    logUpstreamResponseFailure(
+      upstreamResponse.status,
+      errorBody,
+      upstreamResponse.headers,
+      req,
+      requestUpstreamRoute,
+      sessionID,
+    );
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.
