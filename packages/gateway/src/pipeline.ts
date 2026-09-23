@@ -6510,8 +6510,28 @@ function readErrorField(error: unknown, field: string): unknown {
   }
 }
 
-/** Keep transport diagnostics to stable error codes; never log messages or URLs. */
-function fetchFailureCauseSummary(error: unknown): string {
+const SAFE_UPSTREAM_TRANSPORT_CODES = new Set([
+  "EAI_AGAIN",
+  "EADDRNOTAVAIL",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ERR_SOCKET_CLOSED",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function errorCauseChain(error: unknown): unknown[] {
   const chain: unknown[] = [];
   const seen = new Set<object>();
   let current = error;
@@ -6527,7 +6547,41 @@ function fetchFailureCauseSummary(error: unknown): string {
     chain.push(current);
     current = readErrorField(current, "cause");
   }
+  return chain;
+}
 
+function isUpstreamTransportFailure(
+  error: unknown,
+  signal?: AbortSignal,
+): error is Error {
+  if (!(error instanceof Error) || signal?.aborted) return false;
+  const chain = errorCauseChain(error);
+  if (
+    chain.some((entry) => {
+      const name = readErrorField(entry, "name");
+      const code = readErrorField(entry, "code");
+      return (
+        name === "AbortError" ||
+        name === "RedirectError" ||
+        (typeof code === "string" &&
+          (code === "ABORT_ERR" ||
+            code === "ERR_ABORTED" ||
+            code === "UND_ERR_ABORTED" ||
+            code.includes("REDIRECT")))
+      );
+    })
+  ) {
+    return false;
+  }
+  return chain.some((entry) => {
+    const code = readErrorField(entry, "code");
+    return typeof code === "string" && SAFE_UPSTREAM_TRANSPORT_CODES.has(code);
+  });
+}
+
+/** Keep transport diagnostics to stable error codes; never log messages or URLs. */
+function fetchFailureCauseSummary(error: unknown): string {
+  const chain = errorCauseChain(error);
   const name = error instanceof TypeError ? "TypeError" : "Error";
   const codes = [
     ...new Set(
@@ -6535,10 +6589,7 @@ function fetchFailureCauseSummary(error: unknown): string {
         .map((entry) => readErrorField(entry, "code"))
         .filter(
           (code): code is string =>
-            typeof code === "string" &&
-            /^(?:UND_ERR_[A-Z0-9_]{1,32}|ERR_[A-Z0-9_]{1,32}|E[A-Z0-9]{2,15})$/.test(
-              code,
-            ),
+            typeof code === "string" && SAFE_UPSTREAM_TRANSPORT_CODES.has(code),
         ),
     ),
   ];
@@ -6646,8 +6697,9 @@ function logUpstreamFetchFailure(
   error: unknown,
   req: GatewayRequest,
   route: ResolvedRequestUpstreamRoute,
+  signal?: AbortSignal,
 ): void {
-  if (!(error instanceof Error) || error.message !== "fetch failed") return;
+  if (!isUpstreamTransportFailure(error, signal)) return;
   const provider = safeDiagnosticToken(route.providerID) ?? "none";
   const model = safeDiagnosticToken(req.model) ?? "redacted";
   log.error(
@@ -7169,39 +7221,31 @@ async function forwardToUpstream(
 
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
+  const dispatchUpstream = (dispatchSignal?: AbortSignal): Promise<Response> =>
+    responseAgainstAbort(async () => {
+      try {
+        return await upstreamFetch(url, {
+          method: "POST",
+          headers,
+          body: upstreamBody,
+          signal: dispatchSignal,
+        });
+      } catch (error) {
+        logUpstreamFetchFailure(error, req, route, dispatchSignal);
+        throw error;
+      }
+    }, dispatchSignal);
+
   const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
-    try {
-      return await (effectiveInterceptor
-        ? responseAgainstAbort(
-            () =>
-              effectiveInterceptor(body, req.model, req.stream, () =>
-                responseAgainstAbort(
-                  () =>
-                    upstreamFetch(url, {
-                      method: "POST",
-                      headers,
-                      body: upstreamBody,
-                      signal: dispatchSignal,
-                    }),
-                  dispatchSignal,
-                ),
-              ),
-            dispatchSignal,
-          )
-        : responseAgainstAbort(
-            () =>
-              upstreamFetch(url, {
-                method: "POST",
-                headers,
-                body: upstreamBody,
-                signal: dispatchSignal,
-              }),
-            dispatchSignal,
-          ));
-    } catch (error) {
-      logUpstreamFetchFailure(error, req, route);
-      throw error;
-    }
+    return effectiveInterceptor
+      ? responseAgainstAbort(
+          () =>
+            effectiveInterceptor(body, req.model, req.stream, () =>
+              dispatchUpstream(dispatchSignal),
+            ),
+          dispatchSignal,
+        )
+      : dispatchUpstream(dispatchSignal);
   };
 
   const response = await dispatch(signal);

@@ -251,7 +251,7 @@ describe("routing log credential redaction", () => {
     },
   );
 
-  it("logs safe route and cause codes for a fetch failure", async () => {
+  it("does not classify interceptor exceptions as upstream transport failures", async () => {
     const credential = "PRIVATE_GATEWAY_CREDENTIAL_MARKER";
     const privateCauseMessage = "PRIVATE_TRANSPORT_MESSAGE_MARKER";
     const messages: string[] = [];
@@ -298,17 +298,9 @@ describe("routing log credential redaction", () => {
 
     expect(response.status).toBe(502);
     expect(messages).toContain("pipeline request failed: fetch failed");
-    const diagnostic = messages.find((message) =>
-      message.startsWith("upstream fetch failed"),
-    );
-    expect(diagnostic).toContain("provider=github-copilot");
-    expect(diagnostic).toContain("model=gemini-3.8-flash");
-    expect(diagnostic).toContain("protocol=openai");
-    expect(diagnostic).toContain("host=api.githubcopilot.com");
-    expect(diagnostic).toContain("causeCodes=UND_ERR_SOCKET>ECONNRESET");
-    expect(diagnostic).toContain("errno=-104");
-    expect(diagnostic).toContain("syscall=connect");
-    expect(diagnostic).not.toContain("/chat/completions");
+    expect(
+      messages.some((message) => message.startsWith("upstream fetch failed")),
+    ).toBe(false);
     expect(messages.join("\n")).not.toContain(credential);
     expect(messages.join("\n")).not.toContain(privateCauseMessage);
     expect(messages.join("\n")).not.toContain(
