@@ -11,12 +11,12 @@
  *   bun packages/core/eval/run.ts --summarize results/latest.jsonl
  *   bun packages/core/eval/run.ts --output results/eval-2025-05-16.jsonl
  */
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { EvalConfig, EvalResult, Dimension, BaselineMode } from "./types";
 import { ALL_DIMENSIONS } from "./types";
-import { runEval, printSummary } from "./harness";
+import { withOwnedDatabaseRoot } from "./owned-root";
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -92,7 +92,10 @@ if (args.summarize) {
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l));
 
-  printSummary(results);
+  await withOwnedDatabaseRoot(async () => {
+    const { printSummary } = await import("./harness");
+    printSummary(results);
+  });
   process.exit(0);
 }
 
@@ -122,7 +125,7 @@ function parseGateway(raw: string): { host: string; port: number } | undefined {
 const outputPath =
   args.output ||
   resolve(
-    import.meta.dir,
+    import.meta.dirname,
     "results",
     `eval-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-")}.jsonl`,
   );
@@ -167,9 +170,12 @@ console.log(`  Output:     ${config.outputPath}`);
 console.log(`  Model:      ${config.model}`);
 console.log("");
 
-const results = await runEval(config);
-console.log("");
-printSummary(results);
+await withOwnedDatabaseRoot(async (signal) => {
+  const { printSummary, runEval } = await import("./harness");
+  const results = await runEval({ ...config, signal });
+  console.log("");
+  printSummary(results);
 
-console.log(`\nResults written to: ${config.outputPath}`);
-console.log(`Total questions: ${results.length}`);
+  console.log(`\nResults written to: ${config.outputPath}`);
+  console.log(`Total questions: ${results.length}`);
+});

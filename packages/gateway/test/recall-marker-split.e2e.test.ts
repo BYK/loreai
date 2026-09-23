@@ -31,6 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 // ---------------------------------------------------------------------------
 // Helpers: build Anthropic SSE events for fixtures
@@ -214,7 +215,7 @@ async function teardownAll(
 
 describe("Streaming recall marker — Anthropic native (split envelope)", () => {
   test("client receives marker as its own message envelope with lore_marker_* id", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
@@ -292,7 +293,7 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
   });
 
   test("marker envelope is positioned AFTER the preamble text and BEFORE the preamble's held-back message_stop", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
@@ -355,7 +356,7 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
   });
 
   test("SSE event order: every message_start is closed by a message_stop before the next message_start", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
@@ -465,7 +466,7 @@ describe("Streaming recall marker — Anthropic native (split envelope)", () => 
 
 describe("Streaming recall marker — non-Anthropic (inline + translated)", () => {
   test("OpenAI Chat Completions client receives marker as a delta.content chunk", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
@@ -660,7 +661,7 @@ function anthropicMixedToolsStream(query: string): Response {
 
 describe("Streaming recall marker — mixed tools (recall + Read)", () => {
   test("marker envelope is emitted and the other tool_use is forwarded", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
@@ -846,7 +847,7 @@ function anthropicFollowupRecallStream(query: string): Response {
 
 describe("Streaming recall marker — non-Anthropic mixed tools (recall + Read)", () => {
   test("OpenAI mixed-tools wire: finish_reason=tool_calls, single [DONE], Read tool_use forwarded", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
@@ -960,7 +961,7 @@ describe("Streaming recall marker — non-Anthropic mixed tools (recall + Read)"
 
 describe("Streaming recall marker — multi-recall drill-down", () => {
   test("each iteration emits a marker with a unique lore_marker_* id", async () => {
-    const dbPath = `/tmp/lore-marker-split-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("marker-split");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";

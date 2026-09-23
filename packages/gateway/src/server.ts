@@ -324,9 +324,16 @@ export async function startServer(
   let stopPromise: Promise<void> | undefined;
   const result = {
     stop: (deadlineMs?: number): Promise<void> => {
-      stopPromise ??= Promise.all(
-        servers.map((server) => closeBoundServer(server, deadlineMs)),
-      ).then(() => {});
+      if (!stopPromise) {
+        stopPromise = Promise.all(
+          servers.map((server) => closeBoundServer(server, deadlineMs)),
+        )
+          .then(() => {})
+          .catch((error: unknown) => {
+            stopPromise = undefined;
+            throw error;
+          });
+      }
       return stopPromise;
     },
     port: resolvedPort,

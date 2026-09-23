@@ -8,12 +8,12 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { request } from "node:http";
 import { connect, type Socket } from "node:net";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { createTestDatabaseDirectory } from "../../core/test/helpers/test-db-path";
 
 const BUNDLE = resolve(process.cwd(), "packages/gateway/dist/bin.cjs");
 const TEST_TIMEOUT_MS = 30_000;
@@ -76,7 +76,7 @@ describe.skipIf(process.platform === "win32")(
           );
         }
 
-        const dir = await mkdtemp(join(tmpdir(), "lore-signal-lifecycle-"));
+        const dir = createTestDatabaseDirectory("signal-lifecycle");
         tempDirs.add(dir);
         const child = spawn(
           process.execPath,
@@ -127,7 +127,7 @@ describe.skipIf(process.platform === "win32")(
           );
         }
 
-        const dir = await mkdtemp(join(tmpdir(), "lore-local-mode-warning-"));
+        const dir = createTestDatabaseDirectory("local-mode-warning");
         tempDirs.add(dir);
         const child = spawn(
           process.execPath,
@@ -180,7 +180,7 @@ describe.skipIf(process.platform === "win32")(
       "authenticated shutdown closes a stalled partial HTTP connection",
       async () => {
         if (!existsSync(BUNDLE)) throw new Error("Gateway bundle is required");
-        const dir = await mkdtemp(join(tmpdir(), "lore-control-shutdown-"));
+        const dir = createTestDatabaseDirectory("control-shutdown");
         tempDirs.add(dir);
         const child = spawn(
           process.execPath,

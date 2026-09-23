@@ -249,6 +249,8 @@ export type EvalMode = "fixture" | "live";
 
 export interface EvalConfig {
   mode: EvalMode;
+  /** Aborts in-flight work when the owning eval process receives a signal. */
+  signal?: AbortSignal;
   gateway?: { host: string; port: number };
   model: string;
   judgeModel: string;

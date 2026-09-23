@@ -398,7 +398,7 @@ export async function judge(
   question: EvalQuestion,
   hypothesis: string,
   llm?: EvalLLMClient,
-  metadata?: { recallInvoked?: boolean },
+  metadata?: { recallInvoked?: boolean; signal?: AbortSignal },
 ): Promise<JudgeResult> {
   const { rubric } = question;
 
@@ -428,6 +428,7 @@ export async function judge(
     model: llm.config.judgeModel,
     maxTokens: 1024,
     temperature: 0,
+    signal: metadata?.signal,
   });
 
   // Parse JSON response

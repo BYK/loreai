@@ -9,9 +9,9 @@
  * so parallel work on those suites rebases cleanly.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { unlinkSync, existsSync } from "node:fs";
 import { loopbackRequest } from "./helpers/loopback-request";
 import type { LoreMessage } from "@loreai/core";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 let baseURL: string;
 let dbPath: string;
@@ -20,7 +20,7 @@ let closeDB: () => void;
 let resetPipelineState: () => Promise<void>;
 
 beforeAll(async () => {
-  dbPath = `/tmp/lore-api-session-search-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  dbPath = createTestDatabasePath("api-session-search");
   process.env.LORE_DB_PATH = dbPath;
   process.env.LORE_LISTEN_PORT = "0";
   process.env.LORE_DEBUG = "false";
@@ -45,14 +45,6 @@ afterAll(async () => {
   if (server) await server.stop();
   if (closeDB) closeDB();
   if (resetPipelineState) await resetPipelineState();
-  for (const suffix of ["", "-shm", "-wal"]) {
-    const file = `${dbPath}${suffix}`;
-    try {
-      if (existsSync(file)) unlinkSync(file);
-    } catch {
-      /* best-effort */
-    }
-  }
 });
 
 function api(path: string): Promise<Response> {

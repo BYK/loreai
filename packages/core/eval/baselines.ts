@@ -126,6 +126,7 @@ export async function compactionBaseline(
   tailBudgetTokens: number = 80_000,
   llm: EvalLLMClient,
   modelContextWindow: number = 200_000,
+  signal?: AbortSignal,
 ): Promise<string> {
   // Match real tool behavior: no compaction until the conversation exceeds
   // the model's effective context window. Claude Code auto-compacts at ~83.5%
@@ -138,6 +139,7 @@ export async function compactionBaseline(
   let compactionCount = 0;
 
   while (compactionCount < maxCompactions) {
+    signal?.throwIfAborted();
     const total = totalTokens(currentTurns);
 
     // No compaction until the conversation exceeds the threshold (~140K for
@@ -181,6 +183,7 @@ export async function compactionBaseline(
       const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
         maxTokens: 4096,
         temperature: 0,
+        signal,
       });
       summaryText = result.text;
     } else {
@@ -207,6 +210,7 @@ export async function compactionBaseline(
       // Summarize each chunk
       const chunkSummaries: string[] = [];
       for (let c = 0; c < chunks.length; c++) {
+        signal?.throwIfAborted();
         const chunkText = renderConversation(chunks[c]);
         const userPrompt = COMPACTION_USER_TEMPLATE.replace(
           "{{conversation}}",
@@ -215,6 +219,7 @@ export async function compactionBaseline(
         const result = await llm.prompt(COMPACTION_SYSTEM, userPrompt, {
           maxTokens: 4096,
           temperature: 0,
+          signal,
         });
         chunkSummaries.push(result.text);
         console.log(

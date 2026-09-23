@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Harness } from "./helpers/harness";
 import { createHarness, TEST_GATEWAY_AUTH_TOKEN } from "./helpers/harness";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -522,7 +523,7 @@ describe("remote gateway: path-less session attribution", () => {
 
 describe("lore data consolidate", () => {
   let prevDb: string | undefined;
-  const dbPath = `/tmp/lore-consolidate-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  const dbPath = createTestDatabasePath("consolidate");
 
   beforeEach(async () => {
     prevDb = process.env.LORE_DB_PATH;

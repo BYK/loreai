@@ -30,6 +30,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 /** One Responses-API SSE event (`event:` + `data:` framing). */
 function sseEvent(event: string, data: unknown): string {
@@ -170,7 +171,7 @@ afterEach(async () => {
 
 describe("recall follow-up — openai-codex (ChatGPT) path", () => {
   test("forces the follow-up to stream so ChatGPT does not 400", async () => {
-    const dbPath = `/tmp/lore-recall-codex-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("recall-codex");
     process.env.LORE_DB_PATH = dbPath;
     // Port 0 = OS-assigned ephemeral port (avoids EADDRINUSE flakes, #931).
     process.env.LORE_LISTEN_PORT = "0";
@@ -406,7 +407,7 @@ describe("recall follow-up — openai-codex (ChatGPT) path", () => {
   });
 
   test("non-codex openai-responses also streams the follow-up", async () => {
-    const dbPath = `/tmp/lore-recall-resp-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("recall-responses");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
