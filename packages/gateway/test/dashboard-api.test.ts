@@ -302,9 +302,9 @@ describe("PATCH /api/v1/entities/:id", () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      entity: { metadata: Record<string, unknown> };
+      entity: { metadata: Record<string, unknown> | null };
     };
-    expect(body.entity.metadata).toEqual({});
+    expect(body.entity.metadata).toBeNull();
 
     for (const payload of [
       { role: "x".repeat(2001) },
