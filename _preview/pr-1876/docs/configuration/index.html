@@ -257,8 +257,8 @@
 <td><code dir="auto">foregroundSseInactivityMs</code></td>
 <td>number</td>
 <td>—</td>
-<td>min 1000, max 2147483647</td>
-<td>Foreground upstream SSE inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence.</td>
+<td>min 1000, max 2147423647</td>
+<td>Foreground upstream SSE inactivity deadline in milliseconds. Capped at 2147423647ms to reserve 60000ms of request-timeout headroom. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence.</td>
 </tr>
 <tr>
 <td><code dir="auto">foregroundRequestTimeoutMs</code></td>
@@ -271,8 +271,8 @@
 <td><code dir="auto">workerResponseInactivityMs</code></td>
 <td>number</td>
 <td>—</td>
-<td>min 1000, max 2147483647</td>
-<td>Background worker upstream response inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence.</td>
+<td>min 1000, max 2147423647</td>
+<td>Background worker upstream response inactivity deadline in milliseconds. Capped at 2147423647ms to reserve 60000ms of request-timeout headroom. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence.</td>
 </tr>
 <tr>
 <td><code dir="auto">workerRequestTimeoutMs</code></td>
