@@ -20,7 +20,6 @@ import {
 type DetectionResult =
   import("@loreai/core").conversationImport.DetectionResult;
 import { createGatewayLLMClient, getLastWorkerError } from "../llm-adapter";
-import { configureSSEInactivityDeadlines } from "../sse-inactivity";
 import {
   resolveAuth,
   workerKeyScheme,
@@ -1118,7 +1117,6 @@ export async function commandImport(
   // the belt-and-suspenders recordImport() call — that's intentional so the
   // local DB has dedup history if the user later runs without LORE_REMOTE_URL.
   await load(projectPath);
-  configureSSEInactivityDeadlines(loreConfig().timeouts);
   if (!remote) {
     ensureProject(projectPath);
   }
@@ -1520,7 +1518,10 @@ export async function commandImport(
           agentUpstreams,
           auth.getAuth,
           auth.model,
-          { dedicatedWorkerKey: !!workerApiKey || auth.upstream != null },
+          {
+            dedicatedWorkerKey: !!workerApiKey || auth.upstream != null,
+            hostedMode: config.hostedMode,
+          },
         );
 
         // Snapshot the auth-rejected timestamp at the START of this attempt.

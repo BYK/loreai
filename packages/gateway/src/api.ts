@@ -154,6 +154,7 @@ function getAPILLMClient(config: GatewayConfig): LLMClient {
       { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI },
       resolveAuth,
       defaultModel,
+      { hostedMode: config.hostedMode },
     );
   }
   return apiLLMClient;

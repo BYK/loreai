@@ -1,3 +1,10 @@
+import {
+  config as loreConfig,
+  discoverWorkspaceRoot,
+  enableHostedMode,
+  isHostedMode,
+  load,
+} from "@loreai/core";
 import type { SSEStreamOptions } from "./stream/options";
 
 /**
@@ -167,6 +174,11 @@ const ENV_DEFAULTS = resolveSSEInactivityDeadlines();
  * them after loading `.lore.json`; hosted mode uses operator env.
  */
 let currentDeadlines: SSEInactivityDeadlines = ENV_DEFAULTS;
+let configurationGeneration = 0;
+let configurationPromise: Promise<void> | undefined;
+let configurationPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
 
 export function getSSEInactivityDeadlines(): Readonly<SSEInactivityDeadlines> {
   return currentDeadlines;
@@ -177,6 +189,65 @@ export function configureSSEInactivityDeadlines(
 ): Readonly<SSEInactivityDeadlines> {
   currentDeadlines = resolveSSEInactivityDeadlines(config);
   return currentDeadlines;
+}
+
+/** Load the gateway's process-wide timeout config once before a worker starts. */
+export async function ensureSSEInactivityConfiguration(options?: {
+  hostedMode?: boolean;
+  isCurrent?: () => boolean;
+}): Promise<boolean> {
+  const generation = configurationGeneration;
+  const isCurrent = () =>
+    generation === configurationGeneration && (options?.isCurrent?.() ?? true);
+
+  if (!configurationPromise) {
+    configurationPromise = (async () => {
+      if (!isCurrent()) return;
+      if (options?.hostedMode ?? isHostedMode()) {
+        enableHostedMode();
+        configureSSEInactivityDeadlines({});
+        return;
+      }
+
+      await load(discoverWorkspaceRoot(process.cwd()));
+      if (!isCurrent()) return;
+
+      const pause = configurationPauseForTest;
+      if (pause) {
+        pause.onWait();
+        await pause.pause;
+      }
+      if (!isCurrent()) return;
+
+      configureSSEInactivityDeadlines(loreConfig().timeouts);
+    })();
+  }
+
+  const initialization = configurationPromise;
+  try {
+    await initialization;
+  } catch (error) {
+    if (configurationPromise === initialization) {
+      configurationPromise = undefined;
+    }
+    throw error;
+  }
+  return isCurrent();
+}
+
+/** Drop test/process state so a fresh gateway generation resolves its config. */
+export function resetSSEInactivityConfiguration(): void {
+  configurationGeneration++;
+  configurationPromise = undefined;
+  configurationPauseForTest = undefined;
+  configureSSEInactivityDeadlines({});
+}
+
+export function setSSEDeadlineConfigurationPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  configurationPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
 export function foregroundSSEStreamOptions(

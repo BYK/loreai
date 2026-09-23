@@ -339,6 +339,7 @@ export async function runSemanticLint(
     const client = createGatewayLLMClient(judgeUpstreams, judgeAuth, model, {
       dedicatedWorkerKey: !!workerKey,
       disableModelFallbacks: workerKey === "copilot-sdk-bridge",
+      hostedMode: gateway.config.hostedMode,
     });
     const judge = createGatewayInvariantJudge({
       client,

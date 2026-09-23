@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config";
@@ -15,6 +15,8 @@ import {
 import {
   FOREGROUND_REQUEST_TIMEOUT_MS,
   getSSEInactivityDeadlines,
+  resolveSSEInactivityDeadlines,
+  setSSEDeadlineConfigurationPauseForTest,
 } from "../src/sse-inactivity";
 import type { GatewayRequest } from "../src/translate/types";
 import { handleModelsPassthrough, startServer } from "../src/server";
@@ -35,6 +37,28 @@ function fetchUrl(input: RequestInfo | URL): string {
 
 function modelsRequest(signal?: AbortSignal): Request {
   return new Request("http://gateway.test/v1/models", { signal });
+}
+
+function firstMetaRequest(
+  projectPath: string,
+  sessionID: string,
+): GatewayRequest {
+  return {
+    protocol: "anthropic",
+    model: "claude-test",
+    system: "",
+    messages: [{ role: "user", content: [{ type: "text", text: "title" }] }],
+    tools: [],
+    stream: false,
+    maxTokens: 32,
+    metadata: {},
+    rawHeaders: {
+      authorization: "Bearer test-key",
+      "x-lore-session-id": sessionID,
+      "x-lore-project": projectPath,
+      "x-lore-agent": "title",
+    },
+  };
 }
 
 function successfulResponsesResponse(): Response {
@@ -156,24 +180,7 @@ describe("foreground passthrough route aborts", () => {
       );
 
       const response = await handleRequest(
-        {
-          protocol: "anthropic",
-          model: "claude-test",
-          system: "",
-          messages: [
-            { role: "user", content: [{ type: "text", text: "title" }] },
-          ],
-          tools: [],
-          stream: false,
-          maxTokens: 32,
-          metadata: {},
-          rawHeaders: {
-            authorization: "Bearer test-key",
-            "x-lore-session-id": "first-meta-timeout-config",
-            "x-lore-project": projectPath,
-            "x-lore-agent": "title",
-          },
-        },
+        firstMetaRequest(projectPath, "first-meta-timeout-config"),
         config,
       );
       await response.text();
@@ -185,6 +192,105 @@ describe("foreground passthrough route aborts", () => {
         workerRequestTimeoutMs: 400_000,
       });
     } finally {
+      process.chdir(previousCwd);
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  test("loads timeout config from the workspace root for nested launches", async () => {
+    const previousCwd = process.cwd();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "lore-timeout-root-"));
+    const projectPath = join(workspaceRoot, "packages", "app");
+    try {
+      mkdirSync(join(workspaceRoot, ".git"));
+      mkdirSync(projectPath, { recursive: true });
+      writeFileSync(
+        join(workspaceRoot, ".lore.json"),
+        JSON.stringify({
+          timeouts: {
+            foregroundSseInactivityMs: 710_000,
+            foregroundRequestTimeoutMs: 810_000,
+            workerResponseInactivityMs: 310_000,
+            workerRequestTimeoutMs: 410_000,
+          },
+        }),
+      );
+      process.chdir(projectPath);
+      await resetPipelineState({ fast: true });
+      mockedFetch.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            id: "msg_nested_timeout_config",
+            type: "message",
+            role: "assistant",
+            model: "claude-test",
+            content: [{ type: "text", text: "Title" }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      const response = await handleRequest(
+        firstMetaRequest(projectPath, "nested-timeout-config"),
+        config,
+      );
+      await response.text();
+
+      expect(getSSEInactivityDeadlines()).toEqual({
+        foregroundSseInactivityMs: 710_000,
+        foregroundRequestTimeoutMs: 810_000,
+        workerResponseInactivityMs: 310_000,
+        workerRequestTimeoutMs: 410_000,
+      });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a request paused in deadline initialization when reset wins", async () => {
+    const previousCwd = process.cwd();
+    const projectPath = mkdtempSync(join(tmpdir(), "lore-timeout-reset-"));
+    let releaseInitialization!: () => void;
+    let markInitializationReached!: () => void;
+    const initializationReached = new Promise<void>((resolve) => {
+      markInitializationReached = resolve;
+    });
+    const initializationPause = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    try {
+      mkdirSync(join(projectPath, ".git"));
+      writeFileSync(
+        join(projectPath, ".lore.json"),
+        JSON.stringify({ timeouts: { foregroundRequestTimeoutMs: 800_000 } }),
+      );
+      process.chdir(projectPath);
+      await resetPipelineState({ fast: true });
+      setSSEDeadlineConfigurationPauseForTest(initializationPause, () =>
+        markInitializationReached(),
+      );
+
+      const pendingRequest = handleRequest(
+        firstMetaRequest(projectPath, "reset-during-timeout-initialization"),
+        config,
+      );
+      await initializationReached;
+      await resetPipelineState({ fast: true });
+      releaseInitialization();
+
+      const response = await pendingRequest;
+      expect(response.status).toBe(503);
+      expect(mockedFetch).not.toHaveBeenCalled();
+      expect(getSSEInactivityDeadlines()).toEqual(
+        resolveSSEInactivityDeadlines(),
+      );
+    } finally {
+      releaseInitialization();
+      setSSEDeadlineConfigurationPauseForTest(undefined);
       process.chdir(previousCwd);
       rmSync(projectPath, { recursive: true, force: true });
     }

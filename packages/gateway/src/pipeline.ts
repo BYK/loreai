@@ -270,9 +270,10 @@ import {
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
-  configureSSEInactivityDeadlines,
+  ensureSSEInactivityConfiguration,
   foregroundSSEStreamOptions,
   getSSEInactivityDeadlines,
+  resetSSEInactivityConfiguration,
 } from "./sse-inactivity";
 import type { SSEStreamOptions } from "./stream/options";
 import {
@@ -615,8 +616,6 @@ const KNOWLEDGE_DELTA_FRAMING_PREFIX = "[Lore knowledge update —";
 
 /** One-time initialization flag. */
 let initialized = false;
-/** Load the process-wide stream deadlines before the first request is routed. */
-let sseDeadlineConfigurationPromise: Promise<void> | undefined;
 
 // --- Response warning marker ---
 // Injected into the response (assistant message) so the user can see it.
@@ -1071,6 +1070,7 @@ export async function resetPipelineState(opts?: {
 }): Promise<void> {
   if (pipelineResetPromise) return pipelineResetPromise;
   pipelineResetInProgress = true;
+  resetSSEInactivityConfiguration();
   const reset = (async () => {
     try {
       await resetPipelineStateInner(opts);
@@ -1160,8 +1160,6 @@ async function resetPipelineStateInner(opts?: {
     inFlightBackground.clear();
   }
   initialized = false;
-  sseDeadlineConfigurationPromise = undefined;
-  configureSSEInactivityDeadlines({});
   maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
   maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
   sessions.clear();
@@ -4587,24 +4585,14 @@ async function initIfNeeded(
  */
 async function ensureGatewaySSEDeadlineConfiguration(
   config: GatewayConfig,
+  requestGeneration: number,
 ): Promise<void> {
-  if (!sseDeadlineConfigurationPromise) {
-    sseDeadlineConfigurationPromise = (async () => {
-      if (config.hostedMode) {
-        enableHostedMode();
-        configureSSEInactivityDeadlines({});
-        return;
-      }
-      await load(process.cwd());
-      configureSSEInactivityDeadlines(loreConfig().timeouts);
-    })();
-  }
-  try {
-    await sseDeadlineConfigurationPromise;
-  } catch (error) {
-    sseDeadlineConfigurationPromise = undefined;
-    throw error;
-  }
+  await ensureSSEInactivityConfiguration({
+    hostedMode: config.hostedMode,
+    isCurrent: () =>
+      !pipelineResetInProgress &&
+      requestGeneration === streamingPostResponseGeneration,
+  });
 }
 
 function getLLMClient(config: GatewayConfig): LLMClient {
@@ -4665,6 +4653,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       {
         dedicatedWorkerKey: !!workerApiKey,
         vertexProject: config.vertexProject,
+        hostedMode: config.hostedMode,
       },
     );
 
@@ -14925,11 +14914,17 @@ export async function handleCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
-    await ensureGatewaySSEDeadlineConfiguration(config);
+    const requestGeneration = streamingPostResponseGeneration;
+    await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+    if (
+      pipelineResetInProgress ||
+      requestGeneration !== streamingPostResponseGeneration
+    ) {
+      return errorResponse(503, "Gateway pipeline generation changed");
+    }
     const preflight = preflightDirectCompactionSession(req, config);
     if (preflight) return preflight;
     streamingPostResponsesAccepting = true;
-    const requestGeneration = streamingPostResponseGeneration;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
       const response = await runActivePipelineRequest(
@@ -15203,9 +15198,15 @@ export async function handleResponsesCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
-    await ensureGatewaySSEDeadlineConfiguration(config);
-    streamingPostResponsesAccepting = true;
     const requestGeneration = streamingPostResponseGeneration;
+    await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+    if (
+      pipelineResetInProgress ||
+      requestGeneration !== streamingPostResponseGeneration
+    ) {
+      return errorResponse(503, "Gateway pipeline generation changed");
+    }
+    streamingPostResponsesAccepting = true;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
       const response = await runActivePipelineRequest(
@@ -15250,7 +15251,14 @@ export async function passthroughResponsesCompact(
   trustedUpstreamBase?: string | null,
   parsedRequest?: GatewayRequest,
 ): Promise<Response> {
-  await ensureGatewaySSEDeadlineConfiguration(config);
+  const requestGeneration = streamingPostResponseGeneration;
+  await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
   const abortScope = createForegroundAbortScope(callerSignal);
   if (hasConflictingAuthHeaders(rawHeaders)) {
     abortScope.dispose();
@@ -20488,9 +20496,15 @@ async function handleRequestForTenant(
   if (pipelineResetInProgress) {
     return errorResponse(503, "Gateway pipeline is resetting");
   }
-  await ensureGatewaySSEDeadlineConfiguration(config);
-  streamingPostResponsesAccepting = true;
   const requestGeneration = streamingPostResponseGeneration;
+  await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
+  streamingPostResponsesAccepting = true;
   let resolveDownstreamSettled: (() => void) | undefined;
   let downstreamCancelled = false;
   const downstreamSettled = new Promise<void>((resolve) => {

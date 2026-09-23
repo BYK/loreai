@@ -70,6 +70,7 @@ import {
   SSEStreamTransportError,
 } from "./stream/anthropic";
 import {
+  ensureSSEInactivityConfiguration,
   getSSEInactivityDeadlines,
   workerSSEStreamOptions,
 } from "./sse-inactivity";
@@ -3399,6 +3400,8 @@ export function createGatewayLLMClient(
   defaultModel: { providerID: string; modelID: string },
   opts?: {
     dedicatedWorkerKey?: boolean;
+    /** Hosted gateways must keep config reads operator-controlled. */
+    hostedMode?: boolean;
     /** Keep protocol-specific proxies on the selected model. */
     disableModelFallbacks?: boolean;
     vertexProject?: string;
@@ -3407,6 +3410,7 @@ export function createGatewayLLMClient(
   },
 ): GatewayLLMClient {
   const hasDedicatedKey = opts?.dedicatedWorkerKey === true;
+  const factoryHostedMode = opts?.hostedMode;
   const disableModelFallbacks = opts?.disableModelFallbacks === true;
   // Configured GCP project for Vertex workers (else derived from ADC at call
   // time). Threaded so an explicit LORE_VERTEX_PROJECT (without GOOGLE_CLOUD_*)
@@ -3420,6 +3424,9 @@ export function createGatewayLLMClient(
       // non-thrown failure from THIS call, not a stale one from a prior
       // successful or different-failure call.
       lastWorkerError = undefined;
+      await ensureSSEInactivityConfiguration({
+        hostedMode: factoryHostedMode,
+      });
       // `model` is mutable: on a 400 model-not-supported the retry loop swaps
       // in a same-provider backup. Protocol is still model-dependent (Copilot
       // serves GPT-5.6 on Responses and gpt-5-mini on Chat Completions), so a
