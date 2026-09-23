@@ -130,10 +130,12 @@ const Fields: Component<{
   notes: [() => string, (v: string) => void];
 }> = (props) => (
   <div class="grid gap-3">
+    {/* Kobalte's composed handler plus a native listener cover mobile input events. */}
     <TextField>
       <TextFieldLabel>Role</TextFieldLabel>
       <TextFieldInput
         value={props.role[0]()}
+        onInput={(e) => props.role[1](e.currentTarget.value)}
         on:input={(e) => props.role[1](e.currentTarget.value)}
         placeholder="e.g. colleague, maintainer"
         data-testid="entity-role"
@@ -143,6 +145,7 @@ const Fields: Component<{
       <TextFieldLabel>Description</TextFieldLabel>
       <TextFieldInput
         value={props.description[0]()}
+        onInput={(e) => props.description[1](e.currentTarget.value)}
         on:input={(e) => props.description[1](e.currentTarget.value)}
         data-testid="entity-description"
       />
@@ -152,6 +155,7 @@ const Fields: Component<{
       <TextFieldTextArea
         rows={3}
         value={props.notes[0]()}
+        onInput={(e) => props.notes[1](e.currentTarget.value)}
         on:input={(e) => props.notes[1](e.currentTarget.value)}
         data-testid="entity-notes"
       />
