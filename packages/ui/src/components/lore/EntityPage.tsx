@@ -19,7 +19,6 @@ import {
   TextField,
   TextFieldInput,
   TextFieldLabel,
-  TextFieldTextArea,
 } from "~/components/ui/text-field";
 
 import { errorStateFor } from "./ErrorState";
@@ -145,14 +144,19 @@ const Fields: Component<{
         data-testid="entity-description"
       />
     </TextField>
-    <TextField value={props.notes[0]()} onChange={props.notes[1]}>
-      <TextFieldLabel>Notes</TextFieldLabel>
-      <TextFieldTextArea
+    <div class="flex flex-col gap-1">
+      <label class="text-sm font-medium leading-none" for="entity-notes">
+        Notes
+      </label>
+      <textarea
+        id="entity-notes"
+        class="flex min-h-20 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         rows={3}
+        value={props.notes[0]()}
         on:input={(e) => props.notes[1](e.currentTarget.value)}
         data-testid="entity-notes"
       />
-    </TextField>
+    </div>
   </div>
 );
 
