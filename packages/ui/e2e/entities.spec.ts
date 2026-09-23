@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("entities (UI-08)", () => {
-  test("list → detail → edit notes → save", async ({ page }) => {
+  test("list → detail → edit notes → save", async ({ page }, testInfo) => {
+    const notesValue = `First programmer, annotated the engine. [${testInfo.project.name}-${testInfo.retry}-${Date.now()}]`;
     await page.goto("/ui/entities");
     await expect(page.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
@@ -24,7 +25,7 @@ test.describe("entities (UI-08)", () => {
 
     // Edit notes and save; the PATCH lands via /api/v1/entities/:id.
     const notes = detail.getByTestId("entity-notes");
-    await notes.fill("First programmer, annotated the engine.");
+    await notes.fill(notesValue);
     const save = detail.getByTestId("entity-save");
     await expect(save).toBeEnabled();
     await save.click();
@@ -33,7 +34,7 @@ test.describe("entities (UI-08)", () => {
     // The write persisted — a reload re-reads the same notes from the server.
     await page.reload();
     await expect(detail.getByTestId("entity-notes")).toHaveValue(
-      "First programmer, annotated the engine.",
+      notesValue,
     );
   });
 
