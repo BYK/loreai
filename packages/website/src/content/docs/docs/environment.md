@@ -1,71 +1,4 @@
----
-title: Environment variables
-description: Every LORE_* env var, grouped by subsystem, with the parsing rule and default value.
-sidebar:
-  order: 5
----
-
-<!-- Auto-generated from packages/gateway/src/**/*.ts and packages/core/src/**/*.ts. Hand-edit the header above; the table below regenerates via pnpm generate:env-docs. -->
-
-Every env var the gateway reads. Default values are extracted from the source (look for the `||` / `??` / `parseXxx(env.LORE_X, DEFAULT)` pattern at the first use site) and shown under the variable name when set. The parser used to coerce the raw string is also shown under the variable name when present.
-
-Env vars override `.lore.json` for the same setting. To override a `.lore.json` field, look for the corresponding `LORE_*` variable in this table — not all fields are env-var overridable; most budget, distillation, and search tuning fields require a config file change.
-
-## background-limiter
-
-| Variable | Description |
-|---|---|
-| `LORE_BACKGROUND_CONCURRENCY` | Resolve the upper bound for background concurrency. `LORE_BACKGROUND_CONCURRENCY` is a hard ceiling override (escape hatch for large multi-tenant hosts); otherwise the built-in MAX applies. Clamped to a sane [1, 32]. |
-
-## cache-analytics
-
-| Variable | Description |
-|---|---|
-| `LORE_WARMUP_PROBE` | Env var `LORE_WARMUP_PROBE`: when set to `1`, enables the warmup cache-divergence diagnostic. It logs SHA comparisons of the cacheable segments (the stable head `system[0..1]`, tools, and the distilled prefix `messages[0..1]`) on real turns and warmups to tell an Anthropic-side cache eviction (segments match, `cacheRead=0`) apart from a warmup request-body divergence (segments differ). A debugging aid only; off by default, with zero cost when unset (callers skip all parsing/hashing). |
-
-## Upstream + worker pipeline
-
-| Variable | Description |
-|---|---|
-| `LORE_DAILY_BUDGET` | Get the effective daily budget in USD. Resolution priority: 1. `LORE_DAILY_BUDGET` env var (override for automation / CI) 2. DB-persisted value from `kv_meta` (set via UI) 3. 0 (disabled) |
-| `LORE_MAX_RETRIES` | Number of times a worker upstream call retries a transient failure before falling back to the caller's own handling (default: 8). Override with the LORE_MAX_RETRIES env var. |
-| `LORE_WARMING_ENABLED` | Whether cache warming is enabled. Resolution priority (highest first): 1. `LORE_WARMING_ENABLED` env var — "0"/"false"/"off"/"no" disable, anything else enables (override for automation / CI). 2. DB-persisted KV override, set via the dashboard or `/lore:warm:on\|off` ("1" = on, "0" = off). Absent → fall through. 3. `cache.warming.enabled` from `.lore.json` (schema default: true). This makes the file-only config flag runtime-settable without a restart — mirroring the daily-budget toggle. The gate lives in `shouldWarm`, so warming can be turned off globally the moment it stops paying for itself. |
-
-## CLI / `lore` command
-
-| Variable | Description |
-|---|---|
-| `LORE_CONFIG_DIR` | Get the Lore config directory. Uses $LORE_CONFIG_DIR if set, otherwise ~/.lore |
-| `LORE_DB_PATH` | Resolved path of the SQLite database file. Reads `LORE_DB_PATH` first; falls back to `${dataDir}/lore.db` (typically `~/.local/share/lore/lore.db`). The test preload (`packages/core/test/setup.ts`) sets `LORE_DB_PATH` to a temp directory so tests never touch the production DB. Setting it to a non-existent path will create the file on first use. The gateway itself does not set this — it expects a stable location for the DB so the SQLite WAL and FTS5 indices persist across restarts. Env: `LORE_DB_PATH`. |
-| `LORE_GATEWAY_AUTH_TOKEN` | Gateway access credential required for remote/hosted data-plane requests. It is sent as `x-lore-gateway-token` and remains separate from provider API keys/bearer tokens. Remote/hosted startup fails closed unless it is 32-256 visible ASCII characters without commas. OpenCode/Pi consume LORE_REMOTE_URL + LORE_GATEWAY_AUTH_TOKEN in their adapters; Claude Code supports a per-request custom header directly. Never place it in a URL or CLI argument. Env: LORE_GATEWAY_AUTH_TOKEN. |
-| `LORE_GIT_REMOTE` | Git remote URL (e.g. `git@github.com:org/repo.git`) of the project the spawned Codex CLI is operating in. Exported by the gateway so a user-defined `env_http_headers` in `~/.codex/config.toml` can map it to a custom header for upstream telemetry. Set only when `git remote get-url origin` returns a value; the gateway does not read this env var itself. |
-| `LORE_HOSTED_MODE` | Hosted/remote mode — disables all filesystem operations that use client-controlled paths (git subprocess, .lore.json/.lore.md read/write, lat.md/ directory scan, file watchers). Env: LORE_HOSTED_MODE. |
-| `LORE_INSTALL_DIR` | Determine the install directory for a curl-installed binary. Priority: 1. $LORE_INSTALL_DIR environment variable 2. ~/.local/bin (if exists AND in $PATH) 3. ~/bin (if exists AND in $PATH) 4. ~/.lore/bin (fallback) |
-| `LORE_NO_BROWSER` | Heuristic: can we open a browser ON THIS machine that could reach our loopback callback? False for SSH sessions, headless Linux (no display), and CI — in those cases the user's browser is elsewhere, so we use the scan-the-QR / paste-the-code device flow instead. `LORE_NO_BROWSER=1` forces it off explicitly. |
-| `LORE_NO_UPDATE_CHECK` | Check if update checking is disabled via environment variable. When set to `1`, the CLI does not phone home to GitHub for the latest released version and does not print "new version available" notifications. Use this in CI, air-gapped environments, or when you've pinned a version and don't want the upgrade hint. Env: `LORE_NO_UPDATE_CHECK=1`. |
-| `LORE_PR_DESCRIPTION` | Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts. |
-| `LORE_PR_TITLE` | Env vars: LORE_PR_TITLE and LORE_PR_DESCRIPTION provide bounded, untrusted pull-request metadata for semantic lint prompts. |
-| `LORE_PROJECT` | Expose project path & git remote as env vars so downstream agents can map them to custom headers if supported in the future. The gateway resolves the project from system-prompt inference and cwd for now. |
-| `LORE_REMOTE_GATEWAY` | Remote/central gateway mode. When true, the gateway is serving agents running on OTHER machines, so its own `process.cwd()` has no relationship to any client's project. In this mode the gateway MUST NOT attribute path-less requests to its own cwd (doing so merges unrelated projects). Instead, requests that cannot resolve a confident project path are routed to a per-session synthetic "unattributed" bucket (`/__lore_unattributed__/<sessionID>`) that can later self-heal or be consolidated. Env: LORE_REMOTE_GATEWAY. Note: hosted mode (`LORE_HOSTED_MODE`) implies remote-gateway behavior — a hosted gateway never shares a filesystem with its clients. Auto-detection: when neither `LORE_REMOTE_GATEWAY` nor `LORE_HOSTED_MODE` is set, the gateway auto-enables remote-gateway mode if its bind address(es) include any non-loopback host. This catches the common case of running a long-lived gateway on a server (Tailscale, LAN IP, `0.0.0.0`, etc.) without requiring an explicit env var. `lore start` also defaults to remote-gateway mode. Use `lore start --local` when the gateway shares its filesystem with the agents it serves. For equivalent service configuration, set both `LORE_HOSTED_MODE=0` and `LORE_REMOTE_GATEWAY=0`. Local mode disables gateway access authentication, so use it only on loopback or a fully trusted isolated network; use remote/hosted mode for untrusted clients. |
-| `LORE_REMOTE_URL` | CLI remote helper — shared utilities for CLI commands that need to call the remote gateway REST API when `LORE_REMOTE_URL` is set. |
-| `LORE_TARGET`<br>**Default:** ``${process.platform}-${process.arch}`` | Platform target string used to locate the vendored embedding model directory when running the SEA (single executable) binary. Format: `${platform}-${arch}` (e.g. `darwin-arm64`, `linux-x64`). Defaults to the current host. Override this to pre-warm the embedding model cache on a machine of one platform and run the binary on another (CI cross-builds, OCI images). Env: `LORE_TARGET=<platform>-<arch>`. |
-| `LORE_UPSTREAM_EXTRA_HEADERS` | Forward LORE_UPSTREAM_EXTRA_HEADERS to Codex via the `openai_provider_headers` config key (TOML map of header name → value). Codex appends these to every outbound request to the OpenAI-compatible upstream, which now points at the Lore gateway. The gateway reads the same env var and re-injects them on the actual upstream call — this is a belt-and-suspenders pass-through so a user with a custom corporate proxy gets headers on both hops. |
-| `LORE_WORKER_MODEL`<br>**Parser:** `parseWorkerModelEnv` | Parse the `LORE_WORKER_MODEL` env-var override into a `{providerID, modelID}`. Format: `"providerID/modelID"` (e.g. `openai/gpt-5.4-mini`) or a bare `"modelID"` which assumes the `anthropic` provider (the historical default). Returns `undefined` only for an unset/empty value. Single source of truth shared by the live worker-model selection ({@link getWorkerModel}) and standalone `lore import`, so the env override behaves identically in both paths. |
-
-## Gateway startup + routing
-
-| Variable | Description |
-|---|---|
-| `LORE_ALLOW_REMOTE_MANAGEMENT`<br>**Parser:** `isTruthy` | Allow non-loopback socket peers to access the dashboard and management API. Disabled by default. Env: LORE_ALLOW_REMOTE_MANAGEMENT. |
-| `LORE_BEDROCK_REGION` | AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from `LORE_BEDROCK_REGION` first, then falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`, finally defaulting to `"us-east-1"`. Env: LORE_BEDROCK_REGION |
-| `LORE_CALLER_UPSTREAM_ALLOWLIST` | Normalized HTTPS origins that remote/hosted clients may select with `X-Lore-Upstream-URL`. Empty by default, so caller-selected upstreams are denied unless the gateway administrator explicitly allows their origins. Local gateways do not consult this list. Env: LORE_CALLER_UPSTREAM_ALLOWLIST (comma-separated origins). |
-| `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |
-| `LORE_EXPOSE_PROVIDER_DIAGNOSTICS` | Allow fixed provider-frame validation rules in internal error logs. Enabled by default; set LORE_EXPOSE_PROVIDER_DIAGNOSTICS to false or 0 to disable. Never includes provider content. |
-| `LORE_IDLE_TIMEOUT`<br>**Default:** `parsePositiveInt(60)`<br>**Parser:** `parsePositiveInt` | Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`. |
-| `LORE_LISTEN_HOST`<br>**Parser:** `parseHosts` | Hosts to bind to. Default: ["127.0.0.1"]. Env: LORE_LISTEN_HOST (comma-separated for multiple addresses). CLI: --host (can be specified multiple times, or comma-separated). |
-| `LORE_LISTEN_PORT`<br>**Default:** `parsePort(DEFAULT_PORT)`<br>**Parser:** `parsePort` | Default port preference order when LORE_LISTEN_PORT is not set. - 3207: flip upside-down → 7=L, 0=O, 2=R, 3=E → LORE (calculator-word) - 5673: T9 phone keypad → 5=L, 6=O, 7=R, 3=E → LORE |
-| `LORE_SESSION_EVICTION_TIMEOUT` | Session eviction timeout in seconds. Sessions idle beyond this are evicted from memory (state is preserved in DB). Default: 1800 (30 min). Pending tool calls retain state for at least 1 hour after the latest request or completed response (or this timeout, if longer). Active requests, response finalizers, and queued/running session work prevent eviction. Set to 0 to disable eviction. Env: LORE_SESSION_EVICTION_TIMEOUT |
-| `LORE_UPSTREAM_ANTHROPIC`<br>**Default:** `"https://api.anthropic.com"` | Upstream Anthropic API URL. Default: "https://api.anthropic.com". Env: LORE_UPSTREAM_ANTHROPIC |
+ropic.com". Env: LORE_UPSTREAM_ANTHROPIC |
 | `LORE_UPSTREAM_OPENAI`<br>**Default:** `"https://api.openai.com"` | Upstream OpenAI API URL. Default: "https://api.openai.com". Env: LORE_UPSTREAM_OPENAI |
 | `LORE_VERTEX_PROJECT`<br>**Default:** `env.GOOGLE_CLOUD_PROJECT ?? ""` | Vertex config — standard GCP ADC chain + optional LORE overrides |
 | `LORE_VERTEX_REGION` | _no description in source_ |
@@ -96,10 +29,10 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 
 | Variable | Description |
 |---|---|
-| `LORE_FOREGROUND_REQUEST_TIMEOUT_MS` | Wall-clock ceiling for a single foreground request: the hard abort of the whole relay (recall deadline + abort scope). Automatically raised to stay at least 60s above LORE_FOREGROUND_SSE_INACTIVITY_MS, so a request timeout can never make the inactivity deadline unreachable. Floored at 1000ms and capped at 2147483647ms; invalid values fall back to 900000. Env: LORE_FOREGROUND_REQUEST_TIMEOUT_MS. |
-| `LORE_FOREGROUND_SSE_INACTIVITY_MS` | How long the gateway tolerates upstream silence on a foreground relay before aborting it. Raise this for models whose extended-thinking phases emit nothing for minutes (Opus-class reasoning over large cached prompts), since a too-low value kills the stream mid-thinking and the client reports a connection loss rather than a stall. Positive integer ms; invalid values fall back to 600000. Floored at 1000 and capped to reserve 60s of request timeout headroom within Node's 32-bit timer ceiling. Env: LORE_FOREGROUND_SSE_INACTIVITY_MS. |
-| `LORE_WORKER_REQUEST_TIMEOUT_MS` | Wall-clock ceiling for a single background/auxiliary worker call. Automatically raised to stay at least 60s above LORE_WORKER_RESPONSE_INACTIVITY_MS. Floored at 1000ms and capped at 2147483647ms; invalid values fall back to 900000. Env: LORE_WORKER_REQUEST_TIMEOUT_MS. |
-| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a background/auxiliary worker call tolerates upstream silence before aborting. Floored at 1000 and capped to reserve 60s of request timeout headroom within Node's 32-bit timer ceiling. Invalid values fall back to 600000. Env: LORE_WORKER_RESPONSE_INACTIVITY_MS. |
+| `LORE_FOREGROUND_REQUEST_TIMEOUT_MS` | Whole-request foreground ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.foregroundRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_FOREGROUND_SSE_INACTIVITY_MS` | How long the foreground relay tolerates upstream silence. Default: 600000ms. Also set as `timeouts.foregroundSseInactivityMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_WORKER_REQUEST_TIMEOUT_MS` | Whole-request worker ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.workerRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a worker tolerates upstream silence. Default: 600000ms. Also set as `timeouts.workerResponseInactivityMs` in `.lore.json`; this environment variable takes priority. |
 
 ## Memory engine (`@loreai/core`)
 

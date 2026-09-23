@@ -270,9 +270,11 @@ import {
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
-  FOREGROUND_REQUEST_TIMEOUT_MS,
-  FOREGROUND_SSE_INACTIVITY_MS,
+  configureSSEInactivityDeadlines,
+  foregroundSSEStreamOptions,
+  getSSEInactivityDeadlines,
 } from "./sse-inactivity";
+import type { SSEStreamOptions } from "./stream/options";
 import {
   gatewayMessagesToLore,
   deterministicID,
@@ -470,7 +472,329 @@ function requestCheckpointProtocol(req: GatewayRequest): string {
   return sourceCheckpointProtocol(requestContextBoundaryProtocol(req));
 }
 
-export function requestContextBoundaryProtocol(
+export functistate) => state.tail),
+    pipelineResetSettleTimeoutMs,
+  );
+  streamingPostResponseGeneration++;
+  pipelineGenerationAbort = new AbortController();
+  streamingPostResponseFinalizers.clear();
+  streamingPostResponsePendingByAdmissionKey.clear();
+  streamingPostResponsePending = 0;
+  maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
+  maxStreamingPostResponsesPerSession =
+    DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+  lastStreamingPostResponseOverflowLog = 0;
+  lastStreamingPostResponseResetLog = 0;
+  // Quiesce background work before tearing anything down. Only the non-fast
+  // path drains — today that's test/eval teardown (the fast process-exit path,
+  // the sole production caller, skips this to keep Ctrl+C snappy). Stop the
+  // idle scheduler FIRST so no new ticks schedule work, then await every
+  // in-flight distillation / curation / idle task. Done while llmClient + the
+  // upstream interceptor are still live so DIRECT-callType tasks (incl. the
+  // always-scheduled urgent distillation) complete cleanly; a batch-callType
+  // task can't flush until llmClient.shutdown below, so it falls back to the
+  // bounded drain timeout (rare in tests — incremental distill/curation seldom
+  // trigger in short runs). The point: a late `saveSessionTracking()` write
+  // must land in THIS process's DB, not leak into the next one's as a phantom
+  // row — the cross-harness contamination behind the #859 flake. See #885.
+  if (!opts?.fast) {
+    if (stopIdleScheduler) {
+      stopIdleScheduler();
+      stopIdleScheduler = null;
+    }
+    await drainBackground();
+    // Bound this drain too (Seer) — a stalled urgent distillation / curation
+    // chain must not hang the reset, matching drainBackground's guarantee.
+    await boundedSettle(inFlightBackground);
+    inFlightBackground.clear();
+  }
+  initialized = false;
+  configureSSEInactivityDeadlines({});
+  maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
+  maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
+  sessions.clear();
+  cwdWarned.clear();
+  staleHeaderWarned.clear();
+  subagentParentPendingLogged.clear();
+  headerSessionIndex.clear();
+  ambiguousHeaderSessionKeys.clear();
+  provisionalHeaderSessionIndex.clear();
+  identityAdmissionTails.clear();
+  headerSessionIndexHydrated = false;
+  ltmSessionCache.clear();
+  ltmPinnedText.clear();
+  lastSavedDedupDecisions.clear();
+  stableLtmCache.clear();
+  stableLtmInFlight.clear();
+  sessionLifecycleAborts.clear();
+  streamingPostResponseWaiters.clear();
+  // Shut down the batch queue before clearing the client. On process exit
+  // (`fast`), skip the synchronous LLM drain — replaying queued background
+  // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
+  // resume next session. Config/test resets keep draining (default).
+  if (llmClient && "shutdown" in llmClient) {
+    await (
+      llmClient as LLMClient & {
+        shutdown: (o?: { drainQueue?: boolean }) => Promise<void>;
+      }
+    ).shutdown({ drainQueue: !opts?.fast });
+  }
+  llmClient = null;
+  activeInterceptor = undefined;
+  beforeUpstreamCaptureForTest = undefined;
+  postResponseStartObserver = undefined;
+  recallPersistenceCommitObserver = undefined;
+  provisionalFinalizerPauseForTest = undefined;
+  foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
+  if (stopFileWatcher) {
+    stopFileWatcher();
+    stopFileWatcher = null;
+  }
+  if (stopIdleScheduler) {
+    stopIdleScheduler();
+    stopIdleScheduler = null;
+  }
+  if (stopSyncScheduler) {
+    // Awaits a final best-effort push so local changes reach the server on exit.
+    await stopSyncScheduler();
+    stopSyncScheduler = null;
+  }
+  _lastSeenSessionModel = null;
+  _firstTurnConfirmed = false;
+  resetWorkerModelState();
+  resetBackgroundLimiter();
+}
+
+/** Per-session state tracked across requests. */
+const sessions = new Map<string, SessionState>();
+
+const DEFAULT_MAX_STREAMING_POST_RESPONSES = 64;
+// Production requests reserve capacity before upstream work. The limits remain
+// as defense-in-depth for unreserved/test-only scheduling.
+const DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION = 2;
+
+/**
+ * Deferred streaming finalizers keyed by session. The streamer invokes its
+ * callback before closing so registration is atomic with terminal delivery,
+ * but the expensive synchronous accounting itself runs on the next event-loop
+ * turn, allowing the body reader (and Node bridge) to observe EOF first. The
+ * bounded registry preserves in-process ordering; a process crash in that one
+ * event-loop-turn window can still lose final accounting, which is the explicit
+ * availability trade-off required to avoid holding client EOF behind SQLite.
+ */
+const streamingPostResponseFinalizers = new Map<
+  string,
+  { tail: Promise<void>; pending: number }
+>();
+const streamingPostResponsePendingByAdmissionKey = new Map<string, number>();
+let streamingPostResponsePending = 0;
+let streamingPostResponseGeneration = 0;
+let pipelineGenerationAbort = new AbortController();
+let streamingPostResponsesAccepting = true;
+let maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
+let maxStreamingPostResponsesPerSession =
+  DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+let lastStreamingPostResponseOverflowLog = 0;
+let lastStreamingPostResponseResetLog = 0;
+let streamingPostResponseWaitObserverForTest: (() => void) | undefined;
+
+export function setStreamingPostResponseLimitsForTest(
+  globalLimit?: number,
+  perSessionLimit?: number,
+): void {
+  maxStreamingPostResponses =
+    globalLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES;
+  maxStreamingPostResponsesPerSession =
+    perSessionLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
+}
+
+export function streamingPostResponsePendingForTest(): number {
+  return streamingPostResponsePending;
+}
+
+export function setStreamingPostResponseWaitObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  streamingPostResponseWaitObserverForTest = observer;
+}
+
+export function scheduleStreamingPostResponseForTest(
+  sessionID: string,
+  operation: () => void | Promise<void>,
+  onDrop: () => void = () => {},
+): void {
+  scheduleStreamingPostResponse(
+    sessionID,
+    streamingPostResponseGeneration,
+    operation,
+    onDrop,
+  );
+}
+
+function scheduleStreamingPostResponse(
+  sessionID: string,
+  generation: number,
+  operation: () => void | Promise<void>,
+  onDrop: () => void,
+  // Conversation requests reserve global + session capacity before upstream.
+  // Unreserved callers still use the defensive queue limits below.
+  capacityReserved = false,
+  admissionKey?: string,
+): void {
+  const drop = (): void => {
+    try {
+      onDrop();
+    } catch (error) {
+      log.error("streaming post-response drop cleanup failed:", error);
+    }
+  };
+  if (
+    !streamingPostResponsesAccepting ||
+    generation !== streamingPostResponseGeneration
+  ) {
+    const now = Date.now();
+    if (now - lastStreamingPostResponseResetLog >= 30_000) {
+      lastStreamingPostResponseResetLog = now;
+      log.info("streaming post-response skipped during pipeline reset");
+    }
+    drop();
+    return;
+  }
+  const existing = streamingPostResponseFinalizers.get(sessionID);
+  if (
+    (!capacityReserved &&
+      streamingPostResponsePending >= maxStreamingPostResponses) ||
+    (!capacityReserved &&
+      (existing?.pending ?? 0) >= maxStreamingPostResponsesPerSession)
+  ) {
+    const now = Date.now();
+    if (now - lastStreamingPostResponseOverflowLog >= 30_000) {
+      lastStreamingPostResponseOverflowLog = now;
+      log.warn("streaming post-response queue full; dropping finalizer");
+    }
+    drop();
+    return;
+  }
+  const state = existing ?? { tail: Promise.resolve(), pending: 0 };
+  const previous = state.tail;
+  state.pending++;
+  streamingPostResponsePending++;
+  if (admissionKey !== undefined) {
+    streamingPostResponsePendingByAdmissionKey.set(
+      admissionKey,
+      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) + 1,
+    );
+  }
+  const current = (async () => {
+    await previous;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (generation !== streamingPostResponseGeneration) {
+      drop();
+      return;
+    }
+    try {
+      await operation();
+    } catch (error) {
+      log.error("streaming post-response processing failed:", error);
+    }
+  })();
+  state.tail = current;
+  streamingPostResponseFinalizers.set(sessionID, state);
+  void current.finally(() => {
+    if (streamingPostResponseFinalizers.get(sessionID) !== state) return;
+    state.pending--;
+    streamingPostResponsePending--;
+    if (admissionKey !== undefined) {
+      const remaining =
+        (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 1) - 1;
+      if (remaining > 0) {
+        streamingPostResponsePendingByAdmissionKey.set(admissionKey, remaining);
+      } else {
+        streamingPostResponsePendingByAdmissionKey.delete(admissionKey);
+      }
+    }
+    if (state.tail === current && state.pending === 0) {
+      streamingPostResponseFinalizers.delete(sessionID);
+    }
+    pumpPendingSessionClaims();
+  });
+}
+
+const MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION = 16;
+const streamingPostResponseWaiters = new Map<string, number>();
+
+class StreamingPostResponseWaitCapacityError extends Error {}
+
+async function awaitStreamingPostResponse(
+  sessionID: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!streamingPostResponseFinalizers.has(sessionID)) return;
+  const waiters = streamingPostResponseWaiters.get(sessionID) ?? 0;
+  if (waiters >= MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION) {
+    throw new StreamingPostResponseWaitCapacityError(
+      "streaming post-response wait queue full",
+    );
+  }
+  streamingPostResponseWaiters.set(sessionID, waiters + 1);
+  try {
+    for (;;) {
+      const state = streamingPostResponseFinalizers.get(sessionID);
+      if (!state) return;
+      const tail = state.tail;
+      streamingPostResponseWaitObserverForTest?.();
+      await promiseAgainstAbort(() => tail, signal);
+      const latest = streamingPostResponseFinalizers.get(sessionID);
+      if (latest !== state || state.tail === tail) return;
+    }
+  } finally {
+    const remaining = (streamingPostResponseWaiters.get(sessionID) ?? 1) - 1;
+    if (remaining > 0) streamingPostResponseWaiters.set(sessionID, remaining);
+    else streamingPostResponseWaiters.delete(sessionID);
+  }
+}
+
+/** Sessions that have already logged the cwd-fallback warning (dedup). */
+const cwdWarned = new Set<string>();
+
+/** Sessions that have already logged the stale-header conflict warning (dedup). */
+const staleHeaderWarned = new Set<string>();
+
+/** (sessionID + parentClientId) pairs that have already logged the unresolved
+ *  subagent-parent warning. Without dedup, a child agent with an unresolvable
+ *  parent (Tier 3 fingerprint) fires the same "pending" log on every turn —
+ *  50+ identical lines per session. Cleared on session eviction. */
+const subagentParentPendingLogged = new Set<string>();
+
+/** Read-only access to live session states (for dashboard rendering). */
+export function getActiveSessions(): ReadonlyMap<string, SessionState> {
+  return sessions;
+}
+
+/**
+ * Re-bind an active session's project path after a manual move/reassign.
+ *
+ * Updates the in-memory `SessionState` so the live dashboard immediately
+ * reflects the new project without requiring a gateway restart. A no-op
+ * when the session is not currently active (DB-only move is sufficient).
+ */
+export function rebindActiveSession(
+  sessionId: string,
+  newProjectPath: string,
+): void {
+  const sess = sessions.get(sessionId);
+  if (!sess) return;
+  sess.projectPath = newProjectPath;
+  sess.projectPathProvisional = false;
+}
+
+/**
+ * Reverse lookup: maps tenant-scoped header values to internal session IDs.
+ * Key: `credentialFingerprint\x1fheaderName\x1fheaderValue`.
+ */
+const headerSessionIndex = new Map<string, string>();
+const ambiguousHeaderSessionKeys = new Set<string>();
+type on requestContextBoundaryProtocol(
   req: GatewayRequest,
 ): ContextBoundaryProtocol {
   if (req.codex === true) return "openai-codex";
@@ -762,685 +1086,7 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
         const isMatchingProvenance =
           provenanceBlock?.type === "text" &&
           provenanceBlock.text.startsWith(CONTEXT_WARNING_MARKER);
-        const rawContent =
-          provenanceBlock?.type === "opaque" &&
-          provenanceBlock.raw.type === "message" &&
-          Array.isArray(provenanceBlock.raw.content)
-            ? provenanceBlock.raw.content
-            : undefined;
-        const rawHasWarning = rawContent?.some(
-          (part) =>
-            part &&
-            typeof part === "object" &&
-            !Array.isArray(part) &&
-            (part as Record<string, unknown>).type === "output_text" &&
-            typeof (part as Record<string, unknown>).text === "string" &&
-            ((part as Record<string, unknown>).text as string).startsWith(
-              CONTEXT_WARNING_MARKER,
-            ),
-        );
-        if (
-          provenanceIndex === undefined ||
-          !msg.provenanceContent ||
-          !msg.provenancePositions ||
-          !(
-            isMatchingProvenance ||
-            (provenanceBlock?.type === "opaque" && rawHasWarning)
-          )
-        ) {
-          // Removing a visible warning without removing its matching
-          // provenance block leaves the position map shifted. A malformed or
-          // mismatched legacy message must fail closed instead of letting
-          // recall mutate the wrong provider-native block later.
-          delete msg.provenanceContent;
-          delete msg.provenancePositions;
-          break;
-        }
-        msg.provenanceContent.splice(provenanceIndex, 1);
-        msg.provenancePositions = msg.provenancePositions
-          .filter((_position, visibleIndex) => visibleIndex !== i)
-          .map((position) =>
-            position > provenanceIndex ? position - 1 : position,
-          );
-        if (msg.provenanceContent.length === 0) {
-          delete msg.provenanceContent;
-          delete msg.provenancePositions;
-        }
-      }
-      break; // only check the first non-thinking block
-    }
-  }
-}
-
-/**
- * Detect whether a request contains a completed `git commit` tool invocation.
- * Checks tool_use inputs (command string) on assistant messages and tool_result
- * output on user messages for commit indicators. Used to trigger curation at
- * commit boundaries — natural checkpoints where decisions crystallize.
- */
-const GIT_COMMIT_RE = /\bgit\s+commit\b/i;
-function containsGitCommit(req: GatewayRequest): boolean {
-  for (const msg of req.messages) {
-    for (const block of msg.content) {
-      // Check assistant tool_use inputs for the command string
-      if (block.type === "tool_use") {
-        const input = block.input;
-        if (typeof input === "object" && input !== null) {
-          const cmd =
-            (input as Record<string, unknown>).command ??
-            (input as Record<string, unknown>).content ??
-            "";
-          if (typeof cmd === "string" && GIT_COMMIT_RE.test(cmd)) return true;
-        }
-      }
-      // Check user tool_result content for git commit output patterns
-      if (block.type === "tool_result") {
-        const text = blocksToText(block.content);
-        // Match common git commit output (e.g., "[main abc1234] commit message")
-        if (text && /^\[[\w/.-]+ [0-9a-f]+\]/.test(text.trim())) return true;
-      }
-    }
-  }
-  return false;
-}
-
-/** Active upstream interceptor — used for recording/replay. */
-let activeInterceptor: UpstreamInterceptor | undefined;
-/** Monotonic request-start order for concurrency-safe upstream snapshots. */
-let upstreamRequestOrder = 0;
-/** Test-only seam for forcing adversarial request ordering before capture. */
-let beforeUpstreamCaptureForTest:
-  | ((req: GatewayRequest, state: SessionState) => Promise<void>)
-  | undefined;
-/** Foreground request lifetimes cancelled when the pipeline is reset. */
-const activeForegroundAbortControllers = new Set<AbortController>();
-
-export function setBeforeUpstreamCaptureForTest(
-  hook:
-    | ((req: GatewayRequest, state: SessionState) => Promise<void>)
-    | undefined,
-): void {
-  beforeUpstreamCaptureForTest = hook;
-}
-
-/** Test-only observer for pinning post-response lifecycle ordering. */
-let postResponseStartObserver: (() => void) | undefined;
-let recallPersistenceCommitObserver: (() => void) | undefined;
-let pipelineResetPauseForTest: Promise<void> | undefined;
-let pipelinePreUpstreamPauseForTest:
-  | { pause: Promise<void>; onWait: () => void }
-  | undefined;
-let provisionalFinalizerPauseForTest:
-  | { pause: Promise<void>; onWait: () => void }
-  | undefined;
-let pipelineResetSettleTimeoutMs = 5000;
-let pipelineResetInProgress = false;
-let pipelineResetPromise: Promise<void> | undefined;
-
-interface ActivePipelineRequest {
-  admissionKey: string;
-  abort: (reason: unknown) => void;
-  settled: Promise<void>;
-  sessionIDs: Set<string>;
-}
-
-const activePipelineRequests = new Set<ActivePipelineRequest>();
-const detachedPipelineRequests = new Set<ActivePipelineRequest>();
-const DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS = 64;
-const MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY = 16;
-const MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION = 1;
-const MAX_PENDING_SESSION_CLAIMS = 64;
-const MAX_DETACHED_PIPELINE_REQUESTS = 64;
-let maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
-let maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
-
-interface PendingSessionClaim {
-  active: ActivePipelineRequest;
-  sessionID: string;
-  signal: AbortSignal;
-  resolve: () => void;
-  reject: (reason: unknown) => void;
-  onAbort: () => void;
-}
-
-const pendingSessionClaims = new Map<string, PendingSessionClaim>();
-
-class PipelineCapacityError extends Error {}
-
-function activePipelineRequestsForSession(sessionID: string): number {
-  let count = 0;
-  for (const request of activePipelineRequests) {
-    if (request.sessionIDs.has(sessionID)) count++;
-  }
-  return count;
-}
-
-function activePipelineRequestsForAdmissionKey(admissionKey: string): number {
-  let count = 0;
-  for (const request of activePipelineRequests) {
-    if (request.admissionKey === admissionKey) count++;
-  }
-  return count;
-}
-
-function pendingSessionClaimsForAdmissionKey(admissionKey: string): number {
-  let count = 0;
-  for (const claim of pendingSessionClaims.values()) {
-    if (claim.active.admissionKey === admissionKey) count++;
-  }
-  return count;
-}
-
-function pipelineSessionHasCapacity(sessionID: string): boolean {
-  return (
-    activePipelineRequestsForSession(sessionID) +
-      (streamingPostResponseFinalizers.get(sessionID)?.pending ?? 0) <
-    MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION
-  );
-}
-
-function pumpPendingSessionClaims(): void {
-  for (const [sessionID, claim] of pendingSessionClaims) {
-    if (
-      activePipelineRequests.size + streamingPostResponsePending >=
-      maxActivePipelineRequests
-    ) {
-      return;
-    }
-    if (
-      activePipelineRequestsForAdmissionKey(claim.active.admissionKey) +
-        (streamingPostResponsePendingByAdmissionKey.get(
-          claim.active.admissionKey,
-        ) ?? 0) >=
-      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
-    ) {
-      continue;
-    }
-    if (!pipelineSessionHasCapacity(sessionID)) continue;
-    pendingSessionClaims.delete(sessionID);
-    claim.signal.removeEventListener("abort", claim.onAbort);
-    if (claim.signal.aborted) {
-      claim.reject(claim.signal.reason);
-      continue;
-    }
-    claim.active.sessionIDs.add(sessionID);
-    activePipelineRequests.add(claim.active);
-    claim.resolve();
-  }
-}
-
-function isPipelineSessionActive(sessionID: string): boolean {
-  return (
-    activePipelineRequestsForSession(sessionID) > 0 ||
-    pendingSessionClaims.has(sessionID) ||
-    streamingPostResponseFinalizers.has(sessionID)
-  );
-}
-
-export function activePipelineRequestCountForTest(): number {
-  return activePipelineRequests.size;
-}
-
-export function detachedPipelineRequestCountForTest(): number {
-  return detachedPipelineRequests.size;
-}
-
-export function pendingPipelineSessionClaimCountForTest(): number {
-  return pendingSessionClaims.size;
-}
-
-export function setMaxActivePipelineRequestsForTest(
-  limit = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS,
-): void {
-  maxActivePipelineRequests = limit;
-}
-
-export function setMaxDetachedPipelineRequestsForTest(
-  limit = MAX_DETACHED_PIPELINE_REQUESTS,
-): void {
-  maxDetachedPipelineRequests = limit;
-}
-
-export function isPipelineSessionActiveForTest(sessionID: string): boolean {
-  return isPipelineSessionActive(sessionID);
-}
-
-/**
- * Set (or clear) the module-level upstream interceptor.
- *
- * When set, every call to `forwardToUpstream` passes through the interceptor
- * instead of calling `fetch` directly.  Used by the recording and replay
- * scripts to capture or replay upstream traffic without modifying individual
- * call sites.
- */
-export function setUpstreamInterceptor(
-  interceptor: UpstreamInterceptor | undefined,
-): void {
-  activeInterceptor = interceptor;
-}
-
-export function setPostResponseStartObserverForTest(
-  observer: (() => void) | undefined,
-): void {
-  postResponseStartObserver = observer;
-}
-
-export function setRecallPersistenceCommitObserverForTest(
-  observer: (() => void) | undefined,
-): void {
-  recallPersistenceCommitObserver = observer;
-}
-
-export function setPipelineResetPauseForTest(
-  pause: Promise<void> | undefined,
-): void {
-  pipelineResetPauseForTest = pause;
-}
-
-export function setPipelinePreUpstreamPauseForTest(
-  pause: Promise<void> | undefined,
-  onWait: () => void = () => {},
-): void {
-  pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
-}
-
-export function setProvisionalFinalizerPauseForTest(
-  pause: Promise<void> | undefined,
-  onWait: () => void = () => {},
-): void {
-  provisionalFinalizerPauseForTest = pause ? { pause, onWait } : undefined;
-}
-
-export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
-  pipelineResetSettleTimeoutMs = timeoutMs;
-}
-
-/**
- * Reset all module-level singleton state.
- *
- * Called during gateway shutdown (with `{ fast: true }` to skip the batch-queue
- * drain) and by test harnesses (default — drains gracefully so tests observe
- * all side-effects).
- */
-export async function resetPipelineState(opts?: {
-  fast?: boolean;
-}): Promise<void> {
-  if (pipelineResetPromise) return pipelineResetPromise;
-  pipelineResetInProgress = true;
-  const reset = (async () => {
-    try {
-      await resetPipelineStateInner(opts);
-    } finally {
-      pipelineResetInProgress = false;
-      pipelineResetPromise = undefined;
-    }
-  })();
-  pipelineResetPromise = reset;
-  return reset;
-}
-
-async function resetPipelineStateInner(opts?: {
-  fast?: boolean;
-}): Promise<void> {
-  streamingPostResponsesAccepting = false;
-  await pipelineResetPauseForTest;
-  const resetReason = new DOMException("gateway pipeline reset", "AbortError");
-  pipelineGenerationAbort.abort(resetReason);
-  const foregroundControllers = [...activeForegroundAbortControllers];
-  activeForegroundAbortControllers.clear();
-  for (const controller of foregroundControllers) {
-    if (!controller.signal.aborted) controller.abort(resetReason);
-  }
-  const activeRequests = [
-    ...new Set([
-      ...activePipelineRequests,
-      ...[...pendingSessionClaims.values()].map((claim) => claim.active),
-    ]),
-  ];
-  for (const request of activeRequests) request.abort(resetReason);
-  await boundedSettle(
-    activeRequests.map((request) => request.settled),
-    pipelineResetSettleTimeoutMs,
-  );
-  for (const request of activeRequests) {
-    if (!activePipelineRequests.has(request)) continue;
-    activePipelineRequests.delete(request);
-    request.sessionIDs.clear();
-    if (detachedPipelineRequests.size < maxDetachedPipelineRequests) {
-      detachedPipelineRequests.add(request);
-    } else {
-      log.error(
-        "pipeline quarantine full; dropping stale lifecycle reservation",
-      );
-    }
-  }
-  // Streaming responses register post-response finalizers before closing their
-  // bodies. Drain them before sessions or the DB-facing pipeline state are
-  // cleared; a finalizer may also schedule ordinary background work, which the
-  // non-fast drain below will then observe.
-  await boundedSettle(
-    [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
-    pipelineResetSettleTimeoutMs,
-  );
-  streamingPostResponseGeneration++;
-  pipelineGenerationAbort = new AbortController();
-  streamingPostResponseFinalizers.clear();
-  streamingPostResponsePendingByAdmissionKey.clear();
-  streamingPostResponsePending = 0;
-  maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
-  maxStreamingPostResponsesPerSession =
-    DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
-  lastStreamingPostResponseOverflowLog = 0;
-  lastStreamingPostResponseResetLog = 0;
-  // Quiesce background work before tearing anything down. Only the non-fast
-  // path drains — today that's test/eval teardown (the fast process-exit path,
-  // the sole production caller, skips this to keep Ctrl+C snappy). Stop the
-  // idle scheduler FIRST so no new ticks schedule work, then await every
-  // in-flight distillation / curation / idle task. Done while llmClient + the
-  // upstream interceptor are still live so DIRECT-callType tasks (incl. the
-  // always-scheduled urgent distillation) complete cleanly; a batch-callType
-  // task can't flush until llmClient.shutdown below, so it falls back to the
-  // bounded drain timeout (rare in tests — incremental distill/curation seldom
-  // trigger in short runs). The point: a late `saveSessionTracking()` write
-  // must land in THIS process's DB, not leak into the next one's as a phantom
-  // row — the cross-harness contamination behind the #859 flake. See #885.
-  if (!opts?.fast) {
-    if (stopIdleScheduler) {
-      stopIdleScheduler();
-      stopIdleScheduler = null;
-    }
-    await drainBackground();
-    // Bound this drain too (Seer) — a stalled urgent distillation / curation
-    // chain must not hang the reset, matching drainBackground's guarantee.
-    await boundedSettle(inFlightBackground);
-    inFlightBackground.clear();
-  }
-  initialized = false;
-  maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
-  maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
-  sessions.clear();
-  cwdWarned.clear();
-  staleHeaderWarned.clear();
-  subagentParentPendingLogged.clear();
-  headerSessionIndex.clear();
-  ambiguousHeaderSessionKeys.clear();
-  provisionalHeaderSessionIndex.clear();
-  identityAdmissionTails.clear();
-  headerSessionIndexHydrated = false;
-  ltmSessionCache.clear();
-  ltmPinnedText.clear();
-  lastSavedDedupDecisions.clear();
-  stableLtmCache.clear();
-  stableLtmInFlight.clear();
-  sessionLifecycleAborts.clear();
-  streamingPostResponseWaiters.clear();
-  // Shut down the batch queue before clearing the client. On process exit
-  // (`fast`), skip the synchronous LLM drain — replaying queued background
-  // prompts through retries/backoff is what made Ctrl+C hang for minutes; they
-  // resume next session. Config/test resets keep draining (default).
-  if (llmClient && "shutdown" in llmClient) {
-    await (
-      llmClient as LLMClient & {
-        shutdown: (o?: { drainQueue?: boolean }) => Promise<void>;
-      }
-    ).shutdown({ drainQueue: !opts?.fast });
-  }
-  llmClient = null;
-  activeInterceptor = undefined;
-  beforeUpstreamCaptureForTest = undefined;
-  postResponseStartObserver = undefined;
-  recallPersistenceCommitObserver = undefined;
-  provisionalFinalizerPauseForTest = undefined;
-  foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
-  if (stopFileWatcher) {
-    stopFileWatcher();
-    stopFileWatcher = null;
-  }
-  if (stopIdleScheduler) {
-    stopIdleScheduler();
-    stopIdleScheduler = null;
-  }
-  if (stopSyncScheduler) {
-    // Awaits a final best-effort push so local changes reach the server on exit.
-    await stopSyncScheduler();
-    stopSyncScheduler = null;
-  }
-  _lastSeenSessionModel = null;
-  _firstTurnConfirmed = false;
-  resetWorkerModelState();
-  resetBackgroundLimiter();
-}
-
-/** Per-session state tracked across requests. */
-const sessions = new Map<string, SessionState>();
-
-const DEFAULT_MAX_STREAMING_POST_RESPONSES = 64;
-// Production requests reserve capacity before upstream work. The limits remain
-// as defense-in-depth for unreserved/test-only scheduling.
-const DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION = 2;
-
-/**
- * Deferred streaming finalizers keyed by session. The streamer invokes its
- * callback before closing so registration is atomic with terminal delivery,
- * but the expensive synchronous accounting itself runs on the next event-loop
- * turn, allowing the body reader (and Node bridge) to observe EOF first. The
- * bounded registry preserves in-process ordering; a process crash in that one
- * event-loop-turn window can still lose final accounting, which is the explicit
- * availability trade-off required to avoid holding client EOF behind SQLite.
- */
-const streamingPostResponseFinalizers = new Map<
-  string,
-  { tail: Promise<void>; pending: number }
->();
-const streamingPostResponsePendingByAdmissionKey = new Map<string, number>();
-let streamingPostResponsePending = 0;
-let streamingPostResponseGeneration = 0;
-let pipelineGenerationAbort = new AbortController();
-let streamingPostResponsesAccepting = true;
-let maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
-let maxStreamingPostResponsesPerSession =
-  DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
-let lastStreamingPostResponseOverflowLog = 0;
-let lastStreamingPostResponseResetLog = 0;
-let streamingPostResponseWaitObserverForTest: (() => void) | undefined;
-
-export function setStreamingPostResponseLimitsForTest(
-  globalLimit?: number,
-  perSessionLimit?: number,
-): void {
-  maxStreamingPostResponses =
-    globalLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES;
-  maxStreamingPostResponsesPerSession =
-    perSessionLimit ?? DEFAULT_MAX_STREAMING_POST_RESPONSES_PER_SESSION;
-}
-
-export function streamingPostResponsePendingForTest(): number {
-  return streamingPostResponsePending;
-}
-
-export function setStreamingPostResponseWaitObserverForTest(
-  observer: (() => void) | undefined,
-): void {
-  streamingPostResponseWaitObserverForTest = observer;
-}
-
-export function scheduleStreamingPostResponseForTest(
-  sessionID: string,
-  operation: () => void | Promise<void>,
-  onDrop: () => void = () => {},
-): void {
-  scheduleStreamingPostResponse(
-    sessionID,
-    streamingPostResponseGeneration,
-    operation,
-    onDrop,
-  );
-}
-
-function scheduleStreamingPostResponse(
-  sessionID: string,
-  generation: number,
-  operation: () => void | Promise<void>,
-  onDrop: () => void,
-  // Conversation requests reserve global + session capacity before upstream.
-  // Unreserved callers still use the defensive queue limits below.
-  capacityReserved = false,
-  admissionKey?: string,
-): void {
-  const drop = (): void => {
-    try {
-      onDrop();
-    } catch (error) {
-      log.error("streaming post-response drop cleanup failed:", error);
-    }
-  };
-  if (
-    !streamingPostResponsesAccepting ||
-    generation !== streamingPostResponseGeneration
-  ) {
-    const now = Date.now();
-    if (now - lastStreamingPostResponseResetLog >= 30_000) {
-      lastStreamingPostResponseResetLog = now;
-      log.info("streaming post-response skipped during pipeline reset");
-    }
-    drop();
-    return;
-  }
-  const existing = streamingPostResponseFinalizers.get(sessionID);
-  if (
-    (!capacityReserved &&
-      streamingPostResponsePending >= maxStreamingPostResponses) ||
-    (!capacityReserved &&
-      (existing?.pending ?? 0) >= maxStreamingPostResponsesPerSession)
-  ) {
-    const now = Date.now();
-    if (now - lastStreamingPostResponseOverflowLog >= 30_000) {
-      lastStreamingPostResponseOverflowLog = now;
-      log.warn("streaming post-response queue full; dropping finalizer");
-    }
-    drop();
-    return;
-  }
-  const state = existing ?? { tail: Promise.resolve(), pending: 0 };
-  const previous = state.tail;
-  state.pending++;
-  streamingPostResponsePending++;
-  if (admissionKey !== undefined) {
-    streamingPostResponsePendingByAdmissionKey.set(
-      admissionKey,
-      (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 0) + 1,
-    );
-  }
-  const current = (async () => {
-    await previous;
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    if (generation !== streamingPostResponseGeneration) {
-      drop();
-      return;
-    }
-    try {
-      await operation();
-    } catch (error) {
-      log.error("streaming post-response processing failed:", error);
-    }
-  })();
-  state.tail = current;
-  streamingPostResponseFinalizers.set(sessionID, state);
-  void current.finally(() => {
-    if (streamingPostResponseFinalizers.get(sessionID) !== state) return;
-    state.pending--;
-    streamingPostResponsePending--;
-    if (admissionKey !== undefined) {
-      const remaining =
-        (streamingPostResponsePendingByAdmissionKey.get(admissionKey) ?? 1) - 1;
-      if (remaining > 0) {
-        streamingPostResponsePendingByAdmissionKey.set(admissionKey, remaining);
-      } else {
-        streamingPostResponsePendingByAdmissionKey.delete(admissionKey);
-      }
-    }
-    if (state.tail === current && state.pending === 0) {
-      streamingPostResponseFinalizers.delete(sessionID);
-    }
-    pumpPendingSessionClaims();
-  });
-}
-
-const MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION = 16;
-const streamingPostResponseWaiters = new Map<string, number>();
-
-class StreamingPostResponseWaitCapacityError extends Error {}
-
-async function awaitStreamingPostResponse(
-  sessionID: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!streamingPostResponseFinalizers.has(sessionID)) return;
-  const waiters = streamingPostResponseWaiters.get(sessionID) ?? 0;
-  if (waiters >= MAX_STREAMING_POST_RESPONSE_WAITERS_PER_SESSION) {
-    throw new StreamingPostResponseWaitCapacityError(
-      "streaming post-response wait queue full",
-    );
-  }
-  streamingPostResponseWaiters.set(sessionID, waiters + 1);
-  try {
-    for (;;) {
-      const state = streamingPostResponseFinalizers.get(sessionID);
-      if (!state) return;
-      const tail = state.tail;
-      streamingPostResponseWaitObserverForTest?.();
-      await promiseAgainstAbort(() => tail, signal);
-      const latest = streamingPostResponseFinalizers.get(sessionID);
-      if (latest !== state || state.tail === tail) return;
-    }
-  } finally {
-    const remaining = (streamingPostResponseWaiters.get(sessionID) ?? 1) - 1;
-    if (remaining > 0) streamingPostResponseWaiters.set(sessionID, remaining);
-    else streamingPostResponseWaiters.delete(sessionID);
-  }
-}
-
-/** Sessions that have already logged the cwd-fallback warning (dedup). */
-const cwdWarned = new Set<string>();
-
-/** Sessions that have already logged the stale-header conflict warning (dedup). */
-const staleHeaderWarned = new Set<string>();
-
-/** (sessionID + parentClientId) pairs that have already logged the unresolved
- *  subagent-parent warning. Without dedup, a child agent with an unresolvable
- *  parent (Tier 3 fingerprint) fires the same "pending" log on every turn —
- *  50+ identical lines per session. Cleared on session eviction. */
-const subagentParentPendingLogged = new Set<string>();
-
-/** Read-only access to live session states (for dashboard rendering). */
-export function getActiveSessions(): ReadonlyMap<string, SessionState> {
-  return sessions;
-}
-
-/**
- * Re-bind an active session's project path after a manual move/reassign.
- *
- * Updates the in-memory `SessionState` so the live dashboard immediately
- * reflects the new project without requiring a gateway restart. A no-op
- * when the session is not currently active (DB-only move is sufficient).
- */
-export function rebindActiveSession(
-  sessionId: string,
-  newProjectPath: string,
-): void {
-  const sess = sessions.get(sessionId);
-  if (!sess) return;
-  sess.projectPath = newProjectPath;
-  sess.projectPathProvisional = false;
-}
-
-/**
- * Reverse lookup: maps tenant-scoped header values to internal session IDs.
- * Key: `credentialFingerprint\x1fheaderName\x1fheaderValue`.
- */
-const headerSessionIndex = new Map<string, string>();
-const ambiguousHeaderSessionKeys = new Set<string>();
-type ProvisionalHeaderMapping = {
+        const rawConteProvisionalHeaderMapping = {
   sessionID: string;
   createdAt: number;
   guardProject: boolean;
@@ -1822,7 +1468,364 @@ function findLiveSessionState(
 ): SessionState | undefined {
   const known = extractKnownSessionHeader(req.rawHeaders);
   if (known) {
-    // An indexed higher-priority header is authoritative even when its session
+    // nt =
+          provenanceBlock?.type === "opaque" &&
+          provenanceBlock.raw.type === "message" &&
+          Array.isArray(provenanceBlock.raw.content)
+            ? provenanceBlock.raw.content
+            : undefined;
+        const rawHasWarning = rawContent?.some(
+          (part) =>
+            part &&
+            typeof part === "object" &&
+            !Array.isArray(part) &&
+            (part as Record<string, unknown>).type === "output_text" &&
+            typeof (part as Record<string, unknown>).text === "string" &&
+            ((part as Record<string, unknown>).text as string).startsWith(
+              CONTEXT_WARNING_MARKER,
+            ),
+        );
+        if (
+          provenanceIndex === undefined ||
+          !msg.provenanceContent ||
+          !msg.provenancePositions ||
+          !(
+            isMatchingProvenance ||
+            (provenanceBlock?.type === "opaque" && rawHasWarning)
+          )
+        ) {
+          // Removing a visible warning without removing its matching
+          // provenance block leaves the position map shifted. A malformed or
+          // mismatched legacy message must fail closed instead of letting
+          // recall mutate the wrong provider-native block later.
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
+        msg.provenanceContent.splice(provenanceIndex, 1);
+        msg.provenancePositions = msg.provenancePositions
+          .filter((_position, visibleIndex) => visibleIndex !== i)
+          .map((position) =>
+            position > provenanceIndex ? position - 1 : position,
+          );
+        if (msg.provenanceContent.length === 0) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+        }
+      }
+      break; // only check the first non-thinking block
+    }
+  }
+}
+
+/**
+ * Detect whether a request contains a completed `git commit` tool invocation.
+ * Checks tool_use inputs (command string) on assistant messages and tool_result
+ * output on user messages for commit indicators. Used to trigger curation at
+ * commit boundaries — natural checkpoints where decisions crystallize.
+ */
+const GIT_COMMIT_RE = /\bgit\s+commit\b/i;
+function containsGitCommit(req: GatewayRequest): boolean {
+  for (const msg of req.messages) {
+    for (const block of msg.content) {
+      // Check assistant tool_use inputs for the command string
+      if (block.type === "tool_use") {
+        const input = block.input;
+        if (typeof input === "object" && input !== null) {
+          const cmd =
+            (input as Record<string, unknown>).command ??
+            (input as Record<string, unknown>).content ??
+            "";
+          if (typeof cmd === "string" && GIT_COMMIT_RE.test(cmd)) return true;
+        }
+      }
+      // Check user tool_result content for git commit output patterns
+      if (block.type === "tool_result") {
+        const text = blocksToText(block.content);
+        // Match common git commit output (e.g., "[main abc1234] commit message")
+        if (text && /^\[[\w/.-]+ [0-9a-f]+\]/.test(text.trim())) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Active upstream interceptor — used for recording/replay. */
+let activeInterceptor: UpstreamInterceptor | undefined;
+/** Monotonic request-start order for concurrency-safe upstream snapshots. */
+let upstreamRequestOrder = 0;
+/** Test-only seam for forcing adversarial request ordering before capture. */
+let beforeUpstreamCaptureForTest:
+  | ((req: GatewayRequest, state: SessionState) => Promise<void>)
+  | undefined;
+/** Foreground request lifetimes cancelled when the pipeline is reset. */
+const activeForegroundAbortControllers = new Set<AbortController>();
+
+export function setBeforeUpstreamCaptureForTest(
+  hook:
+    | ((req: GatewayRequest, state: SessionState) => Promise<void>)
+    | undefined,
+): void {
+  beforeUpstreamCaptureForTest = hook;
+}
+
+/** Test-only observer for pinning post-response lifecycle ordering. */
+let postResponseStartObserver: (() => void) | undefined;
+let recallPersistenceCommitObserver: (() => void) | undefined;
+let pipelineResetPauseForTest: Promise<void> | undefined;
+let pipelinePreUpstreamPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let provisionalFinalizerPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let pipelineResetSettleTimeoutMs = 5000;
+let pipelineResetInProgress = false;
+let pipelineResetPromise: Promise<void> | undefined;
+
+interface ActivePipelineRequest {
+  admissionKey: string;
+  abort: (reason: unknown) => void;
+  settled: Promise<void>;
+  sessionIDs: Set<string>;
+}
+
+const activePipelineRequests = new Set<ActivePipelineRequest>();
+const detachedPipelineRequests = new Set<ActivePipelineRequest>();
+const DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS = 64;
+const MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY = 16;
+const MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION = 1;
+const MAX_PENDING_SESSION_CLAIMS = 64;
+const MAX_DETACHED_PIPELINE_REQUESTS = 64;
+let maxActivePipelineRequests = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS;
+let maxDetachedPipelineRequests = MAX_DETACHED_PIPELINE_REQUESTS;
+
+interface PendingSessionClaim {
+  active: ActivePipelineRequest;
+  sessionID: string;
+  signal: AbortSignal;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+  onAbort: () => void;
+}
+
+const pendingSessionClaims = new Map<string, PendingSessionClaim>();
+
+class PipelineCapacityError extends Error {}
+
+function activePipelineRequestsForSession(sessionID: string): number {
+  let count = 0;
+  for (const request of activePipelineRequests) {
+    if (request.sessionIDs.has(sessionID)) count++;
+  }
+  return count;
+}
+
+function activePipelineRequestsForAdmissionKey(admissionKey: string): number {
+  let count = 0;
+  for (const request of activePipelineRequests) {
+    if (request.admissionKey === admissionKey) count++;
+  }
+  return count;
+}
+
+function pendingSessionClaimsForAdmissionKey(admissionKey: string): number {
+  let count = 0;
+  for (const claim of pendingSessionClaims.values()) {
+    if (claim.active.admissionKey === admissionKey) count++;
+  }
+  return count;
+}
+
+function pipelineSessionHasCapacity(sessionID: string): boolean {
+  return (
+    activePipelineRequestsForSession(sessionID) +
+      (streamingPostResponseFinalizers.get(sessionID)?.pending ?? 0) <
+    MAX_ACTIVE_PIPELINE_REQUESTS_PER_SESSION
+  );
+}
+
+function pumpPendingSessionClaims(): void {
+  for (const [sessionID, claim] of pendingSessionClaims) {
+    if (
+      activePipelineRequests.size + streamingPostResponsePending >=
+      maxActivePipelineRequests
+    ) {
+      return;
+    }
+    if (
+      activePipelineRequestsForAdmissionKey(claim.active.admissionKey) +
+        (streamingPostResponsePendingByAdmissionKey.get(
+          claim.active.admissionKey,
+        ) ?? 0) >=
+      MAX_ACTIVE_PIPELINE_REQUESTS_PER_ADMISSION_KEY
+    ) {
+      continue;
+    }
+    if (!pipelineSessionHasCapacity(sessionID)) continue;
+    pendingSessionClaims.delete(sessionID);
+    claim.signal.removeEventListener("abort", claim.onAbort);
+    if (claim.signal.aborted) {
+      claim.reject(claim.signal.reason);
+      continue;
+    }
+    claim.active.sessionIDs.add(sessionID);
+    activePipelineRequests.add(claim.active);
+    claim.resolve();
+  }
+}
+
+function isPipelineSessionActive(sessionID: string): boolean {
+  return (
+    activePipelineRequestsForSession(sessionID) > 0 ||
+    pendingSessionClaims.has(sessionID) ||
+    streamingPostResponseFinalizers.has(sessionID)
+  );
+}
+
+export function activePipelineRequestCountForTest(): number {
+  return activePipelineRequests.size;
+}
+
+export function detachedPipelineRequestCountForTest(): number {
+  return detachedPipelineRequests.size;
+}
+
+export function pendingPipelineSessionClaimCountForTest(): number {
+  return pendingSessionClaims.size;
+}
+
+export function setMaxActivePipelineRequestsForTest(
+  limit = DEFAULT_MAX_ACTIVE_PIPELINE_REQUESTS,
+): void {
+  maxActivePipelineRequests = limit;
+}
+
+export function setMaxDetachedPipelineRequestsForTest(
+  limit = MAX_DETACHED_PIPELINE_REQUESTS,
+): void {
+  maxDetachedPipelineRequests = limit;
+}
+
+export function isPipelineSessionActiveForTest(sessionID: string): boolean {
+  return isPipelineSessionActive(sessionID);
+}
+
+/**
+ * Set (or clear) the module-level upstream interceptor.
+ *
+ * When set, every call to `forwardToUpstream` passes through the interceptor
+ * instead of calling `fetch` directly.  Used by the recording and replay
+ * scripts to capture or replay upstream traffic without modifying individual
+ * call sites.
+ */
+export function setUpstreamInterceptor(
+  interceptor: UpstreamInterceptor | undefined,
+): void {
+  activeInterceptor = interceptor;
+}
+
+export function setPostResponseStartObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  postResponseStartObserver = observer;
+}
+
+export function setRecallPersistenceCommitObserverForTest(
+  observer: (() => void) | undefined,
+): void {
+  recallPersistenceCommitObserver = observer;
+}
+
+export function setPipelineResetPauseForTest(
+  pause: Promise<void> | undefined,
+): void {
+  pipelineResetPauseForTest = pause;
+}
+
+export function setPipelinePreUpstreamPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setProvisionalFinalizerPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  provisionalFinalizerPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
+  pipelineResetSettleTimeoutMs = timeoutMs;
+}
+
+/**
+ * Reset all module-level singleton state.
+ *
+ * Called during gateway shutdown (with `{ fast: true }` to skip the batch-queue
+ * drain) and by test harnesses (default — drains gracefully so tests observe
+ * all side-effects).
+ */
+export async function resetPipelineState(opts?: {
+  fast?: boolean;
+}): Promise<void> {
+  if (pipelineResetPromise) return pipelineResetPromise;
+  pipelineResetInProgress = true;
+  const reset = (async () => {
+    try {
+      await resetPipelineStateInner(opts);
+    } finally {
+      pipelineResetInProgress = false;
+      pipelineResetPromise = undefined;
+    }
+  })();
+  pipelineResetPromise = reset;
+  return reset;
+}
+
+async function resetPipelineStateInner(opts?: {
+  fast?: boolean;
+}): Promise<void> {
+  streamingPostResponsesAccepting = false;
+  await pipelineResetPauseForTest;
+  const resetReason = new DOMException("gateway pipeline reset", "AbortError");
+  pipelineGenerationAbort.abort(resetReason);
+  const foregroundControllers = [...activeForegroundAbortControllers];
+  activeForegroundAbortControllers.clear();
+  for (const controller of foregroundControllers) {
+    if (!controller.signal.aborted) controller.abort(resetReason);
+  }
+  const activeRequests = [
+    ...new Set([
+      ...activePipelineRequests,
+      ...[...pendingSessionClaims.values()].map((claim) => claim.active),
+    ]),
+  ];
+  for (const request of activeRequests) request.abort(resetReason);
+  await boundedSettle(
+    activeRequests.map((request) => request.settled),
+    pipelineResetSettleTimeoutMs,
+  );
+  for (const request of activeRequests) {
+    if (!activePipelineRequests.has(request)) continue;
+    activePipelineRequests.delete(request);
+    request.sessionIDs.clear();
+    if (detachedPipelineRequests.size < maxDetachedPipelineRequests) {
+      detachedPipelineRequests.add(request);
+    } else {
+      log.error(
+        "pipeline quarantine full; dropping stale lifecycle reservation",
+      );
+    }
+  }
+  // Streaming responses register post-response finalizers before closing their
+  // bodies. Drain them before sessions or the DB-facing pipeline state are
+  // cleared; a finalizer may also schedule ordinary background work, which the
+  // non-fast drain below will then observe.
+  await boundedSettle(
+    [...streamingPostResponseFinalizers.values()].map((An indexed higher-priority header is authoritative even when its session
     // is not currently hydrated; never fall through to a conflicting alias.
     const indexedSid = findIndexedKnownSessionID(req, config);
     return indexedSid ? allSessions.get(indexedSid) : undefined;
@@ -3500,304 +3503,7 @@ export function appendKnowledgePromptDelta(input: {
   //   - a removal/change ALREADY surfaced by a prior block has left the surfaced
   //     set, so a PERSISTENT mutation (e.g. 66 pinned entries genuinely gone)
   //     fires exactly once, not every turn.
-  // `nextKeys` is retained on the input for the gate sites (hasMaterialLtmDelta).
-  // `entries` supplies content for SYNTHETIC context-source ids (see
-  // syntheticEntries below); knowledge-row content is re-derived from the DB.
-  let blocks = listSessionPromptDeltas(input.sessionID);
-  // Bound pathological growth: if too many blocks have accumulated without a
-  // reshuffle to coalesce them, clear them and re-derive ONE cumulative block
-  // from the frozen pin baseline below (advanceSurfacedKeys over [] == the pin,
-  // so detectSurfacedMutations re-captures the full pin→DB delta). Costs one
-  // bust, paid only when MAX_DELTA_BLOCKS is reached.
-  if (blocks.length >= MAX_DELTA_BLOCKS) {
-    deleteSessionPromptDelta(input.sessionID);
-    blocks = [];
-  }
-  const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
-  // Context-source snapshots (category `recalled`, ids `d:`/`t:`) don't live in
-  // the knowledge table, so detectSurfacedMutations can't resolve their content
-  // from the DB — supply it from this turn's selection. A synthetic's content
-  // is immutable per id, so it only needs resolving on its first-surface turn,
-  // which is exactly when it's present in `input.entries`.
-  const syntheticEntries = new Map<
-    string,
-    { category: string; title: string; content: string }
-  >();
-  for (const e of input.entries ?? []) {
-    if (e.category === ltm.RECALLED_CONTEXT_CATEGORY) {
-      syntheticEntries.set(e.id, {
-        category: e.category,
-        title: e.title,
-        content: e.content,
-      });
-    }
-  }
-  const { changed, removedIds } = detectSurfacedMutations(
-    surfacedKeys,
-    syntheticEntries,
-  );
-  const messages = buildKnowledgeDeltaMessage(
-    changed,
-    removedIds,
-    loreSessionToken(input.sessionID),
-    input.overflow,
-  );
-  if (!messages.length) return false;
-
-  // APPEND a fresh immutable block at the current tail (seq = MAX+1) instead of
-  // rewriting one coalesced row in place. The insertAt is computed tool-pair-
-  // safe at the call site against the CURRENT array tail, so the new message
-  // extends the cache frontier (it sits after everything already cached and
-  // before the final uncached user turn) → it never invalidates the prefix. An
-  // appended block is never touched again: its content + position are frozen,
-  // so later turns replay it byte-identically (cache-stable by construction).
-  // The block stashes the mutation signature it surfaced so the NEXT turn can
-  // advance the surfaced set past it (see advanceSurfacedKeys).
-  //
-  // DEBOUNCE: when the latest block is still within KNOWLEDGE_DELTA_DEBOUNCE_MS
-  // of its creation, merge the new mutations into it instead of creating a
-  // second block. This collapses rapid-fire curator batches (e.g. 3 entries
-  // curated back-to-back) into a single block, so the model sees one
-  // `[memory refreshed]` cycle instead of three back-to-back. The merged block's
-  // `mut` is the union of both, its content is the union payload, and its
-  // `insertAt` is the current tail (which may have moved). The debounce window
-  // resets on every coalesce — consecutive mutations within the window keep
-  // merging into the same block. When the window expires (or a compression
-  // fires), the next mutation creates a fresh block and a new window starts.
-  const mut: DeltaMutation = {
-    changed: changed.map((c) => ({
-      id: c.id,
-      h: surfaceSignature(c.title, c.content),
-    })),
-    removed: removedIds,
-  };
-
-  const latest = blocks[blocks.length - 1];
-  const now = input.now ?? Date.now();
-  if (latest && withinDebounceWindow(latest.selector, now)) {
-    // Merge into the latest block: union muts, union content, update insertAt.
-    const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
-    const mergedMessages = mergeDeltaContent(
-      JSON.parse(latest.content) as GatewayMessage[],
-      messages,
-    );
-    updateSessionPromptDeltaSelector(
-      input.sessionID,
-      latest.seq,
-      JSON.stringify({
-        target: "messages",
-        insertAt: input.insertAt,
-        mut: mergedMut,
-        debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
-      }),
-    );
-    updateSessionPromptDeltaContent(
-      input.sessionID,
-      latest.seq,
-      JSON.stringify(mergedMessages),
-    );
-    log.info(
-      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
-    );
-    return true;
-  }
-
-  appendSessionPromptDelta({
-    sessionID: input.sessionID,
-    projectID: ensureProject(input.projectPath),
-    selector: JSON.stringify({
-      target: "messages",
-      insertAt: input.insertAt,
-      mut,
-      debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
-    }),
-    content: JSON.stringify(messages),
-  });
-  log.info(
-    `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
-  );
-  return true;
-}
-
-/**
- * Window (ms) during which a new mutation merges into the LATEST block instead
- * of appending a new one. Bounds rapid-fire curator batches (e.g. 3 entries
- * curated back-to-back) to a single `[memory refreshed]` cycle. 60s — long
- * enough to absorb a curator batch, short enough that an idle session's next
- * mutation (after the user resumes) gets its own block.
- */
-const KNOWLEDGE_DELTA_DEBOUNCE_MS = 60_000;
-
-/** True when the latest block's debounce window still covers `now`. */
-function withinDebounceWindow(rawSelector: string, now: number): boolean {
-  try {
-    const parsed = JSON.parse(rawSelector) as { debounceAt?: unknown };
-    return typeof parsed.debounceAt === "number" && parsed.debounceAt > now;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Union two DeltaMutations. `changed` entries: same id → keep the later (higher)
- * hash wins (curator may have re-surfaced the same id with new content). `removed`
- * entries: union of both sets.
- */
-function mergeMutations(
-  prev: DeltaMutation | null,
-  next: DeltaMutation,
-): DeltaMutation {
-  if (!prev) return next;
-  const changedMap = new Map<string, { id: string; h: string }>();
-  for (const c of prev.changed) changedMap.set(c.id, c);
-  for (const c of next.changed) changedMap.set(c.id, c);
-  const removed = new Set([...prev.removed, ...next.removed]);
-  return {
-    changed: [...changedMap.values()],
-    removed: [...removed],
-  };
-}
-
-/**
- * Merge the new delta messages into the existing block's content. The existing
- * block has a user-turn payload + assistant-closer pair; we replace the user
- * payload with a union of all changed entries (deduped by id, latest content
- * wins) and remove any removed ids from the rendered list.
- */
-function mergeDeltaContent(
-  prev: GatewayMessage[],
-  next: GatewayMessage[],
-): GatewayMessage[] {
-  // The existing block is [user(payload), assistant(closer)]. The new block is
-  // the same shape. Concatenate the payloads and keep the closer.
-  const userText = firstText(prev[0]) ?? "";
-  const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
-  // Reuse the next block's payload text directly — it was just built by
-  // buildKnowledgeDeltaMessage from the latest changed/removed set, which is
-  // a superset of the previous block's (the previous block's entries are
-  // already in the surfaced set, so they would NOT appear in `changed` again;
-  // the new payload contains only the genuinely-new mutations).
-  const nextUserText = firstText(next[0]) ?? "";
-  return [
-    {
-      role: "user",
-      content: [{ type: "text", text: `${userText}\n\n${nextUserText}` }],
-    },
-    {
-      role: "assistant",
-      content: [{ type: "text", text: closerText }],
-    },
-  ];
-}
-
-/**
- * Stable LTM (preference entries) + known entities per session — injected as
- * system[1] with a 1h cache breakpoint. Computed once per session and pinned
- * for ≥1h even through curation changes, so the Anthropic prompt cache prefix
- * (system[0] host prompt + system[1] stable LTM) stays warm across turns
- * and sessions.
- *
- * Only rebuilt on new session start (cache miss). NOT invalidated by
- * curation, idle resume, or Layer 4 emergency — the stale preferences
- * are kept to preserve the 1h cache investment. On process restart the
- * cache is recomputed (cheap, preferences + the capped entity list are small).
- */
-const stableLtmCache = new Map<
-  string,
-  { formatted: string; tokenCount: number }
->();
-
-/**
- * Single-flight memoizer for the per-session stable-LTM recompute.
- *
- * The stable-LTM block (preferences + known entities + project-knowledge
- * catalog) is computed once per session, then pinned for ≥1h. The compute is
- * heavy (ltm.forSession ×2, entity fetch, catalog scan — all read-worker pool
- * jobs). When a gateway restarts, the in-memory cache is cold, and the client's
- * header-timeout retries can fire THREE concurrent identical turns at the same
- * session BEFORE any of them has populated the cache. Without dedup, all three
- * recompute the block independently and thrash the DB — which compounds the
- * very latency that caused the retries.
- *
- * The settled cache (stableLtmCache) only helps the NEXT turn. This map dedups
- * concurrent in-flight recomputes so a burst of retries shares ONE compute and
- * the session recovers (headers flush, retries stop) instead of re-entering the
- * slow path.
- *
- * Keyed by sessionID. Entries are deleted on settle (the settled value goes
- * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
- */
-const stableLtmInFlight = new Map<string, Promise<void>>();
-const sessionLifecycleAborts = new Map<string, AbortController>();
-
-function sessionLifecycleSignal(sessionID: string): AbortSignal {
-  let controller = sessionLifecycleAborts.get(sessionID);
-  if (!controller) {
-    controller = new AbortController();
-    sessionLifecycleAborts.set(sessionID, controller);
-  }
-  return controller.signal;
-}
-
-function stableLtmComputeSignal(sessionID: string): AbortSignal {
-  return AbortSignal.any([
-    pipelineGenerationAbort.signal,
-    sessionLifecycleSignal(sessionID),
-  ]);
-}
-
-function evictStableLtmSession(sessionID: string): void {
-  sessionLifecycleAborts
-    .get(sessionID)
-    ?.abort(new DOMException("stable LTM session was evicted", "AbortError"));
-  sessionLifecycleAborts.delete(sessionID);
-  stableLtmCache.delete(sessionID);
-  stableLtmInFlight.delete(sessionID);
-}
-
-function evictPipelineSessionState(sessionID: string): void {
-  // Keep the persisted header→session mapping warm. Eviction removes only the
-  // heavy live state; dropping this index would force an unbounded DB reload on
-  // the next request and would make state-changing slash commands unable to
-  // rehydrate the authoritative canonical session safely.
-  ltmSessionCache.delete(sessionID);
-  ltmPinnedText.delete(sessionID);
-  lastSavedDedupDecisions.delete(sessionID);
-  evictStableLtmSession(sessionID);
-  cwdWarned.delete(sessionID);
-  staleHeaderWarned.delete(sessionID);
-  for (const key of subagentParentPendingLogged) {
-    if (key.startsWith(`${sessionID}:`))
-      subagentParentPendingLogged.delete(key);
-  }
-}
-
-/** Test seam for exercising the same cleanup used by idle session eviction. */
-export function evictStableLtmSessionForTest(sessionID: string): void {
-  evictStableLtmSession(sessionID);
-}
-
-/** Exercise idle eviction with the production ownership and satellite cleanup. */
-export function evictIdlePipelineSessionsForTest(
-  config: GatewayConfig,
-  now: number,
-): number {
-  return evictIdleSessions(
-    config,
-    sessions,
-    new Set(),
-    new Set(),
-    now,
-    evictPipelineSessionState,
-    isPipelineSessionActive,
-  );
-}
-
-/**
- * Run a stable-LTM compute under single-flight dedup for a session. If a
- * compute is already in flight for the session, await it and return its
- * settled cache value; otherwise run `compute`, set the settled cache, and
- * clear the in-flight entry. The cache is always populated BEFORE the in-flight
+  // `nextKeys` is retained on the input for the gate sites (hasMaterialLn-flight entry. The cache is always populated BEFORE the in-flight
  * promise resolves, so a concurrent awaiter re-reads it race-free.
  */
 export async function singleFlightStableLtm(
@@ -4100,7 +3806,867 @@ const THINKING_OUTPUT_HEADROOM = 8192;
 /**
  * Compute a right-sized `max_tokens` value for a conversation turn using
  * a hybrid headroom + history approach.
+ wait load(projectPath);
+  configureSSEInactivityDeadlines(
+    config.hostedMode ? {} : loreConfig().timeouts,
+  );
+  if (requestGeneration !== undefined) {
+    assertCurrentPipelineGeneration(signal, requestGeneration);
+  }
+  ensureProject(projectPath, undefined, gitRemote);
+  initialized = true;
+
+  // Import knowledge from .lore.md at startup (picks up user/git edits
+  // since last session). Falls back to agents file for backward compat.
+  const cfg = loreConfig();
+  if (cfg.knowledge.enabled) {
+    tryImportKnowledge(projectPath);
+
+    // Import .lore.md files from configured workspace sub-projects.
+    // Entries are attributed to the root project so they're visible in
+    // the current session's knowledge context.
+    if (cfg.workspaces.length > 0) {
+      const { basename } = require("node:path") as typeof import("node:path");
+      const subDirs = resolveWorkspaces(projectPath, cfg.workspaces);
+      for (const subDir of subDirs) {
+        try {
+          if (loreFileExists(subDir)) {
+            importLoreFileAs(subDir, projectPath);
+            log.info(`imported knowledge from workspace: ${basename(subDir)}`);
+          }
+        } catch (e) {
+          log.error(`workspace knowledge import error (${subDir}):`, e);
+        }
+      }
+    }
+
+    // Prune corrupted/oversized knowledge entries (safety net for past bugs).
+    const pruned = ltm.pruneOversized(1200);
+    if (pruned > 0) {
+      log.info(
+        `pruned ${pruned} oversized knowledge entries (confidence set to 0)`,
+      );
+    }
+
+    // Watch knowledge files for live changes (git pull, manual edits, etc.)
+    if (!stopFileWatcher) {
+      stopFileWatcher = startKnowledgeFileWatcher(projectPath);
+    }
+  }
+
+  // Startup backfills — idempotent, run once per process.
+  try {
+    distillation.backfillMetrics();
+  } catch (e) {
+    log.info("metric backfill failed:", e);
+  }
+  if (process.env.NODE_ENV !== "test") {
+    // Warm the local embedding worker NOW (throwaway embed) so the ~21s ONNX
+    // cold-load is paid at startup instead of on the first real distillation
+    // embed — which on a short/fast session would otherwise race gateway
+    // teardown and never write its `distillation_vec` row (#1331). Local-only,
+    // fire-and-forget; the model loads during the backfill's startup delay.
+    embedding.warmupEmbedding();
+    // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
+    // pool to live traffic: park while the breaker is tripped or a live recall
+    // embed is in flight, resume the instant the worker drains.
+    const startupBackfill = spanStartupBackfill(() => {
+      const backfill = embedding.runStartupBackfill({
+        shouldPause: () => isBackgroundPaused(),
+      });
+      // When embeddings are available, runStartupBackfill synchronously
+      // reconciles config and attempts vec0 cutover before its first await.
+      // Start durable live-message scheduling after those transitions.
+      temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
+      return backfill;
+    });
+    startupBackfill.catch((e) => {
+      log.error("embedding backfill failed:", e);
+    });
+  }
+
+  // Index lat.md/ directory sections (content-hash-based, skips unchanged files).
+  try {
+    latReader.refresh(projectPath);
+  } catch (e) {
+    log.error("lat-reader startup refresh error:", e);
+  }
+
+  // Pre-populate headerSessionIndex from DB so Tier 1 session identification
+  // works immediately after process restart. Without this, the first request
+  // with a known session header generates a new session ID and orphans the
+  // old session's persisted state.
+  try {
+    const restored = restoreHeaderSessionMappings(config);
+    if (restored.cleared > 0) {
+      log.warn(
+        `cleared ${restored.cleared} unsafe persisted header→session mapping(s)`,
+      );
+    }
+    if (restored.restored > 0) {
+      log.info(`restored ${restored.restored} header→session mappings from DB`);
+    }
+  } catch (e) {
+    log.warn("header session index restore failed:", e);
+  }
+
+  // Pre-warm models.dev pricing/limits cache so synchronous lookups in the
+  // request hot path (getModelSpec, emitCostMetric) resolve from memory.
+  fetchModelData().catch((e) => log.warn("models.dev pre-warm failed:", e));
+
+  // Start the idle scheduler for background work (distillation, curation,
+  // pruning, AGENTS.md export). Uses a 30s poll interval and fires for any
+  // session whose lastRequestTime exceeds the idle timeout.
+  if (config && !stopIdleScheduler) {
+    const llm = getLLMClient(config);
+    const baseIdleHandler = buildIdleWorkHandler(llm);
+    // Wrap the idle handler to ALSO precompute the stable-LTM cache for idle
+    // sessions. When a session idles long enough that the next turn is a cold
+    // post-idle resume, the gateway's LTM injection would otherwise recompute
+    // the heavy stable block (ltm.forSession ×2 + entity fetch + catalog scan)
+    // on the request's critical path — compounding the client header-timeout
+    // latency. Precomputing at idle warms stableLtmCache (and the persisted
+    // session tracking) so the resume turn reads it from cache instead. The
+    // compute is single-flighted per session; a concurrent turn's
+    // `singleFlightStableLtm` shares the same in-flight promise.
+    const idleHandler = async (sessionID: string, state: SessionState) =>
+      withTenant(state.storageTenantId ?? "", async () => {
+        void precomputeStableLtmForIdleSession(sessionID, state);
+        await baseIdleHandler(sessionID, state);
+      });
+    stopIdleScheduler = startIdleScheduler(
+      config,
+      sessions,
+      idleHandler,
+      evictPipelineSessionState,
+      isPipelineSessionActive,
+    );
+  }
+
+  // Start background cloud sync (no-op until the user runs `lore sync enable`).
+  if (!stopSyncScheduler) {
+    const { startSyncScheduler } = await import("./sync");
+    if (requestGeneration !== undefined) {
+      assertCurrentPipelineGeneration(signal, requestGeneration);
+    }
+    if (!stopSyncScheduler) stopSyncScheduler = startSyncScheduler(config);
+  }
+
+  log.info(`gateway pipeline initialized: ${projectPath}`);
+}
+
+function getLLMClient(config: GatewayConfig): LLMClient {
+  if (!llmClient) {
+    const cfg = loreConfig();
+    const defaultModel = cfg.model ?? {
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+    };
+
+    // Worker-specific auth: when LORE_WORKER_API_KEY is set, workers use a
+    // dedicated credential instead of the session's client key. This enables
+    // routing workers to a different provider (e.g. MiniMax) while sessions
+    // continue using Anthropic. Falls back to session auth when not set.
+    const workerApiKey = config.workerApiKey;
+    const getWorkerAuth: (
+      sessionID?: string,
+      providerID?: string,
+    ) => AuthCredential | null = workerApiKey
+      ? (_sessionID, providerID) => ({
+          // Scheme is provider-aware: a GitHub-Models worker needs the key as a
+          // Bearer token; every other provider uses api-key (x-api-key), the
+          // long-standing dedicated-key shape. getAuth is invoked with the
+          // worker MODEL's providerID (see llm-adapter), so this resolves per
+          // worker call, not once at setup.
+          scheme: workerKeyScheme(providerID),
+          value: workerApiKey,
+        })
+      : (sessionID, providerID) => {
+          if (sessionID) return resolveAuth(sessionID, providerID);
+          return usesRemoteSessionBinding(config)
+            ? null
+            : resolveAuth(undefined, providerID);
+        };
+
+    // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
+    // calls route to this URL instead of the default upstream URLs.
+    const workerUpstreams = config.workerUpstream
+      ? { anthropic: config.workerUpstream, openai: config.workerUpstream }
+      : { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI };
+
+    if (config.workerApiKey || config.workerUpstream) {
+      log.info(
+        `worker routing: ` +
+          `source=${config.workerApiKey ? "dedicated key" : "session"}, ` +
+          `upstream=${
+            config.workerUpstream
+              ? upstreamUrlForLog(config.workerUpstream)
+              : "default"
+          }`,
+      );
+    }
+
+    const rawClient = createGatewayLLMClient(
+      workerUpstreams,
+      getWorkerAuth,
+      defaultModel,
+      {
+        dedicatedWorkerKey: !!workerApiKey,
+        vertexProject: config.vertexProject,
+      },
+    );
+
+    // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
+    // Enabled by default — disable via LORE_BATCH_DISABLED=1.
+    /**
+     * Disables the batch-queue wrapper for non-urgent worker calls
+     * (distillation, curation, embedding). With batching on, the
+     * gateway groups these calls and submits them via the Anthropic
+     * Message Batches API for ~50% cost savings. Set
+     * `LORE_BATCH_DISABLED=1` to bypass batching and dispatch each
+     * call immediately (useful for low-latency debugging or when the
+     * upstream rejects batch submissions). Env: `LORE_BATCH_DISABLED=1`.
+     */
+    const batchDisabled = process.env.LORE_BATCH_DISABLED === "1";
+    if (Sentry.isInitialized()) {
+      Sentry.setTag("batch_enabled", String(!batchDisabled));
+    }
+    const dispatchClient = batchDisabled
+      ? rawClient
+      : createBatchLLMClient(
+          rawClient,
+          workerUpstreams,
+          getWorkerAuth,
+          defaultModel,
+        );
+    batchQueueEnabled = !batchDisabled;
+
+    // Resolve routing BEFORE the batch client sees opts. Batch enqueue chooses
+    // provider, model, auth, and grouping immediately; wrapping it on the inside
+    // would queue stale/default opts and only correct them during sync fallback.
+    // Current session state is authoritative over a caller's stale opts.model.
+    const routedClient: LLMClient & {
+      shutdown?: (options?: { drainQueue?: boolean }) => Promise<void>;
+      stats?: () => unknown;
+    } = {
+      recordWorkerSuccess: rawClient.recordWorkerSuccess?.bind(rawClient),
+      async prompt(system, user, opts) {
+        if (!opts?.sessionID || opts.upstreamUrl) {
+          return dispatchClient.prompt(system, user, opts);
+        }
+        const state = sessions.get(opts.sessionID);
+        const effectiveModel =
+          (state ? getWorkerModel(state.lastUpstream) : undefined) ??
+          opts.model ??
+          defaultModel;
+        const snapshot = state
+          ? matchingProviderSnapshot(state, effectiveModel.providerID)
+          : undefined;
+        const effectiveOpts: GatewayPromptOptions = {
+          ...opts,
+          model: effectiveModel,
+        };
+        if (
+          snapshot?.providerOptions &&
+          canonicalWorkerProviderID(effectiveModel.providerID) === "openrouter"
+        ) {
+          effectiveOpts.providerOptions = snapshot.providerOptions;
+        }
+        if (!workerApiKey && snapshot?.url && snapshot.providerID) {
+          effectiveOpts.upstreamUrl = snapshot.url;
+          effectiveOpts.upstreamProviderID = snapshot.providerID;
+          effectiveOpts.protocol = snapshot.protocol;
+        }
+        return dispatchClient.prompt(system, user, effectiveOpts);
+      },
+    };
+    if ("shutdown" in dispatchClient && "stats" in dispatchClient) {
+      routedClient.shutdown = (options) => dispatchClient.shutdown(options);
+      routedClient.stats = () => dispatchClient.stats();
+    }
+    llmClient = routedClient;
+  }
+  return llmClient;
+}
+
+/** Test-only access to the fully wrapped gateway worker client. */
+export function getLLMClientForTest(config: GatewayConfig): LLMClient {
+  return getLLMClient(config);
+}
+
+// ---------------------------------------------------------------------------
+// Project path resolution with session cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the final project path for a session, applying sticky per-session
+ * binding and (on remote gateways) stmDelta).
+  // `entries` supplies content for SYNTHETIC context-source ids (see
+  // syntheticEntries below); knowledge-row content is re-derived from the DB.
+  let blocks = listSessionPromptDeltas(input.sessionID);
+  // Bound pathological growth: if too many blocks have accumulated without a
+  // reshuffle to coalesce them, clear them and re-derive ONE cumulative block
+  // from the frozen pin baseline below (advanceSurfacedKeys over [] == the pin,
+  // so detectSurfacedMutations re-captures the full pin→DB delta). Costs one
+  // bust, paid only when MAX_DELTA_BLOCKS is reached.
+  if (blocks.length >= MAX_DELTA_BLOCKS) {
+    deleteSessionPromptDelta(input.sessionID);
+    blocks = [];
+  }
+  const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
+  // Context-source snapshots (category `recalled`, ids `d:`/`t:`) don't live in
+  // the knowledge table, so detectSurfacedMutations can't resolve their content
+  // from the DB — supply it from this turn's selection. A synthetic's content
+  // is immutable per id, so it only needs resolving on its first-surface turn,
+  // which is exactly when it's present in `input.entries`.
+  const syntheticEntries = new Map<
+    string,
+    { category: string; title: string; content: string }
+  >();
+  for (const e of input.entries ?? []) {
+    if (e.category === ltm.RECALLED_CONTEXT_CATEGORY) {
+      syntheticEntries.set(e.id, {
+        category: e.category,
+        title: e.title,
+        content: e.content,
+      });
+    }
+  }
+  const { changed, removedIds } = detectSurfacedMutations(
+    surfacedKeys,
+    syntheticEntries,
+  );
+  const messages = buildKnowledgeDeltaMessage(
+    changed,
+    removedIds,
+    loreSessionToken(input.sessionID),
+    input.overflow,
+  );
+  if (!messages.length) return false;
+
+  // APPEND a fresh immutable block at the current tail (seq = MAX+1) instead of
+  // rewriting one coalesced row in place. The insertAt is computed tool-pair-
+  // safe at the call site against the CURRENT array tail, so the new message
+  // extends the cache frontier (it sits after everything already cached and
+  // before the final uncached user turn) → it never invalidates the prefix. An
+  // appended block is never touched again: its content + position are frozen,
+  // so later turns replay it byte-identically (cache-stable by construction).
+  // The block stashes the mutation signature it surfaced so the NEXT turn can
+  // advance the surfaced set past it (see advanceSurfacedKeys).
+  //
+  // DEBOUNCE: when the latest block is still within KNOWLEDGE_DELTA_DEBOUNCE_MS
+  // of its creation, merge the new mutations into it instead of creating a
+  // second block. This collapses rapid-fire curator batches (e.g. 3 entries
+  // curated back-to-back) into a single block, so the model sees one
+  // `[memory refreshed]` cycle instead of three back-to-back. The merged block's
+  // `mut` is the union of both, its content is the union payload, and its
+  // `insertAt` is the current tail (which may have moved). The debounce window
+  // resets on every coalesce — consecutive mutations within the window keep
+  // merging into the same block. When the window expires (or a compression
+  // fires), the next mutation creates a fresh block and a new window starts.
+  const mut: DeltaMutation = {
+    changed: changed.map((c) => ({
+      id: c.id,
+      h: surfaceSignature(c.title, c.content),
+    })),
+    removed: removedIds,
+  };
+
+  const latest = blocks[blocks.length - 1];
+  const now = input.now ?? Date.now();
+  if (latest && withinDebounceWindow(latest.selector, now)) {
+    // Merge into the latest block: union muts, union content, update insertAt.
+    const mergedMut = mergeMutations(parseDeltaMutation(latest.selector), mut);
+    const mergedMessages = mergeDeltaContent(
+      JSON.parse(latest.content) as GatewayMessage[],
+      messages,
+    );
+    updateSessionPromptDeltaSelector(
+      input.sessionID,
+      latest.seq,
+      JSON.stringify({
+        target: "messages",
+        insertAt: input.insertAt,
+        mut: mergedMut,
+        debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
+      }),
+    );
+    updateSessionPromptDeltaContent(
+      input.sessionID,
+      latest.seq,
+      JSON.stringify(mergedMessages),
+    );
+    log.info(
+      `prompt-delta: coalesced into latest block for session ${input.sessionID.slice(0, 16)} (now ${mergedMut.changed.length} changed, ${mergedMut.removed.length} removed, insertAt=${input.insertAt}, seq=${latest.seq})`,
+    );
+    return true;
+  }
+
+  appendSessionPromptDelta({
+    sessionID: input.sessionID,
+    projectID: ensureProject(input.projectPath),
+    selector: JSON.stringify({
+      target: "messages",
+      insertAt: input.insertAt,
+      mut,
+      debounceAt: now + KNOWLEDGE_DELTA_DEBOUNCE_MS,
+    }),
+    content: JSON.stringify(messages),
+  });
+  log.info(
+    `prompt-delta: appended knowledge block for session ${input.sessionID.slice(0, 16)} (${changed.length} changed, ${removedIds.length} removed, insertAt=${input.insertAt}, seq=${blocks.length})`,
+  );
+  return true;
+}
+
+/**
+ * Window (ms) during which a new mutation merges into the LATEST block instead
+ * of appending a new one. Bounds rapid-fire curator batches (e.g. 3 entries
+ * curated back-to-back) to a single `[memory refreshed]` cycle. 60s — long
+ * enough to absorb a curator batch, short enough that an idle session's next
+ * mutation (after the user resumes) gets its own block.
+ */
+const KNOWLEDGE_DELTA_DEBOUNCE_MS = 60_000;
+
+/** True when the latest block's debounce window still covers `now`. */
+function withinDebounceWindow(rawSelector: string, now: number): boolean {
+  try {
+    const parsed = JSON.parse(rawSelector) as { debounceAt?: unknown };
+    return typeof parsed.debounceAt === "number" && parsed.debounceAt > now;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Union two DeltaMutations. `changed` entries: same id → keep the later (higher)
+ * hash wins (curator may have re-surfaced the same id with new content). `removed`
+ * entries: union of both sets.
+ */
+function mergeMutations(
+  prev: DeltaMutation | null,
+  next: DeltaMutation,
+): DeltaMutation {
+  if (!prev) return next;
+  const changedMap = new Map<string, { id: string; h: string }>();
+  for (const c of prev.changed) changedMap.set(c.id, c);
+  for (const c of next.changed) changedMap.set(c.id, c);
+  const removed = new Set([...prev.removed, ...next.removed]);
+  return {
+    changed: [...changedMap.values()],
+    removed: [...removed],
+  };
+}
+
+/**
+ * Merge the new delta messages into the existing block's content. The existing
+ * block has a user-turn payload + assistant-closer pair; we replace the user
+ * payload with a union of all changed entries (deduped by id, latest content
+ * wins) and remove any removed ids from the rendered list.
+ */
+function mergeDeltaContent(
+  prev: GatewayMessage[],
+  next: GatewayMessage[],
+): GatewayMessage[] {
+  // The existing block is [user(payload), assistant(closer)]. The new block is
+  // the same shape. Concatenate the payloads and keep the closer.
+  const userText = firstText(prev[0]) ?? "";
+  const closerText = firstText(prev[1]) ?? KNOWLEDGE_DELTA_ASSISTANT_CLOSER;
+  // Reuse the next block's payload text directly — it was just built by
+  // buildKnowledgeDeltaMessage from the latest changed/removed set, which is
+  // a superset of the previous block's (the previous block's entries are
+  // already in the surfaced set, so they would NOT appear in `changed` again;
+  // the new payload contains only the genuinely-new mutations).
+  const nextUserText = firstText(next[0]) ?? "";
+  return [
+    {
+      role: "user",
+      content: [{ type: "text", text: `${userText}\n\n${nextUserText}` }],
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: closerText }],
+    },
+  ];
+}
+
+/**
+ * Stable LTM (preference entries) + known entities per session — injected as
+ * system[1] with a 1h cache breakpoint. Computed once per session and pinned
+ * for ≥1h even through curation changes, so the Anthropic prompt cache prefix
+ * (system[0] host prompt + system[1] stable LTM) stays warm across turns
+ * and sessions.
  *
+ * Only rebuilt on new session start (cache miss). NOT invalidated by
+ * curation, idle resume, or Layer 4 emergency — the stale preferences
+ * are kept to preserve the 1h cache investment. On process restart the
+ * cache is recomputed (cheap, preferences + the capped entity list are small).
+ */
+const stableLtmCache = new Map<
+  string,
+  { formatted: string; tokenCount: number }
+>();
+
+/**
+ * Single-flight memoizer for the per-session stable-LTM recompute.
+ *
+ * The stable-LTM block (preferences + known entities + project-knowledge
+ * catalog) is computed once per session, then pinned for ≥1h. The compute is
+ * heavy (ltm.forSession ×2, entity fetch, catalog scan — all read-worker pool
+ * jobs). When a gateway restarts, the in-memory cache is cold, and the client's
+ * header-timeout retries can fire THREE concurrent identical turns at the same
+ * session BEFORE any of them has populated the cache. Without dedup, all three
+ * recompute the block independently and thrash the DB — which compounds the
+ * very latency that caused the retries.
+ *
+ * The settled cache (stableLtmCache) only helps the NEXT turn. This map dedups
+ * concurrent in-flight recomputes so a burst of retries shares ONE compute and
+ * the session recovers (headers flush, retries stop) instead of re-entering the
+ * slow path.
+ *
+ * Keyed by sessionID. Entries are deleted on settle (the settled value goes
+ * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
+ */
+const stableLtmInFlight = new Map<string, Promise<void>>();
+const sessionLifecycleAborts = new Map<string, AbortController>();
+
+function sessionLifecycleSignal(sessionID: string): AbortSignal {
+  let controller = sessionLifecycleAborts.get(sessionID);
+  if (!controller) {
+    controller = new AbortController();
+    sessionLifecycleAborts.set(sessionID, controller);
+  }
+  return controller.signal;
+}
+
+function stableLtmComputeSignal(sessionID: string): AbortSignal {
+  return AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
+}
+
+function evictStableLtmSession(sessionID: string): void {
+  sessionLifecycleAborts
+    .get(sessionID)
+    ?.abort(new DOMException("stable LTM session was evicted", "AbortError"));
+  sessionLifecycleAborts.delete(sessionID);
+  stableLtmCache.delete(sessionID);
+  stableLtmInFlight.delete(sessionID);
+}
+
+function evictPipelineSessionState(sessionID: string): void {
+  // Keep the persisted header→session mapping warm. Eviction removes only the
+  // heavy live state; dropping this index would force an unbounded DB reload on
+  // the next request and would make state-changing slash commands unable to
+  // rehydrate the authoritative canonical session safely.
+  ltmSessionCache.delete(sessionID);
+  ltmPinnedText.delete(sessionID);
+  lastSavedDedupDecisions.delete(sessionID);
+  evictStableLtmSession(sessionID);
+  cwdWarned.delete(sessionID);
+  staleHeaderWarned.delete(sessionID);
+  for (const key of subagentParentPendingLogged) {
+    if (key.startsWith(`${sessionID}:`))
+      subagentParentPendingLogged.delete(key);
+  }
+}
+
+/** Test seam for exercising the same cleanup used by idle session eviction. */
+export function evictStableLtmSessionForTest(sessionID: string): void {
+  evictStableLtmSession(sessionID);
+}
+
+/** Exercise idle eviction with the production ownership and satellite cleanup. */
+export function evictIdlePipelineSessionsForTest(
+  config: GatewayConfig,
+  now: number,
+): number {
+  return evictIdleSessions(
+    config,
+    sessions,
+    new Set(),
+    new Set(),
+    now,
+    evictPipelineSessionState,
+    isPipelineSessionActive,
+  );
+}
+
+/**
+ * Run a stable-LTM compute under single-flight dedup for a session. If a
+ * compute is already in flight for the session, await it and return its
+ * settled cache value; otherwise run `compute`, set the settled cache, and
+ * clear the iynthetic "unattributed" bucketing.
+ *
+ * Context: some requests (Claude Code's haiku side-channel / prompt-cache
+ * probes) carry stripped-down system prompts that lack any path reference, so
+ * `getProjectPath()` returns `source: "cwd"`. On a central/remote gateway the
+ * gateway's own cwd has NO relationship to the client's project — attributing
+ * such requests to cwd merges unrelated sessions into one bogus project (the
+ * "lore-config" bug).
+ *
+ * Rules:
+ *  - A **confident** path (`header`/`inferred`) always binds the session and
+ *    clears the provisional flag. If it overwrites a previously-provisional
+ *    path under which rows were already stored, those rows are re-pointed
+ *    (self-heal) to the real project.
+ *  - A **cwd** result NEVER overwrites a confident binding. If the session has
+ *    no confident binding yet, it stays/becomes provisional:
+ *      - local gateway: keep the cwd path (legacy behavior — gateway shares the
+ *        filesystem with the agent, so cwd is meaningful);
+ *      - remote gateway: route to a per-session synthetic bucket
+ *        (`/__lore_unattributed__/<sessionID>`) so unrelated sessions never
+ *        merge.
+ *
+ * Returns the final resolved project path.
+ */
+export function resolveSessionProjectPath(
+  result: ProjectPathResult,
+  sessionState: SessionState,
+  config: GatewayConfig,
+): string {
+  let { path: projectPath, source } = result;
+
+  // Cache git remote on the session so subsequent turns benefit even if
+  // the header is absent (e.g. prompt-cache probes or follow-up requests).
+  if (result.gitRemote && !sessionState.gitRemote) {
+    sessionState.gitRemote = result.gitRemote;
+  }
+
+  const hasConfident =
+    !!sessionState.projectPath && !sessionState.projectPathProvisional;
+  // Best git remote we know for this session — the current turn's, falling back
+  // to a value cached on an earlier turn (the header is independent of path
+  // resolution, so it can arrive on a turn that otherwise lacks a path).
+  const effectiveRemote = result.gitRemote ?? sessionState.gitRemote;
+
+  if (source === "inferred" || source === "header") {
+    // Confident path — bind the session.
+    const previous = sessionState.projectPath;
+    const wasProvisional = sessionState.projectPathProvisional === true;
+
+    // A stale/static `X-Lore-Project` header was overridden by an authoritative
+    // inference (config.ts getProjectPath set `overrodeHeaderPath`). Warn once
+    // per session so the misconfiguration is observable in the logs — a fixed
+    // header (e.g. baked into ANTHROPIC_CUSTOM_HEADERS) collapses unrelated
+    // projects together, which is otherwise silent.
+    if (
+      result.overrodeHeaderPath &&
+      !staleHeaderWarned.has(sessionState.sessionID)
+    ) {
+      staleHeaderWarned.add(sessionState.sessionID);
+      log.notice(
+        `warning: session ${sessionState.sessionID.slice(0, 16)} sent ` +
+          `X-Lore-Project header "${result.overrodeHeaderPath}" but its system ` +
+          `prompt's working directory is "${projectPath}" — trusting the ` +
+          `inferred path. A stale/static X-Lore-Project header (e.g. a fixed ` +
+          `ANTHROPIC_CUSTOM_HEADERS) causes unrelated projects to collapse into ` +
+          `one. Remove the static header or set it per-project.`,
+      );
+    }
+
+    // Self-heal: if the session was previously bound to a provisional path
+    // (cwd fallback or synthetic bucket) under which rows may already be
+    // stored, migrate those rows into the real project now that we know it.
+    // Only clear the provisional flag once the migration succeeds — otherwise
+    // a transient failure (e.g. SQLITE_BUSY from a separate process) would
+    // permanently strand the bucket data with no retry. Keeping the flag set
+    // lets the next confident turn re-attempt.
+    //
+    // `confidentlyWrong`: the session is currently CONFIDENTLY bound (not
+    // provisional) to the EXACT path a stale header just tried to assert, and
+    // an authoritative inference now contradicts it. This is the only case
+    // where we re-point an already-confident binding — gated tightly on
+    // `previous === result.overrodeHeaderPath` so a normal header/inference
+    // change can never trigger it. The re-attribution itself is merge-safe:
+    // `reattributeProvisionalProject` only folds rows when corroborated (shared
+    // git remote or synthetic bucket); for distinct real projects it re-binds
+    // the session WITHOUT merging, so a stale header can never leak one
+    // project's data into another.
+    const confidentlyWrong =
+      !wasProvisional &&
+      !!previous &&
+      !!result.overrodeHeaderPath &&
+      previous === result.overrodeHeaderPath &&
+      previous !== projectPath;
+
+    let healed = true;
+    if (
+      (wasProvisional || confidentlyWrong) &&
+      previous &&
+      previous !== projectPath
+    ) {
+      healed = reattributeProvisionalProject(
+        previous,
+        projectPath,
+        effectiveRemote,
+      );
+    }
+
+    if (!healed && previous) {
+      // Keep writing to the original bucket until re-attribution succeeds.
+      // Moving the binding to projectPath here would lose `previous`, so the
+      // next confident turn could never retry and the old rows would remain
+      // permanently split from the session.
+      sessionState.projectPath = previous;
+      sessionState.projectPathProvisional = true;
+      return previous;
+    }
+
+    sessionState.projectPath = projectPath;
+    sessionState.projectPathProvisional = false;
+
+    // Backfill git_remote on the (now confident) project row — idempotent.
+    if (effectiveRemote) {
+      ensureProject(projectPath, undefined, effectiveRemote);
+    }
+    return projectPath;
+  }
+
+  // source === "cwd" (no header, inference failed).
+  if (hasConfident) {
+    // Never downgrade a confident binding to cwd. Keep the known-good path.
+    return sessionState.projectPath;
+  }
+
+  // No confident binding yet → provisional attribution.
+  if (config.remoteGateway) {
+    // Remote/central gateway: the gateway's cwd is meaningless for the client.
+    // Use a per-session synthetic bucket so unrelated sessions never merge.
+    projectPath = unattributedBucketPath(sessionState.sessionID);
+  }
+  // (local gateway: keep the cwd path from `result` — cwd is meaningful there.)
+
+  sessionState.projectPath = projectPath;
+  sessionState.projectPathProvisional = true;
+
+  // Record the git remote on the bucket/cwd project row when known. This is
+  // what later lets self-heal and `lore data consolidate` match a provisional
+  // bucket back to its real project by git remote — a common case is a client
+  // that sends X-Lore-Git-Remote but no X-Lore-Project (and no inferable path).
+  if (effectiveRemote) {
+    ensureProject(projectPath, undefined, effectiveRemote);
+  }
+
+  // One-time warning per session when we couldn't confidently attribute.
+  if (!cwdWarned.has(sessionState.sessionID)) {
+    cwdWarned.add(sessionState.sessionID);
+    const detail = config.remoteGateway
+      ? `routed to provisional bucket ${projectPath}`
+      : `falling back to process.cwd() (${projectPath})`;
+    log.notice(
+      `warning: could not determine project for session ` +
+        `${sessionState.sessionID.slice(0, 16)} — ${detail}. ` +
+        `Data may be misattributed. Fix: launch your agent via \`lore run\`, ` +
+        `or have your client send the "X-Lore-Project: /path/to/project" header ` +
+        `(provider-agnostic; e.g. via ANTHROPIC_CUSTOM_HEADERS for Claude Code, ` +
+        `the OpenCode/Pi plugins, or your client's custom-header mechanism).`,
+    );
+  }
+
+  return projectPath;
+}
+
+/**
+ * Migrate all rows stored under a provisional project path (a cwd fallback or
+ * a synthetic `/__lore_unattributed__/...` bucket) into the real project once
+ * a confident path is learned for the session.
+ *
+ * Returns `true` when the re-attribution is complete (either there was nothing
+ * to migrate, the source already resolves to the target, or the merge
+ * succeeded) and `false` when a transient failure left bucket data behind. The
+ * caller keeps the session provisional on `false` so a later turn retries
+ * rather than permanently stranding the data. Never throws — a failed self-heal
+ * must not break the live request.
+ */
+function reattributeProvisionalProject(
+  fromPath: string,
+  toPath: string,
+  gitRemote?: string,
+): boolean {
+  try {
+    const fromId = projectId(fromPath);
+    if (!fromId) return true; // nothing was stored under the provisional path
+    // Ensure the destination project row exists before merging into it.
+    const toId = ensureProject(toPath, undefined, gitRemote);
+    if (fromId === toId) return true;
+
+    // Merging permanently aliases `fromPath` → `toId` (db registers a
+    // project_path_aliases row). That is only safe when we are confident the
+    // two paths are the SAME logical project. Corroborate before merging:
+    //   (a) `fromPath` is a synthetic per-session unattributed bucket — it is
+    //       session-private, so folding it into the real project is always safe.
+    //   (b) the two project rows share a git remote — strong evidence they are
+    //       the same repo (worktree / re-clone / cwd-vs-header path skew).
+    // Otherwise these are two DISTINCT real on-disk paths linked only by a
+    // (possibly mis-)inferred path. Re-bind the session to the new path but do
+    // NOT merge — a stray inferred path must never fold one real project's
+    // knowledge into another's (which would then leak via on-disk .lore.md
+    // export). The orphaned provisional rows can still be reconciled later by
+    // `lore data consolidate` when a shared git remote is known.
+    const fromRemote = projectGitRemote(fromId);
+    const toRemote = gitRemote ?? projectGitRemote(toId);
+    const remotesMatch = !!fromRemote && !!toRemote && fromRemote === toRemote;
+    const corroborated = isUnattributedProjectPath(fromPath) || remotesMatch;
+    if (!corroborated) {
+      log.warn(
+        `self-heal: NOT merging ${fromPath} → ${toPath} — distinct real ` +
+          `projects with no shared git remote; re-binding session only to ` +
+          `avoid cross-project contamination.`,
+      );
+      return true; // session re-binds to toPath; provisional rows stay put
+    }
+
+    mergeProjectInternal(fromId, toId);
+    log.info(
+      `self-heal: re-attributed provisional project ${fromPath} → ${toPath}`,
+    );
+    return true;
+  } catch (e) {
+    log.warn(
+      `self-heal re-attribution failed (${fromPath} → ${toPath}); will retry on next confident turn:`,
+      e,
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic project-resolution helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply the result of a synthetic project-resolution probe to the session.
+ *
+ * Mirrors Branch A of `resolveSessionProjectPath`: if we got a confident
+ * signal (git remote or client-side root), bind the session, reattribute
+ * any provisional data, and clear the provisional flag. Never throws.
+ *
+ * Returns the (possibly updated) projectPath for the caller to use.
+ */
+export function applySyntheticResolution(
+  sessionState: SessionState,
+  resolved: ResolveProjectResult,
+  currentProjectPath: string,
+): string {
+  try {
+    const { root, gitRemote, gitHead } = resolved;
+    if (!root && !gitRemote) return currentProjectPath; // nothing useful — no-op
+
+    const newPath = root ?? currentProjectPath;
+    const previous = sessionState.projectPath;
+    const wasProvisional = sessionState.projectPathProvisional === true;
+
+    if (wasProvisional && previous && previous !== newPath) {
+      if (!reattributeProvisionalProject(previous, newPath, gitRemote)) {
+        return currentProjectPath;
+      }
+    }
+
+    sessionState.projectPath = newPath;
+    // Only clear provisional when we have a real client-side root (from
+    //*
  * - Turn 1 (no history): returns `ceiling` (32K) — matches Claude Code.
  * - Turns 2+: 3× output EMA, clamped by context headroom and ceiling.
  * - After truncation (`stop_reason: "length"`): jumps back to ceiling.
@@ -4427,567 +4993,7 @@ async function initIfNeeded(
     enableHostedMode();
   }
 
-  await load(projectPath);
-  if (requestGeneration !== undefined) {
-    assertCurrentPipelineGeneration(signal, requestGeneration);
-  }
-  ensureProject(projectPath, undefined, gitRemote);
-  initialized = true;
-
-  // Import knowledge from .lore.md at startup (picks up user/git edits
-  // since last session). Falls back to agents file for backward compat.
-  const cfg = loreConfig();
-  if (cfg.knowledge.enabled) {
-    tryImportKnowledge(projectPath);
-
-    // Import .lore.md files from configured workspace sub-projects.
-    // Entries are attributed to the root project so they're visible in
-    // the current session's knowledge context.
-    if (cfg.workspaces.length > 0) {
-      const { basename } = require("node:path") as typeof import("node:path");
-      const subDirs = resolveWorkspaces(projectPath, cfg.workspaces);
-      for (const subDir of subDirs) {
-        try {
-          if (loreFileExists(subDir)) {
-            importLoreFileAs(subDir, projectPath);
-            log.info(`imported knowledge from workspace: ${basename(subDir)}`);
-          }
-        } catch (e) {
-          log.error(`workspace knowledge import error (${subDir}):`, e);
-        }
-      }
-    }
-
-    // Prune corrupted/oversized knowledge entries (safety net for past bugs).
-    const pruned = ltm.pruneOversized(1200);
-    if (pruned > 0) {
-      log.info(
-        `pruned ${pruned} oversized knowledge entries (confidence set to 0)`,
-      );
-    }
-
-    // Watch knowledge files for live changes (git pull, manual edits, etc.)
-    if (!stopFileWatcher) {
-      stopFileWatcher = startKnowledgeFileWatcher(projectPath);
-    }
-  }
-
-  // Startup backfills — idempotent, run once per process.
-  try {
-    distillation.backfillMetrics();
-  } catch (e) {
-    log.info("metric backfill failed:", e);
-  }
-  if (process.env.NODE_ENV !== "test") {
-    // Warm the local embedding worker NOW (throwaway embed) so the ~21s ONNX
-    // cold-load is paid at startup instead of on the first real distillation
-    // embed — which on a short/fast session would otherwise race gateway
-    // teardown and never write its `distillation_vec` row (#1331). Local-only,
-    // fire-and-forget; the model loads during the backfill's startup delay.
-    embedding.warmupEmbedding();
-    // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
-    // pool to live traffic: park while the breaker is tripped or a live recall
-    // embed is in flight, resume the instant the worker drains.
-    const startupBackfill = spanStartupBackfill(() => {
-      const backfill = embedding.runStartupBackfill({
-        shouldPause: () => isBackgroundPaused(),
-      });
-      // When embeddings are available, runStartupBackfill synchronously
-      // reconciles config and attempts vec0 cutover before its first await.
-      // Start durable live-message scheduling after those transitions.
-      temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
-      return backfill;
-    });
-    startupBackfill.catch((e) => {
-      log.error("embedding backfill failed:", e);
-    });
-  }
-
-  // Index lat.md/ directory sections (content-hash-based, skips unchanged files).
-  try {
-    latReader.refresh(projectPath);
-  } catch (e) {
-    log.error("lat-reader startup refresh error:", e);
-  }
-
-  // Pre-populate headerSessionIndex from DB so Tier 1 session identification
-  // works immediately after process restart. Without this, the first request
-  // with a known session header generates a new session ID and orphans the
-  // old session's persisted state.
-  try {
-    const restored = restoreHeaderSessionMappings(config);
-    if (restored.cleared > 0) {
-      log.warn(
-        `cleared ${restored.cleared} unsafe persisted header→session mapping(s)`,
-      );
-    }
-    if (restored.restored > 0) {
-      log.info(`restored ${restored.restored} header→session mappings from DB`);
-    }
-  } catch (e) {
-    log.warn("header session index restore failed:", e);
-  }
-
-  // Pre-warm models.dev pricing/limits cache so synchronous lookups in the
-  // request hot path (getModelSpec, emitCostMetric) resolve from memory.
-  fetchModelData().catch((e) => log.warn("models.dev pre-warm failed:", e));
-
-  // Start the idle scheduler for background work (distillation, curation,
-  // pruning, AGENTS.md export). Uses a 30s poll interval and fires for any
-  // session whose lastRequestTime exceeds the idle timeout.
-  if (config && !stopIdleScheduler) {
-    const llm = getLLMClient(config);
-    const baseIdleHandler = buildIdleWorkHandler(llm);
-    // Wrap the idle handler to ALSO precompute the stable-LTM cache for idle
-    // sessions. When a session idles long enough that the next turn is a cold
-    // post-idle resume, the gateway's LTM injection would otherwise recompute
-    // the heavy stable block (ltm.forSession ×2 + entity fetch + catalog scan)
-    // on the request's critical path — compounding the client header-timeout
-    // latency. Precomputing at idle warms stableLtmCache (and the persisted
-    // session tracking) so the resume turn reads it from cache instead. The
-    // compute is single-flighted per session; a concurrent turn's
-    // `singleFlightStableLtm` shares the same in-flight promise.
-    const idleHandler = async (sessionID: string, state: SessionState) =>
-      withTenant(state.storageTenantId ?? "", async () => {
-        void precomputeStableLtmForIdleSession(sessionID, state);
-        await baseIdleHandler(sessionID, state);
-      });
-    stopIdleScheduler = startIdleScheduler(
-      config,
-      sessions,
-      idleHandler,
-      evictPipelineSessionState,
-      isPipelineSessionActive,
-    );
-  }
-
-  // Start background cloud sync (no-op until the user runs `lore sync enable`).
-  if (!stopSyncScheduler) {
-    const { startSyncScheduler } = await import("./sync");
-    if (requestGeneration !== undefined) {
-      assertCurrentPipelineGeneration(signal, requestGeneration);
-    }
-    if (!stopSyncScheduler) stopSyncScheduler = startSyncScheduler(config);
-  }
-
-  log.info(`gateway pipeline initialized: ${projectPath}`);
-}
-
-function getLLMClient(config: GatewayConfig): LLMClient {
-  if (!llmClient) {
-    const cfg = loreConfig();
-    const defaultModel = cfg.model ?? {
-      providerID: "anthropic",
-      modelID: "claude-sonnet-4-6",
-    };
-
-    // Worker-specific auth: when LORE_WORKER_API_KEY is set, workers use a
-    // dedicated credential instead of the session's client key. This enables
-    // routing workers to a different provider (e.g. MiniMax) while sessions
-    // continue using Anthropic. Falls back to session auth when not set.
-    const workerApiKey = config.workerApiKey;
-    const getWorkerAuth: (
-      sessionID?: string,
-      providerID?: string,
-    ) => AuthCredential | null = workerApiKey
-      ? (_sessionID, providerID) => ({
-          // Scheme is provider-aware: a GitHub-Models worker needs the key as a
-          // Bearer token; every other provider uses api-key (x-api-key), the
-          // long-standing dedicated-key shape. getAuth is invoked with the
-          // worker MODEL's providerID (see llm-adapter), so this resolves per
-          // worker call, not once at setup.
-          scheme: workerKeyScheme(providerID),
-          value: workerApiKey,
-        })
-      : (sessionID, providerID) => {
-          if (sessionID) return resolveAuth(sessionID, providerID);
-          return usesRemoteSessionBinding(config)
-            ? null
-            : resolveAuth(undefined, providerID);
-        };
-
-    // Worker-specific upstream: when LORE_WORKER_UPSTREAM is set, all worker
-    // calls route to this URL instead of the default upstream URLs.
-    const workerUpstreams = config.workerUpstream
-      ? { anthropic: config.workerUpstream, openai: config.workerUpstream }
-      : { anthropic: config.upstreamAnthropic, openai: config.upstreamOpenAI };
-
-    if (config.workerApiKey || config.workerUpstream) {
-      log.info(
-        `worker routing: ` +
-          `source=${config.workerApiKey ? "dedicated key" : "session"}, ` +
-          `upstream=${
-            config.workerUpstream
-              ? upstreamUrlForLog(config.workerUpstream)
-              : "default"
-          }`,
-      );
-    }
-
-    const rawClient = createGatewayLLMClient(
-      workerUpstreams,
-      getWorkerAuth,
-      defaultModel,
-      {
-        dedicatedWorkerKey: !!workerApiKey,
-        vertexProject: config.vertexProject,
-      },
-    );
-
-    // Wrap with batch queue for 50% cost savings on non-urgent worker calls.
-    // Enabled by default — disable via LORE_BATCH_DISABLED=1.
-    /**
-     * Disables the batch-queue wrapper for non-urgent worker calls
-     * (distillation, curation, embedding). With batching on, the
-     * gateway groups these calls and submits them via the Anthropic
-     * Message Batches API for ~50% cost savings. Set
-     * `LORE_BATCH_DISABLED=1` to bypass batching and dispatch each
-     * call immediately (useful for low-latency debugging or when the
-     * upstream rejects batch submissions). Env: `LORE_BATCH_DISABLED=1`.
-     */
-    const batchDisabled = process.env.LORE_BATCH_DISABLED === "1";
-    if (Sentry.isInitialized()) {
-      Sentry.setTag("batch_enabled", String(!batchDisabled));
-    }
-    const dispatchClient = batchDisabled
-      ? rawClient
-      : createBatchLLMClient(
-          rawClient,
-          workerUpstreams,
-          getWorkerAuth,
-          defaultModel,
-        );
-    batchQueueEnabled = !batchDisabled;
-
-    // Resolve routing BEFORE the batch client sees opts. Batch enqueue chooses
-    // provider, model, auth, and grouping immediately; wrapping it on the inside
-    // would queue stale/default opts and only correct them during sync fallback.
-    // Current session state is authoritative over a caller's stale opts.model.
-    const routedClient: LLMClient & {
-      shutdown?: (options?: { drainQueue?: boolean }) => Promise<void>;
-      stats?: () => unknown;
-    } = {
-      recordWorkerSuccess: rawClient.recordWorkerSuccess?.bind(rawClient),
-      async prompt(system, user, opts) {
-        if (!opts?.sessionID || opts.upstreamUrl) {
-          return dispatchClient.prompt(system, user, opts);
-        }
-        const state = sessions.get(opts.sessionID);
-        const effectiveModel =
-          (state ? getWorkerModel(state.lastUpstream) : undefined) ??
-          opts.model ??
-          defaultModel;
-        const snapshot = state
-          ? matchingProviderSnapshot(state, effectiveModel.providerID)
-          : undefined;
-        const effectiveOpts: GatewayPromptOptions = {
-          ...opts,
-          model: effectiveModel,
-        };
-        if (
-          snapshot?.providerOptions &&
-          canonicalWorkerProviderID(effectiveModel.providerID) === "openrouter"
-        ) {
-          effectiveOpts.providerOptions = snapshot.providerOptions;
-        }
-        if (!workerApiKey && snapshot?.url && snapshot.providerID) {
-          effectiveOpts.upstreamUrl = snapshot.url;
-          effectiveOpts.upstreamProviderID = snapshot.providerID;
-          effectiveOpts.protocol = snapshot.protocol;
-        }
-        return dispatchClient.prompt(system, user, effectiveOpts);
-      },
-    };
-    if ("shutdown" in dispatchClient && "stats" in dispatchClient) {
-      routedClient.shutdown = (options) => dispatchClient.shutdown(options);
-      routedClient.stats = () => dispatchClient.stats();
-    }
-    llmClient = routedClient;
-  }
-  return llmClient;
-}
-
-/** Test-only access to the fully wrapped gateway worker client. */
-export function getLLMClientForTest(config: GatewayConfig): LLMClient {
-  return getLLMClient(config);
-}
-
-// ---------------------------------------------------------------------------
-// Project path resolution with session cache
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the final project path for a session, applying sticky per-session
- * binding and (on remote gateways) synthetic "unattributed" bucketing.
- *
- * Context: some requests (Claude Code's haiku side-channel / prompt-cache
- * probes) carry stripped-down system prompts that lack any path reference, so
- * `getProjectPath()` returns `source: "cwd"`. On a central/remote gateway the
- * gateway's own cwd has NO relationship to the client's project — attributing
- * such requests to cwd merges unrelated sessions into one bogus project (the
- * "lore-config" bug).
- *
- * Rules:
- *  - A **confident** path (`header`/`inferred`) always binds the session and
- *    clears the provisional flag. If it overwrites a previously-provisional
- *    path under which rows were already stored, those rows are re-pointed
- *    (self-heal) to the real project.
- *  - A **cwd** result NEVER overwrites a confident binding. If the session has
- *    no confident binding yet, it stays/becomes provisional:
- *      - local gateway: keep the cwd path (legacy behavior — gateway shares the
- *        filesystem with the agent, so cwd is meaningful);
- *      - remote gateway: route to a per-session synthetic bucket
- *        (`/__lore_unattributed__/<sessionID>`) so unrelated sessions never
- *        merge.
- *
- * Returns the final resolved project path.
- */
-export function resolveSessionProjectPath(
-  result: ProjectPathResult,
-  sessionState: SessionState,
-  config: GatewayConfig,
-): string {
-  let { path: projectPath, source } = result;
-
-  // Cache git remote on the session so subsequent turns benefit even if
-  // the header is absent (e.g. prompt-cache probes or follow-up requests).
-  if (result.gitRemote && !sessionState.gitRemote) {
-    sessionState.gitRemote = result.gitRemote;
-  }
-
-  const hasConfident =
-    !!sessionState.projectPath && !sessionState.projectPathProvisional;
-  // Best git remote we know for this session — the current turn's, falling back
-  // to a value cached on an earlier turn (the header is independent of path
-  // resolution, so it can arrive on a turn that otherwise lacks a path).
-  const effectiveRemote = result.gitRemote ?? sessionState.gitRemote;
-
-  if (source === "inferred" || source === "header") {
-    // Confident path — bind the session.
-    const previous = sessionState.projectPath;
-    const wasProvisional = sessionState.projectPathProvisional === true;
-
-    // A stale/static `X-Lore-Project` header was overridden by an authoritative
-    // inference (config.ts getProjectPath set `overrodeHeaderPath`). Warn once
-    // per session so the misconfiguration is observable in the logs — a fixed
-    // header (e.g. baked into ANTHROPIC_CUSTOM_HEADERS) collapses unrelated
-    // projects together, which is otherwise silent.
-    if (
-      result.overrodeHeaderPath &&
-      !staleHeaderWarned.has(sessionState.sessionID)
-    ) {
-      staleHeaderWarned.add(sessionState.sessionID);
-      log.notice(
-        `warning: session ${sessionState.sessionID.slice(0, 16)} sent ` +
-          `X-Lore-Project header "${result.overrodeHeaderPath}" but its system ` +
-          `prompt's working directory is "${projectPath}" — trusting the ` +
-          `inferred path. A stale/static X-Lore-Project header (e.g. a fixed ` +
-          `ANTHROPIC_CUSTOM_HEADERS) causes unrelated projects to collapse into ` +
-          `one. Remove the static header or set it per-project.`,
-      );
-    }
-
-    // Self-heal: if the session was previously bound to a provisional path
-    // (cwd fallback or synthetic bucket) under which rows may already be
-    // stored, migrate those rows into the real project now that we know it.
-    // Only clear the provisional flag once the migration succeeds — otherwise
-    // a transient failure (e.g. SQLITE_BUSY from a separate process) would
-    // permanently strand the bucket data with no retry. Keeping the flag set
-    // lets the next confident turn re-attempt.
-    //
-    // `confidentlyWrong`: the session is currently CONFIDENTLY bound (not
-    // provisional) to the EXACT path a stale header just tried to assert, and
-    // an authoritative inference now contradicts it. This is the only case
-    // where we re-point an already-confident binding — gated tightly on
-    // `previous === result.overrodeHeaderPath` so a normal header/inference
-    // change can never trigger it. The re-attribution itself is merge-safe:
-    // `reattributeProvisionalProject` only folds rows when corroborated (shared
-    // git remote or synthetic bucket); for distinct real projects it re-binds
-    // the session WITHOUT merging, so a stale header can never leak one
-    // project's data into another.
-    const confidentlyWrong =
-      !wasProvisional &&
-      !!previous &&
-      !!result.overrodeHeaderPath &&
-      previous === result.overrodeHeaderPath &&
-      previous !== projectPath;
-
-    let healed = true;
-    if (
-      (wasProvisional || confidentlyWrong) &&
-      previous &&
-      previous !== projectPath
-    ) {
-      healed = reattributeProvisionalProject(
-        previous,
-        projectPath,
-        effectiveRemote,
-      );
-    }
-
-    if (!healed && previous) {
-      // Keep writing to the original bucket until re-attribution succeeds.
-      // Moving the binding to projectPath here would lose `previous`, so the
-      // next confident turn could never retry and the old rows would remain
-      // permanently split from the session.
-      sessionState.projectPath = previous;
-      sessionState.projectPathProvisional = true;
-      return previous;
-    }
-
-    sessionState.projectPath = projectPath;
-    sessionState.projectPathProvisional = false;
-
-    // Backfill git_remote on the (now confident) project row — idempotent.
-    if (effectiveRemote) {
-      ensureProject(projectPath, undefined, effectiveRemote);
-    }
-    return projectPath;
-  }
-
-  // source === "cwd" (no header, inference failed).
-  if (hasConfident) {
-    // Never downgrade a confident binding to cwd. Keep the known-good path.
-    return sessionState.projectPath;
-  }
-
-  // No confident binding yet → provisional attribution.
-  if (config.remoteGateway) {
-    // Remote/central gateway: the gateway's cwd is meaningless for the client.
-    // Use a per-session synthetic bucket so unrelated sessions never merge.
-    projectPath = unattributedBucketPath(sessionState.sessionID);
-  }
-  // (local gateway: keep the cwd path from `result` — cwd is meaningful there.)
-
-  sessionState.projectPath = projectPath;
-  sessionState.projectPathProvisional = true;
-
-  // Record the git remote on the bucket/cwd project row when known. This is
-  // what later lets self-heal and `lore data consolidate` match a provisional
-  // bucket back to its real project by git remote — a common case is a client
-  // that sends X-Lore-Git-Remote but no X-Lore-Project (and no inferable path).
-  if (effectiveRemote) {
-    ensureProject(projectPath, undefined, effectiveRemote);
-  }
-
-  // One-time warning per session when we couldn't confidently attribute.
-  if (!cwdWarned.has(sessionState.sessionID)) {
-    cwdWarned.add(sessionState.sessionID);
-    const detail = config.remoteGateway
-      ? `routed to provisional bucket ${projectPath}`
-      : `falling back to process.cwd() (${projectPath})`;
-    log.notice(
-      `warning: could not determine project for session ` +
-        `${sessionState.sessionID.slice(0, 16)} — ${detail}. ` +
-        `Data may be misattributed. Fix: launch your agent via \`lore run\`, ` +
-        `or have your client send the "X-Lore-Project: /path/to/project" header ` +
-        `(provider-agnostic; e.g. via ANTHROPIC_CUSTOM_HEADERS for Claude Code, ` +
-        `the OpenCode/Pi plugins, or your client's custom-header mechanism).`,
-    );
-  }
-
-  return projectPath;
-}
-
-/**
- * Migrate all rows stored under a provisional project path (a cwd fallback or
- * a synthetic `/__lore_unattributed__/...` bucket) into the real project once
- * a confident path is learned for the session.
- *
- * Returns `true` when the re-attribution is complete (either there was nothing
- * to migrate, the source already resolves to the target, or the merge
- * succeeded) and `false` when a transient failure left bucket data behind. The
- * caller keeps the session provisional on `false` so a later turn retries
- * rather than permanently stranding the data. Never throws — a failed self-heal
- * must not break the live request.
- */
-function reattributeProvisionalProject(
-  fromPath: string,
-  toPath: string,
-  gitRemote?: string,
-): boolean {
-  try {
-    const fromId = projectId(fromPath);
-    if (!fromId) return true; // nothing was stored under the provisional path
-    // Ensure the destination project row exists before merging into it.
-    const toId = ensureProject(toPath, undefined, gitRemote);
-    if (fromId === toId) return true;
-
-    // Merging permanently aliases `fromPath` → `toId` (db registers a
-    // project_path_aliases row). That is only safe when we are confident the
-    // two paths are the SAME logical project. Corroborate before merging:
-    //   (a) `fromPath` is a synthetic per-session unattributed bucket — it is
-    //       session-private, so folding it into the real project is always safe.
-    //   (b) the two project rows share a git remote — strong evidence they are
-    //       the same repo (worktree / re-clone / cwd-vs-header path skew).
-    // Otherwise these are two DISTINCT real on-disk paths linked only by a
-    // (possibly mis-)inferred path. Re-bind the session to the new path but do
-    // NOT merge — a stray inferred path must never fold one real project's
-    // knowledge into another's (which would then leak via on-disk .lore.md
-    // export). The orphaned provisional rows can still be reconciled later by
-    // `lore data consolidate` when a shared git remote is known.
-    const fromRemote = projectGitRemote(fromId);
-    const toRemote = gitRemote ?? projectGitRemote(toId);
-    const remotesMatch = !!fromRemote && !!toRemote && fromRemote === toRemote;
-    const corroborated = isUnattributedProjectPath(fromPath) || remotesMatch;
-    if (!corroborated) {
-      log.warn(
-        `self-heal: NOT merging ${fromPath} → ${toPath} — distinct real ` +
-          `projects with no shared git remote; re-binding session only to ` +
-          `avoid cross-project contamination.`,
-      );
-      return true; // session re-binds to toPath; provisional rows stay put
-    }
-
-    mergeProjectInternal(fromId, toId);
-    log.info(
-      `self-heal: re-attributed provisional project ${fromPath} → ${toPath}`,
-    );
-    return true;
-  } catch (e) {
-    log.warn(
-      `self-heal re-attribution failed (${fromPath} → ${toPath}); will retry on next confident turn:`,
-      e,
-    );
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Synthetic project-resolution helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Apply the result of a synthetic project-resolution probe to the session.
- *
- * Mirrors Branch A of `resolveSessionProjectPath`: if we got a confident
- * signal (git remote or client-side root), bind the session, reattribute
- * any provisional data, and clear the provisional flag. Never throws.
- *
- * Returns the (possibly updated) projectPath for the caller to use.
- */
-export function applySyntheticResolution(
-  sessionState: SessionState,
-  resolved: ResolveProjectResult,
-  currentProjectPath: string,
-): string {
-  try {
-    const { root, gitRemote, gitHead } = resolved;
-    if (!root && !gitRemote) return currentProjectPath; // nothing useful — no-op
-
-    const newPath = root ?? currentProjectPath;
-    const previous = sessionState.projectPath;
-    const wasProvisional = sessionState.projectPathProvisional === true;
-
-    if (wasProvisional && previous && previous !== newPath) {
-      if (!reattributeProvisionalProject(previous, newPath, gitRemote)) {
-        return currentProjectPath;
-      }
-    }
-
-    sessionState.projectPath = newPath;
-    // Only clear provisional when we have a real client-side root (from
-    // shell probe) or a git remote (from either probe). A remote alone
+  a shell probe) or a git remote (from either probe). A remote alone
     // is sufficient for consolidation-based reconciliation.
     if (root || gitRemote) {
       sessionState.projectPathProvisional = false;
@@ -7234,7 +7240,7 @@ export function buildStreamingResponse(
       recallAbort.abort(
         new DOMException("recall stream deadline exceeded", "TimeoutError"),
       ),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
+    getSSEInactivityDeadlines().foregroundRequestTimeoutMs,
   );
   const clearRecallDeadline = (): void => clearTimeout(recallDeadline);
 
@@ -7330,8 +7336,7 @@ export function buildStreamingResponse(
           resetKeepalive();
           const validator = new AnthropicSSEValidator();
           const eventStream = parseSSEStream(reader, {
-            signal: streamSignal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(streamSignal),
             requireEventTerminator: true,
             fatalUtf8: true,
             maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -7738,254 +7743,7 @@ export function buildStreamingResponse(
               };
 
               let streamingFollowUp: Awaited<
-                ReturnType<typeof runRecallFollowUpStreaming>
-              >;
-              try {
-                streamingFollowUp = await runRecallFollowUpStreaming(
-                  streamingRecallCtx,
-                  currentModifiedReq,
-                  currentResp,
-                  followUpResult,
-                  recallBlock,
-                  streamSignal,
-                  finalRecallRound,
-                );
-              } catch (error) {
-                if (streamSignal.aborted) throw error;
-                if (finalRecallRound)
-                  throw new RecallContinuationFailure("follow_up_setup");
-                log.error(
-                  `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
-                );
-                // takeHeldBackEvents() — for Anthropic this is a no-op
-                // (already consumed before the marker envelope emission
-                // above); for non-Anthropic the held-back closes the
-                // (still-open) envelope here.
-                const heldBack = currentAccum.takeHeldBackEvents();
-                if (heldBack) {
-                  await safeEnqueue(encoder.encode(heldBack));
-                }
-                const markerResp = replaceRecallWithMarker(
-                  currentResp,
-                  new Map([[recallBlock.id, markerText]]),
-                );
-                clearKeepalive();
-                markerResp.usage = cumulativeUsage;
-                recallDiagnostics.finish("failed");
-                complete(markerResp);
-                safeClose();
-                return;
-              }
-
-              if (!streamingFollowUp.ok) {
-                if (finalRecallRound)
-                  throw new RecallContinuationFailure("follow_up_failed");
-                log.error(
-                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
-                  new Error(
-                    `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
-                  ),
-                );
-                captureToolPairing400({
-                  status: streamingFollowUp.status ?? 0,
-                  errorBody: streamingFollowUp.detail,
-                  messages: currentModifiedReq.messages,
-                  // Layer is not in scope on the streaming recall continuation;
-                  // -1 signals "unknown" while still tagging the error class.
-                  layer: -1,
-                  model: currentModifiedReq.model,
-                  sessionID: recallContext.sessionState.sessionID,
-                });
-                // takeHeldBackEvents() — for Anthropic this is a no-op
-                // (already consumed before the marker envelope emission
-                // above); for non-Anthropic the held-back closes the
-                // (still-open) envelope here.
-                const heldBack = currentAccum.takeHeldBackEvents();
-                if (heldBack) {
-                  await safeEnqueue(encoder.encode(heldBack));
-                }
-                const markerResp = replaceRecallWithMarker(
-                  currentResp,
-                  new Map([[recallBlock.id, markerText]]),
-                );
-                clearKeepalive();
-                markerResp.usage = cumulativeUsage;
-                recallDiagnostics.finish("failed");
-                complete(markerResp);
-                safeClose();
-                return;
-              }
-
-              const followUp = streamingFollowUp.followUp;
-              log.info(
-                `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
-              );
-
-              // Pipe the continuation stream through a recall-aware accumulator.
-              // For Anthropic-native clients:
-              //  - The marker is its own SSE message envelope (separate
-              //    message_start/message_stop), so the continuation's content_block_start
-              //    indices start at 0 in its own message — blockOffset=0.
-              //  - The continuation must open with its OWN message_start (don't suppress).
-              //    The original envelope's message_start/message_stop were already closed
-              //    by the explicit held-back forwarding just before the marker envelope.
-              //
-              // For non-Anthropic clients:
-              //  - The marker is an inline synthetic text block, so the original envelope
-              //    stays open throughout the marker and the continuation. The continuation
-              //    extends the original envelope — blockOffset includes the marker block,
-              //    and the continuation's message_start is suppressed (single-message
-              //    stream per OpenAI Chat Completions / Responses / Gemini).
-              const contBlockOffset = recallContext.clientSpeaksAnthropic
-                ? 0
-                : currentAccum.clientBlockCount() + currentBlockOffset + 1;
-              const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
-                scaleClientUsage: true,
-                maxReportedUsage,
-                blockOffset: contBlockOffset,
-                suppressMessageStart: !recallContext.clientSpeaksAnthropic,
-              });
-              activeContinuation = contAccum;
-              const contReader = streamingFollowUp.reader;
-              activeReader = contReader;
-
-              const finalTerminalEvents: string[] = [];
-              const continuationValidator = new AnthropicSSEValidator();
-              try {
-                for await (const {
-                  event: contEvent,
-                  data: contData,
-                } of parseSSEStream(contReader, {
-                  signal: streamSignal,
-                  inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-                  requireEventTerminator: true,
-                  fatalUtf8: true,
-                  maxFrames: DEFAULT_MAX_SSE_FRAMES,
-                  maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
-                })) {
-                  resetKeepalive(); // continuation stream alive — reset timer
-                  continuationValidator.process(contEvent, contData);
-                  const forwarded = contAccum.processEvent(contEvent, contData);
-                  if (
-                    forwarded &&
-                    finalRecallRound &&
-                    (contEvent === "message_delta" ||
-                      contEvent === "message_stop")
-                  ) {
-                    finalTerminalEvents.push(forwarded);
-                  } else if (forwarded) {
-                    // Forward non-recall, non-held-back events to client.
-                    // message_delta usage scaling is handled by a separate pass
-                    // below only for the final continuation's terminal events.
-                    if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
-                  }
-                  if (continuationValidator.isDone()) break;
-                }
-              } finally {
-                cancelAndReleaseReader(contReader, streamSignal.reason);
-                if (activeReader === contReader) activeReader = null;
-              }
-              if (!cancelled) continuationValidator.assertDone();
-
-              log.info(
-                `recall follow-up stream complete (depth=${recallDepth}): ` +
-                  `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
-              );
-              const continuationResp = contAccum.getResponse();
-              cumulativeUsage = mergeRecallUsage(
-                cumulativeUsage,
-                continuationResp.usage ?? ZERO_USAGE,
-              );
-              activeContinuation = undefined;
-              const continuationStopReason = recallBudget.recordUsage(
-                continuationResp.usage,
-              );
-              if (finalRecallRound || continuationStopReason) {
-                if (contAccum.hasRecall())
-                  throw new RecallContinuationFailure("depth_exhausted");
-                if (!isUsableRecallContinuation(continuationResp))
-                  throw new RecallContinuationFailure("follow_up_failed");
-              }
-
-              // Check if continuation contained recall — if so, loop
-              if (
-                contAccum.hasRecall() &&
-                !finalRecallRound &&
-                !continuationStopReason
-              ) {
-                currentAccum = contAccum;
-                currentResp = contAccum.getResponse();
-                currentBlockOffset = contBlockOffset;
-                currentModifiedReq = followUp;
-                continue; // Loop: execute the new recall, emit marker, follow up
-              }
-
-              // For non-Anthropic clients: the original (preamble) envelope is
-              // kept open throughout the inline marker and the follow-up
-              // continuation. The continuation's terminal message_delta +
-              // message_stop (held back in contAccum below) close the original
-              // envelope inline as the stream ends. Forwarding the preamble's
-              // held-back here would duplicate the close event and break the
-              // OpenAI wire (extra [DONE] sentinel + contradictory
-              // finish_reason). For Anthropic clients, the preamble's
-              // held-back was already consumed before the marker envelope
-              // emission above — contAccum's held-back is the relevant close.
-              // Use takeHeldBackEvents() (not peek) so the held-back is
-              // atomically consumed: defense-in-depth against any future code
-              // path that might read contAccum's heldBack again (e.g. a
-              // refactor that re-enters the drill-down loop or replays the
-              // accumulator). In the current control flow the heldBack is read
-              // exactly once — this just makes the consume semantics explicit.
-              for (const terminal of finalTerminalEvents)
-                await safeEnqueue(encoder.encode(terminal));
-              const heldBack = contAccum.takeHeldBackEvents();
-              if (heldBack) {
-                // Scale usage in held-back message_delta for anti-compaction
-                await safeEnqueue(encoder.encode(heldBack));
-              }
-
-              continuationResp.usage = cumulativeUsage;
-              if (finalRecallRound || continuationStopReason)
-                log.info("recall final continuation: completed");
-              clearKeepalive();
-              recallDiagnostics.finish("completed");
-              complete(continuationResp);
-              safeClose();
-              return;
-            }
-          }
-
-          // No recall — normal path
-          clearKeepalive();
-          const response = accumulator.getResponse();
-          complete(response);
-          safeClose();
-        } catch (err) {
-          recallPersistence?.rollback();
-          recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
-          if (err instanceof RecallContinuationFailure)
-            reportRecallContinuationFailure(err.category);
-          if (recallFailureResponse) {
-            try {
-              recallContext?.onFailure?.(recallFailureResponse());
-            } catch {
-              log.error("recall failure accounting callback failed");
-            }
-          }
-          streamSignal.removeEventListener("abort", onStreamAbort);
-          clearKeepalive();
-          clearRecallDeadline();
-          if (activeReader) {
-            cancelAndReleaseReader(activeReader, err);
-            activeReader = null;
-          }
-          // Client disconnect / abort is benign — downgrade from error to info
-          // to avoid Sentry noise from normal connection lifecycle events.
-          const isAbort =
-            err instanceof DOMException && err.name === "AbortError";
-          if (isAbort) {
-            log.info("streaming pipeline aborted (client disconnect)");
-            // Only surfaces to Sentry if the host was under pressure at abort time.
+                ReturnType<typeof runRecallFollowUpSy if the host was under pressure at abort time.
             captureClientAbortUnderPressure({
               startMs: streamStartMs,
               route: "stream",
@@ -8410,7 +8168,9 @@ export function streamResponsesRecallAware(
   let streamBytes = 0;
   let hiddenRecallBytes = 0;
   const frameCounter = { count: 0 };
-  const sseInactivityMs = opts.sseInactivityMs ?? FOREGROUND_SSE_INACTIVITY_MS;
+  const sseInactivityMs =
+    opts.sseInactivityMs ??
+    getSSEInactivityDeadlines().foregroundSseInactivityMs;
   const maxPrincipalTransportRetries = 1;
   const maxRecallContinuationTransportRetries = 1;
 
@@ -8679,7 +8439,253 @@ export function streamResponsesRecallAware(
     "response.reasoning_summary_part.done",
     "response.reasoning_summary_text.delta",
     "response.reasoning_summary_text.done",
-    "response.reasoning_text.delta",
+    "response.reasonintreaming>
+              >;
+              try {
+                streamingFollowUp = await runRecallFollowUpStreaming(
+                  streamingRecallCtx,
+                  currentModifiedReq,
+                  currentResp,
+                  followUpResult,
+                  recallBlock,
+                  streamSignal,
+                  finalRecallRound,
+                );
+              } catch (error) {
+                if (streamSignal.aborted) throw error;
+                if (finalRecallRound)
+                  throw new RecallContinuationFailure("follow_up_setup");
+                log.error(
+                  `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
+                );
+                // takeHeldBackEvents() — for Anthropic this is a no-op
+                // (already consumed before the marker envelope emission
+                // above); for non-Anthropic the held-back closes the
+                // (still-open) envelope here.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("failed");
+                complete(markerResp);
+                safeClose();
+                return;
+              }
+
+              if (!streamingFollowUp.ok) {
+                if (finalRecallRound)
+                  throw new RecallContinuationFailure("follow_up_failed");
+                log.error(
+                  `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
+                  new Error(
+                    `recall follow-up upstream ${streamingFollowUp.status ?? "?"}`,
+                  ),
+                );
+                captureToolPairing400({
+                  status: streamingFollowUp.status ?? 0,
+                  errorBody: streamingFollowUp.detail,
+                  messages: currentModifiedReq.messages,
+                  // Layer is not in scope on the streaming recall continuation;
+                  // -1 signals "unknown" while still tagging the error class.
+                  layer: -1,
+                  model: currentModifiedReq.model,
+                  sessionID: recallContext.sessionState.sessionID,
+                });
+                // takeHeldBackEvents() — for Anthropic this is a no-op
+                // (already consumed before the marker envelope emission
+                // above); for non-Anthropic the held-back closes the
+                // (still-open) envelope here.
+                const heldBack = currentAccum.takeHeldBackEvents();
+                if (heldBack) {
+                  await safeEnqueue(encoder.encode(heldBack));
+                }
+                const markerResp = replaceRecallWithMarker(
+                  currentResp,
+                  new Map([[recallBlock.id, markerText]]),
+                );
+                clearKeepalive();
+                markerResp.usage = cumulativeUsage;
+                recallDiagnostics.finish("failed");
+                complete(markerResp);
+                safeClose();
+                return;
+              }
+
+              const followUp = streamingFollowUp.followUp;
+              log.info(
+                `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+              );
+
+              // Pipe the continuation stream through a recall-aware accumulator.
+              // For Anthropic-native clients:
+              //  - The marker is its own SSE message envelope (separate
+              //    message_start/message_stop), so the continuation's content_block_start
+              //    indices start at 0 in its own message — blockOffset=0.
+              //  - The continuation must open with its OWN message_start (don't suppress).
+              //    The original envelope's message_start/message_stop were already closed
+              //    by the explicit held-back forwarding just before the marker envelope.
+              //
+              // For non-Anthropic clients:
+              //  - The marker is an inline synthetic text block, so the original envelope
+              //    stays open throughout the marker and the continuation. The continuation
+              //    extends the original envelope — blockOffset includes the marker block,
+              //    and the continuation's message_start is suppressed (single-message
+              //    stream per OpenAI Chat Completions / Responses / Gemini).
+              const contBlockOffset = recallContext.clientSpeaksAnthropic
+                ? 0
+                : currentAccum.clientBlockCount() + currentBlockOffset + 1;
+              const contAccum = createRecallAwareAccumulator(RECALL_TOOL_NAME, {
+                scaleClientUsage: true,
+                maxReportedUsage,
+                blockOffset: contBlockOffset,
+                suppressMessageStart: !recallContext.clientSpeaksAnthropic,
+              });
+              activeContinuation = contAccum;
+              const contReader = streamingFollowUp.reader;
+              activeReader = contReader;
+
+              const finalTerminalEvents: string[] = [];
+              const continuationValidator = new AnthropicSSEValidator();
+              try {
+                for await (const {
+                  event: contEvent,
+                  data: contData,
+                } of parseSSEStream(contReader, {
+                  ...foregroundSSEStreamOptions(streamSignal),
+                  requireEventTerminator: true,
+                  fatalUtf8: true,
+                  maxFrames: DEFAULT_MAX_SSE_FRAMES,
+                  maxTotalBytes: MAX_FOREGROUND_RESPONSE_BYTES,
+                })) {
+                  resetKeepalive(); // continuation stream alive — reset timer
+                  continuationValidator.process(contEvent, contData);
+                  const forwarded = contAccum.processEvent(contEvent, contData);
+                  if (
+                    forwarded &&
+                    finalRecallRound &&
+                    (contEvent === "message_delta" ||
+                      contEvent === "message_stop")
+                  ) {
+                    finalTerminalEvents.push(forwarded);
+                  } else if (forwarded) {
+                    // Forward non-recall, non-held-back events to client.
+                    // message_delta usage scaling is handled by a separate pass
+                    // below only for the final continuation's terminal events.
+                    if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                  }
+                  if (continuationValidator.isDone()) break;
+                }
+              } finally {
+                cancelAndReleaseReader(contReader, streamSignal.reason);
+                if (activeReader === contReader) activeReader = null;
+              }
+              if (!cancelled) continuationValidator.assertDone();
+
+              log.info(
+                `recall follow-up stream complete (depth=${recallDepth}): ` +
+                  `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
+              );
+              const continuationResp = contAccum.getResponse();
+              cumulativeUsage = mergeRecallUsage(
+                cumulativeUsage,
+                continuationResp.usage ?? ZERO_USAGE,
+              );
+              activeContinuation = undefined;
+              const continuationStopReason = recallBudget.recordUsage(
+                continuationResp.usage,
+              );
+              if (finalRecallRound || continuationStopReason) {
+                if (contAccum.hasRecall())
+                  throw new RecallContinuationFailure("depth_exhausted");
+                if (!isUsableRecallContinuation(continuationResp))
+                  throw new RecallContinuationFailure("follow_up_failed");
+              }
+
+              // Check if continuation contained recall — if so, loop
+              if (
+                contAccum.hasRecall() &&
+                !finalRecallRound &&
+                !continuationStopReason
+              ) {
+                currentAccum = contAccum;
+                currentResp = contAccum.getResponse();
+                currentBlockOffset = contBlockOffset;
+                currentModifiedReq = followUp;
+                continue; // Loop: execute the new recall, emit marker, follow up
+              }
+
+              // For non-Anthropic clients: the original (preamble) envelope is
+              // kept open throughout the inline marker and the follow-up
+              // continuation. The continuation's terminal message_delta +
+              // message_stop (held back in contAccum below) close the original
+              // envelope inline as the stream ends. Forwarding the preamble's
+              // held-back here would duplicate the close event and break the
+              // OpenAI wire (extra [DONE] sentinel + contradictory
+              // finish_reason). For Anthropic clients, the preamble's
+              // held-back was already consumed before the marker envelope
+              // emission above — contAccum's held-back is the relevant close.
+              // Use takeHeldBackEvents() (not peek) so the held-back is
+              // atomically consumed: defense-in-depth against any future code
+              // path that might read contAccum's heldBack again (e.g. a
+              // refactor that re-enters the drill-down loop or replays the
+              // accumulator). In the current control flow the heldBack is read
+              // exactly once — this just makes the consume semantics explicit.
+              for (const terminal of finalTerminalEvents)
+                await safeEnqueue(encoder.encode(terminal));
+              const heldBack = contAccum.takeHeldBackEvents();
+              if (heldBack) {
+                // Scale usage in held-back message_delta for anti-compaction
+                await safeEnqueue(encoder.encode(heldBack));
+              }
+
+              continuationResp.usage = cumulativeUsage;
+              if (finalRecallRound || continuationStopReason)
+                log.info("recall final continuation: completed");
+              clearKeepalive();
+              recallDiagnostics.finish("completed");
+              complete(continuationResp);
+              safeClose();
+              return;
+            }
+          }
+
+          // No recall — normal path
+          clearKeepalive();
+          const response = accumulator.getResponse();
+          complete(response);
+          safeClose();
+        } catch (err) {
+          recallPersistence?.rollback();
+          recallDiagnostics.finish(streamSignal.aborted ? "aborted" : "failed");
+          if (err instanceof RecallContinuationFailure)
+            reportRecallContinuationFailure(err.category);
+          if (recallFailureResponse) {
+            try {
+              recallContext?.onFailure?.(recallFailureResponse());
+            } catch {
+              log.error("recall failure accounting callback failed");
+            }
+          }
+          streamSignal.removeEventListener("abort", onStreamAbort);
+          clearKeepalive();
+          clearRecallDeadline();
+          if (activeReader) {
+            cancelAndReleaseReader(activeReader, err);
+            activeReader = null;
+          }
+          // Client disconnect / abort is benign — downgrade from error to info
+          // to avoid Sentry noise from normal connection lifecycle events.
+          const isAbort =
+            err instanceof DOMException && err.name === "AbortError";
+          if (isAbort) {
+            log.info("streaming pipeline aborted (client disconnect)");
+            // Only surfaces to Sentrg_text.delta",
     "response.reasoning_text.done",
   ]);
   const reasoningSummaryEvents = new Set([
@@ -9629,341 +9635,311 @@ export function streamResponsesRecallAware(
         (event === "response.completed" &&
           status !== "completed" &&
           !(opts.validation === "codex" && status === "incomplete")) ||
-        (event === "response.incomplete" && status !== "incomplete") ||
-        (event === "response.failed" &&
-          status !== "failed" &&
-          status !== "cancelled")
-      ) {
-        throw new Error("Responses terminal event contradicts response status");
-      }
-      if (status === "incomplete") {
-        const details = response?.incomplete_details;
-        if (
-          details !== undefined &&
-          details !== null &&
-          (typeof details !== "object" || Array.isArray(details))
-        ) {
-          throw new Error("malformed Responses terminal event");
-        }
-        const reason =
-          details && typeof details === "object" && !Array.isArray(details)
-            ? (details as Record<string, unknown>).reason
-            : undefined;
-        if (
-          reason !== undefined &&
-          reason !== "max_output_tokens" &&
-          reason !== "content_filter"
-        ) {
-          throw new Error("malformed Responses terminal event");
-        }
-      }
-      lifecycle.terminal = true;
-    }
-  };
-  const assertOutputLifecyclesComplete = (
-    acc: ResponsesAccState,
-    allowedIncompleteIndices: ReadonlySet<number> = new Set(),
-  ): void => {
-    const lifecycles = lifecyclesFor(acc);
-    for (const index of acc.rawItems.keys()) {
-      if (lifecycles.get(index)?.outputDone) continue;
-      if (allowedIncompleteIndices.has(index)) continue;
-      if (opts.validation !== "codex") {
-        throw new Error(
-          `Responses stream ended before output_item.done for index ${index}`,
-        );
-      }
-      const item = acc.rawItems.get(index);
-      if (
-        item?.type === "reasoning" &&
-        typeof item.encrypted_content === "string"
-      ) {
-        throw new Error(
-          `Responses stream ended with provisional reasoning for index ${index}`,
-        );
-      }
-      // Sparse Codex may omit output_item.done. Non-reasoning items and
-      // reasoning without a string ciphertext envelope are safe to retain.
-    }
-  };
-  const preserveStreamedReasoning = (
-    acc: ResponsesAccState,
-    outputIndex: number,
-  ): void => {
-    const raw = acc.rawItems.get(outputIndex);
-    const lifecycle = lifecyclesFor(acc).get(outputIndex);
-    if (raw?.type !== "reasoning" || !lifecycle?.reasoning.size) return;
-    const summary = Array.isArray(raw.summary) ? [...raw.summary] : [];
-    let changed = false;
-    for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
-      if (
-        summary[summaryIndex] === undefined &&
-        summaryState.authoritativeValueSeen
-      ) {
-        summary[summaryIndex] = {
-          type: "summary_text",
-          text: summaryState.authoritativeValue,
-        };
-        changed = true;
-      }
-    }
-    if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
-  };
-  const assertReasoningPartsMatchLifecycle = (
-    rawParts: unknown,
-    states: ReadonlyMap<number, TextPartLifecycle>,
-    kind: "summary_text" | "reasoning_text",
-    description: string,
-    outputIndex: number,
-  ): void => {
-    if (rawParts === undefined) return;
-    const parts = exactReasoningParts(rawParts, kind, description);
-    for (const [partIndex, part] of parts.entries()) {
-      const state = states.get(partIndex);
-      if (!state) {
-        throw new Error(
-          `Responses ${description} introduced untracked part for index ${outputIndex}:${partIndex}`,
-        );
-      }
-      if (
-        (state.deltaSeen && !state.valueDone) ||
-        (state.partAdded && !state.partDone)
-      ) {
-        throw new Error(
-          `Responses ${description} ended before completion for index ${outputIndex}:${partIndex}`,
-        );
-      }
-      if (
-        state.authoritativeValueSeen &&
-        state.authoritativeValue !== part.text
-      ) {
-        throw new Error(
-          `Responses ${description} changed content for index ${outputIndex}:${partIndex}`,
-        );
-      }
-    }
-  };
-  const completedReasoningSummary = (
-    lifecycle: OutputLifecycle,
-    outputIndex: number,
-    requireLifecycleCompletion = false,
-  ): Array<{ type: "summary_text"; text: string }> => {
-    const ordered = Array.from(lifecycle.reasoning).sort(
-      ([left], [right]) => left - right,
-    );
-    return ordered.map(([summaryIndex, summaryState], ordinal) => {
-      if (summaryIndex !== ordinal) {
-        throw new Error(
-          `non-contiguous Responses reasoning summary for index ${outputIndex}`,
-        );
-      }
-      if (
-        !summaryState.authoritativeValueSeen ||
-        (requireLifecycleCompletion &&
-          !lifecycle.outputDone &&
-          !summaryState.valueDone &&
-          !summaryState.partDone) ||
-        (summaryState.deltaSeen && !summaryState.valueDone) ||
-        (summaryState.partAdded && !summaryState.partDone)
-      ) {
-        throw new Error(
-          `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
-        );
-      }
-      return {
-        type: "summary_text",
-        text: summaryState.authoritativeValue,
-      };
-    });
-  };
-  const assertTerminalReasoningMatchesLifecycle = (
-    lifecycle: OutputLifecycle,
-    actual: Record<string, unknown>,
-    outputIndex: number,
-  ): void => {
-    const collections: Array<
-      [
-        unknown,
-        ReadonlyMap<number, TextPartLifecycle>,
-        "summary_text" | "reasoning_text",
-        string,
-      ]
-    > = [
-      [
-        actual.summary,
-        lifecycle.reasoning,
-        "summary_text",
-        "reasoning summary",
-      ],
-      [
-        actual.content,
-        lifecycle.content,
-        "reasoning_text",
-        "reasoning content",
-      ],
-    ];
-    for (const [rawParts, states, kind, description] of collections) {
-      assertReasoningPartsMatchLifecycle(
-        rawParts,
-        states,
-        kind,
-        description,
-        outputIndex,
-      );
-      if (rawParts === undefined) continue;
-      if (!Array.isArray(rawParts)) {
-        throw new Error(`Responses terminal ${description} must be an array`);
-      }
-      for (const [partIndex, state] of states) {
-        const part = rawParts[partIndex];
-        if (!part || typeof part !== "object" || Array.isArray(part)) {
-          throw new Error(`Responses terminal changed ${description}`);
-        }
-        const record = part as Record<string, unknown>;
-        if (
-          record.type !== state.kind ||
-          (state.authoritativeValueSeen &&
-            partValue(state.kind, record, `terminal ${description}`) !==
-              state.authoritativeValue)
-        ) {
-          throw new Error(
-            `Responses terminal changed ${description} for index ${outputIndex}:${partIndex}`,
-          );
-        }
-      }
-    }
-  };
-  const preserveOmittedCodexReasoning = (acc: ResponsesAccState): void => {
-    if (opts.validation !== "codex") return;
-    for (const [outputIndex, raw] of acc.rawItems) {
-      const lifecycle = lifecyclesFor(acc).get(outputIndex);
-      if (raw.type !== "reasoning" || !lifecycle?.reasoning.size) continue;
-      const summary = completedReasoningSummary(lifecycle, outputIndex, true);
-      if (summary.length > 0) {
-        acc.rawItems.set(outputIndex, { ...raw, summary });
-      }
-    }
-  };
-  const assertTerminalOutputMatches = (
-    acc: ResponsesAccState,
-    parsed: Record<string, unknown>,
-    onMatched?: (outputIndex: number, item: Record<string, unknown>) => void,
-    onSynthesizedDone?: (
-      outputIndex: number,
-      item: Record<string, unknown>,
-    ) => void,
-  ): void => {
-    const response = parsed.response as Record<string, unknown> | undefined;
-    if (!response) throw new Error("Responses terminal event missing response");
-    if (acc.id && response.id !== acc.id) {
-      throw new Error("Responses terminal event changed response identity");
-    }
-    if (response.output === undefined) {
-      if (opts.validation === "public" && response.status === "completed") {
-        throw new Error("Responses terminal output must be an array");
-      }
-      preserveOmittedCodexReasoning(acc);
-      return;
-    }
-    if (!Array.isArray(response.output)) {
-      throw new Error("Responses terminal output must be an array");
-    }
-    // ChatGPT/Codex can omit some or all streamed items from the terminal
-    // snapshot. Treat the output_item lifecycle as authoritative while still
-    // requiring every repeated terminal item to match in stream order.
-    const actualOutput = response.output.map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        throw new Error("Responses terminal output contains malformed item");
-      }
-      return item as Record<string, unknown>;
-    });
-    const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
-    const expectedByID = new Map(
-      expected.flatMap(([, item], index) =>
-        typeof item.id === "string" && item.id
-          ? ([[item.id, index]] as const)
-          : [],
-      ),
-    );
-    if (
-      opts.validation === "public" &&
-      actualOutput.length !== expected.length
-    ) {
-      throw new Error("Responses terminal output changed streamed item");
-    }
-    let expectedIndex = 0;
-    for (const actual of actualOutput) {
-      const isReference = actual.type === "item_reference";
-      if (
-        isReference &&
-        (typeof actual.id !== "string" ||
-          !actual.id ||
-          Object.keys(actual).some((key) => key !== "type" && key !== "id"))
-      ) {
-        throw new Error("Responses terminal output contains invalid reference");
-      }
-      const matchIndex =
-        typeof actual.id === "string" ? expectedByID.get(actual.id) : undefined;
-      if (matchIndex === undefined || matchIndex < expectedIndex) {
-        throw new Error("Responses terminal output changed streamed item");
-      }
-      const match = expected[matchIndex];
-      if (!match) {
-        throw new Error("Responses terminal output changed streamed item");
-      }
-      const [matchedOutputIndex, matchedStreamed] = match;
-      if (
-        (!isReference && actual.type !== matchedStreamed.type) ||
-        (!isReference &&
-          actual.call_id !== matchedStreamed.call_id &&
-          !(
-            opts.validation === "codex" &&
-            !lifecyclesFor(acc).get(matchedOutputIndex)?.outputDone
-          ))
-      ) {
-        throw new Error("Responses terminal output changed streamed item");
-      }
-      if (opts.validation === "public" && matchIndex !== expectedIndex) {
-        throw new Error("Responses terminal output changed streamed item");
-      }
-      const [outputIndex, streamed] = match;
-      const lifecycle = lifecyclesFor(acc).get(outputIndex);
-      // Codex may repeat a completed reasoning item with an empty summary in
-      // the terminal snapshot. Preserve only the summaries already validated
-      // through the streamed lifecycle; non-empty terminal values stay strict.
-      const completedSummary =
-        opts.validation === "codex" &&
-        actual.type === "reasoning" &&
-        (actual.summary === undefined ||
-          (Array.isArray(actual.summary) && actual.summary.length === 0)) &&
-        lifecycle
-          ? completedReasoningSummary(lifecycle, outputIndex, true)
-          : [];
-      const reconciledActual =
-        completedSummary.length > 0
-          ? { ...actual, summary: completedSummary }
-          : actual;
-      onMatched?.(outputIndex, reconciledActual);
-      if (
-        !isReference &&
-        opts.validation === "codex" &&
-        lifecycle &&
-        !lifecycle.outputDone
-      ) {
-        outputIndexForEvent(
-          "response.output_item.done",
-          { output_index: outputIndex, item: reconciledActual },
-          acc,
-        );
-        applyResponsesEvent(acc, "response.output_item.done", {
-          output_index: outputIndex,
-          item: reconciledActual,
-        });
-        preserveStreamedReasoning(acc, outputIndex);
-        onSynthesizedDone?.(outputIndex, reconciledActual);
-      } else if (
-        !isReference &&
-        !responsesTerminalItemMatches(reconciledActual, streamed)
+        (event ===unter,
+          })) {
+            resetKeepalive(); // upstream alive — reset inactivity timer
+
+            if (!data || data === "[DONE]") continue;
+            streamBytes += encoder.encode(
+              formatResponsesEvent(event, data),
+            ).byteLength;
+            if (streamBytes > maxStreamBytes) {
+              throw new SSEStreamLimitError(
+                "Responses stream exceeded byte limit",
+              );
+            }
+
+            principalFailureCategory = "principal_protocol";
+            let parsed: Record<string, unknown>;
+            try {
+              parsed = JSON.parse(data) as Record<string, unknown>;
+            } catch {
+              if (event.startsWith("response.")) {
+                throw new Error(`malformed JSON in Responses event ${event}`);
+              }
+              // Non-JSON keepalive/comment event — forward as-is.
+              if (event !== "message") {
+                const chunk = encoder.encode(formatResponsesEvent(event, data));
+                if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
+                  deferredBytes += chunk.byteLength;
+                  if (deferredBytes > maxDeferredBytes) {
+                    throw new SSEStreamLimitError(
+                      "recall stream exceeded deferred event limit",
+                    );
+                  }
+                  deferredEvents.push({ chunk });
+                } else {
+                  await enqueuePrincipal(chunk, otherToolSeen);
+                }
+              }
+              continue;
+            }
+            if (parsed.type !== event) {
+              throw new Error(`Responses payload type does not match ${event}`);
+            }
+            if (
+              (event === "response.output_item.added" ||
+                event === "response.output_item.done") &&
+              (parsed.item as Record<string, unknown> | undefined)?.type ===
+                "function_call" &&
+              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
+            ) {
+              recallDetected = true;
+            }
+            const normalizationState = normalizeCodexEvent(
+              state,
+              event,
+              parsed,
+            );
+            validateResponseLifecycle(state, event, parsed);
+            seedImplicitCodexItem(state, normalizationState, event, parsed);
+
+            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
+              continue;
+            }
+
+            const outputIndex = outputIndexForEvent(
+              event,
+              parsed,
+              state,
+              (index, item) => {
+                if (
+                  item.type !== "function_call" ||
+                  item.name !== RECALL_TOOL_NAME
+                ) {
+                  return;
+                }
+                recallDetected = true;
+                recallIndices.add(index);
+              },
+            );
+            if (outputIndex !== undefined) {
+              retainedStateBytes += encoder.encode(data).byteLength;
+              if (retainedStateBytes > maxRetainedStateBytes) {
+                throw new SSEStreamLimitError(
+                  "Responses retained state exceeded byte limit",
+                );
+              }
+              const implicitItem = state.rawItems.get(outputIndex);
+              if (
+                opts.validation === "codex" &&
+                event !== "response.output_item.added" &&
+                event !== "response.output_item.done" &&
+                implicitItem?.type === "function_call" &&
+                implicitItem.name === ""
+              ) {
+                unresolvedToolIndices.add(outputIndex);
+              }
+            }
+
+            let resolvingRecallTool = false;
+            let resolvingVisibleTool = false;
+            // Detect recall and unresolved sparse function-call identities.
+            if (
+              (event === "response.output_item.added" ||
+                event === "response.output_item.done") &&
+              outputIndex !== undefined
+            ) {
+              const item = parsed.item as Record<string, unknown> | undefined;
+              const isRecallCall =
+                item?.type === "function_call" && item?.name === "recall";
+              if (isRecallCall) {
+                recallDetected = true;
+                recallIndices.add(outputIndex);
+                resolvingRecallTool = true;
+              } else if (item?.type === "function_call") {
+                if (
+                  event === "response.output_item.added" &&
+                  opts.validation === "codex" &&
+                  item.name === ""
+                ) {
+                  unresolvedToolIndices.add(outputIndex);
+                } else {
+                  resolvingVisibleTool = true;
+                }
+              }
+            }
+
+            // Always accumulate into the internal state for postResponse.
+            applyResponsesEvent(state, event, parsed);
+            if (
+              event === "response.output_item.done" &&
+              outputIndex !== undefined
+            ) {
+              preserveStreamedReasoning(state, outputIndex);
+            }
+
+            let resolvedVisibleTool = false;
+            if (outputIndex !== undefined && resolvingRecallTool) {
+              discardDeferredCandidate(outputIndex);
+              promoteDeferredCandidate(outputIndex);
+              unresolvedToolIndices.delete(outputIndex);
+            } else if (outputIndex !== undefined && resolvingVisibleTool) {
+              resolvedVisibleTool = unresolvedToolIndices.delete(outputIndex);
+              unresolvedToolBytes.delete(outputIndex);
+              otherToolSeen = true;
+            }
+
+            if (
+              resolvedVisibleTool &&
+              recallIndices.size === 0 &&
+              unresolvedToolIndices.size === 0
+            ) {
+              for (const deferred of deferredEvents) {
+                if (!(await enqueuePrincipal(deferred.chunk, true))) break;
+              }
+              deferredEvents.length = 0;
+              deferredBytes = 0;
+            }
+
+            const isRecallEvent =
+              outputIndex !== undefined && recallIndices.has(outputIndex);
+            const isUnresolvedToolEvent =
+              outputIndex !== undefined &&
+              unresolvedToolIndices.has(outputIndex);
+
+            // Suppress all events belonging to a recall item, but still count
+            // them so malformed argument streams cannot grow without bound.
+            if (
+              (isRecallEvent || isUnresolvedToolEvent) &&
+              outputIndex !== undefined
+            ) {
+              const hiddenChunk = encoder.encode(
+                formatResponsesEvent(event, data),
+              );
+              const hiddenBytes = hiddenChunk.byteLength;
+              deferredBytes += hiddenBytes;
+              if (isRecallEvent) {
+                hiddenRecallBytes += hiddenBytes;
+              } else {
+                unresolvedToolBytes.set(
+                  outputIndex,
+                  (unresolvedToolBytes.get(outputIndex) ?? 0) + hiddenBytes,
+                );
+              }
+              if (
+                deferredBytes > maxDeferredBytes ||
+                hiddenRecallBytes > maxHiddenRecallBytes
+              ) {
+                throw new SSEStreamLimitError(
+                  "recall stream exceeded deferred event limit",
+                );
+              }
+              if (
+                event === "response.function_call_arguments.done" &&
+                isRecallEvent
+              ) {
+                parsedRecallInputs.set(
+                  outputIndex,
+                  parseRecallArguments(parsed.arguments),
+                );
+              }
+              if (isUnresolvedToolEvent && !isRecallEvent) {
+                deferredEvents.push({
+                  chunk: hiddenChunk,
+                  candidateIndex: outputIndex,
+                });
+              }
+              if (event === "response.output_item.done") {
+                if (isRecallEvent) {
+                  collectCompletedRecall(
+                    state,
+                    outputIndex,
+                    parsedRecallInputs,
+                    pendingRecalls,
+                    completedRecallIndices,
+                  );
+                }
+              }
+              // Don't forward recall-item events to the client.
+              continue;
+            }
+
+            // Terminal events: handle recall interception before forwarding.
+            if (
+              event === "response.completed" ||
+              event === "response.done" ||
+              event === "response.incomplete" ||
+              event === "response.failed"
+            ) {
+              principalReadFinished = true;
+              const terminalParsed = stripHiddenReferenceOutput(parsed);
+              const terminalResponse = terminalParsed.response as
+                | Record<string, unknown>
+                | undefined;
+              if (
+                Array.isArray(terminalResponse?.output) &&
+                terminalResponse.output.some(
+                  (item) =>
+                    item !== null &&
+                    typeof item === "object" &&
+                    !Array.isArray(item) &&
+                    (item as Record<string, unknown>).type ===
+                      "function_call" &&
+                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
+                )
+              ) {
+                recallDetected = true;
+              }
+              if (opts.validation === "codex") {
+                assertTerminalOutputMatches(
+                  state,
+                  terminalParsed,
+                  (outputIndex, item) => {
+                    if (
+                      item.type !== "function_call" ||
+                      item.name !== RECALL_TOOL_NAME ||
+                      (!recallIndices.has(outputIndex) &&
+                        !unresolvedToolIndices.has(outputIndex))
+                    ) {
+                      return;
+                    }
+                    recallDetected = true;
+                    recallIndices.add(outputIndex);
+                    unresolvedToolIndices.delete(outputIndex);
+                    discardDeferredCandidate(outputIndex);
+                    promoteDeferredCandidate(outputIndex);
+                  },
+                  (outputIndex, item) => {
+                    if (item.type !== "function_call") return;
+                    if (item.name === RECALL_TOOL_NAME) {
+                      collectCompletedRecall(
+                        state,
+                        outputIndex,
+                        parsedRecallInputs,
+                        pendingRecalls,
+                        completedRecallIndices,
+                      );
+                    } else {
+                      unresolvedToolIndices.delete(outputIndex);
+                      unresolvedToolBytes.delete(outputIndex);
+                      otherToolSeen = true;
+                    }
+                  },
+                );
+                assertOutputLifecyclesComplete(state);
+              } else {
+                assertOutputLifecyclesComplete(state);
+                assertTerminalOutputMatches(state, terminalParsed);
+              }
+              assertReferenceLifecyclesComplete(referenceIndices);
+              assertRecallItemsCompleted(
+                state,
+                pendingRecalls.map((recall) => recall.outputIndex),
+              );
+              if (
+                principalTransportRetries > 0 &&
+                !principalRetrySucceededReported
+              ) {
+                principalRetrySucceededReported = true;
+                reportPrincipalTransportFailure({
+                  kind: "read",
+                  stage: "pre_output",
+                  outcome: "retry_succeeded",
+                });
+              }
+              if (pendingRecalls.length === 0) {
+                if (unresolvedTesTerminalItemMatches(reconciledActual, streamed)
       ) {
         throw new Error("Responses terminal output changed streamed item");
       }
@@ -10321,7 +10297,602 @@ export function streamResponsesRecallAware(
           type: "response.output_text.delta",
           item_id: itemId,
           output_index: outputIndex,
-          content_index: 0,
+          con "response.incomplete" && status !== "incomplete") ||
+        (event === "response.failed" &&
+          status !== "failed" &&
+          status !== "cancelled")
+      ) {
+        throw new Error("Responses terminal event contradicts response status");
+      }
+      if (status === "incomplete") {
+        const details = response?.incomplete_details;
+        if (
+          details !== undefined &&
+          details !== null &&
+          (typeof details !== "object" || Array.isArray(details))
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+        const reason =
+          details && typeof details === "object" && !Array.isArray(details)
+            ? (details as Record<string, unknown>).reason
+            : undefined;
+        if (
+          reason !== undefined &&
+          reason !== "max_output_tokens" &&
+          reason !== "content_filter"
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+      }
+      lifecycle.terminal = true;
+    }
+  };
+  const assertOutputLifecyclesComplete = (
+    acc: ResponsesAccState,
+    allowedIncompleteIndices: ReadonlySet<number> = new Set(),
+  ): void => {
+    const lifecycles = lifecyclesFor(acc);
+    for (const index of acc.rawItems.keys()) {
+      if (lifecycles.get(index)?.outputDone) continue;
+      if (allowedIncompleteIndices.has(index)) continue;
+      if (opts.validation !== "codex") {
+        throw new Error(
+          `Responses stream ended before output_item.done for index ${index}`,
+        );
+      }
+      const item = acc.rawItems.get(index);
+      if (
+        item?.type === "reasoning" &&
+        typeof item.encrypted_content === "string"
+      ) {
+        throw new Error(
+          `Responses stream ended with provisional reasoning for index ${index}`,
+        );
+      }
+      // Sparse Codex may omit output_item.done. Non-reasoning items and
+      // reasoning without a string ciphertext envelope are safe to retain.
+    }
+  };
+  const preserveStreamedReasoning = (
+    acc: ResponsesAccState,
+    outputIndex: number,
+  ): void => {
+    const raw = acc.rawItems.get(outputIndex);
+    const lifecycle = lifecyclesFor(acc).get(outputIndex);
+    if (raw?.type !== "reasoning" || !lifecycle?.reasoning.size) return;
+    const summary = Array.isArray(raw.summary) ? [...raw.summary] : [];
+    let changed = false;
+    for (const [summaryIndex, summaryState] of lifecycle.reasoning) {
+      if (
+        summary[summaryIndex] === undefined &&
+        summaryState.authoritativeValueSeen
+      ) {
+        summary[summaryIndex] = {
+          type: "summary_text",
+          text: summaryState.authoritativeValue,
+        };
+        changed = true;
+      }
+    }
+    if (changed) acc.rawItems.set(outputIndex, { ...raw, summary });
+  };
+  const assertReasoningPartsMatchLifecycle = (
+    rawParts: unknown,
+    states: ReadonlyMap<number, TextPartLifecycle>,
+    kind: "summary_text" | "reasoning_text",
+    description: string,
+    outputIndex: number,
+  ): void => {
+    if (rawParts === undefined) return;
+    const parts = exactReasoningParts(rawParts, kind, description);
+    for (const [partIndex, part] of parts.entries()) {
+      const state = states.get(partIndex);
+      if (!state) {
+        throw new Error(
+          `Responses ${description} introduced untracked part for index ${outputIndex}:${partIndex}`,
+        );
+      }
+      if (
+        (state.deltaSeen && !state.valueDone) ||
+        (state.partAdded && !state.partDone)
+      ) {
+        throw new Error(
+          `Responses ${description} ended before completion for index ${outputIndex}:${partIndex}`,
+        );
+      }
+      if (
+        state.authoritativeValueSeen &&
+        state.authoritativeValue !== part.text
+      ) {
+        throw new Error(
+          `Responses ${description} changed content for index ${outputIndex}:${partIndex}`,
+        );
+      }
+    }
+  };
+  const completedReasoningSummary = (
+    lifecycle: OutputLifecycle,
+    outputIndex: number,
+    requireLifecycleCompletion = false,
+  ): Array<{ type: "summary_text"; text: string }> => {
+    const ordered = Array.from(lifecycle.reasoning).sort(
+      ([left], [right]) => left - right,
+    );
+    return ordered.map(([summaryIndex, summaryState], ordinal) => {
+      if (summaryIndex !== ordinal) {
+        throw new Error(
+          `non-contiguous Responses reasoning summary for index ${outputIndex}`,
+        );
+      }
+      if (
+        !summaryState.authoritativeValueSeen ||
+        (requireLifecycleCompletion &&
+          !lifecycle.outputDone &&
+          !summaryState.valueDone &&
+          !summaryState.partDone) ||
+        (summaryState.deltaSeen && !summaryState.valueDone) ||
+        (summaryState.partAdded && !summaryState.partDone)
+      ) {
+        throw new Error(
+          `Responses reasoning summary ended before completion for index ${outputIndex}:${summaryIndex}`,
+        );
+      }
+      return {
+        type: "summary_text",
+        text: summaryState.authoritativeValue,
+      };
+    });
+  };
+  const assertTerminalReasoningMatchesLifecycle = (
+    lifecycle: OutputLifecycle,
+    actual: Record<string, unknown>,
+    outputIndex: number,
+  ): void => {
+    const collections: Array<
+      [
+        unknown,
+        ReadonlyMap<number, TextPartLifecycle>,
+        "summary_text" | "reasoning_text",
+        string,
+      ]
+    > = [
+      [
+        actual.summary,
+        lifecycle.reasoning,
+        "summary_text",
+        "reasoning summary",
+      ],
+      [
+        actual.content,
+        lifecycle.content,
+        "reasoning_text",
+        "reasoning content",
+      ],
+    ];
+    for (const [rawParts, states, kind, description] of collections) {
+      assertReasoningPartsMatchLifecycle(
+        rawParts,
+        states,
+        kind,
+        description,
+        outputIndex,
+      );
+      if (rawParts === undefined) continue;
+      if (!Array.isArray(rawParts)) {
+        throw new Error(`Responses terminal ${description} must be an array`);
+      }
+      for (const [partIndex, state] of states) {
+        const part = rawParts[partIndex];
+        if (!part || typeof part !== "object" || Array.isArray(part)) {
+          throw new Error(`Responses terminal changed ${description}`);
+        }
+        const record = part as Record<string, unknown>;
+        if (
+          record.type !== state.kind ||
+          (state.authoritativeValueSeen &&
+            partValue(state.kind, record, `terminal ${description}`) !==
+              state.authoritativeValue)
+        ) {
+          throw new Error(
+            `Responses terminal changed ${description} for index ${outputIndex}:${partIndex}`,
+          );
+        }
+      }
+    }
+  };
+  const preserveOmittedCodexReasoning = (acc: ResponsesAccState): void => {
+    if (opts.validation !== "codex") return;
+    for (const [outputIndex, raw] of acc.rawItems) {
+      const lifecycle = lifecyclesFor(acc).get(outputIndex);
+      if (raw.type !== "reasoning" || !lifecycle?.reasoning.size) continue;
+      const summary = completedReasoningSummary(lifecycle, outputIndex, true);
+      if (summary.length > 0) {
+        acc.rawItems.set(outputIndex, { ...raw, summary });
+      }
+    }
+  };
+  const assertTerminalOutputMatches = (
+    acc: ResponsesAccState,
+    parsed: Record<string, unknown>,
+    onMatched?: (outputIndex: number, item: Record<string, unknown>) => void,
+    onSynthesizedDone?: (
+      outputIndex: number,
+      item: Record<string, unknown>,
+    ) => void,
+  ): void => {
+    const response = parsed.response as Record<string, unknown> | undefined;
+    if (!response) throw new Error("Responses terminal event missing response");
+    if (acc.id && response.id !== acc.id) {
+      throw new Error("Responses terminal event changed response identity");
+    }
+    if (response.output === undefined) {
+      if (opts.validation === "public" && response.status === "completed") {
+        throw new Error("Responses terminal output must be an array");
+      }
+      preserveOmittedCodexReasoning(acc);
+      return;
+    }
+    if (!Array.isArray(response.output)) {
+      throw new Error("Responses terminal output must be an array");
+    }
+    // ChatGPT/Codex can omit some or all streamed items from the terminal
+    // snapshot. Treat the output_item lifecycle as authoritative while still
+    // requiring every repeated terminal item to match in stream order.
+    const actualOutput = response.output.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error("Responses terminal output contains malformed item");
+      }
+      return item as Record<string, unknown>;
+    });
+    const expected = [...acc.rawItems.entries()].sort(([a], [b]) => a - b);
+    const expectedByID = new Map(
+      expected.flatMap(([, item], index) =>
+        typeof item.id === "string" && item.id
+          ? ([[item.id, index]] as const)
+          : [],
+      ),
+    );
+    if (
+      opts.validation === "public" &&
+      actualOutput.length !== expected.length
+    ) {
+      throw new Error("Responses terminal output changed streamed item");
+    }
+    let expectedIndex = 0;
+    for (const actual of actualOutput) {
+      const isReference = actual.type === "item_reference";
+      if (
+        isReference &&
+        (typeof actual.id !== "string" ||
+          !actual.id ||
+          Object.keys(actual).some((key) => key !== "type" && key !== "id"))
+      ) {
+        throw new Error("Responses terminal output contains invalid reference");
+      }
+      const matchIndex =
+        typeof actual.id === "string" ? expectedByID.get(actual.id) : undefined;
+      if (matchIndex === undefined || matchIndex < expectedIndex) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const match = expected[matchIndex];
+      if (!match) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const [matchedOutputIndex, matchedStreamed] = match;
+      if (
+        (!isReference && actual.type !== matchedStreamed.type) ||
+        (!isReference &&
+          actual.call_id !== matchedStreamed.call_id &&
+          !(
+            opts.validation === "codex" &&
+            !lifecyclesFor(acc).get(matchedOutputIndex)?.outputDone
+          ))
+      ) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      if (opts.validation === "public" && matchIndex !== expectedIndex) {
+        throw new Error("Responses terminal output changed streamed item");
+      }
+      const [outputIndex, streamed] = match;
+      const lifecycle = lifecyclesFor(acc).get(outputIndex);
+      // Codex may repeat a completed reasoning item with an empty summary in
+      // the terminal snapshot. Preserve only the summaries already validated
+      // through the streamed lifecycle; non-empty terminal values stay strict.
+      const completedSummary =
+        opts.validation === "codex" &&
+        actual.type === "reasoning" &&
+        (actual.summary === undefined ||
+          (Array.isArray(actual.summary) && actual.summary.length === 0)) &&
+        lifecycle
+          ? completedReasoningSummary(lifecycle, outputIndex, true)
+          : [];
+      const reconciledActual =
+        completedSummary.length > 0
+          ? { ...actual, summary: completedSummary }
+          : actual;
+      onMatched?.(outputIndex, reconciledActual);
+      if (
+        !isReference &&
+        opts.validation === "codex" &&
+        lifecycle &&
+        !lifecycle.outputDone
+      ) {
+        outputIndexForEvent(
+          "response.output_item.done",
+          { output_index: outputIndex, item: reconciledActual },
+          acc,
+        );
+        applyResponsesEvent(acc, "response.output_item.done", {
+          output_index: outputIndex,
+          item: reconciledActual,
+        });
+        preserveStreamedReasoning(acc, outputIndex);
+        onSynthesizedDone?.(outputIndex, reconciledActual);
+      } else if (
+        !isReference &&
+        !responsoolIndices.size > 0) {
+                  throw new Error(
+                    "Responses terminal left sparse function identity unresolved",
+                  );
+                }
+                if (recallIndices.size > 0) {
+                  throw new Error(
+                    "recall stream ended before function arguments completed",
+                  );
+                }
+                for (const deferred of deferredEvents) {
+                  if (!(await enqueuePrincipal(deferred.chunk, otherToolSeen)))
+                    break;
+                }
+                deferredEvents.length = 0;
+                deferredBytes = 0;
+                // No recall — forward the terminal event verbatim.
+                const finalResponse = finalizeResponsesAcc(state);
+                if (
+                  !(await enqueuePrincipal(
+                    encoder.encode(
+                      formatResponsesEvent(
+                        event,
+                        terminalParsed === parsed
+                          ? data
+                          : JSON.stringify(terminalParsed),
+                      ),
+                    ),
+                    otherToolSeen,
+                    () => {
+                      terminalDelivered = true;
+                      finish(
+                        finalResponse,
+                        state.terminalEvent === "response.completed",
+                      );
+                    },
+                  ))
+                )
+                  break;
+                cancelAndReleaseReader(reader, signal.reason);
+                principalReader = null;
+                clearKeepalive();
+                safeClose();
+                return;
+              }
+              if (state.terminalEvent === "response.failed") {
+                throw new Error("recall principal returned response.failed");
+              }
+              if (state.terminalEvent === "response.incomplete") {
+                throw new Error(
+                  "incomplete recall principal cannot execute recall",
+                );
+              }
+
+              // Recall was detected. Drive the recall loop.
+              if (pendingRecalls.length > 1) {
+                throw new RecallContinuationFailure("parallel_recall");
+              }
+              const anchorTexts: string[] = [];
+              transactionBaseline = {
+                ...state,
+                usage: { ...state.usage },
+                items: new Map(state.items),
+                rawItems: new Map(state.rawItems),
+              };
+              transactionProviderUsage = { ...ZERO_USAGE };
+              // The principal Responses stream is part of the same request
+              // budget. Count it once before its first recall is admitted;
+              // continuation streams are accounted for after each follow-up.
+              recallBudget.recordUsage(state.usage);
+              const pendingCommits: Array<() => void> = [];
+              const transactionalEvents: Uint8Array[] = [];
+              let transactionalBytes = 0;
+              const reserveTransactionalBytes = (chunk: Uint8Array): void => {
+                transactionalBytes += chunk.byteLength;
+                if (transactionalBytes > maxTransactionalBytes) {
+                  throw new RecallContinuationFailure("resource_limit");
+                }
+              };
+              const queueTransactional = (chunk: Uint8Array): void => {
+                reserveTransactionalBytes(chunk);
+                transactionalEvents.push(chunk);
+              };
+              for (const recall of pendingRecalls) {
+                const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
+                reserveSyntheticIdentity(syntheticId);
+                const recallAcc = finalizeResponsesAcc(state);
+                const contentPosition = recallAcc.content.findIndex(
+                  (block) =>
+                    block.type === "tool_use" && block.id === recall.toolUseId,
+                );
+                if (contentPosition < 0) {
+                  throw new RecallContinuationFailure("missing_recall_block");
+                }
+                let executed: Awaited<ReturnType<typeof settleRecall>>;
+                try {
+                  executed = await settleRecall({
+                    query: recall.query,
+                    scope: recall.scope,
+                    id: recall.id,
+                    ids: recall.ids,
+                    detailOffset: recall.detailOffset,
+                    detailLimit: recall.detailLimit,
+                    outputIndex: recall.outputIndex,
+                    toolUseId: recall.toolUseId,
+                    contentPosition,
+                    acc: recallAcc,
+                    signal,
+                  });
+                } catch (error) {
+                  if (signal.aborted) throw error;
+                  if (error instanceof RecallContinuationFailure) throw error;
+                  throw new RecallContinuationFailure("recall_execution");
+                }
+                anchorTexts.push(executed.anchorText);
+                if (executed.commit) pendingCommits.push(executed.commit);
+                if (executed.rollback) {
+                  transactionRollbacks.push(executed.rollback);
+                }
+                const anchorChunk = encoder.encode(
+                  emitTextItem(
+                    recall.outputIndex,
+                    executed.anchorText,
+                    syntheticId,
+                  ),
+                );
+                if (otherToolSeen) {
+                  state.items.set(recall.outputIndex, {
+                    type: "text",
+                    id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
+                    text: executed.anchorText,
+                  });
+                  queueTransactional(anchorChunk);
+                  for (const deferred of deferredEvents) {
+                    queueTransactional(deferred.chunk);
+                  }
+                } else {
+                  queueTransactional(anchorChunk);
+                  for (const deferred of deferredEvents) {
+                    queueTransactional(deferred.chunk);
+                  }
+                }
+                deferredEvents.length = 0;
+                deferredBytes = 0;
+
+                if (
+                  !otherToolSeen &&
+                  recall === pendingRecalls[pendingRecalls.length - 1]
+                ) {
+                  // Recall-only: run the streaming follow-up and pipe the
+                  // continuation inline before the final completion.
+                  try {
+                    continuationAttempted = true;
+                    continuationFailureCategory = "follow_up_setup";
+                    signal.throwIfAborted();
+                    let follow = await settleFollowUp({
+                      finalRecallRound: recallBudget.mustFinalizeNext(),
+                      anchorText: executed.anchorText,
+                      resultText: executed.resultText,
+                      acc: recallAcc,
+                      toolUseId: recall.toolUseId,
+                      contentPosition,
+                      signal,
+                    });
+                    let recallContinuationTransportRetries = 0;
+                    let continuationFollowUpInput: Parameters<
+                      typeof opts.runFollowUp
+                    >[0] = {
+                      finalRecallRound: recallBudget.mustFinalizeNext(),
+                      anchorText: executed.anchorText,
+                      resultText: executed.resultText,
+                      acc: recallAcc,
+                      toolUseId: recall.toolUseId,
+                      contentPosition,
+                      signal,
+                    };
+                    let continuationRetryBaseline = {
+                      transactionalEvents: transactionalEvents.length,
+                      transactionalBytes,
+                      retainedStateBytes,
+                      hiddenRecallBytes,
+                      outputIdentities: new Set(outputIdentities),
+                      referenceIdentities: new Set(referenceIdentities),
+                    };
+                    continuationFailureCategory = "follow_up_protocol";
+                    for (;;) {
+                      activeReader = follow.reader;
+                      let retryFollowUp = false;
+                      const contState = makeResponsesAccState();
+                      const contRecallIndices = new Set<number>();
+                      const contReferenceIndices = new Map<
+                        number,
+                        ReferenceLifecycle
+                      >();
+                      const contRecallInputs = new Map<
+                        number,
+                        RecallArguments
+                      >();
+                      const contPending: PendingResponsesRecall[] = [];
+                      const contCompletedRecallIndices = new Set<number>();
+                      const contUnresolvedToolIndices = new Set<number>();
+                      const contUnresolvedToolBytes = new Map<number, number>();
+                      const heldContinuationEvents: Array<{
+                        chunk: Uint8Array;
+                        candidateIndex?: number;
+                        transactional: boolean;
+                      }> = [];
+                      let deferredContinuationBytes = 0;
+                      const holdContinuation = (
+                        chunk: Uint8Array,
+                        candidateIndex?: number,
+                      ): void => {
+                        const transactional = candidateIndex === undefined;
+                        if (transactional) reserveTransactionalBytes(chunk);
+                        else {
+                          deferredContinuationBytes += chunk.byteLength;
+                          if (deferredContinuationBytes > maxDeferredBytes) {
+                            throw new RecallContinuationFailure(
+                              "resource_limit",
+                            );
+                          }
+                        }
+                        heldContinuationEvents.push({
+                          chunk,
+                          transactional,
+                          ...(candidateIndex !== undefined
+                            ? { candidateIndex }
+                            : {}),
+                        });
+                      };
+                      const discardContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        for (
+                          let index = heldContinuationEvents.length - 1;
+                          index >= 0;
+                          index--
+                        ) {
+                          if (
+                            heldContinuationEvents[index].candidateIndex ===
+                            outputIndex
+                          ) {
+                            if (!heldContinuationEvents[index].transactional) {
+                              deferredContinuationBytes -=
+                                heldContinuationEvents[index].chunk.byteLength;
+                            }
+                            heldContinuationEvents.splice(index, 1);
+                          }
+                        }
+                      };
+                      const promoteVisibleContinuationCandidate = (
+                        outputIndex: number,
+                      ): void => {
+                        for (const held of heldContinuationEvents) {
+                          if (held.candidateIndex !== outputIndex) continue;
+                          deferredContinuationBytes -= held.chunk.byteLength;
+                          reserveTransactionalBytes(held.chunk);
+                          held.transactional = true;
+                        }
+                      };
+                      const flushHeldContinuation = (): void => {
+                        for (const tent_index: 0,
           delta: text,
         }),
       ) +
@@ -10662,572 +11233,243 @@ export function streamResponsesRecallAware(
             maxFrames: maxSSEFrames,
             inactivityMs: sseInactivityMs,
             signal,
-            frameCounter,
-          })) {
-            resetKeepalive(); // upstream alive — reset inactivity timer
-
-            if (!data || data === "[DONE]") continue;
-            streamBytes += encoder.encode(
-              formatResponsesEvent(event, data),
-            ).byteLength;
-            if (streamBytes > maxStreamBytes) {
-              throw new SSEStreamLimitError(
-                "Responses stream exceeded byte limit",
-              );
-            }
-
-            principalFailureCategory = "principal_protocol";
-            let parsed: Record<string, unknown>;
-            try {
-              parsed = JSON.parse(data) as Record<string, unknown>;
-            } catch {
-              if (event.startsWith("response.")) {
-                throw new Error(`malformed JSON in Responses event ${event}`);
-              }
-              // Non-JSON keepalive/comment event — forward as-is.
-              if (event !== "message") {
-                const chunk = encoder.encode(formatResponsesEvent(event, data));
-                if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
-                  deferredBytes += chunk.byteLength;
-                  if (deferredBytes > maxDeferredBytes) {
-                    throw new SSEStreamLimitError(
-                      "recall stream exceeded deferred event limit",
-                    );
-                  }
-                  deferredEvents.push({ chunk });
-                } else {
-                  await enqueuePrincipal(chunk, otherToolSeen);
-                }
-              }
-              continue;
-            }
-            if (parsed.type !== event) {
-              throw new Error(`Responses payload type does not match ${event}`);
-            }
-            if (
-              (event === "response.output_item.added" ||
-                event === "response.output_item.done") &&
-              (parsed.item as Record<string, unknown> | undefined)?.type ===
-                "function_call" &&
-              (parsed.item as Record<string, unknown>).name === RECALL_TOOL_NAME
-            ) {
-              recallDetected = true;
-            }
-            const normalizationState = normalizeCodexEvent(
-              state,
-              event,
-              parsed,
-            );
-            validateResponseLifecycle(state, event, parsed);
-            seedImplicitCodexItem(state, normalizationState, event, parsed);
-
-            if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
-              continue;
-            }
-
-            const outputIndex = outputIndexForEvent(
-              event,
-              parsed,
-              state,
-              (index, item) => {
-                if (
-                  item.type !== "function_call" ||
-                  item.name !== RECALL_TOOL_NAME
-                ) {
-                  return;
-                }
-                recallDetected = true;
-                recallIndices.add(index);
-              },
-            );
-            if (outputIndex !== undefined) {
-              retainedStateBytes += encoder.encode(data).byteLength;
-              if (retainedStateBytes > maxRetainedStateBytes) {
-                throw new SSEStreamLimitError(
-                  "Responses retained state exceeded byte limit",
-                );
-              }
-              const implicitItem = state.rawItems.get(outputIndex);
-              if (
-                opts.validation === "codex" &&
-                event !== "response.output_item.added" &&
-                event !== "response.output_item.done" &&
-                implicitItem?.type === "function_call" &&
-                implicitItem.name === ""
-              ) {
-                unresolvedToolIndices.add(outputIndex);
-              }
-            }
-
-            let resolvingRecallTool = false;
-            let resolvingVisibleTool = false;
-            // Detect recall and unresolved sparse function-call identities.
-            if (
-              (event === "response.output_item.added" ||
-                event === "response.output_item.done") &&
-              outputIndex !== undefined
-            ) {
-              const item = parsed.item as Record<string, unknown> | undefined;
-              const isRecallCall =
-                item?.type === "function_call" && item?.name === "recall";
-              if (isRecallCall) {
-                recallDetected = true;
-                recallIndices.add(outputIndex);
-                resolvingRecallTool = true;
-              } else if (item?.type === "function_call") {
-                if (
-                  event === "response.output_item.added" &&
-                  opts.validation === "codex" &&
-                  item.name === ""
-                ) {
-                  unresolvedToolIndices.add(outputIndex);
-                } else {
-                  resolvingVisibleTool = true;
-                }
-              }
-            }
-
-            // Always accumulate into the internal state for postResponse.
-            applyResponsesEvent(state, event, parsed);
-            if (
-              event === "response.output_item.done" &&
-              outputIndex !== undefined
-            ) {
-              preserveStreamedReasoning(state, outputIndex);
-            }
-
-            let resolvedVisibleTool = false;
-            if (outputIndex !== undefined && resolvingRecallTool) {
-              discardDeferredCandidate(outputIndex);
-              promoteDeferredCandidate(outputIndex);
-              unresolvedToolIndices.delete(outputIndex);
-            } else if (outputIndex !== undefined && resolvingVisibleTool) {
-              resolvedVisibleTool = unresolvedToolIndices.delete(outputIndex);
-              unresolvedToolBytes.delete(outputIndex);
-              otherToolSeen = true;
-            }
-
-            if (
-              resolvedVisibleTool &&
-              recallIndices.size === 0 &&
-              unresolvedToolIndices.size === 0
-            ) {
-              for (const deferred of deferredEvents) {
-                if (!(await enqueuePrincipal(deferred.chunk, true))) break;
-              }
-              deferredEvents.length = 0;
-              deferredBytes = 0;
-            }
-
-            const isRecallEvent =
-              outputIndex !== undefined && recallIndices.has(outputIndex);
-            const isUnresolvedToolEvent =
-              outputIndex !== undefined &&
-              unresolvedToolIndices.has(outputIndex);
-
-            // Suppress all events belonging to a recall item, but still count
-            // them so malformed argument streams cannot grow without bound.
-            if (
-              (isRecallEvent || isUnresolvedToolEvent) &&
-              outputIndex !== undefined
-            ) {
-              const hiddenChunk = encoder.encode(
-                formatResponsesEvent(event, data),
-              );
-              const hiddenBytes = hiddenChunk.byteLength;
-              deferredBytes += hiddenBytes;
-              if (isRecallEvent) {
-                hiddenRecallBytes += hiddenBytes;
-              } else {
-                unresolvedToolBytes.set(
-                  outputIndex,
-                  (unresolvedToolBytes.get(outputIndex) ?? 0) + hiddenBytes,
-                );
-              }
-              if (
-                deferredBytes > maxDeferredBytes ||
-                hiddenRecallBytes > maxHiddenRecallBytes
-              ) {
-                throw new SSEStreamLimitError(
-                  "recall stream exceeded deferred event limit",
-                );
-              }
-              if (
-                event === "response.function_call_arguments.done" &&
-                isRecallEvent
-              ) {
-                parsedRecallInputs.set(
-                  outputIndex,
-                  parseRecallArguments(parsed.arguments),
-                );
-              }
-              if (isUnresolvedToolEvent && !isRecallEvent) {
-                deferredEvents.push({
-                  chunk: hiddenChunk,
-                  candidateIndex: outputIndex,
-                });
-              }
-              if (event === "response.output_item.done") {
-                if (isRecallEvent) {
-                  collectCompletedRecall(
-                    state,
-                    outputIndex,
-                    parsedRecallInputs,
-                    pendingRecalls,
-                    completedRecallIndices,
-                  );
-                }
-              }
-              // Don't forward recall-item events to the client.
-              continue;
-            }
-
-            // Terminal events: handle recall interception before forwarding.
-            if (
-              event === "response.completed" ||
-              event === "response.done" ||
-              event === "response.incomplete" ||
-              event === "response.failed"
-            ) {
-              principalReadFinished = true;
-              const terminalParsed = stripHiddenReferenceOutput(parsed);
-              const terminalResponse = terminalParsed.response as
-                | Record<string, unknown>
-                | undefined;
-              if (
-                Array.isArray(terminalResponse?.output) &&
-                terminalResponse.output.some(
-                  (item) =>
-                    item !== null &&
-                    typeof item === "object" &&
-                    !Array.isArray(item) &&
-                    (item as Record<string, unknown>).type ===
-                      "function_call" &&
-                    (item as Record<string, unknown>).name === RECALL_TOOL_NAME,
-                )
-              ) {
-                recallDetected = true;
-              }
-              if (opts.validation === "codex") {
-                assertTerminalOutputMatches(
-                  state,
-                  terminalParsed,
-                  (outputIndex, item) => {
-                    if (
-                      item.type !== "function_call" ||
-                      item.name !== RECALL_TOOL_NAME ||
-                      (!recallIndices.has(outputIndex) &&
-                        !unresolvedToolIndices.has(outputIndex))
-                    ) {
-                      return;
-                    }
-                    recallDetected = true;
-                    recallIndices.add(outputIndex);
-                    unresolvedToolIndices.delete(outputIndex);
-                    discardDeferredCandidate(outputIndex);
-                    promoteDeferredCandidate(outputIndex);
-                  },
-                  (outputIndex, item) => {
-                    if (item.type !== "function_call") return;
-                    if (item.name === RECALL_TOOL_NAME) {
-                      collectCompletedRecall(
-                        state,
-                        outputIndex,
-                        parsedRecallInputs,
-                        pendingRecalls,
-                        completedRecallIndices,
-                      );
-                    } else {
-                      unresolvedToolIndices.delete(outputIndex);
-                      unresolvedToolBytes.delete(outputIndex);
-                      otherToolSeen = true;
-                    }
-                  },
-                );
-                assertOutputLifecyclesComplete(state);
-              } else {
-                assertOutputLifecyclesComplete(state);
-                assertTerminalOutputMatches(state, terminalParsed);
-              }
-              assertReferenceLifecyclesComplete(referenceIndices);
-              assertRecallItemsCompleted(
-                state,
-                pendingRecalls.map((recall) => recall.outputIndex),
-              );
-              if (
-                principalTransportRetries > 0 &&
-                !principalRetrySucceededReported
-              ) {
-                principalRetrySucceededReported = true;
-                reportPrincipalTransportFailure({
-                  kind: "read",
-                  stage: "pre_output",
-                  outcome: "retry_succeeded",
-                });
-              }
-              if (pendingRecalls.length === 0) {
-                if (unresolvedToolIndices.size > 0) {
-                  throw new Error(
-                    "Responses terminal left sparse function identity unresolved",
-                  );
-                }
-                if (recallIndices.size > 0) {
-                  throw new Error(
-                    "recall stream ended before function arguments completed",
-                  );
-                }
-                for (const deferred of deferredEvents) {
-                  if (!(await enqueuePrincipal(deferred.chunk, otherToolSeen)))
-                    break;
-                }
-                deferredEvents.length = 0;
-                deferredBytes = 0;
-                // No recall — forward the terminal event verbatim.
-                const finalResponse = finalizeResponsesAcc(state);
-                if (
-                  !(await enqueuePrincipal(
-                    encoder.encode(
-                      formatResponsesEvent(
-                        event,
-                        terminalParsed === parsed
-                          ? data
-                          : JSON.stringify(terminalParsed),
-                      ),
-                    ),
-                    otherToolSeen,
-                    () => {
-                      terminalDelivered = true;
-                      finish(
-                        finalResponse,
-                        state.terminalEvent === "response.completed",
-                      );
-                    },
-                  ))
-                )
-                  break;
-                cancelAndReleaseReader(reader, signal.reason);
-                principalReader = null;
-                clearKeepalive();
-                safeClose();
-                return;
-              }
-              if (state.terminalEvent === "response.failed") {
-                throw new Error("recall principal returned response.failed");
-              }
-              if (state.terminalEvent === "response.incomplete") {
-                throw new Error(
-                  "incomplete recall principal cannot execute recall",
-                );
-              }
-
-              // Recall was detected. Drive the recall loop.
-              if (pendingRecalls.length > 1) {
-                throw new RecallContinuationFailure("parallel_recall");
-              }
-              const anchorTexts: string[] = [];
-              transactionBaseline = {
-                ...state,
-                usage: { ...state.usage },
-                items: new Map(state.items),
-                rawItems: new Map(state.rawItems),
-              };
-              transactionProviderUsage = { ...ZERO_USAGE };
-              // The principal Responses stream is part of the same request
-              // budget. Count it once before its first recall is admitted;
-              // continuation streams are accounted for after each follow-up.
-              recallBudget.recordUsage(state.usage);
-              const pendingCommits: Array<() => void> = [];
-              const transactionalEvents: Uint8Array[] = [];
-              let transactionalBytes = 0;
-              const reserveTransactionalBytes = (chunk: Uint8Array): void => {
-                transactionalBytes += chunk.byteLength;
-                if (transactionalBytes > maxTransactionalBytes) {
-                  throw new RecallContinuationFailure("resource_limit");
-                }
-              };
-              const queueTransactional = (chunk: Uint8Array): void => {
-                reserveTransactionalBytes(chunk);
-                transactionalEvents.push(chunk);
-              };
-              for (const recall of pendingRecalls) {
-                const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
-                reserveSyntheticIdentity(syntheticId);
-                const recallAcc = finalizeResponsesAcc(state);
-                const contentPosition = recallAcc.content.findIndex(
-                  (block) =>
-                    block.type === "tool_use" && block.id === recall.toolUseId,
-                );
-                if (contentPosition < 0) {
-                  throw new RecallContinuationFailure("missing_recall_block");
-                }
-                let executed: Awaited<ReturnType<typeof settleRecall>>;
-                try {
-                  executed = await settleRecall({
-                    query: recall.query,
-                    scope: recall.scope,
-                    id: recall.id,
-                    ids: recall.ids,
-                    detailOffset: recall.detailOffset,
-                    detailLimit: recall.detailLimit,
-                    outputIndex: recall.outputIndex,
-                    toolUseId: recall.toolUseId,
-                    contentPosition,
-                    acc: recallAcc,
-                    signal,
-                  });
-                } catch (error) {
-                  if (signal.aborted) throw error;
-                  if (error instanceof RecallContinuationFailure) throw error;
-                  throw new RecallContinuationFailure("recall_execution");
-                }
-                anchorTexts.push(executed.anchorText);
-                if (executed.commit) pendingCommits.push(executed.commit);
-                if (executed.rollback) {
-                  transactionRollbacks.push(executed.rollback);
-                }
-                const anchorChunk = encoder.encode(
-                  emitTextItem(
-                    recall.outputIndex,
-                    executed.anchorText,
-                    syntheticId,
-                  ),
-                );
-                if (otherToolSeen) {
-                  state.items.set(recall.outputIndex, {
-                    type: "text",
-                    id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
-                    text: executed.anchorText,
-                  });
-                  queueTransactional(anchorChunk);
-                  for (const deferred of deferredEvents) {
-                    queueTransactional(deferred.chunk);
-                  }
-                } else {
-                  queueTransactional(anchorChunk);
-                  for (const deferred of deferredEvents) {
-                    queueTransactional(deferred.chunk);
-                  }
-                }
-                deferredEvents.length = 0;
-                deferredBytes = 0;
-
-                if (
-                  !otherToolSeen &&
-                  recall === pendingRecalls[pendingRecalls.length - 1]
-                ) {
-                  // Recall-only: run the streaming follow-up and pipe the
-                  // continuation inline before the final completion.
-                  try {
-                    continuationAttempted = true;
-                    continuationFailureCategory = "follow_up_setup";
-                    signal.throwIfAborted();
-                    let follow = await settleFollowUp({
-                      finalRecallRound: recallBudget.mustFinalizeNext(),
-                      anchorText: executed.anchorText,
-                      resultText: executed.resultText,
-                      acc: recallAcc,
-                      toolUseId: recall.toolUseId,
-                      contentPosition,
-                      signal,
-                    });
-                    let recallContinuationTransportRetries = 0;
-                    let continuationFollowUpInput: Parameters<
-                      typeof opts.runFollowUp
-                    >[0] = {
-                      finalRecallRound: recallBudget.mustFinalizeNext(),
-                      anchorText: executed.anchorText,
-                      resultText: executed.resultText,
-                      acc: recallAcc,
-                      toolUseId: recall.toolUseId,
-                      contentPosition,
-                      signal,
-                    };
-                    let continuationRetryBaseline = {
-                      transactionalEvents: transactionalEvents.length,
-                      transactionalBytes,
-                      retainedStateBytes,
-                      hiddenRecallBytes,
-                      outputIdentities: new Set(outputIdentities),
-                      referenceIdentities: new Set(referenceIdentities),
-                    };
-                    continuationFailureCategory = "follow_up_protocol";
-                    for (;;) {
-                      activeReader = follow.reader;
-                      let retryFollowUp = false;
-                      const contState = makeResponsesAccState();
-                      const contRecallIndices = new Set<number>();
-                      const contReferenceIndices = new Map<
-                        number,
-                        ReferenceLifecycle
-                      >();
-                      const contRecallInputs = new Map<
-                        number,
-                        RecallArguments
-                      >();
-                      const contPending: PendingResponsesRecall[] = [];
-                      const contCompletedRecallIndices = new Set<number>();
-                      const contUnresolvedToolIndices = new Set<number>();
-                      const contUnresolvedToolBytes = new Map<number, number>();
-                      const heldContinuationEvents: Array<{
-                        chunk: Uint8Array;
-                        candidateIndex?: number;
-                        transactional: boolean;
-                      }> = [];
-                      let deferredContinuationBytes = 0;
-                      const holdContinuation = (
-                        chunk: Uint8Array,
-                        candidateIndex?: number,
-                      ): void => {
-                        const transactional = candidateIndex === undefined;
-                        if (transactional) reserveTransactionalBytes(chunk);
-                        else {
-                          deferredContinuationBytes += chunk.byteLength;
-                          if (deferredContinuationBytes > maxDeferredBytes) {
-                            throw new RecallContinuationFailure(
-                              "resource_limit",
-                            );
-                          }
-                        }
-                        heldContinuationEvents.push({
-                          chunk,
-                          transactional,
-                          ...(candidateIndex !== undefined
-                            ? { candidateIndex }
-                            : {}),
-                        });
-                      };
-                      const discardContinuationCandidate = (
-                        outputIndex: number,
-                      ): void => {
-                        for (
-                          let index = heldContinuationEvents.length - 1;
-                          index >= 0;
-                          index--
-                        ) {
-                          if (
-                            heldContinuationEvents[index].candidateIndex ===
-                            outputIndex
-                          ) {
-                            if (!heldContinuationEvents[index].transactional) {
-                              deferredContinuationBytes -=
-                                heldContinuationEvents[index].chunk.byteLength;
+            frameCo         if (ce === "response.output_item.done") {
+                              if (isContRecall) {
+                                collectCompletedRecall(
+                                  contState,
+                                  ci,
+                                  contRecallInputs,
+                                  contPending,
+                                  contCompletedRecallIndices,
+                                );
+                              }
                             }
-                            heldContinuationEvents.splice(index, 1);
+                            continue;
+                          }
+                          if (
+                            ce === "response.completed" ||
+                            ce === "response.done" ||
+                            ce === "response.incomplete" ||
+                            ce === "response.failed"
+                          ) {
+                            const terminalParsed =
+                              stripHiddenReferenceOutput(cparsed);
+                            const incompleteRecallIndices = new Set(
+                              [...contRecallIndices].filter(
+                                (outputIndex) =>
+                                  !contCompletedRecallIndices.has(outputIndex),
+                              ),
+                            );
+                            if (opts.validation === "codex") {
+                              assertTerminalOutputMatches(
+                                contState,
+                                terminalParsed,
+                                (outputIndex, item) => {
+                                  if (
+                                    item.type !== "function_call" ||
+                                    item.name !== RECALL_TOOL_NAME
+                                  ) {
+                                    return;
+                                  }
+                                  contRecallIndices.add(outputIndex);
+                                  contUnresolvedToolIndices.delete(outputIndex);
+                                  discardContinuationCandidate(outputIndex);
+                                  promoteContinuationCandidate(outputIndex);
+                                },
+                                (outputIndex, item) => {
+                                  if (item.type !== "function_call") return;
+                                  if (item.name === RECALL_TOOL_NAME) {
+                                    collectCompletedRecall(
+                                      contState,
+                                      outputIndex,
+                                      contRecallInputs,
+                                      contPending,
+                                      contCompletedRecallIndices,
+                                    );
+                                  } else {
+                                    contUnresolvedToolIndices.delete(
+                                      outputIndex,
+                                    );
+                                    contUnresolvedToolBytes.delete(outputIndex);
+                                    contOtherTool = true;
+                                  }
+                                },
+                              );
+                              assertOutputLifecyclesComplete(
+                                contState,
+                                incompleteRecallIndices,
+                              );
+                            } else {
+                              assertOutputLifecyclesComplete(
+                                contState,
+                                incompleteRecallIndices,
+                              );
+                              assertTerminalOutputMatches(
+                                contState,
+                                terminalParsed,
+                              );
+                            }
+                            assertReferenceLifecyclesComplete(
+                              contReferenceIndices,
+                            );
+                            assertRecallItemsCompleted(
+                              contState,
+                              contPending.map((recall) => recall.outputIndex),
+                            );
+                            if (contUnresolvedToolIndices.size > 0) {
+                              throw new Error(
+                                "Responses continuation left sparse function identity unresolved",
+                              );
+                            }
+                            if (contRecallIndices.size === 0) {
+                              flushHeldContinuation();
+                            }
+                            continuationCompleted =
+                              contState.terminalEvent !== undefined;
+                            continuationFailed =
+                              contState.terminalEvent === "response.failed";
+                            break;
+                          }
+                          if (
+                            ce === "response.created" ||
+                            ce === "response.in_progress"
+                          ) {
+                            continue;
+                          }
+                          if (ci !== undefined) {
+                            const shiftedIndex = shiftedOutputIndex(
+                              ci,
+                              contIndex,
+                            );
+                            const projected = projectReasoningEvent(
+                              ce,
+                              cparsed,
+                              shiftedIndex,
+                            );
+                            const shifted = encoder.encode(
+                              formatResponsesEvent(
+                                ce,
+                                JSON.stringify(
+                                  projected ?? {
+                                    ...cparsed,
+                                    output_index: shiftedIndex,
+                                  },
+                                ),
+                              ),
+                            );
+                            if (
+                              contRecallIndices.size > 0 ||
+                              contUnresolvedToolIndices.size > 0
+                            ) {
+                              holdContinuation(shifted);
+                            } else queueTransactional(shifted);
+                          } else if (ce !== "message") {
+                            const chunk = encoder.encode(
+                              formatResponsesEvent(ce, cd),
+                            );
+                            if (
+                              contRecallIndices.size > 0 ||
+                              contUnresolvedToolIndices.size > 0
+                            ) {
+                              holdContinuation(chunk);
+                            } else queueTransactional(chunk);
                           }
                         }
-                      };
-                      const promoteVisibleContinuationCandidate = (
-                        outputIndex: number,
-                      ): void => {
-                        for (const held of heldContinuationEvents) {
-                          if (held.candidateIndex !== outputIndex) continue;
-                          deferredContinuationBytes -= held.chunk.byteLength;
-                          reserveTransactionalBytes(held.chunk);
-                          held.transactional = true;
+                      } catch (error) {
+                        if (
+                          error instanceof SSEStreamLimitError ||
+                          frameCounter.count > maxSSEFrames ||
+                          (error instanceof Error &&
+                            /^SSE stream exceeded \d+ frame limit$/.test(
+                              error.message,
+                            ))
+                        ) {
+                          throw new RecallContinuationFailure("resource_limit");
                         }
+                        if (
+                          error instanceof SSEStreamTransportError &&
+                          !continuationFollowUpInput.finalRecallRound &&
+                          recallContinuationTransportRetries <
+                            maxRecallContinuationTransportRetries
+                        ) {
+                          recallContinuationTransportRetries++;
+                          transactionalEvents.length =
+                            continuationRetryBaseline.transactionalEvents;
+                          transactionalBytes =
+                            continuationRetryBaseline.transactionalBytes;
+                          retainedStateBytes =
+                            continuationRetryBaseline.retainedStateBytes;
+                          hiddenRecallBytes =
+                            continuationRetryBaseline.hiddenRecallBytes;
+                          outputIdentities.clear();
+                          for (const identity of continuationRetryBaseline.outputIdentities) {
+                            outputIdentities.add(identity);
+                          }
+                          referenceIdentities.clear();
+                          for (const identity of continuationRetryBaseline.referenceIdentities) {
+                            referenceIdentities.add(identity);
+                          }
+                          log.warn(
+                            `retrying recall continuation after ${error.kind} transport failure${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+                          );
+                          retryFollowUp = true;
+                        } else {
+                          if (error instanceof SSEStreamTransportError) {
+                            continuationFailureCategory = "follow_up_transport";
+                          }
+                          throw error instanceof RecallContinuationFailure
+                            ? error
+                            : new RecallContinuationFailure(
+                                continuationFailureCategory ?? "unexpected",
+                              );
+                        }
+                      } finally {
+                        cancelAndReleaseReader(follow.reader, signal.reason);
+                      }
+                      if (retryFollowUp) {
+                        continuationFailureCategory = "follow_up_setup";
+                        follow = await settleFollowUp(
+                          continuationFollowUpInput,
+                        );
+                        continuationFailureCategory = "follow_up_protocol";
+                        continue;
+                      }
+                      const mergeContinuation = (): void => {
+                        // Every continuation identity is admitted through the
+                        // request-wide identity indexes before it reaches this
+                        // transactional merge. Re-scanning both maps here
+                        // creates a quadratic cross-product without adding a
+                        // second invariant.
+                        for (const [idx, item] of contState.items) {
+                          state.items.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
+                        }
+                        for (const [idx, item] of contState.rawItems) {
+                          state.rawItems.set(
+                            shiftedOutputIndex(idx, contIndex),
+                            item,
+                          );
+                        }
+                        mergeUsage(state.usage, contState.usage);
                       };
-                      const flushHeldContinuation = (): void => {
-                        for (const held of heldContinuationEvents) {
+                      assertUsageMergeable(
+                        transactionProviderUsage,
+                        contState.usage,
+                      );
+                      mergeUsage(transactionProviderUsage, contState.usage);
+                      recallBudget.recordUsage(contState.usage);
+                      if (
+                        continuationFailed ||
+                        (continuationFollowUpInput.finalRecallRound &&
+                          contState.terminalEvent === "response.incomplete")
+                      ) {
+                        throw new RecallContinuationFailure("follow_up_failed");
+                      }
+                      if (
+                        !continuationCompleted ||
+     held of heldContinuationEvents) {
                           if (held.transactional) {
                             transactionalEvents.push(held.chunk);
                           } else {
@@ -11475,243 +11717,7 @@ export function streamResponsesRecallAware(
                             if (isContUnresolvedTool && !isContRecall) {
                               holdContinuation(hiddenChunk, ci);
                             }
-                            if (ce === "response.output_item.done") {
-                              if (isContRecall) {
-                                collectCompletedRecall(
-                                  contState,
-                                  ci,
-                                  contRecallInputs,
-                                  contPending,
-                                  contCompletedRecallIndices,
-                                );
-                              }
-                            }
-                            continue;
-                          }
-                          if (
-                            ce === "response.completed" ||
-                            ce === "response.done" ||
-                            ce === "response.incomplete" ||
-                            ce === "response.failed"
-                          ) {
-                            const terminalParsed =
-                              stripHiddenReferenceOutput(cparsed);
-                            const incompleteRecallIndices = new Set(
-                              [...contRecallIndices].filter(
-                                (outputIndex) =>
-                                  !contCompletedRecallIndices.has(outputIndex),
-                              ),
-                            );
-                            if (opts.validation === "codex") {
-                              assertTerminalOutputMatches(
-                                contState,
-                                terminalParsed,
-                                (outputIndex, item) => {
-                                  if (
-                                    item.type !== "function_call" ||
-                                    item.name !== RECALL_TOOL_NAME
-                                  ) {
-                                    return;
-                                  }
-                                  contRecallIndices.add(outputIndex);
-                                  contUnresolvedToolIndices.delete(outputIndex);
-                                  discardContinuationCandidate(outputIndex);
-                                  promoteContinuationCandidate(outputIndex);
-                                },
-                                (outputIndex, item) => {
-                                  if (item.type !== "function_call") return;
-                                  if (item.name === RECALL_TOOL_NAME) {
-                                    collectCompletedRecall(
-                                      contState,
-                                      outputIndex,
-                                      contRecallInputs,
-                                      contPending,
-                                      contCompletedRecallIndices,
-                                    );
-                                  } else {
-                                    contUnresolvedToolIndices.delete(
-                                      outputIndex,
-                                    );
-                                    contUnresolvedToolBytes.delete(outputIndex);
-                                    contOtherTool = true;
-                                  }
-                                },
-                              );
-                              assertOutputLifecyclesComplete(
-                                contState,
-                                incompleteRecallIndices,
-                              );
-                            } else {
-                              assertOutputLifecyclesComplete(
-                                contState,
-                                incompleteRecallIndices,
-                              );
-                              assertTerminalOutputMatches(
-                                contState,
-                                terminalParsed,
-                              );
-                            }
-                            assertReferenceLifecyclesComplete(
-                              contReferenceIndices,
-                            );
-                            assertRecallItemsCompleted(
-                              contState,
-                              contPending.map((recall) => recall.outputIndex),
-                            );
-                            if (contUnresolvedToolIndices.size > 0) {
-                              throw new Error(
-                                "Responses continuation left sparse function identity unresolved",
-                              );
-                            }
-                            if (contRecallIndices.size === 0) {
-                              flushHeldContinuation();
-                            }
-                            continuationCompleted =
-                              contState.terminalEvent !== undefined;
-                            continuationFailed =
-                              contState.terminalEvent === "response.failed";
-                            break;
-                          }
-                          if (
-                            ce === "response.created" ||
-                            ce === "response.in_progress"
-                          ) {
-                            continue;
-                          }
-                          if (ci !== undefined) {
-                            const shiftedIndex = shiftedOutputIndex(
-                              ci,
-                              contIndex,
-                            );
-                            const projected = projectReasoningEvent(
-                              ce,
-                              cparsed,
-                              shiftedIndex,
-                            );
-                            const shifted = encoder.encode(
-                              formatResponsesEvent(
-                                ce,
-                                JSON.stringify(
-                                  projected ?? {
-                                    ...cparsed,
-                                    output_index: shiftedIndex,
-                                  },
-                                ),
-                              ),
-                            );
-                            if (
-                              contRecallIndices.size > 0 ||
-                              contUnresolvedToolIndices.size > 0
-                            ) {
-                              holdContinuation(shifted);
-                            } else queueTransactional(shifted);
-                          } else if (ce !== "message") {
-                            const chunk = encoder.encode(
-                              formatResponsesEvent(ce, cd),
-                            );
-                            if (
-                              contRecallIndices.size > 0 ||
-                              contUnresolvedToolIndices.size > 0
-                            ) {
-                              holdContinuation(chunk);
-                            } else queueTransactional(chunk);
-                          }
-                        }
-                      } catch (error) {
-                        if (
-                          error instanceof SSEStreamLimitError ||
-                          frameCounter.count > maxSSEFrames ||
-                          (error instanceof Error &&
-                            /^SSE stream exceeded \d+ frame limit$/.test(
-                              error.message,
-                            ))
-                        ) {
-                          throw new RecallContinuationFailure("resource_limit");
-                        }
-                        if (
-                          error instanceof SSEStreamTransportError &&
-                          !continuationFollowUpInput.finalRecallRound &&
-                          recallContinuationTransportRetries <
-                            maxRecallContinuationTransportRetries
-                        ) {
-                          recallContinuationTransportRetries++;
-                          transactionalEvents.length =
-                            continuationRetryBaseline.transactionalEvents;
-                          transactionalBytes =
-                            continuationRetryBaseline.transactionalBytes;
-                          retainedStateBytes =
-                            continuationRetryBaseline.retainedStateBytes;
-                          hiddenRecallBytes =
-                            continuationRetryBaseline.hiddenRecallBytes;
-                          outputIdentities.clear();
-                          for (const identity of continuationRetryBaseline.outputIdentities) {
-                            outputIdentities.add(identity);
-                          }
-                          referenceIdentities.clear();
-                          for (const identity of continuationRetryBaseline.referenceIdentities) {
-                            referenceIdentities.add(identity);
-                          }
-                          log.warn(
-                            `retrying recall continuation after ${error.kind} transport failure${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
-                          );
-                          retryFollowUp = true;
-                        } else {
-                          if (error instanceof SSEStreamTransportError) {
-                            continuationFailureCategory = "follow_up_transport";
-                          }
-                          throw error instanceof RecallContinuationFailure
-                            ? error
-                            : new RecallContinuationFailure(
-                                continuationFailureCategory ?? "unexpected",
-                              );
-                        }
-                      } finally {
-                        cancelAndReleaseReader(follow.reader, signal.reason);
-                      }
-                      if (retryFollowUp) {
-                        continuationFailureCategory = "follow_up_setup";
-                        follow = await settleFollowUp(
-                          continuationFollowUpInput,
-                        );
-                        continuationFailureCategory = "follow_up_protocol";
-                        continue;
-                      }
-                      const mergeContinuation = (): void => {
-                        // Every continuation identity is admitted through the
-                        // request-wide identity indexes before it reaches this
-                        // transactional merge. Re-scanning both maps here
-                        // creates a quadratic cross-product without adding a
-                        // second invariant.
-                        for (const [idx, item] of contState.items) {
-                          state.items.set(
-                            shiftedOutputIndex(idx, contIndex),
-                            item,
-                          );
-                        }
-                        for (const [idx, item] of contState.rawItems) {
-                          state.rawItems.set(
-                            shiftedOutputIndex(idx, contIndex),
-                            item,
-                          );
-                        }
-                        mergeUsage(state.usage, contState.usage);
-                      };
-                      assertUsageMergeable(
-                        transactionProviderUsage,
-                        contState.usage,
-                      );
-                      mergeUsage(transactionProviderUsage, contState.usage);
-                      recallBudget.recordUsage(contState.usage);
-                      if (
-                        continuationFailed ||
-                        (continuationFollowUpInput.finalRecallRound &&
-                          contState.terminalEvent === "response.incomplete")
-                      ) {
-                        throw new RecallContinuationFailure("follow_up_failed");
-                      }
-                      if (
-                        !continuationCompleted ||
-                        contState.rawItems.size === 0
+                                      contState.rawItems.size === 0
                       ) {
                         throw new RecallContinuationFailure(
                           "follow_up_missing_output",
@@ -12659,1525 +12665,7 @@ function assertValidNonStreamCompletion(
           }
           const part = rawPart as Record<string, unknown>;
           if (
-            (part.type === "output_text" && typeof part.text !== "string") ||
-            (part.type === "refusal" && typeof part.refusal !== "string") ||
-            (part.type !== "output_text" && part.type !== "refusal")
-          ) {
-            throw new Error("upstream Responses request did not complete");
-          }
-        }
-      } else if (item.type === "function_call") {
-        const validItemStatus =
-          item.status === "completed" ||
-          item.status === "failed" ||
-          (status === "incomplete" && item.status === "incomplete");
-        if (
-          typeof item.call_id !== "string" ||
-          !item.call_id ||
-          seenIdentities.has(item.call_id) ||
-          typeof item.name !== "string" ||
-          !item.name ||
-          typeof item.arguments !== "string" ||
-          !validItemStatus
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        seenIdentities.add(item.call_id);
-      } else if (item.type === "reasoning") {
-        const validItemStatus =
-          item.status === undefined ||
-          item.status === "completed" ||
-          (status === "incomplete" && item.status === "incomplete");
-        if (!validItemStatus) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        for (const [field, partType] of [
-          ["summary", "summary_text"],
-          ["content", "reasoning_text"],
-        ] as const) {
-          const parts = item[field];
-          if (parts === undefined) continue;
-          if (!Array.isArray(parts)) {
-            throw new Error("upstream Responses request did not complete");
-          }
-          for (const rawPart of parts) {
-            if (
-              !rawPart ||
-              typeof rawPart !== "object" ||
-              Array.isArray(rawPart) ||
-              (rawPart as Record<string, unknown>).type !== partType ||
-              typeof (rawPart as Record<string, unknown>).text !== "string"
-            ) {
-              throw new Error("upstream Responses request did not complete");
-            }
-          }
-        }
-        if (
-          item.encrypted_content !== undefined &&
-          item.encrypted_content !== null &&
-          typeof item.encrypted_content !== "string"
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-      } else if (item.type === "item_reference") {
-        // A standalone non-stream response has no streamed item lifecycle to
-        // resolve this reference against; accepting it would silently erase
-        // provider output during normalization.
-        throw new Error("upstream Responses request did not complete");
-      } else {
-        if (
-          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
-        ) {
-          throw new Error("upstream Responses request did not complete");
-        }
-      }
-    }
-    if (status === "incomplete") {
-      const details = json.incomplete_details;
-      if (
-        details !== undefined &&
-        details !== null &&
-        (typeof details !== "object" ||
-          Array.isArray(details) ||
-          typeof (details as Record<string, unknown>).reason !== "string")
-      ) {
-        throw new Error("upstream Responses request did not complete");
-      }
-      const reason =
-        details && typeof details === "object" && !Array.isArray(details)
-          ? (details as Record<string, unknown>).reason
-          : undefined;
-      if (
-        reason !== undefined &&
-        reason !== "max_output_tokens" &&
-        reason !== "content_filter"
-      ) {
-        throw new Error("upstream Responses request did not complete");
-      }
-    }
-    return;
-  }
-
-  if (protocol === "gemini") {
-    const candidates = json.candidates;
-    const first = Array.isArray(candidates) ? candidates[0] : undefined;
-    const promptFeedback = json.promptFeedback;
-    const blockReason =
-      promptFeedback &&
-      typeof promptFeedback === "object" &&
-      !Array.isArray(promptFeedback)
-        ? (promptFeedback as Record<string, unknown>).blockReason
-        : undefined;
-    if (
-      (!first ||
-        typeof first !== "object" ||
-        Array.isArray(first) ||
-        typeof (first as Record<string, unknown>).finishReason !== "string") &&
-      typeof blockReason !== "string"
-    ) {
-      throw new Error("upstream Gemini request did not complete");
-    }
-    return;
-  }
-
-  if (
-    json.type !== "message" ||
-    json.role !== "assistant" ||
-    typeof json.id !== "string" ||
-    typeof json.model !== "string" ||
-    !Array.isArray(json.content) ||
-    typeof json.stop_reason !== "string" ||
-    !json.usage ||
-    typeof json.usage !== "object" ||
-    Array.isArray(json.usage)
-  ) {
-    throw new Error("upstream Anthropic request did not complete");
-  }
-}
-
-// Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON
-const accumulateAnthropicNonStreamJSON = parseAnthropicResponseJSON;
-
-export function accumulateOpenAINonStreamJSON(
-  json: Record<string, unknown>,
-): GatewayResponse {
-  const content: GatewayContentBlock[] = [];
-  if (json.choices !== undefined && !Array.isArray(json.choices)) {
-    throw new Error("malformed OpenAI response choice");
-  }
-  const choices = json.choices as Array<Record<string, unknown>> | undefined;
-  const logicalChoiceIndices = new Set<number>();
-  for (let position = 0; position < (choices?.length ?? 0); position++) {
-    const choice = choices?.[position];
-    if (!choice || typeof choice !== "object" || Array.isArray(choice)) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    const logicalIndex =
-      choice.index === undefined ? position : (choice.index as number);
-    if (
-      !Number.isSafeInteger(logicalIndex) ||
-      logicalIndex < 0 ||
-      logicalChoiceIndices.has(logicalIndex)
-    ) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    logicalChoiceIndices.add(logicalIndex);
-  }
-  for (const choice of choices ?? []) {
-    const choiceToolIdentities = new Set<string>();
-    if (
-      !choice ||
-      typeof choice !== "object" ||
-      Array.isArray(choice) ||
-      (choice.index !== undefined &&
-        (!Number.isSafeInteger(choice.index) ||
-          (choice.index as number) < 0)) ||
-      (choice.finish_reason !== undefined &&
-        choice.finish_reason !== null &&
-        typeof choice.finish_reason !== "string") ||
-      !choice.message ||
-      typeof choice.message !== "object" ||
-      Array.isArray(choice.message)
-    ) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    const candidateMessage = choice.message as Record<string, unknown>;
-    if (
-      (candidateMessage.content !== undefined &&
-        candidateMessage.content !== null &&
-        typeof candidateMessage.content !== "string") ||
-      (candidateMessage.role !== undefined &&
-        typeof candidateMessage.role !== "string")
-    ) {
-      throw new Error("malformed OpenAI response choice");
-    }
-    const candidateCalls = candidateMessage?.tool_calls;
-    if (candidateCalls === undefined) continue;
-    if (!Array.isArray(candidateCalls)) {
-      throw new Error("malformed OpenAI response tool identity");
-    }
-    for (const call of candidateCalls) {
-      if (!call || typeof call !== "object" || Array.isArray(call)) {
-        throw new Error("malformed OpenAI response choice");
-      }
-      const typedCall = call as Record<string, unknown>;
-      const fn = typedCall.function;
-      if (
-        !fn ||
-        typeof fn !== "object" ||
-        Array.isArray(fn) ||
-        typeof (fn as Record<string, unknown>).name !== "string" ||
-        typeof (fn as Record<string, unknown>).arguments !== "string"
-      ) {
-        throw new Error("malformed OpenAI response choice");
-      }
-      const id = asString(typedCall.id);
-      if (!id || choiceToolIdentities.has(id)) {
-        throw new Error("malformed OpenAI response tool identity");
-      }
-      choiceToolIdentities.add(id);
-    }
-  }
-  const firstChoice = choices?.[0];
-  const message = firstChoice?.message as Record<string, unknown> | undefined;
-
-  if (message) {
-    const textContent = message.content as string | undefined;
-    if (textContent) {
-      content.push({ type: "text", text: textContent });
-    }
-    const toolCalls = message.tool_calls as
-      | Array<Record<string, unknown>>
-      | undefined;
-    if (toolCalls) {
-      const toolIdentities = new Set<string>();
-      for (const tc of toolCalls) {
-        const fn = tc.function as Record<string, unknown> | undefined;
-        let input: unknown = {};
-        if (typeof fn?.arguments === "string") {
-          try {
-            input = JSON.parse(fn.arguments);
-          } catch {
-            input = fn.arguments;
-          }
-        }
-        const id = asString(tc.id);
-        if (!id || toolIdentities.has(id)) {
-          throw new Error("malformed OpenAI response tool identity");
-        }
-        toolIdentities.add(id);
-        content.push({
-          type: "tool_use",
-          id,
-          name: asString(fn?.name),
-          input,
-        });
-      }
-    }
-  }
-
-  // Map OpenAI finish_reason to gateway stop reason
-  const finishReason = firstChoice?.finish_reason as string | undefined;
-  let stopReason = "end_turn";
-  if (finishReason === "stop") stopReason = "end_turn";
-  else if (finishReason === "length") stopReason = "max_tokens";
-  else if (finishReason === "tool_calls") stopReason = "tool_use";
-
-  const usage = validateOpenAIUsage(
-    json.usage,
-    "malformed OpenAI response usage",
-  );
-  const promptTokensDetails = usage?.prompt_tokens_details as
-    | Record<string, number>
-    | undefined;
-
-  return {
-    id: asString(json.id),
-    model: asString(json.model),
-    content,
-    stopReason,
-    usage: {
-      // prompt_tokens is inclusive of cache reads/writes; convert to the
-      // gateway's disjoint convention so cache tokens aren't double-counted.
-      inputTokens: disjointOpenAIInputTokens(
-        usage?.prompt_tokens as number | undefined,
-        promptTokensDetails?.cached_tokens,
-        promptTokensDetails?.cache_write_tokens,
-      ),
-      outputTokens: (usage?.completion_tokens as number) ?? 0,
-      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
-      // OpenRouter reports cache-write tokens (Anthropic explicit caching) in
-      // prompt_tokens_details.cache_write_tokens. OpenAI proper doesn't report
-      // writes separately (leaves it undefined) — see the OpenRouter usage
-      // accounting docs. Left undefined when absent so it never masquerades
-      // as a real zero-write in analytics/cost tracking.
-      cacheCreationInputTokens: promptTokensDetails?.cache_write_tokens,
-    },
-  };
-}
-
-export function accumulateResponsesNonStreamJSON(
-  json: Record<string, unknown>,
-): GatewayResponse {
-  const content: GatewayContentBlock[] = [];
-  const output = json.output as Array<Record<string, unknown>> | undefined;
-  const replayableOutput = output?.filter(
-    (item) => item.type !== "item_reference",
-  );
-
-  if (replayableOutput) {
-    const identities = new Set<string>();
-    for (const item of replayableOutput) {
-      const itemId = asString(item.id);
-      if (!itemId || identities.has(itemId)) {
-        throw new Error("malformed Responses response item identity");
-      }
-      identities.add(itemId);
-      if (item.type === "message") {
-        const msgContent = item.content as
-          | Array<Record<string, unknown>>
-          | undefined;
-        if (msgContent) {
-          for (const part of msgContent) {
-            if (part.type === "output_text") {
-              content.push({ type: "text", text: asString(part.text) });
-            } else if (
-              part.type === "refusal" &&
-              typeof part.refusal === "string"
-            ) {
-              // Other client protocols emit normalized content. Keep the raw
-              // refusal too for lossless native Responses output and replay.
-              content.push({ type: "text", text: part.refusal });
-            }
-          }
-        }
-      } else if (item.type === "function_call") {
-        let input: unknown = {};
-        if (typeof item.arguments === "string") {
-          try {
-            input = JSON.parse(item.arguments);
-          } catch {
-            input = item.arguments;
-          }
-        }
-        const id = asString(item.call_id ?? item.id);
-        if (!id || identities.has(id)) {
-          throw new Error("malformed Responses response tool identity");
-        }
-        identities.add(id);
-        content.push({
-          type: "tool_use",
-          id,
-          name: asString(item.name),
-          input,
-        });
-      }
-    }
-  }
-
-  // Map Responses API status to gateway stop reason
-  const status = json.status as string | undefined;
-  let stopReason = "end_turn";
-  if (status === "incomplete") {
-    const details = json.incomplete_details;
-    const reason =
-      details && typeof details === "object" && !Array.isArray(details)
-        ? (details as Record<string, unknown>).reason
-        : undefined;
-    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
-  }
-  if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
-    stopReason = "tool_use";
-  }
-
-  const usage = validateResponsesUsage(
-    json.usage,
-    "malformed Responses response usage",
-  );
-  // Responses API reports cache details under `input_tokens_details`; fall back
-  // to `prompt_tokens_details` (Chat Completions shape) for resilience across
-  // OpenAI-compatible providers.
-  const inputTokensDetails = (usage?.input_tokens_details ??
-    usage?.prompt_tokens_details) as Record<string, number> | undefined;
-
-  return {
-    id: asString(json.id),
-    model: asString(json.model),
-    content,
-    rawOutputItems: replayableOutput,
-    stopReason,
-    usage: {
-      inputTokens: disjointOpenAIInputTokens(
-        usage?.input_tokens as number | undefined,
-        inputTokensDetails?.cached_tokens,
-        inputTokensDetails?.cache_write_tokens,
-      ),
-      outputTokens: (usage?.output_tokens as number) ?? 0,
-      cacheReadInputTokens: inputTokensDetails?.cached_tokens,
-      cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,
-    },
-  };
-}
-
-/** @internal Exported for end-to-end replay tests. */
-export function responsesProvenanceContent(
-  response: GatewayResponse,
-  replacements: ReadonlyMap<string, string> = new Map(),
-  stopBeforeToolUseId?: string,
-): GatewayContentBlock[] {
-  if (!response.rawOutputItems?.length) {
-    const content: GatewayContentBlock[] = [];
-    for (const block of response.content) {
-      if (block.type === "tool_use") {
-        if (block.id === stopBeforeToolUseId) break;
-        const replacement = replacements.get(block.id);
-        content.push(replacement ? { type: "text", text: replacement } : block);
-      } else {
-        content.push(block);
-      }
-    }
-    return content;
-  }
-
-  const content: GatewayContentBlock[] = [];
-  const textBlocks = response.content.filter(
-    (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
-      block.type === "text",
-  );
-  // Streaming refusals remain opaque; buffered refusals also have normalized
-  // text. Only the latter consume a text slot when replaying their raw part.
-  const opaqueMessageIds = new Set(
-    response.content.flatMap((block) =>
-      block.type === "opaque" &&
-      block.responsesItem === true &&
-      block.raw.type === "message" &&
-      typeof block.raw.id === "string"
-        ? [block.raw.id]
-        : [],
-    ),
-  );
-  let textIndex = 0;
-  for (const raw of response.rawOutputItems) {
-    if (raw.type === "item_reference") continue;
-    if (raw.type === "reasoning") {
-      content.push({ type: "opaque", raw, responsesItem: true });
-      continue;
-    }
-    if (raw.type === "message") {
-      const parts = Array.isArray(raw.content)
-        ? (raw.content as Array<Record<string, unknown>>)
-        : [];
-      for (const part of parts) {
-        content.push({
-          type: "opaque",
-          raw: { ...raw, content: [part] },
-          responsesItem: true,
-        });
-        if (
-          (part.type === "output_text" && typeof part.text === "string") ||
-          (part.type === "refusal" &&
-            typeof part.refusal === "string" &&
-            typeof raw.id === "string" &&
-            !opaqueMessageIds.has(raw.id))
-        ) {
-          textIndex++;
-        }
-      }
-      if (parts.length === 0 && textBlocks[textIndex]) {
-        content.push(textBlocks[textIndex++]);
-      }
-      continue;
-    }
-    if (raw.type === "function_call") {
-      const toolUseId = asString(raw.call_id ?? raw.id);
-      if (toolUseId === stopBeforeToolUseId) break;
-      const replacement = replacements.get(toolUseId);
-      if (replacement) {
-        content.push({ type: "text", text: replacement });
-        continue;
-      }
-      const block = response.content.find(
-        (candidate): candidate is GatewayToolUseBlock =>
-          candidate.type === "tool_use" && candidate.id === toolUseId,
-      );
-      if (block) content.push(block);
-      continue;
-    }
-    content.push({ type: "opaque", raw, responsesItem: true });
-  }
-  return content;
-}
-
-/** @internal Build the canonical anchor hash used by every Responses path. */
-export function responsesAnchorContext(
-  clientMessages: GatewayMessage[],
-  visibleContent: GatewayContentBlock[],
-  response: GatewayResponse,
-  stopBeforeToolUseId: string,
-): string {
-  return recallAnchorContext(clientMessages, clientMessages.length, [
-    ...visibleContent,
-    ...responsesProvenanceContent(response, new Map(), stopBeforeToolUseId),
-  ]);
-}
-
-/**
- * Convert a GatewayResponse to a non-streaming HTTP Response.
- * Scales usage fields to prevent client auto-compaction.
- */
-function nonStreamHttpResponse(
-  resp: GatewayResponse,
-  clientProtocol?: GatewayRequest["protocol"],
-  clientStream?: boolean,
-  extraHeaders?: Record<string, string>,
-  /** Whether the originating request opted into the 1M window via `context-1m`
-   *  beta. Defaults to `false` so the cap is clamped to the 200K-window value —
-   *  the safe, compaction-proof default for callers that don't thread it. */
-  longContext = false,
-): Response {
-  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
-  const usage = resp.usage ?? ZERO_USAGE;
-
-  // Scale usage so the client's token total stays below auto-compact threshold.
-  // postResponse() has already consumed the real values for calibration/bustRate.
-  // Cap is per-model AND per client-metered-window: a genuine 1M request (with
-  // the context-1m beta) isn't throttled to the 200K cap, but a 1M-capable model
-  // the client meters against 200K (no beta) IS clamped so it can't cross the
-  // client's ~167K auto-compact threshold (#910 regression; MiniMax-M3).
-  const scaledUsage = scaleUsageForClient(
-    {
-      input_tokens: usage.inputTokens,
-      output_tokens: usage.outputTokens,
-      cache_read_input_tokens: usage.cacheReadInputTokens,
-      cache_creation_input_tokens: usage.cacheCreationInputTokens,
-    },
-    maxReportedUsageForModelID(resp.model, longContext),
-  );
-  const scaledResp: GatewayResponse = {
-    ...resp,
-    usage: {
-      inputTokens: scaledUsage.input_tokens,
-      outputTokens: scaledUsage.output_tokens,
-      cacheReadInputTokens: scaledUsage.cache_read_input_tokens,
-      cacheCreationInputTokens: scaledUsage.cache_creation_input_tokens,
-    },
-  };
-
-  // Return the response in the client's native wire format so server handlers
-  // can pass through without re-translation. This prevents the class of bugs
-  // where the stream flag is forgotten during server-side format conversion.
-  let clientResp: Response;
-  if (clientProtocol === "openai") {
-    clientResp = buildOpenAIResponse(scaledResp, clientStream ?? false);
-  } else if (clientProtocol === "openai-responses") {
-    clientResp = buildOpenAIResponsesResponse(
-      scaledResp,
-      clientStream ?? false,
-    );
-  } else if (clientProtocol === "gemini") {
-    clientResp = buildGeminiResponse(scaledResp, clientStream ?? false);
-  } else if (clientStream) {
-    // Anthropic (or unspecified) client that requested `stream: true`. The
-    // upstream response was BUFFERED (non-Anthropic upstreams — OpenAI /
-    // Responses / Gemini — are accumulated, not streamed through), so we
-    // synthesize a complete Anthropic SSE stream from it. Returning the
-    // non-streaming JSON body below would leave the client's SDK waiting
-    // forever for an SSE stream it opened the request for — the github-copilot
-    // + Claude-model "response never reaches the UI" bug (#1052). The other
-    // client protocols already honor `clientStream` via their builders above.
-    clientResp = streamHttpResponse(scaledResp);
-  } else {
-    // Anthropic or unspecified — default non-streaming JSON format.
-    const body = buildAnthropicNonStreamResponse(scaledResp);
-    clientResp = new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  if (extraHeaders) {
-    for (const [k, v] of Object.entries(extraHeaders)) {
-      clientResp.headers.set(k, v);
-    }
-  }
-  return clientResp;
-}
-
-/**
- * Convert a GatewayResponse to a streaming SSE HTTP Response.
- */
-function streamHttpResponse(resp: GatewayResponse): Response {
-  // Synthesize a complete Anthropic SSE stream from the fully-accumulated
-  // response, preserving ALL blocks (text + tool_use + thinking + opaque). This
-  // is used both for synthetic responses (slash commands) and — critically —
-  // when re-emitting a BUFFERED non-Anthropic upstream (OpenAI/Responses/Gemini)
-  // to an Anthropic client that requested `stream: true`. A text-only synthesis
-  // would silently drop tool calls, breaking coding agents (#1052).
-  const sseBody = buildSSEResponse(resp);
-
-  return new Response(sseBody, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    },
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Post-response processing
-// ---------------------------------------------------------------------------
-
-/**
- * Analyze this turn's cache behavior and feed the result into BOTH the
- * telemetry sinks (span attributes, Sentry metric, durable bust counter) and
- * the consecutive-bust tracker (recordCacheUsage).
- *
- * Extracted from postResponse() as a testable seam (issue #928). The wire that
- * matters for correctness is: analyzeCacheTurn -> categorizeBust ->
- * recordCacheUsage(..., bustCause). Threading the categorized cause is what
- * lets recordCacheUsage exempt prefix-rewrite busts (caused by Lore's own
- * meta-distillation) from consecutiveBusts, the same way it exempts idle-resume
- * re-warms — neither is user-context growth. That wire was previously only
- * reachable through the full pipeline; this seam makes it directly unit-testable
- * (a turn that categorizes as prefix-rewrite must NOT increment the counter).
- *
- * Side effects (unchanged from the inlined version):
- *   - mutates sessionState.cacheAnalytics (via analyzeCacheTurn),
- *     sessionState.lastTurnWasIdle (consumed -> false) and
- *     sessionState.coldCacheWindow (rolling 20-turn cold-turn history),
- *   - enriches genAiSpan with cache-divergence attributes and ends it (the span
- *     is finalized here, before recordCacheUsage, exactly as in the original
- *     inlined block),
- *   - increments the per-session consecutive-bust counter in @loreai/core.
- *
- * @returns the categorized bust cause, or `undefined` when there is no request
- *          body to compare (the rare no-body path — the bust tracker then falls
- *          back to its legacy "count it" behavior).
- */
-export function recordCacheTurnUsage(
-  sessionState: SessionState,
-  usage: GatewayUsage,
-  model: string,
-  projectPath: string,
-  /** Serialized JSON body sent upstream — for cache prefix comparison. */
-  requestBody?: string,
-  /** Active gen_ai.chat span to enrich with divergence diagnostics. */
-  genAiSpan?: Sentry.Span,
-  endSpan?: () => void,
-): CacheBustCause | undefined {
-  // Capture the idle-resume flag up front: it is consumed (set false) inside
-  // the block below but is still needed afterwards by recordCacheUsage so a
-  // cold-cache re-warm is not counted as a consecutive bust.
-  const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
-  // bustCause is computed inside the requestBody block (so we know we have a
-  // body to analyze); left undefined when the body is missing so the
-  // recordCacheUsage call below falls through to the legacy "count it"
-  // behavior on the rare no-body path.
-  let bustCause: CacheBustCause | undefined;
-  if (requestBody) {
-    // Read the unified cache strategy so the cache-analytics warn path can
-    // skip the dramatic-drop alert for cool-* sessions (those strategies
-    // explicitly chose to let the prefix go cold; the alert is just noise).
-    // Result is `undefined` for non-confident strategies — analyzeCacheTurn
-    // falls back to the existing noisy behavior in that case (conservative).
-    const econResult = getCacheStrategy(sessionState.sessionID);
-    const cacheStrategy = econResult?.result.confident
-      ? econResult.result.strategy
-      : undefined;
-    const turnAnalysis = analyzeCacheTurn(
-      sessionState.cacheAnalytics,
-      requestBody,
-      usage,
-      sessionState.sessionID,
-      sessionState.messageCount,
-      cacheStrategy,
-    );
-    bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
-    if (genAiSpan) {
-      setCacheAnalyticsAttributes(
-        genAiSpan,
-        turnAnalysis,
-        bustCause,
-        turnAnalysis.prevSnippet,
-        turnAnalysis.currSnippet,
-      );
-    }
-    emitCacheBustMetric(
-      bustCause,
-      usage.cacheCreationInputTokens ?? 0,
-      model,
-      turnAnalysis.relocatable,
-      // Distinguish a free cold-boundary prefix-rewrite (rode along with an
-      // idle-resume write that was happening anyway) from an avoidable warm one
-      // (meta-distillation leaking onto a live cache) — see emitCacheBustMetric.
-      turnWasIdleResume,
-    );
-    // Persist a durable counter so the issue #791 "is system[0] dynamic
-    // content a material cache-bust cause?" gate survives gateway restarts
-    // (the in-memory analytics reset every restart). Passive telemetry only.
-    recordCacheBustObservation({
-      projectID: ensureProject(projectPath),
-      cause: bustCause,
-      relocatable: turnAnalysis.relocatable,
-      writeTokens: usage.cacheCreationInputTokens ?? 0,
-    });
-    sessionState.lastTurnWasIdle = false; // consumed
-
-    // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
-    const cacheRead = usage.cacheReadInputTokens ?? 0;
-    const cacheCreation = usage.cacheCreationInputTokens ?? 0;
-    const isColdTurn = cacheRead === 0 && cacheCreation > 0;
-    if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
-    sessionState.coldCacheWindow.push(isColdTurn);
-    if (sessionState.coldCacheWindow.length > 20) {
-      sessionState.coldCacheWindow.shift();
-    }
-  }
-
-  // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
-  // Ended here (before recordCacheUsage, matching the original inlined order)
-  // so the extraction is ordering-identical: recordCacheUsage is pure
-  // session-state bookkeeping that never touches the span, and ending the span
-  // first means a throw in recordCacheUsage can't leak an unfinished span.
-  if (genAiSpan) {
-    if (endSpan) endSpan();
-    else genAiSpan.end();
-  }
-
-  // --- Consecutive bust tracking for tier-based decisions ---
-  // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
-  // legitimately expired during the user's pause) is not counted as a
-  // consecutive bust — that produced false "unsustainable" warnings on bursty
-  // sessions whose turns are spaced beyond the conversation cache TTL.
-  // Also pass the categorized bust cause so prefix-rewrite busts (caused by
-  // Lore's own meta-distillation) are held the same way idle-resume busts
-  // are — these are not user-context growth.
-  recordCacheUsage(
-    usage.cacheCreationInputTokens ?? 0,
-    usage.cacheReadInputTokens ?? 0,
-    usage.inputTokens ?? 0,
-    sessionState.sessionID,
-    turnWasIdleResume,
-    bustCause,
-  );
-
-  return bustCause;
-}
-
-function accountConversationUsage(
-  usage: GatewayUsage,
-  model: string,
-  sessionID: string,
-  resolvedConversationTTL: "5m" | "1h" | undefined,
-): AnthropicUsage {
-  const usageForSentry: AnthropicUsage = {
-    input_tokens: usage.inputTokens,
-    output_tokens: usage.outputTokens,
-    cache_read_input_tokens: usage.cacheReadInputTokens,
-    cache_creation_input_tokens: usage.cacheCreationInputTokens,
-  };
-  setSentryCacheContext(usage);
-  emitCostMetric(
-    model,
-    usageForSentry,
-    "conversation",
-    resolvedConversationTTL,
-  );
-  recordConversationCost(
-    sessionID,
-    model,
-    usageForSentry,
-    resolvedConversationTTL,
-  );
-  return usageForSentry;
-}
-
-/**
- * Run after a successful response: calibrate, store temporal messages,
- * and schedule background work (distillation, curation).
- */
-function postResponseForTenant(
-  req: GatewayRequest,
-  resp: GatewayResponse,
-  sessionState: SessionState,
-  config: GatewayConfig,
-  temporalInput: TurnTemporalInput,
-  /** Serialized JSON body sent upstream — for cache prefix comparison. */
-  requestBody?: string,
-  /** Active gen_ai.chat span to finalize with usage attributes. */
-  genAiSpan?: Sentry.Span,
-  /** Storage policy captured when this turn resolved its session. */
-  suppressTemporalStorage = false,
-  endSpan?: () => void,
-): boolean {
-  postResponseStartObserver?.();
-  const { sessionID, projectPath } = sessionState;
-
-  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
-  const usage = resp.usage ?? ZERO_USAGE;
-
-  try {
-    confirmKnownSessionHeader(req, sessionState, config);
-
-    // --- Calibrate overhead from real token counts ---
-    const actualInput =
-      (usage.inputTokens ?? 0) +
-      (usage.cacheReadInputTokens ?? 0) +
-      (usage.cacheCreationInputTokens ?? 0);
-    calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
-
-    // --- Sentry cache context + cost metric ---
-    const usageForSentry = accountConversationUsage(
-      usage,
-      resp.model,
-      sessionID,
-      sessionState.resolvedConversationTTL,
-    );
-    if (genAiSpan) {
-      setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
-    }
-
-    // --- Cache analytics + bust cause telemetry + consecutive-bust tracking ---
-    // Extracted into recordCacheTurnUsage() so the analyze -> categorize ->
-    // recordCacheUsage wire (esp. threading the bust cause so prefix-rewrite
-    // busts are exempted from consecutiveBusts) is unit-testable without driving
-    // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
-    // own recordCacheUsage call) so the extraction is ordering-identical to the
-    // original inlined block. See issue #928.
-    if (suppressTemporalStorage) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-      sessionState.cacheAnalytics.lastNormalizedBody = null;
-      sessionState.cacheAnalytics.lastRequestBodyLength = 0;
-    }
-    recordCacheTurnUsage(
-      sessionState,
-      usage,
-      resp.model,
-      projectPath,
-      suppressTemporalStorage ? undefined : requestBody,
-      genAiSpan,
-      endSpan,
-    );
-    // Admin credentials are authorized at dispatch time and never retained in
-    // session snapshots. The idle warmer still receives gateway-global extras,
-    // so prevent it from replaying a cached body to a client-selected endpoint
-    // that is outside every configured trusted base.
-    if (
-      Object.keys(config.upstreamExtraHeaders).length > 0 &&
-      sessionState.lastUpstream &&
-      Object.keys(
-        extraHeadersForUpstream(config, sessionState.lastUpstream.url),
-      ).length === 0
-    ) {
-      sessionState.cacheAnalytics.lastRequestBody = null;
-    }
-
-    // Capture previous stop reason before it's overwritten below (line ~1667).
-    // Used to detect tool-use continuation turns for gap recording filtering.
-    const prevStopReason = sessionState.lastStopReason;
-
-    // --- Temporal storage & session-state updates ---
-    // Use the original user result snapshot captured before gradient. No
-    // historical conversion or tool resolution is needed after the response.
-
-    // Skip temporal storage in amnesia mode or when x-lore-no-store is set.
-    // The session still gets full Lore processing (LTM, recall, gradient)
-    // but doesn't write to memory. Amnesia is session-scoped (toggle via
-    // /lore:amnesia:on|off); no-store is per-request (header-based).
-    // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
-    // intentionally dropped — the seed row never exists, so the later
-    // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
-    const noStore = suppressTemporalStorage;
-
-    // Persist (and tool-trace) this turn's messages, batched into one savepoint.
-    // Extracted seam — see storeTurnTemporal (#1084).
-    storeTurnTemporal({
-      temporalInput,
-      assistantContentBlocks: resp.content,
-      usage,
-      model: resp.model,
-      projectPath,
-      sessionID,
-      noStore,
-    });
-
-    // Update session state (persisted in the batched save after messageCount update)
-    sessionState.turnsSinceCuration =
-      (sessionState.turnsSinceCuration ?? 0) + 1;
-
-    // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
-    const hasToolUse = resp.content.some((b) => b.type === "tool_use");
-    if (resp.stopReason === "end_turn" && !hasToolUse) {
-      sessionState.consecutiveTextOnlyTurns =
-        (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
-    } else {
-      sessionState.consecutiveTextOnlyTurns = 0;
-    }
-
-    // --- Output tracking for dynamic max_tokens sizing ---
-    sessionState.lastStopReason = resp.stopReason;
-    sessionState.lastInputTokens =
-      (usage.inputTokens ?? 0) +
-      (usage.cacheReadInputTokens ?? 0) +
-      (usage.cacheCreationInputTokens ?? 0);
-    const outputTokens = usage.outputTokens;
-    if (outputTokens > 0) {
-      const EMA_ALPHA = 0.3;
-      sessionState.outputTokensEMA =
-        sessionState.outputTokensEMA == null
-          ? outputTokens
-          : Math.round(
-              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
-                outputTokens * EMA_ALPHA,
-            );
-    }
-
-    // --- Cache warming: record inter-turn gap + track warmup hits ---
-    const now = Date.now();
-
-    sessionState.lastResponseTime = now;
-
-    // (A) Record inter-turn gap — only for genuine user-initiated turns.
-    // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
-    // sub-second gaps that represent automated round-trips, not human think
-    // time. Recording these would skew the survival model toward very short
-    // return times.
-    const isToolUseContinuation = prevStopReason === "tool_use";
-    if (!isToolUseContinuation) {
-      if (sessionState.lastUserTurnTime > 0) {
-        const gap = now - sessionState.lastUserTurnTime;
-        recordGap(getSessionHistogram(sessionState), gap);
-        recordGlobalGap(sessionState.projectPath, gap);
-      }
-      // Update baseline for next gap measurement — only after recording.
-      sessionState.lastUserTurnTime = now;
-    }
-
-    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
-    // A user returning after a warmup is a hit regardless of whether it's
-    // a tool-use continuation.
-    // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
-    // is attributed to a warmup hit, skip TTL savings to avoid double-counting
-    // the same cacheReadTokens in both buckets.
-    if (sessionState.lastRequestTime > 0) {
-      let warmupHitThisTurn = false;
-
-      // Track warmup hit: user returned after THIS session warmed the cache.
-      // creditWarmupHit consumes the warmup (clears lastWarmupAt + refresh
-      // tokens), guards against phantom savings (Bug A: only credits when this
-      // session paid for the warmup), and returns the pro-rata savings
-      // (Bug B: min(returning-turn cache read, prefix the warmup refreshed)).
-      if (sessionState.warmup?.lastWarmupAt) {
-        const ttlMs =
-          sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
-        const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
-        const outcome = creditWarmupHit(
-          sessionState.warmup,
-          sinceWarmup,
-          ttlMs,
-          usage.cacheReadInputTokens ?? 0,
-        );
-        if (outcome.hit) {
-          warmupHitThisTurn = true;
-          emitWarmupHitMetric(
-            sessionState.lastUpstream?.model ?? req.model,
-            sessionState.resolvedConversationTTL ?? "5m",
-          );
-          // Record counterfactual savings = the pro-rata credit
-          // min(returning-turn cache read, prefix the warmup refreshed) —
-          // without warming these reads would have been a full cache write.
-          if (outcome.creditedTokens > 0) {
-            recordWarmupHit(
-              sessionID,
-              req.model,
-              outcome.creditedTokens,
-              sessionState.resolvedConversationTTL ?? "5m",
-            );
-          }
-          log.info(
-            `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
-              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup ` +
-              `(credited=${outcome.creditedTokens} tokens)`,
-          );
-        }
-      }
-
-      // Track 1h TTL savings: if gap > 5m but we still got cache reads,
-      // the 1h TTL saved a full cache write. Skip if already counted as
-      // a warmup hit to avoid double-counting the same tokens.
-      if (!warmupHitThisTurn) {
-        const requestGap = now - sessionState.lastRequestTime;
-        if (requestGap > 300_000) {
-          const cacheRead = usage.cacheReadInputTokens ?? 0;
-          if (cacheRead > 0) {
-            recordTTLSavings(sessionID, req.model, cacheRead);
-          }
-        }
-      }
-    }
-    // Reset warming state if session was marked dead or had active warming.
-    // Dead flag is cleared so the next break gets a fresh ROI analysis.
-    // warmupCount is reset so the break-even cap starts from 0 on the next break.
-    if (sessionState.warmup) {
-      if (sessionState.warmup.disabled) {
-        sessionState.warmup.disabled = false;
-        log.info(
-          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
-        );
-      }
-      if (
-        sessionState.warmup.warmupCount > 0 &&
-        !sessionState.warmup.forceKeepWarm
-      ) {
-        sessionState.warmup.warmupCount = 0;
-      }
-    }
-
-    // --- Shadow context tracking for counterfactual compaction estimation ---
-    // Track how large the context *would* be without Lore's distillation
-    // compressing it. When the shadow counter crosses the auto-compact
-    // threshold, record a counterfactual compaction event.
-    updateShadowContext(
-      sessionID,
-      actualInput,
-      usage.outputTokens ?? 0,
-      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
-      req.model,
-      sessionState.resolvedConversationTTL,
-      requestEnablesLongContext(req),
-    );
-
-    // Mark session dirty for periodic flush (gradient + warming + costs).
-    // The 30s idle tick will persist state only for dirty sessions.
-    sessionState._dirty = true;
-
-    // --- Commit-triggered curation ---
-    // Git commits are natural task boundaries where decisions crystallize.
-    // When a commit is detected in tool outputs, force curation to trigger
-    // on this turn by bumping turnsSinceCuration to the threshold.
-    if (
-      loreConfig().knowledge.enabled &&
-      loreConfig().curator.onIdle &&
-      containsGitCommit(req)
-    ) {
-      const modelInputCost =
-        getModelEntrySync(
-          getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
-        ).cost?.input ?? 3;
-      const curationMultiplier =
-        modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
-      const effectiveAfterTurns =
-        loreConfig().curator.afterTurns * curationMultiplier;
-      if (sessionState.turnsSinceCuration < effectiveAfterTurns) {
-        log.info(
-          `commit detected in session ${sessionID.slice(0, 16)} — triggering curation`,
-        );
-        sessionState.turnsSinceCuration = effectiveAfterTurns;
-      }
-    }
-
-    // --- Schedule background work (fire-and-forget) ---
-    saveSessionTracking(sessionID, {
-      messageCount: sessionState.messageCount,
-      turnsSinceCuration: sessionState.turnsSinceCuration,
-      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
-      projectPath: sessionState.projectPath || null,
-      projectPathProvisional: sessionState.projectPathProvisional === true,
-      ...(sessionState.compactionAnomalyPending
-        ? { compactionAnomalyPending: true }
-        : {}),
-    });
-    if (!sessionState.headerSessionId) {
-      const result = learnHeaders(
-        sessionState.candidateHeaders,
-        req.rawHeaders,
-      );
-      sessionState.candidateHeaders = result.updatedCandidates;
-    }
-    if (!noStore) {
-      scheduleBackgroundWork(sessionState, config);
-    }
-    return true;
-  } catch (e) {
-    log.error("post-response processing failed:", e);
-    return false;
-  } finally {
-    endSpan?.();
-  }
-}
-
-/** Record validated provider usage without publishing successful-turn state. */
-function accountUnsuccessfulResponse(
-  resp: GatewayResponse,
-  sessionID: string,
-  resolvedConversationTTL: "5m" | "1h" | undefined,
-  genAiSpan: Sentry.Span | undefined,
-  endSpan: () => void,
-  markDirty?: () => void,
-): void {
-  const usage = resp.usage ?? ZERO_USAGE;
-  const hasUsage = Object.values(usage).some(
-    (tokens) => typeof tokens === "number" && tokens > 0,
-  );
-  try {
-    if (hasUsage) {
-      markDirty?.();
-      const usageForSentry = accountConversationUsage(
-        usage,
-        resp.model,
-        sessionID,
-        resolvedConversationTTL,
-      );
-      if (genAiSpan) {
-        setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
-      }
-    }
-  } finally {
-    genAiSpan?.setStatus({
-      code: 2,
-      message: "upstream response did not complete",
-    });
-    endSpan();
-  }
-}
-
-function conversationTTLForAccounting(
-  sessionID: string,
-): "5m" | "1h" | undefined {
-  const liveTTL = sessions.get(sessionID)?.resolvedConversationTTL;
-  if (liveTTL === "5m" || liveTTL === "1h") return liveTTL;
-  const persistedTTL = loadSessionTracking(sessionID)?.resolvedConversationTTL;
-  return persistedTTL === "5m" || persistedTTL === "1h"
-    ? persistedTTL
-    : undefined;
-}
-
-function postResponse(
-  req: GatewayRequest,
-  resp: GatewayResponse,
-  sessionState: SessionState,
-  config: GatewayConfig,
-  temporalInput: TurnTemporalInput,
-  requestBody?: string,
-  genAiSpan?: Sentry.Span,
-  suppressTemporalStorage = false,
-  endSpan?: () => void,
-): boolean {
-  return withTenant(sessionState.storageTenantId ?? "", () =>
-    postResponseForTenant(
-      req,
-      resp,
-      sessionState,
-      config,
-      temporalInput,
-      requestBody,
-      genAiSpan,
-      suppressTemporalStorage,
-      endSpan,
-    ),
-  );
-}
-
-/**
- * Schedule background distillation and curation (fire-and-forget).
- */
-/**
- * Full background chains, including post-completion state writes. Reset
- * awaits these alongside the limiter's drain before swapping the DB (#885).
- * Session ownership also covers global-queue wait time before a core limiter
- * is entered, so idle eviction cannot discard credentials under queued work.
- */
-const inFlightBackground = new Set<Promise<unknown>>();
-function trackBackground(p: Promise<unknown>, state?: SessionState): void {
-  if (state) state.backgroundWorkCount = (state.backgroundWorkCount ?? 0) + 1;
-  inFlightBackground.add(p);
-  const settled = () => {
-    inFlightBackground.delete(p);
-    if (state) state.backgroundWorkCount!--;
-  };
-  void p.then(settled, settled);
-}
-
-function scheduleBackgroundWorkForTenant(
-  sessionState: SessionState,
-  config: GatewayConfig,
-): void {
-  const { sessionID, projectPath } = sessionState;
-  const signal = AbortSignal.any([
-    pipelineGenerationAbort.signal,
-    sessionLifecycleSignal(sessionID),
-  ]);
-
-  // Skip background work when the session's auth credential is stale and no
-  // fresh fallback is available — worker LLM calls would just 401.
-  // Auth refreshes when the next client request arrives via setSessionAuth().
-  if (isAuthStale(sessionID) && !resolveAuth(sessionID)) return;
-
-  const llm = getLLMClient(config);
-  const cfg = loreConfig();
-  const model = getWorkerModel(sessionState.lastUpstream);
-  // Provider the worker will call — used to scope the circuit-breaker check so
-  // a 429 from a DIFFERENT provider doesn't pause this session's background
-  // work. Undefined when the worker model can't be resolved (→ global breaker).
-  const workerProviderID = model?.providerID;
-
-  // Provider-aware auth guard: if the resolved worker model's provider has no
-  // usable credential for this session, every background worker call to it just
-  // returns no-auth and degrades worker-health each tick. This mirrors the
-  // worker's own resolution (resolveAuth with the model's provider, incl. the
-  // cross-provider fail-closed). The provider-agnostic guard above misses this:
-  // a session can hold a credential under provider A while lastUpstream points
-  // at provider B (e.g. a turn declared x-lore-provider:anthropic but stored no
-  // anthropic key). Skip instead of flooding — getSessionAuth emits the
-  // store-key/lookup-key mismatch warning once, then we stay quiet, and work
-  // resumes automatically once a turn uses a provider we hold a credential for.
-  // Gates urgent distillation too: a no-auth call can never succeed. #894
-  // Exempt the dedicated-worker-key setup (LORE_WORKER_API_KEY): there the
-  // worker uses its own credential and bypasses resolveAuth (getWorkerAuth,
-  // ~1697), so a session-auth miss must NOT disable background work — that
-  // cross-provider config (e.g. MiniMax workers, Anthropic sessions) is exactly
-  // when model.providerID legitimately differs from the session's credential.
-  if (
-    !config.workerApiKey &&
-    model &&
-    !hasWorkerSessionAuth(
-      sessionID,
-      model.providerID,
-      matchingProviderSnapshot(sessionState, model.providerID)?.protocol,
-    )
-  )
-    return;
-
-  // When the OAuth account is near quota exhaustion, skip non-urgent
-  // background work to preserve remaining entitlement for user-facing turns.
-  // Urgent distillation is exempt (it unblocks the next user turn).
-  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
-
-  // Worker circuit breaker: when background workers have been failing for a
-  // sustained period, stop hammering the upstream every turn — allow only a
-  // periodic probe so a recovered upstream is detected without burning
-  // thousands of futile calls (Sentry: runaway lore-distill failure counts).
-  // Urgent distillation below is intentionally exempt — it unblocks the user.
-  // Also throttle sessions soft-paused by an upstream credit/billing state
-  // (HTTP 402) — retrying the failing provider every turn just wastes calls;
-  // a probe is allowed periodically (see isWorkerCreditPaused) to detect a
-  // credit top-up.
-  const workerThrottled =
-    !allowWorkerProbe(sessionID) || isWorkerCreditPaused(sessionID);
-
-  // Check if urgent distillation is needed (gradient flagged it OR a
-  // compaction anomaly was detected on the previous turn). Mark urgent: true
-  // so these bypass the batch queue — the gradient is in overflow (or the
-  // client just compacted) and needs the result before the next user turn.
-  // Note: urgent distillation is NOT gated by isBackgroundPaused() — a
-  // degraded/overflowing context window for up to 10 minutes (max breaker
-  // duration) is worse than one API call with its own tight retry budget
-  // (MAX_RETRIES_URGENT = 2, 1-4s backoff).
-  const urgentFromGradient = needsUrgentDistillation(sessionState.sessionID);
-  const urgentFromCompaction = sessionState.compactionAnomalyPending === true;
-  if (urgentFromCompaction) {
-    // Consume the one-shot flag immediately so the next non-compaction
-    // turn doesn't re-trigger urgent distillation. Persisted with the
-    // session-tracking save below.
-    sessionState.compactionAnomalyPending = false;
-    saveSessionTracking(sessionID, { compactionAnomalyPending: false });
-  }
-  if (urgentFromGradient || urgentFromCompaction) {
-    trackBackground(
-      withTenant(sessionState.storageTenantId ?? "", () =>
-        distillation
-          .run({
-            llm,
-            projectPath,
-            sessionID,
-            model,
-            force: true,
-            urgent: true,
-            callType: "direct",
-            signal,
-            workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-            // Never run meta-distillation while the conversation cache is warm.
-            // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
-            // synthetic distilled prefix at messages[0/1] on the next turn. That
-            // early-message rewrite is a real prompt-cache bust. Idle-time meta in
-            // idle.ts remains enabled because the cache is already cold there.
-            skipMeta: true,
-          })
-          .catch((e) => log.error("background distillation failed:", e)),
-      ),
-      sessionState,
-    );
-  } else if (
-    !isBackgroundPaused(workerProviderID) &&
-    !quotaPaused &&
-    !workerThrottled
-  ) {
-    // Incremental distillation and curation are non-urgent — skip when the
-    // circuit breaker is active to reduce API pressure. These are also gated
-    // by runBackground() which checks isBackgroundPaused(), but the early
-    // check here avoids unnecessary token counting and model lookups.
-    // Idle-time work in idle.ts also uses runBackground(), so under sustained
-    // rate pressure everything defers until the breaker naturally expires.
-    //
-    // Coalesce: if a distillation is already in-flight or queued for THIS
-    // session (distillLimiter is per-session p-limit(1)), skip scheduling
-    // another. The in-flight run will pick up the newly-arrived tokens on
-    // its next segment pass, and queuing duplicates just starves the global
-    // p-limit(2) background slot — distillations getting blocked behind
-    // each other in the global queue.
-    if (!distillLimiter.isBusy(sessionID)) {
-      const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
-      if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
-        log.info(
-          `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
-        );
-        trackBackground(
-          runBackground(
-            () =>
-              withTenant(sessionState.storageTenantId ?? "", () =>
-                distillation.run({
-                  llm,
-                  projectPath,
-                  sessionID,
-                  model,
-                  skipMeta: true,
-                  callType: batchQueueEnabled ? "batch" : "direct",
-                  workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-                  signal,
-                  // #627 Phase 1: stamp the session's gitHead on every distilled row.
-                  metadata: buildSessionMetadata(sessionState.gitHead),
-                }),
-              ),
-            `incremental-distill session=${sessionID.slice(0, 16)}`,
-            workerProviderID,
-          ).catch((e) => log.error("background distillation failed:", e)),
-          sessionState,
-        );
-      }
-    }
-  }
-
-  // Curation: run periodically when the knowledge system is enabled.
-  // Cost-aware frequency: on expensive models, curate less often to reduce
-  // the probability of LTM changes that bust the cache. Each LTM change
-  // that exceeds the diff pinning threshold invalidates tools + messages.
-  // Also gated by circuit breaker — curation is never urgent.
-  // Quota-paused accounts skip curation too (non-urgent background work).
-  // Worker-throttled sessions (sustained worker failure) skip it as well.
-  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
-    return;
-
-  const modelInputCost =
-    getModelEntrySync(
-      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
-    ).cost?.input ?? 3;
-  const curationMultiplier =
-    modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
-  const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
-
-  // Coalesce: skip scheduling curation when one is already scheduled, queued,
-  // or in-flight for THIS session. Without this, `turnsSinceCuration` stays
-  // at/above the threshold (it is only reset in the `.then()` after a run
-  // completes — see below), so every subsequent turn re-schedules curation,
-  // flooding the background queue with duplicates that are shed at queue-full.
-  //
-  // Two signals are required:
-  //  - `curationScheduled` (synchronous): set BEFORE runBackground() and
-  //    cleared in .finally(). `curatorLimiter` is only entered when the task
-  //    actually executes inside curator.run(), so under a saturated global
-  //    queue `isBusy` stays false between scheduling and execution — this flag
-  //    closes that window deterministically.
-  //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
-  //    idle-path curation (idle.ts) which doesn't set curationScheduled.
-  // Mirrors the incremental-distill guard above and the idle-path guard.
-  // In-flight (turn-based) curation is OFF by default: changing the knowledge
-  // base mid-conversation rewrites system[2] (context-bound LTM) and busts the
-  // prompt cache for the rest of a large session. Curation still runs on idle
-  // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
-  // keeps accumulating during the active conversation and fires on the next idle.
-  if (
-    shouldRunInFlightCuration({
-      knowledgeEnabled: cfg.knowledge.enabled,
-      inFlight: cfg.curator.inFlight,
-      turnsSinceCuration: sessionState.turnsSinceCuration,
-      effectiveAfterTurns,
-      curationScheduled: !!sessionState.curationScheduled,
-      curatorBusy: curatorLimiter.isBusy(sessionID),
-    })
-  ) {
-    sessionState.curationScheduled = true;
-    // Track the FULL chain (not just the limiter task) so resetPipelineState's
-    // drain also awaits the post-completion saveSessionTracking writes in the
-    // .then below — those run a few microtasks after the inner task settles and
-    // would otherwise escape the drain. (Latent today since in-flight curation
-    // is off by default, but keeps the leak closed if it's ever enabled.) #885
-    trackBackground(
-      runBackground(
-        () =>
-          withTenant(sessionState.storageTenantId ?? "", () =>
-            Sentry.startSpan(
-              {
-                name: "lore.curator",
-                op: "lore.curation",
-                attributes: { trigger: "in-flight" },
-              },
-              () =>
-                curator.run({
-                  llm,
-                  projectPath,
-                  sessionID,
-                  model,
-                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
-                  signal,
-                  // #627 Phase 1: stamp the session's gitHead on curator entries.
-                  metadata: buildSessionMetadata(sessionState.gitHead),
-                }),
-            ),
-          ),
-        `in-flight-curation session=${sessionID.slice(0, 16)}`,
-        workerProviderID,
-      )
-        .then((result) => {
-          if (!result) return; // skipped by circuit breaker
-          signal.throwIfAborted();
-          sessionState.turnsSinceCuration = 0;
-          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
-          if (
-            result.created > 0 ||
-            result.updated > 0 ||
-            result.deleted > 0 ||
-            result.changedEntries?.length > 0
-          ) {
-            // Invalidate LTM cache only when curation actually changed entries
-            ltmSessionCache.delete(sessionID);
-            saveSessionTracking(sessionID, {
-              ltmCacheText: null,
-              ltmCacheTokens: null,
-            });
-            log.info(
-              `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
-            );
-            emitCurationMetrics({ ...result, trigger: "in-flight" });
-          }
-        })
-        .catch((e) => log.error("background curation failed:", e))
-        .finally(() => {
-          sessionState.curationScheduled = false;
-        }),
-      sessionState,
-    );
-  }
-}
-
-export function scheduleBackgroundWork(
-  sessionState: SessionState,
-  config: GatewayConfig,
-): void {
-  withTenant(sessionState.storageTenantId ?? "", () =>
-    scheduleBackgroundWorkForTenant(sessionState, config),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Compaction summary generation — shared by HTTP interception and /v1/compact
-// ---------------------------------------------------------------------------
-
-/**
- * Interval between keep-alive `ping` events sent on the compaction SSE stream
- * while the summary is being generated. Anthropic itself sends periodic pings
- * on long-running streams; this keeps the client connection from timing out
- * while we (possibly) distill the remainder under a rate limit.
- */
-const COMPACT_KEEPALIVE_PING_MS = 15_000;
-
-/**
- * Generate a compaction summary for a session, assembled deterministically
- * from Lore's own memory (distillations + long-term knowledge + the prior
- * summary). The only LLM work is urgently distilling any undistilled
- * remainder first; there is no dedicated "compaction" LLM call. Returns null
- * only when there is genuinely nothing to compact.
- *
- * This is the core logic shared by both:
- *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
- *  - `handleCompactEndpoint` (explicit POST /v1/compact from Pi plugin)
- */
-export async function generateCompactionSummary(opts: {
-  projectPath: string;
-  sessionID: string;
-  config: GatewayConfig;
-  previousSummary?: string;
-  sessionUpstream?: { providerID?: string; modelID?: string };
-  signal?: AbortSignal;
-  trackOperation?: (operation: Promise<unknown>) => void;
-}): Promise<string | null> {
-  const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
-    opts;
-  opts.signal?.throwIfAborted();
-
-  // 1. Bring distillations current. Compaction does NOT make a dedicated
-  //    "compaction" LLM call anymore — its only LLM work is distilling the
-  //    undistilled remainder. When everything is already distilled this is
-  //    skipped entirely (instant, zero-cost compaction). When not, we distill
-  //    urgently; the caller's keep-alive stream holds the client connection
-  //    open during any rate-limit wait. A distillation failure is non-fatal:
-  //    step 3 assembles from whatever distillations exist plus the raw tail.
-  if (temporal.undistilledCount(projectPath, sessionID) > 0) {
-    const llm = getLLMClient(config);
-    const model = getWorkerModel(sessionUpstream);
-    await promiseAgainstAbort(() => {
-      const operation = distillation.run({
-        llm,
-        projectPath,
-        sessionID,
-        model,
-        force: true,
-        urgent: true,
-        callType: "direct",
-        signal: opts.signal,
-        workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
-        // #627 Phase 1: stamp the session's gitHead on urgent-compaction rows.
+            (part.type === "output_text" &e 1: stamp the session's gitHead on urgent-compaction rows.
         // Compaction is invoked via HTTP intercept or /v1/compact, so we look up
         // the session by ID rather than threading state through the call.
         metadata: buildSessionMetadata(sessions.get(sessionID)?.gitHead),
@@ -14855,7 +13343,1525 @@ async function handleCompactEndpointInner(
           error: "compaction_failed",
           message: "Summary generation failed (worker model unavailable)",
         }),
-        { status: 502, headers: { "content-type": "application/json" } },
+        { status: 502,    // the same cacheReadTokens in both buckets.
+    if (sessionState.lastRequestTime > 0) {
+      let warmupHitThisTurn = false;
+
+      // Track warmup hit: user returned after THIS session warmed the cache.
+      // creditWarmupHit consumes the warmup (clears lastWarmupAt + refresh
+      // tokens), guards against phantom savings (Bug A: only credits when this
+      // session paid for the warmup), and returns the pro-rata savings
+      // (Bug B: min(returning-turn cache read, prefix the warmup refreshed)).
+      if (sessionState.warmup?.lastWarmupAt) {
+        const ttlMs =
+          sessionState.resolvedConversationTTL === "1h" ? 3_600_000 : 300_000;
+        const sinceWarmup = now - sessionState.warmup.lastWarmupAt;
+        const outcome = creditWarmupHit(
+          sessionState.warmup,
+          sinceWarmup,
+          ttlMs,
+          usage.cacheReadInputTokens ?? 0,
+        );
+        if (outcome.hit) {
+          warmupHitThisTurn = true;
+          emitWarmupHitMetric(
+            sessionState.lastUpstream?.model ?? req.model,
+            sessionState.resolvedConversationTTL ?? "5m",
+          );
+          // Record counterfactual savings = the pro-rata credit
+          // min(returning-turn cache read, prefix the warmup refreshed) —
+          // without warming these reads would have been a full cache write.
+          if (outcome.creditedTokens > 0) {
+            recordWarmupHit(
+              sessionID,
+              req.model,
+              outcome.creditedTokens,
+              sessionState.resolvedConversationTTL ?? "5m",
+            );
+          }
+          log.info(
+            `cache-warmer: HIT session=${sessionID.slice(0, 16)} ` +
+              `user returned ${(sinceWarmup / 1000).toFixed(0)}s after warmup ` +
+              `(credited=${outcome.creditedTokens} tokens)`,
+          );
+        }
+      }
+
+      // Track 1h TTL savings: if gap > 5m but we still got cache reads,
+      // the 1h TTL saved a full cache write. Skip if already counted as
+      // a warmup hit to avoid double-counting the same tokens.
+      if (!warmupHitThisTurn) {
+        const requestGap = now - sessionState.lastRequestTime;
+        if (requestGap > 300_000) {
+          const cacheRead = usage.cacheReadInputTokens ?? 0;
+          if (cacheRead > 0) {
+            recordTTLSavings(sessionID, req.model, cacheRead);
+          }
+        }
+      }
+    }
+    // Reset warming state if session was marked dead or had active warming.
+    // Dead flag is cleared so the next break gets a fresh ROI analysis.
+    // warmupCount is reset so the break-even cap starts from 0 on the next break.
+    if (sessionState.warmup) {
+      if (sessionState.warmup.disabled) {
+        sessionState.warmup.disabled = false;
+        log.info(
+          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
+        );
+      }
+      if (
+        sessionState.warmup.warmupCount > 0 &&
+        !sessionState.warmup.forceKeepWarm
+      ) {
+        sessionState.warmup.warmupCount = 0;
+      }
+    }
+
+    // --- Shadow context tracking for counterfactual compaction estimation ---
+    // Track how large the context *would* be without Lore's distillation
+    // compressing it. When the shadow counter crosses the auto-compact
+    // threshold, record a counterfactual compaction event.
+    updateShadowContext(
+      sessionID,
+      actualInput,
+      usage.outputTokens ?? 0,
+      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+      req.model,
+      sessionState.resolvedConversationTTL,
+      requestEnablesLongContext(req),
+    );
+
+    // Mark session dirty for periodic flush (gradient + warming + costs).
+    // The 30s idle tick will persist state only for dirty sessions.
+    sessionState._dirty = true;
+
+    // --- Commit-triggered curation ---
+    // Git commits are natural task boundaries where decisions crystallize.
+    // When a commit is detected in tool outputs, force curation to trigger
+    // on this turn by bumping turnsSinceCuration to the threshold.
+    if (
+      loreConfig().knowledge.enabled &&
+      loreConfig().curator.onIdle &&
+      containsGitCommit(req)
+    ) {
+      const modelInputCost =
+        getModelEntrySync(
+          getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+        ).cost?.input ?? 3;
+      const curationMultiplier =
+        modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+      const effectiveAfterTurns =
+        loreConfig().curator.afterTurns * curationMultiplier;
+      if (sessionState.turnsSinceCuration < effectiveAfterTurns) {
+        log.info(
+          `commit detected in session ${sessionID.slice(0, 16)} — triggering curation`,
+        );
+        sessionState.turnsSinceCuration = effectiveAfterTurns;
+      }
+    }
+
+    // --- Schedule background work (fire-and-forget) ---
+    saveSessionTracking(sessionID, {
+      messageCount: sessionState.messageCount,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+      projectPath: sessionState.projectPath || null,
+      projectPathProvisional: sessionState.projectPathProvisional === true,
+      ...(sessionState.compactionAnomalyPending
+        ? { compactionAnomalyPending: true }
+        : {}),
+    });
+    if (!sessionState.headerSessionId) {
+      const result = learnHeaders(
+        sessionState.candidateHeaders,
+        req.rawHeaders,
+      );
+      sessionState.candidateHeaders = result.updatedCandidates;
+    }
+    if (!noStore) {
+      scheduleBackgroundWork(sessionState, config);
+    }
+    return true;
+  } catch (e) {
+    log.error("post-response processing failed:", e);
+    return false;
+  } finally {
+    endSpan?.();
+  }
+}
+
+/** Record validated provider usage without publishing successful-turn state. */
+function accountUnsuccessfulResponse(
+  resp: GatewayResponse,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+  genAiSpan: Sentry.Span | undefined,
+  endSpan: () => void,
+  markDirty?: () => void,
+): void {
+  const usage = resp.usage ?? ZERO_USAGE;
+  const hasUsage = Object.values(usage).some(
+    (tokens) => typeof tokens === "number" && tokens > 0,
+  );
+  try {
+    if (hasUsage) {
+      markDirty?.();
+      const usageForSentry = accountConversationUsage(
+        usage,
+        resp.model,
+        sessionID,
+        resolvedConversationTTL,
+      );
+      if (genAiSpan) {
+        setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+      }
+    }
+  } finally {
+    genAiSpan?.setStatus({
+      code: 2,
+      message: "upstream response did not complete",
+    });
+    endSpan();
+  }
+}
+
+function conversationTTLForAccounting(
+  sessionID: string,
+): "5m" | "1h" | undefined {
+  const liveTTL = sessions.get(sessionID)?.resolvedConversationTTL;
+  if (liveTTL === "5m" || liveTTL === "1h") return liveTTL;
+  const persistedTTL = loadSessionTracking(sessionID)?.resolvedConversationTTL;
+  return persistedTTL === "5m" || persistedTTL === "1h"
+    ? persistedTTL
+    : undefined;
+}
+
+function postResponse(
+  req: GatewayRequest,
+  resp: GatewayResponse,
+  sessionState: SessionState,
+  config: GatewayConfig,
+  temporalInput: TurnTemporalInput,
+  requestBody?: string,
+  genAiSpan?: Sentry.Span,
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  return withTenant(sessionState.storageTenantId ?? "", () =>
+    postResponseForTenant(
+      req,
+      resp,
+      sessionState,
+      config,
+      temporalInput,
+      requestBody,
+      genAiSpan,
+      suppressTemporalStorage,
+      endSpan,
+    ),
+  );
+}
+
+/**
+ * Schedule background distillation and curation (fire-and-forget).
+ */
+/**
+ * Full background chains, including post-completion state writes. Reset
+ * awaits these alongside the limiter's drain before swapping the DB (#885).
+ * Session ownership also covers global-queue wait time before a core limiter
+ * is entered, so idle eviction cannot discard credentials under queued work.
+ */
+const inFlightBackground = new Set<Promise<unknown>>();
+function trackBackground(p: Promise<unknown>, state?: SessionState): void {
+  if (state) state.backgroundWorkCount = (state.backgroundWorkCount ?? 0) + 1;
+  inFlightBackground.add(p);
+  const settled = () => {
+    inFlightBackground.delete(p);
+    if (state) state.backgroundWorkCount!--;
+  };
+  void p.then(settled, settled);
+}
+
+function scheduleBackgroundWorkForTenant(
+  sessionState: SessionState,
+  config: GatewayConfig,
+): void {
+  const { sessionID, projectPath } = sessionState;
+  const signal = AbortSignal.any([
+    pipelineGenerationAbort.signal,
+    sessionLifecycleSignal(sessionID),
+  ]);
+
+  // Skip background work when the session's auth credential is stale and no
+  // fresh fallback is available — worker LLM calls would just 401.
+  // Auth refreshes when the next client request arrives via setSessionAuth().
+  if (isAuthStale(sessionID) && !resolveAuth(sessionID)) return;
+
+  const llm = getLLMClient(config);
+  const cfg = loreConfig();
+  const model = getWorkerModel(sessionState.lastUpstream);
+  // Provider the worker will call — used to scope the circuit-breaker check so
+  // a 429 from a DIFFERENT provider doesn't pause this session's background
+  // work. Undefined when the worker model can't be resolved (→ global breaker).
+  const workerProviderID = model?.providerID;
+
+  // Provider-aware auth guard: if the resolved worker model's provider has no
+  // usable credential for this session, every background worker call to it just
+  // returns no-auth and degrades worker-health each tick. This mirrors the
+  // worker's own resolution (resolveAuth with the model's provider, incl. the
+  // cross-provider fail-closed). The provider-agnostic guard above misses this:
+  // a session can hold a credential under provider A while lastUpstream points
+  // at provider B (e.g. a turn declared x-lore-provider:anthropic but stored no
+  // anthropic key). Skip instead of flooding — getSessionAuth emits the
+  // store-key/lookup-key mismatch warning once, then we stay quiet, and work
+  // resumes automatically once a turn uses a provider we hold a credential for.
+  // Gates urgent distillation too: a no-auth call can never succeed. #894
+  // Exempt the dedicated-worker-key setup (LORE_WORKER_API_KEY): there the
+  // worker uses its own credential and bypasses resolveAuth (getWorkerAuth,
+  // ~1697), so a session-auth miss must NOT disable background work — that
+  // cross-provider config (e.g. MiniMax workers, Anthropic sessions) is exactly
+  // when model.providerID legitimately differs from the session's credential.
+  if (
+    !config.workerApiKey &&
+    model &&
+    !hasWorkerSessionAuth(
+      sessionID,
+      model.providerID,
+      matchingProviderSnapshot(sessionState, model.providerID)?.protocol,
+    )
+  )
+    return;
+
+  // When the OAuth account is near quota exhaustion, skip non-urgent
+  // background work to preserve remaining entitlement for user-facing turns.
+  // Urgent distillation is exempt (it unblocks the next user turn).
+  const quotaPaused = isQuotaPaused(resolveAuth(sessionID));
+
+  // Worker circuit breaker: when background workers have been failing for a
+  // sustained period, stop hammering the upstream every turn — allow only a
+  // periodic probe so a recovered upstream is detected without burning
+  // thousands of futile calls (Sentry: runaway lore-distill failure counts).
+  // Urgent distillation below is intentionally exempt — it unblocks the user.
+  // Also throttle sessions soft-paused by an upstream credit/billing state
+  // (HTTP 402) — retrying the failing provider every turn just wastes calls;
+  // a probe is allowed periodically (see isWorkerCreditPaused) to detect a
+  // credit top-up.
+  const workerThrottled =
+    !allowWorkerProbe(sessionID) || isWorkerCreditPaused(sessionID);
+
+  // Check if urgent distillation is needed (gradient flagged it OR a
+  // compaction anomaly was detected on the previous turn). Mark urgent: true
+  // so these bypass the batch queue — the gradient is in overflow (or the
+  // client just compacted) and needs the result before the next user turn.
+  // Note: urgent distillation is NOT gated by isBackgroundPaused() — a
+  // degraded/overflowing context window for up to 10 minutes (max breaker
+  // duration) is worse than one API call with its own tight retry budget
+  // (MAX_RETRIES_URGENT = 2, 1-4s backoff).
+  const urgentFromGradient = needsUrgentDistillation(sessionState.sessionID);
+  const urgentFromCompaction = sessionState.compactionAnomalyPending === true;
+  if (urgentFromCompaction) {
+    // Consume the one-shot flag immediately so the next non-compaction
+    // turn doesn't re-trigger urgent distillation. Persisted with the
+    // session-tracking save below.
+    sessionState.compactionAnomalyPending = false;
+    saveSessionTracking(sessionID, { compactionAnomalyPending: false });
+  }
+  if (urgentFromGradient || urgentFromCompaction) {
+    trackBackground(
+      withTenant(sessionState.storageTenantId ?? "", () =>
+        distillation
+          .run({
+            llm,
+            projectPath,
+            sessionID,
+            model,
+            force: true,
+            urgent: true,
+            callType: "direct",
+            signal,
+            workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+            // Never run meta-distillation while the conversation cache is warm.
+            // Meta archives gen-0 rows and creates a gen-1 row, rewriting the
+            // synthetic distilled prefix at messages[0/1] on the next turn. That
+            // early-message rewrite is a real prompt-cache bust. Idle-time meta in
+            // idle.ts remains enabled because the cache is already cold there.
+            skipMeta: true,
+          })
+          .catch((e) => log.error("background distillation failed:", e)),
+      ),
+      sessionState,
+    );
+  } else if (
+    !isBackgroundPaused(workerProviderID) &&
+    !quotaPaused &&
+    !workerThrottled
+  ) {
+    // Incremental distillation and curation are non-urgent — skip when the
+    // circuit breaker is active to reduce API pressure. These are also gated
+    // by runBackground() which checks isBackgroundPaused(), but the early
+    // check here avoids unnecessary token counting and model lookups.
+    // Idle-time work in idle.ts also uses runBackground(), so under sustained
+    // rate pressure everything defers until the breaker naturally expires.
+    //
+    // Coalesce: if a distillation is already in-flight or queued for THIS
+    // session (distillLimiter is per-session p-limit(1)), skip scheduling
+    // another. The in-flight run will pick up the newly-arrived tokens on
+    // its next segment pass, and queuing duplicates just starves the global
+    // p-limit(2) background slot — distillations getting blocked behind
+    // each other in the global queue.
+    if (!distillLimiter.isBusy(sessionID)) {
+      const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
+      if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
+        log.info(
+          `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
+        );
+        trackBackground(
+          runBackground(
+            () =>
+              withTenant(sessionState.storageTenantId ?? "", () =>
+                distillation.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  skipMeta: true,
+                  callType: batchQueueEnabled ? "batch" : "direct",
+                  workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+                  signal,
+                  // #627 Phase 1: stamp the session's gitHead on every distilled row.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+              ),
+            `incremental-distill session=${sessionID.slice(0, 16)}`,
+            workerProviderID,
+          ).catch((e) => log.error("background distillation failed:", e)),
+          sessionState,
+        );
+      }
+    }
+  }
+
+  // Curation: run periodically when the knowledge system is enabled.
+  // Cost-aware frequency: on expensive models, curate less often to reduce
+  // the probability of LTM changes that bust the cache. Each LTM change
+  // that exceeds the diff pinning threshold invalidates tools + messages.
+  // Also gated by circuit breaker — curation is never urgent.
+  // Quota-paused accounts skip curation too (non-urgent background work).
+  // Worker-throttled sessions (sustained worker failure) skip it as well.
+  if (isBackgroundPaused(workerProviderID) || quotaPaused || workerThrottled)
+    return;
+
+  const modelInputCost =
+    getModelEntrySync(
+      getWorkerModel(sessionState.lastUpstream)?.modelID ?? "unknown",
+    ).cost?.input ?? 3;
+  const curationMultiplier =
+    modelInputCost >= 5 ? 3 : modelInputCost >= 1 ? 2 : 1;
+  const effectiveAfterTurns = cfg.curator.afterTurns * curationMultiplier;
+
+  // Coalesce: skip scheduling curation when one is already scheduled, queued,
+  // or in-flight for THIS session. Without this, `turnsSinceCuration` stays
+  // at/above the threshold (it is only reset in the `.then()` after a run
+  // completes — see below), so every subsequent turn re-schedules curation,
+  // flooding the background queue with duplicates that are shed at queue-full.
+  //
+  // Two signals are required:
+  //  - `curationScheduled` (synchronous): set BEFORE runBackground() and
+  //    cleared in .finally(). `curatorLimiter` is only entered when the task
+  //    actually executes inside curator.run(), so under a saturated global
+  //    queue `isBusy` stays false between scheduling and execution — this flag
+  //    closes that window deterministically.
+  //  - `curatorLimiter.isBusy` (durable across ticks): also covers the
+  //    idle-path curation (idle.ts) which doesn't set curationScheduled.
+  // Mirrors the incremental-distill guard above and the idle-path guard.
+  // In-flight (turn-based) curation is OFF by default: changing the knowledge
+  // base mid-conversation rewrites system[2] (context-bound LTM) and busts the
+  // prompt cache for the rest of a large session. Curation still runs on idle
+  // (idle.ts), where the cache is cold so the rewrite is free. `turnsSinceCuration`
+  // keeps accumulating during the active conversation and fires on the next idle.
+  if (
+    shouldRunInFlightCuration({
+      knowledgeEnabled: cfg.knowledge.enabled,
+      inFlight: cfg.curator.inFlight,
+      turnsSinceCuration: sessionState.turnsSinceCuration,
+      effectiveAfterTurns,
+      curationScheduled: !!sessionState.curationScheduled,
+      curatorBusy: curatorLimiter.isBusy(sessionID),
+    })
+  ) {
+    sessionState.curationScheduled = true;
+    // Track the FULL chain (not just the limiter task) so resetPipelineState's
+    // drain also awaits the post-completion saveSessionTracking writes in the
+    // .then below — those run a few microtasks after the inner task settles and
+    // would otherwise escape the drain. (Latent today since in-flight curation
+    // is off by default, but keeps the leak closed if it's ever enabled.) #885
+    trackBackground(
+      runBackground(
+        () =>
+          withTenant(sessionState.storageTenantId ?? "", () =>
+            Sentry.startSpan(
+              {
+                name: "lore.curator",
+                op: "lore.curation",
+                attributes: { trigger: "in-flight" },
+              },
+              () =>
+                curator.run({
+                  llm,
+                  projectPath,
+                  sessionID,
+                  model,
+                  workerHealth: makeWorkerHealth(sessionID, "lore-curator"),
+                  signal,
+                  // #627 Phase 1: stamp the session's gitHead on curator entries.
+                  metadata: buildSessionMetadata(sessionState.gitHead),
+                }),
+            ),
+          ),
+        `in-flight-curation session=${sessionID.slice(0, 16)}`,
+        workerProviderID,
+      )
+        .then((result) => {
+          if (!result) return; // skipped by circuit breaker
+          signal.throwIfAborted();
+          sessionState.turnsSinceCuration = 0;
+          saveSessionTracking(sessionID, { turnsSinceCuration: 0 });
+          if (
+            result.created > 0 ||
+            result.updated > 0 ||
+            result.deleted > 0 ||
+            result.changedEntries?.length > 0
+          ) {
+            // Invalidate LTM cache only when curation actually changed entries
+            ltmSessionCache.delete(sessionID);
+            saveSessionTracking(sessionID, {
+              ltmCacheText: null,
+              ltmCacheTokens: null,
+            });
+            log.info(
+              `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
+            );
+            emitCurationMetrics({ ...result, trigger: "in-flight" });
+          }
+        })
+        .catch((e) => log.error("background curation failed:", e))
+        .finally(() => {
+          sessionState.curationScheduled = false;
+        }),
+      sessionState,
+    );
+  }
+}
+
+export function scheduleBackgroundWork(
+  sessionState: SessionState,
+  config: GatewayConfig,
+): void {
+  withTenant(sessionState.storageTenantId ?? "", () =>
+    scheduleBackgroundWorkForTenant(sessionState, config),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Compaction summary generation — shared by HTTP interception and /v1/compact
+// ---------------------------------------------------------------------------
+
+/**
+ * Interval between keep-alive `ping` events sent on the compaction SSE stream
+ * while the summary is being generated. Anthropic itself sends periodic pings
+ * on long-running streams; this keeps the client connection from timing out
+ * while we (possibly) distill the remainder under a rate limit.
+ */
+const COMPACT_KEEPALIVE_PING_MS = 15_000;
+
+/**
+ * Generate a compaction summary for a session, assembled deterministically
+ * from Lore's own memory (distillations + long-term knowledge + the prior
+ * summary). The only LLM work is urgently distilling any undistilled
+ * remainder first; there is no dedicated "compaction" LLM call. Returns null
+ * only when there is genuinely nothing to compact.
+ *
+ * This is the core logic shared by both:
+ *  - `handleCompaction` (HTTP-intercepted compaction from Claude Code / OpenCode)
+ *  - `handleCompactEndpoint` (explicit POST /v1/compact from Pi plugin)
+ */
+export async function generateCompactionSummary(opts: {
+  projectPath: string;
+  sessionID: string;
+  config: GatewayConfig;
+  previousSummary?: string;
+  sessionUpstream?: { providerID?: string; modelID?: string };
+  signal?: AbortSignal;
+  trackOperation?: (operation: Promise<unknown>) => void;
+}): Promise<string | null> {
+  const { projectPath, sessionID, config, previousSummary, sessionUpstream } =
+    opts;
+  opts.signal?.throwIfAborted();
+
+  // 1. Bring distillations current. Compaction does NOT make a dedicated
+  //    "compaction" LLM call anymore — its only LLM work is distilling the
+  //    undistilled remainder. When everything is already distilled this is
+  //    skipped entirely (instant, zero-cost compaction). When not, we distill
+  //    urgently; the caller's keep-alive stream holds the client connection
+  //    open during any rate-limit wait. A distillation failure is non-fatal:
+  //    step 3 assembles from whatever distillations exist plus the raw tail.
+  if (temporal.undistilledCount(projectPath, sessionID) > 0) {
+    const llm = getLLMClient(config);
+    const model = getWorkerModel(sessionUpstream);
+    await promiseAgainstAbort(() => {
+      const operation = distillation.run({
+        llm,
+        projectPath,
+        sessionID,
+        model,
+        force: true,
+        urgent: true,
+        callType: "direct",
+        signal: opts.signal,
+        workerHealth: makeWorkerHealth(sessionID, "lore-distill"),
+        // #627 Phase: "text", text: part.refusal });
+            }
+          }
+        }
+      } else if (item.type === "function_call") {
+        let input: unknown = {};
+        if (typeof item.arguments === "string") {
+          try {
+            input = JSON.parse(item.arguments);
+          } catch {
+            input = item.arguments;
+          }
+        }
+        const id = asString(item.call_id ?? item.id);
+        if (!id || identities.has(id)) {
+          throw new Error("malformed Responses response tool identity");
+        }
+        identities.add(id);
+        content.push({
+          type: "tool_use",
+          id,
+          name: asString(item.name),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map Responses API status to gateway stop reason
+  const status = json.status as string | undefined;
+  let stopReason = "end_turn";
+  if (status === "incomplete") {
+    const details = json.incomplete_details;
+    const reason =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? (details as Record<string, unknown>).reason
+        : undefined;
+    stopReason = reason === "content_filter" ? "content_filter" : "max_tokens";
+  }
+  if (content.some((b) => b.type === "tool_use") && stopReason === "end_turn") {
+    stopReason = "tool_use";
+  }
+
+  const usage = validateResponsesUsage(
+    json.usage,
+    "malformed Responses response usage",
+  );
+  // Responses API reports cache details under `input_tokens_details`; fall back
+  // to `prompt_tokens_details` (Chat Completions shape) for resilience across
+  // OpenAI-compatible providers.
+  const inputTokensDetails = (usage?.input_tokens_details ??
+    usage?.prompt_tokens_details) as Record<string, number> | undefined;
+
+  return {
+    id: asString(json.id),
+    model: asString(json.model),
+    content,
+    rawOutputItems: replayableOutput,
+    stopReason,
+    usage: {
+      inputTokens: disjointOpenAIInputTokens(
+        usage?.input_tokens as number | undefined,
+        inputTokensDetails?.cached_tokens,
+        inputTokensDetails?.cache_write_tokens,
+      ),
+      outputTokens: (usage?.output_tokens as number) ?? 0,
+      cacheReadInputTokens: inputTokensDetails?.cached_tokens,
+      cacheCreationInputTokens: inputTokensDetails?.cache_write_tokens,
+    },
+  };
+}
+
+/** @internal Exported for end-to-end replay tests. */
+export function responsesProvenanceContent(
+  response: GatewayResponse,
+  replacements: ReadonlyMap<string, string> = new Map(),
+  stopBeforeToolUseId?: string,
+): GatewayContentBlock[] {
+  if (!response.rawOutputItems?.length) {
+    const content: GatewayContentBlock[] = [];
+    for (const block of response.content) {
+      if (block.type === "tool_use") {
+        if (block.id === stopBeforeToolUseId) break;
+        const replacement = replacements.get(block.id);
+        content.push(replacement ? { type: "text", text: replacement } : block);
+      } else {
+        content.push(block);
+      }
+    }
+    return content;
+  }
+
+  const content: GatewayContentBlock[] = [];
+  const textBlocks = response.content.filter(
+    (block): block is Extract<GatewayContentBlock, { type: "text" }> =>
+      block.type === "text",
+  );
+  // Streaming refusals remain opaque; buffered refusals also have normalized
+  // text. Only the latter consume a text slot when replaying their raw part.
+  const opaqueMessageIds = new Set(
+    response.content.flatMap((block) =>
+      block.type === "opaque" &&
+      block.responsesItem === true &&
+      block.raw.type === "message" &&
+      typeof block.raw.id === "string"
+        ? [block.raw.id]
+        : [],
+    ),
+  );
+  let textIndex = 0;
+  for (const raw of response.rawOutputItems) {
+    if (raw.type === "item_reference") continue;
+    if (raw.type === "reasoning") {
+      content.push({ type: "opaque", raw, responsesItem: true });
+      continue;
+    }
+    if (raw.type === "message") {
+      const parts = Array.isArray(raw.content)
+        ? (raw.content as Array<Record<string, unknown>>)
+        : [];
+      for (const part of parts) {
+        content.push({
+          type: "opaque",
+          raw: { ...raw, content: [part] },
+          responsesItem: true,
+        });
+        if (
+          (part.type === "output_text" && typeof part.text === "string") ||
+          (part.type === "refusal" &&
+            typeof part.refusal === "string" &&
+            typeof raw.id === "string" &&
+            !opaqueMessageIds.has(raw.id))
+        ) {
+          textIndex++;
+        }
+      }
+      if (parts.length === 0 && textBlocks[textIndex]) {
+        content.push(textBlocks[textIndex++]);
+      }
+      continue;
+    }
+    if (raw.type === "function_call") {
+      const toolUseId = asString(raw.call_id ?? raw.id);
+      if (toolUseId === stopBeforeToolUseId) break;
+      const replacement = replacements.get(toolUseId);
+      if (replacement) {
+        content.push({ type: "text", text: replacement });
+        continue;
+      }
+      const block = response.content.find(
+        (candidate): candidate is GatewayToolUseBlock =>
+          candidate.type === "tool_use" && candidate.id === toolUseId,
+      );
+      if (block) content.push(block);
+      continue;
+    }
+    content.push({ type: "opaque", raw, responsesItem: true });
+  }
+  return content;
+}
+
+/** @internal Build the canonical anchor hash used by every Responses path. */
+export function responsesAnchorContext(
+  clientMessages: GatewayMessage[],
+  visibleContent: GatewayContentBlock[],
+  response: GatewayResponse,
+  stopBeforeToolUseId: string,
+): string {
+  return recallAnchorContext(clientMessages, clientMessages.length, [
+    ...visibleContent,
+    ...responsesProvenanceContent(response, new Map(), stopBeforeToolUseId),
+  ]);
+}
+
+/**
+ * Convert a GatewayResponse to a non-streaming HTTP Response.
+ * Scales usage fields to prevent client auto-compaction.
+ */
+function nonStreamHttpResponse(
+  resp: GatewayResponse,
+  clientProtocol?: GatewayRequest["protocol"],
+  clientStream?: boolean,
+  extraHeaders?: Record<string, string>,
+  /** Whether the originating request opted into the 1M window via `context-1m`
+   *  beta. Defaults to `false` so the cap is clamped to the 200K-window value —
+   *  the safe, compaction-proof default for callers that don't thread it. */
+  longContext = false,
+): Response {
+  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
+  const usage = resp.usage ?? ZERO_USAGE;
+
+  // Scale usage so the client's token total stays below auto-compact threshold.
+  // postResponse() has already consumed the real values for calibration/bustRate.
+  // Cap is per-model AND per client-metered-window: a genuine 1M request (with
+  // the context-1m beta) isn't throttled to the 200K cap, but a 1M-capable model
+  // the client meters against 200K (no beta) IS clamped so it can't cross the
+  // client's ~167K auto-compact threshold (#910 regression; MiniMax-M3).
+  const scaledUsage = scaleUsageForClient(
+    {
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cache_read_input_tokens: usage.cacheReadInputTokens,
+      cache_creation_input_tokens: usage.cacheCreationInputTokens,
+    },
+    maxReportedUsageForModelID(resp.model, longContext),
+  );
+  const scaledResp: GatewayResponse = {
+    ...resp,
+    usage: {
+      inputTokens: scaledUsage.input_tokens,
+      outputTokens: scaledUsage.output_tokens,
+      cacheReadInputTokens: scaledUsage.cache_read_input_tokens,
+      cacheCreationInputTokens: scaledUsage.cache_creation_input_tokens,
+    },
+  };
+
+  // Return the response in the client's native wire format so server handlers
+  // can pass through without re-translation. This prevents the class of bugs
+  // where the stream flag is forgotten during server-side format conversion.
+  let clientResp: Response;
+  if (clientProtocol === "openai") {
+    clientResp = buildOpenAIResponse(scaledResp, clientStream ?? false);
+  } else if (clientProtocol === "openai-responses") {
+    clientResp = buildOpenAIResponsesResponse(
+      scaledResp,
+      clientStream ?? false,
+    );
+  } else if (clientProtocol === "gemini") {
+    clientResp = buildGeminiResponse(scaledResp, clientStream ?? false);
+  } else if (clientStream) {
+    // Anthropic (or unspecified) client that requested `stream: true`. The
+    // upstream response was BUFFERED (non-Anthropic upstreams — OpenAI /
+    // Responses / Gemini — are accumulated, not streamed through), so we
+    // synthesize a complete Anthropic SSE stream from it. Returning the
+    // non-streaming JSON body below would leave the client's SDK waiting
+    // forever for an SSE stream it opened the request for — the github-copilot
+    // + Claude-model "response never reaches the UI" bug (#1052). The other
+    // client protocols already honor `clientStream` via their builders above.
+    clientResp = streamHttpResponse(scaledResp);
+  } else {
+    // Anthropic or unspecified — default non-streaming JSON format.
+    const body = buildAnthropicNonStreamResponse(scaledResp);
+    clientResp = new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      clientResp.headers.set(k, v);
+    }
+  }
+  return clientResp;
+}
+
+/**
+ * Convert a GatewayResponse to a streaming SSE HTTP Response.
+ */
+function streamHttpResponse(resp: GatewayResponse): Response {
+  // Synthesize a complete Anthropic SSE stream from the fully-accumulated
+  // response, preserving ALL blocks (text + tool_use + thinking + opaque). This
+  // is used both for synthetic responses (slash commands) and — critically —
+  // when re-emitting a BUFFERED non-Anthropic upstream (OpenAI/Responses/Gemini)
+  // to an Anthropic client that requested `stream: true`. A text-only synthesis
+  // would silently drop tool calls, breaking coding agents (#1052).
+  const sseBody = buildSSEResponse(resp);
+
+  return new Response(sseBody, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Post-response processing
+// ---------------------------------------------------------------------------
+
+/**
+ * Analyze this turn's cache behavior and feed the result into BOTH the
+ * telemetry sinks (span attributes, Sentry metric, durable bust counter) and
+ * the consecutive-bust tracker (recordCacheUsage).
+ *
+ * Extracted from postResponse() as a testable seam (issue #928). The wire that
+ * matters for correctness is: analyzeCacheTurn -> categorizeBust ->
+ * recordCacheUsage(..., bustCause). Threading the categorized cause is what
+ * lets recordCacheUsage exempt prefix-rewrite busts (caused by Lore's own
+ * meta-distillation) from consecutiveBusts, the same way it exempts idle-resume
+ * re-warms — neither is user-context growth. That wire was previously only
+ * reachable through the full pipeline; this seam makes it directly unit-testable
+ * (a turn that categorizes as prefix-rewrite must NOT increment the counter).
+ *
+ * Side effects (unchanged from the inlined version):
+ *   - mutates sessionState.cacheAnalytics (via analyzeCacheTurn),
+ *     sessionState.lastTurnWasIdle (consumed -> false) and
+ *     sessionState.coldCacheWindow (rolling 20-turn cold-turn history),
+ *   - enriches genAiSpan with cache-divergence attributes and ends it (the span
+ *     is finalized here, before recordCacheUsage, exactly as in the original
+ *     inlined block),
+ *   - increments the per-session consecutive-bust counter in @loreai/core.
+ *
+ * @returns the categorized bust cause, or `undefined` when there is no request
+ *          body to compare (the rare no-body path — the bust tracker then falls
+ *          back to its legacy "count it" behavior).
+ */
+export function recordCacheTurnUsage(
+  sessionState: SessionState,
+  usage: GatewayUsage,
+  model: string,
+  projectPath: string,
+  /**& typeof part.text !== "string") ||
+            (part.type === "refusal" && typeof part.refusal !== "string") ||
+            (part.type !== "output_text" && part.type !== "refusal")
+          ) {
+            throw new Error("upstream Responses request did not complete");
+          }
+        }
+      } else if (item.type === "function_call") {
+        const validItemStatus =
+          item.status === "completed" ||
+          item.status === "failed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (
+          typeof item.call_id !== "string" ||
+          !item.call_id ||
+          seenIdentities.has(item.call_id) ||
+          typeof item.name !== "string" ||
+          !item.name ||
+          typeof item.arguments !== "string" ||
+          !validItemStatus
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        seenIdentities.add(item.call_id);
+      } else if (item.type === "reasoning") {
+        const validItemStatus =
+          item.status === undefined ||
+          item.status === "completed" ||
+          (status === "incomplete" && item.status === "incomplete");
+        if (!validItemStatus) {
+          throw new Error("upstream Responses request did not complete");
+        }
+        for (const [field, partType] of [
+          ["summary", "summary_text"],
+          ["content", "reasoning_text"],
+        ] as const) {
+          const parts = item[field];
+          if (parts === undefined) continue;
+          if (!Array.isArray(parts)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          for (const rawPart of parts) {
+            if (
+              !rawPart ||
+              typeof rawPart !== "object" ||
+              Array.isArray(rawPart) ||
+              (rawPart as Record<string, unknown>).type !== partType ||
+              typeof (rawPart as Record<string, unknown>).text !== "string"
+            ) {
+              throw new Error("upstream Responses request did not complete");
+            }
+          }
+        }
+        if (
+          item.encrypted_content !== undefined &&
+          item.encrypted_content !== null &&
+          typeof item.encrypted_content !== "string"
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      } else if (item.type === "item_reference") {
+        // A standalone non-stream response has no streamed item lifecycle to
+        // resolve this reference against; accepting it would silently erase
+        // provider output during normalization.
+        throw new Error("upstream Responses request did not complete");
+      } else {
+        if (
+          !isValidResponsesOutputItemStatus(item.type, item.status, "terminal")
+        ) {
+          throw new Error("upstream Responses request did not complete");
+        }
+      }
+    }
+    if (status === "incomplete") {
+      const details = json.incomplete_details;
+      if (
+        details !== undefined &&
+        details !== null &&
+        (typeof details !== "object" ||
+          Array.isArray(details) ||
+          typeof (details as Record<string, unknown>).reason !== "string")
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+      const reason =
+        details && typeof details === "object" && !Array.isArray(details)
+          ? (details as Record<string, unknown>).reason
+          : undefined;
+      if (
+        reason !== undefined &&
+        reason !== "max_output_tokens" &&
+        reason !== "content_filter"
+      ) {
+        throw new Error("upstream Responses request did not complete");
+      }
+    }
+    return;
+  }
+
+  if (protocol === "gemini") {
+    const candidates = json.candidates;
+    const first = Array.isArray(candidates) ? candidates[0] : undefined;
+    const promptFeedback = json.promptFeedback;
+    const blockReason =
+      promptFeedback &&
+      typeof promptFeedback === "object" &&
+      !Array.isArray(promptFeedback)
+        ? (promptFeedback as Record<string, unknown>).blockReason
+        : undefined;
+    if (
+      (!first ||
+        typeof first !== "object" ||
+        Array.isArray(first) ||
+        typeof (first as Record<string, unknown>).finishReason !== "string") &&
+      typeof blockReason !== "string"
+    ) {
+      throw new Error("upstream Gemini request did not complete");
+    }
+    return;
+  }
+
+  if (
+    json.type !== "message" ||
+    json.role !== "assistant" ||
+    typeof json.id !== "string" ||
+    typeof json.model !== "string" ||
+    !Array.isArray(json.content) ||
+    typeof json.stop_reason !== "string" ||
+    !json.usage ||
+    typeof json.usage !== "object" ||
+    Array.isArray(json.usage)
+  ) {
+    throw new Error("upstream Anthropic request did not complete");
+  }
+}
+
+// Anthropic non-stream JSON → GatewayResponse: use shared parseAnthropicResponseJSON
+const accumulateAnthropicNonStreamJSON = parseAnthropicResponseJSON;
+
+export function accumulateOpenAINonStreamJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  if (json.choices !== undefined && !Array.isArray(json.choices)) {
+    throw new Error("malformed OpenAI response choice");
+  }
+  const choices = json.choices as Array<Record<string, unknown>> | undefined;
+  const logicalChoiceIndices = new Set<number>();
+  for (let position = 0; position < (choices?.length ?? 0); position++) {
+    const choice = choices?.[position];
+    if (!choice || typeof choice !== "object" || Array.isArray(choice)) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const logicalIndex =
+      choice.index === undefined ? position : (choice.index as number);
+    if (
+      !Number.isSafeInteger(logicalIndex) ||
+      logicalIndex < 0 ||
+      logicalChoiceIndices.has(logicalIndex)
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    logicalChoiceIndices.add(logicalIndex);
+  }
+  for (const choice of choices ?? []) {
+    const choiceToolIdentities = new Set<string>();
+    if (
+      !choice ||
+      typeof choice !== "object" ||
+      Array.isArray(choice) ||
+      (choice.index !== undefined &&
+        (!Number.isSafeInteger(choice.index) ||
+          (choice.index as number) < 0)) ||
+      (choice.finish_reason !== undefined &&
+        choice.finish_reason !== null &&
+        typeof choice.finish_reason !== "string") ||
+      !choice.message ||
+      typeof choice.message !== "object" ||
+      Array.isArray(choice.message)
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const candidateMessage = choice.message as Record<string, unknown>;
+    if (
+      (candidateMessage.content !== undefined &&
+        candidateMessage.content !== null &&
+        typeof candidateMessage.content !== "string") ||
+      (candidateMessage.role !== undefined &&
+        typeof candidateMessage.role !== "string")
+    ) {
+      throw new Error("malformed OpenAI response choice");
+    }
+    const candidateCalls = candidateMessage?.tool_calls;
+    if (candidateCalls === undefined) continue;
+    if (!Array.isArray(candidateCalls)) {
+      throw new Error("malformed OpenAI response tool identity");
+    }
+    for (const call of candidateCalls) {
+      if (!call || typeof call !== "object" || Array.isArray(call)) {
+        throw new Error("malformed OpenAI response choice");
+      }
+      const typedCall = call as Record<string, unknown>;
+      const fn = typedCall.function;
+      if (
+        !fn ||
+        typeof fn !== "object" ||
+        Array.isArray(fn) ||
+        typeof (fn as Record<string, unknown>).name !== "string" ||
+        typeof (fn as Record<string, unknown>).arguments !== "string"
+      ) {
+        throw new Error("malformed OpenAI response choice");
+      }
+      const id = asString(typedCall.id);
+      if (!id || choiceToolIdentities.has(id)) {
+        throw new Error("malformed OpenAI response tool identity");
+      }
+      choiceToolIdentities.add(id);
+    }
+  }
+  const firstChoice = choices?.[0];
+  const message = firstChoice?.message as Record<string, unknown> | undefined;
+
+  if (message) {
+    const textContent = message.content as string | undefined;
+    if (textContent) {
+      content.push({ type: "text", text: textContent });
+    }
+    const toolCalls = message.tool_calls as
+      | Array<Record<string, unknown>>
+      | undefined;
+    if (toolCalls) {
+      const toolIdentities = new Set<string>();
+      for (const tc of toolCalls) {
+        const fn = tc.function as Record<string, unknown> | undefined;
+        let input: unknown = {};
+        if (typeof fn?.arguments === "string") {
+          try {
+            input = JSON.parse(fn.arguments);
+          } catch {
+            input = fn.arguments;
+          }
+        }
+        const id = asString(tc.id);
+        if (!id || toolIdentities.has(id)) {
+          throw new Error("malformed OpenAI response tool identity");
+        }
+        toolIdentities.add(id);
+        content.push({
+          type: "tool_use",
+          id,
+          name: asString(fn?.name),
+          input,
+        });
+      }
+    }
+  }
+
+  // Map OpenAI finish_reason to gateway stop reason
+  const finishReason = firstChoice?.finish_reason as string | undefined;
+  let stopReason = "end_turn";
+  if (finishReason === "stop") stopReason = "end_turn";
+  else if (finishReason === "length") stopReason = "max_tokens";
+  else if (finishReason === "tool_calls") stopReason = "tool_use";
+
+  const usage = validateOpenAIUsage(
+    json.usage,
+    "malformed OpenAI response usage",
+  );
+  const promptTokensDetails = usage?.prompt_tokens_details as
+    | Record<string, number>
+    | undefined;
+
+  return {
+    id: asString(json.id),
+    model: asString(json.model),
+    content,
+    stopReason,
+    usage: {
+      // prompt_tokens is inclusive of cache reads/writes; convert to the
+      // gateway's disjoint convention so cache tokens aren't double-counted.
+      inputTokens: disjointOpenAIInputTokens(
+        usage?.prompt_tokens as number | undefined,
+        promptTokensDetails?.cached_tokens,
+        promptTokensDetails?.cache_write_tokens,
+      ),
+      outputTokens: (usage?.completion_tokens as number) ?? 0,
+      cacheReadInputTokens: promptTokensDetails?.cached_tokens,
+      // OpenRouter reports cache-write tokens (Anthropic explicit caching) in
+      // prompt_tokens_details.cache_write_tokens. OpenAI proper doesn't report
+      // writes separately (leaves it undefined) — see the OpenRouter usage
+      // accounting docs. Left undefined when absent so it never masquerades
+      // as a real zero-write in analytics/cost tracking.
+      cacheCreationInputTokens: promptTokensDetails?.cache_write_tokens,
+    },
+  };
+}
+
+export function accumulateResponsesNonStreamJSON(
+  json: Record<string, unknown>,
+): GatewayResponse {
+  const content: GatewayContentBlock[] = [];
+  const output = json.output as Array<Record<string, unknown>> | undefined;
+  const replayableOutput = output?.filter(
+    (item) => item.type !== "item_reference",
+  );
+
+  if (replayableOutput) {
+    const identities = new Set<string>();
+    for (const item of replayableOutput) {
+      const itemId = asString(item.id);
+      if (!itemId || identities.has(itemId)) {
+        throw new Error("malformed Responses response item identity");
+      }
+      identities.add(itemId);
+      if (item.type === "message") {
+        const msgContent = item.content as
+          | Array<Record<string, unknown>>
+          | undefined;
+        if (msgContent) {
+          for (const part of msgContent) {
+            if (part.type === "output_text") {
+              content.push({ type: "text", text: asString(part.text) });
+            } else if (
+              part.type === "refusal" &&
+              typeof part.refusal === "string"
+            ) {
+              // Other client protocols emit normalized content. Keep the raw
+              // refusal too for lossless native Responses output and replay.
+              content.push({ typ Serialized JSON body sent upstream — for cache prefix comparison. */
+  requestBody?: string,
+  /** Active gen_ai.chat span to enrich with divergence diagnostics. */
+  genAiSpan?: Sentry.Span,
+  endSpan?: () => void,
+): CacheBustCause | undefined {
+  // Capture the idle-resume flag up front: it is consumed (set false) inside
+  // the block below but is still needed afterwards by recordCacheUsage so a
+  // cold-cache re-warm is not counted as a consecutive bust.
+  const turnWasIdleResume = sessionState.lastTurnWasIdle ?? false;
+  // bustCause is computed inside the requestBody block (so we know we have a
+  // body to analyze); left undefined when the body is missing so the
+  // recordCacheUsage call below falls through to the legacy "count it"
+  // behavior on the rare no-body path.
+  let bustCause: CacheBustCause | undefined;
+  if (requestBody) {
+    // Read the unified cache strategy so the cache-analytics warn path can
+    // skip the dramatic-drop alert for cool-* sessions (those strategies
+    // explicitly chose to let the prefix go cold; the alert is just noise).
+    // Result is `undefined` for non-confident strategies — analyzeCacheTurn
+    // falls back to the existing noisy behavior in that case (conservative).
+    const econResult = getCacheStrategy(sessionState.sessionID);
+    const cacheStrategy = econResult?.result.confident
+      ? econResult.result.strategy
+      : undefined;
+    const turnAnalysis = analyzeCacheTurn(
+      sessionState.cacheAnalytics,
+      requestBody,
+      usage,
+      sessionState.sessionID,
+      sessionState.messageCount,
+      cacheStrategy,
+    );
+    bustCause = categorizeBust(turnAnalysis, turnWasIdleResume);
+    if (genAiSpan) {
+      setCacheAnalyticsAttributes(
+        genAiSpan,
+        turnAnalysis,
+        bustCause,
+        turnAnalysis.prevSnippet,
+        turnAnalysis.currSnippet,
+      );
+    }
+    emitCacheBustMetric(
+      bustCause,
+      usage.cacheCreationInputTokens ?? 0,
+      model,
+      turnAnalysis.relocatable,
+      // Distinguish a free cold-boundary prefix-rewrite (rode along with an
+      // idle-resume write that was happening anyway) from an avoidable warm one
+      // (meta-distillation leaking onto a live cache) — see emitCacheBustMetric.
+      turnWasIdleResume,
+    );
+    // Persist a durable counter so the issue #791 "is system[0] dynamic
+    // content a material cache-bust cause?" gate survives gateway restarts
+    // (the in-memory analytics reset every restart). Passive telemetry only.
+    recordCacheBustObservation({
+      projectID: ensureProject(projectPath),
+      cause: bustCause,
+      relocatable: turnAnalysis.relocatable,
+      writeTokens: usage.cacheCreationInputTokens ?? 0,
+    });
+    sessionState.lastTurnWasIdle = false; // consumed
+
+    // Track cold-cache turns for auto-TTL upgrade (rolling 20-turn window)
+    const cacheRead = usage.cacheReadInputTokens ?? 0;
+    const cacheCreation = usage.cacheCreationInputTokens ?? 0;
+    const isColdTurn = cacheRead === 0 && cacheCreation > 0;
+    if (!sessionState.coldCacheWindow) sessionState.coldCacheWindow = [];
+    sessionState.coldCacheWindow.push(isColdTurn);
+    if (sessionState.coldCacheWindow.length > 20) {
+      sessionState.coldCacheWindow.shift();
+    }
+  }
+
+  // --- Finalize gen_ai.chat span (after cache analytics enrichment) ---
+  // Ended here (before recordCacheUsage, matching the original inlined order)
+  // so the extraction is ordering-identical: recordCacheUsage is pure
+  // session-state bookkeeping that never touches the span, and ending the span
+  // first means a throw in recordCacheUsage can't leak an unfinished span.
+  if (genAiSpan) {
+    if (endSpan) endSpan();
+    else genAiSpan.end();
+  }
+
+  // --- Consecutive bust tracking for tier-based decisions ---
+  // Pass the current turn's idle-resume flag so a cold-cache re-warm (cache
+  // legitimately expired during the user's pause) is not counted as a
+  // consecutive bust — that produced false "unsustainable" warnings on bursty
+  // sessions whose turns are spaced beyond the conversation cache TTL.
+  // Also pass the categorized bust cause so prefix-rewrite busts (caused by
+  // Lore's own meta-distillation) are held the same way idle-resume busts
+  // are — these are not user-context growth.
+  recordCacheUsage(
+    usage.cacheCreationInputTokens ?? 0,
+    usage.cacheReadInputTokens ?? 0,
+    usage.inputTokens ?? 0,
+    sessionState.sessionID,
+    turnWasIdleResume,
+    bustCause,
+  );
+
+  return bustCause;
+}
+
+function accountConversationUsage(
+  usage: GatewayUsage,
+  model: string,
+  sessionID: string,
+  resolvedConversationTTL: "5m" | "1h" | undefined,
+): AnthropicUsage {
+  const usageForSentry: AnthropicUsage = {
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+    cache_read_input_tokens: usage.cacheReadInputTokens,
+    cache_creation_input_tokens: usage.cacheCreationInputTokens,
+  };
+  setSentryCacheContext(usage);
+  emitCostMetric(
+    model,
+    usageForSentry,
+    "conversation",
+    resolvedConversationTTL,
+  );
+  recordConversationCost(
+    sessionID,
+    model,
+    usageForSentry,
+    resolvedConversationTTL,
+  );
+  return usageForSentry;
+}
+
+/**
+ * Run after a successful response: calibrate, store temporal messages,
+ * and schedule background work (distillation, curation).
+ */
+function postResponseForTenant(
+  req: GatewayRequest,
+  resp: GatewayResponse,
+  sessionState: SessionState,
+  config: GatewayConfig,
+  temporalInput: TurnTemporalInput,
+  /** Serialized JSON body sent upstream — for cache prefix comparison. */
+  requestBody?: string,
+  /** Active gen_ai.chat span to finalize with usage attributes. */
+  genAiSpan?: Sentry.Span,
+  /** Storage policy captured when this turn resolved its session. */
+  suppressTemporalStorage = false,
+  endSpan?: () => void,
+): boolean {
+  postResponseStartObserver?.();
+  const { sessionID, projectPath } = sessionState;
+
+  // Guard: resp.usage can be undefined at runtime for vLLM / partial responses.
+  const usage = resp.usage ?? ZERO_USAGE;
+
+  try {
+    confirmKnownSessionHeader(req, sessionState, config);
+
+    // --- Calibrate overhead from real token counts ---
+    const actualInput =
+      (usage.inputTokens ?? 0) +
+      (usage.cacheReadInputTokens ?? 0) +
+      (usage.cacheCreationInputTokens ?? 0);
+    calibrate(actualInput, sessionID, getLastTransformedCount(sessionID));
+
+    // --- Sentry cache context + cost metric ---
+    const usageForSentry = accountConversationUsage(
+      usage,
+      resp.model,
+      sessionID,
+      sessionState.resolvedConversationTTL,
+    );
+    if (genAiSpan) {
+      setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
+    }
+
+    // --- Cache analytics + bust cause telemetry + consecutive-bust tracking ---
+    // Extracted into recordCacheTurnUsage() so the analyze -> categorize ->
+    // recordCacheUsage wire (esp. threading the bust cause so prefix-rewrite
+    // busts are exempted from consecutiveBusts) is unit-testable without driving
+    // the whole pipeline. The seam also enriches and ENDS genAiSpan (before its
+    // own recordCacheUsage call) so the extraction is ordering-identical to the
+    // original inlined block. See issue #928.
+    if (suppressTemporalStorage) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+      sessionState.cacheAnalytics.lastNormalizedBody = null;
+      sessionState.cacheAnalytics.lastRequestBodyLength = 0;
+    }
+    recordCacheTurnUsage(
+      sessionState,
+      usage,
+      resp.model,
+      projectPath,
+      suppressTemporalStorage ? undefined : requestBody,
+      genAiSpan,
+      endSpan,
+    );
+    // Admin credentials are authorized at dispatch time and never retained in
+    // session snapshots. The idle warmer still receives gateway-global extras,
+    // so prevent it from replaying a cached body to a client-selected endpoint
+    // that is outside every configured trusted base.
+    if (
+      Object.keys(config.upstreamExtraHeaders).length > 0 &&
+      sessionState.lastUpstream &&
+      Object.keys(
+        extraHeadersForUpstream(config, sessionState.lastUpstream.url),
+      ).length === 0
+    ) {
+      sessionState.cacheAnalytics.lastRequestBody = null;
+    }
+
+    // Capture previous stop reason before it's overwritten below (line ~1667).
+    // Used to detect tool-use continuation turns for gap recording filtering.
+    const prevStopReason = sessionState.lastStopReason;
+
+    // --- Temporal storage & session-state updates ---
+    // Use the original user result snapshot captured before gradient. No
+    // historical conversion or tool resolution is needed after the response.
+
+    // Skip temporal storage in amnesia mode or when x-lore-no-store is set.
+    // The session still gets full Lore processing (LTM, recall, gradient)
+    // but doesn't write to memory. Amnesia is session-scoped (toggle via
+    // /lore:amnesia:on|off); no-store is per-request (header-based).
+    // Note: tool-call outcomes for a tool_use seeded during a no-store turn are
+    // intentionally dropped — the seed row never exists, so the later
+    // tool_result UPDATE is a harmless no-op (no phantom 'pending' rows leak).
+    const noStore = suppressTemporalStorage;
+
+    // Persist (and tool-trace) this turn's messages, batched into one savepoint.
+    // Extracted seam — see storeTurnTemporal (#1084).
+    storeTurnTemporal({
+      temporalInput,
+      assistantContentBlocks: resp.content,
+      usage,
+      model: resp.model,
+      projectPath,
+      sessionID,
+      noStore,
+    });
+
+    // Update session state (persisted in the batched save after messageCount update)
+    sessionState.turnsSinceCuration =
+      (sessionState.turnsSinceCuration ?? 0) + 1;
+
+    // --- Track consecutive text-only end_turn responses (session-end heuristic) ---
+    const hasToolUse = resp.content.some((b) => b.type === "tool_use");
+    if (resp.stopReason === "end_turn" && !hasToolUse) {
+      sessionState.consecutiveTextOnlyTurns =
+        (sessionState.consecutiveTextOnlyTurns ?? 0) + 1;
+    } else {
+      sessionState.consecutiveTextOnlyTurns = 0;
+    }
+
+    // --- Output tracking for dynamic max_tokens sizing ---
+    sessionState.lastStopReason = resp.stopReason;
+    sessionState.lastInputTokens =
+      (usage.inputTokens ?? 0) +
+      (usage.cacheReadInputTokens ?? 0) +
+      (usage.cacheCreationInputTokens ?? 0);
+    const outputTokens = usage.outputTokens;
+    if (outputTokens > 0) {
+      const EMA_ALPHA = 0.3;
+      sessionState.outputTokensEMA =
+        sessionState.outputTokensEMA == null
+          ? outputTokens
+          : Math.round(
+              sessionState.outputTokensEMA * (1 - EMA_ALPHA) +
+                outputTokens * EMA_ALPHA,
+            );
+    }
+
+    // --- Cache warming: record inter-turn gap + track warmup hits ---
+    const now = Date.now();
+
+    sessionState.lastResponseTime = now;
+
+    // (A) Record inter-turn gap — only for genuine user-initiated turns.
+    // Tool-use auto-continuations (prior stop_reason was "tool_use") produce
+    // sub-second gaps that represent automated round-trips, not human think
+    // time. Recording these would skew the survival model toward very short
+    // return times.
+    const isToolUseContinuation = prevStopReason === "tool_use";
+    if (!isToolUseContinuation) {
+      if (sessionState.lastUserTurnTime > 0) {
+        const gap = now - sessionState.lastUserTurnTime;
+        recordGap(getSessionHistogram(sessionState), gap);
+        recordGlobalGap(sessionState.projectPath, gap);
+      }
+      // Update baseline for next gap measurement — only after recording.
+      sessionState.lastUserTurnTime = now;
+    }
+
+    // (B) Track warmup hits and TTL savings — valid for ALL turn types.
+    // A user returning after a warmup is a hit regardless of whether it's
+    // a tool-use continuation.
+    // NOTE: warmup hits and TTL savings are mutually exclusive — if a turn
+    // is attributed to a warmup hit, skip TTL savings to avoid double-counting
+ headers: { "content-type": "application/json" } },
       );
     }
 
@@ -15502,11 +15508,13 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   const onCallerAbort = () => abort(caller?.reason);
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
-  const deadlineAt = Date.now() + FOREGROUND_REQUEST_TIMEOUT_MS;
+  const requestTimeoutMs =
+    getSSEInactivityDeadlines().foregroundRequestTimeoutMs;
+  const deadlineAt = Date.now() + requestTimeoutMs;
   const timer = setTimeout(
     () =>
       abort(new DOMException("foreground request timed out", "TimeoutError")),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
+    requestTimeoutMs,
   );
   return {
     signal: controller.signal,
@@ -15745,17 +15753,19 @@ export function validatedMetaStream(
   response: Response,
   protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
   codex: boolean,
-  signal?: AbortSignal,
-  inactivityMs = FOREGROUND_SSE_INACTIVITY_MS,
+  streamOptions: SSEStreamOptions = foregroundSSEStreamOptions(),
 ): Response {
+  const {
+    signal,
+    inactivityMs = getSSEInactivityDeadlines().foregroundSseInactivityMs,
+  } = streamOptions;
   if (protocol === "openai-responses") {
     return streamResponsesPassthrough(
       response,
       () => {},
       undefined,
       codex ? "codex" : "public",
-      signal,
-      inactivityMs,
+      { signal, inactivityMs },
     );
   }
   const abort = new AbortController();
@@ -15960,7 +15970,7 @@ async function handlePassthrough(
           upstreamResponse,
           wireProtocol,
           req.codex === true,
-          abortScope.signal,
+          foregroundSSEStreamOptions(abortScope.signal),
         ),
       );
     }
@@ -15998,8 +16008,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToOpenAI(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -16007,8 +16016,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToResponses(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -16016,8 +16024,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToGemini(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -16026,30 +16033,26 @@ async function handlePassthrough(
     const resp = await preserveIncompleteResponsesTerminal(
       wireProtocol === "openai"
         ? accumulateOpenAISSEStream(upstreamResponse, {
-            signal: abortScope.signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(abortScope.signal),
             strict: true,
             stopAtTerminal: true,
             consumeUntilDone: true,
           })
         : wireProtocol === "openai-responses"
           ? accumulateResponsesSSEStream(upstreamResponse, {
-              signal: abortScope.signal,
-              inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+              ...foregroundSSEStreamOptions(abortScope.signal),
               validation: req.codex === true ? "codex" : "public",
               stopAtTerminal: true,
               requireCompletedTerminal: true,
             })
           : wireProtocol === "gemini"
             ? accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
-                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
             : accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
-                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               }),
@@ -16141,16 +16144,14 @@ async function handleProvisionalConversationTurn(
     accumulated = req.stream
       ? forwarded.effectiveProtocol === "openai-responses"
         ? await accumulateResponsesSSEStream(upstreamResponse, {
-            signal: abortScope.signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(abortScope.signal),
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           })
         : forwarded.effectiveProtocol === "openai"
           ? await accumulateOpenAISSEStream(upstreamResponse, {
-              signal: abortScope.signal,
-              inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+              ...foregroundSSEStreamOptions(abortScope.signal),
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
@@ -16160,14 +16161,12 @@ async function handleProvisionalConversationTurn(
             })
           : forwarded.effectiveProtocol === "gemini"
             ? await accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
-                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
             : await accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
-                inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
@@ -16335,346 +16334,261 @@ async function handleProvisionalConversationTurn(
     withSavepoint("commit_provisional_turn", () => {
       if (
         identified.expectedUnowned &&
-        !legacyAdoptionTargetIsUnowned(identified.sessionID)
-      ) {
-        dropOwnedProvisionalKey(
-          identified.provisionalKey,
-          identified.sessionID,
+        !legacyAdoptionTargetIsits own max_tokens (32K for modern models). Other
+  // clients often send low/missing values (defaults to 4096 in ingress
+  // parsing). Apply a hybrid headroom + history algorithm that tightens
+  // from the 32K ceiling based on actual output patterns.
+  const isCC =
+    isClaudeCodeClient(req.rawHeaders) || hasBillingHeader(req.system);
+  if (!isCC) {
+    // Anthropic extended thinking arrives as `metadata.thinking =
+    // { type: "enabled", budget_tokens: N }` (not a KNOWN_BODY_FIELD, so it
+    // lands in metadata). Extract the budget so max_tokens leaves room above it
+    // — otherwise a low output EMA collapses the cap to the floor and truncates
+    // thinking-heavy turns mid-reasoning.
+    const thinkingMeta = req.metadata?.thinking as
+      | { type?: string; budget_tokens?: number }
+      | undefined;
+    const thinkingBudget =
+      thinkingMeta?.type === "enabled" &&
+      typeof thinkingMeta.budget_tokens === "number" &&
+      thinkingMeta.budget_tokens > 0
+        ? thinkingMeta.budget_tokens
+        : undefined;
+    // Structural fallback: thinking-by-default models (e.g. claude-opus-4-8)
+    // emit thinking blocks WITHOUT an explicit `thinking` param, so the budget
+    // above is undefined. Detect active reasoning from the request's thinking
+    // blocks so the rewrite still reserves headroom and doesn't truncate the
+    // turn at the end of a thinking block.
+    const thinkingActive =
+      thinkingBudget !== undefined || requestHasThinking(req.messages);
+    // Unsatisfiable budget: if the thinking budget alone meets or exceeds the
+    // model's hard output limit, no rewrite can produce a valid
+    // `max_tokens > budget_tokens` (Anthropic 400s otherwise). The request is
+    // the client's responsibility — leave its max_tokens untouched rather than
+    // rewrite it into an invalid value.
+    if (thinkingBudget !== undefined && modelSpec.output <= thinkingBudget) {
+      // When models.dev data isn't loaded, modelSpec.output is the fallback
+      // (8192) — likely understating the model's true output limit and making
+      // a legitimate thinking budget look unsatisfiable. Surface that at WARN so
+      // a cold-cache/outage misfire is visible (vs. a genuinely invalid budget).
+      const onFallback = !isModelDataLoaded();
+      const logFn = onFallback ? log.warn : log.info;
+      logFn(
+        `max_tokens: leaving client value ${req.maxTokens} untouched ` +
+          `(thinkingBudget=${thinkingBudget} >= modelOutput=${modelSpec.output}` +
+          (onFallback
+            ? "; model data not loaded — using fallback limits"
+            : "") +
+          `)`,
+      );
+    } else {
+      const computed = computeMaxTokens(
+        modelSpec.output,
+        modelSpec.context,
+        sessionState.outputTokensEMA,
+        sessionState.lastStopReason,
+        sessionState.lastInputTokens,
+        thinkingBudget,
+        thinkingActive,
+      );
+      if (req.maxTokens !== computed) {
+        log.info(
+          `max_tokens: ${req.maxTokens} → ${computed} ` +
+            `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
+            `lastStop=${sessionState.lastStopReason ?? "none"}` +
+            (thinkingBudget
+              ? `, thinkingBudget=${thinkingBudget}`
+              : thinkingActive
+                ? ", thinking=active(no budget)"
+                : "") +
+            `)`,
         );
-        throw new Error("legacy session owner changed during adoption");
+        req.maxTokens = computed;
       }
-      if (
-        identified.guardProject &&
-        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
-      ) {
-        dropOwnedProvisionalKey(
-          identified.provisionalKey,
-          identified.sessionID,
-        );
-        throw new Error("session project changed during provisional migration");
-      }
-      // Project creation/reattribution belongs to the same transaction as the
-      // turn, tracking, route, and header confirmation. A local write failure
-      // must leave the provisional project and identity wholly unchanged.
-      const pathState = {
-        sessionID: identified.sessionID,
-        projectPath: persisted?.projectPath ?? pathResult.path,
-        projectPathProvisional: persisted?.projectPath
-          ? persisted.projectPathProvisional
-          : pathResult.source === "cwd",
-        gitRemote: pathResult.gitRemote,
-      } as Partial<SessionState> as SessionState;
-      projectPath = resolveSessionProjectPath(pathResult, pathState, config);
-      projectPathProvisional = pathState.projectPathProvisional === true;
-      if (
-        projectPathProvisional &&
-        (pathResult.source === "header" || pathResult.source === "inferred")
-      ) {
-        throw new Error("provisional project re-attribution failed");
-      }
-      ensureProject(projectPath, undefined, pathResult.gitRemote);
-      storeTurnTemporal({
-        temporalInput,
-        assistantContentBlocks: accumulated.content,
-        usage: accumulated.usage ?? ZERO_USAGE,
-        model: accumulated.model,
-        projectPath,
-        sessionID: identified.sessionID,
-        noStore,
-      });
-      saveSessionTracking(identified.sessionID, {
-        messageCount: requestSourceMessageCount(req),
-        turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
-        consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
-        projectPath,
-        projectPathProvisional,
-        credentialFingerprint,
-        ...(identified.adoptionFingerprint
-          ? { fingerprint: identified.adoptionFingerprint }
-          : {}),
-        ...(upstreamUpdate.changed
-          ? { lastUpstream: serializeUpstreamState(upstreamState) }
-          : {}),
-        ...(known
-          ? {
-              headerSessionId: known.sessionId,
-              headerName: known.headerName,
-            }
-          : {}),
-      });
+    }
+  }
+
+  // --- 5. Cold-cache idle-resume ---
+  // Auto-sync idle threshold with conversation TTL: when 1h TTL is active
+  // (explicit or auto-upgraded), use 60 min idle threshold instead of the
+  // configured value (which defaults to 5 min for the default cache tier).
+  const effectiveIdleMinutes =
+    sessionState.resolvedConversationTTL === "1h" && cfg.idleResumeMinutes <= 5
+      ? 60
+      : cfg.idleResumeMinutes;
+  const thresholdMs = effectiveIdleMinutes * 60_000;
+  // PR2b: the unified cache-economics strategy decides whether to skip
+  // post-idle compaction. When confident AND the cache is actually still live
+  // (isCacheWarm time check), hold-warm → skip compaction (protect the warm
+  // prefix); cool-bust/cool-full-write → don't skip (let it compact). The
+  // isCacheWarm liveness floor is ALWAYS required — a stale hold-warm strategy
+  // with an expired cache must NOT skip compaction (the cache is cold, compaction
+  // is free and beneficial). Falls back to isCacheWarm when non-confident.
+  const econ = getCacheStrategy(sessionID);
+  const cacheWarm = decideSkipCompact(econ, isCacheWarm(sessionState));
+  // `cacheWarm` also tells onIdleResume to PRESERVE the byte-identity caches
+  // (distilled prefix + raw-window pin) so the warm prefix survives the resume.
+  // A false-positive here (isCacheWarm true but the warmed bytes actually
+  // diverged) is safe: preserving at worst defers folding idle-distilled rows
+  // into the prefix by one cold cycle — never a worse cache bust than clearing
+  // (both produce a full write on a genuine miss; the preserved body is ≤ the
+  // re-rendered one).
+  const idleResult = onIdleResume(
+    sessionID,
+    thresholdMs,
+    Date.now(),
+    cacheWarm,
+  );
+  sessionState.lastTurnWasIdle = idleResult.triggered;
+  if (idleResult.triggered) {
+    ltmSessionCache.delete(sessionID);
+    saveSessionTracking(sessionID, {
+      ltmCacheText: null,
+      ltmCacheTokens: null,
     });
-    const state = getOrCreateSession(
-      identified.sessionID,
-      projectPath,
-      projectPathProvisional ? "cwd" : "header",
-      credentialFingerprint,
-      config,
+    // NOTE: the stable LTM block (system[1]: preferences + entities) is
+    // deliberately NOT refreshed here (v45). It is frozen for the session's life
+    // and replayed byte-identically — recomputing it from the live knowledge
+    // table on idle resume is what let a curator/consolidation delete change the
+    // "stable" prefix and bust the whole prompt cache (ses_14b9bf3d… incident).
+    // Re-warming after the 1h breakpoint expires re-sends the same frozen bytes;
+    // newly-curated preferences are picked up by the NEXT session, not mid-session.
+    log.info(
+      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+        (cacheWarm ? " (cache warm — skipping compact)" : "") +
+        (econ?.result.confident
+          ? ` (strategy=${econ.result.strategy})`
+          : " (legacy isCacheWarm)"),
     );
-    if (upstreamUpdate.changed) {
-      if (upstreamState.lastUpstream) {
-        state.lastUpstream = upstreamState.lastUpstream;
-      } else {
-        delete state.lastUpstream;
-      }
-      state.upstreamByProvider = upstreamState.upstreamByProvider;
-      if (upstreamState._upstreamRequestOrder !== undefined) {
-        state._upstreamRequestOrder = upstreamState._upstreamRequestOrder;
-      } else {
-        delete state._upstreamRequestOrder;
-      }
-      if (upstreamState._upstreamRequestOrderByProvider) {
-        state._upstreamRequestOrderByProvider =
-          upstreamState._upstreamRequestOrderByProvider;
-      } else {
-        delete state._upstreamRequestOrderByProvider;
-      }
-      if (upstreamUpdate.resetCache) {
-        state.cacheAnalytics.lastRequestBody = null;
-      }
-    }
-    if (known) publishKnownSessionHeader(known, state, credentialFingerprint);
-    else state.credentialFingerprint = credentialFingerprint;
-    if (identified.tier === 3) observeHeaderValues(req.rawHeaders);
-    state.projectPath = projectPath;
-    state.projectPathProvisional = projectPathProvisional;
-    if (identified.adoptionFingerprint) {
-      state.fingerprint = identified.adoptionFingerprint;
-    }
-    if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
-    state.messageCount = requestSourceMessageCount(req);
-    state._dirty = true;
-    if (credential) {
-      captureLegacyGlobalAuth(req, config, credential);
-      setSessionAuth(
-        state.sessionID,
-        credential,
-        extractProviderHeader(req.rawHeaders) || undefined,
+    if (econ) {
+      log.info(
+        `cache-economics (compaction): session=${sessionID.slice(0, 16)} ` +
+          `strategy=${econ.result.strategy} skipCompact=${cacheWarm} ` +
+          `confident=${econ.result.confident === true} strategyAgeMs=${Date.now() - econ.decidedAt}`,
       );
     }
-    captureBillingPrefix(state.sessionID, req.system);
-    captureSessionHeaders(state.sessionID, req.rawHeaders);
-    return true;
-  };
-  scheduleStreamingPostResponse(
-    identified.sessionID,
-    requestGeneration,
-    async () => {
-      await downstreamSettled;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      const pause = provisionalFinalizerPauseForTest;
-      if (pause) {
-        pause.onWait();
-        await pause.pause;
+  }
+
+  // Build the Lore message array once (resolved) — shared by the turn-1 LTM
+  // decision below (isLargeColdStart) and the gradient transform in step 7, so
+  // both see identical input and agree on whether this cold session compresses.
+  let {
+    loreMessages,
+    temporalInput,
+    provenanceByMessageId,
+    sourceWindow,
+    checkpoint,
+  } = await prepareSemanticMessages({
+    messages: req.messages,
+    sessionID,
+    projectPath,
+    noStore: suppressTemporalStorage,
+    protocol: req.protocol,
+    checkpointProtocol: requestCheckpointProtocol(req),
+    checkpointBoundarySafe: req.sourceInput?.boundarySafe,
+    sourcePrefix: requestSourcePrefix(req),
+    timing: preparationTiming,
+  });
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
+
+  // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
+  // system[0]: Host prompt              [no cache_control]
+  // system[1]: Stable LTM (preferences) [cache_control: 1h] — pinned ≥1h
+  //
+  // system[0]+[1] form a stable prefix cached at 1h TTL (written at 2×
+  // cost, read at 0.1×). Context-bound LTM (gotchas/patterns/architecture +
+  // distillation/temporal context-sources) is NO LONGER emitted as a system[2]
+  // block — it rides the durable prompt-delta path from its FIRST injection
+  // onward (appended [user,assistant] pair at a frozen conversation-tail
+  // position, replayed byte-identically, re-anchored on compression). This
+  // removes the once-per-session first-population bust that a system[2] block
+  // caused (amplified on the OpenAI/OpenRouter path, where the whole system
+  // string shares a single cache_control breakpoint). The durable delta is the
+  // sole injection channel for context-bound LTM; the pin/cache bookkeeping
+  // below survives purely as the delta's diff baseline.
+  let stableLtmText: string | undefined; // block 2: preferences (system[1])
+  let pendingKnowledgeDelta:
+    | {
+        previousKeys: string[] | undefined;
+        nextKeys: string[] | undefined;
+        entries: Array<{
+          id: string;
+          category: string;
+          title: string;
+          content: string;
+        }>;
+        // #917: relevance-scored entries that didn't fit the system[2] budget,
+        // surfaced as a recall-by-id ToC inside the (frozen) knowledge delta.
+        overflow?: Array<{ id: string; category: string; title: string }>;
       }
-      if (requestGeneration !== streamingPostResponseGeneration) return;
-      if (downstreamWasCancelled()) {
-        accountUnsuccessfulResponse(
-          accumulated,
-          identified.sessionID,
-          conversationTTLForAccounting(identified.sessionID),
-          undefined,
-          () => {},
-        );
-        return;
-      }
-      if (
-        identified.guardProject &&
-        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
-      ) {
-        dropOwnedProvisionalKey(
-          identified.provisionalKey,
-          identified.sessionID,
-        );
-        return;
-      }
-      if (!(await commit())) return;
-      accountConversationUsage(
-        accumulated.usage ?? ZERO_USAGE,
-        accumulated.model,
-        identified.sessionID,
-        conversationTTLForAccounting(identified.sessionID),
+    | undefined;
+  if (cfg.knowledge.enabled) {
+    // Track whether LTM state changed for batched DB persistence
+    let ltmDirty = false;
+    let pinDirty = false;
+
+    try {
+      const ltmFraction = cfg.budget.ltm;
+      // Per-session overhead (Bug 1, lever 2): budget off this session's own
+      // calibrated overhead, not a global EMA blended across sessions.
+      // Sub-agent sessions get a smaller, needs-based LTM budget so injected
+      // knowledge doesn't crowd out a short focused task's own context/output.
+      const ltmBudgetOpts = { isSubagent: !!sessionState.isSubagent };
+      const ltmBudget = getLtmBudget(
+        ltmFraction,
+        sessionID ?? undefined,
+        ltmBudgetOpts,
       );
-      const state = sessions.get(identified.sessionID);
-      if (state) state._dirty = true;
-    },
-    () => {},
-    true,
-    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
-  );
-  return response;
-}
+      const prefBudget = getPreferenceLtmBudget(
+        cfg.budget.preferenceLtm,
+        sessionID ?? undefined,
+        ltmBudgetOpts,
+      );
+      // Surface the resolved LTM budget so a "knowledge is crowding my
+      // sub-agent" report is a one-grep diagnosis (LORE_DEBUG=1) instead of an
+      // inference from window sizes: sub-agents are capped tighter
+      // (SUBAGENT_MAX_LTM_BUDGET_FRACTION) so a small ctxBound here is expected
+      // and NOT the crowding cause — see the Onur sub-agent triage, Jul 2026.
+      log.info(
+        `ltm-budget: session=${sessionID?.slice(0, 16) ?? "none"} ` +
+          `subagent=${!!sessionState.isSubagent} ` +
+          `ctxBound=${ltmBudget} pref=${prefBudget} fraction=${ltmFraction}`,
+      );
+      const isFirstTurn =
+        sessionID != null && !temporal.hasMessages(projectPath, sessionID);
+      const contextHint = lastUserTextTrimmed(req);
 
-/**
- * Check whether the upstream prompt cache is likely still warm for this
- * session. Returns true when a warmup ping was successfully sent within
- * the current cache TTL window.
- *
- * When true, post-idle compaction should be skipped: the warmer replayed
- * the full (uncompacted) request body, so compacting now would produce
- * different bytes and bust the cache the warmer just paid to preserve.
- */
-function isCacheWarm(state: SessionState): boolean {
-  const warmup = state.warmup;
-  // Require at least one successful warmup before claiming warm.
-  // This also gates the forceKeepWarm early-return below.
-  if (!warmup?.lastWarmupAt) return false;
-
-  const profile = resolveWarmingProfile(
-    state.lastUpstream?.model,
-    state.lastUpstream?.protocol,
-    state.resolvedConversationTTL,
-  );
-  if (!profile) return false;
-
-  // /lore:warm:keep sessions: consider warm if the last warmup was within
-  // 2 TTL windows. The warmer fires once per TTL window, so 2× provides a
-  // safety margin while still expiring if the warmer has stopped
-  // (e.g. circuit breaker tripped, process-level failure).
-  if (warmup.forceKeepWarm) {
-    return Date.now() - warmup.lastWarmupAt < profile.ttlMs * 2;
-  }
-
-  return Date.now() - warmup.lastWarmupAt < profile.ttlMs;
-}
-
-/**
- * Decide whether to skip post-idle compaction (PR2b). The unified cache-economics
- * strategy provides the INTENT (hold-warm → protect the warm prefix by skipping
- * compaction; cool-bust/cool-full-write → let it compact), but the cache must
- * ACTUALLY still be live (`cacheIsLive` — the `isCacheWarm` time check) — a stale
- * hold-warm strategy whose cache has expired must NOT skip compaction (the cache
- * is cold; compaction is free and reduces ongoing read cost). Non-confident
- * strategy → `cacheIsLive` alone (the legacy behavior, byte-identical).
- */
-export function decideSkipCompact(
-  econ: {
-    result: { strategy: CacheStrategy; confident: boolean };
-    decidedAt: number;
-  } | null,
-  cacheIsLive: boolean,
-): boolean {
-  if (!econ?.result.confident) return cacheIsLive;
-  // Confident hold-warm wants to skip, but ONLY if the cache is actually live.
-  if (strategyWantsWarming(econ.result.strategy)) return cacheIsLive;
-  // cool-bust / cool-full-write: don't skip — let it compact.
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Case 3: Normal conversation turn — full pipeline
-// ---------------------------------------------------------------------------
-
-export function mergeRecallUsage(
-  current: GatewayUsage,
-  continuation: GatewayUsage,
-): GatewayUsage {
-  const merged: GatewayUsage = {
-    inputTokens: safeTokenSum(
-      [current.inputTokens, continuation.inputTokens],
-      "recall usage token overflow",
-    ),
-    outputTokens: safeTokenSum(
-      [current.outputTokens, continuation.outputTokens],
-      "recall usage token overflow",
-    ),
-  };
-  if (
-    current.cacheReadInputTokens !== undefined ||
-    continuation.cacheReadInputTokens !== undefined
-  ) {
-    merged.cacheReadInputTokens = safeTokenSum(
-      [current.cacheReadInputTokens, continuation.cacheReadInputTokens],
-      "recall usage token overflow",
-    );
-  }
-  if (
-    current.cacheCreationInputTokens !== undefined ||
-    continuation.cacheCreationInputTokens !== undefined
-  ) {
-    merged.cacheCreationInputTokens = safeTokenSum(
-      [current.cacheCreationInputTokens, continuation.cacheCreationInputTokens],
-      "recall usage token overflow",
-    );
-  }
-  safeTokenSum(
-    [
-      merged.inputTokens,
-      merged.outputTokens,
-      merged.cacheReadInputTokens,
-      merged.cacheCreationInputTokens,
-    ],
-    "recall usage token overflow",
-  );
-  return merged;
-}
-
-/** Compact, provider-neutral finalization guidance appended only to the last tool result. */
-function recallBudgetGuidance(
-  result: string,
-  reason: RecallStopReason | undefined,
-): string {
-  if (!reason) return result;
-  return (
-    `${result}\n\n[Recall policy: stop further recall because ${reason}. ` +
-    "Use the evidence above to answer now or hand back an ordinary tool.]"
-  );
-}
-
-function assertCurrentPipelineGeneration(
-  signal: AbortSignal | undefined,
-  requestGeneration: number,
-): void {
-  signal?.throwIfAborted();
-  if (
-    pipelineResetInProgress ||
-    requestGeneration !== streamingPostResponseGeneration
-  ) {
-    throw new DOMException("gateway pipeline generation changed", "AbortError");
-  }
-}
-
-async function handleConversationTurn(
-  req: GatewayRequest,
-  config: GatewayConfig,
-  requestOrder: number,
-  requestGeneration: number,
-  downstreamSettled: Promise<void>,
-  downstreamWasCancelled: () => boolean,
-  claimSession: (sessionID: string) => Promise<void>,
-  onSessionIdentified?: (sessionID: string) => void,
-): Promise<Response> {
-  if (
-    pipelineResetInProgress ||
-    requestGeneration !== streamingPostResponseGeneration
-  ) {
-    return errorResponse(503, "Gateway pipeline generation changed");
-  }
-  // --- 1. Project path & init ---
-  // Enrich headers with context markers injected by lore-hermes plugin.
-  // This lets getProjectPath() pick up [lore:project=...] via the existing
-  // header resolution path without modifying config.ts.
-  if (!req.rawHeaders["x-lore-project"]) {
-    const markerProject = extractProjectMarker(req.messages);
-    if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
-  }
-  const pathResult = getProjectPath(req.system, req.rawHeaders);
-
-  // --- 2. Capture auth credentials for background workers ---
-  const cred = extractAuth(req.rawHeaders);
-
-  // --- 3. Session identification ---
-  const admitted = await withIdentityAdmission(req, config, async () => {
-    const result = await identifySession(
-      req,
-      pathResult.path,
-      pathResult.source,
-      requestGeneration,
-      config,
-    );
-    const claimed = result.isNew || result.provisionalIdentity === true;
-    if (claimed) await claimSession(result.sessionID);
-    const revalidateConfirmedIdentity =
-      !result.isNew && result.provisionalIdentity !== true && result.tier !== 3;
+      // --- system[1]: Stable LTM (preferences) + known entities ---
+      // Computed once per session and pinned for ≥1h. NOT invalidated by
+      // curation — even if a preference changes, we keep the cached version
+      // so the Anthropic 1h prompt cache prefix stays warm.
+      // Uses a dedicated budget independent of context-bound LTM. The known-
+      // entities block is folded in here (not system[2]) so it is available on
+      // turn 1.
+      let stable = stableLtmCache.get(sessionID);
+      if (!stable) {
+        // Single-flight: a client header-timeout retry burst can fire several
+        // concurrent identical turns at a cold session. Without dedup they ALL
+        // recompute the heavy stable block (ltm.forSession ×2 + entity fetch +
+        // catalog scan) independently, compounding the very latency that caused
+        // the retries. Share one in-flight compute; the settled value lands in
+        // stableLtmCache before the promise resolves, so re-reading is race-free.
+        stable = await singleFlightStableLtm(
+          sessionID,
+          (signal) =>
+            computeStableLtm(
+              sessionID,
+              projectPath,
+              cfg,
+              contextHint,
+              prefBudget,
+              signal,
+              requestGeneration,
+            ),
+          req.signal,
+        );
+        assertCurrentPiperue && result.tier !== 3;
     return { identified: result, claimed, revalidateConfirmedIdentity };
   });
   const { identified } = admitted;
@@ -16959,527 +16873,7 @@ async function handleConversationTurn(
     // One-time "it's working" signal. A fresh user has no easy way to tell
     // their agent is actually routed through Lore; this confirms it the first
     // time a credentialed turn is proxied, then stays quiet for the process.
-    if (!_firstTurnConfirmed) {
-      _firstTurnConfirmed = true;
-      log.info(
-        "\u2713 Connected — your agent's traffic is now flowing through Lore.",
-      );
-    }
-
-    // A session-less import may use only the deliberately captured local,
-    // configured direct-provider credential. Remote/custom routes never expose
-    // their credential through the process-global fallback.
-    if (legacyGlobalProvider) {
-      trackBackground(flushPendingImport(legacyGlobalProvider));
-    }
-  }
-
-  // Capture billing header prefix for worker cch computation, scoped to
-  // this session. Bearer tokens (Claude Code OAuth) embed an
-  // x-anthropic-billing-header in the system prompt; we extract the prefix
-  // so workers can rebuild it. Per-session storage prevents cross-session
-  // contamination when multiple Claude Code versions share one process.
-  captureBillingPrefix(sessionID, req.system);
-
-  // Sniff Claude Code headers from conversation turns for replay on worker
-  // calls. For OAuth sessions, workers need the same anthropic-beta and
-  // user-agent headers as conversation turns to avoid 401 rejections.
-  captureSessionHeaders(sessionID, req.rawHeaders);
-
-  // Track fingerprint for future correlation
-  if (isNew) {
-    if (!suppressTemporalStorage) {
-      const credentialFingerprint =
-        requestCredentialFingerprint(req.rawHeaders, config) ?? "";
-      const fingerprint = await fingerprintMessages(
-        req.messages.map((m) => ({ role: m.role, content: m.content })),
-        usesRemoteSessionBinding(config)
-          ? { tenantFingerprint: credentialFingerprint }
-          : { authSuffix: cred ? authFingerprint(cred) : "" },
-      );
-      assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      sessionState.fingerprint = fingerprint;
-      // Persist fingerprint immediately — rare event (new session only)
-      saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
-    }
-
-    // Re-check knowledge files on new session start.  The file watcher
-    // covers live edits, but this catches cases where:
-    //  - The watcher wasn't set up (file didn't exist at startup)
-    //  - The watcher missed an event (e.g. network-mounted fs)
-    //  - The file was created after gateway startup (first export from another machine)
-    tryImportKnowledge(projectPath);
-  }
-
-  // --- Compaction anomaly detection ---
-  // If we reach here (normal turn) with a large message count drop, the client
-  // performed compaction that slipped past both structural and pattern detection.
-  // Skip for sub-agent sessions (small context by design) and tool-less
-  // requests (title-gen, summarization agents that resume with fresh context).
-  const prevMsgCount = sessionState.messageCount;
-  const currMsgCount = requestSourceMessageCount(req);
-  if (
-    prevMsgCount > 10 &&
-    currMsgCount < prevMsgCount * 0.5 &&
-    !sessionState.isSubagent &&
-    req.tools.length > 0
-  ) {
-    log.warn(
-      `compaction anomaly: session=${sessionID.slice(0, 16)} ` +
-        `messages dropped ${prevMsgCount}→${currMsgCount}. ` +
-        `Client may have compacted outside gateway control.`,
-    );
-    // Flag the session for urgent distillation on the next turn. The messages
-    // that just dropped out of the client's view are still in our temporal
-    // store and need to be distilled before any further distillation run
-    // picks up a stale snapshot — otherwise the dropped context is silently
-    // lost from the Lore-side view.
-    sessionState.compactionAnomalyPending = true;
-  }
-
-  // Update message count for proximity matching & structural compaction detection.
-  sessionState.messageCount = currMsgCount;
-  // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
-  // together to avoid multiple DB writes per turn.
-  // Also persist the project binding (v36): this runs AFTER
-  // resolveSessionProjectPath() above, so it captures the post-resolution
-  // binding — including a provisional→confident transition from self-heal —
-  // letting a gateway restart rehydrate the exact project_id and never split it.
-  saveSessionTracking(sessionID, {
-    messageCount: currMsgCount,
-    turnsSinceCuration: sessionState.turnsSinceCuration,
-    consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
-    projectPath: sessionState.projectPath || null,
-    projectPathProvisional: sessionState.projectPathProvisional === true,
-    credentialFingerprint: sessionState.credentialFingerprint ?? "",
-    // v37: persist the compaction anomaly flag so a gateway restart between
-    // detection (this turn) and consumption (next turn's scheduleBackgroundWork)
-    // doesn't lose the urgent-distillation signal.
-    ...(sessionState.compactionAnomalyPending
-      ? { compactionAnomalyPending: true }
-      : {}),
-  });
-
-  // Track session model for worker model discovery
-  _lastSeenSessionModel = req.model;
-
-  // --- Sentry scope enrichment ---
-  setSentryRequestContext({
-    authFingerprint: cred ? authFingerprint(cred) : null,
-    sessionID,
-    model: req.model,
-    upstreamUrl: (() => {
-      const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
-      if (hdrUp) return hdrUp;
-      const pid = extractProviderHeader(req.rawHeaders);
-      if (pid) {
-        const pr = resolveProviderRoute(pid);
-        if (pr?.url) return pr.url;
-      }
-      return (
-        resolveUpstreamRoute(req.model)?.url ??
-        (req.protocol === "anthropic"
-          ? config.upstreamAnthropic
-          : config.upstreamOpenAI)
-      );
-    })(),
-    port: config.port,
-    projectPath,
-  });
-
-  // Anchor provenance must use the normalized client transcript before recall
-  // expansion mutates historical markers into synthetic tool round trips.
-  const recallClientMessages = req.messages.map((message) => ({
-    role: message.role,
-    content: [...message.content],
-    ...(message.provenanceContent
-      ? { provenanceContent: [...message.provenanceContent] }
-      : {}),
-    ...(message.provenancePositions
-      ? { provenancePositions: [...message.provenancePositions] }
-      : {}),
-  }));
-
-  // --- Expand recall markers from previous turns ---
-  // Scan all assistant messages for marker text blocks and restore them
-  // to tool_use + tool_result pairs before forwarding upstream.
-  if (sessionState.recallStore.size > 0) {
-    // Cleanup must inspect the client transcript while anchors still exist.
-    // Expanding first would make every live anchor look orphaned.
-    const recallStoreChanged = cleanupRecallStore(
-      req,
-      sessionState.recallStore,
-    );
-    const expanded = expandRecallMarkers(req, sessionState.recallStore);
-    if (expanded) {
-      log.info(`expanded recall markers for session ${sessionID.slice(0, 16)}`);
-    }
-    if (recallStoreChanged) {
-      saveSessionTracking(sessionID, {
-        recallStore: serializeRecallStore(sessionState.recallStore),
-      });
-    }
-  }
-
-  // --- Strip context warning markers from previous turns ---
-  // The warning is injected into the response (assistant message) so the user
-  // can see it. On the next turn, the client sends it back as part of the
-  // assistant message. Strip it here so the API sees the original content,
-  // preserving the prompt cache prefix.
-  stripContextWarnings(req.messages);
-
-  // Per-turn attribution diagnostics. Surfacing source/header/mode here makes
-  // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
-  // or a hosted gateway falling back to its own cwd) immediately visible in
-  // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
-  const preparationTiming = new PreparationTiming(req);
-  log.info(
-    `turn: session=${sessionID.slice(0, 16)} messages=${currMsgCount} ` +
-      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
-      `subagent=${!!sessionState.isSubagent} ` +
-      `source=${pathResult.source} ` +
-      `hdrProject=${req.rawHeaders["x-lore-project"] ? "present" : "absent"} ` +
-      `provisional=${sessionState.projectPathProvisional === true} ` +
-      `remoteGateway=${config.remoteGateway} hosted=${isHostedMode()} ` +
-      `project=${projectPath}`,
-  );
-
-  // --- 4. Resolve this request's model budget ---
-  // Snapshot ALL model-derived budget inputs into one object keyed to THIS
-  // request's model. The host does async work (ltm.forSession awaits) between
-  // here and the gradient transform; passing this snapshot to transform()
-  // applies it atomically there, so a concurrently-running request for a
-  // different model can't clobber the values mid-flight (the cross-model
-  // contamination that flipped l0cap 200000 ↔ 3571428 and thrashed layers).
-  //
-  // Close the cold-start race: the very first request after a restart can land
-  // before the fire-and-forget models.dev pre-warm resolves, which would size
-  // this turn's budget from fallback pricing/limits (wrong l0cap/usable for one
-  // turn). Wait briefly for real data; bounded so a slow/unreachable models.dev
-  // never hangs the request (falls back to the same fallback path as before).
-  // INVARIANT: this await must stay immediately before getModelSpec — it exists
-  // to make the budget below read real model data, not fallback. (Secondary
-  // getModelEntrySync sites — worker selection, cost metrics — intentionally
-  // keep using the sync fallback on the very first turn; they self-correct.)
-  await ensureModelDataReady();
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-  // Price the session model from the provider it is actually routed to (the
-  // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
-  // published by several providers at different cache prices would otherwise
-  // corrupt cacheReadCost → computeLayer0Cap.
-  const modelSpec = getModelSpec(
-    req.model,
-    extractProviderHeader(req.rawHeaders),
-  );
-  const cfg = loreConfig();
-
-  // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
-  // never inherit another model's layer-0 cap: when this model has no
-  // cacheReadCost we resolve to 0 (disabled), NOT whatever the previous
-  // request left in the global.
-  let layer0Cap = 0;
-  if (cfg.budget.maxLayer0Tokens !== undefined) {
-    layer0Cap = cfg.budget.maxLayer0Tokens;
-  } else if (
-    modelSpec.cacheReadCost &&
-    cfg.budget.targetCacheReadCostPerTurn > 0
-  ) {
-    layer0Cap = computeLayer0Cap(
-      cfg.budget.targetCacheReadCostPerTurn,
-      modelSpec.cacheReadCost,
-      modelSpec.context,
-    );
-  }
-
-  // Cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
-  // Anthropic charges 2× cache_write for 1h TTL — adjust so shouldCompress()
-  // uses the actual write cost. When the model has no pricing data, resolve to
-  // 0/0 (conservative: do-not-compress) rather than the previous model's price.
-  let cacheWriteCostPerToken = 0;
-  let cacheReadCostPerToken = 0;
-  if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
-    cacheWriteCostPerToken =
-      sessionState.resolvedConversationTTL === "1h"
-        ? modelSpec.cacheWriteCost * 2
-        : modelSpec.cacheWriteCost;
-    cacheReadCostPerToken = modelSpec.cacheReadCost;
-  }
-
-  const modelBudget = {
-    contextLimit: modelSpec.context,
-    outputReserved: modelSpec.output,
-    maxLayer0Tokens: layer0Cap,
-    cacheWriteCostPerToken,
-    cacheReadCostPerToken,
-    qualityKneeFraction: modelSpec.qualityKneeFraction,
-  };
-
-  // Also apply to the module globals now, so any gradient helper invoked
-  // BEFORE transform() (and outside the atomic transform path) reads this
-  // request's values. transform() re-applies modelBudget atomically.
-  setModelLimits({ context: modelSpec.context, output: modelSpec.output });
-  setMaxLayer0Tokens(layer0Cap);
-  setCachePricing(cacheWriteCostPerToken, cacheReadCostPerToken);
-  setQualityKnee(
-    modelSpec.qualityKneeFraction ?? DEFAULT_QUALITY_KNEE_FRACTION,
-  );
-
-  // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
-  // Claude Code manages its own max_tokens (32K for modern models). Other
-  // clients often send low/missing values (defaults to 4096 in ingress
-  // parsing). Apply a hybrid headroom + history algorithm that tightens
-  // from the 32K ceiling based on actual output patterns.
-  const isCC =
-    isClaudeCodeClient(req.rawHeaders) || hasBillingHeader(req.system);
-  if (!isCC) {
-    // Anthropic extended thinking arrives as `metadata.thinking =
-    // { type: "enabled", budget_tokens: N }` (not a KNOWN_BODY_FIELD, so it
-    // lands in metadata). Extract the budget so max_tokens leaves room above it
-    // — otherwise a low output EMA collapses the cap to the floor and truncates
-    // thinking-heavy turns mid-reasoning.
-    const thinkingMeta = req.metadata?.thinking as
-      | { type?: string; budget_tokens?: number }
-      | undefined;
-    const thinkingBudget =
-      thinkingMeta?.type === "enabled" &&
-      typeof thinkingMeta.budget_tokens === "number" &&
-      thinkingMeta.budget_tokens > 0
-        ? thinkingMeta.budget_tokens
-        : undefined;
-    // Structural fallback: thinking-by-default models (e.g. claude-opus-4-8)
-    // emit thinking blocks WITHOUT an explicit `thinking` param, so the budget
-    // above is undefined. Detect active reasoning from the request's thinking
-    // blocks so the rewrite still reserves headroom and doesn't truncate the
-    // turn at the end of a thinking block.
-    const thinkingActive =
-      thinkingBudget !== undefined || requestHasThinking(req.messages);
-    // Unsatisfiable budget: if the thinking budget alone meets or exceeds the
-    // model's hard output limit, no rewrite can produce a valid
-    // `max_tokens > budget_tokens` (Anthropic 400s otherwise). The request is
-    // the client's responsibility — leave its max_tokens untouched rather than
-    // rewrite it into an invalid value.
-    if (thinkingBudget !== undefined && modelSpec.output <= thinkingBudget) {
-      // When models.dev data isn't loaded, modelSpec.output is the fallback
-      // (8192) — likely understating the model's true output limit and making
-      // a legitimate thinking budget look unsatisfiable. Surface that at WARN so
-      // a cold-cache/outage misfire is visible (vs. a genuinely invalid budget).
-      const onFallback = !isModelDataLoaded();
-      const logFn = onFallback ? log.warn : log.info;
-      logFn(
-        `max_tokens: leaving client value ${req.maxTokens} untouched ` +
-          `(thinkingBudget=${thinkingBudget} >= modelOutput=${modelSpec.output}` +
-          (onFallback
-            ? "; model data not loaded — using fallback limits"
-            : "") +
-          `)`,
-      );
-    } else {
-      const computed = computeMaxTokens(
-        modelSpec.output,
-        modelSpec.context,
-        sessionState.outputTokensEMA,
-        sessionState.lastStopReason,
-        sessionState.lastInputTokens,
-        thinkingBudget,
-        thinkingActive,
-      );
-      if (req.maxTokens !== computed) {
-        log.info(
-          `max_tokens: ${req.maxTokens} → ${computed} ` +
-            `(ema=${sessionState.outputTokensEMA ?? "none"}, ` +
-            `lastStop=${sessionState.lastStopReason ?? "none"}` +
-            (thinkingBudget
-              ? `, thinkingBudget=${thinkingBudget}`
-              : thinkingActive
-                ? ", thinking=active(no budget)"
-                : "") +
-            `)`,
-        );
-        req.maxTokens = computed;
-      }
-    }
-  }
-
-  // --- 5. Cold-cache idle-resume ---
-  // Auto-sync idle threshold with conversation TTL: when 1h TTL is active
-  // (explicit or auto-upgraded), use 60 min idle threshold instead of the
-  // configured value (which defaults to 5 min for the default cache tier).
-  const effectiveIdleMinutes =
-    sessionState.resolvedConversationTTL === "1h" && cfg.idleResumeMinutes <= 5
-      ? 60
-      : cfg.idleResumeMinutes;
-  const thresholdMs = effectiveIdleMinutes * 60_000;
-  // PR2b: the unified cache-economics strategy decides whether to skip
-  // post-idle compaction. When confident AND the cache is actually still live
-  // (isCacheWarm time check), hold-warm → skip compaction (protect the warm
-  // prefix); cool-bust/cool-full-write → don't skip (let it compact). The
-  // isCacheWarm liveness floor is ALWAYS required — a stale hold-warm strategy
-  // with an expired cache must NOT skip compaction (the cache is cold, compaction
-  // is free and beneficial). Falls back to isCacheWarm when non-confident.
-  const econ = getCacheStrategy(sessionID);
-  const cacheWarm = decideSkipCompact(econ, isCacheWarm(sessionState));
-  // `cacheWarm` also tells onIdleResume to PRESERVE the byte-identity caches
-  // (distilled prefix + raw-window pin) so the warm prefix survives the resume.
-  // A false-positive here (isCacheWarm true but the warmed bytes actually
-  // diverged) is safe: preserving at worst defers folding idle-distilled rows
-  // into the prefix by one cold cycle — never a worse cache bust than clearing
-  // (both produce a full write on a genuine miss; the preserved body is ≤ the
-  // re-rendered one).
-  const idleResult = onIdleResume(
-    sessionID,
-    thresholdMs,
-    Date.now(),
-    cacheWarm,
-  );
-  sessionState.lastTurnWasIdle = idleResult.triggered;
-  if (idleResult.triggered) {
-    ltmSessionCache.delete(sessionID);
-    saveSessionTracking(sessionID, {
-      ltmCacheText: null,
-      ltmCacheTokens: null,
-    });
-    // NOTE: the stable LTM block (system[1]: preferences + entities) is
-    // deliberately NOT refreshed here (v45). It is frozen for the session's life
-    // and replayed byte-identically — recomputing it from the live knowledge
-    // table on idle resume is what let a curator/consolidation delete change the
-    // "stable" prefix and bust the whole prompt cache (ses_14b9bf3d… incident).
-    // Re-warming after the 1h breakpoint expires re-sends the same frozen bytes;
-    // newly-curated preferences are picked up by the NEXT session, not mid-session.
-    log.info(
-      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
-        (cacheWarm ? " (cache warm — skipping compact)" : "") +
-        (econ?.result.confident
-          ? ` (strategy=${econ.result.strategy})`
-          : " (legacy isCacheWarm)"),
-    );
-    if (econ) {
-      log.info(
-        `cache-economics (compaction): session=${sessionID.slice(0, 16)} ` +
-          `strategy=${econ.result.strategy} skipCompact=${cacheWarm} ` +
-          `confident=${econ.result.confident === true} strategyAgeMs=${Date.now() - econ.decidedAt}`,
-      );
-    }
-  }
-
-  // Build the Lore message array once (resolved) — shared by the turn-1 LTM
-  // decision below (isLargeColdStart) and the gradient transform in step 7, so
-  // both see identical input and agree on whether this cold session compresses.
-  let {
-    loreMessages,
-    temporalInput,
-    provenanceByMessageId,
-    sourceWindow,
-    checkpoint,
-  } = await prepareSemanticMessages({
-    messages: req.messages,
-    sessionID,
-    projectPath,
-    noStore: suppressTemporalStorage,
-    protocol: req.protocol,
-    checkpointProtocol: requestCheckpointProtocol(req),
-    checkpointBoundarySafe: req.sourceInput?.boundarySafe,
-    sourcePrefix: requestSourcePrefix(req),
-    timing: preparationTiming,
-  });
-  assertCurrentPipelineGeneration(req.signal, requestGeneration);
-
-  // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
-  // system[0]: Host prompt              [no cache_control]
-  // system[1]: Stable LTM (preferences) [cache_control: 1h] — pinned ≥1h
-  //
-  // system[0]+[1] form a stable prefix cached at 1h TTL (written at 2×
-  // cost, read at 0.1×). Context-bound LTM (gotchas/patterns/architecture +
-  // distillation/temporal context-sources) is NO LONGER emitted as a system[2]
-  // block — it rides the durable prompt-delta path from its FIRST injection
-  // onward (appended [user,assistant] pair at a frozen conversation-tail
-  // position, replayed byte-identically, re-anchored on compression). This
-  // removes the once-per-session first-population bust that a system[2] block
-  // caused (amplified on the OpenAI/OpenRouter path, where the whole system
-  // string shares a single cache_control breakpoint). The durable delta is the
-  // sole injection channel for context-bound LTM; the pin/cache bookkeeping
-  // below survives purely as the delta's diff baseline.
-  let stableLtmText: string | undefined; // block 2: preferences (system[1])
-  let pendingKnowledgeDelta:
-    | {
-        previousKeys: string[] | undefined;
-        nextKeys: string[] | undefined;
-        entries: Array<{
-          id: string;
-          category: string;
-          title: string;
-          content: string;
-        }>;
-        // #917: relevance-scored entries that didn't fit the system[2] budget,
-        // surfaced as a recall-by-id ToC inside the (frozen) knowledge delta.
-        overflow?: Array<{ id: string; category: string; title: string }>;
-      }
-    | undefined;
-  if (cfg.knowledge.enabled) {
-    // Track whether LTM state changed for batched DB persistence
-    let ltmDirty = false;
-    let pinDirty = false;
-
-    try {
-      const ltmFraction = cfg.budget.ltm;
-      // Per-session overhead (Bug 1, lever 2): budget off this session's own
-      // calibrated overhead, not a global EMA blended across sessions.
-      // Sub-agent sessions get a smaller, needs-based LTM budget so injected
-      // knowledge doesn't crowd out a short focused task's own context/output.
-      const ltmBudgetOpts = { isSubagent: !!sessionState.isSubagent };
-      const ltmBudget = getLtmBudget(
-        ltmFraction,
-        sessionID ?? undefined,
-        ltmBudgetOpts,
-      );
-      const prefBudget = getPreferenceLtmBudget(
-        cfg.budget.preferenceLtm,
-        sessionID ?? undefined,
-        ltmBudgetOpts,
-      );
-      // Surface the resolved LTM budget so a "knowledge is crowding my
-      // sub-agent" report is a one-grep diagnosis (LORE_DEBUG=1) instead of an
-      // inference from window sizes: sub-agents are capped tighter
-      // (SUBAGENT_MAX_LTM_BUDGET_FRACTION) so a small ctxBound here is expected
-      // and NOT the crowding cause — see the Onur sub-agent triage, Jul 2026.
-      log.info(
-        `ltm-budget: session=${sessionID?.slice(0, 16) ?? "none"} ` +
-          `subagent=${!!sessionState.isSubagent} ` +
-          `ctxBound=${ltmBudget} pref=${prefBudget} fraction=${ltmFraction}`,
-      );
-      const isFirstTurn =
-        sessionID != null && !temporal.hasMessages(projectPath, sessionID);
-      const contextHint = lastUserTextTrimmed(req);
-
-      // --- system[1]: Stable LTM (preferences) + known entities ---
-      // Computed once per session and pinned for ≥1h. NOT invalidated by
-      // curation — even if a preference changes, we keep the cached version
-      // so the Anthropic 1h prompt cache prefix stays warm.
-      // Uses a dedicated budget independent of context-bound LTM. The known-
-      // entities block is folded in here (not system[2]) so it is available on
-      // turn 1.
-      let stable = stableLtmCache.get(sessionID);
-      if (!stable) {
-        // Single-flight: a client header-timeout retry burst can fire several
-        // concurrent identical turns at a cold session. Without dedup they ALL
-        // recompute the heavy stable block (ltm.forSession ×2 + entity fetch +
-        // catalog scan) independently, compounding the very latency that caused
-        // the retries. Share one in-flight compute; the settled value lands in
-        // stableLtmCache before the promise resolves, so re-reading is race-free.
-        stable = await singleFlightStableLtm(
-          sessionID,
-          (signal) =>
-            computeStableLtm(
-              sessionID,
-              projectPath,
-              cfg,
-              contextHint,
-              prefBudget,
-              signal,
-              requestGeneration,
-            ),
-          req.signal,
-        );
-        assertCurrentPipelineGeneration(req.signal, requestGeneration);
+    if (!_firslineGeneration(req.signal, requestGeneration);
       }
       stableLtmText = stable?.formatted;
 
@@ -18009,7 +17403,612 @@ async function handleConversationTurn(
             // CRITICAL: keep `entryKeys` frozen at the baseline matching the set
             // the durable delta was last coalesced against — do NOT advance to
             // the current `entryKeys`. The coalesced durable delta is replaced
-            // each turn, so it must describe the CUMULATIVE delta from the frozen
+            // each turn, stTurnConfirmed) {
+      _firstTurnConfirmed = true;
+      log.info(
+        "\u2713 Connected — your agent's traffic is now flowing through Lore.",
+      );
+    }
+
+    // A session-less import may use only the deliberately captured local,
+    // configured direct-provider credential. Remote/custom routes never expose
+    // their credential through the process-global fallback.
+    if (legacyGlobalProvider) {
+      trackBackground(flushPendingImport(legacyGlobalProvider));
+    }
+  }
+
+  // Capture billing header prefix for worker cch computation, scoped to
+  // this session. Bearer tokens (Claude Code OAuth) embed an
+  // x-anthropic-billing-header in the system prompt; we extract the prefix
+  // so workers can rebuild it. Per-session storage prevents cross-session
+  // contamination when multiple Claude Code versions share one process.
+  captureBillingPrefix(sessionID, req.system);
+
+  // Sniff Claude Code headers from conversation turns for replay on worker
+  // calls. For OAuth sessions, workers need the same anthropic-beta and
+  // user-agent headers as conversation turns to avoid 401 rejections.
+  captureSessionHeaders(sessionID, req.rawHeaders);
+
+  // Track fingerprint for future correlation
+  if (isNew) {
+    if (!suppressTemporalStorage) {
+      const credentialFingerprint =
+        requestCredentialFingerprint(req.rawHeaders, config) ?? "";
+      const fingerprint = await fingerprintMessages(
+        req.messages.map((m) => ({ role: m.role, content: m.content })),
+        usesRemoteSessionBinding(config)
+          ? { tenantFingerprint: credentialFingerprint }
+          : { authSuffix: cred ? authFingerprint(cred) : "" },
+      );
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
+      sessionState.fingerprint = fingerprint;
+      // Persist fingerprint immediately — rare event (new session only)
+      saveSessionTracking(sessionID, { fingerprint, credentialFingerprint });
+    }
+
+    // Re-check knowledge files on new session start.  The file watcher
+    // covers live edits, but this catches cases where:
+    //  - The watcher wasn't set up (file didn't exist at startup)
+    //  - The watcher missed an event (e.g. network-mounted fs)
+    //  - The file was created after gateway startup (first export from another machine)
+    tryImportKnowledge(projectPath);
+  }
+
+  // --- Compaction anomaly detection ---
+  // If we reach here (normal turn) with a large message count drop, the client
+  // performed compaction that slipped past both structural and pattern detection.
+  // Skip for sub-agent sessions (small context by design) and tool-less
+  // requests (title-gen, summarization agents that resume with fresh context).
+  const prevMsgCount = sessionState.messageCount;
+  const currMsgCount = requestSourceMessageCount(req);
+  if (
+    prevMsgCount > 10 &&
+    currMsgCount < prevMsgCount * 0.5 &&
+    !sessionState.isSubagent &&
+    req.tools.length > 0
+  ) {
+    log.warn(
+      `compaction anomaly: session=${sessionID.slice(0, 16)} ` +
+        `messages dropped ${prevMsgCount}→${currMsgCount}. ` +
+        `Client may have compacted outside gateway control.`,
+    );
+    // Flag the session for urgent distillation on the next turn. The messages
+    // that just dropped out of the client's view are still in our temporal
+    // store and need to be distilled before any further distillation run
+    // picks up a stale snapshot — otherwise the dropped context is silently
+    // lost from the Lore-side view.
+    sessionState.compactionAnomalyPending = true;
+  }
+
+  // Update message count for proximity matching & structural compaction detection.
+  sessionState.messageCount = currMsgCount;
+  // Batched save: messageCount + turnsSinceCuration + consecutiveTextOnlyTurns
+  // together to avoid multiple DB writes per turn.
+  // Also persist the project binding (v36): this runs AFTER
+  // resolveSessionProjectPath() above, so it captures the post-resolution
+  // binding — including a provisional→confident transition from self-heal —
+  // letting a gateway restart rehydrate the exact project_id and never split it.
+  saveSessionTracking(sessionID, {
+    messageCount: currMsgCount,
+    turnsSinceCuration: sessionState.turnsSinceCuration,
+    consecutiveTextOnlyTurns: sessionState.consecutiveTextOnlyTurns,
+    projectPath: sessionState.projectPath || null,
+    projectPathProvisional: sessionState.projectPathProvisional === true,
+    credentialFingerprint: sessionState.credentialFingerprint ?? "",
+    // v37: persist the compaction anomaly flag so a gateway restart between
+    // detection (this turn) and consumption (next turn's scheduleBackgroundWork)
+    // doesn't lose the urgent-distillation signal.
+    ...(sessionState.compactionAnomalyPending
+      ? { compactionAnomalyPending: true }
+      : {}),
+  });
+
+  // Track session model for worker model discovery
+  _lastSeenSessionModel = req.model;
+
+  // --- Sentry scope enrichment ---
+  setSentryRequestContext({
+    authFingerprint: cred ? authFingerprint(cred) : null,
+    sessionID,
+    model: req.model,
+    upstreamUrl: (() => {
+      const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
+      if (hdrUp) return hdrUp;
+      const pid = extractProviderHeader(req.rawHeaders);
+      if (pid) {
+        const pr = resolveProviderRoute(pid);
+        if (pr?.url) return pr.url;
+      }
+      return (
+        resolveUpstreamRoute(req.model)?.url ??
+        (req.protocol === "anthropic"
+          ? config.upstreamAnthropic
+          : config.upstreamOpenAI)
+      );
+    })(),
+    port: config.port,
+    projectPath,
+  });
+
+  // Anchor provenance must use the normalized client transcript before recall
+  // expansion mutates historical markers into synthetic tool round trips.
+  const recallClientMessages = req.messages.map((message) => ({
+    role: message.role,
+    content: [...message.content],
+    ...(message.provenanceContent
+      ? { provenanceContent: [...message.provenanceContent] }
+      : {}),
+    ...(message.provenancePositions
+      ? { provenancePositions: [...message.provenancePositions] }
+      : {}),
+  }));
+
+  // --- Expand recall markers from previous turns ---
+  // Scan all assistant messages for marker text blocks and restore them
+  // to tool_use + tool_result pairs before forwarding upstream.
+  if (sessionState.recallStore.size > 0) {
+    // Cleanup must inspect the client transcript while anchors still exist.
+    // Expanding first would make every live anchor look orphaned.
+    const recallStoreChanged = cleanupRecallStore(
+      req,
+      sessionState.recallStore,
+    );
+    const expanded = expandRecallMarkers(req, sessionState.recallStore);
+    if (expanded) {
+      log.info(`expanded recall markers for session ${sessionID.slice(0, 16)}`);
+    }
+    if (recallStoreChanged) {
+      saveSessionTracking(sessionID, {
+        recallStore: serializeRecallStore(sessionState.recallStore),
+      });
+    }
+  }
+
+  // --- Strip context warning markers from previous turns ---
+  // The warning is injected into the response (assistant message) so the user
+  // can see it. On the next turn, the client sends it back as part of the
+  // assistant message. Strip it here so the API sees the original content,
+  // preserving the prompt cache prefix.
+  stripContextWarnings(req.messages);
+
+  // Per-turn attribution diagnostics. Surfacing source/header/mode here makes
+  // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
+  // or a hosted gateway falling back to its own cwd) immediately visible in
+  // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
+  const preparationTiming = new PreparationTiming(req);
+  log.info(
+    `turn: session=${sessionID.slice(0, 16)} messages=${currMsgCount} ` +
+      `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
+      `subagent=${!!sessionState.isSubagent} ` +
+      `source=${pathResult.source} ` +
+      `hdrProject=${req.rawHeaders["x-lore-project"] ? "present" : "absent"} ` +
+      `provisional=${sessionState.projectPathProvisional === true} ` +
+      `remoteGateway=${config.remoteGateway} hosted=${isHostedMode()} ` +
+      `project=${projectPath}`,
+  );
+
+  // --- 4. Resolve this request's model budget ---
+  // Snapshot ALL model-derived budget inputs into one object keyed to THIS
+  // request's model. The host does async work (ltm.forSession awaits) between
+  // here and the gradient transform; passing this snapshot to transform()
+  // applies it atomically there, so a concurrently-running request for a
+  // different model can't clobber the values mid-flight (the cross-model
+  // contamination that flipped l0cap 200000 ↔ 3571428 and thrashed layers).
+  //
+  // Close the cold-start race: the very first request after a restart can land
+  // before the fire-and-forget models.dev pre-warm resolves, which would size
+  // this turn's budget from fallback pricing/limits (wrong l0cap/usable for one
+  // turn). Wait briefly for real data; bounded so a slow/unreachable models.dev
+  // never hangs the request (falls back to the same fallback path as before).
+  // INVARIANT: this await must stay immediately before getModelSpec — it exists
+  // to make the budget below read real model data, not fallback. (Secondary
+  // getModelEntrySync sites — worker selection, cost metrics — intentionally
+  // keep using the sync fallback on the very first turn; they self-correct.)
+  await ensureModelDataReady();
+  assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  // Price the session model from the provider it is actually routed to (the
+  // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
+  // published by several providers at different cache prices would otherwise
+  // corrupt cacheReadCost → computeLayer0Cap.
+  const modelSpec = getModelSpec(
+    req.model,
+    extractProviderHeader(req.rawHeaders),
+  );
+  const cfg = loreConfig();
+
+  // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
+  // never inherit another model's layer-0 cap: when this model has no
+  // cacheReadCost we resolve to 0 (disabled), NOT whatever the previous
+  // request left in the global.
+  let layer0Cap = 0;
+  if (cfg.budget.maxLayer0Tokens !== undefined) {
+    layer0Cap = cfg.budget.maxLayer0Tokens;
+  } else if (
+    modelSpec.cacheReadCost &&
+    cfg.budget.targetCacheReadCostPerTurn > 0
+  ) {
+    layer0Cap = computeLayer0Cap(
+      cfg.budget.targetCacheReadCostPerTurn,
+      modelSpec.cacheReadCost,
+      modelSpec.context,
+    );
+  }
+
+  // Cache pricing for tier-based bust-vs-continue decisions in gradient.ts.
+  // Anthropic charges 2× cache_write for 1h TTL — adjust so shouldCompress()
+  // uses the actual write cost. When the model has no pricing data, resolve to
+  // 0/0 (conservative: do-not-compress) rather than the previous model's price.
+  let cacheWriteCostPerToken = 0;
+  let cacheReadCostPerToken = 0;
+  if (modelSpec.cacheWriteCost && modelSpec.cacheReadCost) {
+    cacheWriteCostPerToken =
+      sessionState.resolvedConversationTTL === "1h"
+        ? modelSpec.cacheWriteCost * 2
+        : modelSpec.cacheWriteCost;
+    cacheReadCostPerToken = modelSpec.cacheReadCost;
+  }
+
+  const modelBudget = {
+    contextLimit: modelSpec.context,
+    outputReserved: modelSpec.output,
+    maxLayer0Tokens: layer0Cap,
+    cacheWriteCostPerToken,
+    cacheReadCostPerToken,
+    qualityKneeFraction: modelSpec.qualityKneeFraction,
+  };
+
+  // Also apply to the module globals now, so any gradient helper invoked
+  // BEFORE transform() (and outside the atomic transform path) reads this
+  // request's values. transform() re-applies modelBudget atomically.
+  setModelLimits({ context: modelSpec.context, output: modelSpec.output });
+  setMaxLayer0Tokens(layer0Cap);
+  setCachePricing(cacheWriteCostPerToken, cacheReadCostPerToken);
+  setQualityKnee(
+    modelSpec.qualityKneeFraction ?? DEFAULT_QUALITY_KNEE_FRACTION,
+  );
+
+  // --- 4c. Dynamic max_tokens sizing for non-Claude-Code clients ---
+  // Claude Code manages Unowned(identified.sessionID)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("legacy session owner changed during adoption");
+      }
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        throw new Error("session project changed during provisional migration");
+      }
+      // Project creation/reattribution belongs to the same transaction as the
+      // turn, tracking, route, and header confirmation. A local write failure
+      // must leave the provisional project and identity wholly unchanged.
+      const pathState = {
+        sessionID: identified.sessionID,
+        projectPath: persisted?.projectPath ?? pathResult.path,
+        projectPathProvisional: persisted?.projectPath
+          ? persisted.projectPathProvisional
+          : pathResult.source === "cwd",
+        gitRemote: pathResult.gitRemote,
+      } as Partial<SessionState> as SessionState;
+      projectPath = resolveSessionProjectPath(pathResult, pathState, config);
+      projectPathProvisional = pathState.projectPathProvisional === true;
+      if (
+        projectPathProvisional &&
+        (pathResult.source === "header" || pathResult.source === "inferred")
+      ) {
+        throw new Error("provisional project re-attribution failed");
+      }
+      ensureProject(projectPath, undefined, pathResult.gitRemote);
+      storeTurnTemporal({
+        temporalInput,
+        assistantContentBlocks: accumulated.content,
+        usage: accumulated.usage ?? ZERO_USAGE,
+        model: accumulated.model,
+        projectPath,
+        sessionID: identified.sessionID,
+        noStore,
+      });
+      saveSessionTracking(identified.sessionID, {
+        messageCount: requestSourceMessageCount(req),
+        turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
+        consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
+        projectPath,
+        projectPathProvisional,
+        credentialFingerprint,
+        ...(identified.adoptionFingerprint
+          ? { fingerprint: identified.adoptionFingerprint }
+          : {}),
+        ...(upstreamUpdate.changed
+          ? { lastUpstream: serializeUpstreamState(upstreamState) }
+          : {}),
+        ...(known
+          ? {
+              headerSessionId: known.sessionId,
+              headerName: known.headerName,
+            }
+          : {}),
+      });
+    });
+    const state = getOrCreateSession(
+      identified.sessionID,
+      projectPath,
+      projectPathProvisional ? "cwd" : "header",
+      credentialFingerprint,
+      config,
+    );
+    if (upstreamUpdate.changed) {
+      if (upstreamState.lastUpstream) {
+        state.lastUpstream = upstreamState.lastUpstream;
+      } else {
+        delete state.lastUpstream;
+      }
+      state.upstreamByProvider = upstreamState.upstreamByProvider;
+      if (upstreamState._upstreamRequestOrder !== undefined) {
+        state._upstreamRequestOrder = upstreamState._upstreamRequestOrder;
+      } else {
+        delete state._upstreamRequestOrder;
+      }
+      if (upstreamState._upstreamRequestOrderByProvider) {
+        state._upstreamRequestOrderByProvider =
+          upstreamState._upstreamRequestOrderByProvider;
+      } else {
+        delete state._upstreamRequestOrderByProvider;
+      }
+      if (upstreamUpdate.resetCache) {
+        state.cacheAnalytics.lastRequestBody = null;
+      }
+    }
+    if (known) publishKnownSessionHeader(known, state, credentialFingerprint);
+    else state.credentialFingerprint = credentialFingerprint;
+    if (identified.tier === 3) observeHeaderValues(req.rawHeaders);
+    state.projectPath = projectPath;
+    state.projectPathProvisional = projectPathProvisional;
+    if (identified.adoptionFingerprint) {
+      state.fingerprint = identified.adoptionFingerprint;
+    }
+    if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
+    state.messageCount = requestSourceMessageCount(req);
+    state._dirty = true;
+    if (credential) {
+      captureLegacyGlobalAuth(req, config, credential);
+      setSessionAuth(
+        state.sessionID,
+        credential,
+        extractProviderHeader(req.rawHeaders) || undefined,
+      );
+    }
+    captureBillingPrefix(state.sessionID, req.system);
+    captureSessionHeaders(state.sessionID, req.rawHeaders);
+    return true;
+  };
+  scheduleStreamingPostResponse(
+    identified.sessionID,
+    requestGeneration,
+    async () => {
+      await downstreamSettled;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const pause = provisionalFinalizerPauseForTest;
+      if (pause) {
+        pause.onWait();
+        await pause.pause;
+      }
+      if (requestGeneration !== streamingPostResponseGeneration) return;
+      if (downstreamWasCancelled()) {
+        accountUnsuccessfulResponse(
+          accumulated,
+          identified.sessionID,
+          conversationTTLForAccounting(identified.sessionID),
+          undefined,
+          () => {},
+        );
+        return;
+      }
+      if (
+        identified.guardProject &&
+        conflictsWithConfidentSessionProject(identified.sessionID, pathResult)
+      ) {
+        dropOwnedProvisionalKey(
+          identified.provisionalKey,
+          identified.sessionID,
+        );
+        return;
+      }
+      if (!(await commit())) return;
+      accountConversationUsage(
+        accumulated.usage ?? ZERO_USAGE,
+        accumulated.model,
+        identified.sessionID,
+        conversationTTLForAccounting(identified.sessionID),
+      );
+      const state = sessions.get(identified.sessionID);
+      if (state) state._dirty = true;
+    },
+    () => {},
+    true,
+    requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
+  );
+  return response;
+}
+
+/**
+ * Check whether the upstream prompt cache is likely still warm for this
+ * session. Returns true when a warmup ping was successfully sent within
+ * the current cache TTL window.
+ *
+ * When true, post-idle compaction should be skipped: the warmer replayed
+ * the full (uncompacted) request body, so compacting now would produce
+ * different bytes and bust the cache the warmer just paid to preserve.
+ */
+function isCacheWarm(state: SessionState): boolean {
+  const warmup = state.warmup;
+  // Require at least one successful warmup before claiming warm.
+  // This also gates the forceKeepWarm early-return below.
+  if (!warmup?.lastWarmupAt) return false;
+
+  const profile = resolveWarmingProfile(
+    state.lastUpstream?.model,
+    state.lastUpstream?.protocol,
+    state.resolvedConversationTTL,
+  );
+  if (!profile) return false;
+
+  // /lore:warm:keep sessions: consider warm if the last warmup was within
+  // 2 TTL windows. The warmer fires once per TTL window, so 2× provides a
+  // safety margin while still expiring if the warmer has stopped
+  // (e.g. circuit breaker tripped, process-level failure).
+  if (warmup.forceKeepWarm) {
+    return Date.now() - warmup.lastWarmupAt < profile.ttlMs * 2;
+  }
+
+  return Date.now() - warmup.lastWarmupAt < profile.ttlMs;
+}
+
+/**
+ * Decide whether to skip post-idle compaction (PR2b). The unified cache-economics
+ * strategy provides the INTENT (hold-warm → protect the warm prefix by skipping
+ * compaction; cool-bust/cool-full-write → let it compact), but the cache must
+ * ACTUALLY still be live (`cacheIsLive` — the `isCacheWarm` time check) — a stale
+ * hold-warm strategy whose cache has expired must NOT skip compaction (the cache
+ * is cold; compaction is free and reduces ongoing read cost). Non-confident
+ * strategy → `cacheIsLive` alone (the legacy behavior, byte-identical).
+ */
+export function decideSkipCompact(
+  econ: {
+    result: { strategy: CacheStrategy; confident: boolean };
+    decidedAt: number;
+  } | null,
+  cacheIsLive: boolean,
+): boolean {
+  if (!econ?.result.confident) return cacheIsLive;
+  // Confident hold-warm wants to skip, but ONLY if the cache is actually live.
+  if (strategyWantsWarming(econ.result.strategy)) return cacheIsLive;
+  // cool-bust / cool-full-write: don't skip — let it compact.
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Case 3: Normal conversation turn — full pipeline
+// ---------------------------------------------------------------------------
+
+export function mergeRecallUsage(
+  current: GatewayUsage,
+  continuation: GatewayUsage,
+): GatewayUsage {
+  const merged: GatewayUsage = {
+    inputTokens: safeTokenSum(
+      [current.inputTokens, continuation.inputTokens],
+      "recall usage token overflow",
+    ),
+    outputTokens: safeTokenSum(
+      [current.outputTokens, continuation.outputTokens],
+      "recall usage token overflow",
+    ),
+  };
+  if (
+    current.cacheReadInputTokens !== undefined ||
+    continuation.cacheReadInputTokens !== undefined
+  ) {
+    merged.cacheReadInputTokens = safeTokenSum(
+      [current.cacheReadInputTokens, continuation.cacheReadInputTokens],
+      "recall usage token overflow",
+    );
+  }
+  if (
+    current.cacheCreationInputTokens !== undefined ||
+    continuation.cacheCreationInputTokens !== undefined
+  ) {
+    merged.cacheCreationInputTokens = safeTokenSum(
+      [current.cacheCreationInputTokens, continuation.cacheCreationInputTokens],
+      "recall usage token overflow",
+    );
+  }
+  safeTokenSum(
+    [
+      merged.inputTokens,
+      merged.outputTokens,
+      merged.cacheReadInputTokens,
+      merged.cacheCreationInputTokens,
+    ],
+    "recall usage token overflow",
+  );
+  return merged;
+}
+
+/** Compact, provider-neutral finalization guidance appended only to the last tool result. */
+function recallBudgetGuidance(
+  result: string,
+  reason: RecallStopReason | undefined,
+): string {
+  if (!reason) return result;
+  return (
+    `${result}\n\n[Recall policy: stop further recall because ${reason}. ` +
+    "Use the evidence above to answer now or hand back an ordinary tool.]"
+  );
+}
+
+function assertCurrentPipelineGeneration(
+  signal: AbortSignal | undefined,
+  requestGeneration: number,
+): void {
+  signal?.throwIfAborted();
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    throw new DOMException("gateway pipeline generation changed", "AbortError");
+  }
+}
+
+async function handleConversationTurn(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  requestOrder: number,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+  claimSession: (sessionID: string) => Promise<void>,
+  onSessionIdentified?: (sessionID: string) => void,
+): Promise<Response> {
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
+  // --- 1. Project path & init ---
+  // Enrich headers with context markers injected by lore-hermes plugin.
+  // This lets getProjectPath() pick up [lore:project=...] via the existing
+  // header resolution path without modifying config.ts.
+  if (!req.rawHeaders["x-lore-project"]) {
+    const markerProject = extractProjectMarker(req.messages);
+    if (markerProject) req.rawHeaders["x-lore-project"] = markerProject;
+  }
+  const pathResult = getProjectPath(req.system, req.rawHeaders);
+
+  // --- 2. Capture auth credentials for background workers ---
+  const cred = extractAuth(req.rawHeaders);
+
+  // --- 3. Session identification ---
+  const admitted = await withIdentityAdmission(req, config, async () => {
+    const result = await identifySession(
+      req,
+      pathResult.path,
+      pathResult.source,
+      requestGeneration,
+      config,
+    );
+    const claimed = result.isNew || result.provisionalIdentity === true;
+    if (claimed) await claimSession(result.sessionID);
+    const revalidateConfirmedIdentity =
+      !result.isNew && result.provisionalIdentity !== to it must describe the CUMULATIVE delta from the frozen
             // baseline to the current selection; advancing the baseline would
             // drop earlier supersessions from the single row.
             const frozenKeys = pinned.entryKeys;
@@ -18923,8 +18922,7 @@ async function handleConversationTurn(
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
-            signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(signal),
             validation: currentModifiedReq.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -19174,7 +19172,333 @@ async function handleConversationTurn(
       requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
     );
   }
-  function finishUnsuccessfulStreaming(resp: GatewayResponse): void {
+  function finishUnsuccessfulStre    ...foregroundSSEStreamOptions(foregroundAbort.signal),
+            validation: req.codex ? "codex" : "public",
+            stopAtTerminal: true,
+            requireCompletedTerminal: true,
+          }),
+        ),
+      );
+      if (!captured) {
+        return finishForeground(errorResponse(502, "Gateway request failed"));
+      }
+      if (!captured.successful) {
+        if (hasRecallToolUse(captured.response)) {
+          return finishForeground(errorResponse(502, "Gateway request failed"));
+        }
+        return finishForeground(
+          nonStreamHttpResponse(
+            captured.response,
+            req.protocol,
+            req.stream,
+            undefined,
+            requestEnablesLongContext(req),
+          ),
+        );
+      }
+      return finishWithRecall(captured.response);
+    }
+
+    if (effectiveProtocol === "openai") {
+      // OpenAI Chat Completions streaming — accumulate and return as
+      // non-streaming Anthropic format (same pattern as non-stream path).
+      const resp = await awaitForeground(
+        accumulateOpenAISSEStream(upstreamResponse, {
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
+          strict: true,
+          stopAtTerminal: true,
+          consumeUntilDone: true,
+          allowPostTerminalNoop:
+            isOpenCodeZenOpenAIStream(requestUpstreamRoute),
+        }),
+      );
+      return finishWithRecall(resp);
+    }
+
+    if (effectiveProtocol === "gemini") {
+      // Gemini native streaming — accumulate the SSE frames, then re-emit via
+      // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
+      const resp = await awaitForeground(
+        accumulateGeminiSSEStream(upstreamResponse, {
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
+          strict: true,
+          stopAtTerminal: true,
+        }),
+      );
+      return finishWithRecall(resp);
+    }
+
+    // Anthropic streaming: forward events and accumulate in parallel.
+    // Pass recall context so the accumulator can intercept recall tool_use.
+    const hasRecallTool = modifiedReq.tools.some(
+      (t) => t.name === RECALL_TOOL_NAME,
+    );
+    const anthropicSSE = buildStreamingResponse(
+      upstreamResponse,
+      finishStreaming,
+      hasRecallTool
+        ? {
+            clientMessages: recallClientMessages,
+            modifiedReq,
+            config,
+            sessionState,
+            cacheOptions,
+            upstreamRoute: requestUpstreamRoute,
+            noStore: suppressTemporalStorage,
+            onFailure: finishUnsuccessfulStreaming,
+            onTransactionReady: (transaction) => {
+              rollbackRecallPersistence();
+              recallPersistenceTransaction = transaction;
+            },
+            clientSpeaksAnthropic: req.protocol === "anthropic",
+            stableLtmText,
+            recallDeadlineAt: foregroundAbort.deadlineAt,
+            ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
+          }
+        : undefined,
+      warningText,
+      sessionState.sessionID,
+      // Cap usage against the window the CLIENT meters against: the model's real
+      // window only when this request opted into it via the context-1m beta,
+      // else 200K — so a 1M-capable model the client meters against 200K can't
+      // cross its ~167K auto-compact threshold (#910 regression; MiniMax-M3).
+      maxReportedUsageForModelID(req.model, requestEnablesLongContext(req)),
+      foregroundAbort.signal,
+    );
+    // Translate to client's wire format if needed. When the upstream is
+    // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
+    if (req.protocol === "openai") {
+      return finishForeground(
+        translateAnthropicStreamToOpenAI(anthropicSSE, {
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
+          propagateErrors: true,
+        }),
+      );
+    }
+    if (req.protocol === "openai-responses") {
+      return finishForeground(
+        translateAnthropicStreamToResponses(anthropicSSE, {
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
+        }),
+      );
+    }
+    if (req.protocol === "gemini") {
+      return finishForeground(
+        translateAnthropicStreamToGemini(anthropicSSE, {
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
+        }),
+      );
+    }
+    return finishForeground(anthropicSSE);
+  }
+
+  // Non-streaming: dispatch to correct accumulator based on upstream protocol.
+  const captured = await awaitForeground(
+    captureUnsuccessfulResponses(
+      accumulateNonStreamResponse(
+        upstreamResponse,
+        effectiveProtocol,
+        modifiedReq.codex === true,
+        foregroundAbort.signal,
+      ),
+    ),
+  );
+  if (!captured) {
+    return finishForeground(errorResponse(502, "Gateway request failed"));
+  }
+  if (!captured.successful) {
+    if (hasRecallToolUse(captured.response)) {
+      return finishForeground(errorResponse(502, "Gateway request failed"));
+    }
+    return finishForeground(
+      nonStreamHttpResponse(
+        captured.response,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
+    );
+  }
+  return finishWithRecall(captured.response);
+}
+
+/**
+ * Decide whether request-only Responses provenance may cross this transform.
+ *
+ * Encrypted reasoning is deliberately not part of Lore messages, temporal
+ * storage, or embeddings. It is replayed only while the gradient layer is
+ * stable; a layer transition is a compaction boundary and intentionally drops
+ * the old wire provenance. A fresh in-memory session has no prior boundary
+ * (`null`) and may replay its supplied history; persisted sessions with the
+ * v89 `-1` sentinel fail closed until an upstream turn establishes one.
+ * Emergency Layer 4 never replays it.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function shouldPreserveResponsesProvenance(
+  previousLayer: number | null,
+  currentLayer: number,
+): boolean {
+  return (
+    currentLayer < 4 &&
+    (previousLayer === null || previousLayer === currentLayer)
+  );
+}
+
+/**
+ * Provider-native thinking/encrypted blocks are opaque and valid only on the
+ * same wire family that produced them. A cross-protocol request keeps its
+ * visible projection but drops request-only provenance rather than sending
+ * Anthropic blocks to Gemini, Gemini signatures to Anthropic, or Responses
+ * reasoning items to Chat Completions.
+ *
+ * Vertex and Bedrock use the Anthropic Messages body, so they share the
+ * Anthropic provenance family.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function canReplayRequestProvenance(
+  ingressProtocol: GatewayProtocol,
+  effectiveProtocol: GatewayProtocol,
+): boolean {
+  const family = (protocol: GatewayProtocol): string =>
+    protocol === "vertex" ? "anthropic" : protocol;
+  return family(ingressProtocol) === family(effectiveProtocol);
+}
+
+// ---------------------------------------------------------------------------
+// Lore message → Gateway message conversion
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert transformed Lore messages back to gateway message format.
+ *
+ * This reverses `gatewayMessagesToLore` after gradient transform has
+ * potentially trimmed/reordered messages.
+ *
+ * Completed/error tool parts on assistant messages produce BOTH a `tool_use`
+ * block on the assistant AND a corresponding `tool_result` block injected at
+ * the start of the following user message. This makes the conversion
+ * self-contained: tool pairing is reconstructed from whatever messages
+ * survived gradient eviction, without depending on cross-message `tool_result`
+ * parts that can become orphaned when the assistant message is evicted.
+ *
+ * `resolveToolResults()` strips `tool: "result"` parts from user messages
+ * after pairing, so under normal operation those parts are gone. The fallback
+ * handling for residual `tool: "result"` parts is kept for robustness.
+ */
+/**
+ * Reconstruct tool_result content as a `GatewayContentBlock[]` from a Lore
+ * tool state. If structured `blocks` were preserved (non-text sub-blocks like
+ * images), re-emit them losslessly; otherwise wrap the text string.
+ */
+function toolResultContent(state: {
+  status: string;
+  output?: string;
+  error?: string;
+  blocks?: unknown[];
+}): GatewayContentBlock[] {
+  if (state.blocks && state.blocks.length > 0) {
+    // Re-emit the structured blocks that were preserved from ingress.
+    return state.blocks as GatewayContentBlock[];
+  }
+  const text =
+    state.status === "error"
+      ? (state.error ?? "[error]")
+      : (state.output ?? "");
+  return text ? [{ type: "text", text }] : [];
+}
+
+/** @internal Exported for tests. */
+export function loreMessagesToGateway(
+  messages: LoreMessageWithParts[],
+  provenanceByMessageId: ReadonlyMap<
+    string,
+    Pick<
+      GatewayMessage,
+      "content" | "provenanceContent" | "provenancePositions"
+    >
+  > = new Map(),
+  allowProvenance = true,
+): GatewayMessage[] {
+  const out: GatewayMessage[] = [];
+
+  // tool_result blocks reconstructed from the preceding assistant message's
+  // completed/error tool parts. Injected at the start of the next user message.
+  let pendingToolResults: GatewayContentBlock[] = [];
+
+  for (const msg of messages) {
+    const content: GatewayContentBlock[] = [];
+
+    if (msg.info.role === "user") {
+      // Inject reconstructed tool_result blocks from preceding assistant
+      content.push(...pendingToolResults);
+      pendingToolResults = [];
+    } else {
+      // New assistant message — reset pending results (shouldn't have any
+      // in well-formed conversations, but handles back-to-back assistants)
+      pendingToolResults = [];
+    }
+
+    for (const part of msg.parts) {
+      switch (part.type) {
+        case "text":
+          content.push({
+            type: "text",
+            text: (part as { text: string }).text,
+          });
+          break;
+        case "reasoning":
+          // Native/encrypted reasoning is request-only provenance. Older
+          // temporal rows may still contain a reasoning part from before that
+          // boundary existed; never promote it back into visible request
+          // content on replay.
+          break;
+        case "tool": {
+          const toolPart = part as {
+            type: "tool";
+            tool: string;
+            callID: string;
+            toolName?: string;
+            state: {
+              status: string;
+              input?: unknown;
+              output?: string;
+              error?: string;
+            };
+          };
+          if (toolPart.tool === "result") {
+            // Residual tool_result part (should have been stripped by
+            // resolveToolResults, but handle gracefully for robustness)
+            content.push({
+              type: "tool_result",
+              toolUseId: toolPart.callID,
+              ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
+              content: toolResultContent(toolPart.state),
+            });
+          } else {
+            // Emit tool_use on this assistant message
+            content.push({
+              type: "tool_use",
+              id: toolPart.callID,
+              name: toolPart.tool,
+              input: toolPart.state.input ?? {},
+            });
+            // Completed/error tool parts: queue a tool_result for the next
+            // user message. This reconstructs the Anthropic API's split-
+            // message format from Lore's single-message representation.
+            if (toolPart.state.status === "completed") {
+              pendingToolResults.push({
+                type: "tool_result",
+                toolUseId: toolPart.callID,
+                toolName: toolPart.toolName ?? toolPart.tool,
+                content: toolResultContent(toolPart.state),
+              });
+            } else if (toolPart.state.status === "error") {
+              pendingToolResults.push({
+                type: "tool_result",
+                toolaming(resp: GatewayResponse): void {
     if (streamingFinalizerRegistered) return;
     streamingFinalizerRegistered = true;
     scheduleStreamingPostResponse(
@@ -19466,8 +19790,7 @@ async function handleConversationTurn(
             },
             sessionState.sessionID,
             req.codex ? "codex" : "public",
-            foregroundAbort.signal,
-            FOREGROUND_SSE_INACTIVITY_MS,
+            foregroundSSEStreamOptions(foregroundAbort.signal),
           ),
         );
       }
@@ -19476,663 +19799,7 @@ async function handleConversationTurn(
       const captured = await awaitForeground(
         captureUnsuccessfulResponses(
           accumulateResponsesSSEStream(upstreamResponse, {
-            signal: foregroundAbort.signal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-            validation: req.codex ? "codex" : "public",
-            stopAtTerminal: true,
-            requireCompletedTerminal: true,
-          }),
-        ),
-      );
-      if (!captured) {
-        return finishForeground(errorResponse(502, "Gateway request failed"));
-      }
-      if (!captured.successful) {
-        if (hasRecallToolUse(captured.response)) {
-          return finishForeground(errorResponse(502, "Gateway request failed"));
-        }
-        return finishForeground(
-          nonStreamHttpResponse(
-            captured.response,
-            req.protocol,
-            req.stream,
-            undefined,
-            requestEnablesLongContext(req),
-          ),
-        );
-      }
-      return finishWithRecall(captured.response);
-    }
-
-    if (effectiveProtocol === "openai") {
-      // OpenAI Chat Completions streaming — accumulate and return as
-      // non-streaming Anthropic format (same pattern as non-stream path).
-      const resp = await awaitForeground(
-        accumulateOpenAISSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
-          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-          strict: true,
-          stopAtTerminal: true,
-          consumeUntilDone: true,
-          allowPostTerminalNoop:
-            isOpenCodeZenOpenAIStream(requestUpstreamRoute),
-        }),
-      );
-      return finishWithRecall(resp);
-    }
-
-    if (effectiveProtocol === "gemini") {
-      // Gemini native streaming — accumulate the SSE frames, then re-emit via
-      // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
-      const resp = await awaitForeground(
-        accumulateGeminiSSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
-          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-          strict: true,
-          stopAtTerminal: true,
-        }),
-      );
-      return finishWithRecall(resp);
-    }
-
-    // Anthropic streaming: forward events and accumulate in parallel.
-    // Pass recall context so the accumulator can intercept recall tool_use.
-    const hasRecallTool = modifiedReq.tools.some(
-      (t) => t.name === RECALL_TOOL_NAME,
-    );
-    const anthropicSSE = buildStreamingResponse(
-      upstreamResponse,
-      finishStreaming,
-      hasRecallTool
-        ? {
-            clientMessages: recallClientMessages,
-            modifiedReq,
-            config,
-            sessionState,
-            cacheOptions,
-            upstreamRoute: requestUpstreamRoute,
-            noStore: suppressTemporalStorage,
-            onFailure: finishUnsuccessfulStreaming,
-            onTransactionReady: (transaction) => {
-              rollbackRecallPersistence();
-              recallPersistenceTransaction = transaction;
-            },
-            clientSpeaksAnthropic: req.protocol === "anthropic",
-            stableLtmText,
-            recallDeadlineAt: foregroundAbort.deadlineAt,
-            ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
-          }
-        : undefined,
-      warningText,
-      sessionState.sessionID,
-      // Cap usage against the window the CLIENT meters against: the model's real
-      // window only when this request opted into it via the context-1m beta,
-      // else 200K — so a 1M-capable model the client meters against 200K can't
-      // cross its ~167K auto-compact threshold (#910 regression; MiniMax-M3).
-      maxReportedUsageForModelID(req.model, requestEnablesLongContext(req)),
-      foregroundAbort.signal,
-    );
-    // Translate to client's wire format if needed. When the upstream is
-    // Anthropic but the client speaks OpenAI, wrap the Anthropic SSE stream.
-    if (req.protocol === "openai") {
-      return finishForeground(
-        translateAnthropicStreamToOpenAI(anthropicSSE, {
-          signal: foregroundAbort.signal,
-          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-          propagateErrors: true,
-        }),
-      );
-    }
-    if (req.protocol === "openai-responses") {
-      return finishForeground(
-        translateAnthropicStreamToResponses(anthropicSSE, {
-          signal: foregroundAbort.signal,
-          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-        }),
-      );
-    }
-    if (req.protocol === "gemini") {
-      return finishForeground(
-        translateAnthropicStreamToGemini(anthropicSSE, {
-          signal: foregroundAbort.signal,
-          inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
-        }),
-      );
-    }
-    return finishForeground(anthropicSSE);
-  }
-
-  // Non-streaming: dispatch to correct accumulator based on upstream protocol.
-  const captured = await awaitForeground(
-    captureUnsuccessfulResponses(
-      accumulateNonStreamResponse(
-        upstreamResponse,
-        effectiveProtocol,
-        modifiedReq.codex === true,
-        foregroundAbort.signal,
-      ),
-    ),
-  );
-  if (!captured) {
-    return finishForeground(errorResponse(502, "Gateway request failed"));
-  }
-  if (!captured.successful) {
-    if (hasRecallToolUse(captured.response)) {
-      return finishForeground(errorResponse(502, "Gateway request failed"));
-    }
-    return finishForeground(
-      nonStreamHttpResponse(
-        captured.response,
-        req.protocol,
-        req.stream,
-        undefined,
-        requestEnablesLongContext(req),
-      ),
-    );
-  }
-  return finishWithRecall(captured.response);
-}
-
-/**
- * Decide whether request-only Responses provenance may cross this transform.
- *
- * Encrypted reasoning is deliberately not part of Lore messages, temporal
- * storage, or embeddings. It is replayed only while the gradient layer is
- * stable; a layer transition is a compaction boundary and intentionally drops
- * the old wire provenance. A fresh in-memory session has no prior boundary
- * (`null`) and may replay its supplied history; persisted sessions with the
- * v89 `-1` sentinel fail closed until an upstream turn establishes one.
- * Emergency Layer 4 never replays it.
- *
- * @internal Exported for focused policy tests.
- */
-export function shouldPreserveResponsesProvenance(
-  previousLayer: number | null,
-  currentLayer: number,
-): boolean {
-  return (
-    currentLayer < 4 &&
-    (previousLayer === null || previousLayer === currentLayer)
-  );
-}
-
-/**
- * Provider-native thinking/encrypted blocks are opaque and valid only on the
- * same wire family that produced them. A cross-protocol request keeps its
- * visible projection but drops request-only provenance rather than sending
- * Anthropic blocks to Gemini, Gemini signatures to Anthropic, or Responses
- * reasoning items to Chat Completions.
- *
- * Vertex and Bedrock use the Anthropic Messages body, so they share the
- * Anthropic provenance family.
- *
- * @internal Exported for focused policy tests.
- */
-export function canReplayRequestProvenance(
-  ingressProtocol: GatewayProtocol,
-  effectiveProtocol: GatewayProtocol,
-): boolean {
-  const family = (protocol: GatewayProtocol): string =>
-    protocol === "vertex" ? "anthropic" : protocol;
-  return family(ingressProtocol) === family(effectiveProtocol);
-}
-
-// ---------------------------------------------------------------------------
-// Lore message → Gateway message conversion
-// ---------------------------------------------------------------------------
-
-/**
- * Convert transformed Lore messages back to gateway message format.
- *
- * This reverses `gatewayMessagesToLore` after gradient transform has
- * potentially trimmed/reordered messages.
- *
- * Completed/error tool parts on assistant messages produce BOTH a `tool_use`
- * block on the assistant AND a corresponding `tool_result` block injected at
- * the start of the following user message. This makes the conversion
- * self-contained: tool pairing is reconstructed from whatever messages
- * survived gradient eviction, without depending on cross-message `tool_result`
- * parts that can become orphaned when the assistant message is evicted.
- *
- * `resolveToolResults()` strips `tool: "result"` parts from user messages
- * after pairing, so under normal operation those parts are gone. The fallback
- * handling for residual `tool: "result"` parts is kept for robustness.
- */
-/**
- * Reconstruct tool_result content as a `GatewayContentBlock[]` from a Lore
- * tool state. If structured `blocks` were preserved (non-text sub-blocks like
- * images), re-emit them losslessly; otherwise wrap the text string.
- */
-function toolResultContent(state: {
-  status: string;
-  output?: string;
-  error?: string;
-  blocks?: unknown[];
-}): GatewayContentBlock[] {
-  if (state.blocks && state.blocks.length > 0) {
-    // Re-emit the structured blocks that were preserved from ingress.
-    return state.blocks as GatewayContentBlock[];
-  }
-  const text =
-    state.status === "error"
-      ? (state.error ?? "[error]")
-      : (state.output ?? "");
-  return text ? [{ type: "text", text }] : [];
-}
-
-/** @internal Exported for tests. */
-export function loreMessagesToGateway(
-  messages: LoreMessageWithParts[],
-  provenanceByMessageId: ReadonlyMap<
-    string,
-    Pick<
-      GatewayMessage,
-      "content" | "provenanceContent" | "provenancePositions"
-    >
-  > = new Map(),
-  allowProvenance = true,
-): GatewayMessage[] {
-  const out: GatewayMessage[] = [];
-
-  // tool_result blocks reconstructed from the preceding assistant message's
-  // completed/error tool parts. Injected at the start of the next user message.
-  let pendingToolResults: GatewayContentBlock[] = [];
-
-  for (const msg of messages) {
-    const content: GatewayContentBlock[] = [];
-
-    if (msg.info.role === "user") {
-      // Inject reconstructed tool_result blocks from preceding assistant
-      content.push(...pendingToolResults);
-      pendingToolResults = [];
-    } else {
-      // New assistant message — reset pending results (shouldn't have any
-      // in well-formed conversations, but handles back-to-back assistants)
-      pendingToolResults = [];
-    }
-
-    for (const part of msg.parts) {
-      switch (part.type) {
-        case "text":
-          content.push({
-            type: "text",
-            text: (part as { text: string }).text,
-          });
-          break;
-        case "reasoning":
-          // Native/encrypted reasoning is request-only provenance. Older
-          // temporal rows may still contain a reasoning part from before that
-          // boundary existed; never promote it back into visible request
-          // content on replay.
-          break;
-        case "tool": {
-          const toolPart = part as {
-            type: "tool";
-            tool: string;
-            callID: string;
-            toolName?: string;
-            state: {
-              status: string;
-              input?: unknown;
-              output?: string;
-              error?: string;
-            };
-          };
-          if (toolPart.tool === "result") {
-            // Residual tool_result part (should have been stripped by
-            // resolveToolResults, but handle gracefully for robustness)
-            content.push({
-              type: "tool_result",
-              toolUseId: toolPart.callID,
-              ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
-              content: toolResultContent(toolPart.state),
-            });
-          } else {
-            // Emit tool_use on this assistant message
-            content.push({
-              type: "tool_use",
-              id: toolPart.callID,
-              name: toolPart.tool,
-              input: toolPart.state.input ?? {},
-            });
-            // Completed/error tool parts: queue a tool_result for the next
-            // user message. This reconstructs the Anthropic API's split-
-            // message format from Lore's single-message representation.
-            if (toolPart.state.status === "completed") {
-              pendingToolResults.push({
-                type: "tool_result",
-                toolUseId: toolPart.callID,
-                toolName: toolPart.toolName ?? toolPart.tool,
-                content: toolResultContent(toolPart.state),
-              });
-            } else if (toolPart.state.status === "error") {
-              pendingToolResults.push({
-                type: "tool_result",
-                toolUseId: toolPart.callID,
-                toolName: toolPart.toolName ?? toolPart.tool,
-                content: toolResultContent(toolPart.state),
-                isError: true,
-              });
-            }
-            // Pending tool parts (not yet resolved) only emit tool_use —
-            // the model will see an unresolved tool call. sanitizeToolParts
-            // in gradient.ts converts these to error state before this point.
-          }
-          break;
-        }
-        // Opaque parts (image, audio, document, …) — reconstruct the
-        // gateway opaque block from the generic part's raw payload.
-        default:
-          if (
-            "raw" in part &&
-            typeof part.raw === "object" &&
-            part.raw !== null
-          ) {
-            content.push({
-              type: "opaque",
-              raw: part.raw as Record<string, unknown>,
-            });
-          } else if ("text" in part && typeof part.text === "string") {
-            content.push({ type: "text", text: part.text });
-          }
-          break;
-      }
-    }
-
-    const message: GatewayMessage = { role: msg.info.role, content };
-    const provenance = allowProvenance
-      ? provenanceByMessageId.get(msg.info.id)
-      : undefined;
-    if (
-      provenance?.provenanceContent &&
-      JSON.stringify(content) === JSON.stringify(provenance.content)
-    ) {
-      message.provenanceContent = [...provenance.provenanceContent];
-      if (provenance.provenancePositions) {
-        message.provenancePositions = [...provenance.provenancePositions];
-      }
-    }
-    out.push(message);
-  }
-
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Post-conversion validation: remove orphaned tool_result blocks
-// ---------------------------------------------------------------------------
-
-/**
- * Belt-and-suspenders safety net: ensures every `tool_result` block on a user
- * message references a `tool_use` block on the immediately preceding assistant
- * message. Removes orphans and logs a warning.
- *
- * This should never fire under normal operation (resolveToolResults strips
- * redundant tool_result parts, and loreMessagesToGateway reconstructs them
- * from the assistant's completed tool parts). But if a future code path
- * introduces orphaned references, this catches them before they reach the API.
- */
-/** @internal Exported for tests. */
-function clearGatewayMessageProvenance(message: GatewayMessage): void {
-  delete message.provenanceContent;
-  delete message.provenancePositions;
-}
-
-/** @internal Exported for tests. */
-export function removeOrphanedToolResults(messages: GatewayMessage[]): void {
-  // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "user") continue;
-    if (!msg.content.some((b) => b.type === "tool_result")) continue;
-
-    // Collect tool_use IDs from the preceding assistant message
-    const prevMsg = i > 0 ? messages[i - 1] : undefined;
-    const prev = prevMsg?.role === "assistant" ? prevMsg : null;
-    const toolUseIds = new Set(
-      (prev?.content ?? [])
-        .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
-        .map((b) => b.id),
-    );
-
-    // Remove tool_result blocks that reference missing tool_use IDs
-    const before = msg.content.length;
-    msg.content = msg.content.filter(
-      (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
-    );
-    if (msg.content.length < before) {
-      // Provenance is serialized in preference to visible content by every
-      // same-family request builder. Once cleanup changes the visible tool
-      // sequence, retaining the old provider-native sequence could resurrect
-      // an orphaned tool call (and its encrypted reasoning) on the wire.
-      clearGatewayMessageProvenance(msg);
-      log.warn(
-        `removed ${before - msg.content.length} orphaned tool_result block(s) from message ${i}`,
-      );
-    }
-    // If the user message is now empty, add placeholder text so the API
-    // doesn't reject an empty content array.
-    if (msg.content.length === 0) {
-      msg.content = [{ type: "text", text: "[tool results provided]" }];
-    }
-  }
-
-  // --- Pass 2: Remove orphaned tool_use blocks (tool_use → tool_result) ---
-  // Every tool_use on an assistant must have a matching tool_result on the
-  // immediately following user message. Without this, the Anthropic API
-  // rejects with "tool_use ids found without tool_result blocks immediately
-  // after". This catches edge cases where gradient eviction or back-to-back
-  // assistants leave tool_use blocks without matching results (#424).
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg?.role !== "assistant") continue;
-    if (!msg.content.some((b) => b.type === "tool_use")) continue;
-
-    // Collect tool_result IDs from the following user message
-    const nextMsg = i + 1 < messages.length ? messages[i + 1] : undefined;
-    const next = nextMsg?.role === "user" ? nextMsg : null;
-    const toolResultIds = new Set(
-      (next?.content ?? [])
-        .filter((b): b is GatewayToolResultBlock => b.type === "tool_result")
-        .map((b) => b.toolUseId),
-    );
-
-    // Remove tool_use blocks that have no matching tool_result
-    const before = msg.content.length;
-    msg.content = msg.content.filter(
-      (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
-    );
-    if (msg.content.length < before) {
-      clearGatewayMessageProvenance(msg);
-      log.warn(
-        `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
-      );
-    }
-    // If the assistant message is now empty, add placeholder text.
-    if (msg.content.length === 0) {
-      msg.content = [{ type: "text", text: "[assistant response]" }];
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Slash command interception (/lore:warm:*)
-// ---------------------------------------------------------------------------
-
-/**
- * Extract the text of the last user message, trimmed.
- * Returns empty string if no user message found.
- */
-function lastUserTextTrimmed(req: GatewayRequest): string {
-  for (let i = req.messages.length - 1; i >= 0; i--) {
-    const msg = req.messages[i];
-    if (msg.role !== "user") continue;
-    const text = msg.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
-    return text;
-  }
-  return "";
-}
-
-// ---------------------------------------------------------------------------
-// Generic /lore:* slash command dispatcher
-// ---------------------------------------------------------------------------
-
-/**
- * Intercepts all `/lore:*` slash commands. Routes to specific handlers
- * and returns a synthetic response. Unknown `/lore:*` commands get a
- * helpful error response instead of being forwarded upstream.
- */
-async function handleLoreSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-  claimSession: (sessionID: string) => Promise<void>,
-): Promise<Response | null> {
-  const text = lastUserTextTrimmed(req);
-  if (!text.toLowerCase().startsWith("/lore:")) return null;
-  if (requestSourcePrefix(req)) {
-    throw new SourceDeltaUnavailableError(
-      "A checkpointed continuation must be replayed in full before running a slash command.",
-    );
-  }
-
-  let state = findLiveSessionState(req, config, allSessions);
-  const indexedSessionID = findIndexedSessionID(req, config);
-  if (!state && indexedSessionID) {
-    const pathResult = getProjectPath(req.system, req.rawHeaders);
-    state = getOrCreateSession(
-      indexedSessionID,
-      pathResult.path,
-      pathResult.source,
-      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
-      config,
-    );
-  }
-  const sessionID = indexedSessionID ?? state?.sessionID;
-  if (sessionID) {
-    await claimSession(sessionID);
-    if (
-      indexedSessionID &&
-      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-    ) {
-      return slashResponse(
-        req,
-        "No authenticated active session found.",
-        `msg_lore_${Date.now()}`,
-      );
-    }
-    await awaitStreamingPostResponse(sessionID, req.signal);
-    req.signal?.throwIfAborted();
-    if (
-      indexedSessionID &&
-      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
-    ) {
-      return slashResponse(
-        req,
-        "No authenticated active session found.",
-        `msg_lore_${Date.now()}`,
-      );
-    }
-  }
-
-  // Route to specific handlers
-  const warmupResult = handleWarmupSlashCommand(req, allSessions, config);
-  if (warmupResult) return warmupResult;
-
-  const curateResult = await handleCurateSlashCommand(
-    req,
-    allSessions,
-    config,
-    claimSession,
-  );
-  if (curateResult) return curateResult;
-
-  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions, config);
-  if (amnesiaResult) return amnesiaResult;
-
-  // Unknown /lore:* command — return error instead of forwarding upstream
-  log.warn(`unknown slash command: ${text}`);
-  return slashResponse(
-    req,
-    `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto|on|off|reset, /lore:amnesia:on|off`,
-    `msg_lore_${Date.now()}`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// /lore:amnesia — toggle temporal storage and background work
-// ---------------------------------------------------------------------------
-
-/**
- * `/lore:amnesia:on` — suppresses temporal storage and background work.
- * `/lore:amnesia:off` — resumes normal storage.
- *
- * The session still gets full Lore processing (LTM injection, recall tool,
- * gradient transform) but doesn't write new memories. Useful for eval QA
- * questions, read-only introspection, and sensitive conversations.
- */
-function handleAmnesiaSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-): Response | null {
-  const text = lastUserTextTrimmed(req);
-  const lower = text.toLowerCase();
-
-  const isOn = lower === "/lore:amnesia:on";
-  const isOff = lower === "/lore:amnesia:off";
-  if (!isOn && !isOff) return null;
-
-  const state = findLiveSessionState(req, config, allSessions);
-
-  if (!state) {
-    return slashResponse(
-      req,
-      "No active session found. Amnesia mode was not changed.",
-      `msg_lore_${Date.now()}`,
-    );
-  }
-
-  state.amnesia = isOn;
-  saveSessionTracking(state.sessionID, { amnesia: isOn });
-  log.info(
-    `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
-      `storage ${isOn ? "suppressed" : "resumed"}`,
-  );
-
-  const responseText = isOn
-    ? "Amnesia mode on — memory storage suppressed. Recall still works."
-    : "Amnesia mode off — memory storage resumed.";
-  return slashResponse(req, responseText, `msg_lore_${Date.now()}`);
-}
-
-// ---------------------------------------------------------------------------
-// /lore:warm — cache warming control
-// ---------------------------------------------------------------------------
-
-/**
- * Check if the last user message is a warmup slash command.
- *
- * `/lore:warm:stop` — disables cache warming for this session.
- * `/lore:warm:keep` — forces cache warming regardless of survival analysis.
- * `/lore:warm:auto` — returns to normal survival-analysis-driven mode.
- * `/lore:warm:reset` — clears ALL tripped circuit-breaker buckets (re-enables
- *   warming that was disabled after repeated uncached warmups).
- * `/lore:warm:off` — disables cache warming GLOBALLY (persisted override).
- * `/lore:warm:on` — re-enables cache warming globally.
- *
- * Returns a synthetic Anthropic-format response if a command was matched,
- * or null to continue normal processing.
- */
-function handleWarmupSlashCommand(
-  req: GatewayRequest,
-  allSessions: Map<string, SessionState>,
-  config: GatewayConfig,
-): Response | null {
+        ): Response | null {
   const text = lastUserTextTrimmed(req);
   const lower = text.toLowerCase();
 
@@ -20528,7 +20195,331 @@ async function handleRequestInner(
     } catch (error) {
       return errorResponse(
         400,
-        error instanceof Error ? error.message : "Invalid upstream route",
+        error instanceof Error ? error.message : "InvaliUseId: toolPart.callID,
+                toolName: toolPart.toolName ?? toolPart.tool,
+                content: toolResultContent(toolPart.state),
+                isError: true,
+              });
+            }
+            // Pending tool parts (not yet resolved) only emit tool_use —
+            // the model will see an unresolved tool call. sanitizeToolParts
+            // in gradient.ts converts these to error state before this point.
+          }
+          break;
+        }
+        // Opaque parts (image, audio, document, …) — reconstruct the
+        // gateway opaque block from the generic part's raw payload.
+        default:
+          if (
+            "raw" in part &&
+            typeof part.raw === "object" &&
+            part.raw !== null
+          ) {
+            content.push({
+              type: "opaque",
+              raw: part.raw as Record<string, unknown>,
+            });
+          } else if ("text" in part && typeof part.text === "string") {
+            content.push({ type: "text", text: part.text });
+          }
+          break;
+      }
+    }
+
+    const message: GatewayMessage = { role: msg.info.role, content };
+    const provenance = allowProvenance
+      ? provenanceByMessageId.get(msg.info.id)
+      : undefined;
+    if (
+      provenance?.provenanceContent &&
+      JSON.stringify(content) === JSON.stringify(provenance.content)
+    ) {
+      message.provenanceContent = [...provenance.provenanceContent];
+      if (provenance.provenancePositions) {
+        message.provenancePositions = [...provenance.provenancePositions];
+      }
+    }
+    out.push(message);
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Post-conversion validation: remove orphaned tool_result blocks
+// ---------------------------------------------------------------------------
+
+/**
+ * Belt-and-suspenders safety net: ensures every `tool_result` block on a user
+ * message references a `tool_use` block on the immediately preceding assistant
+ * message. Removes orphans and logs a warning.
+ *
+ * This should never fire under normal operation (resolveToolResults strips
+ * redundant tool_result parts, and loreMessagesToGateway reconstructs them
+ * from the assistant's completed tool parts). But if a future code path
+ * introduces orphaned references, this catches them before they reach the API.
+ */
+/** @internal Exported for tests. */
+function clearGatewayMessageProvenance(message: GatewayMessage): void {
+  delete message.provenanceContent;
+  delete message.provenancePositions;
+}
+
+/** @internal Exported for tests. */
+export function removeOrphanedToolResults(messages: GatewayMessage[]): void {
+  // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "user") continue;
+    if (!msg.content.some((b) => b.type === "tool_result")) continue;
+
+    // Collect tool_use IDs from the preceding assistant message
+    const prevMsg = i > 0 ? messages[i - 1] : undefined;
+    const prev = prevMsg?.role === "assistant" ? prevMsg : null;
+    const toolUseIds = new Set(
+      (prev?.content ?? [])
+        .filter((b): b is GatewayToolUseBlock => b.type === "tool_use")
+        .map((b) => b.id),
+    );
+
+    // Remove tool_result blocks that reference missing tool_use IDs
+    const before = msg.content.length;
+    msg.content = msg.content.filter(
+      (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
+    );
+    if (msg.content.length < before) {
+      // Provenance is serialized in preference to visible content by every
+      // same-family request builder. Once cleanup changes the visible tool
+      // sequence, retaining the old provider-native sequence could resurrect
+      // an orphaned tool call (and its encrypted reasoning) on the wire.
+      clearGatewayMessageProvenance(msg);
+      log.warn(
+        `removed ${before - msg.content.length} orphaned tool_result block(s) from message ${i}`,
+      );
+    }
+    // If the user message is now empty, add placeholder text so the API
+    // doesn't reject an empty content array.
+    if (msg.content.length === 0) {
+      msg.content = [{ type: "text", text: "[tool results provided]" }];
+    }
+  }
+
+  // --- Pass 2: Remove orphaned tool_use blocks (tool_use → tool_result) ---
+  // Every tool_use on an assistant must have a matching tool_result on the
+  // immediately following user message. Without this, the Anthropic API
+  // rejects with "tool_use ids found without tool_result blocks immediately
+  // after". This catches edge cases where gradient eviction or back-to-back
+  // assistants leave tool_use blocks without matching results (#424).
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.role !== "assistant") continue;
+    if (!msg.content.some((b) => b.type === "tool_use")) continue;
+
+    // Collect tool_result IDs from the following user message
+    const nextMsg = i + 1 < messages.length ? messages[i + 1] : undefined;
+    const next = nextMsg?.role === "user" ? nextMsg : null;
+    const toolResultIds = new Set(
+      (next?.content ?? [])
+        .filter((b): b is GatewayToolResultBlock => b.type === "tool_result")
+        .map((b) => b.toolUseId),
+    );
+
+    // Remove tool_use blocks that have no matching tool_result
+    const before = msg.content.length;
+    msg.content = msg.content.filter(
+      (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
+    );
+    if (msg.content.length < before) {
+      clearGatewayMessageProvenance(msg);
+      log.warn(
+        `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
+      );
+    }
+    // If the assistant message is now empty, add placeholder text.
+    if (msg.content.length === 0) {
+      msg.content = [{ type: "text", text: "[assistant response]" }];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Slash command interception (/lore:warm:*)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the text of the last user message, trimmed.
+ * Returns empty string if no user message found.
+ */
+function lastUserTextTrimmed(req: GatewayRequest): string {
+  for (let i = req.messages.length - 1; i >= 0; i--) {
+    const msg = req.messages[i];
+    if (msg.role !== "user") continue;
+    const text = msg.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    return text;
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Generic /lore:* slash command dispatcher
+// ---------------------------------------------------------------------------
+
+/**
+ * Intercepts all `/lore:*` slash commands. Routes to specific handlers
+ * and returns a synthetic response. Unknown `/lore:*` commands get a
+ * helpful error response instead of being forwarded upstream.
+ */
+async function handleLoreSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
+  claimSession: (sessionID: string) => Promise<void>,
+): Promise<Response | null> {
+  const text = lastUserTextTrimmed(req);
+  if (!text.toLowerCase().startsWith("/lore:")) return null;
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before running a slash command.",
+    );
+  }
+
+  let state = findLiveSessionState(req, config, allSessions);
+  const indexedSessionID = findIndexedSessionID(req, config);
+  if (!state && indexedSessionID) {
+    const pathResult = getProjectPath(req.system, req.rawHeaders);
+    state = getOrCreateSession(
+      indexedSessionID,
+      pathResult.path,
+      pathResult.source,
+      requestCredentialFingerprint(req.rawHeaders, config) ?? "",
+      config,
+    );
+  }
+  const sessionID = indexedSessionID ?? state?.sessionID;
+  if (sessionID) {
+    await claimSession(sessionID);
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
+    await awaitStreamingPostResponse(sessionID, req.signal);
+    req.signal?.throwIfAborted();
+    if (
+      indexedSessionID &&
+      !confirmedIndexedIdentityResolvesTo(req, sessionID, config)
+    ) {
+      return slashResponse(
+        req,
+        "No authenticated active session found.",
+        `msg_lore_${Date.now()}`,
+      );
+    }
+  }
+
+  // Route to specific handlers
+  const warmupResult = handleWarmupSlashCommand(req, allSessions, config);
+  if (warmupResult) return warmupResult;
+
+  const curateResult = await handleCurateSlashCommand(
+    req,
+    allSessions,
+    config,
+    claimSession,
+  );
+  if (curateResult) return curateResult;
+
+  const amnesiaResult = handleAmnesiaSlashCommand(req, allSessions, config);
+  if (amnesiaResult) return amnesiaResult;
+
+  // Unknown /lore:* command — return error instead of forwarding upstream
+  log.warn(`unknown slash command: ${text}`);
+  return slashResponse(
+    req,
+    `Unknown command: ${text}. Available: /lore:curate, /lore:warm:stop|keep|auto|on|off|reset, /lore:amnesia:on|off`,
+    `msg_lore_${Date.now()}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// /lore:amnesia — toggle temporal storage and background work
+// ---------------------------------------------------------------------------
+
+/**
+ * `/lore:amnesia:on` — suppresses temporal storage and background work.
+ * `/lore:amnesia:off` — resumes normal storage.
+ *
+ * The session still gets full Lore processing (LTM injection, recall tool,
+ * gradient transform) but doesn't write new memories. Useful for eval QA
+ * questions, read-only introspection, and sensitive conversations.
+ */
+function handleAmnesiaSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
+): Response | null {
+  const text = lastUserTextTrimmed(req);
+  const lower = text.toLowerCase();
+
+  const isOn = lower === "/lore:amnesia:on";
+  const isOff = lower === "/lore:amnesia:off";
+  if (!isOn && !isOff) return null;
+
+  const state = findLiveSessionState(req, config, allSessions);
+
+  if (!state) {
+    return slashResponse(
+      req,
+      "No active session found. Amnesia mode was not changed.",
+      `msg_lore_${Date.now()}`,
+    );
+  }
+
+  state.amnesia = isOn;
+  saveSessionTracking(state.sessionID, { amnesia: isOn });
+  log.info(
+    `amnesia: ${lower} for session=${state.sessionID.slice(0, 16)} — ` +
+      `storage ${isOn ? "suppressed" : "resumed"}`,
+  );
+
+  const responseText = isOn
+    ? "Amnesia mode on — memory storage suppressed. Recall still works."
+    : "Amnesia mode off — memory storage resumed.";
+  return slashResponse(req, responseText, `msg_lore_${Date.now()}`);
+}
+
+// ---------------------------------------------------------------------------
+// /lore:warm — cache warming control
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if the last user message is a warmup slash command.
+ *
+ * `/lore:warm:stop` — disables cache warming for this session.
+ * `/lore:warm:keep` — forces cache warming regardless of survival analysis.
+ * `/lore:warm:auto` — returns to normal survival-analysis-driven mode.
+ * `/lore:warm:reset` — clears ALL tripped circuit-breaker buckets (re-enables
+ *   warming that was disabled after repeated uncached warmups).
+ * `/lore:warm:off` — disables cache warming GLOBALLY (persisted override).
+ * `/lore:warm:on` — re-enables cache warming globally.
+ *
+ * Returns a synthetic Anthropic-format response if a command was matched,
+ * or null to continue normal processing.
+ */
+function handleWarmupSlashCommand(
+  req: GatewayRequest,
+  allSessions: Map<string, SessionState>,
+  config: GatewayConfig,
+d upstream route",
       );
     }
 

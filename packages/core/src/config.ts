@@ -179,6 +179,49 @@ export const LoreConfig = z.object({
     .describe(
       "Minutes of inactivity after which Lore refreshes the byte-identity caches on resume (upstream prompt cache is cold). 5 = matches Anthropic's default-tier TTL. Set to 60 for extended (1h) cache tier. 0 to disable. Default: 5.",
     ),
+  timeouts: z
+    .object({
+      foregroundSseInactivityMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(2_147_483_647)
+        .optional()
+        .describe(
+          "Foreground upstream SSE inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_FOREGROUND_SSE_INACTIVITY_MS takes precedence.",
+        ),
+      foregroundRequestTimeoutMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(2_147_483_647)
+        .optional()
+        .describe(
+          "Foreground whole-request deadline in milliseconds. Default: 900000. Automatically raised to at least 60000ms above foregroundSseInactivityMs. Environment variable LORE_FOREGROUND_REQUEST_TIMEOUT_MS takes precedence.",
+        ),
+      workerResponseInactivityMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(2_147_483_647)
+        .optional()
+        .describe(
+          "Background worker upstream response inactivity deadline in milliseconds. Default: 600000. Environment variable LORE_WORKER_RESPONSE_INACTIVITY_MS takes precedence.",
+        ),
+      workerRequestTimeoutMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(2_147_483_647)
+        .optional()
+        .describe(
+          "Background worker whole-request deadline in milliseconds. Default: 900000. Automatically raised to at least 60000ms above workerResponseInactivityMs. Environment variable LORE_WORKER_REQUEST_TIMEOUT_MS takes precedence.",
+        ),
+    })
+    .default({})
+    .describe(
+      "Foreground and background provider request deadlines, in milliseconds. Non-hosted gateways read these values from `.lore.json`; hosted gateways use environment variables.",
+    ),
   distillation: z
     .object({
       minMessages: z

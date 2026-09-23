@@ -1116,720 +1116,7 @@ describe("Pipeline — streaming responses", () => {
     );
 
     try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "terminal-before-eof-session",
-          },
-        }),
-        loadLocalConfig(),
-      );
-      reader = response.body?.getReader();
-      expect(reader).toBeDefined();
-      if (!reader) throw new Error("missing response body");
-      const decoder = new TextDecoder();
-      let output = "";
-      while (!output.includes("event: response.completed")) {
-        const chunk = await reader.read();
-        expect(chunk.done).toBe(false);
-        if (chunk.value) {
-          output += decoder.decode(chunk.value, { stream: true });
-        }
-      }
-
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(postResponses).toBe(0);
-
-      for (;;) {
-        const finalChunk = await reader.read();
-        if (finalChunk.done) break;
-      }
-      await vi.waitFor(() => expect(postResponses).toBe(1));
-    } finally {
-      if (reader) await reader.cancel().catch(() => {});
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("defers buffered warning-path storage until the Responses body closes", async () => {
-    const order: string[] = [];
-    vi.mocked(getDegradationWarning).mockReturnValueOnce("workers degraded");
-    setPostResponseStartObserverForTest(() => order.push("post"));
-    setUpstreamInterceptor(
-      async () =>
-        new Response(validResponsesSSE("resp_warning"), {
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "warning-path-session" },
-        }),
-        loadLocalConfig(),
-      );
-      const body = await response.text();
-      order.push("eof");
-
-      expect(body).toContain("workers degraded");
-      expect(order).toEqual(["eof"]);
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(order).toEqual(["eof", "post"]);
-    } finally {
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("does not finalize a buffered warning-path incomplete Responses turn", async () => {
-    const alias = "warning-incomplete-alias";
-    const canonical = "warning-incomplete-canonical";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      return new Response(
-        upstreamCall === 1
-          ? validResponsesSSE("resp_warning_incomplete_setup")
-          : incompleteResponsesSSE("resp_warning_incomplete"),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    });
-    const store = vi.spyOn(temporal, "store");
-
-    try {
-      await (
-        await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": alias },
-          }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      const state = [...getActiveSessions().values()].find(
-        (candidate) => candidate.headerSessionId === alias,
-      );
-      expect(state).toBeDefined();
-
-      vi.mocked(getDegradationWarning).mockReturnValueOnce("workers degraded");
-      clearAllCosts();
-      store.mockClear();
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": canonical,
-            "x-session-affinity": alias,
-          },
-        }),
-        loadLocalConfig(),
-      );
-      const body = await response.text();
-      expect(body).toContain("event: response.incomplete");
-      expect(body).not.toContain("event: response.completed");
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(store).not.toHaveBeenCalled();
-      expect(
-        getSessionCosts(state?.sessionID ?? "")?.conversation,
-      ).toMatchObject({
-        inputTokens: 1,
-        outputTokens: 0,
-        turns: 1,
-      });
-
-      const compact = await handleCompactEndpoint(
-        new Request("http://gateway.test/v1/compact", {
-          method: "POST",
-          headers: {
-            authorization: "Bearer test-key",
-            "content-type": "application/json",
-            "x-lore-session-id": canonical,
-          },
-          body: JSON.stringify({ project_path: process.cwd() }),
-        }),
-        loadLocalConfig(),
-      );
-      expect(compact.status).toBe(404);
-      expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({
-        headerName: "x-session-affinity",
-        headerSessionId: alias,
-      });
-    } finally {
-      store.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-      clearAllCosts();
-    }
-  });
-
-  it("uses reserved capacity for production finalizers", async () => {
-    const end = vi.fn();
-    const span = {
-      end,
-      setAttribute: vi.fn(),
-      setAttributes: vi.fn(),
-      setStatus: vi.fn(),
-      updateName: vi.fn(),
-    } as unknown as Sentry.Span;
-    const actualSentry =
-      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
-    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
-      options.op === "gen_ai.chat"
-        ? span
-        : actualSentry.startInactiveSpan(options),
-    );
-    let postResponses = 0;
-    setPostResponseStartObserverForTest(() => postResponses++);
-    setStreamingPostResponseLimitsForTest(0, 2);
-    setUpstreamInterceptor(
-      async () =>
-        new Response(validResponsesSSE("resp_dropped_span"), {
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "dropped-span-session" },
-        }),
-        loadLocalConfig(),
-      );
-      await response.text();
-      await vi.waitFor(() => expect(postResponses).toBe(1));
-
-      expect(end).toHaveBeenCalledOnce();
-      expect(streamingPostResponsePendingForTest()).toBe(0);
-    } finally {
-      setStreamingPostResponseLimitsForTest();
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("enforces and cleans up the real per-session and global queue limits", async () => {
-    setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
-    const admissionRequest = makeResponsesRequest({
-      sessionHeaders: { "x-lore-session-id": "queue-admission" },
-      tools: [],
-    });
-    admissionRequest.stream = false;
-    admissionRequest.rawHeaders["x-lore-agent"] = "title";
-
-    try {
-      await (await handleRequest(admissionRequest, loadLocalConfig())).text();
-      const perSessionOrder: number[] = [];
-      let releasePerSession: (() => void) | undefined;
-      const perSessionGate = new Promise<void>((resolve) => {
-        releasePerSession = resolve;
-      });
-      let perSessionDrops = 0;
-      scheduleStreamingPostResponseForTest("real-limit-session", async () => {
-        await perSessionGate;
-        perSessionOrder.push(1);
-      });
-      scheduleStreamingPostResponseForTest("real-limit-session", async () => {
-        await perSessionGate;
-        perSessionOrder.push(2);
-      });
-      scheduleStreamingPostResponseForTest(
-        "real-limit-session",
-        () => {
-          perSessionOrder.push(3);
-        },
-        () => perSessionDrops++,
-      );
-
-      expect(streamingPostResponsePendingForTest()).toBe(2);
-      expect(perSessionDrops).toBe(1);
-      releasePerSession?.();
-      await vi.waitFor(() =>
-        expect(streamingPostResponsePendingForTest()).toBe(0),
-      );
-      expect(perSessionOrder).toEqual([1, 2]);
-
-      let releaseGlobal: (() => void) | undefined;
-      const globalGate = new Promise<void>((resolve) => {
-        releaseGlobal = resolve;
-      });
-      let globalDrops = 0;
-      for (let index = 0; index < 64; index++) {
-        scheduleStreamingPostResponseForTest(
-          `real-global-limit-${index}`,
-          () => globalGate,
-        );
-      }
-      scheduleStreamingPostResponseForTest(
-        "real-global-limit-overflow",
-        () => {},
-        () => globalDrops++,
-      );
-
-      expect(streamingPostResponsePendingForTest()).toBe(64);
-      expect(globalDrops).toBe(1);
-      releaseGlobal?.();
-      await vi.waitFor(() =>
-        expect(streamingPostResponsePendingForTest()).toBe(0),
-      );
-
-      let releaseResetFinalizer: (() => void) | undefined;
-      const resetFinalizerGate = new Promise<void>((resolve) => {
-        releaseResetFinalizer = resolve;
-      });
-      scheduleStreamingPostResponseForTest(
-        "real-reset-limit",
-        () => resetFinalizerGate,
-      );
-      const reset = resetPipelineState();
-      let resetSettled = false;
-      void reset.then(() => {
-        resetSettled = true;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(resetSettled).toBe(false);
-      releaseResetFinalizer?.();
-      await reset;
-      expect(streamingPostResponsePendingForTest()).toBe(0);
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("ends the response span when a stream is cancelled before terminal", async () => {
-    const end = vi.fn();
-    const setStatus = vi.fn();
-    const span = {
-      end,
-      setAttribute: vi.fn(),
-      setAttributes: vi.fn(),
-      setStatus,
-      updateName: vi.fn(),
-    } as unknown as Sentry.Span;
-    const actualSentry =
-      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
-    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
-      options.op === "gen_ai.chat"
-        ? span
-        : actualSentry.startInactiveSpan(options),
-    );
-    let upstreamStartedResolve: (() => void) | undefined;
-    const upstreamStarted = new Promise<void>((resolve) => {
-      upstreamStartedResolve = resolve;
-    });
-    let upstreamCancellations = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamStartedResolve?.();
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          cancel() {
-            upstreamCancellations++;
-          },
-        }),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    });
-
-    // Fake setTimeout from the start so the response stream's
-    // KEEPALIVE_INACTIVITY_MS (30s) tick — the tick that releases the span
-    // after a pre-terminal client cancel — can be advanced instead of
-    // waited on. Keep Date/setImmediate/nextTick real so the stream
-    // plumbing and vi.waitFor keep working.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "cancelled-span-session" },
-        }),
-        loadLocalConfig(),
-      );
-      const reader = response.body?.getReader();
-      expect(reader).toBeDefined();
-      // The upstream stream emits nothing, so the first chunk only
-      // arrives at the (faked) 30s keepalive tick — drive it manually.
-      const firstRead = reader?.read();
-      await vi.advanceTimersByTimeAsync(30_000);
-      await firstRead;
-      await upstreamStarted;
-      await reader?.cancel("client disconnected");
-      await vi.advanceTimersByTimeAsync(30_000);
-      vi.useRealTimers();
-      await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
-
-      expect(setStatus).toHaveBeenCalledWith({
-        code: 2,
-        message: "stream cancelled before terminal response",
-      });
-      expect(upstreamCancellations).toBe(1);
-    } finally {
-      vi.useRealTimers();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("ends an unsuccessful Responses stream span exactly once", async () => {
-    const end = vi.fn();
-    const span = {
-      end,
-      setAttribute: vi.fn(),
-      setAttributes: vi.fn(),
-      setStatus: vi.fn(),
-      updateName: vi.fn(),
-    } as unknown as Sentry.Span;
-    const actualSentry =
-      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
-    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
-      options.op === "gen_ai.chat"
-        ? span
-        : actualSentry.startInactiveSpan(options),
-    );
-    setUpstreamInterceptor(
-      async () =>
-        new Response(incompleteResponsesSSE("resp_incomplete_span"), {
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "incomplete-span-session" },
-        }),
-        loadLocalConfig(),
-      );
-      expect(await response.text()).toContain("event: response.incomplete");
-      await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it.each(["incomplete", "failed"] as const)(
-    "accounts validated usage from a %s Responses terminal without storing the turn",
-    async (terminal) => {
-      clearAllCosts();
-      const today = new Date().toISOString().slice(0, 10);
-      const ledgerBefore = getDailyCostForDay(today);
-      const sessionHeader = `account-${terminal}-response-session`;
-      const wire =
-        responsesEvent("response.created", {
-          response: {
-            id: `resp_account_${terminal}`,
-            model: "gpt-5.6-sol",
-            status: "in_progress",
-          },
-        }) +
-        responsesEvent(`response.${terminal}`, {
-          response: {
-            id: `resp_account_${terminal}`,
-            model: "gpt-5.6-sol",
-            status: terminal,
-            output: [],
-            usage: { input_tokens: 1_000, output_tokens: 100 },
-            ...(terminal === "incomplete"
-              ? { incomplete_details: { reason: "max_output_tokens" } }
-              : {
-                  error: { type: "server_error", message: "provider failed" },
-                }),
-          },
-        });
-      setUpstreamInterceptor(
-        async () =>
-          new Response(wire, {
-            headers: { "content-type": "text/event-stream" },
-          }),
-      );
-      const store = vi.spyOn(temporal, "store");
-
-      try {
-        const response = await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: { "x-lore-session-id": sessionHeader },
-          }),
-          loadLocalConfig(),
-        );
-        expect(await response.text()).toContain(`event: response.${terminal}`);
-        const state = [...getActiveSessions().values()].find(
-          (candidate) => candidate.headerSessionId === sessionHeader,
-        );
-        expect(state).toBeDefined();
-        await vi.waitFor(() => {
-          expect(getSessionCosts(state?.sessionID ?? "")?.conversation).toEqual(
-            expect.objectContaining({
-              inputTokens: 1_000,
-              outputTokens: 100,
-              turns: 1,
-            }),
-          );
-        });
-        expect(getDailySpend().spend).toBeGreaterThan(0);
-        expect(getCostRate()).toBeGreaterThan(0);
-        expect(getDailyCostForDay(today)).toBeGreaterThan(ledgerBefore);
-        expect(store).not.toHaveBeenCalled();
-      } finally {
-        store.mockRestore();
-        setUpstreamInterceptor(undefined);
-        await resetPipelineState();
-        clearAllCosts();
-      }
-    },
-  );
-
-  it("accounts a failed recall-aware continuation without storing the turn", async () => {
-    clearAllCosts();
-    const sessionHeader = "account-failed-recall-continuation";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      if (upstreamCall === 1) {
-        const args = JSON.stringify({
-          query:
-            "one two three four five six seven eight nine architecture terms",
-        });
-        return new Response(
-          responsesEvent("response.created", {
-            response: {
-              id: "resp_recall_accounting",
-              model: "gpt-5.6-sol",
-              status: "in_progress",
-            },
-          }) +
-            responsesEvent("response.output_item.added", {
-              output_index: 0,
-              item: {
-                type: "function_call",
-                id: "fc_recall_accounting",
-                call_id: "call_recall_accounting",
-                name: "recall",
-              },
-            }) +
-            responsesEvent("response.function_call_arguments.done", {
-              output_index: 0,
-              item_id: "fc_recall_accounting",
-              arguments: args,
-            }) +
-            responsesEvent("response.output_item.done", {
-              output_index: 0,
-              item: {
-                type: "function_call",
-                id: "fc_recall_accounting",
-                call_id: "call_recall_accounting",
-                name: "recall",
-                arguments: args,
-                status: "completed",
-              },
-            }) +
-            responsesEvent("response.completed", {
-              response: {
-                id: "resp_recall_accounting",
-                model: "gpt-5.6-sol",
-                status: "completed",
-                output: [
-                  {
-                    type: "function_call",
-                    id: "fc_recall_accounting",
-                    call_id: "call_recall_accounting",
-                    name: "recall",
-                    arguments: args,
-                    status: "completed",
-                  },
-                ],
-                usage: { input_tokens: 10, output_tokens: 1 },
-              },
-            }),
-          { headers: { "content-type": "text/event-stream" } },
-        );
-      }
-      return new Response(
-        responsesEvent("response.created", {
-          response: {
-            id: "resp_recall_accounting_failed",
-            model: "gpt-5.6-sol",
-            status: "in_progress",
-          },
-        }) +
-          responsesEvent("response.failed", {
-            response: {
-              id: "resp_recall_accounting_failed",
-              model: "gpt-5.6-sol",
-              status: "failed",
-              output: [],
-              usage: { input_tokens: 1_000, output_tokens: 100 },
-              error: { type: "server_error", message: "provider failed" },
-            },
-          }),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    });
-    const store = vi.spyOn(temporal, "store");
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": sessionHeader },
-        }),
-        loadLocalConfig(),
-      );
-      expect(await response.text()).toContain("event: response.failed");
-      const state = [...getActiveSessions().values()].find(
-        (candidate) => candidate.headerSessionId === sessionHeader,
-      );
-      expect(state).toBeDefined();
-      await vi.waitFor(() => {
-        expect(
-          getSessionCosts(state?.sessionID ?? "")?.conversation,
-        ).toMatchObject({
-          inputTokens: 1_010,
-          outputTokens: 101,
-          turns: 1,
-        });
-      });
-      expect(store).not.toHaveBeenCalled();
-    } finally {
-      store.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-      clearAllCosts();
-    }
-  });
-
-  it("defers non-stream incomplete accounting and span closure until EOF", async () => {
-    clearAllCosts();
-    const end = vi.fn();
-    const span = {
-      end,
-      setAttribute: vi.fn(),
-      setAttributes: vi.fn(),
-      setStatus: vi.fn(),
-      updateName: vi.fn(),
-    } as unknown as Sentry.Span;
-    const actualSentry =
-      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
-    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
-      options.op === "gen_ai.chat"
-        ? span
-        : actualSentry.startInactiveSpan(options),
-    );
-    setUpstreamInterceptor(
-      async () =>
-        new Response(
-          JSON.stringify({
-            id: "resp_nonstream_incomplete_accounting",
-            object: "response",
-            created_at: 0,
-            model: "gpt-5.6-sol",
-            status: "incomplete",
-            output: [],
-            usage: { input_tokens: 1_000, output_tokens: 100 },
-          }),
-          { headers: { "content-type": "application/json" } },
-        ),
-    );
-
-    try {
-      const request = makeResponsesRequest({
-        sessionHeaders: {
-          "x-lore-session-id": "nonstream-incomplete-accounting",
-        },
-      });
-      request.stream = false;
-      const response = await handleRequest(request, loadLocalConfig());
-      expect(end).not.toHaveBeenCalled();
-      expect(response.status).toBe(200);
-      const body = (await response.json()) as Record<string, unknown>;
-      expect(body.status).toBe("incomplete");
-      expect(body.incomplete_details).toEqual({
-        reason: "max_output_tokens",
-      });
-      await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
-      const state = [...getActiveSessions().values()].find(
-        (candidate) =>
-          candidate.headerSessionId === "nonstream-incomplete-accounting",
-      );
-      expect(
-        getSessionCosts(state?.sessionID ?? "")?.conversation,
-      ).toMatchObject({
-        inputTokens: 1_000,
-        outputTokens: 100,
-        turns: 1,
-      });
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-      clearAllCosts();
-    }
-  });
-
-  it("rejects an unknown public incomplete reason on an established conversation", async () => {
-    const sessionHeader = "malformed-incomplete-established";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      if (upstreamCall === 1) {
-        return new Response(validResponsesSSE("resp_malformed_setup"), {
-          headers: { "content-type": "text/event-stream" },
-        });
-      }
-      return new Response(
-        JSON.stringify({
-          id: "resp_malformed_incomplete",
-          model: "gpt-5.6-sol",
-          status: "incomplete",
-          incomplete_details: { reason: "provider_specific" },
-          output: [],
-          usage: { input_tokens: 10, output_tokens: 2 },
-        }),
-        { headers: { "content-type": "application/json" } },
-      );
-    });
-
-    try {
-      await (
-        await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: { "x-lore-session-id": sessionHeader },
-          }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      const request = makeResponsesRequest({
-        sessionHeaders: { "x-lore-session-id": sessionHeader },
-      });
-      request.stream = false;
-      const response = await handleRequest(request, loadLocalConfig());
-      expect(response.status).toBe(502);
-      expect(await response.text()).toContain("Gateway request failed");
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it.each([false, true])(
-    "rejects malformed completed JSON on an established conversation codex=%s",
-    async (codex) => {
-      const sessionHeader = `malformed-completed-${codex}`;
-      let upstreamCall = 0;
-      setUpstreamInterceptor(async () => {
-        upstreamCall++;
-        if (upstreamCall === 1) {
-          return new Response(validResponsesSSE("resp_completed_setup"), {
-            headers: { "content-type": "text/event-stream" },
-          });
-        }
+      const response = awa  }
         return new Response(JSON.stringify({ status: "completed" }), {
           headers: { "content-type": "application/json" },
         });
@@ -2181,707 +1468,7 @@ describe("Pipeline — streaming responses", () => {
         makeResponsesRequest({
           sessionHeaders: { "x-lore-session-id": "capacity-rejected-session" },
         }),
-        loadLocalConfig(),
-      );
-      expect(saturated.status).toBe(503);
-      expect(await saturated.text()).toContain("Gateway is busy");
-
-      releaseProducer?.();
-      expect((await response).status).toBe(502);
-      await vi.waitFor(() => {
-        expect(activePipelineRequestCountForTest()).toBe(initialActiveRequests);
-        expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(
-          false,
-        );
-      });
-    } finally {
-      releaseProducer?.();
-      setMaxActivePipelineRequestsForTest();
-      setPipelinePreUpstreamPauseForTest(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("waits for an abort-unaware producer before reset clears state", async () => {
-    let releaseProducer: (() => void) | undefined;
-    const producerPause = new Promise<void>((resolve) => {
-      releaseProducer = resolve;
-    });
-    let producerWaitingResolve: (() => void) | undefined;
-    const producerWaiting = new Promise<void>((resolve) => {
-      producerWaitingResolve = resolve;
-    });
-    setPipelinePreUpstreamPauseForTest(producerPause, () =>
-      producerWaitingResolve?.(),
-    );
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(validResponsesSSE("resp_stale_producer"), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    let reset: Promise<void> | undefined;
-
-    try {
-      const response = handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "stale-producer-session" },
-        }),
-        loadLocalConfig(),
-      );
-      await producerWaiting;
-      reset = resetPipelineState();
-      let resetSettled = false;
-      void reset.then(() => {
-        resetSettled = true;
-      });
-
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(resetSettled).toBe(false);
-      releaseProducer?.();
-      await reset;
-      expect(resetSettled).toBe(true);
-      expect(upstreamCalls).toBe(0);
-      expect((await response).status).toBe(502);
-    } finally {
-      releaseProducer?.();
-      await reset;
-      setPipelinePreUpstreamPauseForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("fences a producer that resumes after the reset timeout", async () => {
-    const sessionHeader = "late-stale-producer-session";
-    const staleProjectPath = "/tmp";
-    const freshProjectPath = process.cwd();
-    const staleUpstream = "https://stale-reset.example";
-    const freshUpstream = "https://fresh-reset.example";
-    let releaseProducer: (() => void) | undefined;
-    const producerPause = new Promise<void>((resolve) => {
-      releaseProducer = resolve;
-    });
-    let producerWaitingResolve: (() => void) | undefined;
-    const producerWaiting = new Promise<void>((resolve) => {
-      producerWaitingResolve = resolve;
-    });
-    setPipelinePreUpstreamPauseForTest(producerPause, () =>
-      producerWaitingResolve?.(),
-    );
-    setPipelineResetSettleTimeoutForTest(0);
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(validResponsesSSE("resp_late_stale_producer"), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-
-    try {
-      const staleRequest = makeResponsesRequest({
-        sessionHeaders: {
-          "x-lore-session-id": sessionHeader,
-        },
-      });
-      staleRequest.rawHeaders["x-lore-project"] = staleProjectPath;
-      staleRequest.rawHeaders["x-lore-upstream-url"] = staleUpstream;
-      const response = handleRequest(staleRequest, loadLocalConfig());
-      await producerWaiting;
-      await resetPipelineState();
-
-      expect(activePipelineRequestCountForTest()).toBe(0);
-      expect(detachedPipelineRequestCountForTest()).toBe(1);
-      setMaxDetachedPipelineRequestsForTest(1);
-      const quarantineFull = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "quarantine-saturation-session",
-          },
-        }),
-        loadLocalConfig(),
-      );
-      expect(quarantineFull.status).toBe(503);
-      expect(await quarantineFull.text()).toContain("Gateway is busy");
-      setMaxDetachedPipelineRequestsForTest();
-      setPipelinePreUpstreamPauseForTest(undefined);
-      setUpstreamInterceptor(async () => {
-        upstreamCalls++;
-        return new Response(validResponsesSSE("resp_reopened_after_timeout"), {
-          headers: { "content-type": "text/event-stream" },
-        });
-      });
-      const freshRequest = makeResponsesRequest({
-        sessionHeaders: {
-          "x-lore-session-id": sessionHeader,
-        },
-      });
-      freshRequest.rawHeaders["x-lore-project"] = freshProjectPath;
-      freshRequest.rawHeaders["x-lore-upstream-url"] = freshUpstream;
-      const reopened = await handleRequest(freshRequest, loadLocalConfig());
-      expect(await reopened.text()).toContain("event: response.completed");
-      expect(upstreamCalls).toBe(1);
-      const freshState = [...getActiveSessions().values()].find(
-        (candidate) => candidate.headerSessionId === sessionHeader,
-      );
-      expect(freshState).toBeDefined();
-      await vi.waitFor(() => {
-        expect(loadSessionTracking(freshState?.sessionID ?? "")).toMatchObject({
-          projectPath: freshProjectPath,
-          projectPathProvisional: false,
-          lastUpstream: expect.stringContaining(freshUpstream),
-        });
-      });
-      const freshTracking = loadSessionTracking(freshState?.sessionID ?? "");
-
-      releaseProducer?.();
-      expect((await response).status).toBe(502);
-      await vi.waitFor(() =>
-        expect(detachedPipelineRequestCountForTest()).toBe(0),
-      );
-      expect(upstreamCalls).toBe(1);
-      expect(freshState).toMatchObject({
-        projectPath: freshProjectPath,
-        projectPathProvisional: false,
-        lastUpstream: expect.objectContaining({ url: freshUpstream }),
-      });
-      expect(loadSessionTracking(freshState?.sessionID ?? "")).toMatchObject({
-        projectPath: freshProjectPath,
-        projectPathProvisional: false,
-        lastUpstream: freshTracking?.lastUpstream,
-      });
-    } finally {
-      releaseProducer?.();
-      setMaxDetachedPipelineRequestsForTest();
-      setPipelinePreUpstreamPauseForTest(undefined);
-      setPipelineResetSettleTimeoutForTest();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("aborts a started stream before reset reopens admission", async () => {
-    let upstreamStartedResolve: (() => void) | undefined;
-    const upstreamStarted = new Promise<void>((resolve) => {
-      upstreamStartedResolve = resolve;
-    });
-    let postResponses = 0;
-    let upstreamCancellations = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamStartedResolve?.();
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          cancel() {
-            upstreamCancellations++;
-          },
-        }),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    });
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "started-response-before-reset",
-          },
-        }),
-        loadLocalConfig(),
-      );
-      await upstreamStarted;
-      await resetPipelineState();
-
-      setPostResponseStartObserverForTest(() => postResponses++);
-      setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
-      const reopenedRequest = makeResponsesRequest({
-        sessionHeaders: { "x-lore-session-id": "started-post-reset-request" },
-        tools: [],
-      });
-      reopenedRequest.stream = false;
-      reopenedRequest.rawHeaders["x-lore-agent"] = "title";
-      await (await handleRequest(reopenedRequest, loadLocalConfig())).text();
-      await expect(response.text()).rejects.toMatchObject({
-        name: "AbortError",
-      });
-      expect(upstreamCancellations).toBe(1);
-      expect(postResponses).toBe(0);
-      expect(streamingPostResponsePendingForTest()).toBe(0);
-    } finally {
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("does not start an unread structural compaction after reset", async () => {
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(validResponsesSSE("resp_before_unread_compact"), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const sessionHeaders = {
-      "x-lore-session-id": "unread-compaction-reset-session",
-    };
-    let compactionRead: { mockRestore: () => void } | undefined;
-    let releaseReset: (() => void) | undefined;
-
-    try {
-      const established = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders,
-          messages: Array.from({ length: 12 }, (_, index) => ({
-            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-            content: [{ type: "text" as const, text: `turn ${index}` }],
-          })),
-        }),
-        loadLocalConfig(),
-      );
-      await established.text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      compactionRead = vi.spyOn(temporal, "undistilledCount");
-      const resetPause = new Promise<void>((resolve) => {
-        releaseReset = resolve;
-      });
-      setPipelineResetPauseForTest(resetPause);
-      const reset = resetPipelineState();
-      const compacted = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders,
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: "Create an anchored summary from the conversation history above.",
-                },
-              ],
-            },
-          ],
-          tools: [],
-        }),
-        loadLocalConfig(),
-      );
-      expect(compacted.status).toBe(503);
-      expect(await compacted.text()).toContain("Gateway pipeline is resetting");
-      expect(compactionRead).not.toHaveBeenCalled();
-      expect(upstreamCalls).toBe(1);
-      releaseReset?.();
-      await reset;
-    } finally {
-      releaseReset?.();
-      setPipelineResetPauseForTest(undefined);
-      compactionRead?.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("keeps cancelled streaming compaction active until abort-unaware distillation settles", async () => {
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(validResponsesSSE("resp_before_cancelled_compact"), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const sessionHeaders = {
-      "x-lore-session-id": "cancelled-compaction-session",
-    };
-    let distillationStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      distillationStarted = resolve;
-    });
-    let distillationAborted!: () => void;
-    const aborted = new Promise<void>((resolve) => {
-      distillationAborted = resolve;
-    });
-    let releaseDistillation!: () => void;
-    const distillationResult = new Promise<{
-      rounds: number;
-      distilled: number;
-    }>((resolve) => {
-      releaseDistillation = () => resolve({ rounds: 0, distilled: 0 });
-    });
-    let distillationSignal: AbortSignal | undefined;
-    const undistilledCount = vi
-      .spyOn(temporal, "undistilledCount")
-      .mockReturnValue(1);
-    const runDistillation = vi
-      .spyOn(distillation, "run")
-      .mockImplementation(async (input) => {
-        distillationStarted();
-        const signal = input.signal;
-        if (!signal) throw new Error("compaction signal missing");
-        distillationSignal = signal;
-        const onAbort = () => distillationAborted();
-        signal.addEventListener("abort", onAbort, { once: true });
-        if (signal.aborted) onAbort();
-        // Deliberately ignore cancellation. The request must retain its active
-        // session claim until this underlying operation actually settles.
-        return distillationResult;
-      });
-
-    try {
-      const established = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders,
-          messages: Array.from({ length: 12 }, (_, index) => ({
-            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-            content: [{ type: "text" as const, text: `turn ${index}` }],
-          })),
-        }),
-        loadLocalConfig(),
-      );
-      await established.text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      const sessionState = [...getActiveSessions().values()].find(
-        (candidate) =>
-          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-      );
-      expect(sessionState).toBeDefined();
-
-      const compactRequest = makeResponsesRequest({
-        sessionHeaders,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Create an anchored summary from the conversation history above.",
-              },
-            ],
-          },
-        ],
-        tools: [],
-      });
-      compactRequest.protocol = "anthropic";
-      compactRequest.model = DEFAULT_MODEL;
-      compactRequest.rawHeaders["x-lore-provider"] = "anthropic";
-      compactRequest.rawHeaders["x-lore-upstream-url"] =
-        "https://api.anthropic.com";
-      const compacted = await handleRequest(compactRequest, loadLocalConfig());
-      await started;
-      expect(distillationSignal).toBeDefined();
-      expect(activePipelineRequestCountForTest()).toBe(1);
-
-      await compacted.body?.cancel(
-        new DOMException("client disconnected", "AbortError"),
-      );
-      await aborted;
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(runDistillation).toHaveBeenCalledOnce();
-      expect(distillationSignal?.aborted).toBe(true);
-      expect(activePipelineRequestCountForTest()).toBe(1);
-      expect(
-        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
-      ).toBe(true);
-
-      releaseDistillation();
-      await distillationResult;
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(activePipelineRequestCountForTest()).toBe(0);
-      expect(
-        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
-      ).toBe(false);
-      expect(upstreamCalls).toBe(1);
-    } finally {
-      releaseDistillation();
-      runDistillation.mockRestore();
-      undistilledCount.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("keeps cancelled streaming compaction active until abort-unaware LTM lookup settles", async () => {
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(validResponsesSSE("resp_before_cancelled_ltm"), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const sessionHeaders = {
-      "x-lore-session-id": "cancelled-compaction-ltm-session",
-    };
-    let releaseLookup!: () => void;
-    const lookupResult = new Promise<
-      Awaited<ReturnType<typeof ltm.forProjectOffloaded>>
-    >((resolve) => {
-      releaseLookup = () => resolve([]);
-    });
-    let lookupStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      lookupStarted = resolve;
-    });
-    let undistilledCount: { mockRestore(): void } | undefined;
-    let lookup: { mockRestore(): void } | undefined;
-
-    try {
-      const established = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders,
-          messages: Array.from({ length: 12 }, (_, index) => ({
-            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-            content: [{ type: "text" as const, text: `turn ${index}` }],
-          })),
-        }),
-        loadLocalConfig(),
-      );
-      await established.text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      const sessionState = [...getActiveSessions().values()].find(
-        (candidate) =>
-          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-      );
-      expect(sessionState).toBeDefined();
-
-      undistilledCount = vi
-        .spyOn(temporal, "undistilledCount")
-        .mockReturnValue(0);
-      lookup = vi.spyOn(ltm, "forProjectOffloaded").mockImplementation(() => {
-        lookupStarted();
-        return lookupResult;
-      });
-
-      const compactRequest = makeResponsesRequest({
-        sessionHeaders,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Create an anchored summary from the conversation history above.",
-              },
-            ],
-          },
-        ],
-        tools: [],
-      });
-      compactRequest.protocol = "anthropic";
-      compactRequest.model = DEFAULT_MODEL;
-      compactRequest.rawHeaders["x-lore-provider"] = "anthropic";
-      compactRequest.rawHeaders["x-lore-upstream-url"] =
-        "https://api.anthropic.com";
-      const compacted = await handleRequest(compactRequest, loadLocalConfig());
-      await started;
-
-      await compacted.body?.cancel(
-        new DOMException("client disconnected", "AbortError"),
-      );
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(lookup).toHaveBeenCalledOnce();
-      expect(activePipelineRequestCountForTest()).toBe(1);
-      expect(
-        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
-      ).toBe(true);
-
-      releaseLookup();
-      await lookupResult;
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(activePipelineRequestCountForTest()).toBe(0);
-      expect(
-        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
-      ).toBe(false);
-      expect(upstreamCalls).toBe(1);
-    } finally {
-      releaseLookup();
-      lookup?.mockRestore();
-      undistilledCount?.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("rejects requests while pipeline reset is in progress", async () => {
-    let releaseReset: (() => void) | undefined;
-    const resetPause = new Promise<void>((resolve) => {
-      releaseReset = resolve;
-    });
-    let upstreamCalls = 0;
-    setPipelineResetPauseForTest(resetPause);
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response("{}", { status: 200 });
-    });
-    const reset = resetPipelineState();
-
-    try {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "request-during-reset" },
-        }),
-        loadLocalConfig(),
-      );
-
-      expect(response.status).toBe(503);
-      expect(await response.text()).toContain("Gateway pipeline is resetting");
-      expect(upstreamCalls).toBe(0);
-    } finally {
-      releaseReset?.();
-      await reset;
-      setPipelineResetPauseForTest(undefined);
-      setUpstreamInterceptor(undefined);
-    }
-  });
-
-  it("makes concurrent reset callers await the same teardown", async () => {
-    let releaseReset: (() => void) | undefined;
-    const resetPause = new Promise<void>((resolve) => {
-      releaseReset = resolve;
-    });
-    setPipelineResetPauseForTest(resetPause);
-    const first = resetPipelineState();
-    const second = resetPipelineState();
-    let secondSettled = false;
-    void second.then(() => {
-      secondSettled = true;
-    });
-
-    try {
-      await Promise.resolve();
-      expect(secondSettled).toBe(false);
-      releaseReset?.();
-      await Promise.all([first, second]);
-      expect(secondSettled).toBe(true);
-    } finally {
-      releaseReset?.();
-      await first;
-      setPipelineResetPauseForTest(undefined);
-    }
-  });
-
-  it("admits finalizers after a direct compact route initializes post-reset", async () => {
-    await resetPipelineState();
-    setUpstreamInterceptor(
-      async () =>
-        new Response(JSON.stringify({ output: [] }), {
-          headers: { "content-type": "application/json" },
-        }),
-    );
-    const compact = new Request("http://gateway.test/v1/responses/compact", {
-      method: "POST",
-      headers: {
-        authorization: "Bearer test-key",
-        "content-type": "application/json",
-        "x-lore-project": process.cwd(),
-        "x-lore-provider": "openai",
-        "x-lore-upstream-url": "https://api.openai.com/v1",
-        "x-lore-session-id": "direct-route-initializer",
-      },
-      body: JSON.stringify({
-        model: "gpt-5.6-sol",
-        instructions: "You are a coding agent.",
-        input: [
-          {
-            role: "user",
-            content: [{ type: "input_text", text: "compact" }],
-          },
-        ],
-        tools: [],
-      }),
-    });
-
-    try {
-      await (
-        await handleResponsesCompactEndpoint(compact, loadLocalConfig())
-      ).text();
-      let postResponses = 0;
-      setPostResponseStartObserverForTest(() => postResponses++);
-      setUpstreamInterceptor(
-        async () =>
-          new Response(validResponsesSSE("resp_after_direct_compact"), {
-            headers: { "content-type": "text/event-stream" },
-          }),
-      );
-      const streamed = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { "x-lore-session-id": "post-direct-route" },
-        }),
-        loadLocalConfig(),
-      );
-      await streamed.text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(postResponses).toBe(1);
-    } finally {
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("allows authenticated sessions to use global warming controls", async () => {
-    const sessionHeaders = {
-      "x-lore-session-id": "authenticated-warming-admin",
-    };
-    const { isWarmingEnabled } = await import("../src/cache-warmer");
-    setUpstreamInterceptor(
-      async () =>
-        new Response(validResponsesSSE("resp_warming_admin"), {
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
-    const command = (text: string): GatewayRequest => {
-      const request = makeResponsesRequest({
-        sessionHeaders,
-        messages: [{ role: "user", content: [{ type: "text", text }] }],
-      });
-      request.stream = false;
-      return request;
-    };
-
-    try {
-      await (
-        await handleRequest(
-          makeResponsesRequest({ sessionHeaders }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      const off = await handleRequest(
-        command("/lore:warm:off"),
-        loadLocalConfig(),
-      );
-      expect(await off.text()).toContain("Cache warming disabled globally");
-      expect(isWarmingEnabled()).toBe(false);
-
-      const on = await handleRequest(
-        command("/lore:warm:on"),
-        loadLocalConfig(),
-      );
-      expect(await on.text()).toContain("Cache warming enabled globally");
-      expect(isWarmingEnabled()).toBe(true);
-
-      const reset = await handleRequest(
-        command("/lore:warm:reset"),
-        loadLocalConfig(),
-      );
-      expect(await reset.text()).toContain(
-        "Cache warming circuit breaker reset",
-      );
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
+        leState();
     }
   });
 
@@ -3248,7 +1835,1060 @@ describe("Pipeline — streaming responses", () => {
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSesslationAborted();
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        // Deliberately ignore cancellation. The request must retain its active
+        // session claim until this underlying operation actually settles.
+        return distillationResult;
+      });
+
+    try {
+      const established = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: Array.from({ length: 12 }, (_, index) => ({
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: [{ type: "text" as const, text: `turn ${index}` }],
+          })),
+        }),
+        loadLocalConfig(),
+      );
+      await established.text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const sessionState = [...getActiveSessions().values()].find(
+        (candidate) =>
+          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+      );
+      expect(sessionState).toBeDefined();
+
+      const compactRequest = makeResponsesRequest({
+        sessionHeaders,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Create an anchored summary from the conversation history above.",
+              },
+            ],
+          },
+        ],
+        tools: [],
+      });
+      compactRequest.protocol = "anthropic";
+      compactRequest.model = DEFAULT_MODEL;
+      compactRequest.rawHeaders["x-lore-provider"] = "anthropic";
+      compactRequest.rawHeaders["x-lore-upstream-url"] =
+        "https://api.anthropic.com";
+      const compacted = await handleRequest(compactRequest, loadLocalConfig());
+      await started;
+      expect(distillationSignal).toBeDefined();
+      expect(activePipelineRequestCountForTest()).toBe(1);
+
+      await compacted.body?.cancel(
+        new DOMException("client disconnected", "AbortError"),
+      );
+      await aborted;
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(runDistillation).toHaveBeenCalledOnce();
+      expect(distillationSignal?.aborted).toBe(true);
+      expect(activePipelineRequestCountForTest()).toBe(1);
+      expect(
+        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
+      ).toBe(true);
+
+      releaseDistillation();
+      await distillationResult;
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(activePipelineRequestCountForTest()).toBe(0);
+      expect(
+        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
+      ).toBe(false);
+      expect(upstreamCalls).toBe(1);
+    } finally {
+      releaseDistillation();
+      runDistillation.mockRestore();
+      undistilledCount.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps cancelled streaming compaction active until abort-unaware LTM lookup settles", async () => {
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE("resp_before_cancelled_ltm"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const sessionHeaders = {
+      "x-lore-session-id": "cancelled-compaction-ltm-session",
+    };
+    let releaseLookup!: () => void;
+    const lookupResult = new Promise<
+      Awaited<ReturnType<typeof ltm.forProjectOffloaded>>
+    >((resolve) => {
+      releaseLookup = () => resolve([]);
+    });
+    let lookupStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      lookupStarted = resolve;
+    });
+    let undistilledCount: { mockRestore(): void } | undefined;
+    let lookup: { mockRestore(): void } | undefined;
+
+    try {
+      const established = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: Array.from({ length: 12 }, (_, index) => ({
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: [{ type: "text" as const, text: `turn ${index}` }],
+          })),
+        }),
+        loadLocalConfig(),
+      );
+      await established.text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const sessionState = [...getActiveSessions().values()].find(
+        (candidate) =>
+          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+      );
+      expect(sessionState).toBeDefined();
+
+      undistilledCount = vi
+        .spyOn(temporal, "undistilledCount")
+        .mockReturnValue(0);
+      lookup = vi.spyOn(ltm, "forProjectOffloaded").mockImplementation(() => {
+        lookupStarted();
+        return lookupResult;
+      });
+
+      const compactRequest = makeResponsesRequest({
+        sessionHeaders,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Create an anchored summary from the conversation history above.",
+              },
+            ],
+          },
+        ],
+        tools: [],
+      });
+      compactRequest.protocol = "anthropic";
+      compactRequest.model = DEFAULT_MODEL;
+      compactRequest.rawHeaders["x-lore-provider"] = "anthropic";
+      compactRequest.rawHeaders["x-lore-upstream-url"] =
+        "https://api.anthropic.com";
+      const compacted = await handleRequest(compactRequest, loadLocalConfig());
+      await started;
+
+      await compacted.body?.cancel(
+        new DOMException("client disconnected", "AbortError"),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(lookup).toHaveBeenCalledOnce();
+      expect(activePipelineRequestCountForTest()).toBe(1);
+      expect(
+        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
+      ).toBe(true);
+
+      releaseLookup();
+      await lookupResult;
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(activePipelineRequestCountForTest()).toBe(0);
+      expect(
+        isPipelineSessionActiveForTest(sessionState?.sessionID ?? ""),
+      ).toBe(false);
+      expect(upstreamCalls).toBe(1);
+    } finally {
+      releaseLookup();
+      lookup?.mockRestore();
+      undistilledCount?.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rejects requests while pipeline reset is in progress", async () => {
+    let releaseReset: (() => void) | undefined;
+    const resetPause = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    let upstreamCalls = 0;
+    setPipelineResetPauseForTest(resetPause);
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response("{}", { status: 200 });
+    });
+    const reset = resetPipelineState();
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "request-during-reset" },
+        }),
+        loadLocalConfig(),
+      );
+
+      expect(response.status).toBe(503);
+      expect(await response.text()).toContain("Gateway pipeline is resetting");
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      releaseReset?.();
+      await reset;
+      setPipelineResetPauseForTest(undefined);
+      setUpstreamInterceptor(undefined);
+    }
+  });
+
+  it("makes concurrent reset callers await the same teardown", async () => {
+    let releaseReset: (() => void) | undefined;
+    const resetPause = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    setPipelineResetPauseForTest(resetPause);
+    const first = resetPipelineState();
+    const second = resetPipelineState();
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+
+    try {
+      await Promise.resolve();
+      expect(secondSettled).toBe(false);
+      releaseReset?.();
+      await Promise.all([first, second]);
+      expect(secondSettled).toBe(true);
+    } finally {
+      releaseReset?.();
+      await first;
+      setPipelineResetPauseForTest(undefined);
+    }
+  });
+
+  it("admits finalizers after a direct compact route initializes post-reset", async () => {
+    await resetPipelineState();
+    setUpstreamInterceptor(
+      async () =>
+        new Response(JSON.stringify({ output: [] }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const compact = new Request("http://gateway.test/v1/responses/compact", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-key",
+        "content-type": "application/json",
+        "x-lore-project": process.cwd(),
+        "x-lore-provider": "openai",
+        "x-lore-upstream-url": "https://api.openai.com/v1",
+        "x-lore-session-id": "direct-route-initializer",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        instructions: "You are a coding agent.",
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "compact" }],
+          },
+        ],
+        tools: [],
+      }),
+    });
+
+    try {
+      await (
+        await handleResponsesCompactEndpoint(compact, loadLocalConfig())
+      ).text();
+      let postResponses = 0;
+      setPostResponseStartObserverForTest(() => postResponses++);
+      setUpstreamInterceptor(
+        async () =>
+          new Response(validResponsesSSE("resp_after_direct_compact"), {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      const streamed = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "post-direct-route" },
+        }),
+        loadLocalConfig(),
+      );
+      await streamed.text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(postResponses).toBe(1);
+    } finally {
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("allows authenticated sessions to use global warming controls", async () => {
+    const sessionHeaders = {
+      "x-lore-session-id": "authenticated-warming-admin",
+    };
+    const { isWarmingEnabled } = await import("../src/cache-warmer");
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_warming_admin"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const command = (text: string): GatewayRequest => {
+      const request = makeResponsesRequest({
+        sessionHeaders,
+        messages: [{ role: "user", content: [{ type: "text", text }] }],
+      });
+      request.stream = false;
+      return request;
+    };
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({ sessionHeaders }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const off = await handleRequest(
+        command("/lore:warm:off"),
+        loadLocalConfig(),
+      );
+      expect(await off.text()).toContain("Cache warming disabled globally");
+      expect(isWarmingEnabled()).toBe(false);
+
+      const on = await handleRequest(
+        command("/lore:warm:on"),
+        loadLocalConfig(),
+      );
+      expect(await on.text()).toContain("Cache warming enabled globally");
+      expect(isWarmingEnabled()).toBe(true);
+
+      const reset = await handleRequest(
+        command("/lore:warm:reset"),
+        loadLocalConfig(),
+      );
+      expect(await reset.text()).toContain(
+        "Cache warming circuit breaker reset",
+      );
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelinit handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "terminal-before-eof-session",
+          },
+        }),
+        loadLocalConfig(),
+      );
+      reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      if (!reader) throw new Error("missing response body");
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        if (chunk.value) {
+          output += decoder.decode(chunk.value, { stream: true });
+        }
+      }
+
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(postResponses).toBe(0);
+
+      for (;;) {
+        const finalChunk = await reader.read();
+        if (finalChunk.done) break;
+      }
+      await vi.waitFor(() => expect(postResponses).toBe(1));
+    } finally {
+      if (reader) await reader.cancel().catch(() => {});
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("defers buffered warning-path storage until the Responses body closes", async () => {
+    const order: string[] = [];
+    vi.mocked(getDegradationWarning).mockReturnValueOnce("workers degraded");
+    setPostResponseStartObserverForTest(() => order.push("post"));
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_warning"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "warning-path-session" },
+        }),
+        loadLocalConfig(),
+      );
+      const body = await response.text();
+      order.push("eof");
+
+      expect(body).toContain("workers degraded");
+      expect(order).toEqual(["eof"]);
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(order).toEqual(["eof", "post"]);
+    } finally {
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not finalize a buffered warning-path incomplete Responses turn", async () => {
+    const alias = "warning-incomplete-alias";
+    const canonical = "warning-incomplete-canonical";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? validResponsesSSE("resp_warning_incomplete_setup")
+          : incompleteResponsesSSE("resp_warning_incomplete"),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": alias },
+          }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const state = [...getActiveSessions().values()].find(
         (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+
+      vi.mocked(getDegradationWarning).mockReturnValueOnce("workers degraded");
+      clearAllCosts();
+      store.mockClear();
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": canonical,
+            "x-session-affinity": alias,
+          },
+        }),
+        loadLocalConfig(),
+      );
+      const body = await response.text();
+      expect(body).toContain("event: response.incomplete");
+      expect(body).not.toContain("event: response.completed");
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(store).not.toHaveBeenCalled();
+      expect(
+        getSessionCosts(state?.sessionID ?? "")?.conversation,
+      ).toMatchObject({
+        inputTokens: 1,
+        outputTokens: 0,
+        turns: 1,
+      });
+
+      const compact = await handleCompactEndpoint(
+        new Request("http://gateway.test/v1/compact", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-key",
+            "content-type": "application/json",
+            "x-lore-session-id": canonical,
+          },
+          body: JSON.stringify({ project_path: process.cwd() }),
+        }),
+        loadLocalConfig(),
+      );
+      expect(compact.status).toBe(404);
+      expect(loadSessionTracking(state?.sessionID ?? "")).toMatchObject({
+        headerName: "x-session-affinity",
+        headerSessionId: alias,
+      });
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearAllCosts();
+    }
+  });
+
+  it("uses reserved capacity for production finalizers", async () => {
+    const end = vi.fn();
+    const span = {
+      end,
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+      updateName: vi.fn(),
+    } as unknown as Sentry.Span;
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
+    let postResponses = 0;
+    setPostResponseStartObserverForTest(() => postResponses++);
+    setStreamingPostResponseLimitsForTest(0, 2);
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_dropped_span"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "dropped-span-session" },
+        }),
+        loadLocalConfig(),
+      );
+      await response.text();
+      await vi.waitFor(() => expect(postResponses).toBe(1));
+
+      expect(end).toHaveBeenCalledOnce();
+      expect(streamingPostResponsePendingForTest()).toBe(0);
+    } finally {
+      setStreamingPostResponseLimitsForTest();
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("enforces and cleans up the real per-session and global queue limits", async () => {
+    setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
+    const admissionRequest = makeResponsesRequest({
+      sessionHeaders: { "x-lore-session-id": "queue-admission" },
+      tools: [],
+    });
+    admissionRequest.stream = false;
+    admissionRequest.rawHeaders["x-lore-agent"] = "title";
+
+    try {
+      await (await handleRequest(admissionRequest, loadLocalConfig())).text();
+      const perSessionOrder: number[] = [];
+      let releasePerSession: (() => void) | undefined;
+      const perSessionGate = new Promise<void>((resolve) => {
+        releasePerSession = resolve;
+      });
+      let perSessionDrops = 0;
+      scheduleStreamingPostResponseForTest("real-limit-session", async () => {
+        await perSessionGate;
+        perSessionOrder.push(1);
+      });
+      scheduleStreamingPostResponseForTest("real-limit-session", async () => {
+        await perSessionGate;
+        perSessionOrder.push(2);
+      });
+      scheduleStreamingPostResponseForTest(
+        "real-limit-session",
+        () => {
+          perSessionOrder.push(3);
+        },
+        () => perSessionDrops++,
+      );
+
+      expect(streamingPostResponsePendingForTest()).toBe(2);
+      expect(perSessionDrops).toBe(1);
+      releasePerSession?.();
+      await vi.waitFor(() =>
+        expect(streamingPostResponsePendingForTest()).toBe(0),
+      );
+      expect(perSessionOrder).toEqual([1, 2]);
+
+      let releaseGlobal: (() => void) | undefined;
+      const globalGate = new Promise<void>((resolve) => {
+        releaseGlobal = resolve;
+      });
+      let globalDrops = 0;
+      for (let index = 0; index < 64; index++) {
+        scheduleStreamingPostResponseForTest(
+          `real-global-limit-${index}`,
+          () => globalGate,
+        );
+      }
+      scheduleStreamingPostResponseForTest(
+        "real-global-limit-overflow",
+        () => {},
+        () => globalDrops++,
+      );
+
+      expect(streamingPostResponsePendingForTest()).toBe(64);
+      expect(globalDrops).toBe(1);
+      releaseGlobal?.();
+      await vi.waitFor(() =>
+        expect(streamingPostResponsePendingForTest()).toBe(0),
+      );
+
+      let releaseResetFinalizer: (() => void) | undefined;
+      const resetFinalizerGate = new Promise<void>((resolve) => {
+        releaseResetFinalizer = resolve;
+      });
+      scheduleStreamingPostResponseForTest(
+        "real-reset-limit",
+        () => resetFinalizerGate,
+      );
+      const reset = resetPipelineState();
+      let resetSettled = false;
+      void reset.then(() => {
+        resetSettled = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(resetSettled).toBe(false);
+      releaseResetFinalizer?.();
+      await reset;
+      expect(streamingPostResponsePendingForTest()).toBe(0);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("ends the response span when a stream is cancelled before terminal", async () => {
+    const end = vi.fn();
+    const setStatus = vi.fn();
+    const span = {
+      end,
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus,
+      updateName: vi.fn(),
+    } as unknown as Sentry.Span;
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
+    let upstreamStartedResolve: (() => void) | undefined;
+    const upstreamStarted = new Promise<void>((resolve) => {
+      upstreamStartedResolve = resolve;
+    });
+    let upstreamCancellations = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamStartedResolve?.();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            upstreamCancellations++;
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    // Fake setTimeout from the start so the response stream's
+    // KEEPALIVE_INACTIVITY_MS (30s) tick — the tick that releases the span
+    // after a pre-terminal client cancel — can be advanced instead of
+    // waited on. Keep Date/setImmediate/nextTick real so the stream
+    // plumbing and vi.waitFor keep working.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "cancelled-span-session" },
+        }),
+        loadLocalConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      // The upstream stream emits nothing, so the first chunk only
+      // arrives at the (faked) 30s keepalive tick — drive it manually.
+      const firstRead = reader?.read();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await firstRead;
+      await upstreamStarted;
+      await reader?.cancel("client disconnected");
+      await vi.advanceTimersByTimeAsync(30_000);
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
+
+      expect(setStatus).toHaveBeenCalledWith({
+        code: 2,
+        message: "stream cancelled before terminal response",
+      });
+      expect(upstreamCancellations).toBe(1);
+  oadLocalConfig(),
+      );
+      expect(saturated.status).toBe(503);
+      expect(await saturated.text()).toContain("Gateway is busy");
+
+      releaseProducer?.();
+      expect((await response).status).toBe(502);
+      await vi.waitFor(() => {
+        expect(activePipelineRequestCountForTest()).toBe(initialActiveRequests);
+        expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(
+          false,
+        );
+      });
+    } finally {
+      releaseProducer?.();
+      setMaxActivePipelineRequestsForTest();
+      setPipelinePreUpstreamPauseForTest(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("waits for an abort-unaware producer before reset clears state", async () => {
+    let releaseProducer: (() => void) | undefined;
+    const producerPause = new Promise<void>((resolve) => {
+      releaseProducer = resolve;
+    });
+    let producerWaitingResolve: (() => void) | undefined;
+    const producerWaiting = new Promise<void>((resolve) => {
+      producerWaitingResolve = resolve;
+    });
+    setPipelinePreUpstreamPauseForTest(producerPause, () =>
+      producerWaitingResolve?.(),
+    );
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE("resp_stale_producer"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    let reset: Promise<void> | undefined;
+
+    try {
+      const response = handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "stale-producer-session" },
+        }),
+        loadLocalConfig(),
+      );
+      await producerWaiting;
+      reset = resetPipelineState();
+      let resetSettled = false;
+      void reset.then(() => {
+        resetSettled = true;
+      });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(resetSettled).toBe(false);
+      releaseProducer?.();
+      await reset;
+      expect(resetSettled).toBe(true);
+      expect(upstreamCalls).toBe(0);
+      expect((await response).status).toBe(502);
+    } finally {
+      releaseProducer?.();
+      await reset;
+      setPipelinePreUpstreamPauseForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("fences a producer that resumes after the reset timeout", async () => {
+    const sessionHeader = "late-stale-producer-session";
+    const staleProjectPath = "/tmp";
+    const freshProjectPath = process.cwd();
+    const staleUpstream = "https://stale-reset.example";
+    const freshUpstream = "https://fresh-reset.example";
+    let releaseProducer: (() => void) | undefined;
+    const producerPause = new Promise<void>((resolve) => {
+      releaseProducer = resolve;
+    });
+    let producerWaitingResolve: (() => void) | undefined;
+    const producerWaiting = new Promise<void>((resolve) => {
+      producerWaitingResolve = resolve;
+    });
+    setPipelinePreUpstreamPauseForTest(producerPause, () =>
+      producerWaitingResolve?.(),
+    );
+    setPipelineResetSettleTimeoutForTest(0);
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE("resp_late_stale_producer"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    try {
+      const staleRequest = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": sessionHeader,
+        },
+      });
+      staleRequest.rawHeaders["x-lore-project"] = staleProjectPath;
+      staleRequest.rawHeaders["x-lore-upstream-url"] = staleUpstream;
+      const response = handleRequest(staleRequest, loadLocalConfig());
+      await producerWaiting;
+      await resetPipelineState();
+
+      expect(activePipelineRequestCountForTest()).toBe(0);
+      expect(detachedPipelineRequestCountForTest()).toBe(1);
+      setMaxDetachedPipelineRequestsForTest(1);
+      const quarantineFull = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "quarantine-saturation-session",
+          },
+        }),
+        loadLocalConfig(),
+      );
+      expect(quarantineFull.status).toBe(503);
+      expect(await quarantineFull.text()).toContain("Gateway is busy");
+      setMaxDetachedPipelineRequestsForTest();
+      setPipelinePreUpstreamPauseForTest(undefined);
+      setUpstreamInterceptor(async () => {
+        upstreamCalls++;
+        return new Response(validResponsesSSE("resp_reopened_after_timeout"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+      const freshRequest = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": sessionHeader,
+        },
+      });
+      freshRequest.rawHeaders["x-lore-project"] = freshProjectPath;
+      freshRequest.rawHeaders["x-lore-upstream-url"] = freshUpstream;
+      const reopened = await handleRequest(freshRequest, loadLocalConfig());
+      expect(await reopened.text()).toContain("event: response.completed");
+      expect(upstreamCalls).toBe(1);
+      const freshState = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === sessionHeader,
+      );
+      expect(freshState).toBeDefined();
+      await vi.waitFor(() => {
+        expect(loadSessionTracking(freshState?.sessionID ?? "")).toMatchObject({
+          projectPath: freshProjectPath,
+          projectPathProvisional: false,
+          lastUpstream: expect.stringContaining(freshUpstream),
+        });
+      });
+      const freshTracking = loadSessionTracking(freshState?.sessionID ?? "");
+
+      releaseProducer?.();
+      expect((await response).status).toBe(502);
+      await vi.waitFor(() =>
+        expect(detachedPipelineRequestCountForTest()).toBe(0),
+      );
+      expect(upstreamCalls).toBe(1);
+      expect(freshState).toMatchObject({
+        projectPath: freshProjectPath,
+        projectPathProvisional: false,
+        lastUpstream: expect.objectContaining({ url: freshUpstream }),
+      });
+      expect(loadSessionTracking(freshState?.sessionID ?? "")).toMatchObject({
+        projectPath: freshProjectPath,
+        projectPathProvisional: false,
+        lastUpstream: freshTracking?.lastUpstream,
+      });
+    } finally {
+      releaseProducer?.();
+      setMaxDetachedPipelineRequestsForTest();
+      setPipelinePreUpstreamPauseForTest(undefined);
+      setPipelineResetSettleTimeoutForTest();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("aborts a started stream before reset reopens admission", async () => {
+    let upstreamStartedResolve: (() => void) | undefined;
+    const upstreamStarted = new Promise<void>((resolve) => {
+      upstreamStartedResolve = resolve;
+    });
+    let postResponses = 0;
+    let upstreamCancellations = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamStartedResolve?.();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            upstreamCancellations++;
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "started-response-before-reset",
+          },
+        }),
+        loadLocalConfig(),
+      );
+      await upstreamStarted;
+      await resetPipelineState();
+
+      setPostResponseStartObserverForTest(() => postResponses++);
+      setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
+      const reopenedRequest = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "started-post-reset-request" },
+        tools: [],
+      });
+      reopenedRequest.stream = false;
+      reopenedRequest.rawHeaders["x-lore-agent"] = "title";
+      await (await handleRequest(reopenedRequest, loadLocalConfig())).text();
+      await expect(response.text()).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      expect(upstreamCancellations).toBe(1);
+      expect(postResponses).toBe(0);
+      expect(streamingPostResponsePendingForTest()).toBe(0);
+    } finally {
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not start an unread structural compaction after reset", async () => {
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE("resp_before_unread_compact"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const sessionHeaders = {
+      "x-lore-session-id": "unread-compaction-reset-session",
+    };
+    let compactionRead: { mockRestore: () => void } | undefined;
+    let releaseReset: (() => void) | undefined;
+
+    try {
+      const established = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: Array.from({ length: 12 }, (_, index) => ({
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: [{ type: "text" as const, text: `turn ${index}` }],
+          })),
+        }),
+        loadLocalConfig(),
+      );
+      await established.text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      compactionRead = vi.spyOn(temporal, "undistilledCount");
+      const resetPause = new Promise<void>((resolve) => {
+        releaseReset = resolve;
+      });
+      setPipelineResetPauseForTest(resetPause);
+      const reset = resetPipelineState();
+      const compacted = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Create an anchored summary from the conversation history above.",
+                },
+              ],
+            },
+          ],
+          tools: [],
+        }),
+        loadLocalConfig(),
+      );
+      expect(compacted.status).toBe(503);
+      expect(await compacted.text()).toContain("Gateway pipeline is resetting");
+      expect(compactionRead).not.toHaveBeenCalled();
+      expect(upstreamCalls).toBe(1);
+      releaseReset?.();
+      await reset;
+    } finally {
+      releaseReset?.();
+      setPipelineResetPauseForTest(undefined);
+      compactionRead?.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps cancelled streaming compaction active until abort-unaware distillation settles", async () => {
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE("resp_before_cancelled_compact"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const sessionHeaders = {
+      "x-lore-session-id": "cancelled-compaction-session",
+    };
+    let distillationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      distillationStarted = resolve;
+    });
+    let distillationAborted!: () => void;
+    const aborted = new Promise<void>((resolve) => {
+      distillationAborted = resolve;
+    });
+    let releaseDistillation!: () => void;
+    const distillationResult = new Promise<{
+      rounds: number;
+      distilled: number;
+    }>((resolve) => {
+      releaseDistillation = () => resolve({ rounds: 0, distilled: 0 });
+    });
+    let distillationSignal: AbortSignal | undefined;
+    const undistilledCount = vi
+      .spyOn(temporal, "undistilledCount")
+      .mockReturnValue(1);
+    const runDistillation = vi
+      .spyOn(distillation, "run")
+      .mockImplementation(async (input) => {
+        distillationStarted();
+        const signal = input.signal;
+        if (!signal) throw new Error("compaction signal missing");
+        distillationSignal = signal;
+        const onAbort = () => distilionId === alias,
       );
       expect(state).toBeDefined();
       clearAllCosts();
@@ -3596,7 +3236,367 @@ describe("Pipeline — streaming responses", () => {
               "one two three four five six seven eight nine atomic failure terms",
             )
           : validResponsesSSE(
-              "resp_failed_recall_commit_atomicity_final",
+       } finally {
+      vi.useRealTimers();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("ends an unsuccessful Responses stream span exactly once", async () => {
+    const end = vi.fn();
+    const span = {
+      end,
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+      updateName: vi.fn(),
+    } as unknown as Sentry.Span;
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
+    setUpstreamInterceptor(
+      async () =>
+        new Response(incompleteResponsesSSE("resp_incomplete_span"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "incomplete-span-session" },
+        }),
+        loadLocalConfig(),
+      );
+      expect(await response.text()).toContain("event: response.incomplete");
+      await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it.each(["incomplete", "failed"] as const)(
+    "accounts validated usage from a %s Responses terminal without storing the turn",
+    async (terminal) => {
+      clearAllCosts();
+      const today = new Date().toISOString().slice(0, 10);
+      const ledgerBefore = getDailyCostForDay(today);
+      const sessionHeader = `account-${terminal}-response-session`;
+      const wire =
+        responsesEvent("response.created", {
+          response: {
+            id: `resp_account_${terminal}`,
+            model: "gpt-5.6-sol",
+            status: "in_progress",
+          },
+        }) +
+        responsesEvent(`response.${terminal}`, {
+          response: {
+            id: `resp_account_${terminal}`,
+            model: "gpt-5.6-sol",
+            status: terminal,
+            output: [],
+            usage: { input_tokens: 1_000, output_tokens: 100 },
+            ...(terminal === "incomplete"
+              ? { incomplete_details: { reason: "max_output_tokens" } }
+              : {
+                  error: { type: "server_error", message: "provider failed" },
+                }),
+          },
+        });
+      setUpstreamInterceptor(
+        async () =>
+          new Response(wire, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      const store = vi.spyOn(temporal, "store");
+
+      try {
+        const response = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": sessionHeader },
+          }),
+          loadLocalConfig(),
+        );
+        expect(await response.text()).toContain(`event: response.${terminal}`);
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === sessionHeader,
+        );
+        expect(state).toBeDefined();
+        await vi.waitFor(() => {
+          expect(getSessionCosts(state?.sessionID ?? "")?.conversation).toEqual(
+            expect.objectContaining({
+              inputTokens: 1_000,
+              outputTokens: 100,
+              turns: 1,
+            }),
+          );
+        });
+        expect(getDailySpend().spend).toBeGreaterThan(0);
+        expect(getCostRate()).toBeGreaterThan(0);
+        expect(getDailyCostForDay(today)).toBeGreaterThan(ledgerBefore);
+        expect(store).not.toHaveBeenCalled();
+      } finally {
+        store.mockRestore();
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearAllCosts();
+      }
+    },
+  );
+
+  it("accounts a failed recall-aware continuation without storing the turn", async () => {
+    clearAllCosts();
+    const sessionHeader = "account-failed-recall-continuation";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 1) {
+        const args = JSON.stringify({
+          query:
+            "one two three four five six seven eight nine architecture terms",
+        });
+        return new Response(
+          responsesEvent("response.created", {
+            response: {
+              id: "resp_recall_accounting",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+            },
+          }) +
+            responsesEvent("response.output_item.added", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_recall_accounting",
+                call_id: "call_recall_accounting",
+                name: "recall",
+              },
+            }) +
+            responsesEvent("response.function_call_arguments.done", {
+              output_index: 0,
+              item_id: "fc_recall_accounting",
+              arguments: args,
+            }) +
+            responsesEvent("response.output_item.done", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_recall_accounting",
+                call_id: "call_recall_accounting",
+                name: "recall",
+                arguments: args,
+                status: "completed",
+              },
+            }) +
+            responsesEvent("response.completed", {
+              response: {
+                id: "resp_recall_accounting",
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [
+                  {
+                    type: "function_call",
+                    id: "fc_recall_accounting",
+                    call_id: "call_recall_accounting",
+                    name: "recall",
+                    arguments: args,
+                    status: "completed",
+                  },
+                ],
+                usage: { input_tokens: 10, output_tokens: 1 },
+              },
+            }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return new Response(
+        responsesEvent("response.created", {
+          response: {
+            id: "resp_recall_accounting_failed",
+            model: "gpt-5.6-sol",
+            status: "in_progress",
+          },
+        }) +
+          responsesEvent("response.failed", {
+            response: {
+              id: "resp_recall_accounting_failed",
+              model: "gpt-5.6-sol",
+              status: "failed",
+              output: [],
+              usage: { input_tokens: 1_000, output_tokens: 100 },
+              error: { type: "server_error", message: "provider failed" },
+            },
+          }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": sessionHeader },
+        }),
+        loadLocalConfig(),
+      );
+      expect(await response.text()).toContain("event: response.failed");
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === sessionHeader,
+      );
+      expect(state).toBeDefined();
+      await vi.waitFor(() => {
+        expect(
+          getSessionCosts(state?.sessionID ?? "")?.conversation,
+        ).toMatchObject({
+          inputTokens: 1_010,
+          outputTokens: 101,
+          turns: 1,
+        });
+      });
+      expect(store).not.toHaveBeenCalled();
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearAllCosts();
+    }
+  });
+
+  it("defers non-stream incomplete accounting and span closure until EOF", async () => {
+    clearAllCosts();
+    const end = vi.fn();
+    const span = {
+      end,
+      setAttribute: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+      updateName: vi.fn(),
+    } as unknown as Sentry.Span;
+    const actualSentry =
+      await vi.importActual<typeof import("@sentry/bun")>("@sentry/bun");
+    vi.mocked(Sentry.startInactiveSpan).mockImplementation((options) =>
+      options.op === "gen_ai.chat"
+        ? span
+        : actualSentry.startInactiveSpan(options),
+    );
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "resp_nonstream_incomplete_accounting",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status: "incomplete",
+            output: [],
+            usage: { input_tokens: 1_000, output_tokens: 100 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": "nonstream-incomplete-accounting",
+        },
+      });
+      request.stream = false;
+      const response = await handleRequest(request, loadLocalConfig());
+      expect(end).not.toHaveBeenCalled();
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.status).toBe("incomplete");
+      expect(body.incomplete_details).toEqual({
+        reason: "max_output_tokens",
+      });
+      await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
+      const state = [...getActiveSessions().values()].find(
+        (candidate) =>
+          candidate.headerSessionId === "nonstream-incomplete-accounting",
+      );
+      expect(
+        getSessionCosts(state?.sessionID ?? "")?.conversation,
+      ).toMatchObject({
+        inputTokens: 1_000,
+        outputTokens: 100,
+        turns: 1,
+      });
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearAllCosts();
+    }
+  });
+
+  it("rejects an unknown public incomplete reason on an established conversation", async () => {
+    const sessionHeader = "malformed-incomplete-established";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 1) {
+        return new Response(validResponsesSSE("resp_malformed_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          id: "resp_malformed_incomplete",
+          model: "gpt-5.6-sol",
+          status: "incomplete",
+          incomplete_details: { reason: "provider_specific" },
+          output: [],
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": sessionHeader },
+          }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": sessionHeader },
+      });
+      request.stream = false;
+      const response = await handleRequest(request, loadLocalConfig());
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("Gateway request failed");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it.each([false, true])(
+    "rejects malformed completed JSON on an established conversation codex=%s",
+    async (codex) => {
+      const sessionHeader = `malformed-completed-${codex}`;
+      let upstreamCall = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCall++;
+        if (upstreamCall === 1) {
+          return new Response(validResponsesSSE("resp_completed_setup"), {
+            headers: { "content-type": "text/event-stream" },
+          });
+               "resp_failed_recall_commit_atomicity_final",
               "final answer",
             ),
         { headers: { "content-type": "text/event-stream" } },
@@ -4635,2119 +4635,7 @@ describe("Pipeline — streaming responses", () => {
 
       const migration = makeResponsesRequest({
         sessionHeaders: {
-          "x-lore-session-id": canonical,
-          "x-session-affinity": alias,
-        },
-      });
-      delete migration.rawHeaders["x-lore-project"];
-      migration.system = `You are a coding agent.\nWorking directory: ${projectB}`;
-      await (await handleRequest(migration, loadLocalConfig())).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(original).toMatchObject({
-        headerName: "x-session-affinity",
-        headerSessionId: alias,
-        projectPath: projectA,
-      });
-      const independent = [...getActiveSessions().values()].find(
-        (state) => state.headerSessionId === canonical,
-      );
-      expect(independent).toMatchObject({
-        headerName: "x-lore-session-id",
-        projectPath: projectB,
-      });
-      expect(independent?.sessionID).not.toBe(original?.sessionID);
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it.each([false, true])(
-    "does not confirm canonical migration after a blocked Gemini response (stream=%s)",
-    async (stream) => {
-      const alias = `blocked-gemini-${stream}-alias`;
-      const canonical = `blocked-gemini-${stream}-canonical`;
-      let upstreamCall = 0;
-      setUpstreamInterceptor(async () => {
-        upstreamCall++;
-        if (upstreamCall === 1) {
-          return new Response(validResponsesSSE("resp_gemini_block_setup"), {
-            headers: { "content-type": "text/event-stream" },
-          });
-        }
-        const blocked = {
-          responseId: "gemini-blocked",
-          modelVersion: "gemini-test",
-          promptFeedback: { blockReason: "SAFETY" },
-          usageMetadata: {
-            promptTokenCount: 1,
-            candidatesTokenCount: 0,
-            totalTokenCount: 1,
-          },
-        };
-        return new Response(
-          stream
-            ? `data: ${JSON.stringify(blocked)}\n\n`
-            : JSON.stringify(blocked),
-          {
-            headers: {
-              "content-type": stream ? "text/event-stream" : "application/json",
-            },
-          },
-        );
-      });
-      const store = vi.spyOn(temporal, "store");
-
-      try {
-        await (
-          await handleRequest(
-            makeResponsesRequest({
-              sessionHeaders: { "x-session-affinity": alias },
-            }),
-            loadLocalConfig(),
-          )
-        ).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        await new Promise((resolve) => setImmediate(resolve));
-        const state = [...getActiveSessions().values()].find(
-          (candidate) => candidate.headerSessionId === alias,
-        );
-        const original = loadSessionTracking(state?.sessionID ?? "");
-        store.mockClear();
-
-        const migration = makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": canonical,
-            "x-session-affinity": alias,
-          },
-        });
-        migration.protocol = "gemini";
-        migration.stream = stream;
-        migration.rawHeaders["x-lore-provider"] = "google";
-        migration.rawHeaders["x-lore-upstream-url"] =
-          "https://generativelanguage.googleapis.com";
-        await (await handleRequest(migration, loadLocalConfig())).text();
-        await new Promise((resolve) => setImmediate(resolve));
-
-        expect(store).not.toHaveBeenCalled();
-        expect(loadSessionTracking(state?.sessionID ?? "")).toEqual(original);
-        expect(state).toMatchObject({
-          headerName: "x-session-affinity",
-          headerSessionId: alias,
-        });
-      } finally {
-        store.mockRestore();
-        setUpstreamInterceptor(undefined);
-        await resetPipelineState();
-      }
-    },
-  );
-
-  it("rejects a provisional canonical migration that conflicts with a confirmed alias", async () => {
-    const aliasA = "provisional-conflict-alias-a";
-    const aliasB = "provisional-conflict-alias-b";
-    const canonical = "provisional-conflict-canonical";
-    const projectA = "/tmp/lore-provisional-conflict-a";
-    const projectB = "/tmp/lore-provisional-conflict-b";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      return new Response(validResponsesSSE(`resp_conflict_${upstreamCall}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const establish = async (alias: string, project: string): Promise<void> => {
-      const request = makeResponsesRequest({
-        sessionHeaders: { "x-session-affinity": alias },
-      });
-      request.rawHeaders["x-lore-project"] = project;
-      await (await handleRequest(request, loadLocalConfig())).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-    };
-    let release!: () => void;
-    const paused = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let waitingResolve!: () => void;
-    const waiting = new Promise<void>((resolve) => {
-      waitingResolve = resolve;
-    });
-
-    try {
-      await establish(aliasA, projectA);
-      await establish(aliasB, projectB);
-      const stateA = [...getActiveSessions().values()].find(
-        (state) => state.headerSessionId === aliasA,
-      );
-      const stateB = [...getActiveSessions().values()].find(
-        (state) => state.headerSessionId === aliasB,
-      );
-      expect(stateA?.sessionID).not.toBe(stateB?.sessionID);
-
-      setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
-      const first = makeResponsesRequest({
-        sessionHeaders: {
-          "x-lore-session-id": canonical,
-          "x-session-affinity": aliasA,
-        },
-      });
-      first.rawHeaders["x-lore-project"] = projectA;
-      const firstResponse = handleRequest(first, loadLocalConfig());
-      await waiting;
-      setPipelinePreUpstreamPauseForTest(undefined);
-
-      const conflicting = makeResponsesRequest({
-        sessionHeaders: {
-          "x-lore-session-id": canonical,
-          "x-session-affinity": aliasB,
-        },
-      });
-      conflicting.rawHeaders["x-lore-project"] = projectB;
-      const conflictingResponse = handleRequest(conflicting, loadLocalConfig());
-      release();
-
-      const firstBody = (await firstResponse).text();
-      expect(await firstBody).toContain("event: response.completed");
-      expect(await (await conflictingResponse).text()).toContain(
-        "Gateway request failed",
-      );
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(stateA).toMatchObject({
-        headerName: "x-lore-session-id",
-        headerSessionId: canonical,
-        projectPath: projectA,
-      });
-      expect(stateB).toMatchObject({
-        headerName: "x-session-affinity",
-        headerSessionId: aliasB,
-        projectPath: projectB,
-      });
-      expect(upstreamCall).toBe(3);
-    } finally {
-      release();
-      setPipelinePreUpstreamPauseForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("does not confirm expired provisional ownership after another session claims the canonical header", async () => {
-    const aliasA = "expired-owner-alias-a";
-    const aliasB = "expired-owner-alias-b";
-    const canonical = "expired-owner-canonical";
-    const projectA = "/tmp/lore-expired-owner-a";
-    const projectB = "/tmp/lore-expired-owner-b";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      if (upstreamCall === 3) {
-        return new Response(JSON.stringify({ error: "validation failed" }), {
-          status: 500,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(validResponsesSSE(`resp_expired_${upstreamCall}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const establish = async (alias: string, project: string): Promise<void> => {
-      const request = makeResponsesRequest({
-        sessionHeaders: { "x-session-affinity": alias },
-      });
-      request.rawHeaders["x-lore-project"] = project;
-      await (await handleRequest(request, loadLocalConfig())).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-    };
-    let release!: () => void;
-    const paused = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let waitingResolve!: () => void;
-    const waiting = new Promise<void>((resolve) => {
-      waitingResolve = resolve;
-    });
-
-    try {
-      await establish(aliasA, projectA);
-      await establish(aliasB, projectB);
-      const stateA = [...getActiveSessions().values()].find(
-        (state) => state.headerSessionId === aliasA,
-      );
-      const stateB = [...getActiveSessions().values()].find(
-        (state) => state.headerSessionId === aliasB,
-      );
-      const request = (alias: string, project: string): GatewayRequest => {
-        const result = makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": canonical,
-            "x-session-affinity": alias,
-          },
-        });
-        result.rawHeaders["x-lore-project"] = project;
-        return result;
-      };
-
-      await (
-        await handleRequest(request(aliasA, projectA), loadLocalConfig())
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      const costsBeforeExpiredRetry = structuredClone(
-        getSessionCosts(stateA?.sessionID ?? "")?.conversation,
-      );
-      setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
-      const retryA = handleRequest(
-        request(aliasA, projectA),
-        loadLocalConfig(),
-      );
-      await waiting;
-      setPipelinePreUpstreamPauseForTest(undefined);
-      expireProvisionalHeaderMappingsForTest();
-
-      const retryB = handleRequest(
-        request(aliasB, projectB),
-        loadLocalConfig(),
-      );
-      release();
-      await (await retryA).text();
-      await (await retryB).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(stateA).toMatchObject({
-        headerName: "x-session-affinity",
-        headerSessionId: aliasA,
-        projectPath: projectA,
-      });
-      expect(stateB).toMatchObject({
-        headerName: "x-lore-session-id",
-        headerSessionId: canonical,
-        projectPath: projectB,
-      });
-      expect(
-        [...getActiveSessions().values()].filter(
-          (state) => state.headerSessionId === canonical,
-        ),
-      ).toHaveLength(1);
-      expect(getSessionCosts(stateA?.sessionID ?? "")?.conversation).toEqual(
-        costsBeforeExpiredRetry,
-      );
-    } finally {
-      release();
-      setPipelinePreUpstreamPauseForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("does not learn Tier-2 header evidence from failed requests", async () => {
-    const candidateHeader = "x-candidate-session";
-    const globalHeader = "x-global-session";
-    const candidateValue = "candidate-session-a";
-    const otherCandidateValue = "candidate-session-b";
-    const globalValue = "global-session-a";
-    const failedGlobalValue = "global-session-b";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      if (upstreamCall === 3 || upstreamCall === 4) {
-        return new Response(JSON.stringify({ error: "upstream failed" }), {
-          status: 500,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(validResponsesSSE(`resp_learning_${upstreamCall}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const messages = (seed: string, turn: number): GatewayRequest["messages"] =>
-      Array.from({ length: turn * 2 - 1 }, (_, index) => ({
-        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-        content: [
-          {
-            type: "text" as const,
-            text: index === 0 ? seed : `${seed} turn ${index}`,
-          },
-        ],
-      }));
-    const turn = async (
-      sessionHeaders: Record<string, string>,
-      seed: string,
-      number: number,
-      succeeds: boolean,
-    ): Promise<void> => {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders,
-          messages: messages(seed, number),
-        }),
-        loadLocalConfig(),
-      );
-      const body = await response.text();
-      expect(body).toContain(
-        succeeds ? "event: response.completed" : "Gateway request failed",
-      );
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-    };
-
-    try {
-      // Establish legitimate uniqueness only for candidateHeader.
-      await turn(
-        { [candidateHeader]: otherCandidateValue },
-        "other successful session",
-        1,
-        true,
-      );
-      await turn(
-        {
-          [candidateHeader]: candidateValue,
-          [globalHeader]: globalValue,
-        },
-        "primary session",
-        1,
-        true,
-      );
-      const primary = [...getActiveSessions().values()].find(
-        (state) =>
-          state.candidateHeaders?.get(globalHeader)?.value === globalValue,
-      );
-      expect(primary?.candidateHeaders?.get(candidateHeader)?.seenCount).toBe(
-        1,
-      );
-      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(1);
-
-      // A failed new session must not add global uniqueness.
-      await turn(
-        { [globalHeader]: failedGlobalValue },
-        "failed distinct session",
-        1,
-        false,
-      );
-      expect(
-        [...getActiveSessions().values()].some(
-          (state) =>
-            state.candidateHeaders?.get(globalHeader)?.value ===
-            failedGlobalValue,
-        ),
-      ).toBe(false);
-
-      // A failed matched turn must not advance the primary candidates.
-      await turn(
-        {
-          [candidateHeader]: candidateValue,
-          [globalHeader]: globalValue,
-        },
-        "primary session",
-        2,
-        false,
-      );
-      expect(primary?.candidateHeaders?.get(candidateHeader)?.seenCount).toBe(
-        1,
-      );
-      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(1);
-
-      // The retry is only the second successful observation. If the failed
-      // matched turn counted, candidateHeader would promote here.
-      await turn(
-        {
-          [candidateHeader]: candidateValue,
-          [globalHeader]: globalValue,
-        },
-        "primary session",
-        2,
-        true,
-      );
-      expect(primary?.headerSessionId).toBeUndefined();
-      expect(primary?.candidateHeaders?.get(candidateHeader)?.seenCount).toBe(
-        2,
-      );
-      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(2);
-
-      // The third successful globalHeader observation remains non-unique. If
-      // the failed new session counted globally, it would promote here.
-      await turn({ [globalHeader]: globalValue }, "primary session", 3, true);
-      expect(primary?.headerSessionId).toBeUndefined();
-      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(3);
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("keeps failed Tier-2 promotion retries provisional until success", async () => {
-    const headerName = "x-retry-session";
-    const targetValue = "retry-session-target";
-    const distinctValue = "retry-session-other";
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      if (upstreamCall === 4 || upstreamCall === 5) {
-        return new Response(JSON.stringify({ error: "upstream failed" }), {
-          status: 500,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(validResponsesSSE(`resp_retry_${upstreamCall}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const messages = (seed: string, turn: number): GatewayRequest["messages"] =>
-      Array.from({ length: turn * 2 - 1 }, (_, index) => ({
-        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-        content: [
-          {
-            type: "text" as const,
-            text: index === 0 ? seed : `${seed} turn ${index}`,
-          },
-        ],
-      }));
-    const turn = async (
-      headerValue: string,
-      seed: string,
-      number: number,
-      succeeds: boolean,
-    ): Promise<void> => {
-      const response = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { [headerName]: headerValue },
-          messages: messages(seed, number),
-        }),
-        loadLocalConfig(),
-      );
-      const body = await response.text();
-      expect(body).toContain(
-        succeeds ? "event: response.completed" : "Gateway request failed",
-      );
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-    };
-    const store = vi.spyOn(temporal, "store");
-
-    try {
-      await turn(distinctValue, "other session", 1, true);
-      await turn(targetValue, "target session", 1, true);
-      await turn(targetValue, "target session", 2, true);
-      const target = [...getActiveSessions().values()].find(
-        (state) =>
-          state.candidateHeaders?.get(headerName)?.value === targetValue,
-      );
-      expect(target).toBeDefined();
-      expect(target?.messageCount).toBe(3);
-      expect(target?.candidateHeaders?.get(headerName)?.seenCount).toBe(2);
-      store.mockClear();
-
-      // The third observation promotes only provisionally, and provider failure
-      // must leave all session-owned state unchanged.
-      await turn(targetValue, "target session", 3, false);
-      expect(target?.messageCount).toBe(3);
-      expect(target?.candidateHeaders?.get(headerName)?.seenCount).toBe(2);
-      expect(target?.headerName).toBeUndefined();
-      expect(target?.headerSessionId).toBeUndefined();
-      expect(store).not.toHaveBeenCalled();
-
-      // A retry resolved from the provisional index must remain on the same
-      // validation-only path rather than entering the full pipeline early.
-      await turn(targetValue, "target session", 3, false);
-      expect(target?.messageCount).toBe(3);
-      expect(target?.candidateHeaders?.get(headerName)?.seenCount).toBe(2);
-      expect(target?.headerName).toBeUndefined();
-      expect(target?.headerSessionId).toBeUndefined();
-      expect(store).not.toHaveBeenCalled();
-
-      const slash = makeResponsesRequest({
-        sessionHeaders: { [headerName]: targetValue },
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: "/lore:amnesia:on" }],
-          },
-        ],
-      });
-      const slashResponse = await handleRequest(slash, loadLocalConfig());
-      expect(await slashResponse.text()).toContain(
-        "Amnesia mode was not changed",
-      );
-      expect(target?.amnesia).toBe(false);
-
-      // Even a validated upstream completion does not publish until the client
-      // consumes EOF and the post-response finalizer commits the turn.
-      const validation = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: { [headerName]: targetValue },
-          messages: messages("target session", 3),
-        }),
-        loadLocalConfig(),
-      );
-      expect(target?.headerSessionId).toBeUndefined();
-      expect(await validation.text()).toContain("event: response.completed");
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(target?.headerName).toBe(headerName);
-      expect(target?.headerSessionId).toBe(targetValue);
-      expect(target?.messageCount).toBe(5);
-
-      await turn(targetValue, "target session", 4, true);
-      expect(target?.messageCount).toBe(7);
-      expect(upstreamCall).toBe(7);
-    } finally {
-      store.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("rejects slash commands with ambiguous promoted Tier-2 headers", async () => {
-    let upstreamCall = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCall++;
-      return new Response(validResponsesSSE(`resp_tier2_${upstreamCall}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const messages = (seed: string, turn: number): GatewayRequest["messages"] =>
-      Array.from({ length: turn * 2 - 1 }, (_, index) => ({
-        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-        content: [
-          {
-            type: "text" as const,
-            text: index === 0 ? seed : `${seed} turn ${index}`,
-          },
-        ],
-      }));
-    const turn = async (
-      headerName: string,
-      headerValue: string,
-      seed: string,
-      number: number,
-    ): Promise<void> => {
-      await (
-        await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: { [headerName]: headerValue },
-            messages: messages(seed, number),
-          }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-    };
-
-    try {
-      await turn("x-alpha-session", "alpha-session-value", "alpha seed", 1);
-      await turn("x-alpha-session", "alpha-other-value", "alpha other", 1);
-      await turn("x-alpha-session", "alpha-session-value", "alpha seed", 2);
-      await turn("x-alpha-session", "alpha-session-value", "alpha seed", 3);
-
-      await turn("x-beta-session", "beta-session-value", "beta seed", 1);
-      await turn("x-beta-session", "beta-other-value", "beta other", 1);
-      await turn("x-beta-session", "beta-session-value", "beta seed", 2);
-      await turn("x-beta-session", "beta-session-value", "beta seed", 3);
-
-      const alpha = [...getActiveSessions().values()].find(
-        (state) =>
-          state.headerName === "x-alpha-session" &&
-          state.headerSessionId === "alpha-session-value",
-      );
-      const beta = [...getActiveSessions().values()].find(
-        (state) =>
-          state.headerName === "x-beta-session" &&
-          state.headerSessionId === "beta-session-value",
-      );
-      expect(alpha).toBeDefined();
-      expect(beta).toBeDefined();
-      expect(alpha?.sessionID).not.toBe(beta?.sessionID);
-
-      const ambiguous = makeResponsesRequest({
-        sessionHeaders: {
-          "x-alpha-session": "alpha-session-value",
-          "x-beta-session": "beta-session-value",
-        },
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: "/lore:amnesia:on" }],
-          },
-        ],
-      });
-      ambiguous.stream = false;
-      const response = await handleRequest(ambiguous, loadLocalConfig());
-      expect(await response.text()).toContain("Amnesia mode was not changed");
-      expect(alpha?.amnesia).toBe(false);
-      expect(beta?.amnesia).toBe(false);
-      expect(upstreamCall).toBe(8);
-
-      const normalAmbiguous = makeResponsesRequest({
-        sessionHeaders: {
-          "x-alpha-session": "alpha-session-value",
-          "x-beta-session": "beta-session-value",
-        },
-        messages: messages("alpha seed", 4),
-      });
-      const normal = await handleRequest(normalAmbiguous, loadLocalConfig());
-      expect(await normal.text()).toContain("Gateway request failed");
-      expect(upstreamCall).toBe(8);
-      expect(alpha?.messageCount).toBe(messages("alpha seed", 3).length);
-      expect(beta?.messageCount).toBe(messages("beta seed", 3).length);
-    } finally {
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("rejects unbound structural compaction before reading project memory", async () => {
-    const victimAlias = "structural-compaction-victim-alias";
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(validResponsesSSE("resp_structural_victim"), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    const undistilled = vi.spyOn(temporal, "undistilled");
-
-    try {
-      await (
-        await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": victimAlias },
-          }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      const provisional = makeResponsesRequest({
-        sessionHeaders: {
-          "x-lore-session-id": "provisional-structural-session",
-        },
-      });
-      delete provisional.rawHeaders["x-lore-project"];
-      await (await handleRequest(provisional, loadLocalConfig())).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      undistilled.mockClear();
-
-      const attack = async (
-        sessionHeaders: Record<string, string>,
-        credential: string | null,
-        projectPath = process.cwd(),
-      ): Promise<Response> => {
-        const request = makeResponsesRequest({
-          sessionHeaders,
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: "Create an anchored summary from the conversation history above.",
-                },
-              ],
-            },
-          ],
-          tools: [],
-        });
-        request.stream = false;
-        request.rawHeaders["x-lore-project"] = projectPath;
-        if (credential) request.rawHeaders.authorization = credential;
-        else delete request.rawHeaders.authorization;
-        return handleRequest(request, loadLocalConfig());
-      };
-
-      const fresh = await attack(
-        { "x-lore-session-id": "new-structural-attacker" },
-        "Bearer test-key",
-      );
-      expect(fresh.status).toBe(404);
-      expect(await fresh.text()).not.toContain("structural victim");
-
-      const conflictingAlias = await attack(
-        {
-          "x-lore-session-id": "unknown-structural-canonical",
-          "x-session-affinity": victimAlias,
-        },
-        "Bearer test-key",
-      );
-      expect(conflictingAlias.status).toBe(404);
-      expect(await conflictingAlias.text()).not.toContain("structural victim");
-
-      const missingCredential = await attack(
-        { "x-session-affinity": victimAlias },
-        null,
-      );
-      expect(missingCredential.status).toBe(400);
-
-      const wrongCredential = await attack(
-        { "x-session-affinity": victimAlias },
-        "Bearer wrong-tenant-key",
-      );
-      expect(wrongCredential.status).toBe(404);
-
-      const provisionalRebind = await attack(
-        { "x-lore-session-id": "provisional-structural-session" },
-        "Bearer test-key",
-        "/tmp",
-      );
-      expect(provisionalRebind.status).toBe(403);
-
-      expect(undistilled).not.toHaveBeenCalled();
-      expect(upstreamCalls).toBe(2);
-    } finally {
-      undistilled.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("does not fall through an indexed canonical session to a conflicting alias", async () => {
-    let upstreamCalls = 0;
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(
-        validResponsesSSE(`resp_alias_conflict_${upstreamCalls}`),
-        {
-          headers: { "content-type": "text/event-stream" },
-        },
-      );
-    });
-    const canonicalHeaders = {
-      "x-lore-session-id": "authoritative-canonical-session",
-    };
-    const fallbackHeaders = {
-      "x-session-affinity": "conflicting-fallback-session",
-    };
-    const canonicalRequest = makeResponsesRequest({
-      sessionHeaders: canonicalHeaders,
-    });
-    const store = vi.spyOn(temporal, "store");
-
-    try {
-      await (await handleRequest(canonicalRequest, loadLocalConfig())).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      await (
-        await handleRequest(
-          makeResponsesRequest({ sessionHeaders: fallbackHeaders }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(evictLiveSessionForTest(canonicalRequest)).toBe(true);
-
-      const slash = makeResponsesRequest({
-        sessionHeaders: { ...canonicalHeaders, ...fallbackHeaders },
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: "/lore:amnesia:on" }],
-          },
-        ],
-      });
-      slash.stream = false;
-      await (await handleRequest(slash, loadLocalConfig())).text();
-
-      store.mockClear();
-      await (
-        await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: canonicalHeaders,
-            messages: [
-              {
-                role: "user",
-                content: [{ type: "text", text: "canonical sensitive turn" }],
-              },
-            ],
-          }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(store).not.toHaveBeenCalled();
-
-      store.mockClear();
-      await (
-        await handleRequest(
-          makeResponsesRequest({ sessionHeaders: fallbackHeaders }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(store).toHaveBeenCalled();
-    } finally {
-      store.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("cancels a request waiting behind an unrelated downstream finalizer", async () => {
-    const sessionHeaders = {
-      "x-lore-session-id": "cancel-finalizer-wait-session",
-    };
-    setUpstreamInterceptor(
-      async () =>
-        new Response(validResponsesSSE("resp_waiter_setup"), {
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
-    let release!: () => void;
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let finalizerStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      finalizerStarted = resolve;
-    });
-    let pending: Promise<Response> | undefined;
-
-    try {
-      await (
-        await handleRequest(
-          makeResponsesRequest({ sessionHeaders }),
-          loadLocalConfig(),
-        )
-      ).text();
-      await new Promise((resolve) => setImmediate(resolve));
-      const state = [...getActiveSessions().values()].find(
-        (candidate) =>
-          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-      );
-      expect(state).toBeDefined();
-      scheduleStreamingPostResponseForTest(state?.sessionID ?? "", async () => {
-        finalizerStarted();
-        await blocked;
-      });
-      await started;
-
-      const caller = new AbortController();
-      const slash = makeResponsesRequest({
-        sessionHeaders,
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "text", text: "/lore:amnesia:on" }],
-          },
-        ],
-      });
-      slash.stream = false;
-      slash.signal = caller.signal;
-      pending = handleRequest(slash, loadLocalConfig());
-      caller.abort(new DOMException("caller disconnected", "AbortError"));
-
-      const outcome = await Promise.race([
-        pending.then((response) => response.status),
-        new Promise<"pending">((resolve) =>
-          setImmediate(() => resolve("pending")),
-        ),
-      ]);
-      expect(outcome).toBe(502);
-    } finally {
-      release();
-      await pending;
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it.each(["curate", "compact", "responses-compact"] as const)(
-    "holds %s behind preterminal session work",
-    async (endpoint) => {
-      const sessionHeaders = {
-        "x-lore-session-id": `preterminal-${endpoint}-session`,
-      };
-      setUpstreamInterceptor(
-        async () =>
-          new Response(validResponsesSSE(`resp_${endpoint}_setup`), {
-            headers: { "content-type": "text/event-stream" },
-          }),
-      );
-      let release!: () => void;
-      const blocked = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let finalizerStarted!: () => void;
-      const started = new Promise<void>((resolve) => {
-        finalizerStarted = resolve;
-      });
-      let pending: Promise<Response> | undefined;
-
-      try {
-        await (
-          await handleRequest(
-            makeResponsesRequest({ sessionHeaders }),
-            loadLocalConfig(),
-          )
-        ).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        const state = [...getActiveSessions().values()].find(
-          (candidate) =>
-            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-        );
-        expect(state).toBeDefined();
-        scheduleStreamingPostResponseForTest(
-          state?.sessionID ?? "",
-          async () => {
-            finalizerStarted();
-            await blocked;
-          },
-        );
-        await started;
-
-        const headers = {
-          authorization: "Bearer test-key",
-          "content-type": "application/json",
-          "x-lore-project": process.cwd(),
-          "x-lore-provider": "openai",
-          "x-lore-upstream-url": "https://api.openai.com/v1",
-          ...sessionHeaders,
-        };
-        if (endpoint === "curate") {
-          const curate = makeResponsesRequest({
-            sessionHeaders,
-            messages: [
-              {
-                role: "user",
-                content: [{ type: "text", text: "/lore:curate" }],
-              },
-            ],
-          });
-          curate.stream = false;
-          pending = handleRequest(curate, loadLocalConfig());
-        } else {
-          pending =
-            endpoint === "compact"
-              ? handleCompactEndpoint(
-                  new Request("http://gateway.test/v1/compact", {
-                    method: "POST",
-                    headers,
-                    body: JSON.stringify({
-                      project_path: process.cwd(),
-                      tokens_before: 1,
-                    }),
-                  }),
-                  loadLocalConfig(),
-                )
-              : handleResponsesCompactEndpoint(
-                  new Request("http://gateway.test/v1/responses/compact", {
-                    method: "POST",
-                    headers,
-                    body: JSON.stringify({
-                      model: "gpt-5.6-sol",
-                      instructions: "You are a coding agent.",
-                      input: [
-                        {
-                          role: "user",
-                          content: [{ type: "input_text", text: "compact" }],
-                        },
-                      ],
-                      tools: [],
-                    }),
-                  }),
-                  loadLocalConfig(),
-                );
-        }
-
-        const outcome = await Promise.race([
-          pending.then(() => "settled" as const),
-          new Promise<"pending">((resolve) =>
-            setImmediate(() => resolve("pending")),
-          ),
-        ]);
-        expect(outcome).toBe("pending");
-        expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(
-          true,
-        );
-
-        release();
-        const response = await pending;
-        expect(response.status).toBe(200);
-        await response.text();
-        await vi.waitFor(() =>
-          expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(
-            false,
-          ),
-        );
-      } finally {
-        release();
-        if (pending) {
-          const response = await pending;
-          if (!response.bodyUsed) await response.text();
-        }
-        setUpstreamInterceptor(undefined);
-        await resetPipelineState();
-      }
-    },
-  );
-
-  it.each(["structural", "compact", "responses-compact"] as const)(
-    "rechecks %s project authorization after a queued session claim",
-    async (endpoint) => {
-      const sessionHeaders = {
-        "x-lore-session-id": `queued-project-${endpoint}-session`,
-      };
-      const projectA = `/tmp/lore-queued-${endpoint}-a`;
-      const projectB = `/tmp/lore-queued-${endpoint}-b`;
-      let upstreamCalls = 0;
-      setUpstreamInterceptor(async () => {
-        upstreamCalls++;
-        return new Response(validResponsesSSE(`resp_queued_${endpoint}`), {
-          headers: { "content-type": "text/event-stream" },
-        });
-      });
-      let releaseRebind!: () => void;
-      const rebindPause = new Promise<void>((resolve) => {
-        releaseRebind = resolve;
-      });
-      let rebindWaitingResolve!: () => void;
-      const rebindWaiting = new Promise<void>((resolve) => {
-        rebindWaitingResolve = resolve;
-      });
-      const undistilled = vi.spyOn(temporal, "undistilled");
-
-      try {
-        const setup = makeResponsesRequest({ sessionHeaders });
-        setup.rawHeaders["x-lore-project"] = projectA;
-        await (await handleRequest(setup, loadLocalConfig())).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        await new Promise((resolve) => setImmediate(resolve));
-        undistilled.mockClear();
-
-        setPipelinePreUpstreamPauseForTest(rebindPause, rebindWaitingResolve);
-        const rebind = makeResponsesRequest({ sessionHeaders });
-        rebind.rawHeaders["x-lore-project"] = projectB;
-        const rebindResponse = handleRequest(rebind, loadLocalConfig());
-        await rebindWaiting;
-        setPipelinePreUpstreamPauseForTest(undefined);
-
-        const headers = {
-          authorization: "Bearer test-key",
-          "content-type": "application/json",
-          "x-lore-project": projectA,
-          "x-lore-provider": "openai",
-          "x-lore-upstream-url": "https://api.openai.com/v1",
-          ...sessionHeaders,
-        };
-        let pending: Promise<Response>;
-        if (endpoint === "structural") {
-          const structural = makeResponsesRequest({
-            sessionHeaders,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Create an anchored summary from the conversation history above.",
-                  },
-                ],
-              },
-            ],
-            tools: [],
-          });
-          structural.stream = false;
-          structural.rawHeaders["x-lore-project"] = projectA;
-          pending = handleRequest(structural, loadLocalConfig());
-        } else if (endpoint === "compact") {
-          pending = handleCompactEndpoint(
-            new Request("http://gateway.test/v1/compact", {
-              method: "POST",
-              headers,
-              body: JSON.stringify({ project_path: projectA }),
-            }),
-            loadLocalConfig(),
-          );
-        } else {
-          pending = handleResponsesCompactEndpoint(
-            new Request("http://gateway.test/v1/responses/compact", {
-              method: "POST",
-              headers,
-              body: JSON.stringify({
-                model: "gpt-5.6-sol",
-                instructions: "You are a coding agent.",
-                input: [
-                  {
-                    role: "user",
-                    content: [{ type: "input_text", text: "compact" }],
-                  },
-                ],
-                tools: [],
-              }),
-            }),
-            loadLocalConfig(),
-          );
-        }
-        await vi.waitFor(() =>
-          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
-        );
-
-        releaseRebind();
-        expect(await (await rebindResponse).text()).toContain(
-          "event: response.completed",
-        );
-        const response = await pending;
-        expect(response.status).toBe(403);
-        expect(await response.text()).toMatch(/project[_ ]path/i);
-        expect(undistilled).not.toHaveBeenCalled();
-        expect(upstreamCalls).toBe(2);
-        const state = [...getActiveSessions().values()].find(
-          (candidate) =>
-            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-        );
-        expect(state).toMatchObject({
-          projectPath: projectB,
-          projectPathProvisional: false,
-        });
-      } finally {
-        releaseRebind();
-        undistilled.mockRestore();
-        setPipelinePreUpstreamPauseForTest(undefined);
-        setUpstreamInterceptor(undefined);
-        await resetPipelineState();
-      }
-    },
-  );
-
-  it.each([
-    "regular",
-    "structural",
-    "compact",
-    "responses-compact",
-    "slash",
-  ] as const)(
-    "rejects a queued %s request after affinity rotation revokes its identity",
-    async (route) => {
-      const oldAffinity = `queued-revoked-${route}-old`;
-      const newAffinity = `queued-revoked-${route}-new`;
-      const history: GatewayRequest["messages"] = Array.from(
-        { length: 12 },
-        (_, index) => ({
-          role:
-            index === 0 || index === 10
-              ? ("user" as const)
-              : ("assistant" as const),
-          content: [
-            {
-              type: "text" as const,
-              text: `${route} rotation history ${index}`,
-            },
-          ],
-        }),
-      );
-      let upstreamCalls = 0;
-      setUpstreamInterceptor(async () => {
-        upstreamCalls++;
-        return new Response(
-          validResponsesSSE(`resp_queued_revoked_${upstreamCalls}`),
-          { headers: { "content-type": "text/event-stream" } },
-        );
-      });
-      let releaseRotation!: () => void;
-      const rotationPause = new Promise<void>((resolve) => {
-        releaseRotation = resolve;
-      });
-      let rotationWaitingResolve!: () => void;
-      const rotationWaiting = new Promise<void>((resolve) => {
-        rotationWaitingResolve = resolve;
-      });
-      let queued: Promise<Response> | undefined;
-      let rotationBody: Promise<string> | undefined;
-      const summaryRead = vi.spyOn(distillation, "loadForSession");
-
-      try {
-        const seed = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": oldAffinity },
-          messages: [history[0]],
-        });
-        await (await handleRequest(seed, loadLocalConfig())).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        await new Promise((resolve) => setImmediate(resolve));
-
-        const setup = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": oldAffinity },
-          messages: history,
-        });
-        await (await handleRequest(setup, loadLocalConfig())).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        await new Promise((resolve) => setImmediate(resolve));
-
-        setPipelinePreUpstreamPauseForTest(
-          rotationPause,
-          rotationWaitingResolve,
-        );
-        const rotation = makeResponsesRequest({
-          sessionHeaders: { "x-session-affinity": newAffinity },
-          messages: [
-            ...history,
-            {
-              role: "user",
-              content: [{ type: "text", text: "continue after restart" }],
-            },
-          ],
-        });
-        const rotationResponse = handleRequest(rotation, loadLocalConfig());
-        await rotationWaiting;
-        const oldState = [...getActiveSessions().values()].find(
-          (state) => state.headerSessionId === oldAffinity,
-        );
-        expect(oldState).toBeDefined();
-        expect(isPipelineSessionActiveForTest(oldState?.sessionID ?? "")).toBe(
-          true,
-        );
-
-        const headers = {
-          authorization: "Bearer test-key",
-          "content-type": "application/json",
-          "x-lore-project": process.cwd(),
-          "x-lore-provider": "openai",
-          "x-lore-upstream-url": "https://api.openai.com/v1",
-          "x-session-affinity": oldAffinity,
-        };
-        if (route === "regular") {
-          const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
-          });
-          request.stream = false;
-          queued = handleRequest(request, loadLocalConfig());
-        } else if (route === "structural") {
-          const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Create an anchored summary from the conversation history above.",
-                  },
-                ],
-              },
-            ],
-            tools: [],
-          });
-          request.stream = false;
-          queued = handleRequest(request, loadLocalConfig());
-        } else if (route === "slash") {
-          const request = makeResponsesRequest({
-            sessionHeaders: { "x-session-affinity": oldAffinity },
-            messages: [
-              {
-                role: "user",
-                content: [{ type: "text", text: "/lore:amnesia:on" }],
-              },
-            ],
-          });
-          request.stream = false;
-          queued = handleRequest(request, loadLocalConfig());
-        } else if (route === "compact") {
-          queued = handleCompactEndpoint(
-            new Request("http://gateway.test/v1/compact", {
-              method: "POST",
-              headers,
-              body: JSON.stringify({ project_path: process.cwd() }),
-            }),
-            loadLocalConfig(),
-          );
-        } else {
-          queued = handleResponsesCompactEndpoint(
-            new Request("http://gateway.test/v1/responses/compact", {
-              method: "POST",
-              headers,
-              body: JSON.stringify({
-                model: "gpt-5.6-sol",
-                instructions: "You are a coding agent.",
-                input: [
-                  {
-                    role: "user",
-                    content: [{ type: "input_text", text: "compact" }],
-                  },
-                ],
-                tools: [],
-              }),
-            }),
-            loadLocalConfig(),
-          );
-        }
-        await vi.waitFor(() =>
-          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
-        );
-        summaryRead.mockClear();
-
-        releaseRotation();
-        rotationBody = (await rotationResponse).text();
-        expect(await rotationBody).toContain("event: response.completed");
-        const response = await queued;
-        expect(response.status).toBe(route === "slash" ? 200 : 404);
-        expect(await response.text()).toMatch(/authenticated.*session/i);
-        expect(upstreamCalls).toBe(3);
-        expect(summaryRead).not.toHaveBeenCalled();
-      } finally {
-        releaseRotation();
-        if (rotationBody) await rotationBody.catch(() => "");
-        if (queued) {
-          const response = await queued.catch(() => undefined);
-          if (response && !response.bodyUsed) await response.text();
-        }
-        summaryRead.mockRestore();
-        setPipelinePreUpstreamPauseForTest(undefined);
-        setUpstreamInterceptor(undefined);
-        await resetPipelineState();
-      }
-    },
-  );
-
-  it("drops a captured post-response finalizer after session eviction", async () => {
-    const sessionHeaders = {
-      "x-lore-session-id": "evicted-finalizer-session",
-    };
-    const request = makeResponsesRequest({
-      sessionHeaders,
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: "must not store after eviction" }],
-        },
-      ],
-    });
-    const store = vi.spyOn(temporal, "store");
-    let postResponses = 0;
-    setPostResponseStartObserverForTest(() => postResponses++);
-    setUpstreamInterceptor(
-      async () =>
-        new Response(validResponsesSSE("resp_evicted_finalizer"), {
-          headers: { "content-type": "text/event-stream" },
-        }),
-    );
-
-    try {
-      const response = await handleRequest(request, loadLocalConfig());
-      const reader = response.body?.getReader();
-      expect(reader).toBeDefined();
-      const decoder = new TextDecoder();
-      let output = "";
-      while (!output.includes("event: response.completed")) {
-        const chunk = await reader?.read();
-        expect(chunk?.done).toBe(false);
-        if (chunk?.value)
-          output += decoder.decode(chunk.value, { stream: true });
-      }
-      expect(streamingPostResponsePendingForTest()).toBe(1);
-      expect(evictLiveSessionForTest(request)).toBe(true);
-
-      for (;;) {
-        const chunk = await reader?.read();
-        if (!chunk || chunk.done) break;
-      }
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-
-      expect(postResponses).toBe(0);
-      expect(store).not.toHaveBeenCalled();
-      expect(streamingPostResponsePendingForTest()).toBe(0);
-    } finally {
-      store.mockRestore();
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("keeps a preterminal turn private when amnesia is disabled concurrently", async () => {
-    const legacyHeader = { "x-session-affinity": "amnesia-snapshot-session" };
-    let upstreamCalls = 0;
-    let sensitiveSource:
-      | ReadableStreamDefaultController<Uint8Array>
-      | undefined;
-    let sensitiveStartedResolve: (() => void) | undefined;
-    const sensitiveStarted = new Promise<void>((resolve) => {
-      sensitiveStartedResolve = resolve;
-    });
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      if (upstreamCalls === 1) {
-        return new Response(validResponsesSSE("resp_amnesia_setup"), {
-          headers: { "content-type": "text/event-stream" },
-        });
-      }
-      sensitiveStartedResolve?.();
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            sensitiveSource = controller;
-          },
-        }),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    });
-    const slashRequest = (command: string): GatewayRequest => {
-      const request = makeResponsesRequest({
-        sessionHeaders: legacyHeader,
-        messages: [
-          { role: "user", content: [{ type: "text", text: command }] },
-        ],
-      });
-      request.stream = false;
-      return request;
-    };
-    const store = vi.spyOn(temporal, "store");
-
-    try {
-      const established = await handleRequest(
-        makeResponsesRequest({ sessionHeaders: legacyHeader }),
-        loadLocalConfig(),
-      );
-      await established.text();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      await (
-        await handleRequest(slashRequest("/lore:amnesia:on"), loadLocalConfig())
-      ).text();
-      store.mockClear();
-
-      const order: string[] = [];
-      setPostResponseStartObserverForTest(() => order.push("post"));
-      const sensitive = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: legacyHeader,
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "text", text: "preterminal secret" }],
-            },
-          ],
-        }),
-        loadLocalConfig(),
-      );
-      const sensitiveBody = sensitive.text();
-      await sensitiveStarted;
-
-      const disableAmnesia = handleRequest(
-        slashRequest("/lore:amnesia:off"),
-        loadLocalConfig(),
-      );
-      const beforeTerminal = await Promise.race([
-        disableAmnesia.then(() => "settled" as const),
-        new Promise<"pending">((resolve) =>
-          setImmediate(() => resolve("pending")),
-        ),
-      ]);
-      expect(beforeTerminal).toBe("pending");
-
-      sensitiveSource?.enqueue(
-        new TextEncoder().encode(validResponsesSSE("resp_amnesia_secret")),
-      );
-      sensitiveSource?.close();
-      await sensitiveBody;
-      order.push("eof");
-      await (await disableAmnesia).text();
-      order.push("slash");
-
-      expect(order).toEqual(["eof", "post", "slash"]);
-      expect(store).not.toHaveBeenCalled();
-    } finally {
-      store.mockRestore();
-      setPostResponseStartObserverForTest(undefined);
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it("waits for a canonical finalizer before compaction reads temporal state", async () => {
-    const order: string[] = [];
-    let upstreamCalls = 0;
-    const originalStore = temporal.store.bind(temporal);
-    const store = vi.spyOn(temporal, "store").mockImplementation((input) => {
-      const result = originalStore(input);
-      if (!order.includes("stored")) order.push("stored");
-      return result;
-    });
-    const undistilledCount = vi
-      .spyOn(temporal, "undistilledCount")
-      .mockImplementation(() => {
-        if (!order.includes("compaction-read")) order.push("compaction-read");
-        return 0;
-      });
-    const wire = validResponsesSSE("resp_before_compaction");
-    setUpstreamInterceptor(async () => {
-      upstreamCalls++;
-      return new Response(wire, {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
-    try {
-      const first = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "compaction-stable-session",
-          },
-          messages: Array.from({ length: 12 }, (_, index) => ({
-            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-            content: [
-              { type: "text" as const, text: `remember this turn ${index}` },
-            ],
-          })),
-        }),
-        loadLocalConfig(),
-      );
-      await first.text();
-
-      const compacted = await handleRequest(
-        makeResponsesRequest({
-          sessionHeaders: {
-            "x-lore-session-id": "compaction-stable-session",
-          },
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "text", text: "Summarize this conversation." }],
-            },
-          ],
-          tools: [],
-        }),
-        loadLocalConfig(),
-      );
-      const compactedBody = await compacted.text();
-
-      expect(compactedBody).toContain("remember this turn");
-      expect(order.indexOf("stored")).toBeLessThan(
-        order.indexOf("compaction-read"),
-      );
-      expect(upstreamCalls).toBe(1);
-    } finally {
-      store.mockRestore();
-      undistilledCount.mockRestore();
-      setUpstreamInterceptor(undefined);
-      await resetPipelineState();
-    }
-  });
-
-  it.each(["compact", "responses-compact"] as const)(
-    "waits for deferred storage in the explicit %s endpoint",
-    async (endpoint) => {
-      const order: string[] = [];
-      let upstreamCalls = 0;
-      setPostResponseStartObserverForTest(() => order.push("post"));
-      setUpstreamInterceptor(async () => {
-        upstreamCalls++;
-        if (upstreamCalls === 1) {
-          return new Response(validResponsesSSE("resp_explicit_compact"), {
-            headers: { "content-type": "text/event-stream" },
-          });
-        }
-        return new Response(JSON.stringify({ output: [] }), {
-          headers: { "content-type": "application/json" },
-        });
-      });
-      const sessionID = `explicit-${endpoint}-session`;
-
-      try {
-        const streamed = await handleRequest(
-          makeResponsesRequest({
-            sessionHeaders: { "x-lore-session-id": sessionID },
-          }),
-          loadLocalConfig(),
-        );
-        await streamed.text();
-        order.push("eof");
-
-        const headers = {
-          authorization: "Bearer test-key",
-          "content-type": "application/json",
-          "x-lore-project": process.cwd(),
-          "x-lore-provider": "openai",
-          "x-lore-upstream-url": "https://api.openai.com/v1",
-          "x-lore-session-id": sessionID,
-        };
-        const response =
-          endpoint === "compact"
-            ? await handleCompactEndpoint(
-                new Request("http://gateway.test/v1/compact", {
-                  method: "POST",
-                  headers,
-                  body: JSON.stringify({
-                    project_path: process.cwd(),
-                    tokens_before: 1,
-                  }),
-                }),
-                loadLocalConfig(),
-              )
-            : await handleResponsesCompactEndpoint(
-                new Request("http://gateway.test/v1/responses/compact", {
-                  method: "POST",
-                  headers,
-                  body: JSON.stringify({
-                    model: "gpt-5.6-sol",
-                    instructions: "You are a coding agent.",
-                    input: [
-                      {
-                        role: "user",
-                        content: [{ type: "input_text", text: "continue" }],
-                      },
-                    ],
-                    tools: [],
-                  }),
-                }),
-                loadLocalConfig(),
-              );
-        await response.text();
-        order.push("endpoint");
-
-        expect(order.slice(0, 3)).toEqual(["eof", "post", "endpoint"]);
-      } finally {
-        setPostResponseStartObserverForTest(undefined);
-        setUpstreamInterceptor(undefined);
-        await resetPipelineState();
-      }
-    },
-  );
-
-  it("pauses a filled build queue and resumes it when reads begin", async () => {
-    let pulls = 0;
-    const body = await validAnthropicSSE("resume").text();
-    const chunks = body
-      .split(/(?=event: )/)
-      .filter(Boolean)
-      .map((chunk) => new TextEncoder().encode(chunk));
-    let index = 0;
-    const upstream = new Response(
-      new ReadableStream<Uint8Array>({
-        pull(controller) {
-          pulls++;
-          if (index < chunks.length) controller.enqueue(chunks[index++]);
-          else controller.close();
-        },
-      }),
-    );
-    const downstream = buildStreamingResponse(upstream, () => {});
-    await new Promise((resolve) => setImmediate(resolve));
-    const pullsBeforeRead = pulls;
-    expect(pullsBeforeRead).toBeLessThan(chunks.length + 1);
-    const text = await downstream.text();
-    expect(text).toContain("resume");
-    expect(pulls).toBeGreaterThan(pullsBeforeRead);
-  });
-
-  it("distinguishes external meta abort from silent downstream cancellation", async () => {
-    let cancelledBeforeAcquire = false;
-    const beforeAcquire = validatedMetaStream(
-      new Response(
-        new ReadableStream<Uint8Array>({
-          cancel() {
-            cancelledBeforeAcquire = true;
-          },
-        }),
-      ),
-      "anthropic",
-      false,
-    );
-    await beforeAcquire.body?.cancel();
-    expect(cancelledBeforeAcquire).toBe(true);
-
-    let externallyCancelled = false;
-    const abort = new AbortController();
-    abort.abort(new DOMException("deadline", "TimeoutError"));
-    const removeAbortListener = vi.spyOn(abort.signal, "removeEventListener");
-    const externallyAborted = validatedMetaStream(
-      new Response(
-        new ReadableStream<Uint8Array>({
-          cancel() {
-            externallyCancelled = true;
-          },
-        }),
-      ),
-      "anthropic",
-      false,
-      abort.signal,
-    );
-    await expect(externallyAborted.text()).rejects.toMatchObject({
-      name: "TimeoutError",
-    });
-    expect(externallyCancelled).toBe(true);
-    expect(removeAbortListener).toHaveBeenCalledWith(
-      "abort",
-      expect.any(Function),
-    );
-  });
-
-  it("meta downstream cancel does not await a hostile upstream cancel", async () => {
-    let sourceCancelled = false;
-    const upstream = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            new TextEncoder().encode(
-              'event: message_start\ndata: {"type":"message_start","message":{"id":"hostile","type":"message","role":"assistant","model":"test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
-            ),
-          );
-        },
-        pull() {
-          return new Promise(() => {});
-        },
-        cancel() {
-          sourceCancelled = true;
-          return new Promise<void>(() => {});
-        },
-      }),
-    );
-    const downstreamBody = validatedMetaStream(
-      upstream,
-      "anthropic",
-      false,
-    ).body;
-    if (!downstreamBody) throw new Error("test stream has no body");
-    const reader = downstreamBody.getReader();
-    await reader.read();
-    const outcome = await Promise.race([
-      reader.cancel().then(() => "cancelled"),
-      new Promise<string>((resolve) => setImmediate(() => resolve("hung"))),
-    ]);
-    expect(outcome).toBe("cancelled");
-    expect(sourceCancelled).toBe(true);
-    expect(upstream.body?.locked).toBe(false);
-  });
-
-  it("external meta abort wakes a filled demand waiter", async () => {
-    let sourceCancelled = false;
-    const full = await validAnthropicSSE("waiting").text();
-    const upstream = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(full));
-        },
-        pull() {
-          return new Promise(() => {});
-        },
-        cancel() {
-          sourceCancelled = true;
-        },
-      }),
-    );
-    const abort = new AbortController();
-    const downstream = validatedMetaStream(
-      upstream,
-      "anthropic",
-      false,
-      abort.signal,
-    );
-    await new Promise((resolve) => setImmediate(resolve));
-    abort.abort(new DOMException("deadline", "TimeoutError"));
-    await expect(downstream.text()).rejects.toMatchObject({
-      name: "TimeoutError",
-    });
-    expect(sourceCancelled).toBe(true);
-  });
-
-  it("foreground meta settles when its injected upstream ignores abort", async () => {
-    const controller = new AbortController();
-    setUpstreamInterceptor(async () => new Promise(() => {}));
-    try {
-      const pending = handleRequest(
-        {
-          protocol: "anthropic",
-          model: DEFAULT_MODEL,
-          system: "title this",
-          messages: [
-            { role: "user", content: [{ type: "text", text: "title" }] },
-          ],
-          tools: [],
-          stream: true,
-          maxTokens: 32,
-          metadata: {},
-          rawHeaders: { "x-lore-agent": "title" },
-          signal: controller.signal,
-        },
-        loadLocalConfig(),
-      );
-      await Promise.resolve();
-      controller.abort(new DOMException("client disconnected", "AbortError"));
-      const response = await pending;
-      expect(response.status).toBe(502);
-      await expect(response.text()).resolves.toContain(
-        "Gateway request failed",
-      );
-    } finally {
-      setUpstreamInterceptor(undefined);
-    }
-  });
-
-  it("foreground deadline settles when its injected upstream never resolves", async () => {
-    vi.useFakeTimers();
-    setUpstreamInterceptor(async () => new Promise(() => {}));
-    try {
-      const pending = handleRequest(
-        {
-          protocol: "anthropic",
-          model: DEFAULT_MODEL,
-          system: "title this",
-          messages: [
-            { role: "user", content: [{ type: "text", text: "title" }] },
-          ],
-          tools: [],
-          stream: true,
-          maxTokens: 32,
-          metadata: {},
-          rawHeaders: { "x-lore-agent": "title" },
-        },
-        loadLocalConfig(),
-      );
-      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
-      const response = await pending;
-      expect(response.status).toBe(502);
-      await expect(response.text()).resolves.toContain(
-        "Gateway request failed",
-      );
-    } finally {
-      setUpstreamInterceptor(undefined);
-      vi.useRealTimers();
-    }
-  });
-
-  it.each(STALLED_META_CASES)(
-    "caller abort settles a stalled $protocol meta body",
-    async ({ protocol, model, provider, upstream, wire }) => {
-      const source = stalledMetaUpstream(wire);
-      const caller = new AbortController();
-      setUpstreamInterceptor(async () => source.response);
-      try {
-        let responseTimer: ReturnType<typeof setTimeout> | undefined;
-        const downstream = await Promise.race([
-          handleRequest(
-            {
-              protocol,
-              model,
-              system: "title this",
-              messages: [
-                { role: "user", content: [{ type: "text", text: "title" }] },
-              ],
-              tools: [],
-              stream: true,
-              maxTokens: 32,
-              metadata: {},
-              rawHeaders: {
-                "x-api-key": "test-key",
-                "x-lore-agent": "title",
-                "x-lore-provider": provider,
-                "x-lore-upstream-url": upstream,
-              },
-              signal: caller.signal,
-            },
-            loadLocalConfig(),
-          ),
-          new Promise<never>((_resolve, reject) => {
-            responseTimer = setTimeout(
-              () => reject(new Error("meta response was not returned")),
-              1_000,
-            );
-          }),
-        ]).finally(() => {
-          if (responseTimer) clearTimeout(responseTimer);
-        });
-        await new Promise((resolve) => setImmediate(resolve));
-        caller.abort(new DOMException("caller aborted", "AbortError"));
-        await new Promise((resolve) => setImmediate(resolve));
-        expect(source.cancelled()).toBe(true);
-        expect(source.response.body?.locked).toBe(false);
-        await expect(
-          Promise.race([
-            downstream.text(),
-            new Promise<never>((_resolve, reject) => {
-              responseTimer = setTimeout(
-                () => reject(new Error("meta body abort deadlocked")),
-                1_000,
-              );
-            }),
-          ]).finally(() => {
-            if (responseTimer) clearTimeout(responseTimer);
-          }),
-        ).rejects.toMatchObject({ name: "AbortError" });
-      } finally {
-        setUpstreamInterceptor(undefined);
-      }
-    },
-  );
-
-  it.each(STALLED_META_CASES)(
-    "foreground deadline settles a stalled $protocol meta body",
-    async ({ protocol, model, provider, upstream, wire }) => {
-      vi.useFakeTimers();
-      const source = stalledMetaUpstream(
-        wire,
-        FOREGROUND_SSE_INACTIVITY_MS / 2,
-      );
-      setUpstreamInterceptor(async () => source.response);
-      try {
-        const downstream = await handleRequest(
-          {
-            protocol,
-            model,
-            system: "title this",
-            messages: [
-              { role: "user", content: [{ type: "text", text: "title" }] },
-            ],
-            tools: [],
-            stream: true,
-            maxTokens: 32,
-            metadata: {},
-            rawHeaders: {
-              "x-api-key": "test-key",
-              "x-lore-agent": "title",
-              "x-lore-provider": provider,
-              "x-lore-upstream-url": upstream,
-            },
-          },
-          loadLocalConfig(),
-        );
-        await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
-        await expect(downstream.text()).rejects.toMatchObject({
-          name: "TimeoutError",
-        });
-        expect(source.cancelled()).toBe(true);
-        expect(source.response.body?.locked).toBe(false);
-      } finally {
-        setUpstreamInterceptor(undefined);
-        vi.useRealTimers();
-      }
-    },
-  );
-
-  it.each(STALLED_META_CASES)(
-    "foreground inactivity deadline settles a stalled $protocol meta body",
-    async ({ protocol, wire }) => {
-      vi.useFakeTimers();
-      const source = stalledMetaUpstream(wire);
-      try {
-        const downstream = validatedMetaStream(
-          source.response,
-          protocol,
-          false,
-          undefined,
-          25,
-        );
-        const outcome = Promise.race([
-          downstream.text().then(
-            (body) => ({ body, error: undefined }),
-            (error: unknown) => ({ body: undefined, error }),
-          ),
-          new Promise<{ body: undefined; error: Error }>((resolve) => {
-            setTimeout(() => {
-              resolve({
-                body: undefined,
-                error: new Error("inactivity deadline was not enforced"),
-              });
-            }, 100);
-          }),
-        ]);
-        await vi.advanceTimersByTimeAsync(25);
-        await vi.advanceTimersByTimeAsync(100);
-        const result = await outcome;
-        if (protocol === "openai-responses") {
-          expect(result.body).toContain("event: response.failed");
-        } else {
-          expect(result.error).toMatchObject({
-            message: "SSE stream inactivity deadline exceeded",
-          });
-        }
-        expect(source.cancelled()).toBe(true);
-        expect(source.response.body?.locked).toBe(false);
-      } finally {
-        vi.useRealTimers();
-      }
-    },
-  );
-
-  it("preserves non-OK meta responses for every client protocol", async () => {
-    harness = await createHarness({ fixtures: [] });
-    const cases = [
-      {
-        path: "/v1/messages",
-        status: 429,
-        body: {
-          model: DEFAULT_MODEL,
-          max_tokens: 32,
-          stream: true,
-          messages: [{ role: "user", content: "title" }],
-        },
-      },
-      {
-        path: "/v1/chat/completions",
-        status: 401,
-        body: {
-          model: "gpt-test",
-          max_tokens: 32,
-          stream: true,
-          messages: [{ role: "user", content: "title" }],
-        },
-      },
-      {
-        path: "/v1/responses",
-        status: 400,
-        body: {
-          model: "gpt-test",
-          max_output_tokens: 32,
-          stream: true,
-          input: "title",
-        },
-      },
-      {
-        path: "/v1beta/models/gemini-test:streamGenerateContent",
-        status: 429,
-        body: {
-          contents: [{ role: "user", parts: [{ text: "title" }] }],
-          generationConfig: { maxOutputTokens: 32 },
-        },
-      },
-    ];
-    let nextStatus = 500;
-    setUpstreamInterceptor(
-      async () =>
-        new Response(JSON.stringify({ error: { message: "provider error" } }), {
-          status: nextStatus,
-          headers: {
-            "content-type": "application/json",
-            "retry-after": "17",
-            "set-cookie": "upstream-secret=must-not-leak",
-            "x-ratelimit-reset-requests": "23ms",
-          },
-        }),
-    );
-
-    for (const testCase of cases) {
-      nextStatus = testCase.status;
-      const response = await harness.request(testCase.path, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: "Bearer test-key",
-          "x-lore-agent": "title",
-        },
-        body: JSON.stringify(testCase.body),
-      });
-      expect(response.status).toBe(testCase.status);
-      expect(response.headers.get("retry-after")).toBe("17");
-      expect(response.headers.get("set-cookie")).toBeNull();
-      expect(response.headers.get("x-ratelimit-reset-requests")).toBe("23ms");
-      expect(await response.json()).toEqual({
-        error: { message: "provider error" },
-      });
-    }
-  });
-
-  it.each([true, false])(
-    "preserves a valid incomplete Responses terminal for cross-protocol meta stream=%s",
-    async (stream) => {
-      setUpstreamInterceptor(async () =>
+     setUpstreamInterceptor(async () =>
         stream
           ? new Response(incompleteResponsesSSE("resp_meta_incomplete"), {
               headers: { "content-type": "text/event-stream" },
@@ -7124,7 +5012,2115 @@ describe("Pipeline — streaming responses", () => {
       "malformed UTF-8",
       new Response(
         new Uint8Array([
-          0x65, 0x76, 0x65, 0x6e, 0x74, 0x3a, 0x20, 0x70, 0x69, 0x6e, 0x67,
+          0x65, 0x76, 0x65, 0x6e, 0x74, 0x3a, 0x20, 0x70, 0x69, 0x6e, 0x6r(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rejects unbound structural compaction before reading project memory", async () => {
+    const victimAlias = "structural-compaction-victim-alias";
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE("resp_structural_victim"), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const undistilled = vi.spyOn(temporal, "undistilled");
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": victimAlias },
+          }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const provisional = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": "provisional-structural-session",
+        },
+      });
+      delete provisional.rawHeaders["x-lore-project"];
+      await (await handleRequest(provisional, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      undistilled.mockClear();
+
+      const attack = async (
+        sessionHeaders: Record<string, string>,
+        credential: string | null,
+        projectPath = process.cwd(),
+      ): Promise<Response> => {
+        const request = makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Create an anchored summary from the conversation history above.",
+                },
+              ],
+            },
+          ],
+          tools: [],
+        });
+        request.stream = false;
+        request.rawHeaders["x-lore-project"] = projectPath;
+        if (credential) request.rawHeaders.authorization = credential;
+        else delete request.rawHeaders.authorization;
+        return handleRequest(request, loadLocalConfig());
+      };
+
+      const fresh = await attack(
+        { "x-lore-session-id": "new-structural-attacker" },
+        "Bearer test-key",
+      );
+      expect(fresh.status).toBe(404);
+      expect(await fresh.text()).not.toContain("structural victim");
+
+      const conflictingAlias = await attack(
+        {
+          "x-lore-session-id": "unknown-structural-canonical",
+          "x-session-affinity": victimAlias,
+        },
+        "Bearer test-key",
+      );
+      expect(conflictingAlias.status).toBe(404);
+      expect(await conflictingAlias.text()).not.toContain("structural victim");
+
+      const missingCredential = await attack(
+        { "x-session-affinity": victimAlias },
+        null,
+      );
+      expect(missingCredential.status).toBe(400);
+
+      const wrongCredential = await attack(
+        { "x-session-affinity": victimAlias },
+        "Bearer wrong-tenant-key",
+      );
+      expect(wrongCredential.status).toBe(404);
+
+      const provisionalRebind = await attack(
+        { "x-lore-session-id": "provisional-structural-session" },
+        "Bearer test-key",
+        "/tmp",
+      );
+      expect(provisionalRebind.status).toBe(403);
+
+      expect(undistilled).not.toHaveBeenCalled();
+      expect(upstreamCalls).toBe(2);
+    } finally {
+      undistilled.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not fall through an indexed canonical session to a conflicting alias", async () => {
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(
+        validResponsesSSE(`resp_alias_conflict_${upstreamCalls}`),
+        {
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    const canonicalHeaders = {
+      "x-lore-session-id": "authoritative-canonical-session",
+    };
+    const fallbackHeaders = {
+      "x-session-affinity": "conflicting-fallback-session",
+    };
+    const canonicalRequest = makeResponsesRequest({
+      sessionHeaders: canonicalHeaders,
+    });
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      await (await handleRequest(canonicalRequest, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      await (
+        await handleRequest(
+          makeResponsesRequest({ sessionHeaders: fallbackHeaders }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(evictLiveSessionForTest(canonicalRequest)).toBe(true);
+
+      const slash = makeResponsesRequest({
+        sessionHeaders: { ...canonicalHeaders, ...fallbackHeaders },
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "/lore:amnesia:on" }],
+          },
+        ],
+      });
+      slash.stream = false;
+      await (await handleRequest(slash, loadLocalConfig())).text();
+
+      store.mockClear();
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: canonicalHeaders,
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "canonical sensitive turn" }],
+              },
+            ],
+          }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(store).not.toHaveBeenCalled();
+
+      store.mockClear();
+      await (
+        await handleRequest(
+          makeResponsesRequest({ sessionHeaders: fallbackHeaders }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(store).toHaveBeenCalled();
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("cancels a request waiting behind an unrelated downstream finalizer", async () => {
+    const sessionHeaders = {
+      "x-lore-session-id": "cancel-finalizer-wait-session",
+    };
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_waiter_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let finalizerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      finalizerStarted = resolve;
+    });
+    let pending: Promise<Response> | undefined;
+
+    try {
+      await (
+        await handleRequest(
+          makeResponsesRequest({ sessionHeaders }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      const state = [...getActiveSessions().values()].find(
+        (candidate) =>
+          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+      );
+      expect(state).toBeDefined();
+      scheduleStreamingPostResponseForTest(state?.sessionID ?? "", async () => {
+        finalizerStarted();
+        await blocked;
+      });
+      await started;
+
+      const caller = new AbortController();
+      const slash = makeResponsesRequest({
+        sessionHeaders,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "/lore:amnesia:on" }],
+          },
+        ],
+      });
+      slash.stream = false;
+      slash.signal = caller.signal;
+      pending = handleRequest(slash, loadLocalConfig());
+      caller.abort(new DOMException("caller disconnected", "AbortError"));
+
+      const outcome = await Promise.race([
+        pending.then((response) => response.status),
+        new Promise<"pending">((resolve) =>
+          setImmediate(() => resolve("pending")),
+        ),
+      ]);
+      expect(outcome).toBe(502);
+    } finally {
+      release();
+      await pending;
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it.each(["curate", "compact", "responses-compact"] as const)(
+    "holds %s behind preterminal session work",
+    async (endpoint) => {
+      const sessionHeaders = {
+        "x-lore-session-id": `preterminal-${endpoint}-session`,
+      };
+      setUpstreamInterceptor(
+        async () =>
+          new Response(validResponsesSSE(`resp_${endpoint}_setup`), {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let finalizerStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        finalizerStarted = resolve;
+      });
+      let pending: Promise<Response> | undefined;
+
+      try {
+        await (
+          await handleRequest(
+            makeResponsesRequest({ sessionHeaders }),
+            loadLocalConfig(),
+          )
+        ).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        const state = [...getActiveSessions().values()].find(
+          (candidate) =>
+            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+        );
+        expect(state).toBeDefined();
+        scheduleStreamingPostResponseForTest(
+          state?.sessionID ?? "",
+          async () => {
+            finalizerStarted();
+            await blocked;
+          },
+        );
+        await started;
+
+        const headers = {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": process.cwd(),
+          "x-lore-provider": "openai",
+          "x-lore-upstream-url": "https://api.openai.com/v1",
+          ...sessionHeaders,
+        };
+        if (endpoint === "curate") {
+          const curate = makeResponsesRequest({
+            sessionHeaders,
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "/lore:curate" }],
+              },
+            ],
+          });
+          curate.stream = false;
+          pending = handleRequest(curate, loadLocalConfig());
+        } else {
+          pending =
+            endpoint === "compact"
+              ? handleCompactEndpoint(
+                  new Request("http://gateway.test/v1/compact", {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                      project_path: process.cwd(),
+                      tokens_before: 1,
+                    }),
+                  }),
+                  loadLocalConfig(),
+                )
+              : handleResponsesCompactEndpoint(
+                  new Request("http://gateway.test/v1/responses/compact", {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                      model: "gpt-5.6-sol",
+                      instructions: "You are a coding agent.",
+                      input: [
+                        {
+                          role: "user",
+                          content: [{ type: "input_text", text: "compact" }],
+                        },
+                      ],
+                      tools: [],
+                    }),
+                  }),
+                  loadLocalConfig(),
+                );
+        }
+
+        const outcome = await Promise.race([
+          pending.then(() => "settled" as const),
+          new Promise<"pending">((resolve) =>
+            setImmediate(() => resolve("pending")),
+          ),
+        ]);
+        expect(outcome).toBe("pending");
+        expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBrray.from({ length: turn * 2 - 1 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: [
+          {
+            type: "text" as const,
+            text: index === 0 ? seed : `${seed} turn ${index}`,
+          },
+        ],
+      }));
+    const turn = async (
+      sessionHeaders: Record<string, string>,
+      seed: string,
+      number: number,
+      succeeds: boolean,
+    ): Promise<void> => {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: messages(seed, number),
+        }),
+        loadLocalConfig(),
+      );
+      const body = await response.text();
+      expect(body).toContain(
+        succeeds ? "event: response.completed" : "Gateway request failed",
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    try {
+      // Establish legitimate uniqueness only for candidateHeader.
+      await turn(
+        { [candidateHeader]: otherCandidateValue },
+        "other successful session",
+        1,
+        true,
+      );
+      await turn(
+        {
+          [candidateHeader]: candidateValue,
+          [globalHeader]: globalValue,
+        },
+        "primary session",
+        1,
+        true,
+      );
+      const primary = [...getActiveSessions().values()].find(
+        (state) =>
+          state.candidateHeaders?.get(globalHeader)?.value === globalValue,
+      );
+      expect(primary?.candidateHeaders?.get(candidateHeader)?.seenCount).toBe(
+        1,
+      );
+      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(1);
+
+      // A failed new session must not add global uniqueness.
+      await turn(
+        { [globalHeader]: failedGlobalValue },
+        "failed distinct session",
+        1,
+        false,
+      );
+      expect(
+        [...getActiveSessions().values()].some(
+          (state) =>
+            state.candidateHeaders?.get(globalHeader)?.value ===
+            failedGlobalValue,
+        ),
+      ).toBe(false);
+
+      // A failed matched turn must not advance the primary candidates.
+      await turn(
+        {
+          [candidateHeader]: candidateValue,
+          [globalHeader]: globalValue,
+        },
+        "primary session",
+        2,
+        false,
+      );
+      expect(primary?.candidateHeaders?.get(candidateHeader)?.seenCount).toBe(
+        1,
+      );
+      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(1);
+
+      // The retry is only the second successful observation. If the failed
+      // matched turn counted, candidateHeader would promote here.
+      await turn(
+        {
+          [candidateHeader]: candidateValue,
+          [globalHeader]: globalValue,
+        },
+        "primary session",
+        2,
+        true,
+      );
+      expect(primary?.headerSessionId).toBeUndefined();
+      expect(primary?.candidateHeaders?.get(candidateHeader)?.seenCount).toBe(
+        2,
+      );
+      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(2);
+
+      // The third successful globalHeader observation remains non-unique. If
+      // the failed new session counted globally, it would promote here.
+      await turn({ [globalHeader]: globalValue }, "primary session", 3, true);
+      expect(primary?.headerSessionId).toBeUndefined();
+      expect(primary?.candidateHeaders?.get(globalHeader)?.seenCount).toBe(3);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps failed Tier-2 promotion retries provisional until success", async () => {
+    const headerName = "x-retry-session";
+    const targetValue = "retry-session-target";
+    const distinctValue = "retry-session-other";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 4 || upstreamCall === 5) {
+        return new Response(JSON.stringify({ error: "upstream failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(validResponsesSSE(`resp_retry_${upstreamCall}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const messages = (seed: string, turn: number): GatewayRequest["messages"] =>
+      Array.from({ length: turn * 2 - 1 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: [
+          {
+            type: "text" as const,
+            text: index === 0 ? seed : `${seed} turn ${index}`,
+          },
+        ],
+      }));
+    const turn = async (
+      headerValue: string,
+      seed: string,
+      number: number,
+      succeeds: boolean,
+    ): Promise<void> => {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { [headerName]: headerValue },
+          messages: messages(seed, number),
+        }),
+        loadLocalConfig(),
+      );
+      const body = await response.text();
+      expect(body).toContain(
+        succeeds ? "event: response.completed" : "Gateway request failed",
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      await turn(distinctValue, "other session", 1, true);
+      await turn(targetValue, "target session", 1, true);
+      await turn(targetValue, "target session", 2, true);
+      const target = [...getActiveSessions().values()].find(
+        (state) =>
+          state.candidateHeaders?.get(headerName)?.value === targetValue,
+      );
+      expect(target).toBeDefined();
+      expect(target?.messageCount).toBe(3);
+      expect(target?.candidateHeaders?.get(headerName)?.seenCount).toBe(2);
+      store.mockClear();
+
+      // The third observation promotes only provisionally, and provider failure
+      // must leave all session-owned state unchanged.
+      await turn(targetValue, "target session", 3, false);
+      expect(target?.messageCount).toBe(3);
+      expect(target?.candidateHeaders?.get(headerName)?.seenCount).toBe(2);
+      expect(target?.headerName).toBeUndefined();
+      expect(target?.headerSessionId).toBeUndefined();
+      expect(store).not.toHaveBeenCalled();
+
+      // A retry resolved from the provisional index must remain on the same
+      // validation-only path rather than entering the full pipeline early.
+      await turn(targetValue, "target session", 3, false);
+      expect(target?.messageCount).toBe(3);
+      expect(target?.candidateHeaders?.get(headerName)?.seenCount).toBe(2);
+      expect(target?.headerName).toBeUndefined();
+      expect(target?.headerSessionId).toBeUndefined();
+      expect(store).not.toHaveBeenCalled();
+
+      const slash = makeResponsesRequest({
+        sessionHeaders: { [headerName]: targetValue },
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "/lore:amnesia:on" }],
+          },
+        ],
+      });
+      const slashResponse = await handleRequest(slash, loadLocalConfig());
+      expect(await slashResponse.text()).toContain(
+        "Amnesia mode was not changed",
+      );
+      expect(target?.amnesia).toBe(false);
+
+      // Even a validated upstream completion does not publish until the client
+      // consumes EOF and the post-response finalizer commits the turn.
+      const validation = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { [headerName]: targetValue },
+          messages: messages("target session", 3),
+        }),
+        loadLocalConfig(),
+      );
+      expect(target?.headerSessionId).toBeUndefined();
+      expect(await validation.text()).toContain("event: response.completed");
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(target?.headerName).toBe(headerName);
+      expect(target?.headerSessionId).toBe(targetValue);
+      expect(target?.messageCount).toBe(5);
+
+      await turn(targetValue, "target session", 4, true);
+      expect(target?.messageCount).toBe(7);
+      expect(upstreamCall).toBe(7);
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rejects slash commands with ambiguous promoted Tier-2 headers", async () => {
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(validResponsesSSE(`resp_tier2_${upstreamCall}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const messages = (seed: string, turn: number): GatewayRequest["messages"] =>
+      Array.from({ length: turn * 2 - 1 }, (_, index) => ({
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: [
+          {
+            type: "text" as const,
+            text: index === 0 ? seed : `${seed} turn ${index}`,
+          },
+        ],
+      }));
+    const turn = async (
+      headerName: string,
+      headerValue: string,
+      seed: string,
+      number: number,
+    ): Promise<void> => {
+      await (
+        await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { [headerName]: headerValue },
+            messages: messages(seed, number),
+          }),
+          loadLocalConfig(),
+        )
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    try {
+      await turn("x-alpha-session", "alpha-session-value", "alpha seed", 1);
+      await turn("x-alpha-session", "alpha-other-value", "alpha other", 1);
+      await turn("x-alpha-session", "alpha-session-value", "alpha seed", 2);
+      await turn("x-alpha-session", "alpha-session-value", "alpha seed", 3);
+
+      await turn("x-beta-session", "beta-session-value", "beta seed", 1);
+      await turn("x-beta-session", "beta-other-value", "beta other", 1);
+      await turn("x-beta-session", "beta-session-value", "beta seed", 2);
+      await turn("x-beta-session", "beta-session-value", "beta seed", 3);
+
+      const alpha = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerName === "x-alpha-session" &&
+          state.headerSessionId === "alpha-session-value",
+      );
+      const beta = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerName === "x-beta-session" &&
+          state.headerSessionId === "beta-session-value",
+      );
+      expect(alpha).toBeDefined();
+      expect(beta).toBeDefined();
+      expect(alpha?.sessionID).not.toBe(beta?.sessionID);
+
+      const ambiguous = makeResponsesRequest({
+        sessionHeaders: {
+          "x-alpha-session": "alpha-session-value",
+          "x-beta-session": "beta-session-value",
+        },
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "/lore:amnesia:on" }],
+          },
+        ],
+      });
+      ambiguous.stream = false;
+      const response = await handleRequest(ambiguous, loadLocalConfig());
+      expect(await response.text()).toContain("Amnesia mode was not changed");
+      expect(alpha?.amnesia).toBe(false);
+      expect(beta?.amnesia).toBe(false);
+      expect(upstreamCall).toBe(8);
+
+      const normalAmbiguous = makeResponsesRequest({
+        sessionHeaders: {
+          "x-alpha-session": "alpha-session-value",
+          "x-beta-session": "beta-session-value",
+        },
+        messages: messages("alpha seed", 4),
+      });
+      const normal = await handleRequest(normalAmbiguous, loadLocalConfig());
+      expect(await normal.text()).toContain("Gateway request failed");
+      expect(upstreamCall).toBe(8);
+      expect(alpha?.messageCount).toBe(messages("alpha seed", 3).length);
+      expect(beta?.messageCount).toBe(messages("beta seed", 3).length);
+    } finally {
+      setUpstreamInterceptoe(
+          true,
+        );
+
+        release();
+        const response = await pending;
+        expect(response.status).toBe(200);
+        await response.text();
+        await vi.waitFor(() =>
+          expect(isPipelineSessionActiveForTest(state?.sessionID ?? "")).toBe(
+            false,
+          ),
+        );
+      } finally {
+        release();
+        if (pending) {
+          const response = await pending;
+          if (!response.bodyUsed) await response.text();
+        }
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
+  it.each(["structural", "compact", "responses-compact"] as const)(
+    "rechecks %s project authorization after a queued session claim",
+    async (endpoint) => {
+      const sessionHeaders = {
+        "x-lore-session-id": `queued-project-${endpoint}-session`,
+      };
+      const projectA = `/tmp/lore-queued-${endpoint}-a`;
+      const projectB = `/tmp/lore-queued-${endpoint}-b`;
+      let upstreamCalls = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCalls++;
+        return new Response(validResponsesSSE(`resp_queued_${endpoint}`), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+      let releaseRebind!: () => void;
+      const rebindPause = new Promise<void>((resolve) => {
+        releaseRebind = resolve;
+      });
+      let rebindWaitingResolve!: () => void;
+      const rebindWaiting = new Promise<void>((resolve) => {
+        rebindWaitingResolve = resolve;
+      });
+      const undistilled = vi.spyOn(temporal, "undistilled");
+
+      try {
+        const setup = makeResponsesRequest({ sessionHeaders });
+        setup.rawHeaders["x-lore-project"] = projectA;
+        await (await handleRequest(setup, loadLocalConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        undistilled.mockClear();
+
+        setPipelinePreUpstreamPauseForTest(rebindPause, rebindWaitingResolve);
+        const rebind = makeResponsesRequest({ sessionHeaders });
+        rebind.rawHeaders["x-lore-project"] = projectB;
+        const rebindResponse = handleRequest(rebind, loadLocalConfig());
+        await rebindWaiting;
+        setPipelinePreUpstreamPauseForTest(undefined);
+
+        const headers = {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": projectA,
+          "x-lore-provider": "openai",
+          "x-lore-upstream-url": "https://api.openai.com/v1",
+          ...sessionHeaders,
+        };
+        let pending: Promise<Response>;
+        if (endpoint === "structural") {
+          const structural = makeResponsesRequest({
+            sessionHeaders,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "Create an anchored summary from the conversation history above.",
+                  },
+                ],
+              },
+            ],
+            tools: [],
+          });
+          structural.stream = false;
+          structural.rawHeaders["x-lore-project"] = projectA;
+          pending = handleRequest(structural, loadLocalConfig());
+        } else if (endpoint === "compact") {
+          pending = handleCompactEndpoint(
+            new Request("http://gateway.test/v1/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ project_path: projectA }),
+            }),
+            loadLocalConfig(),
+          );
+        } else {
+          pending = handleResponsesCompactEndpoint(
+            new Request("http://gateway.test/v1/responses/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                model: "gpt-5.6-sol",
+                instructions: "You are a coding agent.",
+                input: [
+                  {
+                    role: "user",
+                    content: [{ type: "input_text", text: "compact" }],
+                  },
+                ],
+                tools: [],
+              }),
+            }),
+            loadLocalConfig(),
+          );
+        }
+        await vi.waitFor(() =>
+          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+        );
+
+        releaseRebind();
+        expect(await (await rebindResponse).text()).toContain(
+          "event: response.completed",
+        );
+        const response = await pending;
+        expect(response.status).toBe(403);
+        expect(await response.text()).toMatch(/project[_ ]path/i);
+        expect(undistilled).not.toHaveBeenCalled();
+        expect(upstreamCalls).toBe(2);
+        const state = [...getActiveSessions().values()].find(
+          (candidate) =>
+            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+        );
+        expect(state).toMatchObject({
+          projectPath: projectB,
+          projectPathProvisional: false,
+        });
+      } finally {
+        releaseRebind();
+        undistilled.mockRestore();
+        setPipelinePreUpstreamPauseForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
+  it.each([
+    "regular",
+    "structural",
+    "compact",
+    "responses-compact",
+    "slash",
+  ] as const)(
+    "rejects a queued %s request after affinity rotation revokes its identity",
+    async (route) => {
+      const oldAffinity = `queued-revoked-${route}-old`;
+      const newAffinity = `queued-revoked-${route}-new`;
+      const history: GatewayRequest["messages"] = Array.from(
+        { length: 12 },
+        (_, index) => ({
+          role:
+            index === 0 || index === 10
+              ? ("user" as const)
+              : ("assistant" as const),
+          content: [
+            {
+              type: "text" as const,
+              text: `${route} rotation history ${index}`,
+            },
+          ],
+        }),
+      );
+      let upstreamCalls = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCalls++;
+        return new Response(
+          validResponsesSSE(`resp_queued_revoked_${upstreamCalls}`),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+      let releaseRotation!: () => void;
+      const rotationPause = new Promise<void>((resolve) => {
+        releaseRotation = resolve;
+      });
+      let rotationWaitingResolve!: () => void;
+      const rotationWaiting = new Promise<void>((resolve) => {
+        rotationWaitingResolve = resolve;
+      });
+      let queued: Promise<Response> | undefined;
+      let rotationBody: Promise<string> | undefined;
+      const summaryRead = vi.spyOn(distillation, "loadForSession");
+
+      try {
+        const seed = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": oldAffinity },
+          messages: [history[0]],
+        });
+        await (await handleRequest(seed, loadLocalConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        const setup = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": oldAffinity },
+          messages: history,
+        });
+        await (await handleRequest(setup, loadLocalConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+
+        setPipelinePreUpstreamPauseForTest(
+          rotationPause,
+          rotationWaitingResolve,
+        );
+        const rotation = makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": newAffinity },
+          messages: [
+            ...history,
+            {
+              role: "user",
+              content: [{ type: "text", text: "continue after restart" }],
+            },
+          ],
+        });
+        const rotationResponse = handleRequest(rotation, loadLocalConfig());
+        await rotationWaiting;
+        const oldState = [...getActiveSessions().values()].find(
+          (state) => state.headerSessionId === oldAffinity,
+        );
+        expect(oldState).toBeDefined();
+        expect(isPipelineSessionActiveForTest(oldState?.sessionID ?? "")).toBe(
+          true,
+        );
+
+        const headers = {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": process.cwd(),
+          "x-lore-provider": "openai",
+          "x-lore-upstream-url": "https://api.openai.com/v1",
+          "x-session-affinity": oldAffinity,
+        };
+        if (route === "regular") {
+          const request = makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": oldAffinity },
+          });
+          request.stream = false;
+          queued = handleRequest(request, loadLocalConfig());
+        } else if (route === "structural") {
+          const request = makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": oldAffinity },
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: "Create an anchored summary from the conversation history above.",
+                  },
+                ],
+              },
+            ],
+            tools: [],
+          });
+          request.stream = false;
+          queued = handleRequest(request, loadLocalConfig());
+        } else if (route === "slash") {
+          const request = makeResponsesRequest({
+            sessionHeaders: { "x-session-affinity": oldAffinity },
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: "/lore:amnesia:on" }],
+              },
+            ],
+          });
+          request.stream = false;
+          queued = handleRequest(request, loadLocalConfig());
+        } else if (route === "compact") {
+          queued = handleCompactEndpoint(
+            new Request("http://gateway.test/v1/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({ project_path: process.cwd() }),
+            }),
+            loadLocalConfig(),
+          );
+        } else {
+          queued = handleResponsesCompactEndpoint(
+            new Request("http://gateway.test/v1/responses/compact", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                model: "gpt-5.6-sol",
+                instructions: "You are a coding agent.",
+                input: [
+                  {
+                    role: "user",
+                    content: [{ type: "input_text", text: "compact" }],
+                  },
+                ],
+                tools: [],
+              }),
+            }),
+            loadLocalConfig(),
+          );
+        }
+        await vi.waitFor(() =>
+          expect(pendingPipelineSessionClaimCountForTest()).toBe(1),
+        );
+        summaryRead.mockClear();
+
+        releaseRotation();
+        rotationBody = (await rotationResponse).text();
+        expect(await rotationBody).toContain("event: response.completed");
+        const response = await queued;
+        expect(response.status).toBe(route === "slash" ? 200 : 404);
+        expect(await response.text()).toMatch(/authenticated.*session/i);
+        expect(upstreamCalls).toBe(3);
+        expect(summaryRead).not.toHaveBeenCalled();
+      } finally {
+        releaseRotation();
+        if (rotationBody) await rotationBody.catch(() => "");
+        if (queued) {
+          const response = await queued.catch(() => undefined);
+          if (response && !response.bodyUsed) await response.text();
+        }
+        summaryRead.mockRestore();
+        setPipelinePreUpstreamPauseForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
+  it("drops a captured post-response finalizer after session eviction", async () =)).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(externallyCancelled).toBe(true);
+    expect(removeAbortListener).toHaveBeenCalledWith(
+      "abort",
+      expect.any(Function),
+    );
+  });
+
+  it("meta downstream cancel does not await a hostile upstream cancel", async () => {
+    let sourceCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"hostile","type":"message","role":"assistant","model":"test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\n',
+            ),
+          );
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          sourceCancelled = true;
+          return new Promise<void>(() => {});
+        },
+      }),
+    );
+    const downstreamBody = validatedMetaStream(
+      upstream,
+      "anthropic",
+      false,
+    ).body;
+    if (!downstreamBody) throw new Error("test stream has no body");
+    const reader = downstreamBody.getReader();
+    await reader.read();
+    const outcome = await Promise.race([
+      reader.cancel().then(() => "cancelled"),
+      new Promise<string>((resolve) => setImmediate(() => resolve("hung"))),
+    ]);
+    expect(outcome).toBe("cancelled");
+    expect(sourceCancelled).toBe(true);
+    expect(upstream.body?.locked).toBe(false);
+  });
+
+  it("external meta abort wakes a filled demand waiter", async () => {
+    let sourceCancelled = false;
+    const full = await validAnthropicSSE("waiting").text();
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(full));
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          sourceCancelled = true;
+        },
+      }),
+    );
+    const abort = new AbortController();
+    const downstream = validatedMetaStream(upstream, "anthropic", false, {
+      signal: abort.signal,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    abort.abort(new DOMException("deadline", "TimeoutError"));
+    await expect(downstream.text()).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(sourceCancelled).toBe(true);
+  });
+
+  it("foreground meta settles when its injected upstream ignores abort", async () => {
+    const controller = new AbortController();
+    setUpstreamInterceptor(async () => new Promise(() => {}));
+    try {
+      const pending = handleRequest(
+        {
+          protocol: "anthropic",
+          model: DEFAULT_MODEL,
+          system: "title this",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "title" }] },
+          ],
+          tools: [],
+          stream: true,
+          maxTokens: 32,
+          metadata: {},
+          rawHeaders: { "x-lore-agent": "title" },
+          signal: controller.signal,
+        },
+        loadLocalConfig(),
+      );
+      await Promise.resolve();
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+      const response = await pending;
+      expect(response.status).toBe(502);
+      await expect(response.text()).resolves.toContain(
+        "Gateway request failed",
+      );
+    } finally {
+      setUpstreamInterceptor(undefined);
+    }
+  });
+
+  it("foreground deadline settles when its injected upstream never resolves", async () => {
+    vi.useFakeTimers();
+    setUpstreamInterceptor(async () => new Promise(() => {}));
+    try {
+      const pending = handleRequest(
+        {
+          protocol: "anthropic",
+          model: DEFAULT_MODEL,
+          system: "title this",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "title" }] },
+          ],
+          tools: [],
+          stream: true,
+          maxTokens: 32,
+          metadata: {},
+          rawHeaders: { "x-lore-agent": "title" },
+        },
+        loadLocalConfig(),
+      );
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
+      const response = await pending;
+      expect(response.status).toBe(502);
+      await expect(response.text()).resolves.toContain(
+        "Gateway request failed",
+      );
+    } finally {
+      setUpstreamInterceptor(undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(STALLED_META_CASES)(
+    "caller abort settles a stalled $protocol meta body",
+    async ({ protocol, model, provider, upstream, wire }) => {
+      const source = stalledMetaUpstream(wire);
+      const caller = new AbortController();
+      setUpstreamInterceptor(async () => source.response);
+      try {
+        let responseTimer: ReturnType<typeof setTimeout> | undefined;
+        const downstream = await Promise.race([
+          handleRequest(
+            {
+              protocol,
+              model,
+              system: "title this",
+              messages: [
+                { role: "user", content: [{ type: "text", text: "title" }] },
+              ],
+              tools: [],
+              stream: true,
+              maxTokens: 32,
+              metadata: {},
+              rawHeaders: {
+                "x-api-key": "test-key",
+                "x-lore-agent": "title",
+                "x-lore-provider": provider,
+                "x-lore-upstream-url": upstream,
+              },
+              signal: caller.signal,
+            },
+            loadLocalConfig(),
+          ),
+          new Promise<never>((_resolve, reject) => {
+            responseTimer = setTimeout(
+              () => reject(new Error("meta response was not returned")),
+              1_000,
+            );
+          }),
+        ]).finally(() => {
+          if (responseTimer) clearTimeout(responseTimer);
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        caller.abort(new DOMException("caller aborted", "AbortError"));
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+        await expect(
+          Promise.race([
+            downstream.text(),
+            new Promise<never>((_resolve, reject) => {
+              responseTimer = setTimeout(
+                () => reject(new Error("meta body abort deadlocked")),
+                1_000,
+              );
+            }),
+          ]).finally(() => {
+            if (responseTimer) clearTimeout(responseTimer);
+          }),
+        ).rejects.toMatchObject({ name: "AbortError" });
+      } finally {
+        setUpstreamInterceptor(undefined);
+      }
+    },
+  );
+
+  it.each(STALLED_META_CASES)(
+    "foreground deadline settles a stalled $protocol meta body",
+    async ({ protocol, model, provider, upstream, wire }) => {
+      vi.useFakeTimers();
+      const source = stalledMetaUpstream(
+        wire,
+        FOREGROUND_SSE_INACTIVITY_MS / 2,
+      );
+      setUpstreamInterceptor(async () => source.response);
+      try {
+        const downstream = await handleRequest(
+          {
+            protocol,
+            model,
+            system: "title this",
+            messages: [
+              { role: "user", content: [{ type: "text", text: "title" }] },
+            ],
+            tools: [],
+            stream: true,
+            maxTokens: 32,
+            metadata: {},
+            rawHeaders: {
+              "x-api-key": "test-key",
+              "x-lore-agent": "title",
+              "x-lore-provider": provider,
+              "x-lore-upstream-url": upstream,
+            },
+          },
+          loadLocalConfig(),
+        );
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
+        await expect(downstream.text()).rejects.toMatchObject({
+          name: "TimeoutError",
+        });
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+      } finally {
+        setUpstreamInterceptor(undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(STALLED_META_CASES)(
+    "foreground inactivity deadline settles a stalled $protocol meta body",
+    async ({ protocol, wire }) => {
+      vi.useFakeTimers();
+      const source = stalledMetaUpstream(wire);
+      try {
+        const downstream = validatedMetaStream(
+          source.response,
+          protocol,
+          false,
+          { inactivityMs: 25 },
+        );
+        const outcome = Promise.race([
+          downstream.text().then(
+            (body) => ({ body, error: undefined }),
+            (error: unknown) => ({ body: undefined, error }),
+          ),
+          new Promise<{ body: undefined; error: Error }>((resolve) => {
+            setTimeout(() => {
+              resolve({
+                body: undefined,
+                error: new Error("inactivity deadline was not enforced"),
+              });
+            }, 100);
+          }),
+        ]);
+        await vi.advanceTimersByTimeAsync(25);
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await outcome;
+        if (protocol === "openai-responses") {
+          expect(result.body).toContain("event: response.failed");
+        } else {
+          expect(result.error).toMatchObject({
+            message: "SSE stream inactivity deadline exceeded",
+          });
+        }
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("preserves non-OK meta responses for every client protocol", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const cases = [
+      {
+        path: "/v1/messages",
+        status: 429,
+        body: {
+          model: DEFAULT_MODEL,
+          max_tokens: 32,
+          stream: true,
+          messages: [{ role: "user", content: "title" }],
+        },
+      },
+      {
+        path: "/v1/chat/completions",
+        status: 401,
+        body: {
+          model: "gpt-test",
+          max_tokens: 32,
+          stream: true,
+          messages: [{ role: "user", content: "title" }],
+        },
+      },
+      {
+        path: "/v1/responses",
+        status: 400,
+        body: {
+          model: "gpt-test",
+          max_output_tokens: 32,
+          stream: true,
+          input: "title",
+        },
+      },
+      {
+        path: "/v1beta/models/gemini-test:streamGenerateContent",
+        status: 429,
+        body: {
+          contents: [{ role: "user", parts: [{ text: "title" }] }],
+          generationConfig: { maxOutputTokens: 32 },
+        },
+      },
+    ];
+    let nextStatus = 500;
+    setUpstreamInterceptor(
+      async () =>
+        new Response(JSON.stringify({ error: { message: "provider error" } }), {
+          status: nextStatus,
+          headers: {
+            "content-type": "application/json",
+            "retry-after": "17",
+            "set-cookie": "upstream-secret=must-not-leak",
+            "x-ratelimit-reset-requests": "23ms",
+          },
+        }),
+    );
+
+    for (const testCase of cases) {
+      nextStatus = testCase.status;
+      const response = await harness.request(testCase.path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer test-key",
+          "x-lore-agent": "title",
+        },
+        body: JSON.stringify(testCase.body),
+      });
+      expect(response.status).toBe(testCase.status);
+      expect(response.headers.get("retry-after")).toBe("17");
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.headers.get("x-ratelimit-reset-requests")).toBe("23ms");
+      expect(await response.json()).toEqual({
+        error: { message: "provider error" },
+      });
+    }
+  });
+
+  it.each([true, false])(
+    "preserves a valid incomplete Responses terminal for cross-protocol meta stream=%s",
+    async (stream) => {
+           "x-lore-session-id": canonical,
+          "x-session-affinity": alias,
+        },
+      });
+      delete migration.rawHeaders["x-lore-project"];
+      migration.system = `You are a coding agent.\nWorking directory: ${projectB}`;
+      await (await handleRequest(migration, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(original).toMatchObject({
+        headerName: "x-session-affinity",
+        headerSessionId: alias,
+        projectPath: projectA,
+      });
+      const independent = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === canonical,
+      );
+      expect(independent).toMatchObject({
+        headerName: "x-lore-session-id",
+        projectPath: projectB,
+      });
+      expect(independent?.sessionID).not.toBe(original?.sessionID);
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it.each([false, true])(
+    "does not confirm canonical migration after a blocked Gemini response (stream=%s)",
+    async (stream) => {
+      const alias = `blocked-gemini-${stream}-alias`;
+      const canonical = `blocked-gemini-${stream}-canonical`;
+      let upstreamCall = 0;
+      setUpstreamInterceptor(async () => {
+        upstreamCall++;
+        if (upstreamCall === 1) {
+          return new Response(validResponsesSSE("resp_gemini_block_setup"), {
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        const blocked = {
+          responseId: "gemini-blocked",
+          modelVersion: "gemini-test",
+          promptFeedback: { blockReason: "SAFETY" },
+          usageMetadata: {
+            promptTokenCount: 1,
+            candidatesTokenCount: 0,
+            totalTokenCount: 1,
+          },
+        };
+        return new Response(
+          stream
+            ? `data: ${JSON.stringify(blocked)}\n\n`
+            : JSON.stringify(blocked),
+          {
+            headers: {
+              "content-type": stream ? "text/event-stream" : "application/json",
+            },
+          },
+        );
+      });
+      const store = vi.spyOn(temporal, "store");
+
+      try {
+        await (
+          await handleRequest(
+            makeResponsesRequest({
+              sessionHeaders: { "x-session-affinity": alias },
+            }),
+            loadLocalConfig(),
+          )
+        ).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === alias,
+        );
+        const original = loadSessionTracking(state?.sessionID ?? "");
+        store.mockClear();
+
+        const migration = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": canonical,
+            "x-session-affinity": alias,
+          },
+        });
+        migration.protocol = "gemini";
+        migration.stream = stream;
+        migration.rawHeaders["x-lore-provider"] = "google";
+        migration.rawHeaders["x-lore-upstream-url"] =
+          "https://generativelanguage.googleapis.com";
+        await (await handleRequest(migration, loadLocalConfig())).text();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(store).not.toHaveBeenCalled();
+        expect(loadSessionTracking(state?.sessionID ?? "")).toEqual(original);
+        expect(state).toMatchObject({
+          headerName: "x-session-affinity",
+          headerSessionId: alias,
+        });
+      } finally {
+        store.mockRestore();
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
+  it("rejects a provisional canonical migration that conflicts with a confirmed alias", async () => {
+    const aliasA = "provisional-conflict-alias-a";
+    const aliasB = "provisional-conflict-alias-b";
+    const canonical = "provisional-conflict-canonical";
+    const projectA = "/tmp/lore-provisional-conflict-a";
+    const projectB = "/tmp/lore-provisional-conflict-b";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(validResponsesSSE(`resp_conflict_${upstreamCall}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const establish = async (alias: string, project: string): Promise<void> => {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-session-affinity": alias },
+      });
+      request.rawHeaders["x-lore-project"] = project;
+      await (await handleRequest(request, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let waitingResolve!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      waitingResolve = resolve;
+    });
+
+    try {
+      await establish(aliasA, projectA);
+      await establish(aliasB, projectB);
+      const stateA = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === aliasA,
+      );
+      const stateB = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === aliasB,
+      );
+      expect(stateA?.sessionID).not.toBe(stateB?.sessionID);
+
+      setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
+      const first = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": canonical,
+          "x-session-affinity": aliasA,
+        },
+      });
+      first.rawHeaders["x-lore-project"] = projectA;
+      const firstResponse = handleRequest(first, loadLocalConfig());
+      await waiting;
+      setPipelinePreUpstreamPauseForTest(undefined);
+
+      const conflicting = makeResponsesRequest({
+        sessionHeaders: {
+          "x-lore-session-id": canonical,
+          "x-session-affinity": aliasB,
+        },
+      });
+      conflicting.rawHeaders["x-lore-project"] = projectB;
+      const conflictingResponse = handleRequest(conflicting, loadLocalConfig());
+      release();
+
+      const firstBody = (await firstResponse).text();
+      expect(await firstBody).toContain("event: response.completed");
+      expect(await (await conflictingResponse).text()).toContain(
+        "Gateway request failed",
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(stateA).toMatchObject({
+        headerName: "x-lore-session-id",
+        headerSessionId: canonical,
+        projectPath: projectA,
+      });
+      expect(stateB).toMatchObject({
+        headerName: "x-session-affinity",
+        headerSessionId: aliasB,
+        projectPath: projectB,
+      });
+      expect(upstreamCall).toBe(3);
+    } finally {
+      release();
+      setPipelinePreUpstreamPauseForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not confirm expired provisional ownership after another session claims the canonical header", async () => {
+    const aliasA = "expired-owner-alias-a";
+    const aliasB = "expired-owner-alias-b";
+    const canonical = "expired-owner-canonical";
+    const projectA = "/tmp/lore-expired-owner-a";
+    const projectB = "/tmp/lore-expired-owner-b";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 3) {
+        return new Response(JSON.stringify({ error: "validation failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(validResponsesSSE(`resp_expired_${upstreamCall}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const establish = async (alias: string, project: string): Promise<void> => {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-session-affinity": alias },
+      });
+      request.rawHeaders["x-lore-project"] = project;
+      await (await handleRequest(request, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let waitingResolve!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      waitingResolve = resolve;
+    });
+
+    try {
+      await establish(aliasA, projectA);
+      await establish(aliasB, projectB);
+      const stateA = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === aliasA,
+      );
+      const stateB = [...getActiveSessions().values()].find(
+        (state) => state.headerSessionId === aliasB,
+      );
+      const request = (alias: string, project: string): GatewayRequest => {
+        const result = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": canonical,
+            "x-session-affinity": alias,
+          },
+        });
+        result.rawHeaders["x-lore-project"] = project;
+        return result;
+      };
+
+      await (
+        await handleRequest(request(aliasA, projectA), loadLocalConfig())
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const costsBeforeExpiredRetry = structuredClone(
+        getSessionCosts(stateA?.sessionID ?? "")?.conversation,
+      );
+      setPipelinePreUpstreamPauseForTest(paused, waitingResolve);
+      const retryA = handleRequest(
+        request(aliasA, projectA),
+        loadLocalConfig(),
+      );
+      await waiting;
+      setPipelinePreUpstreamPauseForTest(undefined);
+      expireProvisionalHeaderMappingsForTest();
+
+      const retryB = handleRequest(
+        request(aliasB, projectB),
+        loadLocalConfig(),
+      );
+      release();
+      await (await retryA).text();
+      await (await retryB).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(stateA).toMatchObject({
+        headerName: "x-session-affinity",
+        headerSessionId: aliasA,
+        projectPath: projectA,
+      });
+      expect(stateB).toMatchObject({
+        headerName: "x-lore-session-id",
+        headerSessionId: canonical,
+        projectPath: projectB,
+      });
+      expect(
+        [...getActiveSessions().values()].filter(
+          (state) => state.headerSessionId === canonical,
+        ),
+      ).toHaveLength(1);
+      expect(getSessionCosts(stateA?.sessionID ?? "")?.conversation).toEqual(
+        costsBeforeExpiredRetry,
+      );
+    } finally {
+      release();
+      setPipelinePreUpstreamPauseForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not learn Tier-2 header evidence from failed requests", async () => {
+    const candidateHeader = "x-candidate-session";
+    const globalHeader = "x-global-session";
+    const candidateValue = "candidate-session-a";
+    const otherCandidateValue = "candidate-session-b";
+    const globalValue = "global-session-a";
+    const failedGlobalValue = "global-session-b";
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      if (upstreamCall === 3 || upstreamCall === 4) {
+        return new Response(JSON.stringify({ error: "upstream failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(validResponsesSSE(`resp_learning_${upstreamCall}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const messages = (seed: string, turn: number): GatewayRequest["messages"] =>
+      A> {
+    const sessionHeaders = {
+      "x-lore-session-id": "evicted-finalizer-session",
+    };
+    const request = makeResponsesRequest({
+      sessionHeaders,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "must not store after eviction" }],
+        },
+      ],
+    });
+    const store = vi.spyOn(temporal, "store");
+    let postResponses = 0;
+    setPostResponseStartObserverForTest(() => postResponses++);
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_evicted_finalizer"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+
+    try {
+      const response = await handleRequest(request, loadLocalConfig());
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      expect(streamingPostResponsePendingForTest()).toBe(1);
+      expect(evictLiveSessionForTest(request)).toBe(true);
+
+      for (;;) {
+        const chunk = await reader?.read();
+        if (!chunk || chunk.done) break;
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(postResponses).toBe(0);
+      expect(store).not.toHaveBeenCalled();
+      expect(streamingPostResponsePendingForTest()).toBe(0);
+    } finally {
+      store.mockRestore();
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps a preterminal turn private when amnesia is disabled concurrently", async () => {
+    const legacyHeader = { "x-session-affinity": "amnesia-snapshot-session" };
+    let upstreamCalls = 0;
+    let sensitiveSource:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    let sensitiveStartedResolve: (() => void) | undefined;
+    const sensitiveStarted = new Promise<void>((resolve) => {
+      sensitiveStartedResolve = resolve;
+    });
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      if (upstreamCalls === 1) {
+        return new Response(validResponsesSSE("resp_amnesia_setup"), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      sensitiveStartedResolve?.();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            sensitiveSource = controller;
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const slashRequest = (command: string): GatewayRequest => {
+      const request = makeResponsesRequest({
+        sessionHeaders: legacyHeader,
+        messages: [
+          { role: "user", content: [{ type: "text", text: command }] },
+        ],
+      });
+      request.stream = false;
+      return request;
+    };
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      const established = await handleRequest(
+        makeResponsesRequest({ sessionHeaders: legacyHeader }),
+        loadLocalConfig(),
+      );
+      await established.text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      await (
+        await handleRequest(slashRequest("/lore:amnesia:on"), loadLocalConfig())
+      ).text();
+      store.mockClear();
+
+      const order: string[] = [];
+      setPostResponseStartObserverForTest(() => order.push("post"));
+      const sensitive = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: legacyHeader,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "preterminal secret" }],
+            },
+          ],
+        }),
+        loadLocalConfig(),
+      );
+      const sensitiveBody = sensitive.text();
+      await sensitiveStarted;
+
+      const disableAmnesia = handleRequest(
+        slashRequest("/lore:amnesia:off"),
+        loadLocalConfig(),
+      );
+      const beforeTerminal = await Promise.race([
+        disableAmnesia.then(() => "settled" as const),
+        new Promise<"pending">((resolve) =>
+          setImmediate(() => resolve("pending")),
+        ),
+      ]);
+      expect(beforeTerminal).toBe("pending");
+
+      sensitiveSource?.enqueue(
+        new TextEncoder().encode(validResponsesSSE("resp_amnesia_secret")),
+      );
+      sensitiveSource?.close();
+      await sensitiveBody;
+      order.push("eof");
+      await (await disableAmnesia).text();
+      order.push("slash");
+
+      expect(order).toEqual(["eof", "post", "slash"]);
+      expect(store).not.toHaveBeenCalled();
+    } finally {
+      store.mockRestore();
+      setPostResponseStartObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("waits for a canonical finalizer before compaction reads temporal state", async () => {
+    const order: string[] = [];
+    let upstreamCalls = 0;
+    const originalStore = temporal.store.bind(temporal);
+    const store = vi.spyOn(temporal, "store").mockImplementation((input) => {
+      const result = originalStore(input);
+      if (!order.includes("stored")) order.push("stored");
+      return result;
+    });
+    const undistilledCount = vi
+      .spyOn(temporal, "undistilledCount")
+      .mockImplementation(() => {
+        if (!order.includes("compaction-read")) order.push("compaction-read");
+        return 0;
+      });
+    const wire = validResponsesSSE("resp_before_compaction");
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(wire, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    try {
+      const first = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "compaction-stable-session",
+          },
+          messages: Array.from({ length: 12 }, (_, index) => ({
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            content: [
+              { type: "text" as const, text: `remember this turn ${index}` },
+            ],
+          })),
+        }),
+        loadLocalConfig(),
+      );
+      await first.text();
+
+      const compacted = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "compaction-stable-session",
+          },
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "Summarize this conversation." }],
+            },
+          ],
+          tools: [],
+        }),
+        loadLocalConfig(),
+      );
+      const compactedBody = await compacted.text();
+
+      expect(compactedBody).toContain("remember this turn");
+      expect(order.indexOf("stored")).toBeLessThan(
+        order.indexOf("compaction-read"),
+      );
+      expect(upstreamCalls).toBe(1);
+    } finally {
+      store.mockRestore();
+      undistilledCount.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it.each(["compact", "responses-compact"] as const)(
+    "waits for deferred storage in the explicit %s endpoint",
+    async (endpoint) => {
+      const order: string[] = [];
+      let upstreamCalls = 0;
+      setPostResponseStartObserverForTest(() => order.push("post"));
+      setUpstreamInterceptor(async () => {
+        upstreamCalls++;
+        if (upstreamCalls === 1) {
+          return new Response(validResponsesSSE("resp_explicit_compact"), {
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response(JSON.stringify({ output: [] }), {
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const sessionID = `explicit-${endpoint}-session`;
+
+      try {
+        const streamed = await handleRequest(
+          makeResponsesRequest({
+            sessionHeaders: { "x-lore-session-id": sessionID },
+          }),
+          loadLocalConfig(),
+        );
+        await streamed.text();
+        order.push("eof");
+
+        const headers = {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": process.cwd(),
+          "x-lore-provider": "openai",
+          "x-lore-upstream-url": "https://api.openai.com/v1",
+          "x-lore-session-id": sessionID,
+        };
+        const response =
+          endpoint === "compact"
+            ? await handleCompactEndpoint(
+                new Request("http://gateway.test/v1/compact", {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify({
+                    project_path: process.cwd(),
+                    tokens_before: 1,
+                  }),
+                }),
+                loadLocalConfig(),
+              )
+            : await handleResponsesCompactEndpoint(
+                new Request("http://gateway.test/v1/responses/compact", {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify({
+                    model: "gpt-5.6-sol",
+                    instructions: "You are a coding agent.",
+                    input: [
+                      {
+                        role: "user",
+                        content: [{ type: "input_text", text: "continue" }],
+                      },
+                    ],
+                    tools: [],
+                  }),
+                }),
+                loadLocalConfig(),
+              );
+        await response.text();
+        order.push("endpoint");
+
+        expect(order.slice(0, 3)).toEqual(["eof", "post", "endpoint"]);
+      } finally {
+        setPostResponseStartObserverForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+      }
+    },
+  );
+
+  it("pauses a filled build queue and resumes it when reads begin", async () => {
+    let pulls = 0;
+    const body = await validAnthropicSSE("resume").text();
+    const chunks = body
+      .split(/(?=event: )/)
+      .filter(Boolean)
+      .map((chunk) => new TextEncoder().encode(chunk));
+    let index = 0;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++;
+          if (index < chunks.length) controller.enqueue(chunks[index++]);
+          else controller.close();
+        },
+      }),
+    );
+    const downstream = buildStreamingResponse(upstream, () => {});
+    await new Promise((resolve) => setImmediate(resolve));
+    const pullsBeforeRead = pulls;
+    expect(pullsBeforeRead).toBeLessThan(chunks.length + 1);
+    const text = await downstream.text();
+    expect(text).toContain("resume");
+    expect(pulls).toBeGreaterThan(pullsBeforeRead);
+  });
+
+  it("distinguishes external meta abort from silent downstream cancellation", async () => {
+    let cancelledBeforeAcquire = false;
+    const beforeAcquire = validatedMetaStream(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelledBeforeAcquire = true;
+          },
+        }),
+      ),
+      "anthropic",
+      false,
+    );
+    await beforeAcquire.body?.cancel();
+    expect(cancelledBeforeAcquire).toBe(true);
+
+    let externallyCancelled = false;
+    const abort = new AbortController();
+    abort.abort(new DOMException("deadline", "TimeoutError"));
+    const removeAbortListener = vi.spyOn(abort.signal, "removeEventListener");
+    const externallyAborted = validatedMetaStream(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            externallyCancelled = true;
+          },
+        }),
+      ),
+      "anthropic",
+      false,
+      { signal: abort.signal },
+    );
+    await expect(externallyAborted.text(7,
           0x0a, 0x64, 0x61, 0x74, 0x61, 0x3a, 0x20, 0xff, 0x0a, 0x0a,
         ]),
       ),

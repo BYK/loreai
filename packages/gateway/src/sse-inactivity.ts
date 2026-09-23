@@ -1,3 +1,5 @@
+import type { SSEStreamOptions } from "./stream/options";
+
 /**
  * Foreground relay deadline configuration.
  *
@@ -24,6 +26,20 @@ const REQUEST_TIMEOUT_HEADROOM_MS = 60_000;
 const MAX_INACTIVITY_DEADLINE_MS =
   MAX_DEADLINE_MS - REQUEST_TIMEOUT_HEADROOM_MS;
 
+export interface SSEInactivityOverrides {
+  foregroundSseInactivityMs?: number;
+  foregroundRequestTimeoutMs?: number;
+  workerResponseInactivityMs?: number;
+  workerRequestTimeoutMs?: number;
+}
+
+export interface SSEInactivityDeadlines {
+  foregroundSseInactivityMs: number;
+  foregroundRequestTimeoutMs: number;
+  workerResponseInactivityMs: number;
+  workerRequestTimeoutMs: number;
+}
+
 /**
  * Parse a Node-safe deadline in milliseconds.
  *
@@ -44,6 +60,73 @@ export function parseSseInactivityMs(
     return fallback;
   }
   return Math.min(Math.max(value, MIN_DEADLINE_MS), maximum);
+}
+
+/** Resolve timeouts with environment variables taking precedence over Lore config. */
+export function resolveSSEInactivityDeadlines(
+  config: SSEInactivityOverrides = {},
+  env: NodeJS.ProcessEnv = process.env,
+): SSEInactivityDeadlines {
+  const configured = (value: number | undefined, fallback: number): number =>
+    value === undefined
+      ? fallback
+      : parseSseInactivityMs(String(value), fallback);
+
+  const foregroundSseInactivityMs = parseSseInactivityMs(
+    // How long the foreground relay tolerates upstream silence. Default:
+    // 600000ms. Also set as `timeouts.foregroundSseInactivityMs` in `.lore.json`;
+    // this environment variable takes priority.
+    env.LORE_FOREGROUND_SSE_INACTIVITY_MS,
+    configured(
+      config.foregroundSseInactivityMs,
+      DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
+    ),
+    MAX_INACTIVITY_DEADLINE_MS,
+  );
+  const workerResponseInactivityMs = parseSseInactivityMs(
+    // How long a worker tolerates upstream silence. Default: 600000ms. Also set
+    // as `timeouts.workerResponseInactivityMs` in `.lore.json`; this environment
+    // variable takes priority.
+    env.LORE_WORKER_RESPONSE_INACTIVITY_MS,
+    configured(
+      config.workerResponseInactivityMs,
+      DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
+    ),
+    MAX_INACTIVITY_DEADLINE_MS,
+  );
+
+  return {
+    foregroundSseInactivityMs,
+    foregroundRequestTimeoutMs: Math.max(
+      parseSseInactivityMs(
+        // Whole-request foreground ceiling. Default: 900000ms; raised as needed
+        // to preserve 60000ms of headroom. Also set as
+        // `timeouts.foregroundRequestTimeoutMs` in `.lore.json`; this environment
+        // variable takes priority.
+        env.LORE_FOREGROUND_REQUEST_TIMEOUT_MS,
+        configured(
+          config.foregroundRequestTimeoutMs,
+          DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
+        ),
+      ),
+      foregroundSseInactivityMs + REQUEST_TIMEOUT_HEADROOM_MS,
+    ),
+    workerResponseInactivityMs,
+    workerRequestTimeoutMs: Math.max(
+      parseSseInactivityMs(
+        // Whole-request worker ceiling. Default: 900000ms; raised as needed to
+        // preserve 60000ms of headroom. Also set as
+        // `timeouts.workerRequestTimeoutMs` in `.lore.json`; this environment
+        // variable takes priority.
+        env.LORE_WORKER_REQUEST_TIMEOUT_MS,
+        configured(
+          config.workerRequestTimeoutMs,
+          DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
+        ),
+      ),
+      workerResponseInactivityMs + REQUEST_TIMEOUT_HEADROOM_MS,
+    ),
+  };
 }
 
 /**
@@ -70,81 +153,47 @@ export const DEFAULT_FOREGROUND_SSE_INACTIVITY_MS = 600_000;
  */
 export const DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS = 900_000;
 
-/**
- * Foreground relay inactivity deadline: env-overridable, defaults to 600s.
- * Read once at module load; restart the gateway to apply a change.
- */
-export const FOREGROUND_SSE_INACTIVITY_MS: number = parseSseInactivityMs(
-  // How long the gateway tolerates upstream silence on a foreground relay
-  // before aborting it. Raise this for models whose extended-thinking phases
-  // emit nothing for minutes (Opus-class reasoning over large cached prompts),
-  // since a too-low value kills the stream mid-thinking and the client reports
-  // a connection loss rather than a stall. Positive integer ms; invalid values
-  // fall back to 600000. Floored at 1000 and capped to reserve 60s of request
-  // timeout headroom within Node's 32-bit timer ceiling. Env:
-  // LORE_FOREGROUND_SSE_INACTIVITY_MS.
-  process.env.LORE_FOREGROUND_SSE_INACTIVITY_MS,
-  DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
-  MAX_INACTIVITY_DEADLINE_MS,
-);
+const ENV_DEFAULTS = resolveSSEInactivityDeadlines();
 
 /**
- * Foreground request timeout: env-overridable, defaults to 900s.
- *
- * Clamped to `max(configured, inactivity + headroom)` so raising the
- * inactivity deadline cannot leave a tighter request ceiling silently in
- * force — the trap that made a 120s->600s change a no-op above 300s. The
- * inactivity deadline reserves that headroom below Node's timer maximum, so
- * this derived delay remains safe for `setTimeout`.
+ * Active deadlines for this gateway process. A non-hosted gateway replaces
+ * them after loading `.lore.json`; hosted mode uses operator env.
  */
-export const FOREGROUND_REQUEST_TIMEOUT_MS: number = Math.max(
-  parseSseInactivityMs(
-    // Wall-clock ceiling for a single foreground request: the hard abort of
-    // the whole relay (recall deadline + abort scope). Automatically raised to
-    // stay at least 60s above LORE_FOREGROUND_SSE_INACTIVITY_MS, so a request
-    // timeout can never make the inactivity deadline unreachable. Floored at
-    // 1000ms and capped at 2147483647ms; invalid values fall back to 900000.
-    // Env: LORE_FOREGROUND_REQUEST_TIMEOUT_MS.
-    process.env.LORE_FOREGROUND_REQUEST_TIMEOUT_MS,
-    DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
-  ),
-  FOREGROUND_SSE_INACTIVITY_MS + REQUEST_TIMEOUT_HEADROOM_MS,
-);
+let currentDeadlines: SSEInactivityDeadlines = ENV_DEFAULTS;
 
-/**
- * Worker (background/auxiliary call) response inactivity deadline. Same defect
- * class as the foreground relay: a self-hosted reasoning model can spend
- * longer than 120s in hidden reasoning without emitting a byte. Separate from
- * the foreground pair because worker calls are not user-visible and need not
- * match the client's watchdog budget.
- */
-export const WORKER_RESPONSE_INACTIVITY_MS: number = parseSseInactivityMs(
-  // How long a background/auxiliary worker call tolerates upstream silence
-  // before aborting. Floored at 1000 and capped to reserve 60s of request
-  // timeout headroom within Node's 32-bit timer ceiling. Invalid values fall
-  // back to 600000.
-  // Env: LORE_WORKER_RESPONSE_INACTIVITY_MS.
-  process.env.LORE_WORKER_RESPONSE_INACTIVITY_MS,
-  DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
-  MAX_INACTIVITY_DEADLINE_MS,
-);
+export function getSSEInactivityDeadlines(): Readonly<SSEInactivityDeadlines> {
+  return currentDeadlines;
+}
 
-/**
- * Worker request deadline: env-overridable, defaults to 900s.
- *
- * Clamped above {@link WORKER_RESPONSE_INACTIVITY_MS} for the same reason as
- * the foreground pair: a request deadline below the inactivity deadline makes
- * the inactivity retry path unreachable, so tuning inactivity appears inert.
- */
-export const WORKER_REQUEST_TIMEOUT_MS: number = Math.max(
-  parseSseInactivityMs(
-    // Wall-clock ceiling for a single background/auxiliary worker call.
-    // Automatically raised to stay at least 60s above
-    // LORE_WORKER_RESPONSE_INACTIVITY_MS. Floored at 1000ms and capped at
-    // 2147483647ms; invalid values fall back to 900000. Env:
-    // LORE_WORKER_REQUEST_TIMEOUT_MS.
-    process.env.LORE_WORKER_REQUEST_TIMEOUT_MS,
-    DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
-  ),
-  WORKER_RESPONSE_INACTIVITY_MS + REQUEST_TIMEOUT_HEADROOM_MS,
-);
+export function configureSSEInactivityDeadlines(
+  config: SSEInactivityOverrides = {},
+): Readonly<SSEInactivityDeadlines> {
+  currentDeadlines = resolveSSEInactivityDeadlines(config);
+  return currentDeadlines;
+}
+
+export function foregroundSSEStreamOptions(
+  signal?: AbortSignal,
+): SSEStreamOptions {
+  return {
+    signal,
+    inactivityMs: currentDeadlines.foregroundSseInactivityMs,
+  };
+}
+
+export function workerSSEStreamOptions(signal?: AbortSignal): SSEStreamOptions {
+  return {
+    signal,
+    inactivityMs: currentDeadlines.workerResponseInactivityMs,
+  };
+}
+
+// Keep the env-resolved exports for test timing and internal API compatibility.
+// Production request paths read the active deadlines at call time.
+export const FOREGROUND_SSE_INACTIVITY_MS =
+  ENV_DEFAULTS.foregroundSseInactivityMs;
+export const FOREGROUND_REQUEST_TIMEOUT_MS =
+  ENV_DEFAULTS.foregroundRequestTimeoutMs;
+export const WORKER_RESPONSE_INACTIVITY_MS =
+  ENV_DEFAULTS.workerResponseInactivityMs;
+export const WORKER_REQUEST_TIMEOUT_MS = ENV_DEFAULTS.workerRequestTimeoutMs;

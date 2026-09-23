@@ -1,3 +1,142 @@
+e frame that carries finishReason. The API has no OpenAI-style
+      // legal usage-only frame after that terminal, so stopAtTerminal
+      // intentionally cancels transport tail instead of waiting indefinitely.
+      // Last non-null usage before/on that frame wins.
+      const um = validateGeminiUsageMetadata(
+        parsed.usageMetadata,
+        "malformed Gemini stream event",
+      );
+      if (um) usage = geminiUsageFromMetadata(um);
+      await opts.onValidatedEvent?.(event, data);
+      if (
+        opts.stopAtTerminal &&
+        typeof finishReason === "string" &&
+        finishReason !== "" &&
+        finishReason !== "FINISH_REASON_UNSPECIFIED"
+      ) {
+        terminalSeen = true;
+        break;
+      }
+    }
+  } finally {
+    cancelAndReleaseReader(reader);
+  }
+
+  if (opts.stopAtTerminal && !terminalSeen) {
+    throw new Error("missing Gemini finishReason terminal");
+  }
+
+  const hasToolCall = contentBlocks.some((block) => block.type === "tool_use");
+  return {
+    id: responseId,
+    model,
+    content: contentBlocks,
+    stopReason: mapGeminiFinishReason(finishReason, hasToolCall),
+    usage,
+  };
+}
+
+/**
+ * Translate an internal Anthropic SSE stream into a Gemini SSE `Response`.
+ *
+ * Buffers via the shared Anthropic stream accumulator, then emits a single
+ * aggregated Gemini `data: <json>\n\n` frame. Used for a Gemini client whose
+ * request was routed to an Anthropic upstream.
+ */
+export function translateAnthropicStreamToGemini(
+  anthropicResponse: Response,
+  opts: SSEStreamOptions & { strict?: boolean } = {},
+): Response {
+  const downstreamAbort = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, downstreamAbort.signal])
+    : downstreamAbort.signal;
+  let pumpStarted = false;
+  let settled = false;
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  const cleanup = (): void =>
+    opts.signal?.removeEventListener("abort", onAbort);
+  const onAbort = (): void => {
+    if (settled) return;
+    settled = true;
+    const reason = opts.signal?.reason;
+    downstreamAbort.abort(reason);
+    if (!pumpStarted) {
+      try {
+        void anthropicResponse.body?.cancel(reason).catch(() => {});
+      } catch {
+        // Best-effort cancellation before reader acquisition.
+      }
+    }
+    cleanup();
+    try {
+      streamController?.error(reason);
+    } catch {
+      // Already closed/cancelled.
+    }
+  };
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        streamController = controller;
+        opts.signal?.addEventListener("abort", onAbort, { once: true });
+        if (opts.signal?.aborted) onAbort();
+      },
+      pull(controller) {
+        if (pumpStarted) return;
+        pumpStarted = true;
+        const encoder = new TextEncoder();
+        const pump = async (): Promise<void> => {
+          try {
+            const resp = await accumulateSSEResponse(anthropicResponse, {
+              signal,
+              inactivityMs: opts.inactivityMs,
+              strict: opts.strict,
+              stopAtTerminal: opts.strict,
+            });
+            if (settled) return;
+            const body = buildGeminiResponseBody(resp);
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(body)}\n\n`),
+            );
+            settled = true;
+            cleanup();
+            controller.close();
+          } catch (error) {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            controller.error(error);
+          }
+        };
+        queueMicrotask(() => void pump().catch(() => {}));
+      },
+      cancel(reason) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        downstreamAbort.abort(reason);
+        if (!pumpStarted) {
+          try {
+            void anthropicResponse.body?.cancel(reason).catch(() => {});
+          } catch {
+            // Best-effort cancellation before reader acquisition.
+          }
+        }
+      },
+    },
+    {
+      // Do not consume/buffer the Anthropic source until a downstream read asks
+      // for the single aggregated Gemini frame.
+      highWaterMark: 0,
+    },
+  );
+
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
 /**
  * Gemini streaming helpers.
  *
@@ -35,6 +174,7 @@ import {
   accumulateSSEResponse,
   cancelAndReleaseReader,
 } from "./anthropic";
+import type { SSEStreamOptions } from "./options";
 import { isRecord, validateGeminiUsageMetadata } from "../usage-validation";
 
 function hasGeminiThoughtSignature(block: GatewayContentBlock): boolean {
@@ -54,11 +194,9 @@ function hasGeminiThoughtSignature(block: GatewayContentBlock): boolean {
  */
 export async function accumulateGeminiSSEStream(
   upstreamResponse: Response,
-  opts: {
-    signal?: AbortSignal;
+  opts: SSEStreamOptions & {
     stopAtTerminal?: boolean;
     strict?: boolean;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
@@ -326,142 +464,4 @@ export async function accumulateGeminiSSEStream(
       if (first.finishReason != null) finishReason = first.finishReason;
 
       // streamGenerateContent reports cumulative usageMetadata on the same
-      // candidate frame that carries finishReason. The API has no OpenAI-style
-      // legal usage-only frame after that terminal, so stopAtTerminal
-      // intentionally cancels transport tail instead of waiting indefinitely.
-      // Last non-null usage before/on that frame wins.
-      const um = validateGeminiUsageMetadata(
-        parsed.usageMetadata,
-        "malformed Gemini stream event",
-      );
-      if (um) usage = geminiUsageFromMetadata(um);
-      await opts.onValidatedEvent?.(event, data);
-      if (
-        opts.stopAtTerminal &&
-        typeof finishReason === "string" &&
-        finishReason !== "" &&
-        finishReason !== "FINISH_REASON_UNSPECIFIED"
-      ) {
-        terminalSeen = true;
-        break;
-      }
-    }
-  } finally {
-    cancelAndReleaseReader(reader);
-  }
-
-  if (opts.stopAtTerminal && !terminalSeen) {
-    throw new Error("missing Gemini finishReason terminal");
-  }
-
-  const hasToolCall = contentBlocks.some((block) => block.type === "tool_use");
-  return {
-    id: responseId,
-    model,
-    content: contentBlocks,
-    stopReason: mapGeminiFinishReason(finishReason, hasToolCall),
-    usage,
-  };
-}
-
-/**
- * Translate an internal Anthropic SSE stream into a Gemini SSE `Response`.
- *
- * Buffers via the shared Anthropic stream accumulator, then emits a single
- * aggregated Gemini `data: <json>\n\n` frame. Used for a Gemini client whose
- * request was routed to an Anthropic upstream.
- */
-export function translateAnthropicStreamToGemini(
-  anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal; inactivityMs?: number } = {},
-): Response {
-  const downstreamAbort = new AbortController();
-  const signal = opts.signal
-    ? AbortSignal.any([opts.signal, downstreamAbort.signal])
-    : downstreamAbort.signal;
-  let pumpStarted = false;
-  let settled = false;
-  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
-  const cleanup = (): void =>
-    opts.signal?.removeEventListener("abort", onAbort);
-  const onAbort = (): void => {
-    if (settled) return;
-    settled = true;
-    const reason = opts.signal?.reason;
-    downstreamAbort.abort(reason);
-    if (!pumpStarted) {
-      try {
-        void anthropicResponse.body?.cancel(reason).catch(() => {});
-      } catch {
-        // Best-effort cancellation before reader acquisition.
-      }
-    }
-    cleanup();
-    try {
-      streamController?.error(reason);
-    } catch {
-      // Already closed/cancelled.
-    }
-  };
-  const stream = new ReadableStream<Uint8Array>(
-    {
-      start(controller) {
-        streamController = controller;
-        opts.signal?.addEventListener("abort", onAbort, { once: true });
-        if (opts.signal?.aborted) onAbort();
-      },
-      pull(controller) {
-        if (pumpStarted) return;
-        pumpStarted = true;
-        const encoder = new TextEncoder();
-        const pump = async (): Promise<void> => {
-          try {
-            const resp = await accumulateSSEResponse(anthropicResponse, {
-              signal,
-              inactivityMs: opts.inactivityMs,
-              strict: opts.strict,
-              stopAtTerminal: opts.strict,
-            });
-            if (settled) return;
-            const body = buildGeminiResponseBody(resp);
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(body)}\n\n`),
-            );
-            settled = true;
-            cleanup();
-            controller.close();
-          } catch (error) {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            controller.error(error);
-          }
-        };
-        queueMicrotask(() => void pump().catch(() => {}));
-      },
-      cancel(reason) {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        downstreamAbort.abort(reason);
-        if (!pumpStarted) {
-          try {
-            void anthropicResponse.body?.cancel(reason).catch(() => {});
-          } catch {
-            // Best-effort cancellation before reader acquisition.
-          }
-        }
-      },
-    },
-    {
-      // Do not consume/buffer the Anthropic source until a downstream read asks
-      // for the single aggregated Gemini frame.
-      highWaterMark: 0,
-    },
-  );
-
-  return new Response(stream, {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
-}
+      // candidat

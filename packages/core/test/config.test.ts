@@ -288,6 +288,29 @@ describe("load — reads config from .lore.json", () => {
     expect(cfg.knowledge.enabled).toBe(false);
   });
 
+  test("loads stream deadlines from .lore.json", async () => {
+    mkdirSync(TMP, { recursive: true });
+    writeFileSync(
+      join(TMP, ".lore.json"),
+      JSON.stringify({
+        timeouts: {
+          foregroundSseInactivityMs: 700_000,
+          foregroundRequestTimeoutMs: 1_000_000,
+          workerResponseInactivityMs: 500_000,
+          workerRequestTimeoutMs: 800_000,
+        },
+      }),
+      "utf8",
+    );
+    const cfg = await load(TMP);
+    expect(cfg.timeouts).toEqual({
+      foregroundSseInactivityMs: 700_000,
+      foregroundRequestTimeoutMs: 1_000_000,
+      workerResponseInactivityMs: 500_000,
+      workerRequestTimeoutMs: 800_000,
+    });
+  });
+
   test("falls back to defaults when no config file exists", async () => {
     mkdirSync(TMP, { recursive: true });
     const cfg = await load(TMP);

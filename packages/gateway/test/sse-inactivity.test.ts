@@ -9,6 +9,9 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   parseSseInactivityMs,
+  resolveSSEInactivityDeadlines,
+  configureSSEInactivityDeadlines,
+  getSSEInactivityDeadlines,
   DEFAULT_FOREGROUND_SSE_INACTIVITY_MS,
   DEFAULT_FOREGROUND_REQUEST_TIMEOUT_MS,
   FOREGROUND_SSE_INACTIVITY_MS,
@@ -39,6 +42,54 @@ async function loadWithDeadlineEnv(
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
+});
+
+describe("resolveSSEInactivityDeadlines", () => {
+  it("uses .lore.json overrides and preserves request-timeout headroom", () => {
+    expect(
+      resolveSSEInactivityDeadlines(
+        {
+          foregroundSseInactivityMs: 700_000,
+          foregroundRequestTimeoutMs: 500_000,
+          workerResponseInactivityMs: 400_000,
+          workerRequestTimeoutMs: 900_000,
+        },
+        {},
+      ),
+    ).toEqual({
+      foregroundSseInactivityMs: 700_000,
+      foregroundRequestTimeoutMs: 760_000,
+      workerResponseInactivityMs: 400_000,
+      workerRequestTimeoutMs: 900_000,
+    });
+  });
+
+  it("lets environment variables override .lore.json values", () => {
+    const deadlines = resolveSSEInactivityDeadlines(
+      {
+        foregroundSseInactivityMs: 700_000,
+        foregroundRequestTimeoutMs: 900_000,
+      },
+      {
+        LORE_FOREGROUND_SSE_INACTIVITY_MS: "500000",
+        LORE_FOREGROUND_REQUEST_TIMEOUT_MS: "800000",
+      },
+    );
+    expect(deadlines.foregroundSseInactivityMs).toBe(500_000);
+    expect(deadlines.foregroundRequestTimeoutMs).toBe(800_000);
+  });
+
+  it("activates the resolved deadlines for stream readers", () => {
+    for (const key of DEADLINE_ENV_KEYS) vi.stubEnv(key, "");
+    const deadlines = configureSSEInactivityDeadlines({
+      foregroundSseInactivityMs: 700_000,
+      workerResponseInactivityMs: 500_000,
+    });
+    expect(getSSEInactivityDeadlines()).toEqual(deadlines);
+    expect(deadlines.foregroundRequestTimeoutMs).toBe(900_000);
+    expect(deadlines.workerRequestTimeoutMs).toBe(900_000);
+    configureSSEInactivityDeadlines({});
+  });
 });
 
 describe("parseSseInactivityMs", () => {
