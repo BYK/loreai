@@ -508,11 +508,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       );
     },
     getEntity(id: string, signal?: AbortSignal): Promise<EntityDetail> {
-      return getJson(
-        apiPath(["entities", id]),
-        entityDetail,
-        signal,
-      );
+      return getJson(apiPath(["entities", id]), entityDetail, signal);
     },
     /** Whether a rebuild POST is in flight (started anywhere). */
     getEntityRebuildStatus(signal?: AbortSignal): Promise<EntityRebuildStatus> {
