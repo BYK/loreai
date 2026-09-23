@@ -132,9 +132,10 @@ describe("RebuildCard", () => {
     );
 
     fireEvent.click(retry);
-    expect(
-      await screen.findByRole("button", { name: "Preview (dry run)" }),
-    ).toBeEnabled();
+    const preview = await screen.findByRole("button", {
+      name: "Preview (dry run)",
+    });
+    await waitFor(() => expect(preview).toBeEnabled());
     expect(getEntityRebuildStatus).toHaveBeenCalledTimes(2);
   });
 
