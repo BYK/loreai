@@ -324,19 +324,19 @@
 <tbody>
 <tr>
 <td><code dir="auto">LORE_FOREGROUND_REQUEST_TIMEOUT_MS</code></td>
-<td>Wall-clock ceiling for a single foreground request: the hard abort of the whole relay (recall deadline + abort scope). Automatically raised to stay at least 60s above LORE_FOREGROUND_SSE_INACTIVITY_MS, so a request timeout can never make the inactivity deadline unreachable. Floored at 1000ms and capped at 2147483647ms; invalid values fall back to 900000. Env: LORE_FOREGROUND_REQUEST_TIMEOUT_MS.</td>
+<td>Whole-request foreground ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as <code dir="auto">timeouts.foregroundRequestTimeoutMs</code> in <code dir="auto">.lore.json</code>; this environment variable takes priority.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_FOREGROUND_SSE_INACTIVITY_MS</code></td>
-<td>How long the gateway tolerates upstream silence on a foreground relay before aborting it. Raise this for models whose extended-thinking phases emit nothing for minutes (Opus-class reasoning over large cached prompts), since a too-low value kills the stream mid-thinking and the client reports a connection loss rather than a stall. Positive integer ms; invalid values fall back to 600000. Floored at 1000 and capped to reserve 60s of request timeout headroom within Node’s 32-bit timer ceiling. Env: LORE_FOREGROUND_SSE_INACTIVITY_MS.</td>
+<td>How long the foreground relay tolerates upstream silence. Default: 600000ms. Also set as <code dir="auto">timeouts.foregroundSseInactivityMs</code> in <code dir="auto">.lore.json</code>; this environment variable takes priority.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_WORKER_REQUEST_TIMEOUT_MS</code></td>
-<td>Wall-clock ceiling for a single background/auxiliary worker call. Automatically raised to stay at least 60s above LORE_WORKER_RESPONSE_INACTIVITY_MS. Floored at 1000ms and capped at 2147483647ms; invalid values fall back to 900000. Env: LORE_WORKER_REQUEST_TIMEOUT_MS.</td>
+<td>Whole-request worker ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as <code dir="auto">timeouts.workerRequestTimeoutMs</code> in <code dir="auto">.lore.json</code>; this environment variable takes priority.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_WORKER_RESPONSE_INACTIVITY_MS</code></td>
-<td>How long a background/auxiliary worker call tolerates upstream silence before aborting. Floored at 1000 and capped to reserve 60s of request timeout headroom within Node’s 32-bit timer ceiling. Invalid values fall back to 600000. Env: LORE_WORKER_RESPONSE_INACTIVITY_MS.</td>
+<td>How long a worker tolerates upstream silence. Default: 600000ms. Also set as <code dir="auto">timeouts.workerResponseInactivityMs</code> in <code dir="auto">.lore.json</code>; this environment variable takes priority.</td>
 </tr>
 </tbody>
 </table>
