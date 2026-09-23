@@ -1,4 +1,354 @@
-};
+/**
+ * Anthropic SSE stream handling.
+ *
+ * Parses upstream Anthropic streaming responses (named SSE events), accumulates
+ * the full response into a `GatewayResponse`, and provides helpers for
+ * generating synthetic SSE event sequences (e.g. for compaction interception).
+ *
+ * Anthropic uses named SSE events with a lifecycle:
+ *   message_start -> content_block_start/delta/stop (repeated) -> message_delta -> message_stop
+ *
+ * All functions are pure (no side effects) except `parseSSEStream` which is
+ * an async generator consuming a byte stream.
+ */
+import {
+  ZERO_USAGE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+  type GatewayUsage,
+} from "../translate/types";
+import {
+  DEFAULT_MAX_REPORTED_USAGE,
+  estimateTokens,
+  scaleUsageForClient,
+} from "../compaction";
+import {
+  ANTHROPIC_CONTENT_BLOCK_TYPES,
+  ANTHROPIC_STOP_REASONS,
+  normalizeAnthropicStopReason,
+  toAnthropicStopReason,
+} from "../anthropic-protocol";
+import { isRecord, validateAnthropicUsage } from "../usage-validation";
+import type { SSEStreamOptions } from "./options";
+// NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
+// helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
+// legacy length/4 heuristic.
+
+// ---------------------------------------------------------------------------
+// SSE formatting
+// ---------------------------------------------------------------------------
+
+/** Format a single named SSE event for sending to the client. */
+export function formatSSEEvent(eventType: string, data: string): string {
+  return `event: ${eventType}\ndata: ${data}\n\n`;
+}
+
+// ---------------------------------------------------------------------------
+// SSE parsing
+// ---------------------------------------------------------------------------
+
+type StreamChunkRead = Awaited<
+  ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
+>;
+
+/**
+ * Foreground and worker SSE streams share this finite frame ceiling. The byte
+ * ceilings bound retained data, while this independently bounds parser work for
+ * tiny frames (including blank and comment-only frames).
+ */
+export const DEFAULT_MAX_SSE_FRAMES = 100_000;
+
+/** A post-header transport failure while reading an SSE response body. */
+export class SSEStreamTransportError extends Error {
+  readonly kind: "inactivity" | "read";
+
+  constructor(
+    kind: "inactivity" | "read",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "SSEStreamTransportError";
+    this.kind = kind;
+  }
+}
+
+/** Deterministic local stream limits must never be reclassified as transport. */
+export class SSEStreamLimitError extends Error {}
+
+/** Read one stream chunk while making abort and inactivity independently fatal. */
+export async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  opts: SSEStreamOptions = {},
+): Promise<StreamChunkRead> {
+  opts.signal?.throwIfAborted();
+  const reads: Array<Promise<StreamChunkRead>> = [
+    reader.read().catch((error: unknown) => {
+      opts.signal?.throwIfAborted();
+      if (error instanceof SSEStreamLimitError) throw error;
+      throw new SSEStreamTransportError("read", "SSE stream read failed", {
+        cause: error,
+      });
+    }),
+  ];
+  let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+  let inactivityError: Error | undefined;
+  let onAbort: (() => void) | undefined;
+
+  if (opts.signal) {
+    const signal = opts.signal;
+    reads.push(
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => {
+          void reader.cancel(signal.reason).catch(() => {});
+          try {
+            signal.throwIfAborted();
+          } catch (error) {
+            reject(error);
+          }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }),
+    );
+  }
+
+  if (opts.inactivityMs) {
+    reads.push(
+      new Promise<never>((_resolve, reject) => {
+        inactivityTimer = setTimeout(() => {
+          inactivityError = new SSEStreamTransportError(
+            "inactivity",
+            "SSE stream inactivity deadline exceeded",
+          );
+          void reader.cancel(inactivityError).catch(() => {});
+          reject(inactivityError);
+        }, opts.inactivityMs);
+      }),
+    );
+  }
+
+  try {
+    const result = await Promise.race(reads);
+    if (inactivityError) throw inactivityError;
+    opts.signal?.throwIfAborted();
+    return result;
+  } finally {
+    if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+  }
+}
+
+/**
+ * Parse an SSE byte stream into typed events.
+ *
+ * Handles:
+ *  - `event: <type>` followed by `data: <json>`
+ *  - Multiple `data:` lines (joined with `\n`)
+ *  - Blank lines as event delimiters
+ *  - Default event type `"message"` when no `event:` line precedes data
+ */
+export async function* parseSSEStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  opts: SSEStreamOptions & {
+    maxEventBytes?: number;
+    maxFrames?: number;
+    frameCounter?: { count: number };
+    requireEventTerminator?: boolean;
+    maxTotalBytes?: number;
+    fatalUtf8?: boolean;
+  } = {},
+): AsyncGenerator<{ event: string; data: string }> {
+  // Expose BOM code points to the parser; `stripInitialBom` below owns removal
+  // and byte accounting exactly once, including split transport chunks.
+  const decoder = new TextDecoder("utf-8", {
+    fatal: opts.fatalUtf8,
+    ignoreBOM: true,
+  });
+  let bufferParts: string[] = [];
+  let delimiterScanTail = "";
+  let initialBytes: number[] = [];
+  let initialBytesResolved = false;
+  let bufferedBytes = 0;
+  const maxEventBytes = opts.maxEventBytes ?? 4 * 1024 * 1024;
+  const maxFrames = opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES;
+  const frameCounter = opts.frameCounter ?? { count: 0 };
+  let totalBytes = 0;
+  const delimiterPattern =
+    "(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))";
+
+  const appendDecoded = (text: string): boolean => {
+    if (!text) return false;
+    bufferParts.push(text);
+    const scan = delimiterScanTail + text;
+    const found = new RegExp(delimiterPattern).test(scan);
+    // The longest delimiter is four characters, so retaining three detects
+    // every delimiter completed by the next transport chunk without rescanning
+    // the accumulated event.
+    delimiterScanTail = scan.slice(-3);
+    return found;
+  };
+
+  if (!Number.isSafeInteger(maxFrames) || maxFrames < 0) {
+    throw new Error("SSE frame limit must be a non-negative safe integer");
+  }
+
+  const countFrame = (): void => {
+    frameCounter.count++;
+    if (frameCounter.count > maxFrames) {
+      throw new SSEStreamLimitError(
+        `SSE stream exceeded ${maxFrames} frame limit`,
+      );
+    }
+  };
+
+  const stripInitialBom = (
+    value: Uint8Array | undefined,
+    done: boolean,
+  ): Uint8Array | undefined => {
+    if (initialBytesResolved) return value;
+    let offset = 0;
+    while (value && offset < value.byteLength && initialBytes.length < 3) {
+      initialBytes.push(value[offset++]);
+      if (
+        initialBytes[0] !== 0xef ||
+        (initialBytes.length >= 2 && initialBytes[1] !== 0xbb)
+      ) {
+        break;
+      }
+    }
+    if (initialBytes.length === 0 && !done) return undefined;
+    const isBom =
+      initialBytes.length === 3 &&
+      initialBytes[0] === 0xef &&
+      initialBytes[1] === 0xbb &&
+      initialBytes[2] === 0xbf;
+    const prefixMismatch =
+      initialBytes[0] !== 0xef ||
+      (initialBytes.length >= 2 && initialBytes[1] !== 0xbb) ||
+      (initialBytes.length >= 3 && !isBom);
+    if (!isBom && !prefixMismatch && !done) return undefined;
+
+    initialBytesResolved = true;
+    const prefix = isBom ? new Uint8Array() : Uint8Array.from(initialBytes);
+    initialBytes = [];
+    const suffix = value?.subarray(offset) ?? new Uint8Array();
+    if (prefix.byteLength === 0) return suffix;
+    if (suffix.byteLength === 0) return prefix;
+    const combined = new Uint8Array(prefix.byteLength + suffix.byteLength);
+    combined.set(prefix);
+    combined.set(suffix, prefix.byteLength);
+    return combined;
+  };
+
+  for (;;) {
+    const { done, value } = await readStreamChunk(reader, {
+      signal: opts.signal,
+      inactivityMs: opts.inactivityMs,
+    });
+    const payload = stripInitialBom(value, done);
+    let shouldProcess = false;
+    if (payload && payload.byteLength > 0) {
+      totalBytes += payload.byteLength;
+      if (totalBytes > (opts.maxTotalBytes ?? Number.POSITIVE_INFINITY)) {
+        throw new SSEStreamLimitError(
+          "SSE stream exceeded aggregate byte limit",
+        );
+      }
+      bufferedBytes += payload.byteLength;
+      try {
+        shouldProcess = appendDecoded(
+          decoder.decode(payload, { stream: true }),
+        );
+      } catch {
+        throw new Error("malformed SSE UTF-8");
+      }
+    }
+    if (done) {
+      try {
+        shouldProcess = appendDecoded(decoder.decode()) || shouldProcess;
+      } catch {
+        throw new Error("malformed SSE UTF-8");
+      }
+    }
+    if (shouldProcess) {
+      // Join only when a complete event exists. An attacker fragmenting one
+      // unterminated event into tiny chunks therefore cannot force repeated
+      // copies and full-prefix delimiter scans.
+      const buffer = bufferParts.join("");
+      const delimiter = new RegExp(delimiterPattern, "g");
+      let consumedChars = 0;
+      let consumedBytes = 0;
+      for (;;) {
+        delimiter.lastIndex = consumedChars;
+        const boundary = delimiter.exec(buffer);
+        if (!boundary) break;
+        const block = buffer.slice(consumedChars, boundary.index);
+        // Every delimiter consumes parser work, even when its block is blank or
+        // comment-only and therefore yields no event to the caller.
+        countFrame();
+        const blockBytes = Buffer.byteLength(block);
+        if (blockBytes > maxEventBytes) {
+          throw new SSEStreamLimitError(
+            `SSE event exceeded ${maxEventBytes} byte limit`,
+          );
+        }
+        consumedChars = boundary.index + boundary[0].length;
+        consumedBytes += blockBytes + boundary[0].length;
+
+        // Skip empty blocks
+        if (block.trim() === "") continue;
+
+        let eventType = "message";
+        const dataLines: string[] = [];
+
+        for (const line of block.split(/\r\n|\r|\n/)) {
+          if (line.startsWith("event:")) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+          // Lines starting with ':' are comments — ignore
+          // Other lines without known prefix — ignore per SSE spec
+        }
+
+        if (dataLines.length > 0) {
+          yield { event: eventType, data: dataLines.join("\n") };
+        }
+      }
+      if (consumedChars > 0) {
+        const remaining = buffer.slice(consumedChars);
+        bufferParts = remaining ? [remaining] : [];
+        delimiterScanTail = remaining.slice(-3);
+        bufferedBytes -= consumedBytes;
+      }
+    }
+
+    if (bufferedBytes > maxEventBytes) {
+      throw new SSEStreamLimitError(
+        `SSE event exceeded ${maxEventBytes} byte limit`,
+      );
+    }
+
+    if (done) {
+      const buffer = bufferParts.join("");
+      // Flush any remaining partial block (shouldn't happen with well-formed SSE)
+      if (buffer.trim()) {
+        countFrame();
+        if (opts.requireEventTerminator) {
+          throw new Error("unterminated SSE event at EOF");
+        }
+        let eventType = "message";
+        const dataLines: string[] = [];
+        for (const line of buffer.split(/\r\n|\r|\n/)) {
+          if (line.startsWith("event:")) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+        }
+        if (dataLines.length > 0) {
+          yield { event: eventType, data: dataLines.join("\n") };
         }
       }
       break;
@@ -359,357 +709,7 @@ export function createStreamAccumulator(options?: {
         content.push({
           type: "opaque",
           raw: block.raw,
-          r/**
- * Anthropic SSE stream handling.
- *
- * Parses upstream Anthropic streaming responses (named SSE events), accumulates
- * the full response into a `GatewayResponse`, and provides helpers for
- * generating synthetic SSE event sequences (e.g. for compaction interception).
- *
- * Anthropic uses named SSE events with a lifecycle:
- *   message_start -> content_block_start/delta/stop (repeated) -> message_delta -> message_stop
- *
- * All functions are pure (no side effects) except `parseSSEStream` which is
- * an async generator consuming a byte stream.
- */
-import {
-  ZERO_USAGE,
-  type GatewayContentBlock,
-  type GatewayResponse,
-  type GatewayUsage,
-} from "../translate/types";
-import {
-  DEFAULT_MAX_REPORTED_USAGE,
-  estimateTokens,
-  scaleUsageForClient,
-} from "../compaction";
-import {
-  ANTHROPIC_CONTENT_BLOCK_TYPES,
-  ANTHROPIC_STOP_REASONS,
-  normalizeAnthropicStopReason,
-  toAnthropicStopReason,
-} from "../anthropic-protocol";
-import { isRecord, validateAnthropicUsage } from "../usage-validation";
-import type { SSEStreamOptions } from "./options";
-// NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
-// helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
-// legacy length/4 heuristic.
-
-// ---------------------------------------------------------------------------
-// SSE formatting
-// ---------------------------------------------------------------------------
-
-/** Format a single named SSE event for sending to the client. */
-export function formatSSEEvent(eventType: string, data: string): string {
-  return `event: ${eventType}\ndata: ${data}\n\n`;
-}
-
-// ---------------------------------------------------------------------------
-// SSE parsing
-// ---------------------------------------------------------------------------
-
-type StreamChunkRead = Awaited<
-  ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
->;
-
-/**
- * Foreground and worker SSE streams share this finite frame ceiling. The byte
- * ceilings bound retained data, while this independently bounds parser work for
- * tiny frames (including blank and comment-only frames).
- */
-export const DEFAULT_MAX_SSE_FRAMES = 100_000;
-
-/** A post-header transport failure while reading an SSE response body. */
-export class SSEStreamTransportError extends Error {
-  readonly kind: "inactivity" | "read";
-
-  constructor(
-    kind: "inactivity" | "read",
-    message: string,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = "SSEStreamTransportError";
-    this.kind = kind;
-  }
-}
-
-/** Deterministic local stream limits must never be reclassified as transport. */
-export class SSEStreamLimitError extends Error {}
-
-/** Read one stream chunk while making abort and inactivity independently fatal. */
-export async function readStreamChunk(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  opts: SSEStreamOptions = {},
-): Promise<StreamChunkRead> {
-  opts.signal?.throwIfAborted();
-  const reads: Array<Promise<StreamChunkRead>> = [
-    reader.read().catch((error: unknown) => {
-      opts.signal?.throwIfAborted();
-      if (error instanceof SSEStreamLimitError) throw error;
-      throw new SSEStreamTransportError("read", "SSE stream read failed", {
-        cause: error,
-      });
-    }),
-  ];
-  let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
-  let inactivityError: Error | undefined;
-  let onAbort: (() => void) | undefined;
-
-  if (opts.signal) {
-    const signal = opts.signal;
-    reads.push(
-      new Promise<never>((_resolve, reject) => {
-        onAbort = () => {
-          void reader.cancel(signal.reason).catch(() => {});
-          try {
-            signal.throwIfAborted();
-          } catch (error) {
-            reject(error);
-          }
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-        if (signal.aborted) onAbort();
-      }),
-    );
-  }
-
-  if (opts.inactivityMs) {
-    reads.push(
-      new Promise<never>((_resolve, reject) => {
-        inactivityTimer = setTimeout(() => {
-          inactivityError = new SSEStreamTransportError(
-            "inactivity",
-            "SSE stream inactivity deadline exceeded",
-          );
-          void reader.cancel(inactivityError).catch(() => {});
-          reject(inactivityError);
-        }, opts.inactivityMs);
-      }),
-    );
-  }
-
-  try {
-    const result = await Promise.race(reads);
-    if (inactivityError) throw inactivityError;
-    opts.signal?.throwIfAborted();
-    return result;
-  } finally {
-    if (onAbort) opts.signal?.removeEventListener("abort", onAbort);
-    if (inactivityTimer) clearTimeout(inactivityTimer);
-  }
-}
-
-/**
- * Parse an SSE byte stream into typed events.
- *
- * Handles:
- *  - `event: <type>` followed by `data: <json>`
- *  - Multiple `data:` lines (joined with `\n`)
- *  - Blank lines as event delimiters
- *  - Default event type `"message"` when no `event:` line precedes data
- */
-export async function* parseSSEStream(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  opts: SSEStreamOptions & {
-    maxEventBytes?: number;
-    maxFrames?: number;
-    frameCounter?: { count: number };
-    requireEventTerminator?: boolean;
-    maxTotalBytes?: number;
-    fatalUtf8?: boolean;
-  } = {},
-): AsyncGenerator<{ event: string; data: string }> {
-  // Expose BOM code points to the parser; `stripInitialBom` below owns removal
-  // and byte accounting exactly once, including split transport chunks.
-  const decoder = new TextDecoder("utf-8", {
-    fatal: opts.fatalUtf8,
-    ignoreBOM: true,
-  });
-  let bufferParts: string[] = [];
-  let delimiterScanTail = "";
-  let initialBytes: number[] = [];
-  let initialBytesResolved = false;
-  let bufferedBytes = 0;
-  const maxEventBytes = opts.maxEventBytes ?? 4 * 1024 * 1024;
-  const maxFrames = opts.maxFrames ?? DEFAULT_MAX_SSE_FRAMES;
-  const frameCounter = opts.frameCounter ?? { count: 0 };
-  let totalBytes = 0;
-  const delimiterPattern =
-    "(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))(?:\\r\\n|(?<!\\r)\\n|\\r(?!\\n))";
-
-  const appendDecoded = (text: string): boolean => {
-    if (!text) return false;
-    bufferParts.push(text);
-    const scan = delimiterScanTail + text;
-    const found = new RegExp(delimiterPattern).test(scan);
-    // The longest delimiter is four characters, so retaining three detects
-    // every delimiter completed by the next transport chunk without rescanning
-    // the accumulated event.
-    delimiterScanTail = scan.slice(-3);
-    return found;
-  };
-
-  if (!Number.isSafeInteger(maxFrames) || maxFrames < 0) {
-    throw new Error("SSE frame limit must be a non-negative safe integer");
-  }
-
-  const countFrame = (): void => {
-    frameCounter.count++;
-    if (frameCounter.count > maxFrames) {
-      throw new SSEStreamLimitError(
-        `SSE stream exceeded ${maxFrames} frame limit`,
-      );
-    }
-  };
-
-  const stripInitialBom = (
-    value: Uint8Array | undefined,
-    done: boolean,
-  ): Uint8Array | undefined => {
-    if (initialBytesResolved) return value;
-    let offset = 0;
-    while (value && offset < value.byteLength && initialBytes.length < 3) {
-      initialBytes.push(value[offset++]);
-      if (
-        initialBytes[0] !== 0xef ||
-        (initialBytes.length >= 2 && initialBytes[1] !== 0xbb)
-      ) {
-        break;
-      }
-    }
-    if (initialBytes.length === 0 && !done) return undefined;
-    const isBom =
-      initialBytes.length === 3 &&
-      initialBytes[0] === 0xef &&
-      initialBytes[1] === 0xbb &&
-      initialBytes[2] === 0xbf;
-    const prefixMismatch =
-      initialBytes[0] !== 0xef ||
-      (initialBytes.length >= 2 && initialBytes[1] !== 0xbb) ||
-      (initialBytes.length >= 3 && !isBom);
-    if (!isBom && !prefixMismatch && !done) return undefined;
-
-    initialBytesResolved = true;
-    const prefix = isBom ? new Uint8Array() : Uint8Array.from(initialBytes);
-    initialBytes = [];
-    const suffix = value?.subarray(offset) ?? new Uint8Array();
-    if (prefix.byteLength === 0) return suffix;
-    if (suffix.byteLength === 0) return prefix;
-    const combined = new Uint8Array(prefix.byteLength + suffix.byteLength);
-    combined.set(prefix);
-    combined.set(suffix, prefix.byteLength);
-    return combined;
-  };
-
-  for (;;) {
-    const { done, value } = await readStreamChunk(reader, {
-      signal: opts.signal,
-      inactivityMs: opts.inactivityMs,
-    });
-    const payload = stripInitialBom(value, done);
-    let shouldProcess = false;
-    if (payload && payload.byteLength > 0) {
-      totalBytes += payload.byteLength;
-      if (totalBytes > (opts.maxTotalBytes ?? Number.POSITIVE_INFINITY)) {
-        throw new SSEStreamLimitError(
-          "SSE stream exceeded aggregate byte limit",
-        );
-      }
-      bufferedBytes += payload.byteLength;
-      try {
-        shouldProcess = appendDecoded(
-          decoder.decode(payload, { stream: true }),
-        );
-      } catch {
-        throw new Error("malformed SSE UTF-8");
-      }
-    }
-    if (done) {
-      try {
-        shouldProcess = appendDecoded(decoder.decode()) || shouldProcess;
-      } catch {
-        throw new Error("malformed SSE UTF-8");
-      }
-    }
-    if (shouldProcess) {
-      // Join only when a complete event exists. An attacker fragmenting one
-      // unterminated event into tiny chunks therefore cannot force repeated
-      // copies and full-prefix delimiter scans.
-      const buffer = bufferParts.join("");
-      const delimiter = new RegExp(delimiterPattern, "g");
-      let consumedChars = 0;
-      let consumedBytes = 0;
-      for (;;) {
-        delimiter.lastIndex = consumedChars;
-        const boundary = delimiter.exec(buffer);
-        if (!boundary) break;
-        const block = buffer.slice(consumedChars, boundary.index);
-        // Every delimiter consumes parser work, even when its block is blank or
-        // comment-only and therefore yields no event to the caller.
-        countFrame();
-        const blockBytes = Buffer.byteLength(block);
-        if (blockBytes > maxEventBytes) {
-          throw new SSEStreamLimitError(
-            `SSE event exceeded ${maxEventBytes} byte limit`,
-          );
-        }
-        consumedChars = boundary.index + boundary[0].length;
-        consumedBytes += blockBytes + boundary[0].length;
-
-        // Skip empty blocks
-        if (block.trim() === "") continue;
-
-        let eventType = "message";
-        const dataLines: string[] = [];
-
-        for (const line of block.split(/\r\n|\r|\n/)) {
-          if (line.startsWith("event:")) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith("data:")) {
-            dataLines.push(line.slice(5).trimStart());
-          }
-          // Lines starting with ':' are comments — ignore
-          // Other lines without known prefix — ignore per SSE spec
-        }
-
-        if (dataLines.length > 0) {
-          yield { event: eventType, data: dataLines.join("\n") };
-        }
-      }
-      if (consumedChars > 0) {
-        const remaining = buffer.slice(consumedChars);
-        bufferParts = remaining ? [remaining] : [];
-        delimiterScanTail = remaining.slice(-3);
-        bufferedBytes -= consumedBytes;
-      }
-    }
-
-    if (bufferedBytes > maxEventBytes) {
-      throw new SSEStreamLimitError(
-        `SSE event exceeded ${maxEventBytes} byte limit`,
-      );
-    }
-
-    if (done) {
-      const buffer = bufferParts.join("");
-      // Flush any remaining partial block (shouldn't happen with well-formed SSE)
-      if (buffer.trim()) {
-        countFrame();
-        if (opts.requireEventTerminator) {
-          throw new Error("unterminated SSE event at EOF");
-        }
-        let eventType = "message";
-        const dataLines: string[] = [];
-        for (const line of buffer.split(/\r\n|\r|\n/)) {
-          if (line.startsWith("event:")) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith("data:")) {
-            dataLines.push(line.slice(5).trimStart());
-          }
-        }
-        if (dataLines.length > 0) {
-          yield { event: eventType, data: dataLines.join("\n") equestOnly: true,
+          requestOnly: true,
         });
         break;
       case "tool_use": {

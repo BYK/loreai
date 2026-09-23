@@ -1,4 +1,323 @@
-Unsupported400(body: string): boolean {
+/**
+ * Gateway LLM adapter: implements LLMClient via direct API calls.
+ * Used by Lore's background workers (distillation, curation, query expansion)
+ * running inside the gateway process.
+ *
+ * Supports both Anthropic Messages API and OpenAI Chat Completions API.
+ * The wire protocol is determined by explicit protocol from the session's
+ * UpstreamSnapshot (threaded via opts.protocol), with fallback to the
+ * provider route registry (PROVIDER_ROUTES) and a safe default of
+ * "anthropic" for unknown/aggregator providers:
+ *   - Anthropic protocol → POST /v1/messages
+ *   - OpenAI protocol    → POST /v1/chat/completions
+ *
+ * Protocol is decoupled from provider identity — proxy/aggregator
+ * providers (e.g. OpenCode Zen) that have protocol=null in the route
+ * table receive their protocol from the session snapshot instead.
+ *
+ * Retry logic, Sentry instrumentation, worker call tracking, and error
+ * handling are shared across both protocols.
+ */
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { LLMClient } from "@loreai/core";
+import { log } from "@loreai/core";
+import { anthropicThinkingBudget, openAIReasoningEffort } from "@loreai/core";
+import { semanticLint } from "@loreai/core";
+import type { ReasoningEffort } from "@loreai/core";
+import * as Sentry from "@sentry/bun";
+import type { AuthCredential } from "./auth";
+import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
+import { tripCircuitBreaker } from "./background-limiter";
+import { resolveProviderRoute } from "./config";
+import {
+  buildBillingBlock,
+  buildCodexWorkerHeaders,
+  buildOAuthWorkerHeaders,
+  workerUserAgent,
+  signBody,
+} from "./cch";
+import {
+  setGenAiUsageAttributes,
+  emitCostMetric,
+  type AnthropicUsage,
+} from "./sentry";
+import { recordWorkerCost } from "./cost-tracker";
+import { upstreamFetch } from "./fetch";
+import { responseAgainstAbort } from "./abort-race";
+import {
+  looksLikeSSE,
+  type GatewayContentBlock,
+  type GatewayResponse,
+} from "./translate/types";
+import {
+  buildOpenAIChatCompletionsUrl,
+  buildOpenAIResponsesUrl,
+  copilotHeaders,
+} from "./translate/openai";
+import { accumulateOpenAISSEStream } from "./stream/openai";
+import { accumulateResponsesSSEStream } from "./stream/openai-responses";
+import { accumulateGeminiSSEStream } from "./stream/gemini";
+import {
+  geminiUsageFromMetadata,
+  validateGeminiFunctionCallIdentity,
+} from "./translate/gemini";
+import {
+  accumulateSSEResponse,
+  cancelAndReleaseReader,
+  readStreamChunk,
+  SSEStreamLimitError,
+  SSEStreamTransportError,
+} from "./stream/anthropic";
+import {
+  getSSEInactivityDeadlines,
+  workerSSEStreamOptions,
+} from "./sse-inactivity";
+import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
+import {
+  ANTHROPIC_CONTENT_BLOCK_TYPES,
+  ANTHROPIC_STOP_REASONS,
+  normalizeAnthropicStopReason,
+} from "./anthropic-protocol";
+import {
+  isRecord,
+  validateAnthropicUsage,
+  validateGeminiUsageMetadata,
+  validateOpenAIUsage,
+  validateResponsesUsage,
+} from "./usage-validation";
+import {
+  toVertexBody,
+  toVertexModelId,
+  vertexRawPredictUrl,
+  vertexRegionFromUrl,
+} from "./translate/vertex";
+import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
+import {
+  recordWorkerFailure,
+  recordWorkerSuccess,
+  markWorkerPaused,
+  isWorkerIncapable,
+  markWorkerIncapable,
+  markFreeModelsDataBlocked,
+  recordEmptyWorkerResponse,
+  clearEmptyWorkerStreak,
+} from "./worker-health";
+import { getModelEntrySync, workerModelCandidates } from "./worker-model";
+
+// ---------------------------------------------------------------------------
+// Worker call tracking
+// ---------------------------------------------------------------------------
+
+/** Tracks worker session IDs so temporal capture can skip them. */
+export const activeWorkerCalls = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Retry helpers (exported for testing)
+// ---------------------------------------------------------------------------
+
+/** HTTP status codes that are transient and worth retrying. 504 (Gateway
+ *  Timeout) is included: upstream gateways (esp. OpenRouter fronting slow free
+ *  models) return it on transient upstream timeouts — a retry usually clears. */
+const TRANSIENT_CODES = new Set([429, 500, 502, 503, 504, 529]);
+
+/** HTTP status codes indicating permanent auth failure. */
+export const AUTH_ERROR_CODES = new Set([401, 403]);
+
+/**
+ * Provider "payment required / out of credit" codes (e.g. OpenRouter 402
+ * "requires more credits"). An expected account state, NOT an infrastructure
+ * outage: suppress Sentry escalation, do not count toward the worker-health
+ * failure ladder, and soft-pause the session so we stop retrying every turn.
+ */
+const INSUFFICIENT_CREDIT_CODES = new Set([402]);
+
+/**
+ * Matches the long-context (1M) beta token family, e.g.
+ * `context-1m-2025-08-07`. The date suffix changes over time, so match the
+ * `context-1m` stem (optionally followed by `-<suffix>`), anchored on a
+ * trimmed token so it can't match a substring inside another beta name.
+ */
+const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/i;
+
+/**
+ * Does this header set carry an `anthropic-beta` whose value contains a
+ * long-context (`context-1m`) token? Only the long-context beta is a plausible
+ * cause of the "beta not available for this subscription" 400 on worker calls,
+ * so the retry fallback is gated on its presence — we never strip betas (and
+ * lose the OAuth gate) for an unrelated 400.
+ */
+function hasLongContextBeta(headers: Record<string, string>): boolean {
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === "anthropic-beta" && /context-1m/i.test(v)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Exported for unit testing in `long-context-beta.test.ts`. The runtime
+// safety net in the worker retry loop is dead code for `context-1m`
+// specifically after the upfront strip (#1571), but the helpers remain as
+// the explicit fallback for any future beta the upstream rejects. Tests pin
+// the helper behavior so a future refactor doesn't accidentally drop the
+// OAuth gate or accept unrelated betas.
+export const __testing = {
+  hasLongContextBeta,
+  stripBetaHeaders,
+  isBetaRelated400,
+};
+
+/**
+ * Return a copy of the headers with ONLY the long-context (`context-1m`) beta
+ * token removed from `anthropic-beta`, preserving every other beta — crucially
+ * `oauth-2025-04-20`, which OAuth/bearer worker calls require to authenticate.
+ * Stripping the whole header would turn a recoverable beta-400 into a 401 on
+ * OAuth sessions. If removing the long-context token leaves no betas, the
+ * header is dropped entirely. Used as a runtime fallback on a beta-related 400.
+ */
+function stripBetaHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === "anthropic-beta") {
+      const kept = v
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0 && !LONG_CONTEXT_BETA_RE.test(t));
+      if (kept.length > 0) out[k] = kept.join(",");
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Heuristic: does a 400 body indicate the request used a beta feature the
+ * model/subscription doesn't support? Matches Anthropic's long-context and
+ * generic beta-availability errors (e.g. "The long context beta is not yet
+ * available for this subscription", "... beta is not available", "unsupported
+ * beta"). Conservative — only triggers the one-shot beta-stripped retry.
+ */
+function isBetaRelated400(body: string): boolean {
+  return (
+    /\bbeta\b/i.test(body) &&
+    /\b(not\s+(yet\s+)?available|unsupported|not\s+enabled|invalid)\b/i.test(
+      body,
+    )
+  );
+}
+
+/**
+ * Reduce a first-party validation error to an allowlisted diagnostic category.
+ * Never return the upstream message: validation text can include request values,
+ * while CI only needs the rejected control family to diagnose an opaque 400.
+ */
+export function classifyWorker400(body: string): string {
+  let detail = body;
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown } };
+    if (typeof parsed.error?.message === "string") {
+      detail = parsed.error.message;
+    }
+  } catch {
+    // Plain-text provider errors are classified directly.
+  }
+  const categories: Array<[string, RegExp]> = [
+    ["thinking", /\bthinking\b/i],
+    ["temperature", /\btemperature\b/i],
+    ["cache-control", /cache[_ -]?control|cache[_ -]?ttl|prompt cach/i],
+    ["max-tokens", /max[_ -]?tokens|output tokens/i],
+    ["model", /\bmodel\b/i],
+    ["messages", /\bmessages?\b/i],
+    ["system", /\bsystem\b/i],
+    ["billing", /\bbilling\b|credit balance|insufficient credit/i],
+  ];
+  for (const [category, pattern] of categories) {
+    if (pattern.test(detail)) return category;
+  }
+  return "invalid-request";
+}
+
+/**
+ * Worker call sites set `temperature: 0` for reproducible distillation/curation.
+ * Newer models (e.g. Anthropic `claude-sonnet-5`) have DEPRECATED the sampling
+ * `temperature` param and reject any request that includes it with a 400
+ * ("`temperature` is deprecated for this model."), which breaks every worker on
+ * that model. We learn this fact at runtime — on the first such 400 — so
+ * subsequent worker calls omit `temperature` upfront instead of burning a
+ * wasted round-trip per call. The set is intentionally NOT seeded from a
+ * hardcoded model list: hardcoding drifts as models ship and risks both false
+ * positives (stripping from a model that supports it) and misses (a new model
+ * we forgot). Runtime learning is always correct and self-healing. Keyed by
+ * `providerID/modelID`; in-memory, so it re-learns at most once per model per
+ * gateway lifetime after a restart.
+ */
+const temperatureUnsupportedModels = new Set<string>();
+const reasoningNoneUnsupportedTargets = new Set<string>();
+
+function reasoningNoneCapabilityKey(
+  target: ProviderTarget,
+  model: { providerID: string; modelID: string },
+): string {
+  let origin = target.url;
+  try {
+    origin = new URL(target.url).origin;
+  } catch {
+    // Keep the unresolved URL string; route validation reports malformed URLs.
+  }
+  return `${origin}\x1f${model.providerID}\x1f${model.modelID}\x1f${target.protocol}`;
+}
+
+/** Stable key for the temperature-capability set. */
+function workerModelKey(model: {
+  providerID: string;
+  modelID: string;
+}): string {
+  return `${model.providerID}/${model.modelID}`;
+}
+
+/** Record that a model rejects the `temperature` param (learned from a 400). */
+export function markTemperatureUnsupported(model: {
+  providerID: string;
+  modelID: string;
+}): void {
+  temperatureUnsupportedModels.add(workerModelKey(model));
+}
+
+/** Has this model been observed to reject the `temperature` param? */
+export function isTemperatureUnsupportedModel(model: {
+  providerID: string;
+  modelID: string;
+}): boolean {
+  return temperatureUnsupportedModels.has(workerModelKey(model));
+}
+
+/** Test-only: clear the learned temperature-capability set. */
+export function _resetTemperatureUnsupportedModels(): void {
+  temperatureUnsupportedModels.clear();
+}
+
+/**
+ * Heuristic: does a 400 body indicate the request's `temperature` param is not
+ * accepted by this model? Matches Anthropic's "`temperature` is deprecated for
+ * this model." and OpenAI-style "Unsupported parameter: temperature" / "...
+ * not supported ..." shapes. Requires the word `temperature` AND a rejection
+ * verb so an unrelated 400 that merely mentions temperature can't trigger the
+ * one-shot temperature-stripped retry.
+ */
+export function isTemperatureUnsupported400(body: string): boolean {
+  return (
+    /temperature/i.test(body) &&
+    /\b(deprecated|unsupported|no\s+longer\s+supported|not\s+(?:a\s+)?support(?:ed)?|removed|not\s+allowed|cannot\s+be\s+(?:set|used|specified))\b/i.test(
+      body,
+    )
+  );
+}
+
+function isReasoningNoneUnsupported400(body: string): boolean {
   return (
     /reasoning/i.test(body) &&
     /(?:effort|none)/i.test(body) &&
@@ -244,7 +563,682 @@ const WORKER_ERROR_BODY_MAX_BYTES = 64 * 1024;
 const WORKER_RESPONSE_SNIFF_BYTES = 64 * 1024;
 // Counts all wire bytes exposed to JSON/SSE decoding and accumulator retention,
 // including replay of the sniff prefix. The Bun HTTP bridge also pauses at a
-// 64 KiB byte queue; buffering below that transport boundary ed `"openai-codex-responses"` worker protocol that speaks Responses.
+// 64 KiB byte queue; buffering below that transport boundary (and one already-
+// delivered source chunk) is outside adapter control. Decoded and accumulated
+// content can only derive from bytes admitted under this cap.
+const MAX_WORKER_RESPONSE_BYTES = 4 * 1024 * 1024;
+// Worker prompts are normally bounded to tens of KiB (distillation segments
+// are capped at 16K tokens). This generous wire cap prevents an accidental or
+// adversarial caller from materializing an unbounded serialized request while
+// preserving substantial headroom for JSON escaping and worker system prompts.
+const MAX_WORKER_REQUEST_BYTES = 4 * 1024 * 1024;
+// JSON can expand one input byte (an ASCII control character) to a six-byte
+// `\u00xx` escape. Cap raw prompt bytes at the derived worst-case ratio so the
+// serializer itself cannot transiently allocate far beyond the wire cap.
+const MAX_WORKER_PROMPT_SOURCE_BYTES = Math.floor(MAX_WORKER_REQUEST_BYTES / 6);
+
+/** Retain endpoint routing while stripping userinfo, query, and fragment. */
+function sanitizedWorkerOrigin(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "invalid-origin";
+    }
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return "invalid-origin";
+  }
+}
+
+/** Prevent control characters in non-body metadata from forging log lines. */
+function diagnosticToken(
+  value: string | undefined,
+  fallback = "unknown",
+): string {
+  if (!value) return fallback;
+  let safe = "";
+  for (const char of value.slice(0, 160)) {
+    const code = char.charCodeAt(0);
+    safe += code < 32 || code === 127 ? "?" : char;
+  }
+  return safe;
+}
+
+function diagnosticContentKind(contentType: string): string {
+  if (!contentType) return "missing";
+  if (looksLikeSSE(contentType, "")) return "sse";
+  return /(?:^|[/+])json(?:$|;)/i.test(contentType) ? "json" : "other";
+}
+
+function diagnosticFinishReason(reason: string | undefined): string {
+  if (!reason) return "n/a";
+  return new Set([
+    "stop",
+    "end_turn",
+    "length",
+    "max_tokens",
+    "max_output_tokens",
+    "content_filter",
+    "tool_calls",
+    "tool_use",
+  ]).has(reason)
+    ? reason
+    : "unknown";
+}
+
+/** Extract a bounded structural transport code without exposing its message. */
+function transportErrorCode(error: unknown): string | undefined {
+  const code = isRecord(error) ? error.code : undefined;
+  return typeof code === "string" && /^[A-Z0-9_]{1,64}$/.test(code)
+    ? code
+    : undefined;
+}
+
+function transportErrorKind(error: unknown): string {
+  if (error instanceof WorkerTransportFailureError) return error.kind;
+  if (error instanceof SSEStreamTransportError) return error.kind;
+  if (error instanceof DOMException && error.name === "TimeoutError") {
+    return "deadline";
+  }
+  return "transport";
+}
+
+/**
+ * Error detail safe for logs/lastWorkerError. Provider body values and arbitrary
+ * stream error messages are deliberately excluded.
+ */
+function safeWorkerBodyErrorDetail(error: unknown): string {
+  if (error instanceof WorkerResponseTooLargeError) return error.message;
+  if (error instanceof SyntaxError) return "malformed JSON body";
+  const message = error instanceof Error ? error.message : "";
+  const safePatterns = [
+    /^SSE stream exceeded \d+ frame limit$/,
+    /^SSE event exceeded \d+ byte limit$/,
+    /^worker response exceeded \d+ byte limit$/,
+    /^unterminated SSE event at EOF$/,
+    /^missing (?:Anthropic message_stop|OpenAI finish_reason|Gemini finishReason) terminal$/,
+    /^missing terminal response status$/,
+    /^missing Responses compatibility terminal status$/,
+    /^malformed (?:Anthropic|OpenAI|Responses|Gemini) (?:stream event|response body|usage|terminal event)$/,
+    /^OpenAI stream emitted a non-empty frame after finish_reason terminal$/,
+    /^worker JSON response root must be an object$/,
+    /^non-success Responses response status$/,
+    /^response\.failed terminal$/,
+    /^Responses terminal reported failure$/,
+    /^Responses terminal event\/status mismatch$/,
+    /^incomplete Responses output lifecycle$/,
+    /^Anthropic stream error event$/,
+    /^(?:Response|Upstream response|Anthropic response) has no body$/,
+  ];
+  return safePatterns.some((pattern) => pattern.test(message))
+    ? message
+    : "invalid response body";
+}
+
+/** Initiate response-body cleanup before a retry without trusting cancel to settle. */
+function cancelWorkerResponseForRetry(
+  response: Response,
+  reason: unknown,
+): void {
+  if (!response.body || response.body.locked) return;
+  void response.body.cancel(reason).catch(() => {});
+}
+
+// Visible-output headroom added on top of an extended-thinking budget so the
+// model has room for the actual answer after reasoning (Anthropic counts thinking
+// against max_tokens). Mirrors pipeline.ts's THINKING_OUTPUT_HEADROOM.
+const THINKING_OUTPUT_HEADROOM = 8192;
+
+// When a worker truncates on the output budget (`finish_reason:"length"` /
+// `stop_reason:"max_tokens"`) and emits NO visible text, the model spent the
+// entire allowance on hidden reasoning. Common when the worker model is a
+// reasoning model reached over a protocol that does not expose an explicit
+// thinking budget (e.g. Claude routed through OpenRouter's OpenAI-compatible
+// endpoint). We retry ONCE with the budget multiplied, clamped to the model's
+// own output limit. Bounded to a single retry per call.
+const WORKER_LENGTH_RETRY_MULTIPLIER = 4;
+// Absolute ceiling for the retried budget when the model's output limit is
+// unknown (fallback entry). Bounds cost/latency.
+const WORKER_LENGTH_RETRY_CAP = 64_000;
+
+// Default hidden-reasoning budget assumed for a reasoning-on-by-default worker
+// model when the caller set NO explicit reasoning effort. Distillation/curation
+// workers pass `thinking:false` / no effort, but OpenRouter (and other
+// aggregators) route reasoning models like `anthropic/claude-sonnet-5` that
+// reason REGARDLESS — burning hidden tokens against the output budget before any
+// visible text. Equal to `anthropicThinkingBudget("high")` (16384): a heavy
+// curator/distillation reasoning pass on claude-sonnet-5 was observed burning
+// past the previous 8192 default and truncating on the FIRST attempt, forcing a
+// wasted call + retry-to-64000 (production logs 2026-07-21, session
+// 1eMRchBV7Ajs0dds: `retrying once with max_tokens 16384 → 64000`). 16384 lands
+// the common case in one round-trip; the length-retry remains the backstop for
+// the rare pass that still exceeds it. A floor, never a charge — a higher
+// ceiling costs nothing for models that emit fewer tokens.
+const DEFAULT_REASONING_MODEL_BUDGET = 16_384;
+
+/**
+ * The minimum output budget a worker call needs so the model can complete its
+ * VISIBLE answer after any hidden reasoning pass, or 0 when no floor applies.
+ *
+ * - Explicit reasoning effort set → `anthropicThinkingBudget(effort) +
+ *   THINKING_OUTPUT_HEADROOM` (the caller asked the model to reason; make room).
+ * - No effort, but the model reasons by default (`workerModelReasons` — ANY
+ *   non-empty models.dev `reasoning_options`, i.e. toggle/effort/budget_tokens,
+ *   or the Claude-id fallback) → `DEFAULT_REASONING_MODEL_BUDGET +
+ *   THINKING_OUTPUT_HEADROOM`. This is the case the length-retry alone could not
+ *   solve: the workers pass tiny budgets (~1–8K) and a reasoning model burns
+ *   most of it on reasoning, so the FIRST attempt must already carry headroom.
+ * - Otherwise → 0 (non-reasoning model with no effort keeps its caller budget).
+ *
+ * A floor, never a charge: a model that doesn't reason still bills only the
+ * tokens it actually emits.
+ */
+function workerReasoningHeadroomFloor(
+  model: { modelID: string },
+  reasoningEffort: ReasoningEffort | undefined,
+): number {
+  const explicitBudget = anthropicThinkingBudget(reasoningEffort);
+  if (explicitBudget != null) return explicitBudget + THINKING_OUTPUT_HEADROOM;
+  if (workerModelReasons(model)) {
+    return DEFAULT_REASONING_MODEL_BUDGET + THINKING_OUTPUT_HEADROOM;
+  }
+  return 0;
+}
+
+/**
+ * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
+ * that are non-numeric, negative, or zero fall back to the default (we never
+ * silently disable retries — that would contradict the "ride it out" policy).
+ */
+function resolveMaxRetries(): number {
+  const env = process.env.LORE_MAX_RETRIES;
+  if (env) {
+    const n = Number.parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 1) return n;
+  }
+  return DEFAULT_MAX_RETRIES;
+}
+
+/**
+ * Max retries for a worker call. A single budget regardless of status code or
+ * urgency (the `_status` parameter is retained for call-site readability and
+ * potential future tuning).
+ */
+export function maxRetriesFor(_status: number | null = null): number {
+  return resolveMaxRetries();
+}
+
+/** Parse the Retry-After header into milliseconds, or null if absent/invalid. */
+export function parseRetryAfter(response: Response): number | null {
+  const header = response.headers.get("retry-after");
+  if (!header) return null;
+  const seconds = Number(header);
+  if (!Number.isNaN(seconds)) {
+    if (!Number.isFinite(seconds) || seconds < 0) return null;
+    const milliseconds = seconds * 1000;
+    if (!Number.isFinite(milliseconds) || !Number.isSafeInteger(milliseconds)) {
+      return null;
+    }
+    return Math.min(milliseconds, MAX_DELAY_MS);
+  }
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) {
+    const milliseconds = Math.max(0, date - Date.now());
+    return Number.isSafeInteger(milliseconds)
+      ? Math.min(milliseconds, MAX_DELAY_MS)
+      : null;
+  }
+  return null;
+}
+
+/**
+ * Compute delay for a retry attempt (0-based) using the unified policy.
+ * - Honor Retry-After when present, capped at MAX_DELAY_MS.
+ * - Otherwise exponential backoff with 0-25% jitter:
+ *   min(BASE_DELAY_MS * 2^attempt, MAX_DELAY_MS) + jitter.
+ */
+export function backoffMs(
+  attempt: number,
+  retryAfterMs: number | null,
+): number {
+  if (retryAfterMs != null && Number.isFinite(retryAfterMs)) {
+    return Math.min(Math.max(0, retryAfterMs), MAX_DELAY_MS);
+  }
+  const base = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
+  return base + Math.random() * 0.25 * base;
+}
+
+export function abortableSleep(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export async function readWorkerResponseText(
+  response: Response,
+  signal?: AbortSignal,
+  maxBytes = WORKER_ERROR_BODY_MAX_BYTES,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (bytes < maxBytes) {
+      const { done, value } = await readStreamChunk(reader, {
+        ...workerSSEStreamOptions(signal),
+      });
+      if (done) break;
+      if (!value) continue;
+      const chunk = value.subarray(0, maxBytes - bytes);
+      chunks.push(chunk);
+      bytes += chunk.byteLength;
+    }
+  } catch (_err) {
+    if (signal?.aborted) throw signal.reason;
+    return "(no body)";
+  } finally {
+    cancelAndReleaseReader(reader);
+  }
+  // This is bounded diagnostic text, not semantic response JSON. Replacement
+  // decoding preserves useful error classification when malformed bytes or a
+  // multibyte code point land at the truncation boundary.
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+class WorkerResponseTooLargeError extends SSEStreamLimitError {
+  constructor() {
+    super(`worker response exceeded ${MAX_WORKER_RESPONSE_BYTES} byte limit`);
+    this.name = "WorkerResponseTooLargeError";
+  }
+}
+
+class IncompleteWorkerResponseError extends Error {
+  constructor(readonly reason?: string) {
+    super(`worker response incomplete${reason ? ` (${reason})` : ""}`);
+    this.name = "IncompleteWorkerResponseError";
+  }
+}
+
+class WorkerRequestTooLargeError extends Error {
+  readonly bytes: number;
+
+  constructor(bytes: number) {
+    super(`worker request exceeded ${MAX_WORKER_REQUEST_BYTES} byte limit`);
+    this.name = "WorkerRequestTooLargeError";
+    this.bytes = bytes;
+  }
+}
+
+class WorkerTransportFailureError extends Error {
+  readonly kind: string;
+  readonly code?: string;
+
+  constructor(error: unknown) {
+    const kind = transportErrorKind(error);
+    const code = transportErrorCode(error);
+    super(
+      `Worker transport failure: kind=${kind}${code ? ` code=${code}` : ""}`,
+    );
+    this.name = "WorkerTransportFailureError";
+    this.kind = kind;
+    this.code = code;
+  }
+}
+
+function enforceWorkerRequestLimit<T extends { body: string }>(request: T): T {
+  const bytes = Buffer.byteLength(request.body);
+  if (bytes > MAX_WORKER_REQUEST_BYTES) {
+    throw new WorkerRequestTooLargeError(bytes);
+  }
+  return request;
+}
+
+type WorkerSuccessBody =
+  | { isSSE: true; response: Response }
+  | { isSSE: false; text: string };
+
+function replayWorkerStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  prefix: Uint8Array[],
+  signal?: AbortSignal,
+): Response {
+  let prefixIndex = 0;
+  let bytes = 0;
+  let finished = false;
+  let overflow = false;
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (finished) return;
+        try {
+          if (overflow) throw new WorkerResponseTooLargeError();
+          const result =
+            prefixIndex < prefix.length
+              ? { done: false as const, value: prefix[prefixIndex++] }
+              : await readStreamChunk(reader, {
+                  ...workerSSEStreamOptions(signal),
+                });
+          signal?.throwIfAborted();
+          if (result.done) {
+            finished = true;
+            reader.releaseLock();
+            controller.close();
+            return;
+          }
+          const remaining = MAX_WORKER_RESPONSE_BYTES - bytes;
+          if (result.value.byteLength > remaining) {
+            if (remaining === 0) throw new WorkerResponseTooLargeError();
+            overflow = true;
+            bytes += remaining;
+            controller.enqueue(result.value.subarray(0, remaining));
+            return;
+          }
+          bytes += result.value.byteLength;
+          controller.enqueue(result.value);
+        } catch (error) {
+          finished = true;
+          void reader.cancel(error).catch(() => {});
+          try {
+            reader.releaseLock();
+          } catch {
+            // Cancellation remains non-blocking if a runtime keeps read pending.
+          }
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        finished = true;
+        void reader.cancel(reason).catch(() => {});
+        try {
+          reader.releaseLock();
+        } catch {
+          // Never await an uncooperative source cancellation.
+        }
+      },
+    }),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+async function readCompleteWorkerBody(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  prefix: Uint8Array[],
+  signal?: AbortSignal,
+  onBodyBytes?: () => void,
+): Promise<string> {
+  const chunks = [...prefix];
+  let bytes = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  try {
+    if (bytes > MAX_WORKER_RESPONSE_BYTES) {
+      throw new WorkerResponseTooLargeError();
+    }
+    for (;;) {
+      const { done, value } = await readStreamChunk(reader, {
+        ...workerSSEStreamOptions(signal),
+      });
+      if (done) break;
+      if (!value) continue;
+      if (value.byteLength > 0) onBodyBytes?.();
+      bytes += value.byteLength;
+      if (bytes > MAX_WORKER_RESPONSE_BYTES) {
+        throw new WorkerResponseTooLargeError();
+      }
+      chunks.push(value);
+    }
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.concat(chunks),
+      );
+    } catch {
+      throw new Error("malformed worker response UTF-8");
+    }
+  } finally {
+    void reader.cancel().catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // See readWorkerResponseText: never wait on provider cancellation.
+    }
+  }
+}
+
+async function inspectWorkerSuccessBody(
+  response: Response,
+  signal?: AbortSignal,
+  onNonSSEBodyBytes?: () => void,
+): Promise<WorkerSuccessBody> {
+  const reader = response.body?.getReader();
+  if (!reader) return { isSSE: false, text: "" };
+  const contentType = response.headers.get("content-type") ?? "";
+  const prefix: Uint8Array[] = [];
+  let prefixBytes = 0;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let sniffToken = "";
+  let skippingLeadingWhitespace = true;
+
+  const sniffSSEPrefix = (chunk: Uint8Array): boolean | null => {
+    const text = decoder.decode(chunk, { stream: true });
+    for (const char of text) {
+      if (skippingLeadingWhitespace) {
+        if (char === "\uFEFF" || /\s/.test(char)) continue;
+        if (char === ":") return true;
+        skippingLeadingWhitespace = false;
+      }
+      sniffToken += char;
+      const sseFields = ["data:", "event:", "id:", "retry:"];
+      if (sseFields.some((field) => field.startsWith(sniffToken))) {
+        if (sseFields.includes(sniffToken)) return true;
+        continue;
+      }
+      return false;
+    }
+    return null;
+  };
+
+  if (looksLikeSSE(contentType, "")) {
+    return {
+      isSSE: true,
+      response: replayWorkerStream(reader, prefix, signal),
+    };
+  }
+
+  try {
+    while (prefixBytes < WORKER_RESPONSE_SNIFF_BYTES) {
+      const { done, value } = await readStreamChunk(reader, {
+        ...workerSSEStreamOptions(signal),
+      });
+      if (done) {
+        if (prefixBytes > MAX_WORKER_RESPONSE_BYTES) {
+          throw new WorkerResponseTooLargeError();
+        }
+        reader.releaseLock();
+        if (prefix.some((chunk) => chunk.byteLength > 0)) {
+          onNonSSEBodyBytes?.();
+        }
+        let text: string;
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(
+            Buffer.concat(prefix),
+          );
+        } catch {
+          throw new Error("malformed worker response UTF-8");
+        }
+        return {
+          isSSE: false,
+          text,
+        };
+      }
+      if (!value) continue;
+      prefix.push(value);
+      const sniffBytes = Math.min(
+        value.byteLength,
+        WORKER_RESPONSE_SNIFF_BYTES - prefixBytes,
+      );
+      prefixBytes += sniffBytes;
+      let ssePrefix: boolean | null;
+      try {
+        ssePrefix = sniffSSEPrefix(value.subarray(0, sniffBytes));
+      } catch {
+        onNonSSEBodyBytes?.();
+        throw new Error("malformed worker response UTF-8");
+      }
+      if (ssePrefix) {
+        return {
+          isSSE: true,
+          response: replayWorkerStream(reader, prefix, signal),
+        };
+      }
+      if (ssePrefix === false) break;
+    }
+
+    if (prefix.some((chunk) => chunk.byteLength > 0)) onNonSSEBodyBytes?.();
+    return {
+      isSSE: false,
+      text: await readCompleteWorkerBody(
+        reader,
+        prefix,
+        signal,
+        onNonSSEBodyBytes,
+      ),
+    };
+  } catch (error) {
+    void reader.cancel(error).catch(() => {});
+    try {
+      reader.releaseLock();
+    } catch {
+      // Never await an uncooperative response-body cancellation.
+    }
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI response types & usage normalization (exported for testing)
+// ---------------------------------------------------------------------------
+
+/** OpenAI Chat Completions response shape (subset we need). */
+type OpenAIChatResponse = {
+  choices?: Array<{
+    index?: number;
+    message?: {
+      content?: string | null | Array<Record<string, unknown>>;
+      // Reasoning models (DeepSeek, Qwen-thinking, Nemotron, MiniMax, etc.)
+      // commonly served on aggregators like OpenCode Zen put their answer in a
+      // reasoning field and leave `content` empty/null. We read these as a
+      // fallback so worker calls to such models are not misclassified as
+      // empty/no-response. `reasoning_content` is the DeepSeek/Qwen field;
+      // `reasoning` is the OpenRouter/others field.
+      reasoning_content?: string;
+      reasoning?: string;
+      refusal?: string | null;
+      tool_calls?: Array<{ id?: string; function?: unknown }>;
+    };
+    finish_reason?: string | null;
+    native_finish_reason?: string | null;
+  }>;
+  model?: string | null;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+    } | null;
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
+      audio_tokens?: number;
+      accepted_prediction_tokens?: number;
+      rejected_prediction_tokens?: number;
+    } | null;
+  };
+};
+
+/**
+ * OpenAI-protocol usage reports cache reads (`cached_tokens`) and writes
+ * (`cache_write_tokens`) as a SUBSET of `prompt_tokens` (inclusive accounting —
+ * confirmed by the OpenAI prompt-caching docs: `prompt_tokens: 2006` includes
+ * `cached_tokens: 1920`). The gateway's cost model and cache analytics treat
+ * input / cache-read / cache-write as DISJOINT buckets (the Anthropic-native
+ * convention, where `input_tokens` already EXCLUDES cache tokens). Feeding the
+ * raw inclusive `prompt_tokens` straight through double-bills the cached and
+ * written tokens (once at input rate, again at cache-read/write rate) and
+ * inflates the analytics denominator.
+ *
+ * Convert to the disjoint convention by subtracting the cache buckets from the
+ * reported input. Clamped at 0 so a provider that (incorrectly) reports cache
+ * tokens exceeding `prompt_tokens` can never yield a negative input count.
+ */
+export function disjointOpenAIInputTokens(
+  rawInputTokens: number | undefined,
+  cachedTokens: number | undefined,
+  cacheWriteTokens: number | undefined,
+): number {
+  return Math.max(
+    0,
+    (rawInputTokens ?? 0) - (cachedTokens ?? 0) - (cacheWriteTokens ?? 0),
+  );
+}
+
+/**
+ * Normalize OpenAI usage to the AnthropicUsage shape for unified cost tracking.
+ *
+ * Maps:
+ *   prompt_tokens − cached − written           → input_tokens (disjoint)
+ *   completion_tokens                          → output_tokens
+ *   prompt_tokens_details.cached_tokens        → cache_read_input_tokens
+ *   prompt_tokens_details.cache_write_tokens   → cache_creation_input_tokens
+ *
+ * OpenAI proper doesn't report cache writes (field absent → 0); OpenRouter does
+ * report them for Anthropic explicit caching. See `disjointOpenAIInputTokens`
+ * for why the cache buckets are subtracted from `prompt_tokens`.
+ */
+export function normalizeOpenAIUsage(
+  usage: OpenAIChatResponse["usage"],
+): AnthropicUsage {
+  validateOpenAIUsage(usage, "malformed OpenAI usage");
+  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const cacheWriteTokens =
+    usage?.prompt_tokens_details?.cache_write_tokens ?? 0;
+  return {
+    input_tokens: disjointOpenAIInputTokens(
+      usage?.prompt_tokens,
+      cachedTokens,
+      cacheWriteTokens,
+    ),
+    output_tokens: usage?.completion_tokens ?? 0,
+    cache_read_input_tokens: cachedTokens,
+    cache_creation_input_tokens: cacheWriteTokens,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Provider-specific request builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Wire protocol for worker requests.
+ *
+ * `openai-responses` is collapsed to `"openai"` (Chat Completions) for normal
+ * OpenAI providers — workers do simple prompt→response and the Chat Completions
+ * endpoint is simpler/cheaper. The one exception is `openai-codex`: ChatGPT's
+ * `/backend-api` serves ONLY the Responses API (`/codex/responses`), so it gets
+ * a dedicated `"openai-codex-responses"` worker protocol that speaks Responses.
  */
 export type WorkerProtocol =
   | "anthropic"
@@ -831,7 +1825,292 @@ function buildAnthropicWorkerRequest(
   // fingerprint (`oauth-2025-04-20` beta on api.anthropic.com); when active the
   // model can spend its budget on a thinking block and return an EMPTY thinking
   // block with no visible text — the worker then sees a "no usable text" empty
-  // response and t) {
+  // response and the whole distill/curate loop degrades. `{type:"disabled"}` is
+  // accepted by on-by-default Sonnet/Opus models; extended-thinking-only models
+  // (including Haiku 4.5) reject it and are excluded by the caller. Any remaining
+  // rejection is learned via a one-shot 400 retry in the loop, which then passes
+  // `disableThinking=false` here.
+  // Extended thinking, opt-in via reasoning effort. When a budget is set the
+  // caller wants the model to reason — this OVERRIDES the default worker
+  // disable-thinking suppression. Anthropic constraints when thinking is on:
+  //   1. max_tokens MUST exceed budget_tokens — the judge's tiny 256-token cap
+  //      would otherwise 400, so we raise max_tokens to budget + headroom.
+  //   2. temperature must be unset (only the default is allowed) — so we drop it.
+  // Caveat: budget+headroom for `xhigh` is ~41K; a model whose output ceiling is
+  // below that would 400. Not guarded here (we lack the per-model ceiling on the
+  // worker path), but the effort budgets stay well under the common 64K ceiling
+  // and the semantic-lint judge — the only effort caller — degrades a judge 400
+  // to a safe "no finding" (advisory: never fails the build).
+  const thinkingBudget = anthropicThinkingBudget(reasoningEffort);
+  const thinkingEnabled = thinkingBudget != null;
+  const effectiveMaxTokens = thinkingEnabled
+    ? Math.max(maxTokens, thinkingBudget + THINKING_OUTPUT_HEADROOM)
+    : maxTokens;
+
+  let body = JSON.stringify({
+    model: upstreamModelID,
+    max_tokens: effectiveMaxTokens,
+    // temperature is incompatible with extended thinking — omit when enabled.
+    ...(temperature != null && !thinkingEnabled && { temperature }),
+    ...(thinkingEnabled
+      ? { thinking: { type: "enabled", budget_tokens: thinkingBudget } }
+      : disableThinking && { thinking: { type: "disabled" } }),
+    system: systemPayload,
+    messages: [{ role: "user", content: user }],
+  });
+
+  // Sign the body: compute xxHash64 and replace cch=00000 with real hash
+  if (billingBlock) {
+    body = signBody(body);
+  }
+
+  // For OAuth sessions, include Claude Code headers (anthropic-beta,
+  // user-agent, etc.) sniffed from conversation turns. Without these,
+  // Anthropic may reject worker calls with 401 even when the token is valid.
+  const oauthHeaders = buildOAuthWorkerHeaders(sessionID);
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01",
+    // Replay a user-agent on every worker request. Anthropic-compat providers
+    // (MiniMax) reject UA-less requests with a generic auth failure even when
+    // the key/host are correct — the conversation path works only because it
+    // forwards the client UA. oauthHeaders (billing sessions) may override this.
+    "user-agent": workerUserAgent(sessionID),
+    ...authHeaders(cred),
+    ...oauthHeaders,
+  };
+
+  // Worker calls never need the 1M context window — workers operate on bounded
+  // message segments (a distillation segment is capped at 16K tokens; the whole
+  // session is typically well under 200K). The user's `anthropic-beta` is
+  // replayed verbatim onto worker calls, so a sniffed `context-1m` long-context
+  // beta rides along UNLESS we strip it here. On a subscription auth account
+  // without purchased usage credits, Anthropic rejects any call carrying the
+  // `context-1m` beta with a 429 ("Usage credits are required for long context
+  // requests.") regardless of payload size, and that 429 is permanent — workers
+  // exhaust their retry budget, the circuit breaker trips, and distillation /
+  // curation / cache-warming stop forever (issue #1571). The earlier
+  // capability-conditional filter was wrong: it asked "can this worker model
+  // handle 1M", but the right question is "does this call need 1M", and the
+  // answer is always no for a background worker. Strip it unconditionally.
+  // (A runtime 400-retry-without-beta fallback in the retry loop covers any
+  // other beta we couldn't validate here.)
+  stripLongContextBetaForWorker(headers);
+
+  return {
+    url: `${target.url}/v1/messages`,
+    headers,
+    body,
+  };
+}
+
+/**
+ * Drop the long-context (`context-1m`) beta token from worker calls.
+ *
+ * Workers operate on bounded message segments (distillation, curation, cache
+ * warming, query expansion) — never on the full 1M window the user opted into
+ * for their conversation turn. Carrying the `context-1m` beta on a worker call
+ * is never useful, and on a subscription auth account without purchased usage
+ * credits it is actively harmful: Anthropic rejects any call carrying the beta
+ * with a 429 ("Usage credits are required for long context requests."),
+ * regardless of how small the worker payload is, and that 429 is permanent.
+ * The call exhausts its retry budget, the circuit breaker trips, and the
+ * session's background work stops forever (issue #1571).
+ *
+ * The previous capability-conditional filter only stripped the beta when the
+ * worker model's catalog context window was below 1M — which never fired for
+ * the default worker model (claude-sonnet-4-6, 1M-capable) and so produced the
+ * exact failure described above. Strip unconditionally for workers and let
+ * capability be a runtime concern (the 400-retry-without-beta fallback in the
+ * retry loop remains as a safety net for any future beta we couldn't validate).
+ *
+ * Other betas (oauth-2025-04-20, fine-grained-tool-streaming, extended-cache-ttl,
+ * prompt-caching-scope, etc.) are preserved. If stripping leaves no betas,
+ * the header is removed entirely. Mutates `headers` in place.
+ */
+function stripLongContextBetaForWorker(headers: Record<string, string>): void {
+  const betaKey = Object.keys(headers).find(
+    (k) => k.toLowerCase() === "anthropic-beta",
+  );
+  if (!betaKey) return;
+  const betaValue = headers[betaKey];
+  if (!betaValue || !/context-1m/i.test(betaValue)) return;
+
+  const kept = betaValue
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !LONG_CONTEXT_BETA_RE.test(t));
+  if (kept.length > 0) {
+    headers[betaKey] = kept.join(",");
+  } else {
+    delete headers[betaKey];
+  }
+}
+
+/**
+ * Build OpenAI Chat Completions API request.
+ * Returns the full URL, headers, and serialized body.
+ */
+function buildOpenAIWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature?: number,
+  reasoningEffort?: ReasoningEffort,
+  providerOptions?: Readonly<Record<string, unknown>>,
+): { url: string; headers: Record<string, string>; body: string } {
+  const messages: Array<{ role: string; content: string }> = [];
+  if (system) messages.push({ role: "system", content: system });
+  messages.push({ role: "user", content: user });
+
+  // OpenRouter workers inherit the owning session's explicit routing policy.
+  // Without one, retain Lore's existing cheapest-provider default for
+  // latency-tolerant background work. Other providers never see this field.
+  const validProviderOptions =
+    providerOptions !== null &&
+    typeof providerOptions === "object" &&
+    !Array.isArray(providerOptions)
+      ? providerOptions
+      : undefined;
+  const providerPrefs =
+    target.providerName === "openrouter"
+      ? { provider: validProviderOptions ?? { sort: "price" } }
+      : undefined;
+
+  // Reasoning models honor `reasoning_effort`; non-reasoning models (gpt-4o-mini,
+  // the CI default) silently ignore it. `off`/undefined → omit. `xhigh` clamps to
+  // `high` (not a standard OpenAI value) inside openAIReasoningEffort.
+  const effort = openAIReasoningEffort(reasoningEffort);
+
+  return {
+    // Background workers have no original request to forward verbatim, so the
+    // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
+    // Google Gemini serves `/v1beta/openai/...`, issue #1070).
+    url: buildOpenAIChatCompletionsUrl(target.url),
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(cred),
+      // GitHub Copilot wants Copilot-Integration-Id + X-GitHub-Api-Version;
+      // no-op for others.
+      ...copilotHeaders(target.url),
+    },
+    body: JSON.stringify({
+      model: model.modelID,
+      max_completion_tokens: maxTokens,
+      stream: false,
+      ...(temperature != null && { temperature }),
+      ...(effort != null && { reasoning_effort: effort }),
+      messages,
+      ...providerPrefs,
+    }),
+  };
+}
+
+/**
+ * Build a native Gemini `generateContent` worker request. Gemini authenticates
+ * with an API key via `x-goog-api-key` (NOT Bearer), carries the model in the
+ * URL path, and uses `systemInstruction` + `contents` + `generationConfig`.
+ */
+function buildGeminiWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature?: number,
+): { url: string; headers: Record<string, string>; body: string } {
+  const generationConfig: Record<string, unknown> = {
+    maxOutputTokens: maxTokens,
+  };
+  if (temperature != null) generationConfig.temperature = temperature;
+  const body: Record<string, unknown> = {
+    contents: [{ role: "user", parts: [{ text: user }] }],
+    generationConfig,
+  };
+  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  // Gemini API-key auth uses `x-goog-api-key`; OAuth/Code-Assist sessions use a
+  // Bearer token. Be scheme-aware so a bearer credential is never shoved into
+  // the api-key header (which would silently misauth).
+  const authHeader: Record<string, string> =
+    cred.scheme === "bearer"
+      ? { Authorization: `Bearer ${cred.value}` }
+      : { "x-goog-api-key": cred.value };
+  return {
+    url: `${target.url}/v1beta/models/${encodeURIComponent(model.modelID)}:generateContent`,
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeader,
+    },
+    body: JSON.stringify(body),
+  };
+}
+
+/** Parse a native Gemini `generateContent` worker response into `{text,usage,model}`. */
+export function parseGeminiWorkerResponse(data: {
+  candidates?: unknown;
+  usageMetadata?: unknown;
+  modelVersion?: unknown;
+}): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  const malformed = (): never => {
+    throw new Error("malformed Gemini response body");
+  };
+  if (data.candidates !== undefined && !Array.isArray(data.candidates)) {
+    malformed();
+  }
+  const candidates = (data.candidates ?? []) as unknown[];
+  for (const candidate of candidates) {
+    const toolIdentities = new Set<string>();
+    if (!isRecord(candidate)) malformed();
+    const typedCandidate = candidate as Record<string, unknown>;
+    if (
+      typedCandidate.index !== undefined &&
+      (!Number.isSafeInteger(typedCandidate.index) ||
+        (typedCandidate.index as number) < 0)
+    ) {
+      malformed();
+    }
+    if (
+      typedCandidate.finishReason !== undefined &&
+      typedCandidate.finishReason !== null &&
+      typeof typedCandidate.finishReason !== "string"
+    ) {
+      malformed();
+    }
+    if (
+      typedCandidate.tokenCount !== undefined &&
+      (!Number.isSafeInteger(typedCandidate.tokenCount) ||
+        (typedCandidate.tokenCount as number) < 0)
+    ) {
+      malformed();
+    }
+    if (typedCandidate.content === undefined) continue;
+    if (!isRecord(typedCandidate.content)) malformed();
+    const typedContent = typedCandidate.content as Record<string, unknown>;
+    if (
+      typedContent.role !== undefined &&
+      typeof typedContent.role !== "string"
+    ) {
+      malformed();
+    }
+    const parts = typedContent.parts;
+    if (parts === undefined) continue;
+    if (!Array.isArray(parts)) malformed();
+    for (const part of parts as unknown[]) {
+      if (!isRecord(part)) malformed();
+      const typedPart = part as Record<string, unknown>;
+      if (
+        typedPart.text !== undefined &&
+        typedPart.functionCall !== undefined
+      ) {
         malformed();
       }
       if (typedPart.text !== undefined && typeof typedPart.text !== "string") {
@@ -1183,1629 +2462,7 @@ export function parseOpenAIResponse(data: OpenAIChatResponse): {
       (choice.finish_reason !== undefined &&
         choice.finish_reason !== null &&
         typeof choice.finish_reason !== "string") ||
-      (choice.native_finish_rreason?: string) {
-    super(`worker response incomplete${reason ? ` (${reason})` : ""}`);
-    this.name = "IncompleteWorkerResponseError";
-  }
-}
-
-class WorkerRequestTooLargeError extends Error {
-  readonly bytes: number;
-
-  constructor(bytes: number) {
-    super(`worker request exceeded ${MAX_WORKER_REQUEST_BYTES} byte limit`);
-    this.name = "WorkerRequestTooLargeError";
-    this.bytes = bytes;
-  }
-}
-
-class WorkerTransportFailureError extends Error {
-  readonly kind: string;
-  readonly code?: string;
-
-  constructor(error: unknown) {
-    const kind = transportErrorKind(error);
-    const code = transportErrorCode(error);
-    super(
-      `Worker transport failure: kind=${kind}${code ? ` code=${code}` : ""}`,
-    );
-    this.name = "WorkerTransportFailureError";
-    this.kind = kind;
-    this.code = code;
-  }
-}
-
-function enforceWorkerRequestLimit<T extends { body: string }>(request: T): T {
-  const bytes = Buffer.byteLength(request.body);
-  if (bytes > MAX_WORKER_REQUEST_BYTES) {
-    throw new WorkerRequestTooLargeError(bytes);
-  }
-  return request;
-}
-
-type WorkerSuccessBody =
-  | { isSSE: true; response: Response }
-  | { isSSE: false; text: string };
-
-function replayWorkerStream(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  prefix: Uint8Array[],
-  signal?: AbortSignal,
-): Response {
-  let prefixIndex = 0;
-  let bytes = 0;
-  let finished = false;
-  let overflow = false;
-
-  return new Response(
-    new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        if (finished) return;
-        try {
-          if (overflow) throw new WorkerResponseTooLargeError();
-          const result =
-            prefixIndex < prefix.length
-              ? { done: false as const, value: prefix[prefixIndex++] }
-              : await readStreamChunk(reader, {
-                  ...workerSSEStreamOptions(signal),
-                });
-          signal?.throwIfAborted();
-          if (result.done) {
-            finished = true;
-            reader.releaseLock();
-            controller.close();
-            return;
-          }
-          const remaining = MAX_WORKER_RESPONSE_BYTES - bytes;
-          if (result.value.byteLength > remaining) {
-            if (remaining === 0) throw new WorkerResponseTooLargeError();
-            overflow = true;
-            bytes += remaining;
-            controller.enqueue(result.value.subarray(0, remaining));
-            return;
-          }
-          bytes += result.value.byteLength;
-          controller.enqueue(result.value);
-        } catch (error) {
-          finished = true;
-          void reader.cancel(error).catch(() => {});
-          try {
-            reader.releaseLock();
-          } catch {
-            // Cancellation remains non-blocking if a runtime keeps read pending.
-          }
-          controller.error(error);
-        }
-      },
-      cancel(reason) {
-        finished = true;
-        void reader.cancel(reason).catch(() => {});
-        try {
-          reader.releaseLock();
-        } catch {
-          // Never await an uncooperative source cancellation.
-        }
-      },
-    }),
-    { headers: { "content-type": "text/event-stream" } },
-  );
-}
-
-async function readCompleteWorkerBody(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  prefix: Uint8Array[],
-  signal?: AbortSignal,
-  onBodyBytes?: () => void,
-): Promise<string> {
-  const chunks = [...prefix];
-  let bytes = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  try {
-    if (bytes > MAX_WORKER_RESPONSE_BYTES) {
-      throw new WorkerResponseTooLargeError();
-    }
-    for (;;) {
-      const { done, value } = await readStreamChunk(reader, {
-        ...workerSSEStreamOptions(signal),
-      });
-      if (done) break;
-      if (!value) continue;
-      if (value.byteLength > 0) onBodyBytes?.();
-      bytes += value.byteLength;
-      if (bytes > MAX_WORKER_RESPONSE_BYTES) {
-        throw new WorkerResponseTooLargeError();
-      }
-      chunks.push(value);
-    }
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(
-        Buffer.concat(chunks),
-      );
-    } catch {
-      throw new Error("malformed worker response UTF-8");
-    }
-  } finally {
-    void reader.cancel().catch(() => {});
-    try {
-      reader.releaseLock();
-    } catch {
-      // See readWorkerResponseText: never wait on provider cancellation.
-    }
-  }
-}
-
-async function inspectWorkerSuccessBody(
-  response: Response,
-  signal?: AbortSignal,
-  onNonSSEBodyBytes?: () => void,
-): Promise<WorkerSuccessBody> {
-  const reader = response.body?.getReader();
-  if (!reader) return { isSSE: false, text: "" };
-  const contentType = response.headers.get("content-type") ?? "";
-  const prefix: Uint8Array[] = [];
-  let prefixBytes = 0;
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let sniffToken = "";
-  let skippingLeadingWhitespace = true;
-
-  const sniffSSEPrefix = (chunk: Uint8Array): boolean | null => {
-    const text = decoder.decode(chunk, { stream: true });
-    for (const char of text) {
-      if (skippingLeadingWhitespace) {
-        if (char === "\uFEFF" || /\s/.test(char)) continue;
-        if (char === ":") return true;
-        skippingLeadingWhitespace = false;
-      }
-      sniffToken += char;
-      const sseFields = ["data:", "event:", "id:", "retry:"];
-      if (sseFields.some((field) => field.startsWith(sniffToken))) {
-        if (sseFields.includes(sniffToken)) return true;
-        continue;
-      }
-      return false;
-    }
-    return null;
-  };
-
-  if (looksLikeSSE(contentType, "")) {
-    return {
-      isSSE: true,
-      response: replayWorkerStream(reader, prefix, signal),
-    };
-  }
-
-  try {
-    while (prefixBytes < WORKER_RESPONSE_SNIFF_BYTES) {
-      const { done, value } = await readStreamChunk(reader, {
-        ...workerSSEStreamOptions(signal),
-      });
-      if (done) {
-        if (prefixBytes > MAX_WORKER_RESPONSE_BYTES) {
-          throw new WorkerResponseTooLargeError();
-        }
-        reader.releaseLock();
-        if (prefix.some((chunk) => chunk.byteLength > 0)) {
-          onNonSSEBodyBytes?.();
-        }
-        let text: string;
-        try {
-          text = new TextDecoder("utf-8", { fatal: true }).decode(
-            Buffer.concat(prefix),
-          );
-        } catch {
-          throw new Error("malformed worker response UTF-8");
-        }
-        return {
-          isSSE: false,
-          text,
-        };
-      }
-      if (!value) continue;
-      prefix.push(value);
-      const sniffBytes = Math.min(
-        value.byteLength,
-        WORKER_RESPONSE_SNIFF_BYTES - prefixBytes,
-      );
-      prefixBytes += sniffBytes;
-      let ssePrefix: boolean | null;
-      try {
-        ssePrefix = sniffSSEPrefix(value.subarray(0, sniffBytes));
-      } catch {
-        onNonSSEBodyBytes?.();
-        throw new Error("malformed worker response UTF-8");
-      }
-      if (ssePrefix) {
-        return {
-          isSSE: true,
-          response: replayWorkerStream(reader, prefix, signal),
-        };
-      }
-      if (ssePrefix === false) break;
-    }
-
-    if (prefix.some((chunk) => chunk.byteLength > 0)) onNonSSEBodyBytes?.();
-    return {
-      isSSE: false,
-      text: await readCompleteWorkerBody(
-        reader,
-        prefix,
-        signal,
-        onNonSSEBodyBytes,
-      ),
-    };
-  } catch (error) {
-    void reader.cancel(error).catch(() => {});
-    try {
-      reader.releaseLock();
-    } catch {
-      // Never await an uncooperative response-body cancellation.
-    }
-    throw error;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// OpenAI response types & usage normalization (exported for testing)
-// ---------------------------------------------------------------------------
-
-/** OpenAI Chat Completions response shape (subset we need). */
-type OpenAIChatResponse = {
-  choices?: Array<{
-    index?: number;
-    message?: {
-      content?: string | null | Array<Record<string, unknown>>;
-      // Reasoning models (DeepSeek, Qwen-thinking, Nemotron, MiniMax, etc.)
-      // commonly served on aggregators like OpenCode Zen put their answer in a
-      // reasoning field and leave `content` empty/null. We read these as a
-      // fallback so worker calls to such models are not misclassified as
-      // empty/no-response. `reasoning_content` is the DeepSeek/Qwen field;
-      // `reasoning` is the OpenRouter/others field.
-      reasoning_content?: string;
-      reasoning?: string;
-      refusal?: string | null;
-      tool_calls?: Array<{ id?: string; function?: unknown }>;
-    };
-    finish_reason?: string | null;
-    native_finish_reason?: string | null;
-  }>;
-  model?: string | null;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    prompt_tokens_details?: {
-      cached_tokens?: number;
-      cache_write_tokens?: number;
-    } | null;
-    completion_tokens_details?: {
-      reasoning_tokens?: number;
-      audio_tokens?: number;
-      accepted_prediction_tokens?: number;
-      rejected_prediction_tokens?: number;
-    } | null;
-  };
-};
-
-/**
- * OpenAI-protocol usage reports cache reads (`cached_tokens`) and writes
- * (`cache_write_tokens`) as a SUBSET of `prompt_tokens` (inclusive accounting —
- * confirmed by the OpenAI prompt-caching docs: `prompt_tokens: 2006` includes
- * `cached_tokens: 1920`). The gateway's cost model and cache analytics treat
- * input / cache-read / cache-write as DISJOINT buckets (the Anthropic-native
- * convention, where `input_tokens` already EXCLUDES cache tokens). Feeding the
- * raw inclusive `prompt_tokens` straight through double-bills the cached and
- * written tokens (once at input rate, again at cache-read/write rate) and
- * inflates the analytics denominator.
- *
- * Convert to the disjoint convention by subtracting the cache buckets from the
- * reported input. Clamped at 0 so a provider that (incorrectly) reports cache
- * tokens exceeding `prompt_tokens` can never yield a negative input count.
- */
-export function disjointOpenAIInputTokens(
-  rawInputTokens: number | undefined,
-  cachedTokens: number | undefined,
-  cacheWriteTokens: number | undefined,
-): number {
-  return Math.max(
-    0,
-    (rawInputTokens ?? 0) - (cachedTokens ?? 0) - (cacheWriteTokens ?? 0),
-  );
-}
-
-/**
- * Normalize OpenAI usage to the AnthropicUsage shape for unified cost tracking.
- *
- * Maps:
- *   prompt_tokens − cached − written           → input_tokens (disjoint)
- *   completion_tokens                          → output_tokens
- *   prompt_tokens_details.cached_tokens        → cache_read_input_tokens
- *   prompt_tokens_details.cache_write_tokens   → cache_creation_input_tokens
- *
- * OpenAI proper doesn't report cache writes (field absent → 0); OpenRouter does
- * report them for Anthropic explicit caching. See `disjointOpenAIInputTokens`
- * for why the cache buckets are subtracted from `prompt_tokens`.
- */
-export function normalizeOpenAIUsage(
-  usage: OpenAIChatResponse["usage"],
-): AnthropicUsage {
-  validateOpenAIUsage(usage, "malformed OpenAI usage");
-  const cachedTokens = usage?.prompt_tokens_details?.cached_tokens ?? 0;
-  const cacheWriteTokens =
-    usage?.prompt_tokens_details?.cache_write_tokens ?? 0;
-  return {
-    input_tokens: disjointOpenAIInputTokens(
-      usage?.prompt_tokens,
-      cachedTokens,
-      cacheWriteTokens,
-    ),
-    output_tokens: usage?.completion_tokens ?? 0,
-    cache_read_input_tokens: cachedTokens,
-    cache_creation_input_tokens: cacheWriteTokens,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Provider-specific request builders
-// ---------------------------------------------------------------------------
-
-/**
- * Wire protocol for worker requests.
- *
- * `openai-responses` is collapsed to `"openai"` (Chat Completions) for normal
- * OpenAI providers — workers do simple prompt→response and the Chat Completions
- * endpoint is simpler/cheaper. The one exception is `openai-codex`: ChatGPT's
- * `/backend-api` serves ONLY the Responses API (`/codex/responses`), so it gets
- * a dedicat(and one already-
-// delivered source chunk) is outside adapter control. Decoded and accumulated
-// content can only derive from bytes admitted under this cap.
-const MAX_WORKER_RESPONSE_BYTES = 4 * 1024 * 1024;
-// Worker prompts are normally bounded to tens of KiB (distillation segments
-// are capped at 16K tokens). This generous wire cap prevents an accidental or
-// adversarial caller from materializing an unbounded serialized request while
-// preserving substantial headroom for JSON escaping and worker system prompts.
-const MAX_WORKER_REQUEST_BYTES = 4 * 1024 * 1024;
-// JSON can expand one input byte (an ASCII control character) to a six-byte
-// `\u00xx` escape. Cap raw prompt bytes at the derived worst-case ratio so the
-// serializer itself cannot transiently allocate far beyond the wire cap.
-const MAX_WORKER_PROMPT_SOURCE_BYTES = Math.floor(MAX_WORKER_REQUEST_BYTES / 6);
-
-/** Retain endpoint routing while stripping userinfo, query, and fragment. */
-function sanitizedWorkerOrigin(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return "invalid-origin";
-    }
-    return `${url.origin}${url.pathname}`;
-  } catch {
-    return "invalid-origin";
-  }
-}
-
-/** Prevent control characters in non-body metadata from forging log lines. */
-function diagnosticToken(
-  value: string | undefined,
-  fallback = "unknown",
-): string {
-  if (!value) return fallback;
-  let safe = "";
-  for (const char of value.slice(0, 160)) {
-    const code = char.charCodeAt(0);
-    safe += code < 32 || code === 127 ? "?" : char;
-  }
-  return safe;
-}
-
-function diagnosticContentKind(contentType: string): string {
-  if (!contentType) return "missing";
-  if (looksLikeSSE(contentType, "")) return "sse";
-  return /(?:^|[/+])json(?:$|;)/i.test(contentType) ? "json" : "other";
-}
-
-function diagnosticFinishReason(reason: string | undefined): string {
-  if (!reason) return "n/a";
-  return new Set([
-    "stop",
-    "end_turn",
-    "length",
-    "max_tokens",
-    "max_output_tokens",
-    "content_filter",
-    "tool_calls",
-    "tool_use",
-  ]).has(reason)
-    ? reason
-    : "unknown";
-}
-
-/** Extract a bounded structural transport code without exposing its message. */
-function transportErrorCode(error: unknown): string | undefined {
-  const code = isRecord(error) ? error.code : undefined;
-  return typeof code === "string" && /^[A-Z0-9_]{1,64}$/.test(code)
-    ? code
-    : undefined;
-}
-
-function transportErrorKind(error: unknown): string {
-  if (error instanceof WorkerTransportFailureError) return error.kind;
-  if (error instanceof SSEStreamTransportError) return error.kind;
-  if (error instanceof DOMException && error.name === "TimeoutError") {
-    return "deadline";
-  }
-  return "transport";
-}
-
-/**
- * Error detail safe for logs/lastWorkerError. Provider body values and arbitrary
- * stream error messages are deliberately excluded.
- */
-function safeWorkerBodyErrorDetail(error: unknown): string {
-  if (error instanceof WorkerResponseTooLargeError) return error.message;
-  if (error instanceof SyntaxError) return "malformed JSON body";
-  const message = error instanceof Error ? error.message : "";
-  const safePatterns = [
-    /^SSE stream exceeded \d+ frame limit$/,
-    /^SSE event exceeded \d+ byte limit$/,
-    /^worker response exceeded \d+ byte limit$/,
-    /^unterminated SSE event at EOF$/,
-    /^missing (?:Anthropic message_stop|OpenAI finish_reason|Gemini finishReason) terminal$/,
-    /^missing terminal response status$/,
-    /^missing Responses compatibility terminal status$/,
-    /^malformed (?:Anthropic|OpenAI|Responses|Gemini) (?:stream event|response body|usage|terminal event)$/,
-    /^OpenAI stream emitted a non-empty frame after finish_reason terminal$/,
-    /^worker JSON response root must be an object$/,
-    /^non-success Responses response status$/,
-    /^response\.failed terminal$/,
-    /^Responses terminal reported failure$/,
-    /^Responses terminal event\/status mismatch$/,
-    /^incomplete Responses output lifecycle$/,
-    /^Anthropic stream error event$/,
-    /^(?:Response|Upstream response|Anthropic response) has no body$/,
-  ];
-  return safePatterns.some((pattern) => pattern.test(message))
-    ? message
-    : "invalid response body";
-}
-
-/** Initiate response-body cleanup before a retry without trusting cancel to settle. */
-function cancelWorkerResponseForRetry(
-  response: Response,
-  reason: unknown,
-): void {
-  if (!response.body || response.body.locked) return;
-  void response.body.cancel(reason).catch(() => {});
-}
-
-// Visible-output headroom added on top of an extended-thinking budget so the
-// model has room for the actual answer after reasoning (Anthropic counts thinking
-// against max_tokens). Mirrors pipeline.ts's THINKING_OUTPUT_HEADROOM.
-const THINKING_OUTPUT_HEADROOM = 8192;
-
-// When a worker truncates on the output budget (`finish_reason:"length"` /
-// `stop_reason:"max_tokens"`) and emits NO visible text, the model spent the
-// entire allowance on hidden reasoning. Common when the worker model is a
-// reasoning model reached over a protocol that does not expose an explicit
-// thinking budget (e.g. Claude routed through OpenRouter's OpenAI-compatible
-// endpoint). We retry ONCE with the budget multiplied, clamped to the model's
-// own output limit. Bounded to a single retry per call.
-const WORKER_LENGTH_RETRY_MULTIPLIER = 4;
-// Absolute ceiling for the retried budget when the model's output limit is
-// unknown (fallback entry). Bounds cost/latency.
-const WORKER_LENGTH_RETRY_CAP = 64_000;
-
-// Default hidden-reasoning budget assumed for a reasoning-on-by-default worker
-// model when the caller set NO explicit reasoning effort. Distillation/curation
-// workers pass `thinking:false` / no effort, but OpenRouter (and other
-// aggregators) route reasoning models like `anthropic/claude-sonnet-5` that
-// reason REGARDLESS — burning hidden tokens against the output budget before any
-// visible text. Equal to `anthropicThinkingBudget("high")` (16384): a heavy
-// curator/distillation reasoning pass on claude-sonnet-5 was observed burning
-// past the previous 8192 default and truncating on the FIRST attempt, forcing a
-// wasted call + retry-to-64000 (production logs 2026-07-21, session
-// 1eMRchBV7Ajs0dds: `retrying once with max_tokens 16384 → 64000`). 16384 lands
-// the common case in one round-trip; the length-retry remains the backstop for
-// the rare pass that still exceeds it. A floor, never a charge — a higher
-// ceiling costs nothing for models that emit fewer tokens.
-const DEFAULT_REASONING_MODEL_BUDGET = 16_384;
-
-/**
- * The minimum output budget a worker call needs so the model can complete its
- * VISIBLE answer after any hidden reasoning pass, or 0 when no floor applies.
- *
- * - Explicit reasoning effort set → `anthropicThinkingBudget(effort) +
- *   THINKING_OUTPUT_HEADROOM` (the caller asked the model to reason; make room).
- * - No effort, but the model reasons by default (`workerModelReasons` — ANY
- *   non-empty models.dev `reasoning_options`, i.e. toggle/effort/budget_tokens,
- *   or the Claude-id fallback) → `DEFAULT_REASONING_MODEL_BUDGET +
- *   THINKING_OUTPUT_HEADROOM`. This is the case the length-retry alone could not
- *   solve: the workers pass tiny budgets (~1–8K) and a reasoning model burns
- *   most of it on reasoning, so the FIRST attempt must already carry headroom.
- * - Otherwise → 0 (non-reasoning model with no effort keeps its caller budget).
- *
- * A floor, never a charge: a model that doesn't reason still bills only the
- * tokens it actually emits.
- */
-function workerReasoningHeadroomFloor(
-  model: { modelID: string },
-  reasoningEffort: ReasoningEffort | undefined,
-): number {
-  const explicitBudget = anthropicThinkingBudget(reasoningEffort);
-  if (explicitBudget != null) return explicitBudget + THINKING_OUTPUT_HEADROOM;
-  if (workerModelReasons(model)) {
-    return DEFAULT_REASONING_MODEL_BUDGET + THINKING_OUTPUT_HEADROOM;
-  }
-  return 0;
-}
-
-/**
- * Resolve the retry budget. `LORE_MAX_RETRIES` overrides the default; values
- * that are non-numeric, negative, or zero fall back to the default (we never
- * silently disable retries — that would contradict the "ride it out" policy).
- */
-function resolveMaxRetries(): number {
-  const env = process.env.LORE_MAX_RETRIES;
-  if (env) {
-    const n = Number.parseInt(env, 10);
-    if (Number.isFinite(n) && n >= 1) return n;
-  }
-  return DEFAULT_MAX_RETRIES;
-}
-
-/**
- * Max retries for a worker call. A single budget regardless of status code or
- * urgency (the `_status` parameter is retained for call-site readability and
- * potential future tuning).
- */
-export function maxRetriesFor(_status: number | null = null): number {
-  return resolveMaxRetries();
-}
-
-/** Parse the Retry-After header into milliseconds, or null if absent/invalid. */
-export function parseRetryAfter(response: Response): number | null {
-  const header = response.headers.get("retry-after");
-  if (!header) return null;
-  const seconds = Number(header);
-  if (!Number.isNaN(seconds)) {
-    if (!Number.isFinite(seconds) || seconds < 0) return null;
-    const milliseconds = seconds * 1000;
-    if (!Number.isFinite(milliseconds) || !Number.isSafeInteger(milliseconds)) {
-      return null;
-    }
-    return Math.min(milliseconds, MAX_DELAY_MS);
-  }
-  const date = Date.parse(header);
-  if (!Number.isNaN(date)) {
-    const milliseconds = Math.max(0, date - Date.now());
-    return Number.isSafeInteger(milliseconds)
-      ? Math.min(milliseconds, MAX_DELAY_MS)
-      : null;
-  }
-  return null;
-}
-
-/**
- * Compute delay for a retry attempt (0-based) using the unified policy.
- * - Honor Retry-After when present, capped at MAX_DELAY_MS.
- * - Otherwise exponential backoff with 0-25% jitter:
- *   min(BASE_DELAY_MS * 2^attempt, MAX_DELAY_MS) + jitter.
- */
-export function backoffMs(
-  attempt: number,
-  retryAfterMs: number | null,
-): number {
-  if (retryAfterMs != null && Number.isFinite(retryAfterMs)) {
-    return Math.min(Math.max(0, retryAfterMs), MAX_DELAY_MS);
-  }
-  const base = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
-  return base + Math.random() * 0.25 * base;
-}
-
-export function abortableSleep(
-  ms: number,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
-  signal.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = (): void => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-export async function readWorkerResponseText(
-  response: Response,
-  signal?: AbortSignal,
-  maxBytes = WORKER_ERROR_BODY_MAX_BYTES,
-): Promise<string> {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (bytes < maxBytes) {
-      const { done, value } = await readStreamChunk(reader, {
-        ...workerSSEStreamOptions(signal),
-      });
-      if (done) break;
-      if (!value) continue;
-      const chunk = value.subarray(0, maxBytes - bytes);
-      chunks.push(chunk);
-      bytes += chunk.byteLength;
-    }
-  } catch (_err) {
-    if (signal?.aborted) throw signal.reason;
-    return "(no body)";
-  } finally {
-    cancelAndReleaseReader(reader);
-  }
-  // This is bounded diagnostic text, not semantic response JSON. Replacement
-  // decoding preserves useful error classification when malformed bytes or a
-  // multibyte code point land at the truncation boundary.
-  return new TextDecoder().decode(Buffer.concat(chunks));
-}
-
-class WorkerResponseTooLargeError extends SSEStreamLimitError {
-  constructor() {
-    super(`worker response exceeded ${MAX_WORKER_RESPONSE_BYTES} byte limit`);
-    this.name = "WorkerResponseTooLargeError";
-  }
-}
-
-class IncompleteWorkerResponseError extends Error {
-  constructor(readonly /**
- * Gateway LLM adapter: implements LLMClient via direct API calls.
- * Used by Lore's background workers (distillation, curation, query expansion)
- * running inside the gateway process.
- *
- * Supports both Anthropic Messages API and OpenAI Chat Completions API.
- * The wire protocol is determined by explicit protocol from the session's
- * UpstreamSnapshot (threaded via opts.protocol), with fallback to the
- * provider route registry (PROVIDER_ROUTES) and a safe default of
- * "anthropic" for unknown/aggregator providers:
- *   - Anthropic protocol → POST /v1/messages
- *   - OpenAI protocol    → POST /v1/chat/completions
- *
- * Protocol is decoupled from provider identity — proxy/aggregator
- * providers (e.g. OpenCode Zen) that have protocol=null in the route
- * table receive their protocol from the session snapshot instead.
- *
- * Retry logic, Sentry instrumentation, worker call tracking, and error
- * handling are shared across both protocols.
- */
-
-import { AsyncLocalStorage } from "node:async_hooks";
-import type { LLMClient } from "@loreai/core";
-import { log } from "@loreai/core";
-import { anthropicThinkingBudget, openAIReasoningEffort } from "@loreai/core";
-import { semanticLint } from "@loreai/core";
-import type { ReasoningEffort } from "@loreai/core";
-import * as Sentry from "@sentry/bun";
-import type { AuthCredential } from "./auth";
-import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
-import { tripCircuitBreaker } from "./background-limiter";
-import { resolveProviderRoute } from "./config";
-import {
-  buildBillingBlock,
-  buildCodexWorkerHeaders,
-  buildOAuthWorkerHeaders,
-  workerUserAgent,
-  signBody,
-} from "./cch";
-import {
-  setGenAiUsageAttributes,
-  emitCostMetric,
-  type AnthropicUsage,
-} from "./sentry";
-import { recordWorkerCost } from "./cost-tracker";
-import { upstreamFetch } from "./fetch";
-import { responseAgainstAbort } from "./abort-race";
-import {
-  looksLikeSSE,
-  type GatewayContentBlock,
-  type GatewayResponse,
-} from "./translate/types";
-import {
-  buildOpenAIChatCompletionsUrl,
-  buildOpenAIResponsesUrl,
-  copilotHeaders,
-} from "./translate/openai";
-import { accumulateOpenAISSEStream } from "./stream/openai";
-import { accumulateResponsesSSEStream } from "./stream/openai-responses";
-import { accumulateGeminiSSEStream } from "./stream/gemini";
-import {
-  geminiUsageFromMetadata,
-  validateGeminiFunctionCallIdentity,
-} from "./translate/gemini";
-import {
-  accumulateSSEResponse,
-  cancelAndReleaseReader,
-  readStreamChunk,
-  SSEStreamLimitError,
-  SSEStreamTransportError,
-} from "./stream/anthropic";
-import {
-  getSSEInactivityDeadlines,
-  workerSSEStreamOptions,
-} from "./sse-inactivity";
-import { isBedrockMantleHost, toMantleModelId } from "./translate/bedrock";
-import {
-  ANTHROPIC_CONTENT_BLOCK_TYPES,
-  ANTHROPIC_STOP_REASONS,
-  normalizeAnthropicStopReason,
-} from "./anthropic-protocol";
-import {
-  isRecord,
-  validateAnthropicUsage,
-  validateGeminiUsageMetadata,
-  validateOpenAIUsage,
-  validateResponsesUsage,
-} from "./usage-validation";
-import {
-  toVertexBody,
-  toVertexModelId,
-  vertexRawPredictUrl,
-  vertexRegionFromUrl,
-} from "./translate/vertex";
-import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
-import {
-  recordWorkerFailure,
-  recordWorkerSuccess,
-  markWorkerPaused,
-  isWorkerIncapable,
-  markWorkerIncapable,
-  markFreeModelsDataBlocked,
-  recordEmptyWorkerResponse,
-  clearEmptyWorkerStreak,
-} from "./worker-health";
-import { getModelEntrySync, workerModelCandidates } from "./worker-model";
-
-// ---------------------------------------------------------------------------
-// Worker call tracking
-// ---------------------------------------------------------------------------
-
-/** Tracks worker session IDs so temporal capture can skip them. */
-export const activeWorkerCalls = new Set<string>();
-
-// ---------------------------------------------------------------------------
-// Retry helpers (exported for testing)
-// ---------------------------------------------------------------------------
-
-/** HTTP status codes that are transient and worth retrying. 504 (Gateway
- *  Timeout) is included: upstream gateways (esp. OpenRouter fronting slow free
- *  models) return it on transient upstream timeouts — a retry usually clears. */
-const TRANSIENT_CODES = new Set([429, 500, 502, 503, 504, 529]);
-
-/** HTTP status codes indicating permanent auth failure. */
-export const AUTH_ERROR_CODES = new Set([401, 403]);
-
-/**
- * Provider "payment required / out of credit" codes (e.g. OpenRouter 402
- * "requires more credits"). An expected account state, NOT an infrastructure
- * outage: suppress Sentry escalation, do not count toward the worker-health
- * failure ladder, and soft-pause the session so we stop retrying every turn.
- */
-const INSUFFICIENT_CREDIT_CODES = new Set([402]);
-
-/**
- * Matches the long-context (1M) beta token family, e.g.
- * `context-1m-2025-08-07`. The date suffix changes over time, so match the
- * `context-1m` stem (optionally followed by `-<suffix>`), anchored on a
- * trimmed token so it can't match a substring inside another beta name.
- */
-const LONG_CONTEXT_BETA_RE = /^context-1m(?:-.*)?$/i;
-
-/**
- * Does this header set carry an `anthropic-beta` whose value contains a
- * long-context (`context-1m`) token? Only the long-context beta is a plausible
- * cause of the "beta not available for this subscription" 400 on worker calls,
- * so the retry fallback is gated on its presence — we never strip betas (and
- * lose the OAuth gate) for an unrelated 400.
- */
-function hasLongContextBeta(headers: Record<string, string>): boolean {
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === "anthropic-beta" && /context-1m/i.test(v)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Exported for unit testing in `long-context-beta.test.ts`. The runtime
-// safety net in the worker retry loop is dead code for `context-1m`
-// specifically after the upfront strip (#1571), but the helpers remain as
-// the explicit fallback for any future beta the upstream rejects. Tests pin
-// the helper behavior so a future refactor doesn't accidentally drop the
-// OAuth gate or accept unrelated betas.
-export const __testing = {
-  hasLongContextBeta,
-  stripBetaHeaders,
-  isBetaRelated400,
-};
-
-/**
- * Return a copy of the headers with ONLY the long-context (`context-1m`) beta
- * token removed from `anthropic-beta`, preserving every other beta — crucially
- * `oauth-2025-04-20`, which OAuth/bearer worker calls require to authenticate.
- * Stripping the whole header would turn a recoverable beta-400 into a 401 on
- * OAuth sessions. If removing the long-context token leaves no betas, the
- * header is dropped entirely. Used as a runtime fallback on a beta-related 400.
- */
-function stripBetaHeaders(
-  headers: Record<string, string>,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === "anthropic-beta") {
-      const kept = v
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0 && !LONG_CONTEXT_BETA_RE.test(t));
-      if (kept.length > 0) out[k] = kept.join(",");
-      continue;
-    }
-    out[k] = v;
-  }
-  return out;
-}
-
-/**
- * Heuristic: does a 400 body indicate the request used a beta feature the
- * model/subscription doesn't support? Matches Anthropic's long-context and
- * generic beta-availability errors (e.g. "The long context beta is not yet
- * available for this subscription", "... beta is not available", "unsupported
- * beta"). Conservative — only triggers the one-shot beta-stripped retry.
- */
-function isBetaRelated400(body: string): boolean {
-  return (
-    /\bbeta\b/i.test(body) &&
-    /\b(not\s+(yet\s+)?available|unsupported|not\s+enabled|invalid)\b/i.test(
-      body,
-    )
-  );
-}
-
-/**
- * Reduce a first-party validation error to an allowlisted diagnostic category.
- * Never return the upstream message: validation text can include request values,
- * while CI only needs the rejected control family to diagnose an opaque 400.
- */
-export function classifyWorker400(body: string): string {
-  let detail = body;
-  try {
-    const parsed = JSON.parse(body) as { error?: { message?: unknown } };
-    if (typeof parsed.error?.message === "string") {
-      detail = parsed.error.message;
-    }
-  } catch {
-    // Plain-text provider errors are classified directly.
-  }
-  const categories: Array<[string, RegExp]> = [
-    ["thinking", /\bthinking\b/i],
-    ["temperature", /\btemperature\b/i],
-    ["cache-control", /cache[_ -]?control|cache[_ -]?ttl|prompt cach/i],
-    ["max-tokens", /max[_ -]?tokens|output tokens/i],
-    ["model", /\bmodel\b/i],
-    ["messages", /\bmessages?\b/i],
-    ["system", /\bsystem\b/i],
-    ["billing", /\bbilling\b|credit balance|insufficient credit/i],
-  ];
-  for (const [category, pattern] of categories) {
-    if (pattern.test(detail)) return category;
-  }
-  return "invalid-request";
-}
-
-/**
- * Worker call sites set `temperature: 0` for reproducible distillation/curation.
- * Newer models (e.g. Anthropic `claude-sonnet-5`) have DEPRECATED the sampling
- * `temperature` param and reject any request that includes it with a 400
- * ("`temperature` is deprecated for this model."), which breaks every worker on
- * that model. We learn this fact at runtime — on the first such 400 — so
- * subsequent worker calls omit `temperature` upfront instead of burning a
- * wasted round-trip per call. The set is intentionally NOT seeded from a
- * hardcoded model list: hardcoding drifts as models ship and risks both false
- * positives (stripping from a model that supports it) and misses (a new model
- * we forgot). Runtime learning is always correct and self-healing. Keyed by
- * `providerID/modelID`; in-memory, so it re-learns at most once per model per
- * gateway lifetime after a restart.
- */
-const temperatureUnsupportedModels = new Set<string>();
-const reasoningNoneUnsupportedTargets = new Set<string>();
-
-function reasoningNoneCapabilityKey(
-  target: ProviderTarget,
-  model: { providerID: string; modelID: string },
-): string {
-  let origin = target.url;
-  try {
-    origin = new URL(target.url).origin;
-  } catch {
-    // Keep the unresolved URL string; route validation reports malformed URLs.
-  }
-  return `${origin}\x1f${model.providerID}\x1f${model.modelID}\x1f${target.protocol}`;
-}
-
-/** Stable key for the temperature-capability set. */
-function workerModelKey(model: {
-  providerID: string;
-  modelID: string;
-}): string {
-  return `${model.providerID}/${model.modelID}`;
-}
-
-/** Record that a model rejects the `temperature` param (learned from a 400). */
-export function markTemperatureUnsupported(model: {
-  providerID: string;
-  modelID: string;
-}): void {
-  temperatureUnsupportedModels.add(workerModelKey(model));
-}
-
-/** Has this model been observed to reject the `temperature` param? */
-export function isTemperatureUnsupportedModel(model: {
-  providerID: string;
-  modelID: string;
-}): boolean {
-  return temperatureUnsupportedModels.has(workerModelKey(model));
-}
-
-/** Test-only: clear the learned temperature-capability set. */
-export function _resetTemperatureUnsupportedModels(): void {
-  temperatureUnsupportedModels.clear();
-}
-
-/**
- * Heuristic: does a 400 body indicate the request's `temperature` param is not
- * accepted by this model? Matches Anthropic's "`temperature` is deprecated for
- * this model." and OpenAI-style "Unsupported parameter: temperature" / "...
- * not supported ..." shapes. Requires the word `temperature` AND a rejection
- * verb so an unrelated 400 that merely mentions temperature can't trigger the
- * one-shot temperature-stripped retry.
- */
-export function isTemperatureUnsupported400(body: string): boolean {
-  return (
-    /temperature/i.test(body) &&
-    /\b(deprecated|unsupported|no\s+longer\s+supported|not\s+(?:a\s+)?support(?:ed)?|removed|not\s+allowed|cannot\s+be\s+(?:set|used|specified))\b/i.test(
-      body,
-    )
-  );
-}
-
-function isReasoningNonehe whole distill/curate loop degrades. `{type:"disabled"}` is
-  // accepted by on-by-default Sonnet/Opus models; extended-thinking-only models
-  // (including Haiku 4.5) reject it and are excluded by the caller. Any remaining
-  // rejection is learned via a one-shot 400 retry in the loop, which then passes
-  // `disableThinking=false` here.
-  // Extended thinking, opt-in via reasoning effort. When a budget is set the
-  // caller wants the model to reason — this OVERRIDES the default worker
-  // disable-thinking suppression. Anthropic constraints when thinking is on:
-  //   1. max_tokens MUST exceed budget_tokens — the judge's tiny 256-token cap
-  //      would otherwise 400, so we raise max_tokens to budget + headroom.
-  //   2. temperature must be unset (only the default is allowed) — so we drop it.
-  // Caveat: budget+headroom for `xhigh` is ~41K; a model whose output ceiling is
-  // below that would 400. Not guarded here (we lack the per-model ceiling on the
-  // worker path), but the effort budgets stay well under the common 64K ceiling
-  // and the semantic-lint judge — the only effort caller — degrades a judge 400
-  // to a safe "no finding" (advisory: never fails the build).
-  const thinkingBudget = anthropicThinkingBudget(reasoningEffort);
-  const thinkingEnabled = thinkingBudget != null;
-  const effectiveMaxTokens = thinkingEnabled
-    ? Math.max(maxTokens, thinkingBudget + THINKING_OUTPUT_HEADROOM)
-    : maxTokens;
-
-  let body = JSON.stringify({
-    model: upstreamModelID,
-    max_tokens: effectiveMaxTokens,
-    // temperature is incompatible with extended thinking — omit when enabled.
-    ...(temperature != null && !thinkingEnabled && { temperature }),
-    ...(thinkingEnabled
-      ? { thinking: { type: "enabled", budget_tokens: thinkingBudget } }
-      : disableThinking && { thinking: { type: "disabled" } }),
-    system: systemPayload,
-    messages: [{ role: "user", content: user }],
-  });
-
-  // Sign the body: compute xxHash64 and replace cch=00000 with real hash
-  if (billingBlock) {
-    body = signBody(body);
-  }
-
-  // For OAuth sessions, include Claude Code headers (anthropic-beta,
-  // user-agent, etc.) sniffed from conversation turns. Without these,
-  // Anthropic may reject worker calls with 401 even when the token is valid.
-  const oauthHeaders = buildOAuthWorkerHeaders(sessionID);
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "anthropic-version": "2023-06-01",
-    // Replay a user-agent on every worker request. Anthropic-compat providers
-    // (MiniMax) reject UA-less requests with a generic auth failure even when
-    // the key/host are correct — the conversation path works only because it
-    // forwards the client UA. oauthHeaders (billing sessions) may override this.
-    "user-agent": workerUserAgent(sessionID),
-    ...authHeaders(cred),
-    ...oauthHeaders,
-  };
-
-  // Worker calls never need the 1M context window — workers operate on bounded
-  // message segments (a distillation segment is capped at 16K tokens; the whole
-  // session is typically well under 200K). The user's `anthropic-beta` is
-  // replayed verbatim onto worker calls, so a sniffed `context-1m` long-context
-  // beta rides along UNLESS we strip it here. On a subscription auth account
-  // without purchased usage credits, Anthropic rejects any call carrying the
-  // `context-1m` beta with a 429 ("Usage credits are required for long context
-  // requests.") regardless of payload size, and that 429 is permanent — workers
-  // exhaust their retry budget, the circuit breaker trips, and distillation /
-  // curation / cache-warming stop forever (issue #1571). The earlier
-  // capability-conditional filter was wrong: it asked "can this worker model
-  // handle 1M", but the right question is "does this call need 1M", and the
-  // answer is always no for a background worker. Strip it unconditionally.
-  // (A runtime 400-retry-without-beta fallback in the retry loop covers any
-  // other beta we couldn't validate here.)
-  stripLongContextBetaForWorker(headers);
-
-  return {
-    url: `${target.url}/v1/messages`,
-    headers,
-    body,
-  };
-}
-
-/**
- * Drop the long-context (`context-1m`) beta token from worker calls.
- *
- * Workers operate on bounded message segments (distillation, curation, cache
- * warming, query expansion) — never on the full 1M window the user opted into
- * for their conversation turn. Carrying the `context-1m` beta on a worker call
- * is never useful, and on a subscription auth account without purchased usage
- * credits it is actively harmful: Anthropic rejects any call carrying the beta
- * with a 429 ("Usage credits are required for long context requests."),
- * regardless of how small the worker payload is, and that 429 is permanent.
- * The call exhausts its retry budget, the circuit breaker trips, and the
- * session's background work stops forever (issue #1571).
- *
- * The previous capability-conditional filter only stripped the beta when the
- * worker model's catalog context window was below 1M — which never fired for
- * the default worker model (claude-sonnet-4-6, 1M-capable) and so produced the
- * exact failure described above. Strip unconditionally for workers and let
- * capability be a runtime concern (the 400-retry-without-beta fallback in the
- * retry loop remains as a safety net for any future beta we couldn't validate).
- *
- * Other betas (oauth-2025-04-20, fine-grained-tool-streaming, extended-cache-ttl,
- * prompt-caching-scope, etc.) are preserved. If stripping leaves no betas,
- * the header is removed entirely. Mutates `headers` in place.
- */
-function stripLongContextBetaForWorker(headers: Record<string, string>): void {
-  const betaKey = Object.keys(headers).find(
-    (k) => k.toLowerCase() === "anthropic-beta",
-  );
-  if (!betaKey) return;
-  const betaValue = headers[betaKey];
-  if (!betaValue || !/context-1m/i.test(betaValue)) return;
-
-  const kept = betaValue
-    .split(",")
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0 && !LONG_CONTEXT_BETA_RE.test(t));
-  if (kept.length > 0) {
-    headers[betaKey] = kept.join(",");
-  } else {
-    delete headers[betaKey];
-  }
-}
-
-/**
- * Build OpenAI Chat Completions API request.
- * Returns the full URL, headers, and serialized body.
- */
-function buildOpenAIWorkerRequest(
-  target: ProviderTarget,
-  cred: AuthCredential,
-  model: { providerID: string; modelID: string },
-  system: string,
-  user: string,
-  maxTokens: number,
-  temperature?: number,
-  reasoningEffort?: ReasoningEffort,
-  providerOptions?: Readonly<Record<string, unknown>>,
-): { url: string; headers: Record<string, string>; body: string } {
-  const messages: Array<{ role: string; content: string }> = [];
-  if (system) messages.push({ role: "system", content: system });
-  messages.push({ role: "user", content: user });
-
-  // OpenRouter workers inherit the owning session's explicit routing policy.
-  // Without one, retain Lore's existing cheapest-provider default for
-  // latency-tolerant background work. Other providers never see this field.
-  const validProviderOptions =
-    providerOptions !== null &&
-    typeof providerOptions === "object" &&
-    !Array.isArray(providerOptions)
-      ? providerOptions
-      : undefined;
-  const providerPrefs =
-    target.providerName === "openrouter"
-      ? { provider: validProviderOptions ?? { sort: "price" } }
-      : undefined;
-
-  // Reasoning models honor `reasoning_effort`; non-reasoning models (gpt-4o-mini,
-  // the CI default) silently ignore it. `off`/undefined → omit. `xhigh` clamps to
-  // `high` (not a standard OpenAI value) inside openAIReasoningEffort.
-  const effort = openAIReasoningEffort(reasoningEffort);
-
-  return {
-    // Background workers have no original request to forward verbatim, so the
-    // URL is reconstructed host-aware (GitHub Copilot omits `/v1`, issue #1052;
-    // Google Gemini serves `/v1beta/openai/...`, issue #1070).
-    url: buildOpenAIChatCompletionsUrl(target.url),
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders(cred),
-      // GitHub Copilot wants Copilot-Integration-Id + X-GitHub-Api-Version;
-      // no-op for others.
-      ...copilotHeaders(target.url),
-    },
-    body: JSON.stringify({
-      model: model.modelID,
-      max_completion_tokens: maxTokens,
-      stream: false,
-      ...(temperature != null && { temperature }),
-      ...(effort != null && { reasoning_effort: effort }),
-      messages,
-      ...providerPrefs,
-    }),
-  };
-}
-
-/**
- * Build a native Gemini `generateContent` worker request. Gemini authenticates
- * with an API key via `x-goog-api-key` (NOT Bearer), carries the model in the
- * URL path, and uses `systemInstruction` + `contents` + `generationConfig`.
- */
-function buildGeminiWorkerRequest(
-  target: ProviderTarget,
-  cred: AuthCredential,
-  model: { providerID: string; modelID: string },
-  system: string,
-  user: string,
-  maxTokens: number,
-  temperature?: number,
-): { url: string; headers: Record<string, string>; body: string } {
-  const generationConfig: Record<string, unknown> = {
-    maxOutputTokens: maxTokens,
-  };
-  if (temperature != null) generationConfig.temperature = temperature;
-  const body: Record<string, unknown> = {
-    contents: [{ role: "user", parts: [{ text: user }] }],
-    generationConfig,
-  };
-  if (system) body.systemInstruction = { parts: [{ text: system }] };
-  // Gemini API-key auth uses `x-goog-api-key`; OAuth/Code-Assist sessions use a
-  // Bearer token. Be scheme-aware so a bearer credential is never shoved into
-  // the api-key header (which would silently misauth).
-  const authHeader: Record<string, string> =
-    cred.scheme === "bearer"
-      ? { Authorization: `Bearer ${cred.value}` }
-      : { "x-goog-api-key": cred.value };
-  return {
-    url: `${target.url}/v1beta/models/${encodeURIComponent(model.modelID)}:generateContent`,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeader,
-    },
-    body: JSON.stringify(body),
-  };
-}
-
-/** Parse a native Gemini `generateContent` worker response into `{text,usage,model}`. */
-export function parseGeminiWorkerResponse(data: {
-  candidates?: unknown;
-  usageMetadata?: unknown;
-  modelVersion?: unknown;
-}): {
-  text: string | null;
-  usage: AnthropicUsage | null;
-  model: string | null;
-} {
-  const malformed = (): never => {
-    throw new Error("malformed Gemini response body");
-  };
-  if (data.candidates !== undefined && !Array.isArray(data.candidates)) {
-    malformed();
-  }
-  const candidates = (data.candidates ?? []) as unknown[];
-  for (const candidate of candidates) {
-    const toolIdentities = new Set<string>();
-    if (!isRecord(candidate)) malformed();
-    const typedCandidate = candidate as Record<string, unknown>;
-    if (
-      typedCandidate.index !== undefined &&
-      (!Number.isSafeInteger(typedCandidate.index) ||
-        (typedCandidate.index as number) < 0)
-    ) {
-      malformed();
-    }
-    if (
-      typedCandidate.finishReason !== undefined &&
-      typedCandidate.finishReason !== null &&
-      typeof typedCandidate.finishReason !== "string"
-    ) {
-      malformed();
-    }
-    if (
-      typedCandidate.tokenCount !== undefined &&
-      (!Number.isSafeInteger(typedCandidate.tokenCount) ||
-        (typedCandidate.tokenCount as number) < 0)
-    ) {
-      malformed();
-    }
-    if (typedCandidate.content === undefined) continue;
-    if (!isRecord(typedCandidate.content)) malformed();
-    const typedContent = typedCandidate.content as Record<string, unknown>;
-    if (
-      typedContent.role !== undefined &&
-      typeof typedContent.role !== "string"
-    ) {
-      malformed();
-    }
-    const parts = typedContent.parts;
-    if (parts === undefined) continue;
-    if (!Array.isArray(parts)) malformed();
-    for (const part of parts as unknown[]) {
-      if (!isRecord(part)) malformed();
-      const typedPart = part as Record<string, unknown>;
-      if (
-        typedPart.text !== undefined &&
-        typedPart.functionCall !== undefined
-      thropic Messages body shape, so the same
-      // adaptive-thinking-on-by-default applies (sonnet-5). A reasoning-effort
-      // budget enables thinking (overriding the default disable); otherwise
-      // `thinking:{type:"disabled"}` turns it off. See buildAnthropicWorkerRequest.
-      ...(vertexThinkingEnabled
-        ? { thinking: { type: "enabled", budget_tokens: vertexThinkingBudget } }
-        : disableThinking && { thinking: { type: "disabled" } }),
-      system: systemBlocks,
-      messages: [{ role: "user", content: user }],
-    }),
-  );
-  return {
-    url: vertexRawPredictUrl(region, project, vertexModel, false),
-    // The documented Vertex rawPredict header set is exactly these two (see
-    // https://docs.claude.com/en/api/claude-on-vertex-ai). NEVER add
-    // `anthropic-beta` here: it's an api.anthropic.com-only header. Worker
-    // prompt caching is driven by the cache_control block on `systemBlocks`
-    // above (a GA Vertex feature), NOT a beta header — so its absence does not
-    // disable caching, while forwarding it would risk a Vertex 400.
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body,
-  };
-}
-
-/**
- * Dispatch to the correct worker request builder for a resolved target.
- * Single source of truth so adding a protocol touches exactly one place.
- * Async: the Vertex builder mints a GCP OAuth2 token; the other builders are
- * synchronous and resolve immediately.
- */
-async function buildWorkerRequest(
-  target: ProviderTarget,
-  cred: AuthCredential,
-  model: { providerID: string; modelID: string },
-  system: string,
-  user: string,
-  maxTokens: number,
-  sessionID?: string,
-  temperature?: number,
-  vertexProject?: string,
-  disableThinking = false,
-  reasoningEffort?: ReasoningEffort,
-  providerOptions?: Readonly<Record<string, unknown>>,
-  signal?: AbortSignal,
-): Promise<{ url: string; headers: Record<string, string>; body: string }> {
-  switch (target.protocol) {
-    case "openai-codex-responses":
-      // Codex omits max_output_tokens (rejected by ChatGPT) — no maxTokens arg.
-      return buildCodexWorkerRequest(
-        target,
-        cred,
-        model,
-        system,
-        user,
-        sessionID,
-        temperature,
-      );
-    case "openai-responses":
-      return buildOpenAIResponsesWorkerRequest(
-        target,
-        cred,
-        model,
-        system,
-        user,
-        maxTokens,
-        temperature,
-        reasoningEffort,
-      );
-    case "openai":
-      return buildOpenAIWorkerRequest(
-        target,
-        cred,
-        model,
-        system,
-        user,
-        maxTokens,
-        temperature,
-        reasoningEffort,
-        providerOptions,
-      );
-    case "vertex":
-      return buildVertexWorkerRequest(
-        target,
-        model,
-        system,
-        user,
-        maxTokens,
-        vertexProject,
-        temperature,
-        disableThinking,
-        reasoningEffort,
-        signal,
-      );
-    case "gemini":
-      return buildGeminiWorkerRequest(
-        target,
-        cred,
-        model,
-        system,
-        user,
-        maxTokens,
-        temperature,
-      );
-    default:
-      return buildAnthropicWorkerRequest(
-        target,
-        cred,
-        model,
-        system,
-        user,
-        maxTokens,
-        sessionID,
-        temperature,
-        disableThinking,
-        reasoningEffort,
-      );
-  }
-}
-
-/** Dispatch to the correct worker response parser for a resolved target. */
-function parseWorkerResponse(
-  protocol: WorkerProtocol,
-  rawData: unknown,
-): { text: string | null; usage: AnthropicUsage | null; model: string | null } {
-  switch (protocol) {
-    case "openai-codex-responses":
-      return parseResponsesWorkerResponse(
-        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
-      );
-    case "openai-responses":
-      // Same wire shape as the Codex path — reuse the existing Responses-API
-      // worker parser; openai-responses and openai-codex-responses both
-      // produce `{ output: [...], usage: { input_tokens, output_tokens, ... } }`.
-      return parseResponsesWorkerResponse(
-        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
-      );
-    case "openai":
-      return parseOpenAIResponse(rawData as OpenAIChatResponse);
-    case "gemini":
-      return parseGeminiWorkerResponse(
-        rawData as Parameters<typeof parseGeminiWorkerResponse>[0],
-      );
-    default:
-      return parseAnthropicResponse(
-        rawData as Parameters<typeof parseAnthropicResponse>[0],
-      );
-  }
-}
-
-/**
- * Accumulate an SSE upstream worker response into a GatewayResponse using the
- * protocol's stream accumulator. The ChatGPT/Copilot/Codex backend and some
- * OpenAI-compatible providers stream even for a non-streaming worker request;
- * merging every chunk here (rather than reading a single JSON body) makes the
- * worker read multi-chunk safe and immune to a mislabeled/absent
- * text/event-stream content-type (LOREAI-GATEWAY-38 / -1P).
- */
-function accumulateWorkerSSE(
-  protocol: WorkerProtocol,
-  response: Response,
-  signal?: AbortSignal,
-  onSemanticContent?: () => void,
-): Promise<GatewayResponse> {
-  switch (protocol) {
-    case "openai-codex-responses":
-      return accumulateResponsesSSEStream(response, {
-        validation: "codex",
-        stopAtTerminal: true,
-        ...workerSSEStreamOptions(signal),
-        onSemanticContent,
-      });
-    case "openai-responses":
-      // OpenAI Responses API uses the same wire-shape SSE stream as the
-      // Codex-Responses path (`event: response.*` deltas). Reuse the existing
-      // accumulator.
-      return accumulateResponsesSSEStream(response, {
-        validation: "public",
-        stopAtTerminal: true,
-        ...workerSSEStreamOptions(signal),
-        onSemanticContent,
-      });
-    case "gemini":
-      return accumulateGeminiSSEStream(response, {
-        ...workerSSEStreamOptions(signal),
-        stopAtTerminal: true,
-        strict: true,
-        onSemanticContent,
-      });
-    case "openai":
-      return accumulateOpenAISSEStream(response, {
-        ...workerSSEStreamOptions(signal),
-        stopAtTerminal: true,
-        strict: true,
-        onSemanticContent,
-        consumeUntilDone: true,
-      });
-    default:
-      // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
-      return accumulateSSEResponse(response, {
-        ...workerSSEStreamOptions(signal),
-        stopAtTerminal: true,
-        strict: true,
-        onSemanticContent,
-      });
-  }
-}
-
-/**
- * Project an accumulated GatewayResponse down to the worker result shape
- * ({ text, usage, model }). Only the visible text blocks form the worker's
- * text — a response that is purely tool_use (no text) is treated as empty,
- * matching parseWorkerResponse (workers consume text, not tool calls).
- */
-export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
-  text: string | null;
-  usage: AnthropicUsage | null;
-  model: string | null;
-} {
-  const text = resp.content
-    .filter(
-      (b): b is Extract<GatewayContentBlock, { type: "text" }> =>
-        b.type === "text",
-    )
-    .map((b) => b.text)
-    .join("");
-  // Reasoning models (e.g. MiniMax-M3 via OpenRouter) can emit their entire answer
-  // as reasoning/thinking with an empty text block. Never treat a present thinking
-  // body as no-response — fall back to it when there is no visible text, mirroring
-  // parseOpenAIResponse (content→reasoning) and parseAnthropicResponse (text→thinking). (#1334)
-  const workerText =
-    text ||
-    resp.content
-      .filter(
-        (b): b is Extract<GatewayContentBlock, { type: "thinking" }> =>
-          b.type === "thinking",
-      )
-      .map((b) => b.thinking)
-      .join("") ||
-    resp.content
-      .flatMap((block) => {
-        if (block.type !== "opaque") return [];
-        const content = block.raw.content;
-        if (!Array.isArray(content)) return [];
-        return content
-          .filter(
-            (part): part is Record<string, unknown> =>
-              !!part && typeof part === "object" && !Array.isArray(part),
-          )
-          .map((part) =>
-            part.type === "refusal" && typeof part.refusal === "string"
-              ? part.refusal
-              : "",
-          );
-      })
-      .join("");
-  const usage: AnthropicUsage | null = resp.usage
-    ? {
-        input_tokens: resp.usage.inputTokens,
-        output_tokens: resp.usage.outputTokens,
-        cache_read_input_tokens: resp.usage.cacheReadInputTokens,
-        cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
-      }
-    : null;
-  return { text: workerText || null, usage, model: resp.model || null };
-}
-
-/**
- * Summarize an upstream worker response body for diagnostics when the parser
- * found no usable text. Reports which fields were present (content vs the
- * reasoning/thinking fallbacks), the finish_reason, and a truncated body
- * shape summary without dumping response values. This lets us
- * classify an empty `no-response` as a genuinely empty completion, a
- * reasoning-field shape we don't read, or a truncation (`finish_reason:
- * "length"`), instead of an opaque failure.
- */
-/**
- * Best-effort extraction of the upstream finish/stop reason from a worker
- * response body. Reads, in order: OpenAI `choices[0].finish_reason`, the
- * aggregator-specific `choices[0].native_finish_reason` (OpenRouter surfaces the
- * true upstream reason here — e.g. `MAX_TOKENS` — while sometimes leaving
- * `finish_reason` normalized or absent), then Anthropic top-level `stop_reason`.
- * Used to distinguish a *complete* empty response (model capability issue) from
- * a *truncated* one (`length`/`max_tokens` — a budget problem, not a capability
- * one). `isLengthTruncation` lower-cases the result so provider casing
- * (`MAX_TOKENS`) still matches.
- */
-function extractFinishReason(rawData: unknown): string | undefined {
-  try {
-    const d = rawData as {
-      choices?: Array<{
-        finish_reason?: string;
-        native_finish_reason?: string;
-      }>;
-      stop_reason?: string;
-      status?: string;
-      incomplete_details?: { reason?: string } | null;
-    };
-    const reason =
-      d.choices?.[0]?.finish_reason ??
-      d.choices?.[0]?.native_finish_reason ??
-      d.stop_reason ??
-      (d.status === "incomplete" &&
-      d.incomplete_details?.reason === "max_output_tokens"
-        ? "length"
-        : d.status === "incomplete"
-          ? d.incomplete_details?.reason
-          : undefined) ??
-      undefined;
-    return reason === "refusal" ? normalizeAnthropicStopReason(reason) : reason;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * True when a finish/stop reason indicates the model hit its OUTPUT BUDGET
- * (rather than finishing, being content-filtered, or making a tool call).
- * Matches the OpenAI (`length`), Anthropic (`max_tokens`), and Gemini-style
- * (`max_output_tokens` / `MAX_TOKENS`) spellings surfaced by
- * `extractFinishReason` (which reads `finish_reason`, then the aggregator
- * `native_finish_reason`, then `stop_reason`). Case-insensitive so a provider's
- * upstream casing still matches. A budget truncation is retryable with a larger
- * budget; a genuine `stop`/`end_turn` empty is a capability signal.
- */
-function isLengthTruncation(finishReason: string | undefined): boolean {
-  if (!finishReason) return false;
-  const r = finishReason.toLowerCase();
-  return r === "length" || r === "max_tokens" || r === "max_output_tokens";
-}
-
-/**
- * The largest output budget a `finish_reason:"length"` retry may request for a
- * given model: the model's own `limit.output` when known, else a conservative
- * absolute cap. Bounds cost/latency and guarantees the retry never exceeds what
- * the model can actually emit (which would just truncate again).
- */
-function workerLengthRetryCeiling(modelID: string): number {
-  const out = getModelEntrySync(modelID).limit?.output;
-  return out && out > 0
-    ? Math.min(out, WORKER_LENGTH_RETRY_CAP)
-    : WORKEeason !== undefined &&
+      (choice.native_finish_reason !== undefined &&
         choice.native_finish_reason !== null &&
         typeof choice.native_finish_reason !== "string")
     ) {
@@ -3156,7 +2813,350 @@ async function buildVertexWorkerRequest(
         : maxTokens,
       // temperature is incompatible with extended thinking — omit when enabled.
       ...(temperature != null && !vertexThinkingEnabled && { temperature }),
-      // Vertex serves Claude over the AnR_LENGTH_RETRY_CAP;
+      // Vertex serves Claude over the Anthropic Messages body shape, so the same
+      // adaptive-thinking-on-by-default applies (sonnet-5). A reasoning-effort
+      // budget enables thinking (overriding the default disable); otherwise
+      // `thinking:{type:"disabled"}` turns it off. See buildAnthropicWorkerRequest.
+      ...(vertexThinkingEnabled
+        ? { thinking: { type: "enabled", budget_tokens: vertexThinkingBudget } }
+        : disableThinking && { thinking: { type: "disabled" } }),
+      system: systemBlocks,
+      messages: [{ role: "user", content: user }],
+    }),
+  );
+  return {
+    url: vertexRawPredictUrl(region, project, vertexModel, false),
+    // The documented Vertex rawPredict header set is exactly these two (see
+    // https://docs.claude.com/en/api/claude-on-vertex-ai). NEVER add
+    // `anthropic-beta` here: it's an api.anthropic.com-only header. Worker
+    // prompt caching is driven by the cache_control block on `systemBlocks`
+    // above (a GA Vertex feature), NOT a beta header — so its absence does not
+    // disable caching, while forwarding it would risk a Vertex 400.
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body,
+  };
+}
+
+/**
+ * Dispatch to the correct worker request builder for a resolved target.
+ * Single source of truth so adding a protocol touches exactly one place.
+ * Async: the Vertex builder mints a GCP OAuth2 token; the other builders are
+ * synchronous and resolve immediately.
+ */
+async function buildWorkerRequest(
+  target: ProviderTarget,
+  cred: AuthCredential,
+  model: { providerID: string; modelID: string },
+  system: string,
+  user: string,
+  maxTokens: number,
+  sessionID?: string,
+  temperature?: number,
+  vertexProject?: string,
+  disableThinking = false,
+  reasoningEffort?: ReasoningEffort,
+  providerOptions?: Readonly<Record<string, unknown>>,
+  signal?: AbortSignal,
+): Promise<{ url: string; headers: Record<string, string>; body: string }> {
+  switch (target.protocol) {
+    case "openai-codex-responses":
+      // Codex omits max_output_tokens (rejected by ChatGPT) — no maxTokens arg.
+      return buildCodexWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        sessionID,
+        temperature,
+      );
+    case "openai-responses":
+      return buildOpenAIResponsesWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+        reasoningEffort,
+      );
+    case "openai":
+      return buildOpenAIWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+        reasoningEffort,
+        providerOptions,
+      );
+    case "vertex":
+      return buildVertexWorkerRequest(
+        target,
+        model,
+        system,
+        user,
+        maxTokens,
+        vertexProject,
+        temperature,
+        disableThinking,
+        reasoningEffort,
+        signal,
+      );
+    case "gemini":
+      return buildGeminiWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        temperature,
+      );
+    default:
+      return buildAnthropicWorkerRequest(
+        target,
+        cred,
+        model,
+        system,
+        user,
+        maxTokens,
+        sessionID,
+        temperature,
+        disableThinking,
+        reasoningEffort,
+      );
+  }
+}
+
+/** Dispatch to the correct worker response parser for a resolved target. */
+function parseWorkerResponse(
+  protocol: WorkerProtocol,
+  rawData: unknown,
+): { text: string | null; usage: AnthropicUsage | null; model: string | null } {
+  switch (protocol) {
+    case "openai-codex-responses":
+      return parseResponsesWorkerResponse(
+        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
+      );
+    case "openai-responses":
+      // Same wire shape as the Codex path — reuse the existing Responses-API
+      // worker parser; openai-responses and openai-codex-responses both
+      // produce `{ output: [...], usage: { input_tokens, output_tokens, ... } }`.
+      return parseResponsesWorkerResponse(
+        rawData as Parameters<typeof parseResponsesWorkerResponse>[0],
+      );
+    case "openai":
+      return parseOpenAIResponse(rawData as OpenAIChatResponse);
+    case "gemini":
+      return parseGeminiWorkerResponse(
+        rawData as Parameters<typeof parseGeminiWorkerResponse>[0],
+      );
+    default:
+      return parseAnthropicResponse(
+        rawData as Parameters<typeof parseAnthropicResponse>[0],
+      );
+  }
+}
+
+/**
+ * Accumulate an SSE upstream worker response into a GatewayResponse using the
+ * protocol's stream accumulator. The ChatGPT/Copilot/Codex backend and some
+ * OpenAI-compatible providers stream even for a non-streaming worker request;
+ * merging every chunk here (rather than reading a single JSON body) makes the
+ * worker read multi-chunk safe and immune to a mislabeled/absent
+ * text/event-stream content-type (LOREAI-GATEWAY-38 / -1P).
+ */
+function accumulateWorkerSSE(
+  protocol: WorkerProtocol,
+  response: Response,
+  signal?: AbortSignal,
+  onSemanticContent?: () => void,
+): Promise<GatewayResponse> {
+  switch (protocol) {
+    case "openai-codex-responses":
+      return accumulateResponsesSSEStream(response, {
+        validation: "codex",
+        stopAtTerminal: true,
+        ...workerSSEStreamOptions(signal),
+        onSemanticContent,
+      });
+    case "openai-responses":
+      // OpenAI Responses API uses the same wire-shape SSE stream as the
+      // Codex-Responses path (`event: response.*` deltas). Reuse the existing
+      // accumulator.
+      return accumulateResponsesSSEStream(response, {
+        validation: "public",
+        stopAtTerminal: true,
+        ...workerSSEStreamOptions(signal),
+        onSemanticContent,
+      });
+    case "gemini":
+      return accumulateGeminiSSEStream(response, {
+        ...workerSSEStreamOptions(signal),
+        stopAtTerminal: true,
+        strict: true,
+        onSemanticContent,
+      });
+    case "openai":
+      return accumulateOpenAISSEStream(response, {
+        ...workerSSEStreamOptions(signal),
+        stopAtTerminal: true,
+        strict: true,
+        onSemanticContent,
+        consumeUntilDone: true,
+      });
+    default:
+      // Anthropic wire (incl. Vertex/Bedrock-mantle) SSE.
+      return accumulateSSEResponse(response, {
+        ...workerSSEStreamOptions(signal),
+        stopAtTerminal: true,
+        strict: true,
+        onSemanticContent,
+      });
+  }
+}
+
+/**
+ * Project an accumulated GatewayResponse down to the worker result shape
+ * ({ text, usage, model }). Only the visible text blocks form the worker's
+ * text — a response that is purely tool_use (no text) is treated as empty,
+ * matching parseWorkerResponse (workers consume text, not tool calls).
+ */
+export function gatewayResponseToWorkerResult(resp: GatewayResponse): {
+  text: string | null;
+  usage: AnthropicUsage | null;
+  model: string | null;
+} {
+  const text = resp.content
+    .filter(
+      (b): b is Extract<GatewayContentBlock, { type: "text" }> =>
+        b.type === "text",
+    )
+    .map((b) => b.text)
+    .join("");
+  // Reasoning models (e.g. MiniMax-M3 via OpenRouter) can emit their entire answer
+  // as reasoning/thinking with an empty text block. Never treat a present thinking
+  // body as no-response — fall back to it when there is no visible text, mirroring
+  // parseOpenAIResponse (content→reasoning) and parseAnthropicResponse (text→thinking). (#1334)
+  const workerText =
+    text ||
+    resp.content
+      .filter(
+        (b): b is Extract<GatewayContentBlock, { type: "thinking" }> =>
+          b.type === "thinking",
+      )
+      .map((b) => b.thinking)
+      .join("") ||
+    resp.content
+      .flatMap((block) => {
+        if (block.type !== "opaque") return [];
+        const content = block.raw.content;
+        if (!Array.isArray(content)) return [];
+        return content
+          .filter(
+            (part): part is Record<string, unknown> =>
+              !!part && typeof part === "object" && !Array.isArray(part),
+          )
+          .map((part) =>
+            part.type === "refusal" && typeof part.refusal === "string"
+              ? part.refusal
+              : "",
+          );
+      })
+      .join("");
+  const usage: AnthropicUsage | null = resp.usage
+    ? {
+        input_tokens: resp.usage.inputTokens,
+        output_tokens: resp.usage.outputTokens,
+        cache_read_input_tokens: resp.usage.cacheReadInputTokens,
+        cache_creation_input_tokens: resp.usage.cacheCreationInputTokens,
+      }
+    : null;
+  return { text: workerText || null, usage, model: resp.model || null };
+}
+
+/**
+ * Summarize an upstream worker response body for diagnostics when the parser
+ * found no usable text. Reports which fields were present (content vs the
+ * reasoning/thinking fallbacks), the finish_reason, and a truncated body
+ * shape summary without dumping response values. This lets us
+ * classify an empty `no-response` as a genuinely empty completion, a
+ * reasoning-field shape we don't read, or a truncation (`finish_reason:
+ * "length"`), instead of an opaque failure.
+ */
+/**
+ * Best-effort extraction of the upstream finish/stop reason from a worker
+ * response body. Reads, in order: OpenAI `choices[0].finish_reason`, the
+ * aggregator-specific `choices[0].native_finish_reason` (OpenRouter surfaces the
+ * true upstream reason here — e.g. `MAX_TOKENS` — while sometimes leaving
+ * `finish_reason` normalized or absent), then Anthropic top-level `stop_reason`.
+ * Used to distinguish a *complete* empty response (model capability issue) from
+ * a *truncated* one (`length`/`max_tokens` — a budget problem, not a capability
+ * one). `isLengthTruncation` lower-cases the result so provider casing
+ * (`MAX_TOKENS`) still matches.
+ */
+function extractFinishReason(rawData: unknown): string | undefined {
+  try {
+    const d = rawData as {
+      choices?: Array<{
+        finish_reason?: string;
+        native_finish_reason?: string;
+      }>;
+      stop_reason?: string;
+      status?: string;
+      incomplete_details?: { reason?: string } | null;
+    };
+    const reason =
+      d.choices?.[0]?.finish_reason ??
+      d.choices?.[0]?.native_finish_reason ??
+      d.stop_reason ??
+      (d.status === "incomplete" &&
+      d.incomplete_details?.reason === "max_output_tokens"
+        ? "length"
+        : d.status === "incomplete"
+          ? d.incomplete_details?.reason
+          : undefined) ??
+      undefined;
+    return reason === "refusal" ? normalizeAnthropicStopReason(reason) : reason;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when a finish/stop reason indicates the model hit its OUTPUT BUDGET
+ * (rather than finishing, being content-filtered, or making a tool call).
+ * Matches the OpenAI (`length`), Anthropic (`max_tokens`), and Gemini-style
+ * (`max_output_tokens` / `MAX_TOKENS`) spellings surfaced by
+ * `extractFinishReason` (which reads `finish_reason`, then the aggregator
+ * `native_finish_reason`, then `stop_reason`). Case-insensitive so a provider's
+ * upstream casing still matches. A budget truncation is retryable with a larger
+ * budget; a genuine `stop`/`end_turn` empty is a capability signal.
+ */
+function isLengthTruncation(finishReason: string | undefined): boolean {
+  if (!finishReason) return false;
+  const r = finishReason.toLowerCase();
+  return r === "length" || r === "max_tokens" || r === "max_output_tokens";
+}
+
+/**
+ * The largest output budget a `finish_reason:"length"` retry may request for a
+ * given model: the model's own `limit.output` when known, else a conservative
+ * absolute cap. Bounds cost/latency and guarantees the retry never exceeds what
+ * the model can actually emit (which would just truncate again).
+ */
+function workerLengthRetryCeiling(modelID: string): number {
+  const out = getModelEntrySync(modelID).limit?.output;
+  return out && out > 0
+    ? Math.min(out, WORKER_LENGTH_RETRY_CAP)
+    : WORKER_LENGTH_RETRY_CAP;
 }
 
 /**
@@ -3474,987 +3474,7 @@ export function createGatewayLLMClient(
       // consistent with the worker model's provider.
       const sameProviderAsSession =
         opts?.upstreamProviderID !== undefined &&
-        workerProvidersEquivalent(opts.upstreamProviderID, m              text: string | null;
-                  usage: AnthropicUsage | null;
-                  model: string | null;
-                };
-                if (successBody.isSSE) {
-                  let gwResp: GatewayResponse;
-                  try {
-                    gwResp = await accumulateWorkerSSE(
-                      target.protocol,
-                      successBody.response,
-                      requestSignal,
-                      () => {
-                        semanticContentConsumed = true;
-                      },
-                    );
-                  } catch (error) {
-                    if (opts?.signal?.aborted) throw opts.signal.reason;
-                    if (requestSignal.aborted) throw requestSignal.reason;
-                    if (error instanceof SSEStreamTransportError) {
-                      if (semanticContentConsumed) {
-                        throw new WorkerTransportFailureError(error);
-                      }
-                      await retryPostHeaderTransportFailure(
-                        error,
-                        response,
-                        attempt,
-                      );
-                      continue;
-                    }
-                    return rejectInvalidWorkerBody(error);
-                  }
-                  sseStopReason = gwResp.stopReason;
-                  parsed = gatewayResponseToWorkerResult(gwResp);
-                } else {
-                  try {
-                    parsed = parseWorkerResponse(target.protocol, rawData);
-                  } catch (error) {
-                    return rejectInvalidWorkerBody(error);
-                  }
-                }
-
-                const finishReason = isSSE
-                  ? sseStopReason
-                  : extractFinishReason(rawData);
-
-                // Provider completion metadata is authoritative. A truncated
-                // semantic-judge answer can happen to be valid verdict JSON;
-                // never accept it merely because it is non-empty and parseable.
-                if (parsed.text && isLengthTruncation(finishReason)) {
-                  return rejectInvalidWorkerBody(
-                    new IncompleteWorkerResponseError(finishReason),
-                  );
-                }
-
-                // Set usage attributes on the span
-                if (parsed.usage) {
-                  setGenAiUsageAttributes(
-                    span,
-                    parsed.usage,
-                    parsed.model ?? undefined,
-                  );
-                  emitCostMetric(model.modelID, parsed.usage, "direct");
-                  recordWorkerCost(
-                    opts?.sessionID,
-                    model.modelID,
-                    parsed.usage,
-                    "direct",
-                    opts?.workerID,
-                  );
-                }
-
-                // Enrich span with retry metadata on eventual success
-                if (retryCount > 0) {
-                  span.setAttribute("lore.retry.count", retryCount);
-                  span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
-                  if (lastRetryAfterMs != null) {
-                    span.setAttribute(
-                      "lore.retry.last_retry_after_ms",
-                      lastRetryAfterMs,
-                    );
-                  }
-                  span.setAttribute("lore.retry.final_status", finalStatus);
-                }
-
-                // NOTE: We intentionally do NOT call recordWorkerSuccess() here.
-                // The LLM adapter only knows the transport succeeded; the core
-                // distillation/curator pipeline knows whether the response was
-                // actually parseable and usable. Recording success at the
-                // transport layer would clear failure state before the parse
-                // step can record "parse-error", making sustained parse
-                // failures invisible to the health ladder.
-                if (parsed.text) {
-                  // A usable response resets the consecutive-empty streak so a
-                  // model that recovers isn't pushed toward an incapable verdict
-                  // by old, non-consecutive empties. Scoped per worker: a usable
-                  // distillation must NOT reset the curator's empty streak.
-                  clearEmptyWorkerStreak(
-                    model.providerID,
-                    model.modelID,
-                    opts?.workerID,
-                  );
-                  return parsed.text;
-                }
-
-                // Transport succeeded but the model returned no usable text.
-                // Log WHAT came back so an empty no-response can be classified
-                // (genuinely empty vs an unread field shape vs a length
-                // truncation) instead of being opaque. The raw body is
-                // otherwise discarded here. For SSE the finish reason lives on
-                // the accumulated stream (rawData is `{}`), so prefer it.
-                log.warn(
-                  `worker empty response (HTTP ${response.status}, ct=${diagnosticContentKind(contentType)}) ` +
-                    `— model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
-                    `worker=${diagnosticToken(opts?.workerID)} ` +
-                    `session=${opts?.sessionID?.slice(0, 16) ?? "none"} ` +
-                    `— ${describeEmptyWorkerResponse(rawData)}`,
-                );
-
-                // Empty completion truncated on the OUTPUT BUDGET
-                // (`finish_reason:"length"` / `stop_reason:"max_tokens"`): the
-                // model spent its entire allowance on hidden reasoning and never
-                // reached visible text. This is a budget problem, not a
-                // capability one — retry ONCE with the budget multiplied (clamped
-                // to the model's own output limit) so a capable reasoning model
-                // gets room for both the reasoning pass and the answer. `maxTokens`
-                // here is already the effective budget (the OpenAI reasoning floor
-                // was applied at loop entry), so the multiply raises from the real
-                // baseline, not the tiny raw budget. Rebuild via buildWorkerRequest
-                // (not string-editing the body) so the OAuth billing signature is
-                // recomputed. Bounded to a single retry per call: a model that
-                // truncates even at its max output falls through to the normal
-                // empty-response handling.
-                const lengthRetryCeiling = workerLengthRetryCeiling(
-                  model.modelID,
-                );
-                if (
-                  !lengthRetried &&
-                  isLengthTruncation(finishReason) &&
-                  maxTokens < lengthRetryCeiling
-                ) {
-                  lengthRetried = true;
-                  const bumped = Math.min(
-                    maxTokens * WORKER_LENGTH_RETRY_MULTIPLIER,
-                    lengthRetryCeiling,
-                  );
-                  log.warn(
-                    `worker empty response was a budget truncation (finish_reason=${finishReason}) ` +
-                      `— retrying once with max_tokens ${maxTokens} → ${bumped} ` +
-                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
-                      `worker=${diagnosticToken(opts?.workerID)})`,
-                  );
-                  maxTokens = bumped;
-                  req = await buildCurrentRequest();
-                  // Re-apply a runtime beta strip if one already happened this
-                  // call (rebuilding restores the freshly-built header set) —
-                  // mirrors the temperature-strip rebuild below.
-                  if (betaStripped) {
-                    req = { ...req, headers: stripBetaHeaders(req.headers) };
-                  }
-                  retryCount++;
-                  continue;
-                }
-
-                // Classify: a COMPLETE response (finish/stop reason indicates
-                // the model finished producing — not a truncation, content
-                // filter, or tool-call) that still has no usable text, even
-                // after the reasoning-field fallback, is a model CAPABILITY
-                // signal. Budget truncations ("length"/"max_tokens"), content
-                // filtering, and tool-call stops are NOT capability facts and
-                // stay retryable no-response. We require several CONSECUTIVE
-                // such empties before marking the model incapable, so a single
-                // transient/prompt-specific empty doesn't permanently skip a
-                // capable model. recordEmptyWorkerResponse encapsulates this.
-                if (
-                  recordEmptyWorkerResponse(
-                    model.providerID,
-                    model.modelID,
-                    finishReason,
-                    opts?.workerID,
-                  )
-                ) {
-                  recordWorkerFailure(
-                    opts?.sessionID ?? "_unknown",
-                    opts?.workerID ?? "unknown",
-                    "worker-incapable",
-                  );
-                  recordPromptFailure(
-                    "worker-incapable",
-                    `worker incapable: ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} produced no usable text`,
-                    { model, protocol: target.protocol, finishReason },
-                  );
-                  return null;
-                }
-
-                // Record as no-response here so the adapter is the single
-                // owner of transport-failure attribution — core workers no
-                // longer record on a null return (which double-counted, e.g.
-                // a no-auth failure was logged by both the adapter AND the
-                // distiller). Sustained empty completions still escalate.
-                recordWorkerFailure(
-                  opts?.sessionID ?? "_unknown",
-                  opts?.workerID ?? "unknown",
-                  "no-response",
-                );
-                recordPromptFailure(
-                  isLengthTruncation(finishReason)
-                    ? "incomplete-response"
-                    : "empty-response",
-                  `${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}: no usable text in response (finish=${diagnosticFinishReason(finishReason)})`,
-                  { model, protocol: target.protocol, finishReason },
-                );
-                return null;
-              }
-
-              // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
-              if (AUTH_ERROR_CODES.has(response.status)) {
-                await readWorkerResponseText(response, requestSignal);
-                if (onAuthRejected) {
-                  try {
-                    onAuthRejected({
-                      status: response.status,
-                      providerID: model.providerID,
-                      modelID: model.modelID,
-                      url: sanitizedWorkerOrigin(target.url).replace(/\/$/, ""),
-                      scheme: cred.scheme,
-                      workerID: opts?.workerID,
-                      sessionID: opts?.sessionID,
-                    });
-                  } catch {
-                    // Diagnostics must never break the adapter's null contract.
-                  }
-                }
-                // Mark this provider's credential stale so resolveAuth()
-                // falls through to global — but only for THIS provider,
-                // not other providers on the same session. Requires a real
-                // session ID (staleness is per-session state).
-                if (opts?.sessionID) {
-                  markAuthStale(opts.sessionID, credentialProviderID);
-                } else {
-                  // Session-less worker (e.g. entity-rebuild) — mark the
-     ail=${classifyWorker400(text)}`
-                      : "") +
-                    ` request_id=${diagnosticToken(response.headers.get("request-id") ?? undefined, "none")}` +
-                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
-                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
-                    ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
-                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
-                );
-                span.setStatus({ code: 2, message: `HTTP ${response.status}` });
-                recordWorkerFailure(
-                  opts?.sessionID ?? "_unknown",
-                  opts?.workerID ?? "unknown",
-                  "upstream-error",
-                );
-                // Soft-pause: a non-transient 4xx for a worker re-sending the
-                // same content is permanent. Stops the re-fire-every-turn loop;
-                // isWorkerCreditPaused() still probes once per 5 min so a fixed
-                // request recovers. Urgent calls are pause-exempt.
-                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
-                recordPromptFailure(
-                  isUnsupportedApi400(response.status, text)
-                    ? "api-unsupported"
-                    : isModelUnsupported400(response.status, text)
-                      ? "model-unsupported"
-                      : "upstream-error",
-                  `HTTP ${response.status}: non-transient upstream error for ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}`,
-                  {
-                    model,
-                    protocol: target.protocol,
-                    httpStatus: response.status,
-                  },
-                );
-                return null;
-              }
-
-              // Transient error — retry if attempts remain.
-              // Trip the circuit breaker for THIS provider on ANY 429 (urgent
-              // included) so background work targeting the same provider pauses
-              // instead of piling on more requests while this call rides out
-              // the rate limit. Work routed to other providers keeps draining.
-              // The urgent call itself is not gated by the breaker, so it keeps
-              // retrying. Trip at most once per call to avoid runaway
-              // escalation of the backoff schedule across a multi-retry loop.
-              if (response.status === 429 && !breakerTripped) {
-                breakerTripped = true;
-                const cbRetryAfter = parseRetryAfter(response);
-                const pauseSec = cbRetryAfter
-                  ? Math.ceil(cbRetryAfter / 1000)
-                  : undefined;
-                tripCircuitBreaker(pauseSec, model.providerID);
-              }
-
-              if (attempt < maxRetries) {
-                const retryAfter = parseRetryAfter(response);
-                const delay = backoffMs(attempt, retryAfter);
-                retryCount++;
-                totalDelayMs += delay;
-                if (retryAfter != null) lastRetryAfterMs = retryAfter;
-                log.warn(
-                  `worker upstream status=${response.status} ` +
-                    `(attempt ${attempt + 1}/${maxRetries + 1}, ` +
-                    `origin=${sanitizedWorkerOrigin(req.url)}), ` +
-                    `retrying in ${delay}ms` +
-                    (retryAfter != null
-                      ? ` (retry-after: ${Math.round(retryAfter / 1000)}s)`
-                      : ""),
-                );
-                cancelWorkerResponseForRetry(response, response.status);
-                await abortableSleep(delay, requestSignal);
-                continue;
-              }
-
-              // Exhausted retries — fall back, log, capture Sentry, enrich span.
-              // Urgent calls (compaction, query expansion) hand control back to
-              // a caller that degrades gracefully without losing data — e.g.
-              // handleCompaction forwards the client's own compaction upstream.
-              // On a shared-quota 429 that fallback will hit the same limit and
-              // the client handles it, so our exhaustion here is not itself a
-              // failure to surface loudly. Log it at `warn` (hidden unless
-              // LORE_DEBUG) to avoid alarming red `[lore]` noise; non-urgent
-              // background exhaustion stays at `error` since it can indicate a
-              // sustained problem worth investigating.
-              await readWorkerResponseText(response, requestSignal);
-              const exhaustionMsg =
-                `worker upstream request failed after ${maxRetries + 1} attempts:` +
-                ` status=${response.status} origin=${sanitizedWorkerOrigin(req.url)}` +
-                ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
-                ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
-                ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`;
-              if (urgent) {
-                log.warn(exhaustionMsg);
-              } else {
-                log.error(exhaustionMsg);
-              }
-
-              // Capture as Sentry error for alerting
-              Sentry.captureException(
-                new Error(
-                  `Worker upstream exhausted ${maxRetries + 1} retries: HTTP ${response.status}`,
-                ),
-                {
-                  fingerprint: [
-                    "LOREAI-GATEWAY",
-                    "worker-retry-exhausted",
-                    String(response.status),
-                  ],
-                  extra: {
-                    status: response.status,
-                    attempts: maxRetries + 1,
-                    totalDelayMs,
-                    lastRetryAfterMs,
-                    model: diagnosticToken(model.modelID),
-                    workerID: diagnosticToken(opts?.workerID),
-                    origin: sanitizedWorkerOrigin(req.url),
-                  },
-                },
-              );
-
-              // Enrich span with retry metadata
-              span.setAttribute("lore.retry.count", retryCount);
-              span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
-              if (lastRetryAfterMs != null) {
-                span.setAttribute(
-                  "lore.retry.last_retry_after_ms",
-                  lastRetryAfterMs,
-                );
-              }
-              span.setAttribute("lore.retry.final_status", finalStatus);
-              span.setStatus({ code: 2, message: `HTTP exhausted retries` });
-              recordWorkerFailure(
-                opts?.sessionID ?? "_unknown",
-                opts?.workerID ?? "unknown",
-                response.status === 429 ? "rate-limit" : "upstream-error",
-              );
-              recordPromptFailure(
-                response.status === 429 ? "rate-limited" : "upstream-error",
-                `HTTP ${response.status}: transient upstream error exhausted retries`,
-                {
-                  retryable: true,
-                  model,
-                  protocol: target.protocol,
-                  httpStatus: response.status,
-                },
-              );
-              return null;
-            }
-          },
-        );
-      } catch (e) {
-        // Preserve the caller's exact abort reason regardless of its class.
-        if (opts?.signal?.aborted) throw opts.signal.reason;
-        if (e instanceof DOMException && e.name === "TimeoutError") {
-          recordWorkerFailure(
-            opts?.sessionID ?? "_unknown",
-            opts?.workerID ?? "unknown",
-            "timeout",
-          );
-          throw e;
-        }
-
-        if (e instanceof WorkerRequestTooLargeError) {
-          recordWorkerFailure(
-            opts?.sessionID ?? "_unknown",
-            opts?.workerID ?? "unknown",
-            "upstream-error",
-          );
-          log.warn(
-            `worker request rebuild rejected: request_bytes=${e.bytes} ` +
-              `limit_bytes=${MAX_WORKER_REQUEST_BYTES}`,
-          );
-          lastWorkerError = e.message;
-          return null;
-        }
-
-        // Caller cancellation was rethrown above and never enters health.
-        const isAbort = e instanceof DOMException && e.name === "AbortError";
-        if (!isAbort) {
-          recordWorkerFailure(
-            opts?.sessionID ?? "_unknown",
-            opts?.workerID ?? "unknown",
-            transportErrorKind(e) === "deadline" ||
-              transportErrorKind(e) === "timeout"
-              ? "timeout"
-              : "transport-error",
-          );
-        }
-        if (isAbort) {
-          log.info("worker prompt aborted (client disconnect or shutdown)");
-          recordPromptFailure("aborted", "client disconnect or shutdown", {
-            model,
-            protocol: target.protocol,
-            preserveExisting: true,
-          });
-        } else {
-          const kind = transportErrorKind(e);
-          const code = transportErrorCode(e);
-          log.error(
-            `worker prompt transport failure: kind=${kind}` +
-              (code ? ` code=${code}` : "") +
-              ` origin=${sanitizedWorkerOrigin(req.url)}` +
-              ` provider=${diagnosticToken(model.providerID)}`,
-          );
-          recordPromptFailure(
-            e instanceof DOMException && e.name === "TimeoutError"
-              ? "timeout"
-              : "network-error",
-            `network error: no response from ${diagnosticToken(model.providerID)} ` +
-              `(kind=${kind}${code ? `, code=${code}` : ""})`,
-            {
-              retryable: true,
-              model,
-              protocol: target.protocol,
-              preserveExisting: true,
-            },
-          );
-        }
-        return null;
-      } finally {
-        clearTimeout(deadlineTimer);
-        activeWorkerCalls.delete(callID);
-      }
-    },
-    async promptDetailed(system, user, promptOpts) {
-      const initialModel = promptOpts?.model ?? defaultModel;
-      const context: PromptDiagnosticContext = {
-        attempts: 0,
-        model: initialModel,
-      };
-      return promptDiagnosticStorage.run(context, async () => {
-        try {
-          const text = await client.prompt(system, user, promptOpts);
-          if (text !== null) {
-            return {
-              kind: "success" as const,
-              text,
-              model: `${context.model.providerID}/${context.model.modelID}`,
-              protocol:
-                context.protocol ??
-                resolveWorkerProtocol(
-                  context.model.providerID,
-                  promptOpts?.protocol,
-                  context.model.modelID,
-                  promptOpts?.upstreamUrl,
-                ),
-              attempts: context.attempts,
-            };
-          }
-        } catch (error) {
-          if (promptOpts?.signal?.aborted) {
-            const reason = promptOpts.signal.reason;
-            recordPromptFailure(
-              reason instanceof DOMException && reason.name === "TimeoutError"
-                ? "timeout"
-                : "aborted",
-              error instanceof Error ? error.message : String(error),
-              { model: context.model, protocol: context.protocol },
-            );
-          } else {
-            throw attachPromptAttempts(error, context.attempts);
-          }
-        }
-        return (
-          context.failure ?? {
-            kind: "failure" as const,
-            code: "upstream-error" as const,
-            message:
-              lastWorkerError ?? "worker prompt failed without a diagnostic",
-            retryable: false,
-            model: `${context.model.providerID}/${context.model.modelID}`,
-            ...(context.protocol ? { protocol: context.protocol } : {}),
-            attempts: context.attempts,
-          }
-        );
-      });
-    },
-  };
-  return client;
-}
-
-export interface GatewayInvariantJudgeOptions {
-  client: GatewayLLMClient;
-  model: { proviis deprecated/unsupported" complaint →
-                // the request carries a `temperature` the model rejects (newer
-                // models like claude-sonnet-5 dropped the sampling param). Learn
-                // it so future calls omit temperature upfront, then rebuild THIS
-                // request without temperature and retry once. We rebuild via
-                // buildWorkerRequest rather than string-editing req.body so the
-                // OAuth billing signature is recomputed over the new body
-                // (mutating the serialized body would invalidate the cch hash).
-                // Bounded to one retry per call.
-                if (
-                  response.status === 400 &&
-                  !temperatureStripped &&
-                  effectiveTemperature != null &&
-                  isTemperatureUnsupported400(text)
-                ) {
-                  temperatureStripped = true;
-                  effectiveTemperature = undefined;
-                  req = await buildCurrentRequest();
-                  // Rebuilding restores the freshly-built header set, which
-                  // resurrects a beta we may have already stripped at runtime.
-                  // The upfront filter strips `context-1m` unconditionally for
-                  // workers (issue #1571), so a 400 β-loop on that specific
-                  // beta can't happen — but the runtime strip is still in
-                  // place for any future beta the upstream rejects, and the
-                  // `if (betaStripped)` latch re-applies it after the rebuild
-                  // so a model that needed BOTH fixes doesn't regress into a
-                  // beta-400 loop.
-                  if (betaStripped) {
-                    req = { ...req, headers: stripBetaHeaders(req.headers) };
-                  }
-                  log.warn(
-                    `worker 400 reports temperature is unsupported — retrying once without the temperature param ` +
-                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
-                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
-                  );
-                  retryCount++;
-                  continue;
-                }
-
-                // 400 + a "thinking is unsupported" complaint → the model rejects
-                // the `thinking:{type:"disabled"}` param we add for supported
-                // Claude workers.
-                // Learn it so future calls omit the param upfront, then rebuild
-                // THIS request without it and retry once. Rebuilt via
-                // buildWorkerRequest (not string-editing req.body) so the OAuth
-                // billing signature is recomputed over the new body. Bounded to
-                // one retry per call; composes with the temperature/beta strips
-                // above (each rebuild uses the current effective values).
-                if (
-                  response.status === 400 &&
-                  !thinkingStripped &&
-                  effectiveDisableThinking &&
-                  isThinkingUnsupported400(text)
-                ) {
-                  thinkingStripped = true;
-                  effectiveDisableThinking = false;
-                  req = await buildCurrentRequest();
-                  // Preserve a runtime beta strip across this rebuild (same
-                  // reasoning as the temperature-strip path above).
-                  if (betaStripped) {
-                    req = { ...req, headers: stripBetaHeaders(req.headers) };
-                  }
-                  log.warn(
-                    `worker 400 reports thinking is unsupported — retrying once without the thinking param ` +
-                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
-                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
-                  );
-                  retryCount++;
-                  continue;
-                }
-
-                // Data-policy 404: the selected worker model (typically an
-                // OpenRouter `:free` model) is unavailable because the account
-                // has not opted into the provider's data-collection policy.
-                // This is a per-account availability fact about THIS model, not
-                // an outage — retrying is futile. Blocklist the model (and, for
-                // a `:free` model, the whole `:free` tier on this provider per
-                // the "assume all :free collect data" directive) and classify
-                // as `data-policy` so it does NOT feed the Sentry outage ladder
-                // or credit-pause the session. Worker-model selection re-resolves
-                // to a usable same-family sibling on the next pass; the next real
-                // worker call against that sibling is the recovery probe.
-                if (isDataPolicyBlocked404(response.status, text)) {
-                  log.warn(
-                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
-                      `blocked by account data policy (404) — ` +
-                      `blocklisting and re-resolving (worker=${diagnosticToken(opts?.workerID)}, ` +
-                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
-                      `origin=${sanitizedWorkerOrigin(req.url)})`,
-                  );
-                  markWorkerIncapable(model.providerID, model.modelID);
-                  if (model.modelID.endsWith(":free")) {
-                    markFreeModelsDataBlocked(model.providerID);
-                  }
-                  span.setStatus({
-                    code: 2,
-                    message: `HTTP ${response.status} (data-policy)`,
-                  });
-                  recordWorkerFailure(
-                    opts?.sessionID ?? "_unknown",
-                    opts?.workerID ?? "unknown",
-                    "data-policy",
-                  );
-                  // Do NOT markWorkerPaused: the fix is re-resolution to a
-                  // different model, not pausing the session's workers.
-                  recordPromptFailure(
-                    "data-policy",
-                    `HTTP ${response.status}: data policy blocked — ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} unavailable (account has not opted in)`,
-                    {
-                      model,
-                      protocol: target.protocol,
-                      httpStatus: response.status,
-                    },
-                  );
-                  return null;
-                }
-
-                // 400 model-not-supported: the requested model is unavailable
-                // on this account/plan (Copilot subscription tiers serve
-                // different catalogs). This is a per-account capability fact,
-                // not an outage — retrying the SAME model is futile. Blocklist
-                // it and, if a same-provider backup remains, swap it in and
-                // retry (rebuild via buildWorkerRequest so the OAuth billing
-                // signature is recomputed over the new body). Bounded by the
-                // finite candidate list. Only when NO backup remains do we fall
-                // through to the generic failure below.
-                if (
-                  isModelUnsupported400(response.status, text) &&
-                  modelFallbacks.length > 0
-                ) {
-                  markWorkerIncapable(model.providerID, model.modelID);
-                  // length-checked above, so a value is guaranteed.
-                  const next = modelFallbacks.shift() ?? model;
-                  log.warn(
-                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
-                      `not supported on this account (400) — ` +
-                      `falling back to ${diagnosticToken(next.providerID)}/${diagnosticToken(next.modelID)} ` +
-                      `(worker=${diagnosticToken(opts?.workerID)}, ` +
-                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
-                      `origin=${sanitizedWorkerOrigin(req.url)})`,
-                  );
-                  model = next;
-                  // Protocol and target are model-dependent even within one
-                  // provider (GitHub Copilot serves gpt-5.6 on Responses but
-                  // gpt-5-mini on Chat Completions). Re-resolve the complete
-                  // route before rebuilding so URL, body, parser, and model
-                  // controls all describe the fallback model.
-                  protocol = resolveWorkerProtocol(
-                    model.providerID,
-                    sameProviderAsSession ? opts?.protocol : undefined,
-                    model.modelID,
-                    sameProviderAsSession ? upstreamOverride : undefined,
-                  );
-                  target = resolveTarget(
-                    upstreams,
-                    protocol,
-                    upstreamOverride,
-                    model.providerID,
-                    opts?.upstreamProviderID,
-                  );
-                  if (target.routeUnavailable || !target.url) {
-                    lastWorkerError = `no upstream route for ${diagnosticToken(model.providerID)} fallback`;
-                    return null;
-                  }
-                  const fallbackFloorsReasoningBudget =
-                    target.protocol === "openai" ||
-                    target.protocol === "openai-responses" ||
-                    target.protocol === "gemini";
-                  const fallbackReasoningFloor = fallbackFloorsReasoningBudget
-                    ? Math.min(
-                        workerReasoningHeadroomFloor(
-                          model,
-                          opts?.reasoningEffort,
-                        ),
-                        workerLengthRetryCeiling(model.modelID),
-                      )
-                    : 0;
-                  maxTokens = Math.min(
-                    Math.max(rawMaxTokens, fallbackReasoningFloor),
-                    workerLengthRetryCeiling(model.modelID),
-                  );
-                  effectiveTemperature =
-                    isTemperatureUnsupportedModel(model) ||
-                    modelRejectsTemperatureByData(model.modelID)
-                      ? undefined
-                      : opts?.temperature;
-                  effectiveDisableThinking =
-                    (target.protocol === "anthropic" ||
-                      target.protocol === "vertex") &&
-                    workerThinkingOnByDefault(model) &&
-                    !isThinkingUnsupportedModel(model);
-                  temperatureStripped = false;
-                  thinkingStripped = false;
-                  lengthRetried = false;
-                  req = await buildCurrentRequest();
-                  // Preserve any runtime beta strip across the rebuild (same
-                  // reasoning as the temperature/thinking rebuilds above).
-                  if (betaStripped) {
-                    req = { ...req, headers: stripBetaHeaders(req.headers) };
-                  }
-                  retryCount++;
-                  // A model swap is NOT a transient retry — it's a one-way walk
-                  // down a finite candidate list (bounded by modelFallbacks
-                  // shrinking). Don't let it consume the transient-error budget
-                  // (`attempt < maxRetries`): decrement to cancel the `attempt++`
-                  // the loop applies on `continue`, so the working backup keeps
-                  // its full 429/5xx retry allowance.
-                  attempt--;
-                  continue;
-                }
-
-                log.error(
-                  `worker upstream request failed: status=${response.status}` +
-                    (response.status === 400
-                      ? ` det             // global fallback as stale so resolveAuth(undefined)
-                  // returns null instead of the same rejected token.
-                  // Without this, session-less workers hammer indefinitely
-                  // because markAuthStale requires a sessionID.
-                  markGlobalAuthStale();
-                }
-
-                // Re-resolve: credential may have been refreshed by a concurrent client request
-                const freshCred = getAuth(
-                  opts?.sessionID,
-                  credentialProviderID,
-                );
-                const credentialChanged =
-                  !!freshCred && freshCred.value !== cred.value;
-                if (credentialChanged && attempt === 0) {
-                  // Credential changed — adopt it as the current credential so
-                  // any subsequent rebuild (e.g. the temperature-strip retry)
-                  // uses the fresh key, then rebuild request and retry once.
-                  activeCred = freshCred;
-                  log.info(
-                    `worker auth error status=${response.status}, credential refreshed — retrying ` +
-                      `(origin=${sanitizedWorkerOrigin(req.url)})`,
-                  );
-                  req = await buildCurrentRequest();
-                  retryCount++;
-                  continue;
-                }
-
-                // Only the terminal auth failure reaches worker health. A
-                // rejected stale credential that refreshes successfully is an
-                // intermediate attempt, not a failed worker call.
-                recordWorkerFailure(
-                  opts?.sessionID ?? "_unknown",
-                  opts?.workerID ?? "unknown",
-                  "auth-rejected",
-                );
-
-                // No fresh credential or retry also failed — bail.
-                //
-                // log.warn (not log.error) because 401/403 is expected,
-                // user-actionable state, NOT an outage. Adm hit this in
-                // Slack on 2026-07-30 with stale on-disk auth.json keys
-                // — that's a config issue, not a gateway failure. The
-                // chain's diagnostic already surfaces the actual HTTP
-                // status to the user via getLastWorkerError() (PR
-                // #1542/#1544); we don't need log.error to also scream.
-                //
-                log.warn(
-                  `worker upstream auth error: status=${response.status}` +
-                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
-                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
-                    ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
-                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
-                );
-                Sentry.captureException(
-                  new Error(
-                    `Worker upstream auth error: HTTP ${response.status}`,
-                  ),
-                  {
-                    fingerprint: [
-                      "LOREAI-GATEWAY",
-                      "worker-auth-error",
-                      String(response.status),
-                    ],
-                    extra: {
-                      status: response.status,
-                      model: diagnosticToken(model.modelID),
-                      workerID: diagnosticToken(opts?.workerID),
-                      sessionID: opts?.sessionID?.slice(0, 16),
-                      origin: sanitizedWorkerOrigin(req.url),
-                      credentialChanged,
-                      freshCredAvailable: !!freshCred,
-                    },
-                  },
-                );
-                span.setStatus({
-                  code: 2,
-                  message: `HTTP ${response.status} auth`,
-                });
-                // Soft-pause so a persistent auth failure doesn't re-fire on
-                // every idle tick + turn. The per-provider staleness above
-                // does NOT stop the loop for a cross-provider 401 (the key is
-                // valid for its real provider, so it's never marked stale) —
-                // the pause is the robust backstop. isWorkerCreditPaused()
-                // still lets one probe through per 5 min so a refreshed
-                // credential recovers automatically. Urgent calls are exempt.
-                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
-                recordPromptFailure(
-                  "auth-rejected",
-                  `HTTP ${response.status}: authentication rejected`,
-                  {
-                    model,
-                    protocol: target.protocol,
-                    httpStatus: response.status,
-                  },
-                );
-                return null;
-              }
-
-              // --- Insufficient credit: 402 — expected account state ---
-              // (e.g. OpenRouter "requires more credits"). NOT an outage:
-              //  • log.warn (no Error object) so it does NOT auto-forward to
-              //    Sentry;
-              //  • intentionally NO recordWorkerFailure — that ladder is what
-              //    escalates to Sentry after 3 hits, and 402 must not;
-              //  • markWorkerPaused soft-pauses this session's background work
-              //    so the distiller/curator stop retrying every turn (a probe
-              //    is allowed once per circuit interval to detect a top-up).
-              if (INSUFFICIENT_CREDIT_CODES.has(response.status)) {
-                await readWorkerResponseText(response, requestSignal);
-                log.warn(
-                  `worker upstream insufficient credit: status=${response.status}` +
-                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
-                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
-                    ` worker=${diagnosticToken(opts?.workerID)}` +
-                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
-                );
-                if (opts?.sessionID) {
-                  markWorkerPaused(opts.sessionID);
-                } else {
-                  // Session-less workers (e.g. entity-rebuild) can't be paused
-                  // per-session — log so it's visible but don't escalate.
-                  log.warn(
-                    `worker upstream insufficient credit (session-less, no pause): ${response.status}`,
-                  );
-                }
-                span.setStatus({
-                  code: 2,
-                  message: `HTTP ${response.status} credit`,
-                });
-                recordPromptFailure(
-                  "insufficient-credit",
-                  `HTTP ${response.status}: insufficient credit — add credits to your account or switch providers`,
-                  {
-                    model,
-                    protocol: target.protocol,
-                    httpStatus: response.status,
-                  },
-                );
-                return null;
-              }
-
-              // Non-transient error — fail immediately, no retry
-              if (!TRANSIENT_CODES.has(response.status)) {
-                const text = await readWorkerResponseText(
-                  response,
-                  requestSignal,
-                );
-
-                // 400 + a beta-related complaint → the request carries a beta
-                // header the model/subscription doesn't support. The upfront
-                // filter (buildAnthropicWorkerRequest) strips the long-context
-                // `context-1m` beta unconditionally for workers (issue #1571:
-                // a 1M-capable worker model on a subscription auth without
-                // usage credits 429s permanently because the beta rides along),
-                // but this is the runtime safety net for any OTHER beta the
-                // upstream refuses: retry ONCE with the long-context beta
-                // removed (preserving oauth-2025-04-20 et al. so OAuth calls
-                // still authenticate) before giving up. Bounded to one retry.
-                if (
-                  response.status === 400 &&
-                  !betaStripped &&
-                  hasLongContextBeta(req.headers) &&
-                  isBetaRelated400(text)
-                ) {
-                  betaStripped = true;
-                  req = { ...req, headers: stripBetaHeaders(req.headers) };
-                  log.warn(
-                    `worker 400 looks long-context-beta-related — retrying once without the context-1m beta ` +
-                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
-                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
-                  );
-                  retryCount++;
-                  continue;
-                }
-
-                if (
-                  response.status === 400 &&
-                  target.protocol === "openai-responses" &&
-                  requestedReasoningEffort === "off" &&
-                  reasoningEffort === "off" &&
-                  !reasoningNoneStripped &&
-                  isReasoningNoneUnsupported400(text)
-                ) {
-                  reasoningNoneStripped = true;
-                  reasoningNoneUnsupportedTargets.add(
-                    reasoningNoneCapabilityKey(target, model),
-                  );
-                  reasoningEffort = undefined;
-                  req = await buildCurrentRequest();
-                  if (betaStripped) {
-                    req = { ...req, headers: stripBetaHeaders(req.headers) };
-                  }
-                  log.warn(
-                    `worker 400 rejects reasoning effort none — retrying once without the reasoning field ` +
-                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
-                  );
-                  retryCount++;
-                  continue;
-                }
-
-                const alternateProtocol = alternateProtocolRetried
-                  ? null
-                  : isUnsupportedApi400(response.status, text)
-                    ? alternateProtocolForUnsupportedApi(target)
-                    : null;
-                if (alternateProtocol) {
-                  alternateProtocolRetried = true;
-                  protocol = alternateProtocol;
-                  target = resolveTarget(
-                    upstreams,
-                    protocol,
-                    upstreamOverride,
-                    model.providerID,
-                    opts?.upstreamProviderID,
-                  );
-                  effectiveDisableThinking = false;
-                  reasoningEffort =
-                    requestedReasoningEffort === "off" &&
-                    protocol === "openai-responses" &&
-                    reasoningNoneUnsupportedTargets.has(
-                      reasoningNoneCapabilityKey(target, model),
-                    )
-                      ? undefined
-                      : requestedReasoningEffort;
-                  if (protocol === "openai") {
-                    maxTokens = Math.max(
-                      maxTokens,
-                      Math.min(
-                        workerReasoningHeadroomFloor(model, reasoningEffort),
-                        workerLengthRetryCeiling(model.modelID),
-                      ),
-                    );
-                  }
-                  req = await buildCurrentRequest();
-                  log.warn(
-                    `worker 400 reports API unsupported for model — retrying once via ${protocol} ` +
-                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
-                  );
-                  retryCount++;
-                  // A bounded route correction must not consume transient budget.
-                  attempt--;
-                  continue;
-                }
-
-                // 400 + a "temperature odel.providerID);
+        workerProvidersEquivalent(opts.upstreamProviderID, model.providerID);
       let protocol = resolveWorkerProtocol(
         model.providerID,
         sameProviderAsSession ? opts?.protocol : undefined,
@@ -5177,7 +4197,987 @@ export interface GatewayInvariantJudgeOptions {
                 // was requested (ChatGPT/Copilot/Codex, DeepSeek). (Seer #1413.)
                 let sseStopReason: string | undefined;
                 let parsed: {
-    derID: string; modelID: string };
+                  text: string | null;
+                  usage: AnthropicUsage | null;
+                  model: string | null;
+                };
+                if (successBody.isSSE) {
+                  let gwResp: GatewayResponse;
+                  try {
+                    gwResp = await accumulateWorkerSSE(
+                      target.protocol,
+                      successBody.response,
+                      requestSignal,
+                      () => {
+                        semanticContentConsumed = true;
+                      },
+                    );
+                  } catch (error) {
+                    if (opts?.signal?.aborted) throw opts.signal.reason;
+                    if (requestSignal.aborted) throw requestSignal.reason;
+                    if (error instanceof SSEStreamTransportError) {
+                      if (semanticContentConsumed) {
+                        throw new WorkerTransportFailureError(error);
+                      }
+                      await retryPostHeaderTransportFailure(
+                        error,
+                        response,
+                        attempt,
+                      );
+                      continue;
+                    }
+                    return rejectInvalidWorkerBody(error);
+                  }
+                  sseStopReason = gwResp.stopReason;
+                  parsed = gatewayResponseToWorkerResult(gwResp);
+                } else {
+                  try {
+                    parsed = parseWorkerResponse(target.protocol, rawData);
+                  } catch (error) {
+                    return rejectInvalidWorkerBody(error);
+                  }
+                }
+
+                const finishReason = isSSE
+                  ? sseStopReason
+                  : extractFinishReason(rawData);
+
+                // Provider completion metadata is authoritative. A truncated
+                // semantic-judge answer can happen to be valid verdict JSON;
+                // never accept it merely because it is non-empty and parseable.
+                if (parsed.text && isLengthTruncation(finishReason)) {
+                  return rejectInvalidWorkerBody(
+                    new IncompleteWorkerResponseError(finishReason),
+                  );
+                }
+
+                // Set usage attributes on the span
+                if (parsed.usage) {
+                  setGenAiUsageAttributes(
+                    span,
+                    parsed.usage,
+                    parsed.model ?? undefined,
+                  );
+                  emitCostMetric(model.modelID, parsed.usage, "direct");
+                  recordWorkerCost(
+                    opts?.sessionID,
+                    model.modelID,
+                    parsed.usage,
+                    "direct",
+                    opts?.workerID,
+                  );
+                }
+
+                // Enrich span with retry metadata on eventual success
+                if (retryCount > 0) {
+                  span.setAttribute("lore.retry.count", retryCount);
+                  span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
+                  if (lastRetryAfterMs != null) {
+                    span.setAttribute(
+                      "lore.retry.last_retry_after_ms",
+                      lastRetryAfterMs,
+                    );
+                  }
+                  span.setAttribute("lore.retry.final_status", finalStatus);
+                }
+
+                // NOTE: We intentionally do NOT call recordWorkerSuccess() here.
+                // The LLM adapter only knows the transport succeeded; the core
+                // distillation/curator pipeline knows whether the response was
+                // actually parseable and usable. Recording success at the
+                // transport layer would clear failure state before the parse
+                // step can record "parse-error", making sustained parse
+                // failures invisible to the health ladder.
+                if (parsed.text) {
+                  // A usable response resets the consecutive-empty streak so a
+                  // model that recovers isn't pushed toward an incapable verdict
+                  // by old, non-consecutive empties. Scoped per worker: a usable
+                  // distillation must NOT reset the curator's empty streak.
+                  clearEmptyWorkerStreak(
+                    model.providerID,
+                    model.modelID,
+                    opts?.workerID,
+                  );
+                  return parsed.text;
+                }
+
+                // Transport succeeded but the model returned no usable text.
+                // Log WHAT came back so an empty no-response can be classified
+                // (genuinely empty vs an unread field shape vs a length
+                // truncation) instead of being opaque. The raw body is
+                // otherwise discarded here. For SSE the finish reason lives on
+                // the accumulated stream (rawData is `{}`), so prefer it.
+                log.warn(
+                  `worker empty response (HTTP ${response.status}, ct=${diagnosticContentKind(contentType)}) ` +
+                    `— model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                    `worker=${diagnosticToken(opts?.workerID)} ` +
+                    `session=${opts?.sessionID?.slice(0, 16) ?? "none"} ` +
+                    `— ${describeEmptyWorkerResponse(rawData)}`,
+                );
+
+                // Empty completion truncated on the OUTPUT BUDGET
+                // (`finish_reason:"length"` / `stop_reason:"max_tokens"`): the
+                // model spent its entire allowance on hidden reasoning and never
+                // reached visible text. This is a budget problem, not a
+                // capability one — retry ONCE with the budget multiplied (clamped
+                // to the model's own output limit) so a capable reasoning model
+                // gets room for both the reasoning pass and the answer. `maxTokens`
+                // here is already the effective budget (the OpenAI reasoning floor
+                // was applied at loop entry), so the multiply raises from the real
+                // baseline, not the tiny raw budget. Rebuild via buildWorkerRequest
+                // (not string-editing the body) so the OAuth billing signature is
+                // recomputed. Bounded to a single retry per call: a model that
+                // truncates even at its max output falls through to the normal
+                // empty-response handling.
+                const lengthRetryCeiling = workerLengthRetryCeiling(
+                  model.modelID,
+                );
+                if (
+                  !lengthRetried &&
+                  isLengthTruncation(finishReason) &&
+                  maxTokens < lengthRetryCeiling
+                ) {
+                  lengthRetried = true;
+                  const bumped = Math.min(
+                    maxTokens * WORKER_LENGTH_RETRY_MULTIPLIER,
+                    lengthRetryCeiling,
+                  );
+                  log.warn(
+                    `worker empty response was a budget truncation (finish_reason=${finishReason}) ` +
+                      `— retrying once with max_tokens ${maxTokens} → ${bumped} ` +
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)})`,
+                  );
+                  maxTokens = bumped;
+                  req = await buildCurrentRequest();
+                  // Re-apply a runtime beta strip if one already happened this
+                  // call (rebuilding restores the freshly-built header set) —
+                  // mirrors the temperature-strip rebuild below.
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  retryCount++;
+                  continue;
+                }
+
+                // Classify: a COMPLETE response (finish/stop reason indicates
+                // the model finished producing — not a truncation, content
+                // filter, or tool-call) that still has no usable text, even
+                // after the reasoning-field fallback, is a model CAPABILITY
+                // signal. Budget truncations ("length"/"max_tokens"), content
+                // filtering, and tool-call stops are NOT capability facts and
+                // stay retryable no-response. We require several CONSECUTIVE
+                // such empties before marking the model incapable, so a single
+                // transient/prompt-specific empty doesn't permanently skip a
+                // capable model. recordEmptyWorkerResponse encapsulates this.
+                if (
+                  recordEmptyWorkerResponse(
+                    model.providerID,
+                    model.modelID,
+                    finishReason,
+                    opts?.workerID,
+                  )
+                ) {
+                  recordWorkerFailure(
+                    opts?.sessionID ?? "_unknown",
+                    opts?.workerID ?? "unknown",
+                    "worker-incapable",
+                  );
+                  recordPromptFailure(
+                    "worker-incapable",
+                    `worker incapable: ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} produced no usable text`,
+                    { model, protocol: target.protocol, finishReason },
+                  );
+                  return null;
+                }
+
+                // Record as no-response here so the adapter is the single
+                // owner of transport-failure attribution — core workers no
+                // longer record on a null return (which double-counted, e.g.
+                // a no-auth failure was logged by both the adapter AND the
+                // distiller). Sustained empty completions still escalate.
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "no-response",
+                );
+                recordPromptFailure(
+                  isLengthTruncation(finishReason)
+                    ? "incomplete-response"
+                    : "empty-response",
+                  `${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}: no usable text in response (finish=${diagnosticFinishReason(finishReason)})`,
+                  { model, protocol: target.protocol, finishReason },
+                );
+                return null;
+              }
+
+              // --- Auth error: 401/403 — mark stale, re-resolve, retry once ---
+              if (AUTH_ERROR_CODES.has(response.status)) {
+                await readWorkerResponseText(response, requestSignal);
+                if (onAuthRejected) {
+                  try {
+                    onAuthRejected({
+                      status: response.status,
+                      providerID: model.providerID,
+                      modelID: model.modelID,
+                      url: sanitizedWorkerOrigin(target.url).replace(/\/$/, ""),
+                      scheme: cred.scheme,
+                      workerID: opts?.workerID,
+                      sessionID: opts?.sessionID,
+                    });
+                  } catch {
+                    // Diagnostics must never break the adapter's null contract.
+                  }
+                }
+                // Mark this provider's credential stale so resolveAuth()
+                // falls through to global — but only for THIS provider,
+                // not other providers on the same session. Requires a real
+                // session ID (staleness is per-session state).
+                if (opts?.sessionID) {
+                  markAuthStale(opts.sessionID, credentialProviderID);
+                } else {
+                  // Session-less worker (e.g. entity-rebuild) — mark the
+                  // global fallback as stale so resolveAuth(undefined)
+                  // returns null instead of the same rejected token.
+                  // Without this, session-less workers hammer indefinitely
+                  // because markAuthStale requires a sessionID.
+                  markGlobalAuthStale();
+                }
+
+                // Re-resolve: credential may have been refreshed by a concurrent client request
+                const freshCred = getAuth(
+                  opts?.sessionID,
+                  credentialProviderID,
+                );
+                const credentialChanged =
+                  !!freshCred && freshCred.value !== cred.value;
+                if (credentialChanged && attempt === 0) {
+                  // Credential changed — adopt it as the current credential so
+                  // any subsequent rebuild (e.g. the temperature-strip retry)
+                  // uses the fresh key, then rebuild request and retry once.
+                  activeCred = freshCred;
+                  log.info(
+                    `worker auth error status=${response.status}, credential refreshed — retrying ` +
+                      `(origin=${sanitizedWorkerOrigin(req.url)})`,
+                  );
+                  req = await buildCurrentRequest();
+                  retryCount++;
+                  continue;
+                }
+
+                // Only the terminal auth failure reaches worker health. A
+                // rejected stale credential that refreshes successfully is an
+                // intermediate attempt, not a failed worker call.
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "auth-rejected",
+                );
+
+                // No fresh credential or retry also failed — bail.
+                //
+                // log.warn (not log.error) because 401/403 is expected,
+                // user-actionable state, NOT an outage. Adm hit this in
+                // Slack on 2026-07-30 with stale on-disk auth.json keys
+                // — that's a config issue, not a gateway failure. The
+                // chain's diagnostic already surfaces the actual HTTP
+                // status to the user via getLastWorkerError() (PR
+                // #1542/#1544); we don't need log.error to also scream.
+                //
+                log.warn(
+                  `worker upstream auth error: status=${response.status}` +
+                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
+                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                    ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
+                );
+                Sentry.captureException(
+                  new Error(
+                    `Worker upstream auth error: HTTP ${response.status}`,
+                  ),
+                  {
+                    fingerprint: [
+                      "LOREAI-GATEWAY",
+                      "worker-auth-error",
+                      String(response.status),
+                    ],
+                    extra: {
+                      status: response.status,
+                      model: diagnosticToken(model.modelID),
+                      workerID: diagnosticToken(opts?.workerID),
+                      sessionID: opts?.sessionID?.slice(0, 16),
+                      origin: sanitizedWorkerOrigin(req.url),
+                      credentialChanged,
+                      freshCredAvailable: !!freshCred,
+                    },
+                  },
+                );
+                span.setStatus({
+                  code: 2,
+                  message: `HTTP ${response.status} auth`,
+                });
+                // Soft-pause so a persistent auth failure doesn't re-fire on
+                // every idle tick + turn. The per-provider staleness above
+                // does NOT stop the loop for a cross-provider 401 (the key is
+                // valid for its real provider, so it's never marked stale) —
+                // the pause is the robust backstop. isWorkerCreditPaused()
+                // still lets one probe through per 5 min so a refreshed
+                // credential recovers automatically. Urgent calls are exempt.
+                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+                recordPromptFailure(
+                  "auth-rejected",
+                  `HTTP ${response.status}: authentication rejected`,
+                  {
+                    model,
+                    protocol: target.protocol,
+                    httpStatus: response.status,
+                  },
+                );
+                return null;
+              }
+
+              // --- Insufficient credit: 402 — expected account state ---
+              // (e.g. OpenRouter "requires more credits"). NOT an outage:
+              //  • log.warn (no Error object) so it does NOT auto-forward to
+              //    Sentry;
+              //  • intentionally NO recordWorkerFailure — that ladder is what
+              //    escalates to Sentry after 3 hits, and 402 must not;
+              //  • markWorkerPaused soft-pauses this session's background work
+              //    so the distiller/curator stop retrying every turn (a probe
+              //    is allowed once per circuit interval to detect a top-up).
+              if (INSUFFICIENT_CREDIT_CODES.has(response.status)) {
+                await readWorkerResponseText(response, requestSignal);
+                log.warn(
+                  `worker upstream insufficient credit: status=${response.status}` +
+                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
+                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                    ` worker=${diagnosticToken(opts?.workerID)}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
+                );
+                if (opts?.sessionID) {
+                  markWorkerPaused(opts.sessionID);
+                } else {
+                  // Session-less workers (e.g. entity-rebuild) can't be paused
+                  // per-session — log so it's visible but don't escalate.
+                  log.warn(
+                    `worker upstream insufficient credit (session-less, no pause): ${response.status}`,
+                  );
+                }
+                span.setStatus({
+                  code: 2,
+                  message: `HTTP ${response.status} credit`,
+                });
+                recordPromptFailure(
+                  "insufficient-credit",
+                  `HTTP ${response.status}: insufficient credit — add credits to your account or switch providers`,
+                  {
+                    model,
+                    protocol: target.protocol,
+                    httpStatus: response.status,
+                  },
+                );
+                return null;
+              }
+
+              // Non-transient error — fail immediately, no retry
+              if (!TRANSIENT_CODES.has(response.status)) {
+                const text = await readWorkerResponseText(
+                  response,
+                  requestSignal,
+                );
+
+                // 400 + a beta-related complaint → the request carries a beta
+                // header the model/subscription doesn't support. The upfront
+                // filter (buildAnthropicWorkerRequest) strips the long-context
+                // `context-1m` beta unconditionally for workers (issue #1571:
+                // a 1M-capable worker model on a subscription auth without
+                // usage credits 429s permanently because the beta rides along),
+                // but this is the runtime safety net for any OTHER beta the
+                // upstream refuses: retry ONCE with the long-context beta
+                // removed (preserving oauth-2025-04-20 et al. so OAuth calls
+                // still authenticate) before giving up. Bounded to one retry.
+                if (
+                  response.status === 400 &&
+                  !betaStripped &&
+                  hasLongContextBeta(req.headers) &&
+                  isBetaRelated400(text)
+                ) {
+                  betaStripped = true;
+                  req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  log.warn(
+                    `worker 400 looks long-context-beta-related — retrying once without the context-1m beta ` +
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
+                  );
+                  retryCount++;
+                  continue;
+                }
+
+                if (
+                  response.status === 400 &&
+                  target.protocol === "openai-responses" &&
+                  requestedReasoningEffort === "off" &&
+                  reasoningEffort === "off" &&
+                  !reasoningNoneStripped &&
+                  isReasoningNoneUnsupported400(text)
+                ) {
+                  reasoningNoneStripped = true;
+                  reasoningNoneUnsupportedTargets.add(
+                    reasoningNoneCapabilityKey(target, model),
+                  );
+                  reasoningEffort = undefined;
+                  req = await buildCurrentRequest();
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  log.warn(
+                    `worker 400 rejects reasoning effort none — retrying once without the reasoning field ` +
+                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+                  );
+                  retryCount++;
+                  continue;
+                }
+
+                const alternateProtocol = alternateProtocolRetried
+                  ? null
+                  : isUnsupportedApi400(response.status, text)
+                    ? alternateProtocolForUnsupportedApi(target)
+                    : null;
+                if (alternateProtocol) {
+                  alternateProtocolRetried = true;
+                  protocol = alternateProtocol;
+                  target = resolveTarget(
+                    upstreams,
+                    protocol,
+                    upstreamOverride,
+                    model.providerID,
+                    opts?.upstreamProviderID,
+                  );
+                  effectiveDisableThinking = false;
+                  reasoningEffort =
+                    requestedReasoningEffort === "off" &&
+                    protocol === "openai-responses" &&
+                    reasoningNoneUnsupportedTargets.has(
+                      reasoningNoneCapabilityKey(target, model),
+                    )
+                      ? undefined
+                      : requestedReasoningEffort;
+                  if (protocol === "openai") {
+                    maxTokens = Math.max(
+                      maxTokens,
+                      Math.min(
+                        workerReasoningHeadroomFloor(model, reasoningEffort),
+                        workerLengthRetryCeiling(model.modelID),
+                      ),
+                    );
+                  }
+                  req = await buildCurrentRequest();
+                  log.warn(
+                    `worker 400 reports API unsupported for model — retrying once via ${protocol} ` +
+                      `(model=${model.providerID}/${model.modelID}, worker=${opts?.workerID ?? "unknown"})`,
+                  );
+                  retryCount++;
+                  // A bounded route correction must not consume transient budget.
+                  attempt--;
+                  continue;
+                }
+
+                // 400 + a "temperature is deprecated/unsupported" complaint →
+                // the request carries a `temperature` the model rejects (newer
+                // models like claude-sonnet-5 dropped the sampling param). Learn
+                // it so future calls omit temperature upfront, then rebuild THIS
+                // request without temperature and retry once. We rebuild via
+                // buildWorkerRequest rather than string-editing req.body so the
+                // OAuth billing signature is recomputed over the new body
+                // (mutating the serialized body would invalidate the cch hash).
+                // Bounded to one retry per call.
+                if (
+                  response.status === 400 &&
+                  !temperatureStripped &&
+                  effectiveTemperature != null &&
+                  isTemperatureUnsupported400(text)
+                ) {
+                  temperatureStripped = true;
+                  effectiveTemperature = undefined;
+                  req = await buildCurrentRequest();
+                  // Rebuilding restores the freshly-built header set, which
+                  // resurrects a beta we may have already stripped at runtime.
+                  // The upfront filter strips `context-1m` unconditionally for
+                  // workers (issue #1571), so a 400 β-loop on that specific
+                  // beta can't happen — but the runtime strip is still in
+                  // place for any future beta the upstream rejects, and the
+                  // `if (betaStripped)` latch re-applies it after the rebuild
+                  // so a model that needed BOTH fixes doesn't regress into a
+                  // beta-400 loop.
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  log.warn(
+                    `worker 400 reports temperature is unsupported — retrying once without the temperature param ` +
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
+                  );
+                  retryCount++;
+                  continue;
+                }
+
+                // 400 + a "thinking is unsupported" complaint → the model rejects
+                // the `thinking:{type:"disabled"}` param we add for supported
+                // Claude workers.
+                // Learn it so future calls omit the param upfront, then rebuild
+                // THIS request without it and retry once. Rebuilt via
+                // buildWorkerRequest (not string-editing req.body) so the OAuth
+                // billing signature is recomputed over the new body. Bounded to
+                // one retry per call; composes with the temperature/beta strips
+                // above (each rebuild uses the current effective values).
+                if (
+                  response.status === 400 &&
+                  !thinkingStripped &&
+                  effectiveDisableThinking &&
+                  isThinkingUnsupported400(text)
+                ) {
+                  thinkingStripped = true;
+                  effectiveDisableThinking = false;
+                  req = await buildCurrentRequest();
+                  // Preserve a runtime beta strip across this rebuild (same
+                  // reasoning as the temperature-strip path above).
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  log.warn(
+                    `worker 400 reports thinking is unsupported — retrying once without the thinking param ` +
+                      `(model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}, ` +
+                      `worker=${diagnosticToken(opts?.workerID)}, origin=${sanitizedWorkerOrigin(req.url)})`,
+                  );
+                  retryCount++;
+                  continue;
+                }
+
+                // Data-policy 404: the selected worker model (typically an
+                // OpenRouter `:free` model) is unavailable because the account
+                // has not opted into the provider's data-collection policy.
+                // This is a per-account availability fact about THIS model, not
+                // an outage — retrying is futile. Blocklist the model (and, for
+                // a `:free` model, the whole `:free` tier on this provider per
+                // the "assume all :free collect data" directive) and classify
+                // as `data-policy` so it does NOT feed the Sentry outage ladder
+                // or credit-pause the session. Worker-model selection re-resolves
+                // to a usable same-family sibling on the next pass; the next real
+                // worker call against that sibling is the recovery probe.
+                if (isDataPolicyBlocked404(response.status, text)) {
+                  log.warn(
+                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                      `blocked by account data policy (404) — ` +
+                      `blocklisting and re-resolving (worker=${diagnosticToken(opts?.workerID)}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
+                      `origin=${sanitizedWorkerOrigin(req.url)})`,
+                  );
+                  markWorkerIncapable(model.providerID, model.modelID);
+                  if (model.modelID.endsWith(":free")) {
+                    markFreeModelsDataBlocked(model.providerID);
+                  }
+                  span.setStatus({
+                    code: 2,
+                    message: `HTTP ${response.status} (data-policy)`,
+                  });
+                  recordWorkerFailure(
+                    opts?.sessionID ?? "_unknown",
+                    opts?.workerID ?? "unknown",
+                    "data-policy",
+                  );
+                  // Do NOT markWorkerPaused: the fix is re-resolution to a
+                  // different model, not pausing the session's workers.
+                  recordPromptFailure(
+                    "data-policy",
+                    `HTTP ${response.status}: data policy blocked — ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} unavailable (account has not opted in)`,
+                    {
+                      model,
+                      protocol: target.protocol,
+                      httpStatus: response.status,
+                    },
+                  );
+                  return null;
+                }
+
+                // 400 model-not-supported: the requested model is unavailable
+                // on this account/plan (Copilot subscription tiers serve
+                // different catalogs). This is a per-account capability fact,
+                // not an outage — retrying the SAME model is futile. Blocklist
+                // it and, if a same-provider backup remains, swap it in and
+                // retry (rebuild via buildWorkerRequest so the OAuth billing
+                // signature is recomputed over the new body). Bounded by the
+                // finite candidate list. Only when NO backup remains do we fall
+                // through to the generic failure below.
+                if (
+                  isModelUnsupported400(response.status, text) &&
+                  modelFallbacks.length > 0
+                ) {
+                  markWorkerIncapable(model.providerID, model.modelID);
+                  // length-checked above, so a value is guaranteed.
+                  const next = modelFallbacks.shift() ?? model;
+                  log.warn(
+                    `worker model ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)} ` +
+                      `not supported on this account (400) — ` +
+                      `falling back to ${diagnosticToken(next.providerID)}/${diagnosticToken(next.modelID)} ` +
+                      `(worker=${diagnosticToken(opts?.workerID)}, ` +
+                      `session=${opts?.sessionID?.slice(0, 16) ?? "none"}, ` +
+                      `origin=${sanitizedWorkerOrigin(req.url)})`,
+                  );
+                  model = next;
+                  // Protocol and target are model-dependent even within one
+                  // provider (GitHub Copilot serves gpt-5.6 on Responses but
+                  // gpt-5-mini on Chat Completions). Re-resolve the complete
+                  // route before rebuilding so URL, body, parser, and model
+                  // controls all describe the fallback model.
+                  protocol = resolveWorkerProtocol(
+                    model.providerID,
+                    sameProviderAsSession ? opts?.protocol : undefined,
+                    model.modelID,
+                    sameProviderAsSession ? upstreamOverride : undefined,
+                  );
+                  target = resolveTarget(
+                    upstreams,
+                    protocol,
+                    upstreamOverride,
+                    model.providerID,
+                    opts?.upstreamProviderID,
+                  );
+                  if (target.routeUnavailable || !target.url) {
+                    lastWorkerError = `no upstream route for ${diagnosticToken(model.providerID)} fallback`;
+                    return null;
+                  }
+                  const fallbackFloorsReasoningBudget =
+                    target.protocol === "openai" ||
+                    target.protocol === "openai-responses" ||
+                    target.protocol === "gemini";
+                  const fallbackReasoningFloor = fallbackFloorsReasoningBudget
+                    ? Math.min(
+                        workerReasoningHeadroomFloor(
+                          model,
+                          opts?.reasoningEffort,
+                        ),
+                        workerLengthRetryCeiling(model.modelID),
+                      )
+                    : 0;
+                  maxTokens = Math.min(
+                    Math.max(rawMaxTokens, fallbackReasoningFloor),
+                    workerLengthRetryCeiling(model.modelID),
+                  );
+                  effectiveTemperature =
+                    isTemperatureUnsupportedModel(model) ||
+                    modelRejectsTemperatureByData(model.modelID)
+                      ? undefined
+                      : opts?.temperature;
+                  effectiveDisableThinking =
+                    (target.protocol === "anthropic" ||
+                      target.protocol === "vertex") &&
+                    workerThinkingOnByDefault(model) &&
+                    !isThinkingUnsupportedModel(model);
+                  temperatureStripped = false;
+                  thinkingStripped = false;
+                  lengthRetried = false;
+                  req = await buildCurrentRequest();
+                  // Preserve any runtime beta strip across the rebuild (same
+                  // reasoning as the temperature/thinking rebuilds above).
+                  if (betaStripped) {
+                    req = { ...req, headers: stripBetaHeaders(req.headers) };
+                  }
+                  retryCount++;
+                  // A model swap is NOT a transient retry — it's a one-way walk
+                  // down a finite candidate list (bounded by modelFallbacks
+                  // shrinking). Don't let it consume the transient-error budget
+                  // (`attempt < maxRetries`): decrement to cancel the `attempt++`
+                  // the loop applies on `continue`, so the working backup keeps
+                  // its full 429/5xx retry allowance.
+                  attempt--;
+                  continue;
+                }
+
+                log.error(
+                  `worker upstream request failed: status=${response.status}` +
+                    (response.status === 400
+                      ? ` detail=${classifyWorker400(text)}`
+                      : "") +
+                    ` request_id=${diagnosticToken(response.headers.get("request-id") ?? undefined, "none")}` +
+                    ` origin=${sanitizedWorkerOrigin(req.url)}` +
+                    ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                    ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
+                    ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`,
+                );
+                span.setStatus({ code: 2, message: `HTTP ${response.status}` });
+                recordWorkerFailure(
+                  opts?.sessionID ?? "_unknown",
+                  opts?.workerID ?? "unknown",
+                  "upstream-error",
+                );
+                // Soft-pause: a non-transient 4xx for a worker re-sending the
+                // same content is permanent. Stops the re-fire-every-turn loop;
+                // isWorkerCreditPaused() still probes once per 5 min so a fixed
+                // request recovers. Urgent calls are pause-exempt.
+                if (opts?.sessionID) markWorkerPaused(opts.sessionID);
+                recordPromptFailure(
+                  isUnsupportedApi400(response.status, text)
+                    ? "api-unsupported"
+                    : isModelUnsupported400(response.status, text)
+                      ? "model-unsupported"
+                      : "upstream-error",
+                  `HTTP ${response.status}: non-transient upstream error for ${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}`,
+                  {
+                    model,
+                    protocol: target.protocol,
+                    httpStatus: response.status,
+                  },
+                );
+                return null;
+              }
+
+              // Transient error — retry if attempts remain.
+              // Trip the circuit breaker for THIS provider on ANY 429 (urgent
+              // included) so background work targeting the same provider pauses
+              // instead of piling on more requests while this call rides out
+              // the rate limit. Work routed to other providers keeps draining.
+              // The urgent call itself is not gated by the breaker, so it keeps
+              // retrying. Trip at most once per call to avoid runaway
+              // escalation of the backoff schedule across a multi-retry loop.
+              if (response.status === 429 && !breakerTripped) {
+                breakerTripped = true;
+                const cbRetryAfter = parseRetryAfter(response);
+                const pauseSec = cbRetryAfter
+                  ? Math.ceil(cbRetryAfter / 1000)
+                  : undefined;
+                tripCircuitBreaker(pauseSec, model.providerID);
+              }
+
+              if (attempt < maxRetries) {
+                const retryAfter = parseRetryAfter(response);
+                const delay = backoffMs(attempt, retryAfter);
+                retryCount++;
+                totalDelayMs += delay;
+                if (retryAfter != null) lastRetryAfterMs = retryAfter;
+                log.warn(
+                  `worker upstream status=${response.status} ` +
+                    `(attempt ${attempt + 1}/${maxRetries + 1}, ` +
+                    `origin=${sanitizedWorkerOrigin(req.url)}), ` +
+                    `retrying in ${delay}ms` +
+                    (retryAfter != null
+                      ? ` (retry-after: ${Math.round(retryAfter / 1000)}s)`
+                      : ""),
+                );
+                cancelWorkerResponseForRetry(response, response.status);
+                await abortableSleep(delay, requestSignal);
+                continue;
+              }
+
+              // Exhausted retries — fall back, log, capture Sentry, enrich span.
+              // Urgent calls (compaction, query expansion) hand control back to
+              // a caller that degrades gracefully without losing data — e.g.
+              // handleCompaction forwards the client's own compaction upstream.
+              // On a shared-quota 429 that fallback will hit the same limit and
+              // the client handles it, so our exhaustion here is not itself a
+              // failure to surface loudly. Log it at `warn` (hidden unless
+              // LORE_DEBUG) to avoid alarming red `[lore]` noise; non-urgent
+              // background exhaustion stays at `error` since it can indicate a
+              // sustained problem worth investigating.
+              await readWorkerResponseText(response, requestSignal);
+              const exhaustionMsg =
+                `worker upstream request failed after ${maxRetries + 1} attempts:` +
+                ` status=${response.status} origin=${sanitizedWorkerOrigin(req.url)}` +
+                ` model=${diagnosticToken(model.providerID)}/${diagnosticToken(model.modelID)}` +
+                ` cred=${cred.scheme} worker=${diagnosticToken(opts?.workerID)}` +
+                ` session=${opts?.sessionID?.slice(0, 16) ?? "none"}`;
+              if (urgent) {
+                log.warn(exhaustionMsg);
+              } else {
+                log.error(exhaustionMsg);
+              }
+
+              // Capture as Sentry error for alerting
+              Sentry.captureException(
+                new Error(
+                  `Worker upstream exhausted ${maxRetries + 1} retries: HTTP ${response.status}`,
+                ),
+                {
+                  fingerprint: [
+                    "LOREAI-GATEWAY",
+                    "worker-retry-exhausted",
+                    String(response.status),
+                  ],
+                  extra: {
+                    status: response.status,
+                    attempts: maxRetries + 1,
+                    totalDelayMs,
+                    lastRetryAfterMs,
+                    model: diagnosticToken(model.modelID),
+                    workerID: diagnosticToken(opts?.workerID),
+                    origin: sanitizedWorkerOrigin(req.url),
+                  },
+                },
+              );
+
+              // Enrich span with retry metadata
+              span.setAttribute("lore.retry.count", retryCount);
+              span.setAttribute("lore.retry.total_delay_ms", totalDelayMs);
+              if (lastRetryAfterMs != null) {
+                span.setAttribute(
+                  "lore.retry.last_retry_after_ms",
+                  lastRetryAfterMs,
+                );
+              }
+              span.setAttribute("lore.retry.final_status", finalStatus);
+              span.setStatus({ code: 2, message: `HTTP exhausted retries` });
+              recordWorkerFailure(
+                opts?.sessionID ?? "_unknown",
+                opts?.workerID ?? "unknown",
+                response.status === 429 ? "rate-limit" : "upstream-error",
+              );
+              recordPromptFailure(
+                response.status === 429 ? "rate-limited" : "upstream-error",
+                `HTTP ${response.status}: transient upstream error exhausted retries`,
+                {
+                  retryable: true,
+                  model,
+                  protocol: target.protocol,
+                  httpStatus: response.status,
+                },
+              );
+              return null;
+            }
+          },
+        );
+      } catch (e) {
+        // Preserve the caller's exact abort reason regardless of its class.
+        if (opts?.signal?.aborted) throw opts.signal.reason;
+        if (e instanceof DOMException && e.name === "TimeoutError") {
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            "timeout",
+          );
+          throw e;
+        }
+
+        if (e instanceof WorkerRequestTooLargeError) {
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            "upstream-error",
+          );
+          log.warn(
+            `worker request rebuild rejected: request_bytes=${e.bytes} ` +
+              `limit_bytes=${MAX_WORKER_REQUEST_BYTES}`,
+          );
+          lastWorkerError = e.message;
+          return null;
+        }
+
+        // Caller cancellation was rethrown above and never enters health.
+        const isAbort = e instanceof DOMException && e.name === "AbortError";
+        if (!isAbort) {
+          recordWorkerFailure(
+            opts?.sessionID ?? "_unknown",
+            opts?.workerID ?? "unknown",
+            transportErrorKind(e) === "deadline" ||
+              transportErrorKind(e) === "timeout"
+              ? "timeout"
+              : "transport-error",
+          );
+        }
+        if (isAbort) {
+          log.info("worker prompt aborted (client disconnect or shutdown)");
+          recordPromptFailure("aborted", "client disconnect or shutdown", {
+            model,
+            protocol: target.protocol,
+            preserveExisting: true,
+          });
+        } else {
+          const kind = transportErrorKind(e);
+          const code = transportErrorCode(e);
+          log.error(
+            `worker prompt transport failure: kind=${kind}` +
+              (code ? ` code=${code}` : "") +
+              ` origin=${sanitizedWorkerOrigin(req.url)}` +
+              ` provider=${diagnosticToken(model.providerID)}`,
+          );
+          recordPromptFailure(
+            e instanceof DOMException && e.name === "TimeoutError"
+              ? "timeout"
+              : "network-error",
+            `network error: no response from ${diagnosticToken(model.providerID)} ` +
+              `(kind=${kind}${code ? `, code=${code}` : ""})`,
+            {
+              retryable: true,
+              model,
+              protocol: target.protocol,
+              preserveExisting: true,
+            },
+          );
+        }
+        return null;
+      } finally {
+        clearTimeout(deadlineTimer);
+        activeWorkerCalls.delete(callID);
+      }
+    },
+    async promptDetailed(system, user, promptOpts) {
+      const initialModel = promptOpts?.model ?? defaultModel;
+      const context: PromptDiagnosticContext = {
+        attempts: 0,
+        model: initialModel,
+      };
+      return promptDiagnosticStorage.run(context, async () => {
+        try {
+          const text = await client.prompt(system, user, promptOpts);
+          if (text !== null) {
+            return {
+              kind: "success" as const,
+              text,
+              model: `${context.model.providerID}/${context.model.modelID}`,
+              protocol:
+                context.protocol ??
+                resolveWorkerProtocol(
+                  context.model.providerID,
+                  promptOpts?.protocol,
+                  context.model.modelID,
+                  promptOpts?.upstreamUrl,
+                ),
+              attempts: context.attempts,
+            };
+          }
+        } catch (error) {
+          if (promptOpts?.signal?.aborted) {
+            const reason = promptOpts.signal.reason;
+            recordPromptFailure(
+              reason instanceof DOMException && reason.name === "TimeoutError"
+                ? "timeout"
+                : "aborted",
+              error instanceof Error ? error.message : String(error),
+              { model: context.model, protocol: context.protocol },
+            );
+          } else {
+            throw attachPromptAttempts(error, context.attempts);
+          }
+        }
+        return (
+          context.failure ?? {
+            kind: "failure" as const,
+            code: "upstream-error" as const,
+            message:
+              lastWorkerError ?? "worker prompt failed without a diagnostic",
+            retryable: false,
+            model: `${context.model.providerID}/${context.model.modelID}`,
+            ...(context.protocol ? { protocol: context.protocol } : {}),
+            attempts: context.attempts,
+          }
+        );
+      });
+    },
+  };
+  return client;
+}
+
+export interface GatewayInvariantJudgeOptions {
+  client: GatewayLLMClient;
+  model: { providerID: string; modelID: string };
   upstreamUrl?: string;
   effort?: ReasoningEffort;
   sessionID: string;

@@ -2162,7 +2162,681 @@ export async function accumulateResponsesSSEStream(
       if (event === "response.output_text.done") {
         state.textDoneItems.add(parsed.output_index as number);
       } else if (event === "response.refusal.done") {
-        state.refusalDoneItems.add(parsed.out      continue;
+        state.refusalDoneItems.add(parsed.output_index as number);
+      }
+      if (
+        opts.validation === "codex" &&
+        event === "response.output_item.added"
+      ) {
+        const outputIndex = parsed.output_index as number;
+        const item = state.items.get(outputIndex);
+        if (item?.type === "tool_use" && (item.callId || item.id)) {
+          bindCodexEffectiveToolIdentity(
+            state,
+            outputIndex,
+            item.callId || item.id,
+          );
+        }
+      }
+      if (event === "response.output_item.done") {
+        const outputIndex = parsed.output_index as number;
+        doneItems.add(outputIndex);
+        state.activeTextItems.delete(outputIndex);
+        state.activeToolItems.delete(outputIndex);
+        state.unboundTextItems.delete(outputIndex);
+        state.unboundToolItems.delete(outputIndex);
+      }
+      if (
+        event === "response.completed" ||
+        event === "response.done" ||
+        event === "response.incomplete" ||
+        ((opts.allowFailureTerminal || opts.requireCompletedTerminal) &&
+          event === "response.failed")
+      ) {
+        const terminal = parsed.response as Record<string, unknown> | undefined;
+        if (opts.validation && terminal?.output !== undefined) {
+          if (!Array.isArray(terminal.output)) {
+            throw new Error("malformed Responses terminal event");
+          }
+          const snapshotIndices = new Set<number>();
+          for (const snapshot of terminal.output) {
+            if (!isRecord(snapshot) || !isNonEmptyString(snapshot.id)) {
+              throw new Error("malformed Responses terminal event");
+            }
+            const outputIndex = state.itemIndexById.get(snapshot.id);
+            let accumulated =
+              outputIndex === undefined
+                ? undefined
+                : state.rawItems.get(outputIndex);
+            if (
+              outputIndex === undefined ||
+              snapshotIndices.has(outputIndex) ||
+              !accumulated ||
+              (snapshot.type !== "item_reference" &&
+                snapshot.type !== accumulated.type)
+            ) {
+              throw new Error("malformed Responses terminal event");
+            }
+            snapshotIndices.add(outputIndex);
+            if (snapshot.type === "item_reference") {
+              if (
+                !doneItems.has(outputIndex) ||
+                Object.keys(snapshot).some(
+                  (key) => key !== "type" && key !== "id",
+                )
+              ) {
+                throw new Error("malformed Responses terminal event");
+              }
+              continue;
+            }
+            if (!doneItems.has(outputIndex)) {
+              if (opts.validation !== "codex") {
+                throw new Error("malformed Responses terminal event");
+              }
+              const completedSnapshot = completeCodexMessageSnapshot(
+                snapshot,
+                outputIndex,
+                terminalContentParts,
+              );
+              reconcileCodexDoneItem(state, outputIndex, completedSnapshot);
+              if (
+                !responsesDoneItemMatchesAdded(completedSnapshot, accumulated)
+              ) {
+                throw new Error("malformed Responses terminal event");
+              }
+              assertResponsesDoneMatchesAccumulatedState(
+                state,
+                outputIndex,
+                completedSnapshot,
+                terminalContentParts,
+              );
+              applyResponsesEvent(state, "response.output_item.done", {
+                output_index: outputIndex,
+                item: completedSnapshot,
+              });
+              doneItems.add(outputIndex);
+              state.activeTextItems.delete(outputIndex);
+              state.activeToolItems.delete(outputIndex);
+              state.unboundTextItems.delete(outputIndex);
+              state.unboundToolItems.delete(outputIndex);
+              accumulated = state.rawItems.get(outputIndex);
+              if (!accumulated) {
+                throw new Error("malformed Responses terminal event");
+              }
+              continue;
+            }
+            if (!responsesTerminalItemMatches(snapshot, accumulated)) {
+              throw new Error("malformed Responses terminal event");
+            }
+            state.rawItems.set(outputIndex, { ...accumulated, ...snapshot });
+          }
+          const hasUnfinishedItems = Array.from(state.rawItems.keys()).some(
+            (index) => !doneItems.has(index),
+          );
+          // ChatGPT Codex sometimes sends an empty terminal snapshot after completing every item.
+          const emptyCodexSnapshotAfterCompletedItems =
+            opts.validation === "codex" &&
+            terminal.output.length === 0 &&
+            !hasUnfinishedItems;
+          if (
+            (opts.validation === "codex" &&
+              terminal.output.length === 0 &&
+              hasUnfinishedItems) ||
+            (!emptyCodexSnapshotAfterCompletedItems &&
+              (snapshotIndices.size !== doneItems.size ||
+                Array.from(doneItems).some(
+                  (index) => !snapshotIndices.has(index),
+                )))
+          ) {
+            throw new Error("malformed Responses terminal event");
+          }
+        }
+        if (opts.validation === "codex") {
+          for (const [outputIndex, item] of state.rawItems) {
+            if (
+              !doneItems.has(outputIndex) &&
+              item.type === "reasoning" &&
+              typeof item.encrypted_content === "string"
+            ) {
+              throw new Error("malformed Responses terminal event");
+            }
+          }
+        }
+        terminalStatus = opts.validation
+          ? event === "response.failed"
+            ? "failed"
+            : validatedTerminalStatus(
+                event,
+                parsed,
+                opts.validation,
+                opts.requireCompletedTerminal,
+              )
+          : typeof terminal?.status === "string"
+            ? terminal.status
+            : null;
+        if (
+          opts.validation === "public" &&
+          terminalStatus === "completed" &&
+          terminal?.output === undefined
+        ) {
+          throw new Error("malformed Responses terminal event");
+        }
+        if (
+          opts.validation &&
+          terminalStatus === "incomplete" &&
+          state.stopReason === "end_turn"
+        ) {
+          state.stopReason = mapStatusToStopReason(terminalStatus);
+        }
+        if (
+          opts.validation === "public" &&
+          doneItems.size !== state.rawItems.size
+        ) {
+          throw new Error("incomplete Responses output lifecycle");
+        }
+        if (opts.validation && activeContentParts.size > 0) {
+          throw new Error("incomplete Responses output lifecycle");
+        }
+        if (opts.validation === "codex") {
+          for (const item of state.items.values()) {
+            if (item.type === "tool_use" && !(item.callId || item.id)) {
+              throw new Error("malformed Responses stream event");
+            }
+          }
+        }
+        // The first semantic terminal is authoritative. Any bytes already
+        // delivered after it are transport tail and are discarded on cancel.
+        await opts.onValidatedEvent?.(event, data);
+        if (opts.stopAtTerminal) break;
+        continue;
+      }
+      if (event !== "message") await opts.onValidatedEvent?.(event, data);
+    }
+  } finally {
+    cancelAndReleaseReader(reader);
+  }
+
+  if (opts.validation && !terminalStatus) {
+    throw new Error("missing terminal response status");
+  }
+  if (
+    opts.validation &&
+    opts.requireCompletedTerminal &&
+    terminalStatus !== "completed"
+  ) {
+    throw new ResponsesTerminalError(
+      finalizeResponsesAcc(state),
+      terminalStatus ?? "unknown",
+    );
+  }
+
+  return finalizeResponsesAcc(state);
+}
+
+// ---------------------------------------------------------------------------
+// True pass-through streamer (Responses upstream → Responses client)
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize a parsed SSE event back to wire form, preserving the original data
+ * payload (multi-line `data:` payloads are re-prefixed per line so nothing is
+ * dropped or re-serialized — `reasoning_summary`, content_part annotations,
+ * etc. survive intact because we forward the original `data` string).
+ */
+export function formatResponsesEvent(event: string, data: string): string {
+  const dataLines = data
+    .split("\n")
+    .map((line) => `data: ${line}`)
+    .join("\n");
+  return `event: ${event}\n${dataLines}\n\n`;
+}
+
+/**
+ * Stream an OpenAI Responses API upstream straight through to a Responses-API
+ * client, forwarding each SSE event as it arrives while accumulating a complete
+ * `GatewayResponse` in parallel.
+ *
+ * True-streaming counterpart to `accumulateResponsesSSEStream` (which buffers
+ * the ENTIRE upstream before the client sees a byte — the cause of the
+ * codex/ChatGPT "waiting for response headers" hang, since ChatGPT's
+ * `/backend-api/codex/responses` reasoning turns are slow-to-first-token).
+ *
+ * Safe ONLY when no `recall` tool_use can appear in the stream (the caller
+ * gates on recall-tool absence): recall interception requires buffering so the
+ * injected tool_use never leaks to the client. When the recall tool is present
+ * the caller keeps the buffered `accumulateResponsesSSEStream` path.
+ *
+ * `onComplete` is invoked exactly once with the accumulated response and a
+ * success flag. Failed/incomplete/malformed streams must not enter successful
+ * turn persistence or session-identity confirmation.
+ */
+export function streamResponsesPassthrough(
+  upstreamResponse: Response,
+  onComplete: (response: GatewayResponse, successful: boolean) => void,
+  sessionID?: string,
+  validation: ResponsesValidationMode = "public",
+  streamOptions: SSEStreamOptions = {},
+): Response {
+  const { signal, inactivityMs } = streamOptions;
+  const state = makeResponsesAccState();
+  const encoder = new TextEncoder();
+
+  let downstreamCancelled = false;
+  let externalAborted = false;
+  const cancelController = new AbortController();
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let resumeDemand: (() => void) | undefined;
+  let pumpStarted = false;
+  const onAbort = () => {
+    externalAborted = true;
+    resumeDemand?.();
+    resumeDemand = undefined;
+    cancelController.abort(signal?.reason);
+    if (activeReader) cancelAndReleaseReader(activeReader, signal?.reason);
+    else if (!pumpStarted)
+      void upstreamResponse.body?.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  const MAX_PASSTHROUGH_RETAINED_BYTES = 4 * 1024 * 1024;
+  let retainedBytes = 0;
+
+  // --- Keepalive ---
+  // The Responses API has no first-class `ping` event (unlike Anthropic), so we
+  // emit an SSE comment line (`: keepalive`), which is spec-compliant and MUST
+  // be ignored by any conformant SSE client. Keeps the client↔gateway
+  // connection alive during long reasoning pauses (Bun's ~5-min fetch timeout,
+  // oven-sh/bun#16682). True streaming emits real bytes frequently, so this
+  // only fires during genuine upstream silence.
+  const KEEPALIVE_INACTIVITY_MS = 30_000;
+  const keepaliveComment = encoder.encode(`: keepalive\n\n`);
+  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
+  let completed = false;
+  let terminalForwarded = false;
+  const cleanup = (): void => {
+    if (keepaliveTimer) clearTimeout(keepaliveTimer);
+    keepaliveTimer = null;
+    signal?.removeEventListener("abort", onAbort);
+  };
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let settled = false;
+      const safeEnqueue = (chunk: Uint8Array): boolean => {
+        if (downstreamCancelled || settled) return false;
+        if (externalAborted) throw signal?.reason;
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          downstreamCancelled = true;
+          return false;
+        }
+      };
+      const waitForDemand = async (): Promise<void> => {
+        while (
+          !downstreamCancelled &&
+          !externalAborted &&
+          (controller.desiredSize ?? 1) <= 0
+        ) {
+          await new Promise<void>((resolve) => {
+            resumeDemand = resolve;
+          });
+        }
+        if (externalAborted) throw signal?.reason;
+      };
+      const safeClose = (): void => {
+        if (downstreamCancelled || settled) return;
+        settled = true;
+        cleanup();
+        try {
+          controller.close();
+        } catch {
+          // Already closed/cancelled
+        }
+      };
+      const safeError = (error: unknown): void => {
+        if (downstreamCancelled || settled) return;
+        settled = true;
+        cleanup();
+        try {
+          controller.error(error);
+        } catch {
+          // Already closed/cancelled.
+        }
+      };
+
+      const resetKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = setTimeout(function tick() {
+          if (downstreamCancelled || externalAborted || settled) return;
+          if ((controller.desiredSize ?? 1) > 0) {
+            try {
+              safeEnqueue(keepaliveComment);
+            } catch (error) {
+              safeError(error);
+              return;
+            }
+          }
+          keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
+        }, KEEPALIVE_INACTIVITY_MS);
+      };
+      const clearKeepalive = (): void => {
+        if (keepaliveTimer) clearTimeout(keepaliveTimer);
+        keepaliveTimer = null;
+      };
+
+      const finish = (successful: boolean): void => {
+        if (completed) return;
+        completed = true;
+        try {
+          onComplete(finalizeResponsesAcc(state), successful);
+        } catch (err) {
+          log.error("openai-responses passthrough onComplete error:", err);
+        }
+      };
+
+      const pump = async (): Promise<void> => {
+        pumpStarted = true;
+        if (downstreamCancelled) return;
+        try {
+          resetKeepalive();
+          const accumulated = await accumulateResponsesSSEStream(
+            upstreamResponse,
+            {
+              validation,
+              stopAtTerminal: true,
+              signal: cancelController.signal,
+              inactivityMs,
+              allowFailureTerminal: true,
+              state,
+              onReader: (reader) => {
+                activeReader = reader;
+              },
+              onValidatedEvent: async (event, data) => {
+                resetKeepalive();
+                retainedBytes += Buffer.byteLength(data);
+                if (retainedBytes > MAX_PASSTHROUGH_RETAINED_BYTES) {
+                  throw new Error(
+                    "Responses passthrough exceeded retained byte limit",
+                  );
+                }
+                await waitForDemand();
+                if (
+                  downstreamCancelled ||
+                  !safeEnqueue(
+                    encoder.encode(formatResponsesEvent(event, data)),
+                  )
+                ) {
+                  throw new DOMException("client disconnected", "AbortError");
+                }
+                if (
+                  event === "response.completed" ||
+                  event === "response.done" ||
+                  event === "response.incomplete" ||
+                  event === "response.failed"
+                ) {
+                  terminalForwarded = true;
+                  finish(state.terminalEvent === "response.completed");
+                }
+              },
+            },
+          );
+          clearKeepalive();
+          if (!completed) {
+            completed = true;
+            onComplete(
+              accumulated,
+              state.terminalEvent === "response.completed",
+            );
+          }
+          safeClose();
+        } catch (err) {
+          clearKeepalive();
+          if (downstreamCancelled) {
+            cleanup();
+            return;
+          }
+          if (externalAborted) {
+            safeError(signal?.reason ?? err);
+            return;
+          }
+          log.error(
+            `openai-responses passthrough stream error${
+              sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""
+            }:`,
+            err,
+          );
+          if (terminalForwarded) {
+            // The client already received an authoritative terminal. Never emit
+            // a contradictory second response.failed because local accounting
+            // failed after delivery.
+            safeClose();
+            return;
+          }
+          // Emit response.failed so the client doesn't hang waiting for a
+          // terminal event, then still run onComplete with what we accumulated.
+          await waitForDemand();
+          if (downstreamCancelled) {
+            cleanup();
+            return;
+          }
+          safeEnqueue(
+            encoder.encode(
+              formatResponsesEvent(
+                "response.failed",
+                JSON.stringify({
+                  type: "response.failed",
+                  response: {
+                    id: state.id || "resp_error",
+                    object: "response",
+                    created_at: Math.floor(Date.now() / 1000),
+                    model: state.model,
+                    status: "failed",
+                    output: [],
+                    usage: null,
+                    error: {
+                      type: "server_error",
+                      message: "Upstream response stream failed",
+                    },
+                  },
+                }),
+              ),
+            ),
+          );
+          finish(false);
+          safeClose();
+        }
+      };
+      queueMicrotask(() => void pump().catch((error) => safeError(error)));
+    },
+
+    pull() {
+      resumeDemand?.();
+      resumeDemand = undefined;
+    },
+
+    cancel(reason) {
+      resumeDemand?.();
+      resumeDemand = undefined;
+      // Client disconnected — cancel the upstream reader to stop wasting bandwidth
+      downstreamCancelled = true;
+      cancelController.abort(
+        new DOMException("client disconnected", "AbortError"),
+      );
+      if (keepaliveTimer) clearTimeout(keepaliveTimer);
+      cleanup();
+      if (activeReader) cancelAndReleaseReader(activeReader, reason);
+      else if (!pumpStarted)
+        void upstreamResponse.body?.cancel(reason).catch(() => {});
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function mapStatusToStopReason(status: string): string {
+  switch (status) {
+    case "completed":
+      return "end_turn";
+    case "incomplete":
+      return "max_tokens";
+    case "cancelled":
+      return "stop";
+    case "failed":
+      return "stop";
+    default:
+      return "end_turn";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic SSE → OpenAI Responses API SSE streaming translator
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate an Anthropic SSE streaming Response into an OpenAI Responses API
+ * SSE streaming Response.
+ *
+ * Anthropic lifecycle:
+ *   message_start → content_block_start → content_block_delta (repeated)
+ *   → content_block_stop → message_delta → message_stop
+ *
+ * Responses API lifecycle:
+ *   response.created → response.in_progress →
+ *   response.output_item.added → response.content_part.added →
+ *   response.output_text.delta (repeated) → response.output_text.done →
+ *   response.content_part.done → response.output_item.done →
+ *   response.completed
+ *
+ * The returned Response streams Responses API named SSE events incrementally
+ * as upstream Anthropic events arrive.
+ */
+export function translateAnthropicStreamToResponses(
+  anthropicResponse: Response,
+  opts: SSEStreamOptions & { strict?: boolean } = {},
+): Response {
+  const encoder = new TextEncoder();
+  // Reuse the Anthropic accumulator internally so we get a complete
+  // GatewayResponse for the final `response.completed` event.
+  const accumulator = createStreamAccumulator();
+
+  // State extracted from message_start
+  let respId = "";
+  let model = "";
+  let created = Math.floor(Date.now() / 1000);
+
+  // Output item tracking
+  let outputIndex = 0;
+
+  /** Maps Anthropic block index → output-level tracking info. */
+  type OutputItem =
+    | { kind: "text"; itemId: string; outputIndex: number; text: string }
+    | {
+        kind: "tool_use";
+        itemId: string;
+        outputIndex: number;
+        callId: string;
+        name: string;
+        args: string;
+      };
+
+  const outputItems = new Map<number, OutputItem>();
+  let cancelled = false;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let resumeDemand: (() => void) | undefined;
+  let terminalEmitted = false;
+  let downstreamSettled = false;
+
+  function emit(eventType: string, data: Record<string, unknown>): string {
+    return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const onAbort = (): void => {
+        cancelled = true;
+        resumeDemand?.();
+        resumeDemand = undefined;
+        const reason = opts.signal?.reason;
+        if (activeReader) cancelAndReleaseReader(activeReader, reason);
+        else void anthropicResponse.body?.cancel(reason).catch(() => {});
+        if (!downstreamSettled) {
+          downstreamSettled = true;
+          try {
+            controller.error(reason);
+          } catch {
+            // Already closed/cancelled.
+          }
+        }
+      };
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      if (opts.signal?.aborted) onAbort();
+      const waitForDemand = async (): Promise<void> => {
+        while (
+          !cancelled &&
+          !opts.signal?.aborted &&
+          (controller.desiredSize ?? 1) <= 0
+        ) {
+          await new Promise<void>((resolve) => {
+            resumeDemand = resolve;
+          });
+        }
+        opts.signal?.throwIfAborted();
+      };
+      async function safeEnqueue(chunk: Uint8Array): Promise<boolean> {
+        if (cancelled) return false;
+        await waitForDemand();
+        if (cancelled) return false;
+        try {
+          controller.enqueue(chunk);
+          return true;
+        } catch {
+          cancelled = true;
+          return false;
+        }
+      }
+
+      const pump = async (): Promise<void> => {
+        try {
+          if (!anthropicResponse.body) {
+            throw new Error("Anthropic response has no body");
+          }
+          const reader = anthropicResponse.body.getReader();
+          activeReader = reader;
+          const validator = opts.strict ? new AnthropicSSEValidator() : null;
+
+          for await (const { event, data } of parseSSEStream(reader, {
+            signal: opts.signal,
+            inactivityMs: opts.inactivityMs,
+            requireEventTerminator: opts.strict,
+            fatalUtf8: opts.strict,
+            maxFrames: opts.strict ? DEFAULT_MAX_SSE_FRAMES : undefined,
+            maxEventBytes: opts.strict ? 4 * 1024 * 1024 : undefined,
+            maxTotalBytes: opts.strict ? 4 * 1024 * 1024 : undefined,
+          })) {
+            if (cancelled) break;
+            validator?.process(event, data);
+
+            // Always feed the accumulator
+            accumulator.processEvent(event, data);
+
+            let parsed: Record<string, unknown>;
+            try {
+              parsed = JSON.parse(data) as Record<string, unknown>;
+            } catch {
+              continue;
             }
 
             switch (event) {
@@ -2480,311 +3154,7 @@ export async function accumulateResponsesSSEStream(
                     });
                   } else if (block.type === "tool_use") {
                     finalOutput.push({
-                      type:put_index as number);
-      }
-      if (
-        opts.validation === "codex" &&
-        event === "response.output_item.added"
-      ) {
-        const outputIndex = parsed.output_index as number;
-        const item = state.items.get(outputIndex);
-        if (item?.type === "tool_use" && (item.callId || item.id)) {
-          bindCodexEffectiveToolIdentity(
-            state,
-            outputIndex,
-            item.callId || item.id,
-          );
-        }
-      }
-      if (event === "response.output_item.done") {
-        const outputIndex = parsed.output_index as number;
-        doneItems.add(outputIndex);
-        state.activeTextItems.delete(outputIndex);
-        state.activeToolItems.delete(outputIndex);
-        state.unboundTextItems.delete(outputIndex);
-        state.unboundToolItems.delete(outputIndex);
-      }
-      if (
-        event === "response.completed" ||
-        event === "response.done" ||
-        event === "response.incomplete" ||
-        ((opts.allowFailureTerminal || opts.requireCompletedTerminal) &&
-          event === "response.failed")
-      ) {
-        const terminal = parsed.response as Record<string, unknown> | undefined;
-        if (opts.validation && terminal?.output !== undefined) {
-          if (!Array.isArray(terminal.output)) {
-            throw new Error("malformed Responses terminal event");
-          }
-          const snapshotIndices = new Set<number>();
-          for (const snapshot of terminal.output) {
-            if (!isRecord(snapshot) || !isNonEmptyString(snapshot.id)) {
-              throw new Error("malformed Responses terminal event");
-            }
-            const outputIndex = state.itemIndexById.get(snapshot.id);
-            let accumulated =
-              outputIndex === undefined
-                ? undefined
-                : state.rawItems.get(outputIndex);
-            if (
-              outputIndex === undefined ||
-              snapshotIndices.has(outputIndex) ||
-              !accumulated ||
-              (snapshot.type !== "item_reference" &&
-                snapshot.type !== accumulated.type)
-            ) {
-              throw new Error("malformed Responses terminal event");
-            }
-            snapshotIndices.add(outputIndex);
-            if (snapshot.type === "item_reference") {
-              if (
-                !doneItems.has(outputIndex) ||
-                Object.keys(snapshot).some(
-                  (key) => key !== "type" && key !== "id",
-                )
-              ) {
-                throw new Error("malformed Responses terminal event");
-              }
-              continue;
-            }
-            if (!doneItems.has(outputIndex)) {
-              if (opts.validation !== "codex") {
-                throw new Error("malformed Responses terminal event");
-              }
-              const completedSnapshot = completeCodexMessageSnapshot(
-                snapshot,
-                outputIndex,
-                terminalContentParts,
-              );
-              reconcileCodexDoneItem(state, outputIndex, completedSnapshot);
-              if (
-                !responsesDoneItemMatchesAdded(completedSnapshot, accumulated)
-              ) {
-                throw new Error("malformed Responses terminal event");
-              }
-              assertResponsesDoneMatchesAccumulatedState(
-                state,
-                outputIndex,
-                completedSnapshot,
-                terminalContentParts,
-              );
-              applyResponsesEvent(state, "response.output_item.done", {
-                output_index: outputIndex,
-                item: completedSnapshot,
-              });
-              doneItems.add(outputIndex);
-              state.activeTextItems.delete(outputIndex);
-              state.activeToolItems.delete(outputIndex);
-              state.unboundTextItems.delete(outputIndex);
-              state.unboundToolItems.delete(outputIndex);
-              accumulated = state.rawItems.get(outputIndex);
-              if (!accumulated) {
-                throw new Error("malformed Responses terminal event");
-              }
-              continue;
-            }
-            if (!responsesTerminalItemMatches(snapshot, accumulated)) {
-              throw new Error("malformed Responses terminal event");
-            }
-            state.rawItems.set(outputIndex, { ...accumulated, ...snapshot });
-          }
-          const hasUnfinishedItems = Array.from(state.rawItems.keys()).some(
-            (index) => !doneItems.has(index),
-          );
-          // ChatGPT Codex sometimes sends an empty terminal snapshot after completing every item.
-          const emptyCodexSnapshotAfterCompletedItems =
-            opts.validation === "codex" &&
-            terminal.output.length === 0 &&
-            !hasUnfinishedItems;
-          if (
-            (opts.validation === "codex" &&
-              terminal.output.length === 0 &&
-              hasUnfinishedItems) ||
-            (!emptyCodexSnapshotAfterCompletedItems &&
-              (snapshotIndices.size !== doneItems.size ||
-                Array.from(doneItems).some(
-                  (index) => !snapshotIndices.has(index),
-                )))
-          ) {
-            throw new Error("malformed Responses terminal event");
-          }
-        }
-        if (opts.validation === "codex") {
-          for (const [outputIndex, item] of state.rawItems) {
-            if (
-              !doneItems.has(outputIndex) &&
-              item.type === "reasoning" &&
-              typeof item.encrypted_content === "string"
-            ) {
-              throw new Error("malformed Responses terminal event");
-            }
-          }
-        }
-        terminalStatus = opts.validation
-          ? event === "response.failed"
-            ? "failed"
-            : validatedTerminalStatus(
-                event,
-                parsed,
-                opts.validation,
-                opts.requireCompletedTerminal,
-              )
-          : typeof terminal?.status === "string"
-            ? terminal.status
-            : null;
-        if (
-          opts.validation === "public" &&
-          terminalStatus === "completed" &&
-          terminal?.output === undefined
-        ) {
-          throw new Error("malformed Responses terminal event");
-        }
-        if (
-          opts.validation &&
-          terminalStatus === "incomplete" &&
-          state.stopReason === "end_turn"
-        ) {
-          state.stopReason = mapStatusToStopReason(terminalStatus);
-        }
-        if (
-          opts.validation === "public" &&
-          doneItems.size !== state.rawItems.size
-        ) {
-          throw new Error("incomplete Responses output lifecycle");
-        }
-        if (opts.validation && activeContentParts.size > 0) {
-          throw new Error("incomplete Responses output lifecycle");
-        }
-        if (opts.validation === "codex") {
-          for (const item of state.items.values()) {
-            if (item.type === "tool_use" && !(item.callId || item.id)) {
-              throw new Error("malformed Responses stream event");
-            }
-          }
-        }
-        // The first semantic terminal is authoritative. Any bytes already
-        // delivered after it are transport tail and are discarded on cancel.
-        await opts.onValidatedEvent?.(event, data);
-        if (opts.stopAtTerminal) break;
-        continue;
-      }
-      if (event !== "message") await opts.onValidatedEvent?.(event, data);
-    }
-  } finally {
-    cancelAndReleaseReader(reader);
-  }
-
-  if (opts.validation && !terminalStatus) {
-    throw new Error("missing terminal response status");
-  }
-  if (
-    opts.validation &&
-    opts.requireCompletedTerminal &&
-    terminalStatus !== "completed"
-  ) {
-    throw new ResponsesTerminalError(
-      finalizeResponsesAcc(state),
-      terminalStatus ?? "unknown",
-    );
-  }
-
-  return finalizeResponsesAcc(state);
-}
-
-// ---------------------------------------------------------------------------
-// True pass-through streamer (Responses upstream → Responses client)
-// ---------------------------------------------------------------------------
-
-/**
- * Serialize a parsed SSE event back to wire form, preserving the original data
- * payload (multi-line `data:` payloads are re-prefixed per line so nothing is
- * dropped or re-serialized — `reasoning_summary`, content_part annotations,
- * etc. survive intact because we forward the original `data` string).
- */
-export function formatResponsesEvent(event: string, data: string): string {
-  const dataLines = data
-    .split("\n")
-    .map((line) => `data: ${line}`)
-    .join("\n");
-  return `event: ${event}\n${dataLines}\n\n`;
-}
-
-/**
- * Stream an OpenAI Responses API upstream straight through to a Responses-API
- * client, forwarding each SSE event as it arrives while accumulating a complete
- * `GatewayResponse` in parallel.
- *
- * True-streaming counterpart to `accumulateResponsesSSEStream` (which buffers
- * the ENTIRE upstream before the client sees a byte — the cause of the
- * codex/ChatGPT "waiting for response headers" hang, since ChatGPT's
- * `/backend-api/codex/responses` reasoning turns are slow-to-first-token).
- *
- * Safe ONLY when no `recall` tool_use can appear in the stream (the caller
- * gates on recall-tool absence): recall interception requires buffering so the
- * injected tool_use never leaks to the client. When the recall tool is present
- * the caller keeps the buffered `accumulateResponsesSSEStream` path.
- *
- * `onComplete` is invoked exactly once with the accumulated response and a
- * success flag. Failed/incomplete/malformed streams must not enter successful
- * turn persistence or session-identity confirmation.
- */
-export function streamResponsesPassthrough(
-  upstreamResponse: Response,
-  onComplete: (response: GatewayResponse, successful: boolean) => void,
-  sessionID?: string,
-  validation: ResponsesValidationMode = "public",
-  streamOptions: SSEStreamOptions = {},
-): Response {
-  const { signal, inactivityMs } = streamOptions;
-  const state = makeResponsesAccState();
-  const encoder = new TextEncoder();
-
-  let downstreamCancelled = false;
-  let externalAborted = false;
-  const cancelController = new AbortController();
-  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  let resumeDemand: (() => void) | undefined;
-  let pumpStarted = false;
-  const onAbort = () => {
-    externalAborted = true;
-    resumeDemand?.();
-    resumeDemand = undefined;
-    cancelController.abort(signal?.reason);
-    if (activeReader) cancelAndReleaseReader(activeReader, signal?.reason);
-    else if (!pumpStarted)
-      void upstreamResponse.body?.cancel(signal?.reason).catch(() => {});
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  if (signal?.aborted) onAbort();
-  const MAX_PASSTHROUGH_RETAINED_BYTES = 4 * 1024 * 1024;
-  let retainedBytes = 0;
-
-  // --- Keepalive ---
-  // The Responses API has no first-class `ping` event (unlike Anthropic), so we
-  // emit an SSE comment line (`: keepalive`), which is spec-compliant and MUST
-  // be ignored by any conformant SSE client. Keeps the client↔gateway
-  // connection alive during long reasoning pauses (Bun's ~5-min fetch timeout,
-  // oven-sh/bun#16682). True streaming emits real bytes frequently, so this
-  // only fires during genuine upstream silence.
-  const KEEPALIVE_INACTIVITY_MS = 30_000;
-  const keepaliveComment = encoder.encode(`: keepalive\n\n`);
-  let keepaliveTimer: ReturnType<typeof setTimeout> | null = null;
-  let completed = false;
-  let terminalForwarded = false;
-  const cleanup = (): void => {
-    if (keepaliveTimer) clearTimeout(keepaliveTimer);
-    keepaliveTimer = null;
-    signal?.removeEventListener("abort", onAbort);
-  };
-
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      let settled = false;
-      const safeEnqueue = (chunk: Uint8Array): boolean => {
-        if (downstreamCancelled || settled) return false;
-        if (externalAborted) throw signal?.reason;
-        try {
-          controller.en "function_call",
+                      type: "function_call",
                       id: `fc_${block.id}`,
                       call_id: block.id,
                       name: block.name,

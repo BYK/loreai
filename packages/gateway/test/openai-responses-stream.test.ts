@@ -1668,7 +1668,433 @@ describe("accumulateResponsesSSEStream", () => {
     },
   );
 
-  test.each(["public", "codex"]   expect(
+  test.each(["public", "codex"] as const)(
+    "%s rejects recursive explicit null replacement in the terminal snapshot",
+    async (validation) => {
+      const item = {
+        type: "image_generation_call",
+        id: `image-null-${validation}`,
+        status: "completed",
+        result: null,
+        details: { revised_prompt: null },
+      };
+      const terminalItem = {
+        ...item,
+        result: "base64-result",
+        details: { revised_prompt: "cat" },
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "generating" },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: { status: "completed", output: [terminalItem] },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts hosted-tool status transitions",
+    async (validation) => {
+      const item = {
+        type: "image_generation_call",
+        id: `image-status-${validation}`,
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "generating" },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { ...item, status: "failed" },
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                response: {
+                  status: "completed",
+                  output: [{ ...item, status: "failed" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).resolves.toMatchObject({
+        rawOutputItems: [{ ...item, status: "failed" }],
+      });
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts a failed function-call companion",
+    async (validation) => {
+      const item = {
+        type: "function_call",
+        id: `fc-failed-${validation}`,
+        call_id: `call-failed-${validation}`,
+        name: "lookup",
+        arguments: "{}",
+      };
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse([
+          {
+            event: "response.output_item.added",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "in_progress" },
+            },
+          },
+          {
+            event: "response.output_item.done",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: { ...item, status: "failed" },
+            },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                output: [{ ...item, status: "failed" }],
+              },
+            },
+          },
+        ]),
+        { validation, stopAtTerminal: true },
+      );
+
+      expect(result.rawOutputItems).toEqual([{ ...item, status: "failed" }]);
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects unknown output item types",
+    async (validation) => {
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { type: "provider_specific_output", id: "unknown" },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test("keeps the standard output-item allowlist exhaustive", () => {
+    const expected = [
+      "message",
+      "function_call",
+      "function_call_output",
+      "reasoning",
+      "item_reference",
+      "web_search_call",
+      "file_search_call",
+      "computer_call",
+      "computer_call_output",
+      "computer_tool_call",
+      "computer_tool_call_output",
+      "code_interpreter_call",
+      "image_generation_call",
+      "local_shell_call",
+      "local_shell_call_output",
+      "shell_call",
+      "shell_call_output",
+      "mcp_call",
+      "mcp_list_tools",
+      "mcp_approval_request",
+      "mcp_approval_response",
+      "custom_tool_call",
+      "custom_tool_call_output",
+      "apply_patch_call",
+      "apply_patch_call_output",
+      "program",
+      "program_output",
+      "tool_search_call",
+      "tool_search_output",
+      "additional_tools",
+      "compaction",
+    ];
+
+    expect(SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES).toEqual(expected);
+    expect(expected.every(isSupportedResponsesOutputItemType)).toBe(true);
+    expect(isSupportedResponsesOutputItemType("provider_specific_output")).toBe(
+      false,
+    );
+  });
+
+  test("only permits sparse added fields to be extended by output_item.done", () => {
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "function_call",
+          id: "fc_sparse",
+          call_id: "call_sparse",
+          name: "lookup",
+          arguments: '{"value":1}',
+        },
+        {
+          type: "function_call",
+          id: "fc_sparse",
+          call_id: "call_sparse",
+          name: "lookup",
+          arguments: "",
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "image_generation_call",
+          id: "image_sparse",
+          result: "base64-result",
+        },
+        {
+          type: "image_generation_call",
+          id: "image_sparse",
+          result: null,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "function_call",
+          id: "fc_changed",
+          call_id: "call_changed",
+          name: "lookup",
+          arguments: "evil",
+        },
+        {
+          type: "function_call",
+          id: "fc_changed",
+          call_id: "call_changed",
+          name: "lookup",
+          arguments: "good",
+        },
+      ),
+    ).toBe(false);
+    for (const [type, field, partType] of [
+      ["message", "content", "output_text"],
+      ["reasoning", "summary", "summary_text"],
+    ] as const) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type,
+            id: `${type}_changed`,
+            [field]: [{ type: partType, text: "evil" }],
+          },
+          {
+            type,
+            id: `${type}_changed`,
+            [field]: [{ type: partType, text: "good" }],
+          },
+        ),
+      ).toBe(false);
+    }
+    expect(
+      responsesDoneItemMatchesAdded(
+        {
+          type: "reasoning",
+          id: "reasoning_ciphertext",
+          summary: [],
+          encrypted_content: "completed-ciphertext",
+        },
+        {
+          type: "reasoning",
+          id: "reasoning_ciphertext",
+          summary: [],
+          encrypted_content: "provisional-ciphertext",
+        },
+      ),
+    ).toBe(true);
+    for (const encrypted_content of [null, undefined, 42, [], {}]) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            ...(encrypted_content === undefined ? {} : { encrypted_content }),
+          },
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            encrypted_content: "provisional-ciphertext",
+          },
+        ),
+      ).toBe(false);
+    }
+    for (const encrypted_content of [42, [], {}]) {
+      expect(
+        responsesDoneItemMatchesAdded(
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            encrypted_content: "completed-ciphertext",
+          },
+          {
+            type: "reasoning",
+            id: "reasoning_ciphertext",
+            summary: [],
+            encrypted_content,
+          },
+        ),
+      ).toBe(false);
+    }
+  });
+
+  test("Codex rejects malformed reasoning ciphertext in sparse item lifecycles", async () => {
+    for (const event of [
+      "response.output_item.added",
+      "response.output_item.done",
+    ] as const) {
+      for (const encrypted_content of [42, [], {}]) {
+        await expect(
+          accumulateResponsesSSEStream(
+            buildSSEResponse([
+              {
+                event,
+                data: {
+                  type: event,
+                  item: {
+                    type: "reasoning",
+                    id: `rs_sparse_${event}`,
+                    summary: [],
+                    encrypted_content,
+                  },
+                },
+              },
+            ]),
+            { validation: "codex", stopAtTerminal: true },
+          ),
+        ).rejects.toThrow("malformed Responses stream event");
+      }
+    }
+  });
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects malformed reasoning ciphertext introduced by a terminal snapshot",
+    async (validation) => {
+      const item = {
+        type: "reasoning",
+        id: `rs_terminal_ciphertext_${validation}`,
+        summary: [],
+      };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                type: "response.output_item.added",
+                output_index: 0,
+                item,
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                type: "response.output_item.done",
+                output_index: 0,
+                item,
+              },
+            },
+            {
+              event: "response.completed",
+              data: {
+                type: "response.completed",
+                response: {
+                  status: "completed",
+                  output: [{ ...item, encrypted_content: 42 }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
+
+  test("rejects terminal null replacement but permits sparse enrichment", () => {
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: "base64-result",
+          details: { revised_prompt: "cat" },
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: null,
+          details: { revised_prompt: null },
+        },
+      ),
+    ).toBe(false);
+    expect(
+      responsesTerminalItemMatches(
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: "base64-result",
+          details: { revised_prompt: "cat" },
+        },
+        {
+          type: "image_generation_call",
+          id: "image_terminal_sparse",
+          status: "completed",
+          result: undefined,
+          details: {},
+        },
+      ),
+    ).toBe(true);
+    expect(
       responsesTerminalItemMatches(
         {
           type: "image_generation_call",
@@ -2081,408 +2507,395 @@ describe("accumulateResponsesSSEStream", () => {
           },
           {
             event: "response.output_text.done",
-            data: { ...ete reasons", async () => {
-    const response = buildSSEResponse([
-      {
-        event: "response.incomplete",
-        data: {
-          response: {
-            status: "incomplete",
-            incomplete_details: { reason: "provider_specific" },
+            data: { ...reference, text: "same" },
           },
-        },
-      },
-    ]);
-
-    const result = await accumulateResponsesSSEStream(response, {
-      validation: "codex",
-      stopAtTerminal: true,
+          {
+            event: "response.content_part.added",
+            data: {
+              ...reference,
+              part: { type: "output_text", text: "" },
+            },
+          },
+          {
+            event: "response.content_part.done",
+            data: {
+              ...reference,
+              part: { type: "output_text", text: "same" },
+            },
+          },
+          {
+            event: "response.output_item.done",
+            data: {
+              ...(validation === "public" ? { output_index: 0 } : {}),
+              item: {
+                type: "message",
+                id: itemId,
+                content: [{ type: "output_text", text: "same" }],
+              },
+            },
+          },
+          {
+            event: "response.completed",
+            data: {
+              response: {
+                status: "completed",
+                output: [
+                  {
+                    type: "message",
+                    id: itemId,
+                    content: [{ type: "output_text", text: "same" }],
+                  },
+                ],
+              },
+            },
+          },
+        ]),
+        { validation, stopAtTerminal: true },
+      );
+      expect(result.content).toEqual([{ type: "text", text: "same" }]);
     });
 
-    expect(result.stopReason).toBe("max_tokens");
-  });
+    test(`${validation} rejects content and item snapshots contradicting output_text.done`, async () => {
+      const itemId = `msg-contradicting-${validation}`;
+      const reference =
+        validation === "public"
+          ? { output_index: 0, item_id: itemId, content_index: 0 }
+          : { item_id: itemId, content_index: 0 };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { type: "message", id: itemId },
+              },
+            },
+            {
+              event: "response.content_part.added",
+              data: {
+                ...reference,
+                part: { type: "output_text", text: "" },
+              },
+            },
+            {
+              event: "response.output_text.done",
+              data: { ...reference, text: "one" },
+            },
+            {
+              event: "response.content_part.done",
+              data: {
+                ...reference,
+                part: { type: "output_text", text: "two" },
+              },
+            },
+            {
+              event: "response.output_item.done",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: {
+                  type: "message",
+                  id: itemId,
+                  content: [{ type: "output_text", text: "three" }],
+                },
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    });
+  }
 
-  test.each([
-    [
-      "malformed output index",
-      [
+  test.each(["public", "codex"] as const)(
+    "%s validation handles high-cardinality indexed identities",
+    async (validation) => {
+      const count = 2_000;
+      const events: Array<{
+        event: string;
+        data: Record<string, unknown>;
+      }> = Array.from({ length: count }, (_, outputIndex) => ({
+        event: "response.output_item.added",
+        data: {
+          ...(validation === "public" ? { output_index: outputIndex } : {}),
+          item: { type: "message", id: `msg_${validation}_${outputIndex}` },
+        },
+      }));
+      if (validation === "public") {
+        events.push(
+          ...Array.from({ length: count }, (_, outputIndex) => ({
+            event: "response.output_item.done",
+            data: {
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: `msg_${validation}_${outputIndex}`,
+                content: [],
+              },
+            },
+          })),
+        );
+      }
+      events.push({
+        event: "response.completed",
+        data: {
+          response: {
+            status: "completed",
+            ...(validation === "public"
+              ? {
+                  output: Array.from({ length: count }, (_, outputIndex) => ({
+                    type: "item_reference",
+                    id: `msg_${validation}_${outputIndex}`,
+                  })),
+                }
+              : {}),
+          },
+        },
+      });
+
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse(events),
+        { validation, stopAtTerminal: true, maxFrames: events.length },
+      );
+      expect(result.rawOutputItems).toHaveLength(count);
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s rejects MAX_SAFE_INTEGER sparse output and content indices",
+    async (validation) => {
+      const indexed =
+        validation === "public"
+          ? { output_index: Number.MAX_SAFE_INTEGER }
+          : { output_index: Number.MAX_SAFE_INTEGER };
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: { ...indexed, item: { type: "message", id: "too-large" } },
+            },
+          ]),
+          { validation, stopAtTerminal: true, maxFrames: 4 },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+
+      await expect(
+        accumulateResponsesSSEStream(
+          buildSSEResponse([
+            {
+              event: "response.output_item.added",
+              data: {
+                ...(validation === "public" ? { output_index: 0 } : {}),
+                item: { type: "message", id: "content-too-large" },
+              },
+            },
+            {
+              event: "response.output_text.delta",
+              data: {
+                ...(validation === "public"
+                  ? { output_index: 0 }
+                  : { item_id: "content-too-large" }),
+                content_index: Number.MAX_SAFE_INTEGER,
+                delta: "x",
+              },
+            },
+          ]),
+          { validation, stopAtTerminal: true, maxFrames: 4 },
+        ),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s accepts the sparse-index boundary and rejects the first value beyond it",
+    async (validation) => {
+      const itemId = `boundary-${validation}`;
+      const events = [
         {
           event: "response.output_item.added",
+          data: { output_index: 3, item: { type: "message", id: itemId } },
+        },
+        {
+          event: "response.output_item.done",
           data: {
-            output_index: "0",
-            item: { type: "message", id: "msg_bad_output" },
+            output_index: 3,
+            item: { type: "message", id: itemId, content: [] },
           },
         },
-      ],
-      "malformed Responses stream event",
-    ],
-    [
-      "malformed content index",
-      [
         {
-          event: "response.output_text.delta",
-          data: {
-            item_id: "msg_bad_content",
-            content_index: "0",
-            delta: "text",
-          },
-        },
-      ],
-      "malformed Responses stream event",
-    ],
-    [
-      "non-string incomplete reason",
-      [
-        {
-          event: "response.incomplete",
+          event: "response.completed",
           data: {
             response: {
-              status: "incomplete",
-              incomplete_details: { reason: 1 },
+              status: "completed",
+              ...(validation === "public"
+                ? { output: [{ type: "item_reference", id: itemId }] }
+                : {}),
             },
           },
         },
-      ],
-      "malformed Responses terminal event",
-    ],
-    [
-      "contradictory response.done status",
-      [
-        {
-          event: "response.done",
-          data: { response: { status: "in_progress" } },
-        },
-      ],
-      "Responses terminal event/status mismatch",
-    ],
-  ] as const)(
-    "Codex validation rejects %s when provided",
-    async (_case, events, diagnostic) => {
+      ];
       await expect(
-        accumulateResponsesSSEStream(buildSSEResponse([...events]), {
-          validation: "codex",
+        accumulateResponsesSSEStream(buildSSEResponse(events), {
+          validation,
           stopAtTerminal: true,
+          maxFrames: 4,
         }),
-      ).rejects.toThrow(diagnostic);
+      ).resolves.toBeDefined();
+      events[0] = {
+        event: "response.output_item.added",
+        data: { output_index: 4, item: { type: "message", id: itemId } },
+      };
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(events), {
+          validation,
+          stopAtTerminal: true,
+          maxFrames: 4,
+        }),
+      ).rejects.toThrow("malformed Responses stream event");
     },
   );
-});
 
-test("Anthropic translator emits inclusive Responses cache usage", async () => {
-  const event = (type: string, data: Record<string, unknown>) =>
-    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
-  const upstream = new Response(
-    event("message_start", {
-      message: {
-        id: "msg_usage",
-        type: "message",
-        role: "assistant",
-        model: "claude-test",
-        content: [],
-        stop_reason: null,
-        stop_sequence: null,
-        usage: {
-          input_tokens: 10,
-          cache_read_input_tokens: 90,
-          cache_creation_input_tokens: 20,
-          output_tokens: 0,
-        },
-      },
-    }) +
-      event("message_delta", {
-        delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage: { output_tokens: 1 },
-      }) +
-      event("message_stop", {}),
-  );
-  const output = await translateAnthropicStreamToResponses(upstream, {
-    strict: true,
-  }).text();
-  const completedLine = output
-    .split("\n")
-    .find(
-      (line) =>
-        line.startsWith("data: {") && line.includes("response.completed"),
-    );
-  const completed = JSON.parse(completedLine?.slice(6) ?? "null") as {
-    response: { usage: Record<string, unknown> };
-  };
-  expect(completed.response.usage).toEqual({
-    input_tokens: 120,
-    output_tokens: 1,
-    total_tokens: 121,
-    input_tokens_details: { cached_tokens: 90, cache_write_tokens: 20 },
-  });
-  expect(() =>
-    validateResponsesUsage(
-      completed.response.usage,
-      "invalid translated usage",
-    ),
-  ).not.toThrow();
-});
-
-test("Anthropic translator emits content_filter as response.incomplete", async () => {
-  const event = (type: string, data: Record<string, unknown>) =>
-    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
-  const upstream = new Response(
-    event("message_start", {
-      message: {
-        id: "msg_filtered",
-        type: "message",
-        role: "assistant",
-        model: "claude-test",
-        content: [],
-        stop_reason: null,
-        stop_sequence: null,
-        usage: { input_tokens: 10, output_tokens: 0 },
-      },
-    }) +
-      event("message_delta", {
-        delta: { stop_reason: "refusal", stop_sequence: null },
-        usage: { output_tokens: 1 },
-      }) +
-      event("message_stop", {}),
-  );
-
-  const output = await translateAnthropicStreamToResponses(upstream, {
-    strict: true,
-  }).text();
-  expect(output).toContain("event: response.incomplete");
-  expect(output).toContain('"status":"incomplete"');
-  expect(output).toContain('"reason":"content_filter"');
-  expect(output).not.toContain("event: response.completed");
-});
-
-// ---------------------------------------------------------------------------
-// streamResponsesPassthrough — true streaming (Responses → Responses client)
-// ---------------------------------------------------------------------------
-
-/**
- * Build a controllable upstream SSE Response whose events are released one at a
- * time via the returned `push`/`close` handles, so a test can assert that the
- * client sees early events BEFORE the upstream terminal event arrives.
- */
-function controllableSSE(): {
-  response: Response;
-  push: (event: string, data: Record<string, unknown>) => void;
-  close: () => void;
-  error: (err: Error) => void;
-} {
-  const encoder = new TextEncoder();
-  let ctrl!: ReadableStreamDefaultController<Uint8Array>;
-  const body = new ReadableStream<Uint8Array>({
-    start(c) {
-      ctrl = c;
-    },
-  });
-  return {
-    response: new Response(body, {
-      headers: { "content-type": "text/event-stream" },
-    }),
-    push: (event, data) =>
-      ctrl.enqueue(
-        encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-      ),
-    close: () => ctrl.close(),
-    error: (err) => ctrl.error(err),
-  };
-}
-
-/** Read the client-facing SSE stream fully into a decoded string. */
-async function drainToString(resp: Response): Promise<string> {
-  if (!resp.body) throw new Error("test response has no body");
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let out = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (value) out += decoder.decode(value, { stream: true });
-    if (done) break;
-  }
-  return out;
-}
-
-describe("streamResponsesPassthrough", () => {
-  test("drains a pre-buffered stream after a delayed first read", async () => {
-    const downstream = streamResponsesPassthrough(
-      buildSSEResponse([
+  test.each(["public", "codex"] as const)(
+    "%s bounds sparse content indices by the frame ceiling",
+    async (validation) => {
+      const itemId = `content-boundary-${validation}`;
+      const makeEvents = (contentIndex: number) => [
         {
-          event: "response.created",
+          event: "response.output_item.added",
+          data: { output_index: 0, item: { type: "message", id: itemId } },
+        },
+        {
+          event: "response.output_text.done",
           data: {
-            type: "response.created",
-            response: { id: "delayed", status: "in_progress" },
+            output_index: 0,
+            item_id: itemId,
+            content_index: contentIndex,
+            text: "ok",
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: itemId,
+              content: [{ type: "output_text", text: "ok" }],
+            },
           },
         },
         {
           event: "response.completed",
           data: {
-            type: "response.completed",
-            response: { id: "delayed", status: "completed", output: [] },
+            response: {
+              status: "completed",
+              ...(validation === "public"
+                ? { output: [{ type: "item_reference", id: itemId }] }
+                : {}),
+            },
           },
         },
-      ]),
-      () => {},
-    );
-    await new Promise((resolve) => setImmediate(resolve));
-    const output = await downstream.text();
-    expect(output).toContain("response.created");
-    expect(output).toContain("response.completed");
-  });
+      ];
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(makeEvents(3)), {
+          validation,
+          stopAtTerminal: true,
+          maxFrames: 4,
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(makeEvents(4)), {
+          validation,
+          stopAtTerminal: true,
+          maxFrames: 4,
+        }),
+      ).rejects.toThrow("malformed Responses stream event");
+    },
+  );
 
-  test("an already-aborted external signal errors downstream and cancels upstream", async () => {
-    let sourceCancelled = false;
-    const upstream = new Response(
-      new ReadableStream<Uint8Array>({
-        pull() {
-          return new Promise(() => {});
-        },
-        cancel() {
-          sourceCancelled = true;
-        },
-      }),
-    );
-    const abort = new AbortController();
-    abort.abort(new DOMException("deadline", "TimeoutError"));
-    const removeAbortListener = vi.spyOn(abort.signal, "removeEventListener");
-    const downstream = streamResponsesPassthrough(
-      upstream,
-      () => {},
-      undefined,
-      "public",
-      { signal: abort.signal },
-    );
-    await expect(downstream.text()).rejects.toMatchObject({
-      name: "TimeoutError",
-    });
-    expect(sourceCancelled).toBe(true);
-    expect(removeAbortListener).toHaveBeenCalledWith(
-      "abort",
-      expect.any(Function),
-    );
-  });
-
-  test("external abort wakes a demand waiter and errors the reader", async () => {
-    let sourceCancelled = false;
-    const abort = new AbortController();
-    const removeAbortListener = vi.spyOn(abort.signal, "removeEventListener");
-    const event = (type: string, response: Record<string, unknown>) =>
-      `event: ${type}\ndata: ${JSON.stringify({ type, response })}\n\n`;
-    const wrapped = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            new TextEncoder().encode(
-              event("response.created", {
-                id: "waiting",
-                status: "in_progress",
-              }) +
-                event("response.completed", {
-                  id: "waiting",
-                  status: "completed",
-                  output: [],
-                }),
-            ),
-          );
-        },
-        pull() {
-          return new Promise(() => {});
-        },
-        cancel() {
-          sourceCancelled = true;
-        },
-      }),
-    );
-    const downstream = streamResponsesPassthrough(
-      wrapped,
-      () => {},
-      undefined,
-      "public",
-      { signal: abort.signal },
-    );
-    await new Promise((resolve) => setImmediate(resolve));
-    abort.abort(new DOMException("deadline", "TimeoutError"));
-    await expect(downstream.text()).rejects.toMatchObject({
-      name: "TimeoutError",
-    });
-    expect(sourceCancelled).toBe(true);
-    expect(removeAbortListener).toHaveBeenCalledWith(
-      "abort",
-      expect.any(Function),
-    );
-  });
-
-  test("downstream cancel before reader acquisition is silent and cancels the source", async () => {
-    let sourceCancelled = false;
-    const upstream = new Response(
-      new ReadableStream<Uint8Array>({
-        cancel() {
-          sourceCancelled = true;
-        },
-      }),
-    );
-    const downstream = streamResponsesPassthrough(upstream, () => {});
-    await downstream.body?.cancel();
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(sourceCancelled).toBe(true);
-  });
-
-  test("downstream cancel does not await a hostile upstream cancel", async () => {
-    let sourceCancelled = false;
-    const upstream = new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            new TextEncoder().encode(
-              'event: response.created\ndata: {"type":"response.created","response":{"id":"hostile","status":"in_progress"}}\n\n',
-            ),
-          );
-        },
-        pull() {
-          return new Promise(() => {});
-        },
-        cancel() {
-          sourceCancelled = true;
-          return new Promise<void>(() => {});
-        },
-      }),
-    );
-    const downstreamBody = streamResponsesPassthrough(upstream, () => {}).body;
-    if (!downstreamBody) throw new Error("test stream has no body");
-    const reader = downstreamBody.getReader();
-    await reader.read();
-    const outcome = await Promise.race([
-      reader.cancel().then(() => "cancelled"),
-      new Promise<string>((resolve) => setImmediate(() => resolve("hung"))),
-    ]);
-    expect(outcome).toBe("cancelled");
-    expect(sourceCancelled).toBe(true);
-    expect(upstream.body?.locked).toBe(false);
-  });
-
-  test("does not emit a second terminal when onComplete throws", async () => {
-    const output = await streamResponsesPassthrough(
-      buildSSEResponse([
+  test("Codex sparse sole-active inference stays indexed at high cardinality", async () => {
+    const count = 2_000;
+    const events: Array<{
+      event: string;
+      data: Record<string, unknown>;
+    }> = [];
+    for (let index = 0; index < count; index++) {
+      const itemId = `msg-sparse-${index}`;
+      events.push(
         {
-          event: "response.completed",
+          event: "response.output_item.added",
+          data: { item: { type: "message", id: itemId } },
+        },
+        {
+          event: "response.output_text.delta",
+          data: { delta: "x" },
+        },
+        {
+          event: "response.output_item.done",
           data: {
-            type: "response.completed",
-            response: { status: "completed", output: [] },
+            item: {
+              type: "message",
+              id: itemId,
+              content: [{ type: "output_text", text: "x" }],
+            },
           },
         },
-      ]),
-      () => {
-        throw new Error("accounting failed");
-      },
-      undefined,
-      "public",
-    ).text();
-    expect(output.match(/event: response\.completed/g)).toHaveLength(1);
-    expect(output).not.toContain("event: response.failed");
+      );
+    }
+    events.push({
+      event: "response.completed",
+      data: { response: { status: "completed" } },
+    });
+    const entries = vi.spyOn(Map.prototype, "entries");
+    try {
+      const result = await accumulateResponsesSSEStream(
+        buildSSEResponse(events),
+        { validation: "codex", stopAtTerminal: true },
+      );
+      expect(result.rawOutputItems).toHaveLength(count);
+      // Finalization enumerates rawItems once. Sparse inference must not scan
+      // the growing item registry for each omitted-index delta/done event.
+      expect(entries).toHaveBeenCalledTimes(1);
+    } finally {
+      entries.mockRestore();
+    }
   });
 
-  test("does not forward malformed JSON", async () => {
-    const outcomes: boolean[] = [];
-    const output = await streamlateEvent: "response.output_text.done",
+  const contentTerminalCases = [
+    {
+      name: "text delta after output_text.done",
+      terminalEvent: "response.output_text.done",
+      terminalData: { text: "done" },
+      lateEvent: "response.output_text.delta",
+      lateData: { delta: "late" },
+    },
+    {
+      name: "refusal delta after refusal.done",
+      terminalEvent: "response.refusal.done",
+      terminalData: { refusal: "done" },
+      lateEvent: "response.refusal.delta",
+      lateData: { delta: "late" },
+    },
+    {
+      name: "duplicate output_text.done",
+      terminalEvent: "response.output_text.done",
+      terminalData: { text: "done" },
+      lateEvent: "response.output_text.done",
+      lateData: { text: "done again" },
+    },
+    {
+      name: "duplicate refusal.done",
+      terminalEvent: "response.refusal.done",
+      terminalData: { refusal: "done" },
+      lateEvent: "response.refusal.done",
+      lateData: { refusal: "done again" },
+    },
+    {
+      name: "text after refusal.done",
+      terminalEvent: "response.refusal.done",
+      terminalData: { refusal: "done" },
+      lateEvent: "response.output_text.done",
       lateData: { text: "late text" },
     },
     {
@@ -3313,433 +3726,408 @@ describe("streamResponsesPassthrough", () => {
     },
   );
 
-  test("Codex validation accepts provider-specific incompl as const)(
-    "%s rejects recursive explicit null replacement in the terminal snapshot",
-    async (validation) => {
-      const item = {
-        type: "image_generation_call",
-        id: `image-null-${validation}`,
-        status: "completed",
-        result: null,
-        details: { revised_prompt: null },
-      };
-      const terminalItem = {
-        ...item,
-        result: "base64-result",
-        details: { revised_prompt: "cat" },
-      };
-      await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: { ...item, status: "generating" },
-              },
-            },
-            {
-              event: "response.output_item.done",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item,
-              },
-            },
-            {
-              event: "response.completed",
-              data: {
-                response: { status: "completed", output: [terminalItem] },
-              },
-            },
-          ]),
-          { validation, stopAtTerminal: true },
-        ),
-      ).rejects.toThrow("malformed Responses terminal event");
-    },
-  );
+  test("Codex validation accepts provider-specific incomplete reasons", async () => {
+    const response = buildSSEResponse([
+      {
+        event: "response.incomplete",
+        data: {
+          response: {
+            status: "incomplete",
+            incomplete_details: { reason: "provider_specific" },
+          },
+        },
+      },
+    ]);
 
-  test.each(["public", "codex"] as const)(
-    "%s accepts hosted-tool status transitions",
-    async (validation) => {
-      const item = {
-        type: "image_generation_call",
-        id: `image-status-${validation}`,
-      };
-      await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: { ...item, status: "generating" },
-              },
-            },
-            {
-              event: "response.output_item.done",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: { ...item, status: "failed" },
-              },
-            },
-            {
-              event: "response.completed",
-              data: {
-                response: {
-                  status: "completed",
-                  output: [{ ...item, status: "failed" }],
-                },
-              },
-            },
-          ]),
-          { validation, stopAtTerminal: true },
-        ),
-      ).resolves.toMatchObject({
-        rawOutputItems: [{ ...item, status: "failed" }],
-      });
-    },
-  );
+    const result = await accumulateResponsesSSEStream(response, {
+      validation: "codex",
+      stopAtTerminal: true,
+    });
 
-  test.each(["public", "codex"] as const)(
-    "%s accepts a failed function-call companion",
-    async (validation) => {
-      const item = {
-        type: "function_call",
-        id: `fc-failed-${validation}`,
-        call_id: `call-failed-${validation}`,
-        name: "lookup",
-        arguments: "{}",
-      };
-      const result = await accumulateResponsesSSEStream(
-        buildSSEResponse([
-          {
-            event: "response.output_item.added",
-            data: {
-              ...(validation === "public" ? { output_index: 0 } : {}),
-              item: { ...item, status: "in_progress" },
+    expect(result.stopReason).toBe("max_tokens");
+  });
+
+  test.each([
+    [
+      "malformed output index",
+      [
+        {
+          event: "response.output_item.added",
+          data: {
+            output_index: "0",
+            item: { type: "message", id: "msg_bad_output" },
+          },
+        },
+      ],
+      "malformed Responses stream event",
+    ],
+    [
+      "malformed content index",
+      [
+        {
+          event: "response.output_text.delta",
+          data: {
+            item_id: "msg_bad_content",
+            content_index: "0",
+            delta: "text",
+          },
+        },
+      ],
+      "malformed Responses stream event",
+    ],
+    [
+      "non-string incomplete reason",
+      [
+        {
+          event: "response.incomplete",
+          data: {
+            response: {
+              status: "incomplete",
+              incomplete_details: { reason: 1 },
             },
           },
-          {
-            event: "response.output_item.done",
-            data: {
-              ...(validation === "public" ? { output_index: 0 } : {}),
-              item: { ...item, status: "failed" },
-            },
-          },
-          {
-            event: "response.completed",
-            data: {
-              response: {
-                status: "completed",
-                output: [{ ...item, status: "failed" }],
-              },
-            },
-          },
-        ]),
-        { validation, stopAtTerminal: true },
-      );
-
-      expect(result.rawOutputItems).toEqual([{ ...item, status: "failed" }]);
-    },
-  );
-
-  test.each(["public", "codex"] as const)(
-    "%s rejects unknown output item types",
-    async (validation) => {
+        },
+      ],
+      "malformed Responses terminal event",
+    ],
+    [
+      "contradictory response.done status",
+      [
+        {
+          event: "response.done",
+          data: { response: { status: "in_progress" } },
+        },
+      ],
+      "Responses terminal event/status mismatch",
+    ],
+  ] as const)(
+    "Codex validation rejects %s when provided",
+    async (_case, events, diagnostic) => {
       await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: { type: "provider_specific_output", id: "unknown" },
-              },
-            },
-          ]),
-          { validation, stopAtTerminal: true },
-        ),
-      ).rejects.toThrow("malformed Responses stream event");
+        accumulateResponsesSSEStream(buildSSEResponse([...events]), {
+          validation: "codex",
+          stopAtTerminal: true,
+        }),
+      ).rejects.toThrow(diagnostic);
     },
   );
+});
 
-  test("keeps the standard output-item allowlist exhaustive", () => {
-    const expected = [
-      "message",
-      "function_call",
-      "function_call_output",
-      "reasoning",
-      "item_reference",
-      "web_search_call",
-      "file_search_call",
-      "computer_call",
-      "computer_call_output",
-      "computer_tool_call",
-      "computer_tool_call_output",
-      "code_interpreter_call",
-      "image_generation_call",
-      "local_shell_call",
-      "local_shell_call_output",
-      "shell_call",
-      "shell_call_output",
-      "mcp_call",
-      "mcp_list_tools",
-      "mcp_approval_request",
-      "mcp_approval_response",
-      "custom_tool_call",
-      "custom_tool_call_output",
-      "apply_patch_call",
-      "apply_patch_call_output",
-      "program",
-      "program_output",
-      "tool_search_call",
-      "tool_search_output",
-      "additional_tools",
-      "compaction",
-    ];
+test("Anthropic translator emits inclusive Responses cache usage", async () => {
+  const event = (type: string, data: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const upstream = new Response(
+    event("message_start", {
+      message: {
+        id: "msg_usage",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: {
+          input_tokens: 10,
+          cache_read_input_tokens: 90,
+          cache_creation_input_tokens: 20,
+          output_tokens: 0,
+        },
+      },
+    }) +
+      event("message_delta", {
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }) +
+      event("message_stop", {}),
+  );
+  const output = await translateAnthropicStreamToResponses(upstream, {
+    strict: true,
+  }).text();
+  const completedLine = output
+    .split("\n")
+    .find(
+      (line) =>
+        line.startsWith("data: {") && line.includes("response.completed"),
+    );
+  const completed = JSON.parse(completedLine?.slice(6) ?? "null") as {
+    response: { usage: Record<string, unknown> };
+  };
+  expect(completed.response.usage).toEqual({
+    input_tokens: 120,
+    output_tokens: 1,
+    total_tokens: 121,
+    input_tokens_details: { cached_tokens: 90, cache_write_tokens: 20 },
+  });
+  expect(() =>
+    validateResponsesUsage(
+      completed.response.usage,
+      "invalid translated usage",
+    ),
+  ).not.toThrow();
+});
 
-    expect(SUPPORTED_RESPONSES_OUTPUT_ITEM_TYPES).toEqual(expected);
-    expect(expected.every(isSupportedResponsesOutputItemType)).toBe(true);
-    expect(isSupportedResponsesOutputItemType("provider_specific_output")).toBe(
-      false,
+test("Anthropic translator emits content_filter as response.incomplete", async () => {
+  const event = (type: string, data: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const upstream = new Response(
+    event("message_start", {
+      message: {
+        id: "msg_filtered",
+        type: "message",
+        role: "assistant",
+        model: "claude-test",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 0 },
+      },
+    }) +
+      event("message_delta", {
+        delta: { stop_reason: "refusal", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      }) +
+      event("message_stop", {}),
+  );
+
+  const output = await translateAnthropicStreamToResponses(upstream, {
+    strict: true,
+  }).text();
+  expect(output).toContain("event: response.incomplete");
+  expect(output).toContain('"status":"incomplete"');
+  expect(output).toContain('"reason":"content_filter"');
+  expect(output).not.toContain("event: response.completed");
+});
+
+// ---------------------------------------------------------------------------
+// streamResponsesPassthrough — true streaming (Responses → Responses client)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a controllable upstream SSE Response whose events are released one at a
+ * time via the returned `push`/`close` handles, so a test can assert that the
+ * client sees early events BEFORE the upstream terminal event arrives.
+ */
+function controllableSSE(): {
+  response: Response;
+  push: (event: string, data: Record<string, unknown>) => void;
+  close: () => void;
+  error: (err: Error) => void;
+} {
+  const encoder = new TextEncoder();
+  let ctrl!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      ctrl = c;
+    },
+  });
+  return {
+    response: new Response(body, {
+      headers: { "content-type": "text/event-stream" },
+    }),
+    push: (event, data) =>
+      ctrl.enqueue(
+        encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+      ),
+    close: () => ctrl.close(),
+    error: (err) => ctrl.error(err),
+  };
+}
+
+/** Read the client-facing SSE stream fully into a decoded string. */
+async function drainToString(resp: Response): Promise<string> {
+  if (!resp.body) throw new Error("test response has no body");
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) out += decoder.decode(value, { stream: true });
+    if (done) break;
+  }
+  return out;
+}
+
+describe("streamResponsesPassthrough", () => {
+  test("drains a pre-buffered stream after a delayed first read", async () => {
+    const downstream = streamResponsesPassthrough(
+      buildSSEResponse([
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: { id: "delayed", status: "in_progress" },
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: { id: "delayed", status: "completed", output: [] },
+          },
+        },
+      ]),
+      () => {},
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const output = await downstream.text();
+    expect(output).toContain("response.created");
+    expect(output).toContain("response.completed");
+  });
+
+  test("an already-aborted external signal errors downstream and cancels upstream", async () => {
+    let sourceCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          sourceCancelled = true;
+        },
+      }),
+    );
+    const abort = new AbortController();
+    abort.abort(new DOMException("deadline", "TimeoutError"));
+    const removeAbortListener = vi.spyOn(abort.signal, "removeEventListener");
+    const downstream = streamResponsesPassthrough(
+      upstream,
+      () => {},
+      undefined,
+      "public",
+      { signal: abort.signal },
+    );
+    await expect(downstream.text()).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(sourceCancelled).toBe(true);
+    expect(removeAbortListener).toHaveBeenCalledWith(
+      "abort",
+      expect.any(Function),
     );
   });
 
-  test("only permits sparse added fields to be extended by output_item.done", () => {
-    expect(
-      responsesDoneItemMatchesAdded(
-        {
-          type: "function_call",
-          id: "fc_sparse",
-          call_id: "call_sparse",
-          name: "lookup",
-          arguments: '{"value":1}',
-        },
-        {
-          type: "function_call",
-          id: "fc_sparse",
-          call_id: "call_sparse",
-          name: "lookup",
-          arguments: "",
-        },
-      ),
-    ).toBe(true);
-    expect(
-      responsesDoneItemMatchesAdded(
-        {
-          type: "image_generation_call",
-          id: "image_sparse",
-          result: "base64-result",
-        },
-        {
-          type: "image_generation_call",
-          id: "image_sparse",
-          result: null,
-        },
-      ),
-    ).toBe(true);
-    expect(
-      responsesDoneItemMatchesAdded(
-        {
-          type: "function_call",
-          id: "fc_changed",
-          call_id: "call_changed",
-          name: "lookup",
-          arguments: "evil",
-        },
-        {
-          type: "function_call",
-          id: "fc_changed",
-          call_id: "call_changed",
-          name: "lookup",
-          arguments: "good",
-        },
-      ),
-    ).toBe(false);
-    for (const [type, field, partType] of [
-      ["message", "content", "output_text"],
-      ["reasoning", "summary", "summary_text"],
-    ] as const) {
-      expect(
-        responsesDoneItemMatchesAdded(
-          {
-            type,
-            id: `${type}_changed`,
-            [field]: [{ type: partType, text: "evil" }],
-          },
-          {
-            type,
-            id: `${type}_changed`,
-            [field]: [{ type: partType, text: "good" }],
-          },
-        ),
-      ).toBe(false);
-    }
-    expect(
-      responsesDoneItemMatchesAdded(
-        {
-          type: "reasoning",
-          id: "reasoning_ciphertext",
-          summary: [],
-          encrypted_content: "completed-ciphertext",
-        },
-        {
-          type: "reasoning",
-          id: "reasoning_ciphertext",
-          summary: [],
-          encrypted_content: "provisional-ciphertext",
-        },
-      ),
-    ).toBe(true);
-    for (const encrypted_content of [null, undefined, 42, [], {}]) {
-      expect(
-        responsesDoneItemMatchesAdded(
-          {
-            type: "reasoning",
-            id: "reasoning_ciphertext",
-            summary: [],
-            ...(encrypted_content === undefined ? {} : { encrypted_content }),
-          },
-          {
-            type: "reasoning",
-            id: "reasoning_ciphertext",
-            summary: [],
-            encrypted_content: "provisional-ciphertext",
-          },
-        ),
-      ).toBe(false);
-    }
-    for (const encrypted_content of [42, [], {}]) {
-      expect(
-        responsesDoneItemMatchesAdded(
-          {
-            type: "reasoning",
-            id: "reasoning_ciphertext",
-            summary: [],
-            encrypted_content: "completed-ciphertext",
-          },
-          {
-            type: "reasoning",
-            id: "reasoning_ciphertext",
-            summary: [],
-            encrypted_content,
-          },
-        ),
-      ).toBe(false);
-    }
-  });
-
-  test("Codex rejects malformed reasoning ciphertext in sparse item lifecycles", async () => {
-    for (const event of [
-      "response.output_item.added",
-      "response.output_item.done",
-    ] as const) {
-      for (const encrypted_content of [42, [], {}]) {
-        await expect(
-          accumulateResponsesSSEStream(
-            buildSSEResponse([
-              {
-                event,
-                data: {
-                  type: event,
-                  item: {
-                    type: "reasoning",
-                    id: `rs_sparse_${event}`,
-                    summary: [],
-                    encrypted_content,
-                  },
-                },
-              },
-            ]),
-            { validation: "codex", stopAtTerminal: true },
-          ),
-        ).rejects.toThrow("malformed Responses stream event");
-      }
-    }
-  });
-
-  test.each(["public", "codex"] as const)(
-    "%s rejects malformed reasoning ciphertext introduced by a terminal snapshot",
-    async (validation) => {
-      const item = {
-        type: "reasoning",
-        id: `rs_terminal_ciphertext_${validation}`,
-        summary: [],
-      };
-      await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: {
-                type: "response.output_item.added",
-                output_index: 0,
-                item,
-              },
-            },
-            {
-              event: "response.output_item.done",
-              data: {
-                type: "response.output_item.done",
-                output_index: 0,
-                item,
-              },
-            },
-            {
-              event: "response.completed",
-              data: {
-                type: "response.completed",
-                response: {
+  test("external abort wakes a demand waiter and errors the reader", async () => {
+    let sourceCancelled = false;
+    const abort = new AbortController();
+    const removeAbortListener = vi.spyOn(abort.signal, "removeEventListener");
+    const event = (type: string, response: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, response })}\n\n`;
+    const wrapped = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              event("response.created", {
+                id: "waiting",
+                status: "in_progress",
+              }) +
+                event("response.completed", {
+                  id: "waiting",
                   status: "completed",
-                  output: [{ ...item, encrypted_content: 42 }],
-                },
-              },
-            },
-          ]),
-          { validation, stopAtTerminal: true },
-        ),
-      ).rejects.toThrow("malformed Responses terminal event");
-    },
-  );
+                  output: [],
+                }),
+            ),
+          );
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+        cancel() {
+          sourceCancelled = true;
+        },
+      }),
+    );
+    const downstream = streamResponsesPassthrough(
+      wrapped,
+      () => {},
+      undefined,
+      "public",
+      { signal: abort.signal },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    abort.abort(new DOMException("deadline", "TimeoutError"));
+    await expect(downstream.text()).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(sourceCancelled).toBe(true);
+    expect(removeAbortListener).toHaveBeenCalledWith(
+      "abort",
+      expect.any(Function),
+    );
+  });
 
-  test("rejects terminal null replacement but permits sparse enrichment", () => {
-    expect(
-      responsesTerminalItemMatches(
-        {
-          type: "image_generation_call",
-          id: "image_terminal_sparse",
-          status: "completed",
-          result: "base64-result",
-          details: { revised_prompt: "cat" },
+  test("downstream cancel before reader acquisition is silent and cancels the source", async () => {
+    let sourceCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel() {
+          sourceCancelled = true;
         },
-        {
-          type: "image_generation_call",
-          id: "image_terminal_sparse",
-          status: "completed",
-          result: null,
-          details: { revised_prompt: null },
+      }),
+    );
+    const downstream = streamResponsesPassthrough(upstream, () => {});
+    await downstream.body?.cancel();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(sourceCancelled).toBe(true);
+  });
+
+  test("downstream cancel does not await a hostile upstream cancel", async () => {
+    let sourceCancelled = false;
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: response.created\ndata: {"type":"response.created","response":{"id":"hostile","status":"in_progress"}}\n\n',
+            ),
+          );
         },
-      ),
-    ).toBe(false);
-    expect(
-      responsesTerminalItemMatches(
-        {
-          type: "image_generation_call",
-          id: "image_terminal_sparse",
-          status: "completed",
-          result: "base64-result",
-          details: { revised_prompt: "cat" },
+        pull() {
+          return new Promise(() => {});
         },
-        {
-          type: "image_generation_call",
-          id: "image_terminal_sparse",
-          status: "completed",
-          result: undefined,
-          details: {},
+        cancel() {
+          sourceCancelled = true;
+          return new Promise<void>(() => {});
         },
-      ),
-    ).toBe(true);
- ResponsesPassthrough(
+      }),
+    );
+    const downstreamBody = streamResponsesPassthrough(upstream, () => {}).body;
+    if (!downstreamBody) throw new Error("test stream has no body");
+    const reader = downstreamBody.getReader();
+    await reader.read();
+    const outcome = await Promise.race([
+      reader.cancel().then(() => "cancelled"),
+      new Promise<string>((resolve) => setImmediate(() => resolve("hung"))),
+    ]);
+    expect(outcome).toBe("cancelled");
+    expect(sourceCancelled).toBe(true);
+    expect(upstream.body?.locked).toBe(false);
+  });
+
+  test("does not emit a second terminal when onComplete throws", async () => {
+    const output = await streamResponsesPassthrough(
+      buildSSEResponse([
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: { status: "completed", output: [] },
+          },
+        },
+      ]),
+      () => {
+        throw new Error("accounting failed");
+      },
+      undefined,
+      "public",
+    ).text();
+    expect(output.match(/event: response\.completed/g)).toHaveLength(1);
+    expect(output).not.toContain("event: response.failed");
+  });
+
+  test("does not forward malformed JSON", async () => {
+    const outcomes: boolean[] = [];
+    const output = await streamResponsesPassthrough(
       new Response("event: response.created\ndata: {bad}\n\n"),
       (_response, successful) => outcomes.push(successful),
       undefined,
@@ -4097,395 +4485,7 @@ describe("streamResponsesPassthrough", () => {
         c.close();
       },
     });
-  reference, text: "same" },
-          },
-          {
-            event: "response.content_part.added",
-            data: {
-              ...reference,
-              part: { type: "output_text", text: "" },
-            },
-          },
-          {
-            event: "response.content_part.done",
-            data: {
-              ...reference,
-              part: { type: "output_text", text: "same" },
-            },
-          },
-          {
-            event: "response.output_item.done",
-            data: {
-              ...(validation === "public" ? { output_index: 0 } : {}),
-              item: {
-                type: "message",
-                id: itemId,
-                content: [{ type: "output_text", text: "same" }],
-              },
-            },
-          },
-          {
-            event: "response.completed",
-            data: {
-              response: {
-                status: "completed",
-                output: [
-                  {
-                    type: "message",
-                    id: itemId,
-                    content: [{ type: "output_text", text: "same" }],
-                  },
-                ],
-              },
-            },
-          },
-        ]),
-        { validation, stopAtTerminal: true },
-      );
-      expect(result.content).toEqual([{ type: "text", text: "same" }]);
-    });
-
-    test(`${validation} rejects content and item snapshots contradicting output_text.done`, async () => {
-      const itemId = `msg-contradicting-${validation}`;
-      const reference =
-        validation === "public"
-          ? { output_index: 0, item_id: itemId, content_index: 0 }
-          : { item_id: itemId, content_index: 0 };
-      await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: { type: "message", id: itemId },
-              },
-            },
-            {
-              event: "response.content_part.added",
-              data: {
-                ...reference,
-                part: { type: "output_text", text: "" },
-              },
-            },
-            {
-              event: "response.output_text.done",
-              data: { ...reference, text: "one" },
-            },
-            {
-              event: "response.content_part.done",
-              data: {
-                ...reference,
-                part: { type: "output_text", text: "two" },
-              },
-            },
-            {
-              event: "response.output_item.done",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: {
-                  type: "message",
-                  id: itemId,
-                  content: [{ type: "output_text", text: "three" }],
-                },
-              },
-            },
-          ]),
-          { validation, stopAtTerminal: true },
-        ),
-      ).rejects.toThrow("malformed Responses stream event");
-    });
-  }
-
-  test.each(["public", "codex"] as const)(
-    "%s validation handles high-cardinality indexed identities",
-    async (validation) => {
-      const count = 2_000;
-      const events: Array<{
-        event: string;
-        data: Record<string, unknown>;
-      }> = Array.from({ length: count }, (_, outputIndex) => ({
-        event: "response.output_item.added",
-        data: {
-          ...(validation === "public" ? { output_index: outputIndex } : {}),
-          item: { type: "message", id: `msg_${validation}_${outputIndex}` },
-        },
-      }));
-      if (validation === "public") {
-        events.push(
-          ...Array.from({ length: count }, (_, outputIndex) => ({
-            event: "response.output_item.done",
-            data: {
-              output_index: outputIndex,
-              item: {
-                type: "message",
-                id: `msg_${validation}_${outputIndex}`,
-                content: [],
-              },
-            },
-          })),
-        );
-      }
-      events.push({
-        event: "response.completed",
-        data: {
-          response: {
-            status: "completed",
-            ...(validation === "public"
-              ? {
-                  output: Array.from({ length: count }, (_, outputIndex) => ({
-                    type: "item_reference",
-                    id: `msg_${validation}_${outputIndex}`,
-                  })),
-                }
-              : {}),
-          },
-        },
-      });
-
-      const result = await accumulateResponsesSSEStream(
-        buildSSEResponse(events),
-        { validation, stopAtTerminal: true, maxFrames: events.length },
-      );
-      expect(result.rawOutputItems).toHaveLength(count);
-    },
-  );
-
-  test.each(["public", "codex"] as const)(
-    "%s rejects MAX_SAFE_INTEGER sparse output and content indices",
-    async (validation) => {
-      const indexed =
-        validation === "public"
-          ? { output_index: Number.MAX_SAFE_INTEGER }
-          : { output_index: Number.MAX_SAFE_INTEGER };
-      await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: { ...indexed, item: { type: "message", id: "too-large" } },
-            },
-          ]),
-          { validation, stopAtTerminal: true, maxFrames: 4 },
-        ),
-      ).rejects.toThrow("malformed Responses stream event");
-
-      await expect(
-        accumulateResponsesSSEStream(
-          buildSSEResponse([
-            {
-              event: "response.output_item.added",
-              data: {
-                ...(validation === "public" ? { output_index: 0 } : {}),
-                item: { type: "message", id: "content-too-large" },
-              },
-            },
-            {
-              event: "response.output_text.delta",
-              data: {
-                ...(validation === "public"
-                  ? { output_index: 0 }
-                  : { item_id: "content-too-large" }),
-                content_index: Number.MAX_SAFE_INTEGER,
-                delta: "x",
-              },
-            },
-          ]),
-          { validation, stopAtTerminal: true, maxFrames: 4 },
-        ),
-      ).rejects.toThrow("malformed Responses stream event");
-    },
-  );
-
-  test.each(["public", "codex"] as const)(
-    "%s accepts the sparse-index boundary and rejects the first value beyond it",
-    async (validation) => {
-      const itemId = `boundary-${validation}`;
-      const events = [
-        {
-          event: "response.output_item.added",
-          data: { output_index: 3, item: { type: "message", id: itemId } },
-        },
-        {
-          event: "response.output_item.done",
-          data: {
-            output_index: 3,
-            item: { type: "message", id: itemId, content: [] },
-          },
-        },
-        {
-          event: "response.completed",
-          data: {
-            response: {
-              status: "completed",
-              ...(validation === "public"
-                ? { output: [{ type: "item_reference", id: itemId }] }
-                : {}),
-            },
-          },
-        },
-      ];
-      await expect(
-        accumulateResponsesSSEStream(buildSSEResponse(events), {
-          validation,
-          stopAtTerminal: true,
-          maxFrames: 4,
-        }),
-      ).resolves.toBeDefined();
-      events[0] = {
-        event: "response.output_item.added",
-        data: { output_index: 4, item: { type: "message", id: itemId } },
-      };
-      await expect(
-        accumulateResponsesSSEStream(buildSSEResponse(events), {
-          validation,
-          stopAtTerminal: true,
-          maxFrames: 4,
-        }),
-      ).rejects.toThrow("malformed Responses stream event");
-    },
-  );
-
-  test.each(["public", "codex"] as const)(
-    "%s bounds sparse content indices by the frame ceiling",
-    async (validation) => {
-      const itemId = `content-boundary-${validation}`;
-      const makeEvents = (contentIndex: number) => [
-        {
-          event: "response.output_item.added",
-          data: { output_index: 0, item: { type: "message", id: itemId } },
-        },
-        {
-          event: "response.output_text.done",
-          data: {
-            output_index: 0,
-            item_id: itemId,
-            content_index: contentIndex,
-            text: "ok",
-          },
-        },
-        {
-          event: "response.output_item.done",
-          data: {
-            output_index: 0,
-            item: {
-              type: "message",
-              id: itemId,
-              content: [{ type: "output_text", text: "ok" }],
-            },
-          },
-        },
-        {
-          event: "response.completed",
-          data: {
-            response: {
-              status: "completed",
-              ...(validation === "public"
-                ? { output: [{ type: "item_reference", id: itemId }] }
-                : {}),
-            },
-          },
-        },
-      ];
-      await expect(
-        accumulateResponsesSSEStream(buildSSEResponse(makeEvents(3)), {
-          validation,
-          stopAtTerminal: true,
-          maxFrames: 4,
-        }),
-      ).resolves.toBeDefined();
-      await expect(
-        accumulateResponsesSSEStream(buildSSEResponse(makeEvents(4)), {
-          validation,
-          stopAtTerminal: true,
-          maxFrames: 4,
-        }),
-      ).rejects.toThrow("malformed Responses stream event");
-    },
-  );
-
-  test("Codex sparse sole-active inference stays indexed at high cardinality", async () => {
-    const count = 2_000;
-    const events: Array<{
-      event: string;
-      data: Record<string, unknown>;
-    }> = [];
-    for (let index = 0; index < count; index++) {
-      const itemId = `msg-sparse-${index}`;
-      events.push(
-        {
-          event: "response.output_item.added",
-          data: { item: { type: "message", id: itemId } },
-        },
-        {
-          event: "response.output_text.delta",
-          data: { delta: "x" },
-        },
-        {
-          event: "response.output_item.done",
-          data: {
-            item: {
-              type: "message",
-              id: itemId,
-              content: [{ type: "output_text", text: "x" }],
-            },
-          },
-        },
-      );
-    }
-    events.push({
-      event: "response.completed",
-      data: { response: { status: "completed" } },
-    });
-    const entries = vi.spyOn(Map.prototype, "entries");
-    try {
-      const result = await accumulateResponsesSSEStream(
-        buildSSEResponse(events),
-        { validation: "codex", stopAtTerminal: true },
-      );
-      expect(result.rawOutputItems).toHaveLength(count);
-      // Finalization enumerates rawItems once. Sparse inference must not scan
-      // the growing item registry for each omitted-index delta/done event.
-      expect(entries).toHaveBeenCalledTimes(1);
-    } finally {
-      entries.mockRestore();
-    }
-  });
-
-  const contentTerminalCases = [
-    {
-      name: "text delta after output_text.done",
-      terminalEvent: "response.output_text.done",
-      terminalData: { text: "done" },
-      lateEvent: "response.output_text.delta",
-      lateData: { delta: "late" },
-    },
-    {
-      name: "refusal delta after refusal.done",
-      terminalEvent: "response.refusal.done",
-      terminalData: { refusal: "done" },
-      lateEvent: "response.refusal.delta",
-      lateData: { delta: "late" },
-    },
-    {
-      name: "duplicate output_text.done",
-      terminalEvent: "response.output_text.done",
-      terminalData: { text: "done" },
-      lateEvent: "response.output_text.done",
-      lateData: { text: "done again" },
-    },
-    {
-      name: "duplicate refusal.done",
-      terminalEvent: "response.refusal.done",
-      terminalData: { refusal: "done" },
-      lateEvent: "response.refusal.done",
-      lateData: { refusal: "done again" },
-    },
-    {
-      name: "text after refusal.done",
-      terminalEvent: "response.refusal.done",
-      terminalData: { refusal: "done" },
-        const upstreamResp = new Response(body, {
+    const upstreamResp = new Response(body, {
       headers: { "content-type": "text/event-stream" },
     });
 
