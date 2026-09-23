@@ -13,7 +13,7 @@ import type {
   GatewayTool,
 } from "./types";
 import { forwardClientHeaders, ZERO_USAGE } from "./types";
-import { asString } from "@loreai/core";
+import { asString, digestChain } from "@loreai/core";
 import { extractAuth, authHeaders } from "../auth";
 import {
   normalizeAnthropicStopReason,
@@ -24,6 +24,7 @@ import {
   parseStreamedRequest,
   type StreamedItemsBuilder,
 } from "./streaming-request";
+import { parseContextBoundary } from "../context-boundary";
 
 // ---------------------------------------------------------------------------
 // Anthropic API version — used in all outgoing requests
@@ -108,22 +109,52 @@ function toGatewayBlock(block: Record<string, unknown>): GatewayContentBlock {
 }
 
 /**
- * Normalize Anthropic message content (string or array of blocks) into
- * a `GatewayContentBlock[]`.
+ * Normalize Anthropic message content while keeping extended-thinking blocks
+ * on the request-only provenance side of the boundary.
+ *
+ * Anthropic requires an assistant's thinking block (including its signature) to
+ * be returned verbatim on a follow-up request. Lore must not turn that block
+ * into a visible/textual part, so the visible projection omits it while the
+ * provenance projection retains the original wire block at its original index.
  */
-function normalizeContent(content: unknown): GatewayContentBlock[] {
+function normalizeMessageContent(content: unknown): {
+  content: GatewayContentBlock[];
+  provenanceContent?: GatewayContentBlock[];
+  provenancePositions?: number[];
+} {
   if (typeof content === "string") {
-    return [{ type: "text", text: content }];
+    return { content: [{ type: "text", text: content }] };
   }
 
-  if (Array.isArray(content)) {
-    return content.map((block) =>
-      toGatewayBlock(block as Record<string, unknown>),
-    );
+  if (!Array.isArray(content)) {
+    // Null / undefined / unexpected → empty
+    return { content: [] };
   }
 
-  // Null / undefined / unexpected → empty
-  return [];
+  const visible: GatewayContentBlock[] = [];
+  const provenance: GatewayContentBlock[] = [];
+  const provenancePositions: number[] = [];
+  let hasRequestOnlyProvenance = false;
+
+  for (const rawBlock of content as Array<Record<string, unknown>>) {
+    if (rawBlock.type === "thinking" || rawBlock.type === "redacted_thinking") {
+      hasRequestOnlyProvenance = true;
+      provenance.push({ type: "opaque", raw: rawBlock, requestOnly: true });
+      continue;
+    }
+
+    const block = toGatewayBlock(rawBlock);
+    provenancePositions.push(provenance.length);
+    visible.push(block);
+    provenance.push(block);
+  }
+
+  return {
+    content: visible,
+    ...(hasRequestOnlyProvenance
+      ? { provenanceContent: provenance, provenancePositions }
+      : {}),
+  };
 }
 
 export function createAnthropicMessagesBuilder(): StreamedItemsBuilder<
@@ -135,7 +166,7 @@ export function createAnthropicMessagesBuilder(): StreamedItemsBuilder<
       const msg = item as Record<string, unknown>;
       messages.push({
         role: msg.role === "assistant" ? "assistant" : "user",
-        content: normalizeContent(msg.content),
+        ...normalizeMessageContent(msg.content),
       });
     },
     finish() {
@@ -207,7 +238,10 @@ function toAnthropicBlock(block: GatewayContentBlock): Record<string, unknown> {
 
     case "opaque":
       // Re-emit the original block verbatim.
-      return block.raw;
+      // Return a fresh envelope because conversation caching annotates the
+      // serialized block with `cache_control`; mutating `raw` would mutate
+      // request-only provenance retained on the GatewayMessage.
+      return { ...block.raw };
   }
 }
 
@@ -239,7 +273,7 @@ export function parseAnthropicRequest(
   const messages: GatewayMessage[] = rawMessages.map(
     (msg: Record<string, unknown>) => ({
       role: msg.role === "assistant" ? "assistant" : "user",
-      content: normalizeContent(msg.content),
+      ...normalizeMessageContent(msg.content),
     }),
   );
 
@@ -269,6 +303,12 @@ export function parseAnthropicRequest(
     maxTokens,
     metadata,
     rawHeaders: headers,
+    sourceInput: {
+      itemCount: rawMessages.length,
+      inputDigest: digestChain(rawMessages),
+      boundarySafe: rawMessages.length > 0,
+      retainedItems: 0,
+    },
   };
 }
 
@@ -276,9 +316,15 @@ export function parseAnthropicRequestChunks(
   chunks: AsyncIterable<Uint8Array>,
   headers: Record<string, string>,
 ): Promise<GatewayRequest> {
+  const boundary = parseContextBoundary(headers, "anthropic");
   return parseStreamedRequest(chunks, {
     streamKey: "messages",
     captureKeys: "*",
+    contextBoundary: boundary,
+    describeBoundary: (messages) => ({
+      boundarySafe: messages.length > 0,
+      retainedItems: 0,
+    }),
     createItemsBuilder: createAnthropicMessagesBuilder,
     parseSync: (raw) => parseAnthropicRequest(raw, headers),
     assemble(raw, streamed) {
@@ -490,7 +536,9 @@ export function buildAnthropicRequest(
   // Messages
   const messages = req.messages.map((msg) => ({
     role: msg.role,
-    content: msg.content.map(toAnthropicBlock),
+    // Thinking/signature blocks live in request-only provenance. Re-emit the
+    // complete native sequence only while the pipeline permits provenance.
+    content: (msg.provenanceContent ?? msg.content).map(toAnthropicBlock),
   }));
 
   // Conversation caching: place a breakpoint on the final content block of
@@ -508,7 +556,12 @@ export function buildAnthropicRequest(
     const prefixLen = cache.distilledPrefixLength ?? 0;
     if (prefixLen > 0 && prefixLen < messages.length) {
       const prefixMsg = messages[prefixLen - 1];
-      const prefixBlock = prefixMsg?.content[prefixMsg.content.length - 1];
+      const prefixBlock = [...(prefixMsg?.content ?? [])]
+        .reverse()
+        .find(
+          (block) =>
+            block.type !== "thinking" && block.type !== "redacted_thinking",
+        );
       if (prefixBlock) {
         prefixBlock.cache_control =
           cache.systemTTL === "1h"
@@ -518,7 +571,12 @@ export function buildAnthropicRequest(
     }
 
     const lastMsg = messages[messages.length - 1];
-    const lastBlock = lastMsg?.content[lastMsg.content.length - 1];
+    const lastBlock = [...(lastMsg?.content ?? [])]
+      .reverse()
+      .find(
+        (block) =>
+          block.type !== "thinking" && block.type !== "redacted_thinking",
+      );
     if (lastBlock) {
       // Use configured TTL: "1h" for extended cache tier (2× write cost but
       // 12× longer eviction window), bare ephemeral (5m) otherwise.
@@ -600,6 +658,9 @@ export function parseAnthropicResponseJSON(
               ? { signature: asString(block.signature) }
               : undefined),
           });
+          break;
+        case "redacted_thinking":
+          content.push({ type: "opaque", raw: block, requestOnly: true });
           break;
         case "tool_use": {
           const id = asString(block.id);

@@ -60,6 +60,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_BEDROCK_REGION` | AWS Bedrock region. Selects both the bedrock-mantle Anthropic endpoint and the bedrock-runtime Converse/InvokeModel endpoint. Resolves from `LORE_BEDROCK_REGION` first, then falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`, finally defaulting to `"us-east-1"`. Env: LORE_BEDROCK_REGION |
 | `LORE_CALLER_UPSTREAM_ALLOWLIST` | Normalized HTTPS origins that remote/hosted clients may select with `X-Lore-Upstream-URL`. Empty by default, so caller-selected upstreams are denied unless the gateway administrator explicitly allows their origins. Local gateways do not consult this list. Env: LORE_CALLER_UPSTREAM_ALLOWLIST (comma-separated origins). |
 | `LORE_DEBUG`<br>**Parser:** `isTruthy` | Whether to log requests. Default: false. Env: LORE_DEBUG |
+| `LORE_EXPOSE_PROVIDER_DIAGNOSTICS` | Allow fixed provider-frame validation rules in internal error logs. Enabled by default; set LORE_EXPOSE_PROVIDER_DIAGNOSTICS to false or 0 to disable. Never includes provider content. |
 | `LORE_IDLE_TIMEOUT`<br>**Default:** `parsePositiveInt(60)`<br>**Parser:** `parsePositiveInt` | Idle timeout in seconds. After this many seconds with no active request, the gateway stops the per-session in-memory cache warmer and distillation loop to free resources. State is preserved in the DB so a new request resumes from where the session left off. Default: 60. Env: `LORE_IDLE_TIMEOUT`. |
 | `LORE_LISTEN_HOST`<br>**Parser:** `parseHosts` | Hosts to bind to. Default: ["127.0.0.1"]. Env: LORE_LISTEN_HOST (comma-separated for multiple addresses). CLI: --host (can be specified multiple times, or comma-separated). |
 | `LORE_LISTEN_PORT`<br>**Default:** `parsePort(DEFAULT_PORT)`<br>**Parser:** `parsePort` | Default port preference order when LORE_LISTEN_PORT is not set. - 3207: flip upside-down → 7=L, 0=O, 2=R, 3=E → LORE (calculator-word) - 5673: T9 phone keypad → 5=L, 6=O, 7=R, 3=E → LORE |
@@ -90,6 +91,15 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | Variable | Description |
 |---|---|
 | `LORE_SHUTDOWN_TIMEOUT_MS` | Environment variable: LORE_SHUTDOWN_TIMEOUT_MS overrides the single process-wide deadline shared by signal-driven and authenticated-control shutdown. Values are milliseconds and are clamped to the minimum safe deadline; invalid values use the default. |
+
+## sse-inactivity
+
+| Variable | Description |
+|---|---|
+| `LORE_FOREGROUND_REQUEST_TIMEOUT_MS` | Whole-request foreground ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.foregroundRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_FOREGROUND_SSE_INACTIVITY_MS` | How long the foreground relay tolerates upstream silence. Default: 600000ms. Also set as `timeouts.foregroundSseInactivityMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_WORKER_REQUEST_TIMEOUT_MS` | Whole-request worker ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.workerRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
+| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a worker tolerates upstream silence. Default: 600000ms. Also set as `timeouts.workerResponseInactivityMs` in `.lore.json`; this environment variable takes priority. |
 
 ## Memory engine (`@loreai/core`)
 

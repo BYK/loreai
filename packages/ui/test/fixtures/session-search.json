@@ -1,0 +1,17 @@
+{
+  "hits": [
+    {
+      "message_id": "<tm-0>",
+      "created_at": 1700000000000,
+      "role": "user",
+      "snippet": "message 1 body",
+      "rank": -0.000001
+    }
+  ],
+  "terms": [
+    "body"
+  ],
+  "mode": "phrase",
+  "total": 2,
+  "next_cursor": "<cursor>"
+}

@@ -91,6 +91,12 @@ export interface GatewayConfig {
   sessionEvictionTimeoutSeconds: number;
   /** Whether to log requests. Default: false. Env: LORE_DEBUG */
   debug: boolean;
+  /**
+   * Allow fixed provider-frame validation rules in internal error logs.
+   * Enabled by default; set LORE_EXPOSE_PROVIDER_DIAGNOSTICS to false or 0
+   * to disable. Never includes provider content.
+   */
+  exposeProviderDiagnostics: boolean;
   /** Remote gateway URL. When set, `lore run` delegates to this gateway instead of starting a local one. Env: LORE_REMOTE_URL */
   remoteUrl?: string;
   /**
@@ -275,6 +281,9 @@ export function loadConfig(): GatewayConfig {
       1800,
     ),
     debug: isTruthy(env.LORE_DEBUG),
+    exposeProviderDiagnostics:
+      env.LORE_EXPOSE_PROVIDER_DIAGNOSTICS?.trim().toLowerCase() !== "false" &&
+      env.LORE_EXPOSE_PROVIDER_DIAGNOSTICS?.trim() !== "0",
     remoteUrl: env.LORE_REMOTE_URL
       ? trimTrailingSlash(env.LORE_REMOTE_URL)
       : undefined,
@@ -663,7 +672,16 @@ export function isUpstreamWithinBase(
   upstreamUrl: string,
   configuredBase: string,
 ): boolean {
-  const destination = normalizeUpstreamBase(upstreamUrl);
+  // A destination query is opaque routing data and cannot change its origin or
+  // path containment. Validate the original (pre-WHATWG-normalization) URL path
+  // bytes with normalizeUpstreamBase, while deliberately excluding the query.
+  // Fragments are never part of an HTTP request target and fail closed.
+  const fragmentIndex = upstreamUrl.indexOf("#");
+  if (fragmentIndex >= 0) return false;
+  const queryIndex = upstreamUrl.indexOf("?");
+  const destination = normalizeUpstreamBase(
+    queryIndex >= 0 ? upstreamUrl.slice(0, queryIndex) : upstreamUrl,
+  );
   const base = normalizeUpstreamBase(configuredBase);
   if (!destination || !base) return false;
   if (destination === base) return true;
@@ -699,22 +717,23 @@ export function extraHeadersForUpstream(
     : {};
 }
 
-/** Maximum allowed length for an upstream path header value. */
-const MAX_UPSTREAM_PATH_LENGTH = 512;
+/** Match the URL-header bound for a full path + query request target. */
+const MAX_UPSTREAM_PATH_LENGTH = MAX_UPSTREAM_URL_LENGTH;
 
 /**
  * Extract and validate the `X-Lore-Upstream-Path` header from a request.
  *
- * Set by the fetch interceptor to the client's ORIGINAL endpoint pathname (the
- * full pathname, e.g. `/chat/completions`, `/v1/messages`, or a prefixed
- * `/api/v1/chat/completions`). Lets the gateway forward to the exact endpoint
- * the SDK intended instead of synthesizing a canonical `/v1/...` path — required
- * for providers whose endpoint omits `/v1` (GitHub Copilot, issue #1052).
+ * Set by the fetch interceptor to the client's ORIGINAL endpoint request target
+ * (the full pathname plus query, e.g. `/chat/completions`, `/v1/messages`, or
+ * Gemini's `:streamGenerateContent?alt=sse`). Lets the gateway forward to the
+ * exact endpoint the SDK intended instead of synthesizing a canonical URL.
  *
- * Returns the sanitized absolute path, or `undefined` when absent/invalid. The
- * value is only ever appended to an already-resolved upstream origin (see
- * `verbatimUpstreamUrl`), so it can never change the destination host; these
- * checks are defense-in-depth against a malformed/hostile header.
+ * Returns the sanitized absolute request target, or `undefined` when
+ * absent/invalid. The value is only ever appended to an already-resolved
+ * upstream origin (see `verbatimUpstreamUrl`), so it can never change the
+ * destination host; these checks are defense-in-depth against a malformed or
+ * hostile header. Query bytes are opaque, while the pathname receives the same
+ * encoded-separator and traversal validation as a configured upstream base.
  */
 export function extractUpstreamPathHeader(
   headers: Record<string, string>,
@@ -727,11 +746,21 @@ export function extractUpstreamPathHeader(
   const sanitized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
   if (!sanitized || sanitized.length > MAX_UPSTREAM_PATH_LENGTH)
     return undefined;
-  // Must be a single absolute path: one leading slash (reject protocol-relative
-  // `//host`), no whitespace, no `..` traversal.
+  // Must be a single absolute request target: one leading slash (reject
+  // protocol-relative `//host`), no whitespace, and no fragment. A fragment is
+  // client-side URL state and is never transmitted in an HTTP request target.
   if (!sanitized.startsWith("/") || sanitized.startsWith("//"))
     return undefined;
-  if (sanitized.includes("..") || /\s/.test(sanitized)) return undefined;
+  if (sanitized.includes("#") || /\s/.test(sanitized)) return undefined;
+
+  // Validate only the path. Query values may legitimately contain encoded
+  // slashes, dots, and complete callback URLs; none can alter the destination
+  // origin or path once the target is anchored to the resolved origin.
+  const queryIndex = sanitized.indexOf("?");
+  const pathname = queryIndex >= 0 ? sanitized.slice(0, queryIndex) : sanitized;
+  if (!normalizeUpstreamBase(`https://request-target.invalid${pathname}`)) {
+    return undefined;
+  }
   return sanitized;
 }
 
@@ -740,11 +769,12 @@ export function extractUpstreamPathHeader(
  * original endpoint over the gateway-reconstructed canonical path.
  *
  * Returns `origin(effectiveUpstreamBase) + upstreamPath` (the client's original
- * URL) when ALL hold; otherwise returns `reconstructedUrl` unchanged:
+ * pathname + query) when ALL hold; otherwise returns `reconstructedUrl`
+ * unchanged:
  *  - `headerUpstream` is present — the base came from the original host via
  *    `X-Lore-Upstream-URL` (the highest-priority routing tier), so we are NOT
  *    rerouting to a different provider;
- *  - `upstreamPath` is present — the interceptor preserved the endpoint;
+ *  - `upstreamPath` is present — the interceptor preserved the request target;
  *  - `effectiveProtocol === ingressProtocol` — we are NOT translating wire
  *    protocols (which would change the endpoint shape; e.g. anthropic↔openai),
  *    and the path belongs to the protocol we're actually speaking. This also

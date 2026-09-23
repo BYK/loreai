@@ -59,6 +59,7 @@ export function storeTurnTemporal(input: {
         },
         parts: user.parts,
         legacySourceID: user.legacySourceID,
+        legacySourceIDs: user.legacySourceIDs,
       };
       temporal.store(message);
       // Outcomes carry call IDs: recordToolCalls updates the preceding call
@@ -79,6 +80,7 @@ export function storeTurnTemporal(input: {
       info: assistant.info,
       parts: assistant.parts,
       legacySourceID: assistant.legacySourceID,
+      legacySourceIDs: assistant.legacySourceIDs,
     };
     if (assistantContent.length > 0) temporal.store(message);
     // Tool-only/error turns still need traces even when no text was stored.

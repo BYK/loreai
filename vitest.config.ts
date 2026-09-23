@@ -27,7 +27,10 @@ export default defineConfig({
     ],
     // Preload test setup for DB isolation
     setupFiles: ["./packages/core/test/setup.ts"],
-    globalSetup: ["./packages/gateway/test/helpers/ensure-ui-assets.ts"],
+    globalSetup: [
+      "./packages/gateway/test/helpers/ensure-ui-assets.ts",
+      "./packages/core/test/global-setup.ts",
+    ],
     // Environment
     environment: "node",
     pool: "forks",

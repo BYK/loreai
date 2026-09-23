@@ -122,6 +122,31 @@ describe("RebuildCard", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
   });
 
+  it("clears an external rebuild after cancellation is confirmed", async () => {
+    let active = true;
+    const getEntityRebuildStatus = vi.fn(async () => ({ active }));
+    const cancelEntityRebuild = vi.fn(async () => {
+      active = false;
+      return { cancelled: true };
+    });
+    mount(
+      clientWith({
+        getEntityRebuildStatus,
+        cancelEntityRebuild,
+      }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Preview (dry run)" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Cancel" }),
+    ).not.toBeInTheDocument();
+    expect(getEntityRebuildStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("surfaces a hosted-mode refusal", async () => {
     mount(
       clientWith({

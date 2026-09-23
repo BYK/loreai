@@ -14,6 +14,8 @@ import {
   applyLoreProviderConfig,
   gatewayAccessHeadersForRemote,
   installEmbeddedGatewaySigtermHandler,
+  isLoopbackUrl,
+  prepareLocalUiAssets,
   probeGateway,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
@@ -53,11 +55,22 @@ async function resolveGatewayUrl(): Promise<string | null> {
   }
 
   // 1. Explicit env var — probe it to verify it's actually reachable.
+  let preparedLocalUi = false;
   if (process.env.LORE_GATEWAY_URL) {
     const url = process.env.LORE_GATEWAY_URL.replace(/\/$/, "");
+    if (isLoopbackUrl(url)) {
+      await prepareLocalUiAssets();
+      preparedLocalUi = true;
+    }
     if (await probeGateway(url)) return url;
     // env var set but gateway unreachable — fall through to discovery
   }
+
+  // A source-loaded plugin may be running before the workspace's postinstall
+  // build has staged packages/ui/dist into the gateway. Prepare it before
+  // probing/reusing a local gateway, so an already-running source gateway can
+  // discover the newly staged manifest as well.
+  if (!preparedLocalUi) await prepareLocalUiAssets();
 
   // 2. Build probe list: port file first (handles random port), then known defaults.
   const probePorts = new Set<number>();

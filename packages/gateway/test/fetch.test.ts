@@ -2,6 +2,11 @@ import { describe, test, expect, vi, afterEach } from "vitest";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { EventEmitter } from "node:events";
 
+// Global test setup wraps upstreamFetch to keep models.dev offline. This file
+// tests the transport implementation itself, so every fresh import must bypass
+// that wrapper and observe the file-local runtime and Undici mocks below.
+vi.unmock("../src/fetch");
+
 function listen(server: Server): Promise<number> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {

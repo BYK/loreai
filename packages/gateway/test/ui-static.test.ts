@@ -740,10 +740,12 @@ describe("asset sources (SEA-style in-memory source vs. disk)", () => {
   function memorySource(
     files: Record<string, Uint8Array | string>,
     description = "memory",
+    mutable = false,
   ): UiAssetSource & { reads: string[] } {
     const reads: string[] = [];
     return {
       description,
+      mutable,
       reads,
       read(path) {
         reads.push(path);
@@ -862,6 +864,71 @@ describe("asset sources (SEA-style in-memory source vs. disk)", () => {
     await expect(res.json()).resolves.toMatchObject({
       error: { type: "ui_unavailable" },
     });
+  });
+
+  test("retries a source that becomes available after an initial 503", async () => {
+    const files: Record<string, Uint8Array | string> = {
+      "index.html": html,
+    };
+    setUiAssetSource(memorySource(files));
+
+    expect(direct("/ui").status).toBe(503);
+
+    // This is the source-checkout startup race: the gateway can answer its
+    // first request before the build/staging step has finished.
+    files[UI_MANIFEST_FILE] = JSON.stringify(validManifest);
+    expect(direct("/ui").status).toBe(200);
+    await expect(direct("/ui").text()).resolves.toBe(html);
+  });
+
+  test("refreshes a mutable source when a new build is published", async () => {
+    const oldHtml = "<div>old</div>";
+    const newHtml = "<div>new</div>";
+    const oldManifest = {
+      ...validManifest,
+      buildId: "old-build",
+      files: {
+        "index.html": {
+          type: "text/html; charset=utf-8",
+          size: oldHtml.length,
+        },
+        "assets/old.js": { type: "text/javascript; charset=utf-8", size: 3 },
+      },
+    } satisfies UiManifest;
+    const newManifest = {
+      ...validManifest,
+      buildId: "new-build",
+      files: {
+        "index.html": {
+          type: "text/html; charset=utf-8",
+          size: newHtml.length,
+        },
+        "assets/new.js": { type: "text/javascript; charset=utf-8", size: 3 },
+      },
+    } satisfies UiManifest;
+    const files: Record<string, Uint8Array | string> = {
+      [UI_MANIFEST_FILE]: JSON.stringify(oldManifest),
+      "index.html": oldHtml,
+      "assets/old.js": "old",
+    };
+    setUiAssetSource(memorySource(files, "mutable-memory", true));
+
+    expect(await direct("/ui").text()).toBe(oldHtml);
+    expect(await direct("/ui/assets/old.js").text()).toBe("old");
+
+    // A request during the directory-swap gap keeps using the last complete
+    // generation instead of observing a missing or half-written manifest.
+    delete files[UI_MANIFEST_FILE];
+    expect(await direct("/ui").text()).toBe(oldHtml);
+
+    files[UI_MANIFEST_FILE] = JSON.stringify(newManifest);
+    files["index.html"] = newHtml;
+    files["assets/new.js"] = "new";
+    delete files["assets/old.js"];
+
+    expect(await direct("/ui").text()).toBe(newHtml);
+    expect(direct("/ui/assets/old.js").status).toBe(404);
+    expect(await direct("/ui/assets/new.js").text()).toBe("new");
   });
 
   test.each<[string, string]>([

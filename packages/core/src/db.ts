@@ -2076,6 +2076,12 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   SOURCE_WINDOW_SCHEMA,
   // Version 88: reviewed dedup apply ledger (operations + provenance).
   DEDUP_APPLY_SCHEMA,
+  `
+  -- Version 89: persist the accepted upstream provenance boundary separately
+  -- from core's transform-attempt layer. Existing sessions start at -1 so a
+  -- restarted session fails closed until an upstream request is accepted.
+  ALTER TABLE session_state ADD COLUMN last_accepted_provenance_layer INTEGER NOT NULL DEFAULT -1;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -5921,6 +5927,10 @@ export type SessionTrackingState = {
   lastKnownMessageCount?: number;
   lastTurnAt?: number;
   lastBustAt?: number;
+  // v89: last layer whose request was accepted by the upstream provider.
+  // Kept separate from the transform-attempt layer so failed/synthetic turns
+  // cannot move the provenance boundary.
+  lastAcceptedProvenanceLayer?: number;
   // v26: sub-agent parent–child relationships
   parentSessionId?: string | null;
   isSubagent?: boolean;
@@ -6069,6 +6079,11 @@ export function saveSessionTracking(
     sets.push("last_bust_at = ?");
     vals.push(state.lastBustAt);
   }
+  // v89: accepted upstream provenance boundary.
+  if (state.lastAcceptedProvenanceLayer !== undefined) {
+    sets.push("last_accepted_provenance_layer = ?");
+    vals.push(state.lastAcceptedProvenanceLayer);
+  }
   // v26: sub-agent parent–child relationships
   if (state.parentSessionId !== undefined) {
     sets.push("parent_session_id = ?");
@@ -6139,6 +6154,8 @@ export type LoadedSessionTracking = {
   lastKnownMessageCount: number;
   lastTurnAt: number;
   lastBustAt: number;
+  // v89: accepted upstream provenance boundary; -1 means no accepted turn.
+  lastAcceptedProvenanceLayer: number;
   // v26: sub-agent parent–child relationships
   parentSessionId: string | null;
   isSubagent: boolean;
@@ -6473,7 +6490,7 @@ export function loadSessionTracking(
               resolved_conversation_ttl, warmup_state,
               dynamic_context_cap, bust_rate_ema, inter_bust_interval_ema,
               last_layer, last_known_input, last_known_message_count,
-              last_turn_at, last_bust_at,
+              last_turn_at, last_bust_at, last_accepted_provenance_layer,
               parent_session_id, is_subagent,
               project_path, project_path_provisional,
                compaction_anomaly_pending, amnesia
@@ -6508,6 +6525,7 @@ export function loadSessionTracking(
     last_known_message_count: number;
     last_turn_at: number;
     last_bust_at: number;
+    last_accepted_provenance_layer: number;
     parent_session_id: string | null;
     is_subagent: number;
     project_path: string | null;
@@ -6545,6 +6563,7 @@ export function loadSessionTracking(
     lastKnownMessageCount: row.last_known_message_count,
     lastTurnAt: row.last_turn_at,
     lastBustAt: row.last_bust_at,
+    lastAcceptedProvenanceLayer: row.last_accepted_provenance_layer,
     parentSessionId: row.parent_session_id,
     isSubagent: row.is_subagent === 1,
     projectPath: row.project_path,

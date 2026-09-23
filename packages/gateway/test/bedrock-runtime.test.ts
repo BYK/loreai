@@ -19,10 +19,12 @@ import {
 } from "../src/translate/bedrock-runtime";
 import { setUpstreamDispatcherForTest } from "../src/fetch";
 import { resetPipelineState } from "../src/pipeline";
+import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import { startServer } from "../src/server";
 import { loadConfig } from "../src/config";
 import { close as closeDB } from "@loreai/core";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 function localRequest(
   baseURL: string,
@@ -293,7 +295,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       if (mode === "caller") {
         caller.abort(new DOMException("client disconnected", "AbortError"));
       } else {
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       }
       await rejected;
       rejectPull(new Error("late upload rejection"));
@@ -335,7 +337,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       if (mode === "caller") {
         caller.abort(new DOMException("client disconnected", "AbortError"));
       } else {
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       }
       await rejected;
       expect(upstreamSignal?.aborted).toBe(true);
@@ -388,7 +390,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       if (mode === "caller") {
         caller.abort(new DOMException("client disconnected", "AbortError"));
       } else {
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       }
       await rejected;
       expect(cancelled).toBe(true);
@@ -420,7 +422,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       expect(response.status).toBe(201);
       expect(response.headers.get("x-bedrock")).toBe("complete");
       await expect(response.text()).resolves.toBe("complete");
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       expect(upstreamSignal?.aborted).toBe(false);
       expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
     } finally {
@@ -457,7 +459,7 @@ describe("proxyBedrockRuntimeRequest — handler logic", () => {
       await expect(response.body?.cancel()).resolves.toBeUndefined();
       expect(cancelled).toBe(true);
       expect(upstream.body?.locked).toBe(false);
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       expect(upstreamSignal?.aborted).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -485,7 +487,7 @@ afterEach(async () => {
 
 describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", () => {
   test("forwards a non-streaming converse request to bedrock-runtime.<region>.amazonaws.com", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";
@@ -609,7 +611,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
   });
 
   test("forwards a modelId with version-suffix colon (e2e regression for #1575 follow-up)", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-colon-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime-colon");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";
@@ -714,7 +716,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
   });
 
   test("streams a converse-stream response (AWS event-stream passthrough)", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-stream-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime-stream");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "eu-west-1";
@@ -787,7 +789,7 @@ describe("POST /v1/model/{modelId}/{verb} — Bedrock Runtime API passthrough", 
   });
 
   test("a non-matching path still 404s (does not over-match)", async () => {
-    const dbPath = `/tmp/lore-bedrock-runtime-nomatch-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+    const dbPath = createTestDatabasePath("bedrock-runtime-nomatch");
     process.env.LORE_DB_PATH = dbPath;
     process.env.LORE_LISTEN_PORT = "0";
     process.env.LORE_BEDROCK_REGION = "us-east-1";

@@ -454,6 +454,325 @@ describe("accumulateGeminiSSEStream", () => {
     expect(resp.usage?.cacheReadInputTokens).toBe(6);
   });
 
+  test("preserves signed thought part boundaries and native order", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "rea",
+                    thought: true,
+                    thoughtSignature: "signature-1",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "son",
+                    thought: true,
+                    thoughtSignature: "signature-2",
+                  },
+                  { text: "visible answer" },
+                ],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 1,
+            candidatesTokenCount: 1,
+            totalTokenCount: 2,
+          },
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "rea",
+        signature: "signature-1",
+      },
+      {
+        type: "thinking",
+        thinking: "son",
+        signature: "signature-2",
+      },
+      { type: "text", text: "visible answer" },
+    ]);
+  });
+
+  test("retains early thought signatures through later deltas", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "rea",
+                    thought: true,
+                    thoughtSignature: "premature-signature",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: "son", thought: true }],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "reason",
+        signature: "premature-signature",
+      },
+    ]);
+  });
+
+  test("does not merge multiple unsigned parts after a signed continuation", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "A",
+                    thought: true,
+                    thoughtSignature: "signature-a",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "B", thought: true },
+                  { text: "C", thought: true },
+                ],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "AB",
+        signature: "signature-a",
+      },
+      { type: "thinking", thinking: "C" },
+    ]);
+  });
+
+  test("retains an early thought signature when the terminal frame has no parts", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "reasoning",
+                    thought: true,
+                    thoughtSignature: "signature-early",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "reasoning",
+        signature: "signature-early",
+      },
+    ]);
+  });
+
+  test("preserves signed text part boundaries without truncating egress", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: "Hel", thoughtSignature: "signature-1" }],
+              },
+            },
+          ],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: "lo", thoughtSignature: "signature-2" }],
+                role: "model",
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      {
+        type: "text",
+        text: "Hel",
+        raw: {
+          text: "Hel",
+          thoughtSignature: "signature-1",
+        },
+      },
+      {
+        type: "text",
+        text: "lo",
+        raw: {
+          text: "lo",
+          thoughtSignature: "signature-2",
+        },
+      },
+    ]);
+  });
+
+  test.each([
+    [
+      "camel-to-snake",
+      { thoughtSignature: "signature-1" },
+      { thought_signature: "signature-2" },
+      { text: "lo", thought_signature: "signature-2" },
+    ],
+    [
+      "snake-to-camel",
+      { thought_signature: "signature-1" },
+      { thoughtSignature: "signature-2" },
+      { text: "lo", thoughtSignature: "signature-2" },
+    ],
+  ])(
+    "preserves signed text aliases at part boundaries during %s",
+    async (_name, firstSignature, secondSignature, expectedRaw) => {
+      const response = await accumulateGeminiSSEStream(
+        sse([
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: "Hel", ...firstSignature }],
+                },
+              },
+            ],
+          },
+          {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: "lo", ...secondSignature }],
+                },
+                finishReason: "STOP",
+              },
+            ],
+          },
+        ]),
+        { strict: true },
+      );
+
+      expect(response.content).toEqual([
+        {
+          type: "text",
+          text: "Hel",
+          raw: { text: "Hel", ...firstSignature },
+        },
+        {
+          type: "text",
+          text: "lo",
+          raw: expectedRaw,
+        },
+      ]);
+    },
+  );
+
+  test("does not collapse adjacent signed thought parts in one frame", async () => {
+    const response = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: "A",
+                    thought: true,
+                    thoughtSignature: "signature-a",
+                  },
+                  {
+                    text: "B",
+                    thought: true,
+                    thoughtSignature: "signature-b",
+                  },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { strict: true },
+    );
+
+    expect(response.content).toEqual([
+      { type: "thinking", thinking: "A", signature: "signature-a" },
+      { type: "thinking", thinking: "B", signature: "signature-b" },
+    ]);
+  });
+
   test("thought deltas stay out of visible text (separate thinking block)", async () => {
     const res = sse([
       {
@@ -481,6 +800,38 @@ describe("accumulateGeminiSSEStream", () => {
     expect(resp.content).toEqual([
       { type: "thinking", thinking: "reasoning" },
       { type: "text", text: "answer" },
+    ]);
+  });
+
+  test("does not treat empty text or thinking deltas as semantic content", async () => {
+    let semanticContentCalls = 0;
+    const resp = await accumulateGeminiSSEStream(
+      sse([
+        {
+          candidates: [{ content: { parts: [{ text: "" }] } }],
+        },
+        {
+          candidates: [{ content: { parts: [{ text: "", thought: true }] } }],
+        },
+        {
+          candidates: [
+            {
+              content: {
+                parts: [{ functionCall: { name: "lookup", args: {} } }],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      ]),
+      { onSemanticContent: () => semanticContentCalls++ },
+    );
+
+    expect(semanticContentCalls).toBe(1);
+    expect(resp.content).toEqual([
+      { type: "text", text: "" },
+      { type: "thinking", thinking: "" },
+      { type: "tool_use", id: "lookup", name: "lookup", input: {} },
     ]);
   });
 
@@ -661,6 +1012,72 @@ describe("translateAnthropicStreamToGemini", () => {
     });
   }
 
+  function anthropicSSEWithRedactedThinking(): Response {
+    const events = [
+      [
+        "message_start",
+        {
+          type: "message_start",
+          message: {
+            id: "msg_redacted",
+            type: "message",
+            model: "claude-x",
+            role: "assistant",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        },
+      ],
+      [
+        "content_block_start",
+        {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "redacted_thinking",
+            data: "encrypted-thinking",
+          },
+        },
+      ],
+      ["content_block_stop", { type: "content_block_stop", index: 0 }],
+      [
+        "content_block_start",
+        {
+          type: "content_block_start",
+          index: 1,
+          content_block: { type: "text", text: "" },
+        },
+      ],
+      [
+        "content_block_delta",
+        {
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "text_delta", text: "answer" },
+        },
+      ],
+      ["content_block_stop", { type: "content_block_stop", index: 1 }],
+      [
+        "message_delta",
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 1 },
+        },
+      ],
+      ["message_stop", { type: "message_stop" }],
+    ] as const;
+    const body = events
+      .map(([e, d]) => `event: ${e}\ndata: ${JSON.stringify(d)}\n\n`)
+      .join("");
+    return new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  }
+
   test("emits a Gemini SSE frame with the accumulated model-role content", async () => {
     const res = translateAnthropicStreamToGemini(anthropicSSE());
     expect(res.headers.get("content-type")).toBe("text/event-stream");
@@ -673,5 +1090,18 @@ describe("translateAnthropicStreamToGemini", () => {
     const um = frame.usageMetadata as Record<string, number>;
     expect(um.promptTokenCount).toBe(3);
     expect(um.candidatesTokenCount).toBe(2);
+  });
+
+  test("omits redacted thinking from Anthropic-to-Gemini streaming egress", async () => {
+    const frame = await readGeminiSSEFrame(
+      translateAnthropicStreamToGemini(anthropicSSEWithRedactedThinking(), {
+        strict: true,
+      }),
+    );
+    const candidates = frame.candidates as Array<Record<string, unknown>>;
+    const content = candidates[0].content as { parts: unknown[] };
+    expect(content.parts).toEqual([{ text: "answer" }]);
+    expect(JSON.stringify(frame)).not.toContain("redacted_thinking");
+    expect(JSON.stringify(frame)).not.toContain("encrypted-thinking");
   });
 });

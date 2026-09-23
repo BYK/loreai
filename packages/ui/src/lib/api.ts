@@ -21,6 +21,7 @@ import {
   accountStatus,
   ApiError,
   apiErrorBody,
+  apiPath,
   cursorPage,
   distillationDetail,
   distillationList,
@@ -35,12 +36,14 @@ import {
   knowledgeVersionHistory,
   parseContract,
   projectList,
+  query,
   recallResponse,
   safeParseContract,
   sessionDetail,
   sessionList,
   sessionSummary,
   sessionPage,
+  sessionSearchPage,
   sharingStatus,
   syncStatus,
   teamList,
@@ -62,6 +65,7 @@ import {
   type KnowledgeSort,
   type SessionDetail,
   type SessionPage,
+  type SessionSearchPage,
   type SessionSummary,
   type SharingStatus,
   type SyncStatus,
@@ -76,21 +80,9 @@ export {
   type ApiErrorKind,
   type ContractIssue,
 } from "~/contracts";
+export { apiPath, query };
 
 export const API_BASE = "/api/v1";
-
-export function query(
-  params: Record<string, string | number | boolean | null | undefined>,
-): string {
-  const values = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== null && value !== undefined) {
-      values.set(key, String(value));
-    }
-  }
-  const encoded = values.toString();
-  return encoded ? `?${encoded}` : "";
-}
 
 /** True for any abort rejection (`DOMException`, `Error`, or a custom `abort(reason)`). */
 export function isAbortError(error: unknown): boolean {
@@ -271,7 +263,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<KnowledgeEntry[]> {
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/knowledge`,
+        apiPath(["projects", projectId, "knowledge"]),
         knowledgeList,
         signal,
       );
@@ -293,7 +285,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<CursorPage<KnowledgeEntry>> {
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/knowledge${query({
+        apiPath(["projects", projectId, "knowledge"], {
           page: "cursor",
           cursor: opts.cursor,
           limit: opts.limit,
@@ -301,26 +293,22 @@ export function createApiClient(options: ApiClientOptions = {}) {
           category: opts.category,
           scope: opts.scope,
           sort: opts.sort,
-        })}`,
+        }),
         cursorPage(knowledgeEntry),
         signal,
       );
     },
     getKnowledge(id: string, signal?: AbortSignal): Promise<KnowledgeEntry> {
-      return getJson(
-        `/knowledge/${encodeURIComponent(id)}`,
-        knowledgeEntry,
-        signal,
-      );
+      return getJson(apiPath(["knowledge", id]), knowledgeEntry, signal);
     },
     listKnowledgeVersions(
       id: string,
       opts: { includeDeleted?: boolean; signal?: AbortSignal } = {},
     ): Promise<KnowledgeVersionHistory> {
       return getJson(
-        `/knowledge/${encodeURIComponent(id)}/versions${query({
+        apiPath(["knowledge", id, "versions"], {
           include_deleted: opts.includeDeleted || null,
-        })}`,
+        }),
         knowledgeVersionHistory,
         opts.signal,
       );
@@ -330,7 +318,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<SessionSummary[]> {
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/sessions`,
+        apiPath(["projects", projectId, "sessions"]),
         sessionList,
         signal,
       );
@@ -341,11 +329,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<CursorPage<SessionSummary>> {
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/sessions${query({
+        apiPath(["projects", projectId, "sessions"], {
           page: "cursor",
           cursor: opts.cursor,
           limit: opts.limit,
-        })}`,
+        }),
         cursorPage(sessionSummary),
         signal,
       );
@@ -361,7 +349,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<RecallResponse> {
       return getJson(
-        `/recall${query({
+        apiPath(["recall"], {
           q: opts.q,
           scope: opts.scope,
           expand: false,
@@ -369,7 +357,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           git_remote: opts.project.git_remote,
           path: opts.project.git_remote ? null : opts.project.path,
           session: opts.session,
-        })}`,
+        }),
         recallResponse,
         signal,
       );
@@ -385,7 +373,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<SessionDetail> {
       return getJson(
-        `/sessions/${encodeURIComponent(sessionId)}${query({ path: projectPath })}`,
+        apiPath(["sessions", sessionId], { path: projectPath }),
         sessionDetail,
         signal,
       );
@@ -403,13 +391,40 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<SessionPage> {
       return getJson(
-        `/sessions/${encodeURIComponent(sessionId)}${query({
+        apiPath(["sessions", sessionId], {
           path: projectPath,
           page: cursor ? null : "cursor",
           limit: cursor ? null : limit,
           cursor,
-        })}`,
+        }),
         sessionPage,
+        signal,
+      );
+    },
+
+    /**
+     * `GET /sessions/:id/search?q=` — ids of the messages whose stored text
+     * matches `q`, newest first across pages (`cursor === null` is the first
+     * page; each `next_cursor` fetches older hits). The server only knows
+     * message ids and raw text; the reader maps a hit onto rendered blocks
+     * and computes displayed-text offsets itself.
+     */
+    searchSession(
+      projectPath: string,
+      sessionId: string,
+      q: string,
+      cursor: string | null,
+      limit: number,
+      signal?: AbortSignal,
+    ): Promise<SessionSearchPage> {
+      return getJson(
+        apiPath(["sessions", sessionId, "search"], {
+          path: projectPath,
+          q,
+          limit,
+          cursor,
+        }),
+        sessionSearchPage,
         signal,
       );
     },
@@ -418,7 +433,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<DistillationSummary[]> {
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/distillations`,
+        apiPath(["projects", projectId, "distillations"]),
         distillationList,
         signal,
       );
@@ -428,7 +443,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<DistillationDetail> {
       return getJson(
-        `/distillations/${encodeURIComponent(id)}`,
+        apiPath(["distillations", id]),
         distillationDetail,
         signal,
       );
@@ -447,7 +462,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<SharingStatus> {
       return getJson(
-        `/projects/${encodeURIComponent(projectId)}/sharing`,
+        apiPath(["projects", projectId, "sharing"]),
         sharingStatus,
         signal,
       );

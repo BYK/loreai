@@ -1518,7 +1518,10 @@ export async function commandImport(
           agentUpstreams,
           auth.getAuth,
           auth.model,
-          { dedicatedWorkerKey: !!workerApiKey || auth.upstream != null },
+          {
+            dedicatedWorkerKey: !!workerApiKey || auth.upstream != null,
+            hostedMode: config.hostedMode,
+          },
         );
 
         // Snapshot the auth-rejected timestamp at the START of this attempt.

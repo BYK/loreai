@@ -12,7 +12,11 @@ import {
   recordedWriter as recordedWriterOf,
 } from "~/lib/format";
 import { sessionHref } from "~/routes/Browse";
-import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
+import type {
+  DistillationDetail,
+  KnowledgeEntry,
+  ProjectSummary,
+} from "~/contracts";
 import type { EvidenceResult } from "~/state/sessions";
 import type { Loader } from "~/lib/loader";
 import type { KnowledgeVersionHistory } from "~/contracts";
@@ -20,6 +24,7 @@ import { errorStateFor } from "./ErrorState";
 
 import { DocHeader, ScopeLabel, type Participant } from "./Document";
 import { FUTURE_ACTIONS, FutureActionRow } from "./FutureAction";
+import { RetainedSummary } from "./RetainedSummary";
 import { VersionHistory } from "./VersionHistory";
 
 function paragraphs(content: string): string[] {
@@ -63,6 +68,7 @@ export const KnowledgeDocument: Component<{
   project: ProjectSummary | undefined;
   versions?: Loader<KnowledgeVersionHistory>;
   evidence?: Loader<EvidenceResult>;
+  loadDistillation?: (id: string) => Promise<DistillationDetail>;
 }> = (props) => {
   const isCrossProject = () =>
     props.entry.cross_project === true || props.entry.cross_project === 1;
@@ -212,19 +218,39 @@ export const KnowledgeDocument: Component<{
                                     "distillation",
                                   )}
                                 </div>
-                                <For each={value().detail?.distillations ?? []}>
-                                  {(distillation) => (
-                                    <div class="mt-1 text-muted">
-                                      gen {distillation.generation},{" "}
-                                      {formatWhen(distillation.created_at)}
-                                    </div>
+                                <Show
+                                  when={props.loadDistillation}
+                                  fallback={
+                                    <For
+                                      each={value().detail?.distillations ?? []}
+                                    >
+                                      {(distillation) => (
+                                        <div class="mt-1 text-muted">
+                                          gen {distillation.generation},{" "}
+                                          {formatWhen(distillation.created_at)}
+                                        </div>
+                                      )}
+                                    </For>
+                                  }
+                                >
+                                  {(load) => (
+                                    <For
+                                      each={value().detail?.distillations ?? []}
+                                    >
+                                      {(distillation) => (
+                                        <RetainedSummary
+                                          distillation={distillation}
+                                          load={load()}
+                                        />
+                                      )}
+                                    </For>
                                   )}
-                                </For>
+                                </Show>
                                 <div class="mt-1 text-muted">
-                                  Summary text is in the{" "}
+                                  Open in the{" "}
                                   <Show
                                     when={projectId()}
-                                    fallback=" session reader."
+                                    fallback="session reader."
                                   >
                                     {(id) => (
                                       <>

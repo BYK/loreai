@@ -24,13 +24,15 @@
  * larger than brotli on every asset (brotli's built-in dictionary wins on
  * small text), so it would only grow the artifacts.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   copyFile,
+  mkdtemp,
   mkdir,
   readdir,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -56,6 +58,48 @@ const uiDistDir = join(uiDir, "dist");
 
 /** Where the staged SPA lives, next to the gateway bundles. */
 export const UI_STAGE_DIR = join(packageDir, "dist", "ui");
+
+/**
+ * Publish a completed UI tree without exposing its partially-written files.
+ *
+ * The running gateway may have cached a disk-backed source, so replacing
+ * files in-place can leave its manifest pointing at a mixture of generations.
+ * Move the old tree aside, install the completed tree in one rename, and
+ * restore the old tree if the second rename fails. The brief missing-directory
+ * window is handled by ui-static.ts retaining its last valid generation.
+ */
+async function publishUiStage(stageDir: string): Promise<void> {
+  const previousDir = `${UI_STAGE_DIR}.previous-${process.pid}-${randomUUID()}`;
+  let movedPrevious = false;
+  let preservePrevious = false;
+  try {
+    try {
+      await rename(UI_STAGE_DIR, previousDir);
+      movedPrevious = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+
+    try {
+      await rename(stageDir, UI_STAGE_DIR);
+    } catch (error) {
+      if (movedPrevious) {
+        try {
+          await rename(previousDir, UI_STAGE_DIR);
+        } catch {
+          // Preserve the original publication error; the old tree may still
+          // be recoverable from the uniquely named previous directory.
+          preservePrevious = true;
+        }
+      }
+      throw error;
+    }
+  } finally {
+    if (movedPrevious && !preservePrevious) {
+      await rm(previousDir, { recursive: true, force: true });
+    }
+  }
+}
 
 const CONTENT_TYPES = new Map<string, string>([
   [".html", "text/html; charset=utf-8"],
@@ -174,96 +218,112 @@ export async function stageUiAssets(
     await runViteBuild();
   }
 
-  // Own the directory outright so a stale file from a previous build can
-  // never be served (or embedded) alongside the new set.
-  await rm(UI_STAGE_DIR, { recursive: true, force: true });
+  // Build in a sibling directory and publish only after the manifest and all
+  // variants are complete. This prevents a running gateway from observing a
+  // half-written generation while source plugins rebuild the shared tree.
+  await mkdir(dirname(UI_STAGE_DIR), { recursive: true });
+  const stageDir = await mkdtemp(join(dirname(UI_STAGE_DIR), ".ui-stage-"));
+  let published = false;
+  try {
+    const digest = createHash("sha256");
+    const sizes: UiAssetSizes[] = [];
+    const manifestFiles: Record<string, UiManifestFile> = Object.create(null);
+    let bytes = 0;
+    let files = 0;
 
-  const digest = createHash("sha256");
-  const sizes: UiAssetSizes[] = [];
-  const manifestFiles: Record<string, UiManifestFile> = Object.create(null);
-  let bytes = 0;
-  let files = 0;
-
-  if (!existsSync(join(uiDistDir, "index.html"))) {
-    return { files, bytes, buildId: null, sizes };
-  }
-
-  const compress = compressors();
-  const seen = new Set<string>();
-  const stage = async (rel: string, data: Buffer | string): Promise<void> => {
-    if (seen.has(rel)) {
-      throw new Error(
-        `packages/ui/dist yields ${rel} twice (variant collision)`,
-      );
+    if (!existsSync(join(uiDistDir, "index.html"))) {
+      await publishUiStage(stageDir);
+      published = true;
+      return { files, bytes, buildId: null, sizes };
     }
-    seen.add(rel);
-    const dest = join(UI_STAGE_DIR, rel);
-    await mkdir(dirname(dest), { recursive: true });
-    if (typeof data === "string") await copyFile(data, dest);
-    else await writeFile(dest, data);
-  };
-  const tree = await walk(uiDistDir);
-  for (const [, rel] of tree) {
-    if (rel === UI_MANIFEST_FILE) {
-      throw new Error(
-        `packages/ui/dist must not contain ${UI_MANIFEST_FILE} (reserved for the gateway manifest)`,
-      );
-    }
-  }
 
-  // Reads and compressions run concurrently (zlib works off the libuv
-  // threadpool); the loop below then folds the results back in tree order so
-  // the digest and manifest stay deterministic.
-  const prepared = await Promise.all(
-    tree.map(async ([full, rel]) => {
-      const ext = extname(rel).toLowerCase();
-      const buf = await readFile(full);
-      const variants: Array<[UiContentEncoding, Buffer]> = [];
-      if (COMPRESSIBLE_EXTENSIONS.has(ext)) {
-        for (const [name, fn] of compress) {
-          const compressed = await fn(buf);
-          if (compressed.byteLength < buf.byteLength) {
-            variants.push([name, compressed]);
+    const compress = compressors();
+    const seen = new Set<string>();
+    const stage = async (rel: string, data: Buffer | string): Promise<void> => {
+      if (seen.has(rel)) {
+        throw new Error(
+          `packages/ui/dist yields ${rel} twice (variant collision)`,
+        );
+      }
+      seen.add(rel);
+      const dest = join(stageDir, rel);
+      await mkdir(dirname(dest), { recursive: true });
+      if (typeof data === "string") await copyFile(data, dest);
+      else await writeFile(dest, data);
+    };
+    const tree = await walk(uiDistDir);
+    for (const [, rel] of tree) {
+      if (rel === UI_MANIFEST_FILE) {
+        throw new Error(
+          `packages/ui/dist must not contain ${UI_MANIFEST_FILE} (reserved for the gateway manifest)`,
+        );
+      }
+    }
+
+    // Reads and compressions run concurrently (zlib works off the libuv
+    // threadpool); the loop below then folds the results back in tree order so
+    // the digest and manifest stay deterministic.
+    const prepared = await Promise.all(
+      tree.map(async ([full, rel]) => {
+        const ext = extname(rel).toLowerCase();
+        const buf = await readFile(full);
+        const variants: Array<[UiContentEncoding, Buffer]> = [];
+        if (COMPRESSIBLE_EXTENSIONS.has(ext)) {
+          for (const [name, fn] of compress) {
+            const compressed = await fn(buf);
+            if (compressed.byteLength < buf.byteLength) {
+              variants.push([name, compressed]);
+            }
           }
         }
+        return { full, rel, ext, buf, variants };
+      }),
+    );
+
+    for (const { full, rel, ext, buf, variants } of prepared) {
+      // The build ID covers identity bytes only, so it does not depend on the
+      // compressor set or zlib version of the build host.
+      digest.update(rel).update("\0").update(buf);
+      bytes += buf.byteLength;
+      files++;
+      await stage(rel, full);
+
+      const entry: UiManifestFile = {
+        type: CONTENT_TYPES.get(ext) ?? "application/octet-stream",
+        size: buf.byteLength,
+      };
+      const variantSizes: UiAssetSizes["variants"] = {};
+      for (const [name, compressed] of variants) {
+        variantSizes[name] = compressed.byteLength;
+        await stage(`${rel}${UI_VARIANT_SUFFIX[name]}`, compressed);
       }
-      return { full, rel, ext, buf, variants };
-    }),
-  );
-
-  for (const { full, rel, ext, buf, variants } of prepared) {
-    // The build ID covers identity bytes only, so it does not depend on the
-    // compressor set or zlib version of the build host.
-    digest.update(rel).update("\0").update(buf);
-    bytes += buf.byteLength;
-    files++;
-    await stage(rel, full);
-
-    const entry: UiManifestFile = {
-      type: CONTENT_TYPES.get(ext) ?? "application/octet-stream",
-      size: buf.byteLength,
-    };
-    const variantSizes: UiAssetSizes["variants"] = {};
-    for (const [name, compressed] of variants) {
-      variantSizes[name] = compressed.byteLength;
-      await stage(`${rel}${UI_VARIANT_SUFFIX[name]}`, compressed);
+      if (variants.length > 0) entry.variants = variantSizes;
+      sizes.push({
+        path: rel,
+        identity: buf.byteLength,
+        variants: variantSizes,
+      });
+      manifestFiles[rel] = entry;
     }
-    if (variants.length > 0) entry.variants = variantSizes;
-    sizes.push({ path: rel, identity: buf.byteLength, variants: variantSizes });
-    manifestFiles[rel] = entry;
-  }
 
-  const buildId = digest.digest("hex").slice(0, 16);
-  const manifest: UiManifest = {
-    version: UI_MANIFEST_VERSION,
-    buildId,
-    files: manifestFiles,
-  };
-  await writeFile(
-    join(UI_STAGE_DIR, UI_MANIFEST_FILE),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  );
-  return { files, bytes, buildId, sizes };
+    const buildId = digest.digest("hex").slice(0, 16);
+    const manifest: UiManifest = {
+      version: UI_MANIFEST_VERSION,
+      buildId,
+      files: manifestFiles,
+    };
+    await writeFile(
+      join(stageDir, UI_MANIFEST_FILE),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+    );
+    await publishUiStage(stageDir);
+    published = true;
+    return { files, bytes, buildId, sizes };
+  } finally {
+    if (!published) {
+      await rm(stageDir, { recursive: true, force: true });
+    }
+  }
 }
 
 export function describeUiAssets(result: UiAssetsResult): string {

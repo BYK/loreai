@@ -27,6 +27,7 @@ export interface PromptOptions {
   temperature?: number;
   /** If true, parse the response as JSON. */
   json?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface PromptResult {
@@ -44,6 +45,24 @@ export interface EvalLLMClient {
   readonly config: BackendConfig;
 }
 
+function waitForDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason);
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Rate limiter (token-bucket with 429 backoff)
 // ---------------------------------------------------------------------------
@@ -52,6 +71,7 @@ class RateLimiter {
   private queue: Array<{
     resolve: () => void;
     reject: (e: Error) => void;
+    signal?: AbortSignal;
   }> = [];
   private inflight = 0;
   private backoffUntil = 0;
@@ -61,11 +81,12 @@ class RateLimiter {
     private minIntervalMs: number,
   ) {}
 
-  async acquire(): Promise<void> {
+  async acquire(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     // Honor backoff from 429 responses
     const now = Date.now();
     if (this.backoffUntil > now) {
-      await new Promise((r) => setTimeout(r, this.backoffUntil - now));
+      await waitForDelay(this.backoffUntil - now, signal);
     }
 
     if (this.inflight < this.maxConcurrent) {
@@ -74,17 +95,49 @@ class RateLimiter {
     }
 
     return new Promise<void>((resolve, reject) => {
-      this.queue.push({ resolve, reject });
+      const entry = { resolve, reject, signal };
+      this.queue.push(entry);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          const index = this.queue.indexOf(entry);
+          if (index >= 0) this.queue.splice(index, 1);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+      if (signal?.aborted) {
+        const index = this.queue.indexOf(entry);
+        if (index >= 0) this.queue.splice(index, 1);
+        reject(signal.reason);
+      }
     });
   }
 
   release(): void {
     this.inflight--;
-    if (this.queue.length > 0) {
+    this.grantNext();
+  }
+
+  private grantNext(): void {
+    while (this.queue.length > 0) {
       const next = this.queue.shift()!;
+      if (next.signal?.aborted) {
+        next.reject(next.signal.reason);
+        continue;
+      }
       this.inflight++;
       // Add minimum interval between requests
-      setTimeout(() => next.resolve(), this.minIntervalMs);
+      setTimeout(() => {
+        if (next.signal?.aborted) {
+          this.inflight--;
+          next.reject(next.signal.reason);
+          this.grantNext();
+        } else {
+          next.resolve();
+        }
+      }, this.minIntervalMs);
+      return;
     }
   }
 
@@ -175,6 +228,7 @@ async function promptAnthropic(
       system,
       messages: [{ role: "user", content: user }],
     }),
+    signal: opts?.signal,
   });
 
   if (!resp.ok) {
@@ -249,6 +303,7 @@ async function promptOpenAI(
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal: opts?.signal,
   });
 
   if (!resp.ok) {
@@ -306,7 +361,8 @@ export function createEvalLLMClient(
       let lastError: Error | undefined;
 
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        await limiter.acquire();
+        opts?.signal?.throwIfAborted();
+        await limiter.acquire(opts?.signal);
         try {
           const result = await promptFn(config, system, user, opts);
           return result;
@@ -324,7 +380,7 @@ export function createEvalLLMClient(
               `  Rate limited (attempt ${attempt + 1}/${MAX_RETRIES + 1}), backing off ${Math.round(backoffMs / 1000)}s...`,
             );
             limiter.backoff(backoffMs);
-            await new Promise((r) => setTimeout(r, backoffMs));
+            await waitForDelay(backoffMs, opts?.signal);
             continue;
           }
 

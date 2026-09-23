@@ -72,6 +72,10 @@ import {
   streamingPostResponsePendingForTest,
   validatedMetaStream,
 } from "../src/pipeline";
+import {
+  FOREGROUND_REQUEST_TIMEOUT_MS,
+  FOREGROUND_SSE_INACTIVITY_MS,
+} from "../src/sse-inactivity";
 import { loadConfig as loadBaseConfig } from "../src/config";
 import { authFingerprint } from "../src/auth";
 import { getDegradationWarning } from "../src/worker-health";
@@ -621,9 +625,11 @@ describe("budget throttle cancellation", () => {
     const foreground = createForegroundAbortScope();
     let recorded = 0;
     let upstreamStarted = false;
+    // Throttle past the foreground deadline so the deadline must win the race.
+    const throttleDelayMs = FOREGROUND_REQUEST_TIMEOUT_MS + 60_000;
     const pending = (async () => {
       await completeBudgetThrottleDelay(
-        600_000,
+        throttleDelayMs,
         foreground.signal,
         () => recorded++,
       );
@@ -632,7 +638,7 @@ describe("budget throttle cancellation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(recorded).toBe(0);
     expect(upstreamStarted).toBe(false);
@@ -693,21 +699,31 @@ const STALLED_META_CASES = [
   },
 ] as const;
 
-function stalledMetaUpstream(wire: string): {
+function stalledMetaUpstream(
+  wire: string,
+  heartbeatMs?: number,
+): {
   response: Response;
   cancelled: () => boolean;
 } {
   let cancelled = false;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   const response = new Response(
     new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode(wire));
+        if (heartbeatMs) {
+          heartbeatTimer = setInterval(() => {
+            controller.enqueue(new TextEncoder().encode(": keepalive\n\n"));
+          }, heartbeatMs);
+        }
       },
       pull() {
         return new Promise(() => {});
       },
       cancel() {
         cancelled = true;
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
         return new Promise<void>(() => {});
       },
     }),
@@ -807,6 +823,33 @@ describe("Pipeline — streaming responses", () => {
     },
   );
 
+  it.each([
+    ["OpenAI", translateAnthropicStreamToOpenAI],
+    ["Responses", translateAnthropicStreamToResponses],
+    ["Gemini", translateAnthropicStreamToGemini],
+  ] as const)(
+    "applies the inactivity deadline to Anthropic->%s translations",
+    async (_name, translate) => {
+      vi.useFakeTimers();
+      const source = stalledMetaUpstream(STALLED_META_CASES[0].wire);
+      try {
+        const downstream = translate(source.response, {
+          strict: true,
+          inactivityMs: 25,
+        });
+        const result = expect(downstream.text()).rejects.toThrow(
+          "SSE stream inactivity deadline exceeded",
+        );
+        await vi.advanceTimersByTimeAsync(25);
+        await result;
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("aborts the Anthropic conversation streamer before downstream demand", async () => {
     const firstEvent = (await validAnthropicSSE("never reached").text()).split(
       /(?=event: )/,
@@ -868,7 +911,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const downstream = buildStreamingResponse(upstream, () => {});
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(120_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_SSE_INACTIVITY_MS);
       await expect(downstream.text()).rejects.toThrow(
         "SSE stream inactivity deadline exceeded",
       );
@@ -1395,6 +1438,12 @@ describe("Pipeline — streaming responses", () => {
       );
     });
 
+    // Fake setTimeout from the start so the response stream's
+    // KEEPALIVE_INACTIVITY_MS (30s) tick — the tick that releases the span
+    // after a pre-terminal client cancel — can be advanced instead of
+    // waited on. Keep Date/setImmediate/nextTick real so the stream
+    // plumbing and vi.waitFor keep working.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const response = await handleRequest(
         makeResponsesRequest({
@@ -1404,9 +1453,15 @@ describe("Pipeline — streaming responses", () => {
       );
       const reader = response.body?.getReader();
       expect(reader).toBeDefined();
-      await reader?.read();
+      // The upstream stream emits nothing, so the first chunk only
+      // arrives at the (faked) 30s keepalive tick — drive it manually.
+      const firstRead = reader?.read();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await firstRead;
       await upstreamStarted;
       await reader?.cancel("client disconnected");
+      await vi.advanceTimersByTimeAsync(30_000);
+      vi.useRealTimers();
       await vi.waitFor(() => expect(end).toHaveBeenCalledOnce());
 
       expect(setStatus).toHaveBeenCalledWith({
@@ -1415,6 +1470,7 @@ describe("Pipeline — streaming responses", () => {
       });
       expect(upstreamCancellations).toBe(1);
     } finally {
+      vi.useRealTimers();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
@@ -6312,7 +6368,7 @@ describe("Pipeline — streaming responses", () => {
       ),
       "anthropic",
       false,
-      abort.signal,
+      { signal: abort.signal },
     );
     await expect(externallyAborted.text()).rejects.toMatchObject({
       name: "TimeoutError",
@@ -6378,12 +6434,9 @@ describe("Pipeline — streaming responses", () => {
       }),
     );
     const abort = new AbortController();
-    const downstream = validatedMetaStream(
-      upstream,
-      "anthropic",
-      false,
-      abort.signal,
-    );
+    const downstream = validatedMetaStream(upstream, "anthropic", false, {
+      signal: abort.signal,
+    });
     await new Promise((resolve) => setImmediate(resolve));
     abort.abort(new DOMException("deadline", "TimeoutError"));
     await expect(downstream.text()).rejects.toMatchObject({
@@ -6445,7 +6498,7 @@ describe("Pipeline — streaming responses", () => {
         },
         loadLocalConfig(),
       );
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       const response = await pending;
       expect(response.status).toBe(502);
       await expect(response.text()).resolves.toContain(
@@ -6525,7 +6578,10 @@ describe("Pipeline — streaming responses", () => {
     "foreground deadline settles a stalled $protocol meta body",
     async ({ protocol, model, provider, upstream, wire }) => {
       vi.useFakeTimers();
-      const source = stalledMetaUpstream(wire);
+      const source = stalledMetaUpstream(
+        wire,
+        FOREGROUND_SSE_INACTIVITY_MS / 2,
+      );
       setUpstreamInterceptor(async () => source.response);
       try {
         const downstream = await handleRequest(
@@ -6550,7 +6606,7 @@ describe("Pipeline — streaming responses", () => {
           loadLocalConfig(),
         );
         await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
         await expect(downstream.text()).rejects.toMatchObject({
           name: "TimeoutError",
         });
@@ -6558,6 +6614,50 @@ describe("Pipeline — streaming responses", () => {
         expect(source.response.body?.locked).toBe(false);
       } finally {
         setUpstreamInterceptor(undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(STALLED_META_CASES)(
+    "foreground inactivity deadline settles a stalled $protocol meta body",
+    async ({ protocol, wire }) => {
+      vi.useFakeTimers();
+      const source = stalledMetaUpstream(wire);
+      try {
+        const downstream = validatedMetaStream(
+          source.response,
+          protocol,
+          false,
+          { inactivityMs: 25 },
+        );
+        const outcome = Promise.race([
+          downstream.text().then(
+            (body) => ({ body, error: undefined }),
+            (error: unknown) => ({ body: undefined, error }),
+          ),
+          new Promise<{ body: undefined; error: Error }>((resolve) => {
+            setTimeout(() => {
+              resolve({
+                body: undefined,
+                error: new Error("inactivity deadline was not enforced"),
+              });
+            }, 100);
+          }),
+        ]);
+        await vi.advanceTimersByTimeAsync(25);
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await outcome;
+        if (protocol === "openai-responses") {
+          expect(result.body).toContain("event: response.failed");
+        } else {
+          expect(result.error).toMatchObject({
+            message: "SSE stream inactivity deadline exceeded",
+          });
+        }
+        expect(source.cancelled()).toBe(true);
+        expect(source.response.body?.locked).toBe(false);
+      } finally {
         vi.useRealTimers();
       }
     },

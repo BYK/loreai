@@ -9,8 +9,13 @@
  *  - Extras: reasoning/truncation passthrough; previous_response_id is DROPPED
  *    (the gateway is a stateless full-history proxy)
  */
-import { afterEach, describe, test, expect } from "vitest";
-import { log, MAX_RECALL_BATCH_IDS } from "@loreai/core";
+import { afterEach, describe, test, expect, vi } from "vitest";
+import {
+  db,
+  installFetchInterceptor,
+  log,
+  MAX_RECALL_BATCH_IDS,
+} from "@loreai/core";
 import {
   parseOpenAIResponsesRequest,
   parseOpenAIResponsesRequestChunks,
@@ -20,7 +25,7 @@ import {
   buildOpenAIResponsesUpstreamRequest,
   buildOpenAIResponsesResponse,
 } from "../src/translate/openai-responses";
-import { gzipSync } from "node:zlib";
+import { gzipSync, inflateSync } from "node:zlib";
 import { decodedRequestChunks } from "../src/http-body";
 import { createHarness, type Harness } from "./helpers/harness";
 import { makeConversationFixtures } from "./helpers/fixtures";
@@ -34,12 +39,26 @@ import {
   resolveToolResults,
 } from "../src/temporal-adapter";
 import { RECALL_GATEWAY_TOOL } from "../src/recall";
+import { accumulateResponsesSSEStream } from "../src/stream/openai-responses";
+import { digestChain } from "../src/chain-digest";
+import { encodeContextBoundary } from "../src/context-boundary";
+import { StreamedRequestBoundaryMismatchError } from "../src/translate/streaming-request";
+import { PreparationTiming } from "../src/semantic-preparation";
 import type {
   GatewayResponse,
   GatewayContentBlock,
   GatewayToolUseBlock,
   GatewayToolResultBlock,
 } from "../src/translate/types";
+
+async function* byteChunks(
+  bytes: Uint8Array,
+  size = 31,
+): AsyncGenerator<Uint8Array> {
+  for (let offset = 0; offset < bytes.byteLength; offset += size) {
+    yield bytes.subarray(offset, offset + size);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // parseOpenAIResponsesRequest
@@ -106,6 +125,29 @@ describe("parseOpenAIResponsesRequest", () => {
     await expect(
       parseOpenAIResponsesRequestChunks(chunks(), headers),
     ).rejects.toThrow("Unexpected non-whitespace character after JSON");
+  });
+
+  test.each([
+    ['{"model" "gpt-5.6","input":[]}', "missing colon"],
+    ['{"model":"gpt-5.6" "input":[]}', "missing comma"],
+    ['{"model":"gpt-5.6",,"input":[]}', "doubled comma"],
+  ])("rejects malformed boundary JSON with a %s", async (body) => {
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai-codex",
+      inputItems: 0,
+      inputDigest: digestChain([]),
+      retainedItems: 0,
+      sourceMessages: 0,
+      sourceDigest: digestChain([]),
+    });
+
+    await expect(
+      parseOpenAICodexRequestChunks(byteChunks(Buffer.from(body), 2), {
+        ...headers,
+        "x-lore-context-boundary": boundary,
+      }),
+    ).rejects.toThrow("Invalid JSON body");
   });
 
   test("accepts a primitive root after crossing the streaming threshold", async () => {
@@ -283,6 +325,107 @@ describe("parseOpenAIResponsesRequest", () => {
       parseOpenAICodexRequestChunks(chunks(), headers),
     ).resolves.toEqual(parseOpenAICodexRequest(body, headers));
   });
+
+  test("parses a Codex suffix against a verified source prefix", async () => {
+    const prefix = [
+      { type: "message", role: "user", content: "old question" },
+      { type: "message", role: "assistant", content: "old answer" },
+    ];
+    const first = parseOpenAICodexRequest(
+      { model: "gpt-5.6-codex", input: prefix },
+      headers,
+    );
+    const firstSourceInput = first.sourceInput;
+    if (!firstSourceInput) throw new Error("missing source input metadata");
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai-codex",
+      inputItems: firstSourceInput.itemCount,
+      inputDigest: firstSourceInput.inputDigest,
+      retainedItems: 0,
+      sourceMessages: first.messages.length,
+      sourceDigest: digestChain(first.messages),
+    });
+    const nextBody = {
+      model: "gpt-5.6-codex",
+      input: [{ type: "message", role: "user", content: "new question" }],
+    };
+    const next = await parseOpenAICodexRequestChunks(
+      byteChunks(Buffer.from(JSON.stringify(nextBody)), 7),
+      { ...headers, "x-lore-context-boundary": boundary },
+    );
+
+    expect(next.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "new question" }] },
+    ]);
+    expect(next.sourceInput?.sourcePrefix).toEqual({
+      messageCount: first.messages.length,
+      sourceDigest: digestChain(first.messages),
+    });
+    expect(next.sourceInput?.itemCount).toBe(3);
+  });
+
+  test("rejects a continuation boundary for another protocol", async () => {
+    const first = parseOpenAICodexRequest(
+      {
+        model: "gpt-5.6-codex",
+        input: [{ type: "message", role: "user", content: "original" }],
+      },
+      headers,
+    );
+    const firstSourceInput = first.sourceInput;
+    if (!firstSourceInput) throw new Error("missing source input metadata");
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai-responses",
+      inputItems: firstSourceInput.itemCount,
+      inputDigest: firstSourceInput.inputDigest,
+      retainedItems: 0,
+      sourceMessages: first.messages.length,
+      sourceDigest: digestChain(first.messages),
+    });
+    const body = {
+      model: "gpt-5.6-codex",
+      input: [{ type: "message", role: "user", content: "new" }],
+    };
+
+    await expect(async () =>
+      parseOpenAICodexRequestChunks(
+        byteChunks(Buffer.from(JSON.stringify(body))),
+        {
+          ...headers,
+          "x-lore-context-boundary": boundary,
+        },
+      ),
+    ).rejects.toBeInstanceOf(StreamedRequestBoundaryMismatchError);
+  });
+
+  test.each([
+    [
+      "adjacent function calls",
+      { type: "function_call", call_id: "a", name: "read", arguments: "{}" },
+      { type: "function_call", call_id: "b", name: "grep", arguments: "{}" },
+    ],
+    [
+      "adjacent function outputs",
+      { type: "function_call_output", call_id: "a", output: "one" },
+      { type: "function_call_output", call_id: "b", output: "two" },
+    ],
+    [
+      "reasoning followed by an assistant message",
+      { type: "reasoning", summary: [{ type: "summary_text", text: "why" }] },
+      { type: "message", role: "assistant", content: "answer" },
+    ],
+  ])(
+    "does not advertise an unsafe normalization seam: %s",
+    (_name, prefixItem, _suffixItem) => {
+      const prefix = parseOpenAICodexRequest(
+        { model: "gpt-5.6-codex", input: [prefixItem] },
+        headers,
+      );
+      expect(prefix.sourceInput?.boundarySafe).toBe(false);
+    },
+  );
 
   test("parses string input as single user message", () => {
     const req = parseOpenAIResponsesRequest(
@@ -1028,8 +1171,17 @@ describe("parseOpenAIResponsesRequest", () => {
 
 describe("streamed Responses ingress", () => {
   let harness: Harness | undefined;
+  let interceptorCleanup: (() => void) | undefined;
+  let originalFetch: typeof globalThis.fetch | undefined;
 
-  afterEach(async () => harness?.teardown());
+  afterEach(async () => {
+    interceptorCleanup?.();
+    interceptorCleanup = undefined;
+    if (originalFetch) globalThis.fetch = originalFetch;
+    originalFetch = undefined;
+    await harness?.teardown();
+    harness = undefined;
+  });
 
   test("normalizes a compressed body above the streaming threshold", async () => {
     const content = "x".repeat(STREAMING_PARSE_SPOOL_BYTES + 1);
@@ -1055,6 +1207,329 @@ describe("streamed Responses ingress", () => {
     });
 
     expect(response.status, await response.text()).toBe(200);
+  });
+
+  test("keeps OpenAI clients without boundary capability on the legacy checkpoint namespace", async () => {
+    const projectPath = process.cwd();
+    const sessionID = "openai-legacy-checkpoint";
+    harness = await createHarness({
+      fixtures: [],
+      projectPath,
+    });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      const sequence = ++upstreamCall;
+      return new Response(
+        JSON.stringify({
+          id: `chatcmpl_legacy_${sequence}`,
+          object: "chat.completion",
+          created: 1,
+          model: "gpt-4o",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: `answer ${sequence}`,
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 5,
+            total_tokens: 105,
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const start = (messages: Array<{ role: string; content: string }>) =>
+      harness!.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+          "x-lore-project": projectPath,
+          "x-lore-session-id": sessionID,
+          "x-lore-upstream-url": "https://api.openai.com",
+        },
+        body: JSON.stringify({ model: "gpt-4o", stream: false, messages }),
+      });
+    const checkpoint = () => {
+      const row = harness!.queryDB<{ payload: Uint8Array | null }>(
+        "SELECT payload FROM source_windows ORDER BY updated_at DESC LIMIT 1",
+      )[0];
+      if (!row?.payload) return undefined;
+      return JSON.parse(inflateSync(row.payload).toString("utf8")) as {
+        protocol: string;
+        sourceCount: number;
+      };
+    };
+
+    const firstMessages = [
+      { role: "user", content: "older question" },
+      { role: "assistant", content: "older answer" },
+      { role: "user", content: "first" },
+    ];
+    const response = await start(firstMessages);
+
+    expect(response.headers.get("x-lore-context-boundary")).toBeNull();
+    expect(response.status, await response.text()).toBe(200);
+    await vi.waitFor(() => {
+      expect(checkpoint()).toMatchObject({
+        protocol: "openai",
+        sourceCount: firstMessages.length,
+      });
+    });
+
+    const metric = vi.spyOn(PreparationTiming.prototype, "metric");
+    const secondMessages = [
+      ...firstMessages,
+      { role: "assistant", content: "answer 1" },
+      { role: "user", content: "second" },
+    ];
+    const continuation = await start(secondMessages);
+    expect(continuation.headers.get("x-lore-context-boundary")).toBeNull();
+    expect(continuation.status, await continuation.text()).toBe(200);
+    await vi.waitFor(() => {
+      expect(checkpoint()).toMatchObject({
+        protocol: "openai",
+        sourceCount: secondMessages.length,
+      });
+    });
+    expect(metric).toHaveBeenCalledWith("source_checkpoint_hit", 1);
+    expect(metric).toHaveBeenCalledWith("source_converted_messages", 2);
+  });
+
+  test("orders EOF publication across stale replay and the next continuation", async () => {
+    const projectPath = process.cwd();
+    const sessionID = "codex-boundary-lifecycle";
+    harness = await createHarness({
+      fixtures: makeConversationFixtures([
+        { userMessage: "first", assistantText: "answer one" },
+        { userMessage: "second", assistantText: "answer two" },
+        { userMessage: "third", assistantText: "answer three" },
+      ]),
+      projectPath,
+    });
+    const upstreamBodies: unknown[] = [];
+    let upstreamCall = 0;
+    const answers = ["answer one", "answer two", "answer three"];
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (body) => {
+      upstreamBodies.push(structuredClone(body));
+      const sequence = ++upstreamCall;
+      const text = answers[sequence - 1] ?? "unexpected";
+      const event = (type: string, payload: Record<string, unknown>) =>
+        `event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`;
+      return new Response(
+        event("response.created", {
+          response: { id: `resp_${sequence}`, model: "gpt-5.6-codex" },
+        }) +
+          event("response.output_item.added", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: `msg_${sequence}`,
+              role: "assistant",
+            },
+          }) +
+          event("response.output_text.done", {
+            output_index: 0,
+            item_id: `msg_${sequence}`,
+            content_index: 0,
+            text,
+          }) +
+          event("response.output_item.done", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: `msg_${sequence}`,
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text }],
+            },
+          }) +
+          event("response.completed", {
+            response: {
+              id: `resp_${sequence}`,
+              model: "gpt-5.6-codex",
+              status: "completed",
+              output: [{ type: "item_reference", id: `msg_${sequence}` }],
+              usage: { input_tokens: 100, output_tokens: 5 },
+            },
+          }) +
+          "data: [DONE]\n\n",
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    const gatewayCalls: Array<{
+      boundary: string | null;
+      capability: string | null;
+      status?: number;
+      error?: string;
+      responseBoundary?: string | null;
+      inputItems?: number;
+    }> = [];
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (!url.href.startsWith(harness!.baseURL)) {
+          return originalFetch!(input, init);
+        }
+        const gatewayCall: (typeof gatewayCalls)[number] = {
+          boundary: request.headers.get("x-lore-context-boundary"),
+          capability: request.headers.get("x-lore-context-boundary-capability"),
+          status: undefined as number | undefined,
+        };
+        gatewayCalls.push(gatewayCall);
+        const body = request.body
+          ? new Uint8Array(await request.arrayBuffer())
+          : undefined;
+        if (body) {
+          const parsed = JSON.parse(Buffer.from(body).toString("utf8")) as {
+            input?: unknown[];
+          };
+          gatewayCall.inputItems = parsed.input?.length;
+        }
+        const response = await harness!.request(
+          `${url.pathname}${url.search}`,
+          {
+            method: request.method,
+            headers: request.headers,
+            body,
+          },
+        );
+        gatewayCall.status = response.status;
+        gatewayCall.responseBoundary = response.headers.get(
+          "x-lore-context-boundary",
+        );
+        if (response.status === 409) {
+          gatewayCall.error = await response.clone().text();
+        }
+        return response;
+      },
+    ) as unknown as typeof globalThis.fetch;
+    interceptorCleanup = installFetchInterceptor({
+      gatewayBase: harness.baseURL,
+      getHeaders: () => ({
+        "x-lore-session-id": sessionID,
+        "x-lore-project": projectPath,
+      }),
+    });
+
+    const codexURL = "https://chatgpt.com/backend-api/codex/responses";
+    const start = (input: unknown[]) =>
+      fetch(codexURL, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.6-codex",
+          instructions: "Be helpful.",
+          stream: true,
+          input,
+        }),
+      });
+    const consume = async (response: Response) => {
+      const responseText = await response.text();
+      expect(response.status, responseText).toBe(200);
+    };
+    const checkpoint = () => {
+      const row = harness!.queryDB<{ payload: Uint8Array | null }>(
+        "SELECT payload FROM source_windows ORDER BY updated_at DESC LIMIT 1",
+      )[0];
+      if (!row?.payload) return undefined;
+      return JSON.parse(inflateSync(row.payload).toString("utf8")) as {
+        sourceCount: number;
+        sourceDigest: string;
+        protocol: string;
+      };
+    };
+    const waitForCheckpoint = async (sourceCount: number) => {
+      await vi.waitFor(
+        () => expect(checkpoint()?.sourceCount).toBe(sourceCount),
+        2_000,
+      );
+    };
+
+    const firstInput = [
+      { type: "message", role: "user", content: "older question" },
+      { type: "message", role: "assistant", content: "older answer" },
+      { type: "message", role: "user", content: "first" },
+    ];
+    const firstResponse = await start(firstInput);
+    expect(firstResponse.headers.get("x-lore-context-boundary")).toEqual(
+      expect.any(String),
+    );
+    // The optimistic header is visible before the durable checkpoint exists.
+    // Neither the gateway nor the interceptor may publish it until body EOF.
+    expect(checkpoint()).toBeUndefined();
+    await consume(firstResponse);
+    await waitForCheckpoint(3);
+    const firstBoundary = gatewayCalls[0]?.boundary;
+    expect(firstBoundary).toBeNull();
+    expect(gatewayCalls[0]?.capability).toBe("v1");
+
+    // Make the cached client boundary stale after it has been accepted once.
+    db().exec("DELETE FROM source_windows");
+    const secondInput = [
+      ...firstInput,
+      { type: "message", role: "assistant", content: "answer one" },
+      { type: "message", role: "user", content: "second" },
+    ];
+    const secondCallStart = gatewayCalls.length;
+    await consume(await start(secondInput));
+    await waitForCheckpoint(5);
+    expect(
+      gatewayCalls.slice(secondCallStart).map((call) => call.boundary),
+    ).toEqual([expect.any(String), null]);
+    expect(
+      gatewayCalls.slice(secondCallStart).map((call) => call.inputItems),
+    ).toEqual([2, 5]);
+    expect(
+      gatewayCalls.slice(secondCallStart).map((call) => call.status),
+    ).toEqual([409, 200]);
+    expect(gatewayCalls[secondCallStart]?.error).toContain(
+      "retained Lore context no longer matches",
+    );
+    const freshBoundaryValue = gatewayCalls.at(-1)?.responseBoundary;
+    expect(freshBoundaryValue).toEqual(expect.any(String));
+    const freshBoundary = JSON.parse(
+      Buffer.from(freshBoundaryValue!, "base64url").toString("utf8"),
+    ) as { sourceDigest: string };
+    expect(checkpoint()).toMatchObject({
+      protocol: "context-boundary-v1:openai-codex",
+      sourceCount: 5,
+      sourceDigest: freshBoundary.sourceDigest,
+    });
+
+    const metric = vi.spyOn(PreparationTiming.prototype, "metric");
+    const thirdInput = [
+      ...secondInput,
+      { type: "message", role: "assistant", content: "answer two" },
+      { type: "message", role: "user", content: "third" },
+    ];
+    const thirdCallStart = gatewayCalls.length;
+    await consume(await start(thirdInput));
+    await waitForCheckpoint(7);
+    expect(gatewayCalls.slice(thirdCallStart)).toHaveLength(1);
+    expect(gatewayCalls[thirdCallStart]).toMatchObject({
+      boundary: expect.any(String),
+      status: 200,
+      inputItems: 2,
+    });
+    expect(gatewayCalls[thirdCallStart]?.boundary).toEqual(expect.any(String));
+    expect(metric).toHaveBeenCalledWith("source_converted_messages", 2);
+    expect(upstreamBodies).toHaveLength(3);
   });
 });
 
@@ -1435,6 +1910,93 @@ describe("buildOpenAIResponsesResponse", () => {
     const body = (await response.json()) as Record<string, unknown>;
 
     expect(body.output).toEqual(rawOutputItems);
+  });
+
+  test("streaming: preserves native reasoning output items", async () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_abc",
+      status: "completed",
+      summary: [],
+      encrypted_content: "encrypted-reasoning",
+    };
+    const response = buildOpenAIResponsesResponse(
+      {
+        ...baseResponse,
+        rawOutputItems: [reasoning],
+      },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.output_item.added");
+    expect(text).toContain("event: response.output_item.done");
+    expect(text).toContain('"encrypted_content":"encrypted-reasoning"');
+    expect(text).toContain('"output":[{"type":"reasoning"');
+  });
+
+  test("streaming: rebuilds delta lifecycles for raw visible output items", async () => {
+    const response = buildOpenAIResponsesResponse(
+      {
+        ...baseResponse,
+        rawOutputItems: [
+          {
+            type: "message",
+            id: "msg_raw",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "Done", annotations: [] }],
+          },
+          {
+            type: "function_call",
+            id: "fc_raw",
+            call_id: "call_raw",
+            name: "search",
+            arguments: '{"query":"cats"}',
+            status: "completed",
+          },
+        ],
+      },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain("event: response.output_text.delta");
+    expect(text).toContain('"delta":"Done"');
+    expect(text).toContain("event: response.output_text.done");
+    expect(text).toContain("event: response.content_part.done");
+    expect(text).toContain("event: response.function_call_arguments.delta");
+    expect(text).toContain('"delta":"{\\\"query\\\":\\\"cats\\\"}"');
+    expect(text).toContain("event: response.function_call_arguments.done");
+  });
+
+  test("streaming: emits a valid lifecycle for apply_patch_call", async () => {
+    const rawApplyPatchCall = {
+      type: "apply_patch_call",
+      id: "patch_1",
+      status: "completed",
+      call_id: "call_patch_1",
+    };
+    const response = buildOpenAIResponsesResponse(
+      { ...baseResponse, rawOutputItems: [rawApplyPatchCall] },
+      true,
+    );
+    const text = await response.text();
+
+    expect(text).toContain(
+      '"type":"apply_patch_call","id":"patch_1","status":"in_progress"',
+    );
+    await expect(
+      accumulateResponsesSSEStream(
+        new Response(text, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+        {
+          validation: "public",
+          stopAtTerminal: true,
+        },
+      ),
+    ).resolves.toMatchObject({ rawOutputItems: [rawApplyPatchCall] });
   });
 
   test("non-streaming: max_tokens maps to incomplete status", async () => {

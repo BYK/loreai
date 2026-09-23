@@ -15,6 +15,7 @@ import { setSessionAuth } from "../src/auth";
 import type { GatewayConfig } from "../src/config";
 import { fetchArgUrl } from "./helpers/fetch-url";
 import { loopbackRequest } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 vi.mock("../src/fetch", () => ({ upstreamFetch: vi.fn() }));
 
@@ -196,7 +197,7 @@ async function start(
   } = {},
 ): Promise<Started> {
   const env = {
-    LORE_DB_PATH: `/tmp/lore-openrouter-routing-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+    LORE_DB_PATH: createTestDatabasePath("openrouter-routing"),
     LORE_LISTEN_PORT: "0",
     LORE_DEBUG: "false",
     // This suite exercises local caller-selected provider routing. Keep it

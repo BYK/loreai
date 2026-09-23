@@ -20,6 +20,7 @@ import type { FixtureEntry } from "../../src/recorder";
 import type { GatewayConfig } from "../../src/config";
 import type { SimulatedCacheTurn } from "./simulated-cache";
 import { loopbackRequest } from "./loopback-request";
+import { createTestDatabasePath } from "../../../core/test/helpers/test-db-path";
 
 export const TEST_GATEWAY_AUTH_TOKEN =
   "test-gateway-access-token-32-bytes-minimum";
@@ -55,6 +56,11 @@ export interface HarnessOptions {
   projectPath?: string;
   /** Test-only race hook: runs after selecting the port, before loadConfig(). */
   beforeConfigLoad?: () => void;
+  /** Test-only server seam for startup and cleanup failure paths. */
+  startServer?: (config: GatewayConfig) => Promise<{
+    port: number;
+    stop(): Promise<void>;
+  }>;
 }
 
 export interface Harness {
@@ -105,7 +111,7 @@ export interface Harness {
 
 export async function createHarness(opts: HarnessOptions): Promise<Harness> {
   // --- 1. Isolated temp DB path ---
-  const dbPath = `/tmp/lore-gateway-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  const dbPath = createTestDatabasePath("gateway-harness");
 
   // Set env vars BEFORE any gateway/core imports so db.ts picks up the right path
   process.env.LORE_DB_PATH = dbPath;
@@ -183,25 +189,109 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
     }
   }
 
+  async function cleanupHarnessState(
+    stopServer?: () => Promise<void>,
+  ): Promise<void> {
+    const failures: unknown[] = [];
+    let serverStopped = stopServer === undefined;
+    if (stopServer) {
+      try {
+        await stopServer();
+        serverStopped = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (serverStopped) {
+      try {
+        closeDB();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 0) {
+        try {
+          await resetPipelineState();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length === 0) {
+        try {
+          _resetAuthForTest();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length === 0) {
+        try {
+          setUpstreamInterceptor(undefined);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length === 0) {
+        for (const suffix of ["", "-shm", "-wal"]) {
+          const file = `${dbPath}${suffix}`;
+          try {
+            if (existsSync(file)) unlinkSync(file);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "test gateway cleanup failed");
+    }
+  }
+
   // --- 5. Start gateway ---
-  opts.beforeConfigLoad?.();
-  const config = {
-    ...loadConfig(),
-    // Harnesses are local unless a test opts into remote/hosted semantics.
-    // This keeps the suite independent of the developer machine's bind env.
-    remoteGateway: false,
-    hostedMode: false,
-    ...opts.configOverrides,
-  };
-  // Vitest files share process.env within a worker. Another file can clobber
-  // LORE_LISTEN_PORT between the assignment above and this loadConfig() call,
-  // so pin the requested harness port on the config object itself.
-  config.port = port;
-  config.portExplicit = port !== 0;
-  const server = await startServer(config);
-  if (server.port <= 0) {
-    await server.stop();
-    throw new Error(`test gateway resolved invalid port ${server.port}`);
+  const server = await (async () => {
+    try {
+      opts.beforeConfigLoad?.();
+      const config = {
+        ...loadConfig(),
+        // Harnesses are local unless a test opts into remote/hosted semantics.
+        // This keeps the suite independent of the developer machine's bind env.
+        remoteGateway: false,
+        hostedMode: false,
+        ...opts.configOverrides,
+      };
+      // Vitest files share process.env within a worker. Another file can clobber
+      // LORE_LISTEN_PORT between the assignment above and this loadConfig() call,
+      // so pin the requested harness port on the config object itself.
+      config.port = port;
+      config.portExplicit = port !== 0;
+      return await (opts.startServer ?? startServer)(config);
+    } catch (startError) {
+      try {
+        await cleanupHarnessState();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [startError, cleanupError],
+          "test gateway startup and cleanup failed",
+        );
+      }
+      throw startError;
+    }
+  })();
+  if (
+    !Number.isInteger(server.port) ||
+    server.port < 1 ||
+    server.port > 65_535
+  ) {
+    const invalidPortError = new Error(
+      `test gateway resolved invalid port ${server.port}`,
+    );
+    try {
+      await cleanupHarnessState(() => server.stop());
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [invalidPortError, cleanupError],
+        "test gateway startup and cleanup failed",
+      );
+    }
+    throw invalidPortError;
   }
 
   const baseURL = `http://127.0.0.1:${server.port}`;
@@ -269,23 +359,7 @@ export async function createHarness(opts: HarnessOptions): Promise<Harness> {
 
   // --- 8. teardown() ---
   async function teardown(): Promise<void> {
-    await server.stop();
-    // Close the core DB singleton first so the next harness can open a fresh
-    // DB at its own LORE_DB_PATH.
-    closeDB();
-    await resetPipelineState();
-    _resetAuthForTest();
-    setUpstreamInterceptor(undefined);
-
-    // Delete DB files (main + WAL + SHM)
-    for (const suffix of ["", "-shm", "-wal"]) {
-      const file = `${dbPath}${suffix}`;
-      try {
-        if (existsSync(file)) unlinkSync(file);
-      } catch {
-        // best-effort
-      }
-    }
+    await cleanupHarnessState(() => server.stop());
   }
 
   function upstreamBodies(): string[] {

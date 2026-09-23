@@ -7,6 +7,7 @@ import {
   buildGeminiResponseBody,
   buildGeminiResponse,
 } from "../src/translate/gemini";
+import { parseAnthropicResponseJSON } from "../src/translate/anthropic";
 import type { GatewayRequest, GatewayResponse } from "../src/translate/types";
 import { validateGeminiUsageMetadata } from "../src/usage-validation";
 
@@ -506,7 +507,9 @@ test("Gemini request round-trip preserves distinct function ID and name", () => 
     false,
   );
   const rebuilt = buildGeminiUpstreamRequest(parsed, "https://example.test")
-    .body as { contents: Array<{ parts: unknown[] }> };
+    .body as {
+    contents: Array<{ parts: unknown[] }>;
+  };
   expect(rebuilt.contents).toEqual([
     {
       role: "model",
@@ -532,6 +535,121 @@ test("Gemini request round-trip preserves distinct function ID and name", () => 
 // ---------------------------------------------------------------------------
 // Egress: thinking + preserved finishReason round-trip
 // ---------------------------------------------------------------------------
+
+describe("Gemini thinking provenance", () => {
+  test("keeps thought parts and signatures request-only with original positions", () => {
+    const thought = {
+      text: "private summary",
+      thought: true,
+      thoughtSignature: "thought-signature",
+    };
+    const signedCall = {
+      functionCall: {
+        id: "call-1",
+        name: "lookup",
+        args: { query: "x" },
+      },
+      thoughtSignature: "call-signature",
+    };
+    const request = parseGeminiRequest(
+      {
+        contents: [
+          { role: "user", parts: [{ text: "look up x" }] },
+          {
+            role: "model",
+            parts: [thought, { text: "visible answer" }, signedCall],
+          },
+        ],
+      },
+      {},
+      "gemini-2.5-pro",
+      false,
+    );
+
+    expect(request.messages[1]).toEqual({
+      role: "assistant",
+      content: [
+        { type: "text", text: "visible answer" },
+        {
+          type: "tool_use",
+          id: "call-1",
+          name: "lookup",
+          input: { query: "x" },
+        },
+      ],
+      provenanceContent: [
+        { type: "opaque", raw: thought },
+        { type: "text", text: "visible answer" },
+        { type: "opaque", raw: signedCall },
+      ],
+      provenancePositions: [1, 2],
+    });
+
+    const built = buildGeminiUpstreamRequest(
+      request,
+      "https://generativelanguage.googleapis.com",
+    );
+    const contents = (
+      built.body as {
+        contents: Array<{ parts: unknown[] }>;
+      }
+    ).contents;
+    expect(contents[1]?.parts).toEqual([
+      thought,
+      { text: "visible answer" },
+      signedCall,
+    ]);
+  });
+
+  test("preserves response thought signatures and signed calls on egress", () => {
+    const thought = {
+      text: "private summary",
+      thought: true,
+      thoughtSignature: "thought-signature",
+    };
+    const signedCall = {
+      functionCall: {
+        id: "call-1",
+        name: "lookup",
+        args: { query: "x" },
+      },
+      thoughtSignature: "call-signature",
+    };
+    const response = parseGeminiResponseJSON({
+      responseId: "resp-1",
+      modelVersion: "gemini-2.5-pro",
+      candidates: [
+        {
+          content: { role: "model", parts: [thought, signedCall] },
+          finishReason: "STOP",
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 1,
+        candidatesTokenCount: 1,
+        totalTokenCount: 2,
+      },
+    });
+
+    expect(response.content[0]).toEqual({
+      type: "thinking",
+      thinking: "private summary",
+      signature: "thought-signature",
+    });
+    expect(response.content[1]).toMatchObject({
+      type: "tool_use",
+      id: "call-1",
+      raw: signedCall,
+    });
+    expect(
+      (
+        buildGeminiResponseBody(response).candidates as Array<{
+          content: { parts: unknown[] };
+        }>
+      )[0]?.content.parts,
+    ).toEqual([thought, signedCall]);
+  });
+});
 
 describe("buildGeminiResponseBody — thinking + block reason", () => {
   test("thinking block re-emits as a thought part (thought:true), separate from text", () => {
@@ -563,6 +681,31 @@ describe("buildGeminiResponseBody — thinking + block reason", () => {
     });
     const cand = (b.candidates as Array<Record<string, unknown>>)[0];
     expect(cand.finishReason).toBe("SAFETY");
+  });
+
+  test("drops request-only redacted thinking from Gemini egress", async () => {
+    const response = parseAnthropicResponseJSON({
+      id: "r",
+      model: "claude-sonnet",
+      content: [
+        { type: "redacted_thinking", data: "encrypted" },
+        { type: "text", text: "answer" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+
+    const body = buildGeminiResponseBody(response);
+    const firstCandidate = (
+      body.candidates as Array<Record<string, unknown>>
+    )[0];
+    if (!firstCandidate) throw new Error("missing Gemini candidate");
+    const parts = (firstCandidate.content as { parts: unknown[] }).parts;
+    expect(parts).toEqual([{ text: "answer" }]);
+
+    const stream = await buildGeminiResponse(response, true).text();
+    expect(stream).not.toContain("redacted_thinking");
+    expect(stream).toContain('"text":"answer"');
   });
 });
 

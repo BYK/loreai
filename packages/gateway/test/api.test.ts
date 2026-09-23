@@ -12,6 +12,7 @@ import {
   loopbackRequest,
   type LoopbackRequestInit,
 } from "./helpers/loopback-request";
+import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup
@@ -24,7 +25,7 @@ let closeDB: () => void;
 let resetPipelineState: () => Promise<void>;
 
 beforeAll(async () => {
-  dbPath = `/tmp/lore-api-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  dbPath = createTestDatabasePath("api");
   process.env.LORE_DB_PATH = dbPath;
 
   // Port 0 = OS-assigned ephemeral port; server.port returns the actual bound

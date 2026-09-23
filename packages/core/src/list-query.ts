@@ -345,28 +345,175 @@ export function listSessionMessagesPage(
     : sql.empty;
   const rows = sql.all<TemporalMessage>(
     db(),
-    sql`SELECT * FROM temporal_messages
-       WHERE project_id = ${pid} AND session_id = ${sessionId} ${before}
-       ORDER BY created_at DESC, id DESC
-       LIMIT ${limit + 1}`,
+    sql`SELECT * FROM (
+         SELECT * FROM temporal_messages
+         WHERE project_id = ${pid} AND session_id = ${sessionId} ${before}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ${limit + 1})
+       ORDER BY created_at ASC, id ASC`,
   );
   const total =
     sql.get<{ n: number }>(
       db(),
       sql`SELECT COUNT(*) AS n FROM temporal_messages WHERE project_id = ${pid} AND session_id = ${sessionId}`,
     )?.n ?? 0;
+  return { ...olderPage(rows, limit), total };
+}
 
+/**
+ * Splits a chronological `LIMIT limit + 1` fetch of the newest rows before a
+ * keyset into the page and the keyset of its oldest row. The probe row, when
+ * present, is the first (oldest) one and only proves that older rows exist.
+ */
+function olderPage<T extends MessageKeyset>(
+  rows: T[],
+  limit: number,
+): { items: T[]; next: MessageKeyset | null } {
   const hasMore = rows.length > limit;
-  const newestFirst = hasMore ? rows.slice(0, limit) : rows;
-  const oldest = newestFirst[newestFirst.length - 1];
+  const items = hasMore ? rows.slice(1) : rows;
+  const oldest = items[0];
   return {
-    items: newestFirst.reverse(),
+    items,
     next:
       hasMore && oldest
         ? { created_at: oldest.created_at, id: oldest.id }
         : null,
-    total,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Session search (in-session finder, #1857)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tokens the FTS5 `unicode61` tokenizer would produce for `raw` (letters and
+ * digits; everything else separates), lower-cased so the response echoes what
+ * was actually matched. Unlike `filterTerms()` this keeps single-character
+ * tokens and stop words: a reader searching "needle-5" or "the store" wants
+ * the literal sequence, not the recall engine's relevance heuristics.
+ */
+export function sessionSearchTerms(raw: string): string[] {
+  return raw
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) => t.length > 0)
+    .slice(0, 32);
+}
+
+/** How the hits were matched: the terms as one adjacent phrase, or every
+ *  term anywhere in the message. Either way only the last term is a prefix. */
+export type SessionSearchMode = "phrase" | "terms";
+
+export type SessionSearchHit = {
+  id: string;
+  created_at: number;
+  role: string;
+  /** Plain-text excerpt around the first match, FTS5 `snippet()` with the
+   *  part separator (`\x1f`) turned into a space. */
+  snippet: string;
+  /** FTS5 bm25 rank (lower is better) for callers that want relevance. */
+  rank: number;
+};
+
+export type SessionSearchPage = {
+  terms: string[];
+  mode: SessionSearchMode;
+  /** Chronological (`created_at ASC, id ASC`) within the page. */
+  items: SessionSearchHit[];
+  /** Keyset to fetch the next *older* page of hits, or null. */
+  next: MessageKeyset | null;
+  /** Matching messages in the session at query time. */
+  total: number;
+};
+
+function ftsQuoted(term: string): string {
+  return `"${term.replace(/"/g, '""')}"`;
+}
+
+/** `"a b c"*` — the terms as one phrase, last term a prefix. */
+function phraseMatch(terms: readonly string[]): string {
+  return `${ftsQuoted(terms.join(" "))}*`;
+}
+
+/**
+ * `"a" "b" "c"*` — every term anywhere in the message, only the last one a
+ * prefix (like the phrase form, and like a finder matching what was typed so
+ * far). A short inner token such as the `5` of `needle-5 config` therefore
+ * has to appear as that token, not as the start of every `5…` number.
+ */
+function termsMatch(terms: readonly string[]): string {
+  return terms
+    .map((t, i) => (i === terms.length - 1 ? `${ftsQuoted(t)}*` : ftsQuoted(t)))
+    .join(" ");
+}
+
+/**
+ * Keyset-paginated hits of an in-session finder over `temporal_fts`, walking
+ * from the newest matching message backwards like `listSessionMessagesPage`.
+ *
+ * The query is tokenised the way the index is and quoted, so FTS5 operators
+ * in user input (`NEAR`, `*`, `"`, `-`) are literal characters, never syntax.
+ * The first page decides the mode: the literal phrase when any message
+ * contains it, otherwise (multi-term queries only) every term anywhere. Later
+ * pages pin the mode via `options.mode` so a data change between pages can't
+ * make the walk switch semantics half-way.
+ */
+export function searchSessionMessagesPage(
+  projectPath: string,
+  sessionId: string,
+  options: {
+    query: string;
+    limit: number;
+    before?: MessageKeyset;
+    mode?: SessionSearchMode;
+  },
+): SessionSearchPage {
+  const pid = ensureProject(projectPath);
+  const terms = sessionSearchTerms(options.query);
+  const limit = Math.max(1, Math.floor(options.limit));
+  if (terms.length === 0) {
+    return { terms, mode: "phrase", items: [], next: null, total: 0 };
+  }
+
+  const count = (match: string): number =>
+    sql.get<{ n: number }>(
+      db(),
+      sql`SELECT COUNT(*) AS n FROM temporal_fts f
+         CROSS JOIN temporal_messages m ON m.rowid = f.rowid
+         WHERE f.content MATCH ${match} AND m.project_id = ${pid} AND m.session_id = ${sessionId}`,
+    )?.n ?? 0;
+
+  let mode: SessionSearchMode = options.mode ?? "phrase";
+  let match = mode === "phrase" ? phraseMatch(terms) : termsMatch(terms);
+  let total = count(match);
+  if (
+    options.mode === undefined &&
+    mode === "phrase" &&
+    total === 0 &&
+    terms.length > 1
+  ) {
+    mode = "terms";
+    match = termsMatch(terms);
+    total = count(match);
+  }
+
+  const before = options.before
+    ? sql`AND (m.created_at < ${options.before.created_at} OR (m.created_at = ${options.before.created_at} AND m.id < ${options.before.id}))`
+    : sql.empty;
+  const rows = sql.all<SessionSearchHit>(
+    db(),
+    sql`SELECT * FROM (
+         SELECT m.id, m.created_at, m.role,
+                replace(snippet(temporal_fts, 0, '', '', '…', 16), char(31), ' ') AS snippet,
+                f.rank AS rank
+         FROM temporal_fts f
+         CROSS JOIN temporal_messages m ON m.rowid = f.rowid
+         WHERE f.content MATCH ${match} AND m.project_id = ${pid} AND m.session_id = ${sessionId} ${before}
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ${limit + 1})
+       ORDER BY created_at ASC, id ASC`,
+  );
+  return { terms, mode, ...olderPage(rows, limit), total };
 }
 
 // ---------------------------------------------------------------------------

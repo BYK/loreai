@@ -10,7 +10,13 @@
  *   - System prompt is in the `instructions` field
  *   - Tools use `parameters` directly (not wrapped in `function`)
  */
-import { asString, log } from "@loreai/core";
+import {
+  CHAIN_DIGEST_SEED,
+  asString,
+  digestChain,
+  log,
+  type ContextBoundary,
+} from "@loreai/core";
 import type {
   GatewayContentBlock,
   GatewayMessage,
@@ -29,11 +35,21 @@ import {
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
 import {
+  parseContextBoundary,
+  type ContextBoundaryProtocol,
+} from "../context-boundary";
+import {
   parseStreamedRequest,
+  StreamedRequestBoundaryMismatchError,
   type StreamingRequestSpec,
 } from "./streaming-request";
 
 export { STREAMING_PARSE_SPOOL_BYTES } from "./streaming-request";
+
+type ParsedInputItems = {
+  messages: GatewayMessage[];
+  boundarySafe: boolean;
+};
 
 function responsesUsage(usage: GatewayUsage): Record<string, unknown> {
   const inclusiveInputTokens = safeTokenSum(
@@ -72,6 +88,19 @@ export function parseOpenAIResponsesRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
+  const boundary = parseContextBoundary(headers, "openai-responses");
+  const input = rawInput(body);
+  const parsed = parseInputItems(input);
+  const req = parseOpenAIResponsesRequestInternal(body, headers, parsed);
+  attachDirectSourceInput(req, input, parsed, boundary);
+  return req;
+}
+
+function parseOpenAIResponsesRequestInternal(
+  body: unknown,
+  headers: Record<string, string>,
+  parsedInput?: ParsedInputItems,
+): GatewayRequest {
   const raw = (body ?? {}) as Record<string, unknown>;
 
   const model = asString(raw.model);
@@ -85,7 +114,7 @@ export function parseOpenAIResponsesRequest(
   const system = typeof raw.instructions === "string" ? raw.instructions : "";
 
   // Parse input items into normalized messages
-  const messages = parseInputItems(raw.input);
+  const messages = (parsedInput ?? parseInputItems(raw.input)).messages;
 
   // Parse tools
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
@@ -195,23 +224,34 @@ function addCodexControls(
 const responsesSpec = (
   headers: Record<string, string>,
   codex: boolean,
-): StreamingRequestSpec<GatewayMessage[]> => ({
-  streamKey: "input",
-  captureKeys: codex
-    ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
-    : RESPONSES_TOP_LEVEL_KEYS,
-  createItemsBuilder: createInputItemsBuilder,
-  parseSync: (raw) =>
-    codex
-      ? parseOpenAICodexRequest(raw, headers)
-      : parseOpenAIResponsesRequest(raw, headers),
-  assemble(raw, streamed) {
-    const req = parseOpenAIResponsesRequest(raw, headers);
-    if (streamed) req.messages = streamed;
-    else if ("input" in raw) req.messages = parseInputItems(raw.input);
-    return codex ? addCodexControls(req, raw) : req;
-  },
-});
+): StreamingRequestSpec<ParsedInputItems> => {
+  const protocol: ContextBoundaryProtocol = codex
+    ? "openai-codex"
+    : "openai-responses";
+  const boundary = parseContextBoundary(headers, protocol);
+  return {
+    streamKey: "input",
+    captureKeys: codex
+      ? new Set([...RESPONSES_TOP_LEVEL_KEYS, ...CODEX_TOP_LEVEL_KEYS])
+      : RESPONSES_TOP_LEVEL_KEYS,
+    contextBoundary: boundary,
+    describeBoundary: (parsed) => ({
+      boundarySafe: parsed.boundarySafe,
+      retainedItems: 0,
+    }),
+    createItemsBuilder: createInputItemsBuilder,
+    parseSync: (raw) =>
+      codex
+        ? parseOpenAICodexRequest(raw, headers)
+        : parseOpenAIResponsesRequest(raw, headers),
+    assemble(raw, streamed) {
+      const parsed = streamed ?? parseInputItems(raw.input);
+      const req = parseOpenAIResponsesRequestInternal(raw, headers, parsed);
+      if (codex) addCodexControls(req, raw);
+      return req;
+    },
+  };
+};
 
 /** Parse a streamed OpenAI Responses request. */
 export function parseOpenAIResponsesRequestChunks(
@@ -236,8 +276,11 @@ export function parseOpenAICodexRequest(
   body: unknown,
   headers: Record<string, string>,
 ): GatewayRequest {
-  const req = parseOpenAIResponsesRequest(body, headers);
+  const boundary = parseContextBoundary(headers, "openai-codex");
+  const parsed = parseInputItems(rawInput(body));
+  const req = parseOpenAIResponsesRequestInternal(body, headers, parsed);
   const raw = (body ?? {}) as Record<string, unknown>;
+  attachDirectSourceInput(req, raw.input, parsed, boundary);
   return addCodexControls(req, raw);
 }
 
@@ -253,13 +296,24 @@ export function parseOpenAICodexRequestChunks(
 // Input item parsing
 // ---------------------------------------------------------------------------
 
-function parseInputItems(input: unknown): GatewayMessage[] {
+function rawInput(body: unknown): unknown {
+  const raw = (body ?? {}) as Record<string, unknown>;
+  return raw.input;
+}
+
+function parseInputItems(input: unknown): ParsedInputItems {
   // String shorthand: single user message
   if (typeof input === "string") {
-    return [{ role: "user", content: [{ type: "text", text: input }] }];
+    return {
+      messages: [{ role: "user", content: [{ type: "text", text: input }] }],
+      // String shorthand cannot be suffix-elided as an item array.
+      boundarySafe: false,
+    };
   }
 
-  if (!Array.isArray(input)) return [];
+  if (!Array.isArray(input)) {
+    return { messages: [], boundarySafe: false };
+  }
 
   const builder = createInputItemsBuilder();
   for (const item of input) {
@@ -268,12 +322,43 @@ function parseInputItems(input: unknown): GatewayMessage[] {
   return builder.finish();
 }
 
+function attachDirectSourceInput(
+  req: GatewayRequest,
+  input: unknown,
+  parsed: ParsedInputItems,
+  boundary?: ContextBoundary,
+): void {
+  if (!Array.isArray(input)) {
+    if (!boundary) return;
+    throw new StreamedRequestBoundaryMismatchError(
+      "The checkpointed input suffix is not an array; retrying with the full conversation.",
+    );
+  }
+  req.sourceInput = {
+    itemCount: (boundary?.inputItems ?? 0) + input.length,
+    inputDigest: digestChain(input, boundary?.inputDigest ?? CHAIN_DIGEST_SEED),
+    boundarySafe: input.length > 0 && parsed.boundarySafe,
+    retainedItems: 0,
+    ...(boundary
+      ? {
+          sourcePrefix: {
+            messageCount: boundary.sourceMessages,
+            sourceDigest: boundary.sourceDigest,
+          },
+        }
+      : {}),
+  };
+}
+
 function createInputItemsBuilder(): {
   add(item: unknown): void;
-  finish(): GatewayMessage[];
+  finish(): ParsedInputItems;
 } {
   const messages: GatewayMessage[] = [];
   let pendingReasoning: GatewayContentBlock[] = [];
+  let sawItem = false;
+  let seamKind: "none" | "other" | "tool-call" | "tool-result" = "none";
+  let seamHasPendingReasoning = false;
 
   const appendAssistant = (
     content: GatewayContentBlock[],
@@ -299,10 +384,28 @@ function createInputItemsBuilder(): {
   };
 
   const add = (item: unknown): void => {
+    sawItem = true;
     const raw = item as Record<string, unknown>;
     const itemType = raw.type as string | undefined;
     const role = raw.role as string | undefined;
 
+    // Track only the state that can affect normalization across an item seam.
+    if (itemType === "message" || (!itemType && role)) {
+      const content = parseMessageContent(raw.content);
+      if (role === "assistant") {
+        seamHasPendingReasoning = false;
+        seamKind = "other";
+      } else if (content.length > 0) {
+        seamKind = "other";
+      }
+    } else if (itemType === "function_call") {
+      seamHasPendingReasoning = false;
+      seamKind = "tool-call";
+    } else if (itemType === "function_call_output") {
+      seamKind = "tool-result";
+    } else {
+      seamHasPendingReasoning = true;
+    }
     if (itemType === "message" || (!itemType && role)) {
       // Message item — has role + content
       const msgRole =
@@ -435,7 +538,12 @@ function createInputItemsBuilder(): {
     pendingReasoning.push({ type: "opaque", raw, responsesItem: true });
   };
 
-  const finish = (): GatewayMessage[] => {
+  const finish = (): ParsedInputItems => {
+    const boundarySafe =
+      sawItem &&
+      !seamHasPendingReasoning &&
+      seamKind !== "tool-call" &&
+      seamKind !== "tool-result";
     if (pendingReasoning.length > 0) {
       messages.push({
         role: "assistant",
@@ -446,7 +554,7 @@ function createInputItemsBuilder(): {
       pendingReasoning = [];
     }
 
-    return messages;
+    return { messages, boundarySafe };
   };
 
   return { add, finish };
@@ -934,6 +1042,191 @@ function incompleteDetails(stopReason: string): { reason: string } {
   };
 }
 
+type ResponsesEventEmitter = (
+  eventType: string,
+  data: Record<string, unknown>,
+) => void;
+
+function emitRawResponsesOutputItemLifecycle(
+  emit: ResponsesEventEmitter,
+  item: Record<string, unknown>,
+  outputIndex: number,
+): void {
+  const itemType = String(item.type);
+  if (itemType === "message") {
+    const itemId =
+      typeof item.id === "string" && item.id
+        ? item.id
+        : `msg_lore_${outputIndex}`;
+    const addedItem: Record<string, unknown> = {
+      ...item,
+      status: "in_progress",
+      content: [],
+    };
+    emit("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: addedItem,
+    });
+
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const [contentIndex, rawPart] of content.entries()) {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) {
+        continue;
+      }
+      const part = rawPart as Record<string, unknown>;
+      if (part.type === "output_text" && typeof part.text === "string") {
+        emit("response.content_part.added", {
+          type: "response.content_part.added",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part: {
+            type: "output_text",
+            text: "",
+            annotations: Array.isArray(part.annotations)
+              ? part.annotations
+              : [],
+          },
+        });
+        for (let offset = 0; offset < part.text.length; offset += 50) {
+          emit("response.output_text.delta", {
+            type: "response.output_text.delta",
+            item_id: itemId,
+            output_index: outputIndex,
+            content_index: contentIndex,
+            delta: part.text.slice(offset, offset + 50),
+          });
+        }
+        emit("response.output_text.done", {
+          type: "response.output_text.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          text: part.text,
+        });
+        emit("response.content_part.done", {
+          type: "response.content_part.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part,
+        });
+      } else if (part.type === "refusal" && typeof part.refusal === "string") {
+        emit("response.content_part.added", {
+          type: "response.content_part.added",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part: {
+            type: "refusal",
+            refusal: "",
+          },
+        });
+        for (let offset = 0; offset < part.refusal.length; offset += 50) {
+          emit("response.refusal.delta", {
+            type: "response.refusal.delta",
+            item_id: itemId,
+            output_index: outputIndex,
+            content_index: contentIndex,
+            delta: part.refusal.slice(offset, offset + 50),
+          });
+        }
+        emit("response.refusal.done", {
+          type: "response.refusal.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          refusal: part.refusal,
+        });
+        emit("response.content_part.done", {
+          type: "response.content_part.done",
+          item_id: itemId,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part,
+        });
+      }
+    }
+
+    emit("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item,
+    });
+    return;
+  }
+
+  if (itemType === "function_call") {
+    const callId = typeof item.call_id === "string" ? item.call_id : "";
+    const itemId =
+      typeof item.id === "string" && item.id
+        ? item.id
+        : `fc_${callId || outputIndex}`;
+    const args = typeof item.arguments === "string" ? item.arguments : "";
+    emit("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: {
+        ...item,
+        status: "in_progress",
+        arguments: "",
+      },
+    });
+    if (args) {
+      emit("response.function_call_arguments.delta", {
+        type: "response.function_call_arguments.delta",
+        item_id: itemId,
+        output_index: outputIndex,
+        delta: args,
+      });
+    }
+    emit("response.function_call_arguments.done", {
+      type: "response.function_call_arguments.done",
+      item_id: itemId,
+      output_index: outputIndex,
+      arguments: args,
+    });
+    emit("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: outputIndex,
+      item,
+    });
+    return;
+  }
+
+  const addedItem = { ...item };
+  if (
+    [
+      "reasoning",
+      "web_search_call",
+      "file_search_call",
+      "tool_search_call",
+      "computer_call",
+      "computer_tool_call",
+      "code_interpreter_call",
+      "image_generation_call",
+      "local_shell_call",
+      "shell_call",
+      "mcp_call",
+      "custom_tool_call",
+      "apply_patch_call",
+    ].includes(itemType)
+  ) {
+    addedItem.status = "in_progress";
+  }
+  emit("response.output_item.added", {
+    type: "response.output_item.added",
+    output_index: outputIndex,
+    item: addedItem,
+  });
+  emit("response.output_item.done", {
+    type: "response.output_item.done",
+    output_index: outputIndex,
+    item,
+  });
+}
+
 function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
   const usage = resp.usage ?? ZERO_USAGE;
   const encoder = new TextEncoder();
@@ -987,140 +1280,150 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
       let outputIndex = 0;
 
-      // Process content blocks
-      for (const block of resp.content) {
-        if (block.type === "text") {
-          const itemId = `msg_${respId}_${outputIndex}`;
+      // Rebuild native Responses output items when the accumulator has
+      // them. This includes opaque reasoning items with encrypted_content;
+      // reducing them to GatewayResponse.content would silently drop the
+      // provider's continuation state from buffered client streams.
+      if (resp.rawOutputItems) {
+        for (const item of resp.rawOutputItems) {
+          emitRawResponsesOutputItemLifecycle(emit, item, outputIndex);
+          outputIndex++;
+        }
+      } else {
+        for (const block of resp.content) {
+          if (block.type === "text") {
+            const itemId = `msg_${respId}_${outputIndex}`;
 
-          // output_item.added
-          emit("response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: outputIndex,
-            item: {
-              type: "message",
-              id: itemId,
-              role: "assistant",
-              status: "in_progress",
-              content: [],
-            },
-          });
+            // output_item.added
+            emit("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: itemId,
+                role: "assistant",
+                status: "in_progress",
+                content: [],
+              },
+            });
 
-          // content_part.added
-          emit("response.content_part.added", {
-            type: "response.content_part.added",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: { type: "output_text", text: "", annotations: [] },
-          });
-
-          // output_text.delta — emit text in chunks
-          const text = block.text;
-          let pos = 0;
-          while (pos < text.length) {
-            const chunk = text.slice(pos, pos + 50);
-            emit("response.output_text.delta", {
-              type: "response.output_text.delta",
+            // content_part.added
+            emit("response.content_part.added", {
+              type: "response.content_part.added",
               item_id: itemId,
               output_index: outputIndex,
               content_index: 0,
-              delta: chunk,
+              part: { type: "output_text", text: "", annotations: [] },
             });
-            pos += 50;
-          }
 
-          // output_text.done
-          emit("response.output_text.done", {
-            type: "response.output_text.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            text: block.text,
-          });
+            // output_text.delta — emit text in chunks
+            const text = block.text;
+            let pos = 0;
+            while (pos < text.length) {
+              const chunk = text.slice(pos, pos + 50);
+              emit("response.output_text.delta", {
+                type: "response.output_text.delta",
+                item_id: itemId,
+                output_index: outputIndex,
+                content_index: 0,
+                delta: chunk,
+              });
+              pos += 50;
+            }
 
-          // content_part.done
-          emit("response.content_part.done", {
-            type: "response.content_part.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            content_index: 0,
-            part: {
-              type: "output_text",
+            // output_text.done
+            emit("response.output_text.done", {
+              type: "response.output_text.done",
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: 0,
               text: block.text,
-              annotations: [],
-            },
-          });
+            });
 
-          // output_item.done
-          emit("response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: outputIndex,
-            item: {
-              type: "message",
-              id: itemId,
-              role: "assistant",
-              status: "completed",
-              content: [
-                {
-                  type: "output_text",
-                  text: block.text,
-                  annotations: [],
-                },
-              ],
-            },
-          });
+            // content_part.done
+            emit("response.content_part.done", {
+              type: "response.content_part.done",
+              item_id: itemId,
+              output_index: outputIndex,
+              content_index: 0,
+              part: {
+                type: "output_text",
+                text: block.text,
+                annotations: [],
+              },
+            });
 
-          outputIndex++;
-        } else if (block.type === "tool_use") {
-          const callId = block.id;
-          const itemId = `fc_${callId}`;
-          const args = JSON.stringify(block.input);
+            // output_item.done
+            emit("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: {
+                type: "message",
+                id: itemId,
+                role: "assistant",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: block.text,
+                    annotations: [],
+                  },
+                ],
+              },
+            });
 
-          // output_item.added
-          emit("response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: callId,
-              name: block.name,
-              arguments: "",
-              status: "in_progress",
-            },
-          });
+            outputIndex++;
+          } else if (block.type === "tool_use") {
+            const callId = block.id;
+            const itemId = `fc_${callId}`;
+            const args = JSON.stringify(block.input);
 
-          // function_call_arguments.delta
-          emit("response.function_call_arguments.delta", {
-            type: "response.function_call_arguments.delta",
-            item_id: itemId,
-            output_index: outputIndex,
-            delta: args,
-          });
+            // output_item.added
+            emit("response.output_item.added", {
+              type: "response.output_item.added",
+              output_index: outputIndex,
+              item: {
+                type: "function_call",
+                id: itemId,
+                call_id: callId,
+                name: block.name,
+                arguments: "",
+                status: "in_progress",
+              },
+            });
 
-          // function_call_arguments.done
-          emit("response.function_call_arguments.done", {
-            type: "response.function_call_arguments.done",
-            item_id: itemId,
-            output_index: outputIndex,
-            arguments: args,
-          });
+            // function_call_arguments.delta
+            emit("response.function_call_arguments.delta", {
+              type: "response.function_call_arguments.delta",
+              item_id: itemId,
+              output_index: outputIndex,
+              delta: args,
+            });
 
-          // output_item.done
-          emit("response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: callId,
-              name: block.name,
+            // function_call_arguments.done
+            emit("response.function_call_arguments.done", {
+              type: "response.function_call_arguments.done",
+              item_id: itemId,
+              output_index: outputIndex,
               arguments: args,
-              status: "completed",
-            },
-          });
+            });
 
-          outputIndex++;
+            // output_item.done
+            emit("response.output_item.done", {
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item: {
+                type: "function_call",
+                id: itemId,
+                call_id: callId,
+                name: block.name,
+                arguments: args,
+                status: "completed",
+              },
+            });
+
+            outputIndex++;
+          }
         }
       }
 
@@ -1138,32 +1441,38 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
           ...(status === "incomplete"
             ? { incomplete_details: incompleteDetails(resp.stopReason) }
             : {}),
-          output: resp.content
-            .map((block, i) => {
-              if (block.type === "text") {
-                return {
-                  type: "message",
-                  id: `msg_${respId}_${i}`,
-                  role: "assistant",
-                  status: "completed",
-                  content: [
-                    { type: "output_text", text: block.text, annotations: [] },
-                  ],
-                };
-              }
-              if (block.type === "tool_use") {
-                return {
-                  type: "function_call",
-                  id: `fc_${block.id}`,
-                  call_id: block.id,
-                  name: block.name,
-                  arguments: JSON.stringify(block.input),
-                  status: "completed",
-                };
-              }
-              return null;
-            })
-            .filter(Boolean),
+          output:
+            resp.rawOutputItems ??
+            resp.content
+              .map((block, i) => {
+                if (block.type === "text") {
+                  return {
+                    type: "message",
+                    id: `msg_${respId}_${i}`,
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      {
+                        type: "output_text",
+                        text: block.text,
+                        annotations: [],
+                      },
+                    ],
+                  };
+                }
+                if (block.type === "tool_use") {
+                  return {
+                    type: "function_call",
+                    id: `fc_${block.id}`,
+                    call_id: block.id,
+                    name: block.name,
+                    arguments: JSON.stringify(block.input),
+                    status: "completed",
+                  };
+                }
+                return null;
+              })
+              .filter(Boolean),
           usage: responsesUsage(usage),
         },
       });

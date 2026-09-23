@@ -161,6 +161,7 @@ export const Session: Component = () => {
           loadingOlder={reader.loadingOlder()}
           olderError={reader.olderError()}
           onLoadOlder={reader.loadOlder}
+          onSearchWhole={reader.search}
           status={reader.status()}
           anchorParam={anchorParam()}
           onAnchorChange={(encoded) =>

@@ -12,7 +12,7 @@
  *   - fixture: deterministic replay via UpstreamInterceptor, no real API calls
  *   - live: real API calls through the gateway, LLM-as-judge scoring
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -43,6 +43,7 @@ import { judge } from "./judge";
 import { scoreRetrieval } from "./recall-score";
 import type { EvalLLMClient } from "./llm-backend";
 import { createEvalLLMClient, resolveBackend } from "./llm-backend";
+import { createOwnedRoot, removeOwnedPath } from "../test/helpers/owned-path";
 
 // ---------------------------------------------------------------------------
 // Gateway connection
@@ -54,11 +55,26 @@ export interface GatewayHandle {
   chat(
     requestBody: unknown,
     headers?: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<Response>;
   /** Stop the gateway (fixture mode only). */
   teardown?(): Promise<void>;
   /** True if this is a real gateway (not a stub). */
   isReal?: boolean;
+}
+
+type LiveStartServer = typeof import("../../gateway/src/server").startServer;
+
+interface LiveServer {
+  port: number;
+  stop(): Promise<void>;
+}
+
+export interface LiveGatewayDependencies {
+  startServer?: (config: unknown) => Promise<LiveServer>;
+  loadConfig?: () => unknown;
+  closeDB?: () => void;
+  resetPipelineState?: () => Promise<void>;
 }
 
 /**
@@ -73,7 +89,26 @@ export async function connectGateway(
   config: EvalConfig,
 ): Promise<GatewayHandle> {
   if (config.mode === "fixture") {
-    return startFixtureGateway();
+    const {
+      installOfflineModelsDevDispatcher,
+      uninstallOfflineModelsDevDispatcher,
+    } = await import("../../gateway/test/helpers/models-dev-dispatcher");
+    await installOfflineModelsDevDispatcher();
+    try {
+      const gateway = await startFixtureGateway();
+      const teardown = gateway.teardown;
+      gateway.teardown = async () => {
+        try {
+          await teardown?.();
+        } finally {
+          await uninstallOfflineModelsDevDispatcher();
+        }
+      };
+      return gateway;
+    } catch (error) {
+      await uninstallOfflineModelsDevDispatcher();
+      throw error;
+    }
   }
 
   // Live mode with explicit gateway: connect to it
@@ -84,7 +119,7 @@ export async function connectGateway(
 
     // Verify the gateway is running
     try {
-      const resp = await fetch(`${baseURL}/health`);
+      const resp = await fetch(`${baseURL}/health`, { signal: config.signal });
       if (!resp.ok) {
         throw new Error(`Gateway health check failed: ${resp.status}`);
       }
@@ -98,7 +133,7 @@ export async function connectGateway(
 
     return {
       baseURL,
-      async chat(requestBody, headers) {
+      async chat(requestBody, headers, signal) {
         return fetch(`${baseURL}/v1/messages`, {
           method: "POST",
           headers: {
@@ -108,6 +143,7 @@ export async function connectGateway(
             ...headers,
           },
           body: JSON.stringify(requestBody),
+          signal,
         });
       },
     };
@@ -117,7 +153,7 @@ export async function connectGateway(
   // start an isolated gateway. Otherwise, skip the gateway entirely —
   // questions will be answered via direct LLM calls without Lore processing.
   if (process.env.ANTHROPIC_API_KEY) {
-    return startLiveGateway();
+    return startLiveGateway(undefined, config.signal);
   }
 
   // No gateway available — return a stub that logs warnings
@@ -158,7 +194,7 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
 
   return {
     baseURL: harness.baseURL,
-    async chat(requestBody, headers) {
+    async chat(requestBody, headers, signal) {
       return fetch(`${harness.baseURL}/v1/messages`, {
         method: "POST",
         headers: {
@@ -168,10 +204,11 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
           ...headers,
         },
         body: JSON.stringify(requestBody),
+        signal,
       });
     },
     async teardown() {
-      harness.teardown();
+      await harness.teardown();
     },
   };
 }
@@ -183,45 +220,173 @@ async function startFixtureGateway(): Promise<GatewayHandle> {
  * Uses the same harness infrastructure but does NOT wire in a replay
  * interceptor, so requests go to the real upstream (Anthropic, OpenAI, etc).
  */
-async function startLiveGateway(): Promise<GatewayHandle> {
-  const { unlinkSync, existsSync } = await import("node:fs");
+export async function startLiveGateway(
+  dependencies: LiveGatewayDependencies = {},
+  signal?: AbortSignal,
+): Promise<GatewayHandle> {
+  const previousEnvironment = {
+    LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
+    LORE_DB_PATH: process.env.LORE_DB_PATH,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    LORE_LISTEN_PORT: process.env.LORE_LISTEN_PORT,
+    LORE_IDLE_TIMEOUT: process.env.LORE_IDLE_TIMEOUT,
+    LORE_BATCH_DISABLED: process.env.LORE_BATCH_DISABLED,
+    LORE_DEBUG: process.env.LORE_DEBUG,
+  };
+  const configuredRoot = previousEnvironment.LORE_TEST_DB_ROOT;
+  if (configuredRoot) mkdirSync(configuredRoot, { recursive: true });
+  const configuredRootIdentity = configuredRoot
+    ? lstatSync(configuredRoot, { bigint: true })
+    : undefined;
+  let ownedRoot: Awaited<ReturnType<typeof createOwnedRoot>> | undefined;
+  let dbPath = "";
+  let server: LiveServer | undefined;
+  let closeDB: (() => void) | undefined;
+  let resetPipelineState: (() => Promise<void>) | undefined;
+  let teardownPromise: Promise<void> | undefined;
+  let serverStopped = false;
+  let databaseClosed = false;
+  let pipelineReset = false;
+  let rootRemoved = false;
+  let environmentRestored = false;
 
-  // Create an isolated temp DB
-  const dbPath = `/tmp/lore-eval-live-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
-  process.env.LORE_DB_PATH = dbPath;
+  const restoreEnvironment = (): void => {
+    if (environmentRestored) return;
+    for (const [key, value] of Object.entries(previousEnvironment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    environmentRestored = true;
+  };
+  const teardown = async (): Promise<void> => {
+    const failures: unknown[] = [];
+    if (server && !serverStopped) {
+      try {
+        await server.stop();
+        serverStopped = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 0 && closeDB && !databaseClosed) {
+      try {
+        closeDB();
+        databaseClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 0 && resetPipelineState && !pipelineReset) {
+      try {
+        await resetPipelineState();
+        pipelineReset = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 0 && ownedRoot && !rootRemoved) {
+      try {
+        await removeOwnedPath(ownedRoot);
+        rootRemoved = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 0) {
+      restoreEnvironment();
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "live eval gateway teardown failed");
+    }
+  };
+  const runTeardown = (): Promise<void> => {
+    if (!teardownPromise) {
+      teardownPromise = teardown().catch((error) => {
+        teardownPromise = undefined;
+        throw error;
+      });
+    }
+    return teardownPromise;
+  };
 
-  // Random port
-  const port = 20000 + Math.floor(Math.random() * 30000);
-  process.env.LORE_LISTEN_PORT = String(port);
+  try {
+    signal?.throwIfAborted();
+    ownedRoot = await createOwnedRoot({
+      prefix: "lore-eval-live-",
+      parent: configuredRoot,
+    });
+    if (configuredRoot && configuredRootIdentity) {
+      ownedRoot.parent = {
+        path: configuredRoot,
+        identity: {
+          dev: configuredRootIdentity.dev,
+          ino: configuredRootIdentity.ino,
+        },
+        cleaned: false,
+      };
+    }
+    dbPath = join(ownedRoot.path, "test.db");
+    process.env.LORE_TEST_DB_ROOT = ownedRoot.path;
+    process.env.LORE_DB_PATH = dbPath;
+    process.env.XDG_DATA_HOME = join(ownedRoot.path, "xdg");
+    process.env.LORE_LISTEN_PORT = "0";
+    process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
+    process.env.LORE_BATCH_DISABLED = "1";
+    if (!process.env.LORE_DEBUG) process.env.LORE_DEBUG = "false";
 
-  // Short idle timeout so curation/distillation fires quickly after replay.
-  process.env.LORE_IDLE_TIMEOUT = process.env.LORE_IDLE_TIMEOUT ?? "5";
-  // Disable batch queue — eval needs synchronous LLM calls for /lore:curate.
-  process.env.LORE_BATCH_DISABLED = "1";
+    const importedServer = dependencies.startServer
+      ? undefined
+      : await import("../../gateway/src/server");
+    const importedConfig = dependencies.loadConfig
+      ? undefined
+      : await import("../../gateway/src/config");
+    const importedCore = dependencies.closeDB
+      ? undefined
+      : await import("@loreai/core");
+    const importedPipeline = dependencies.resetPipelineState
+      ? undefined
+      : await import("../../gateway/src/pipeline");
+    const startServer =
+      dependencies.startServer ??
+      ((config: unknown) =>
+        importedServer!.startServer(config as Parameters<LiveStartServer>[0]));
+    const loadConfig = dependencies.loadConfig ?? importedConfig!.loadConfig;
+    closeDB = dependencies.closeDB ?? importedCore!.close;
+    resetPipelineState =
+      dependencies.resetPipelineState ?? importedPipeline!.resetPipelineState;
 
-  if (!process.env.LORE_DEBUG) {
-    process.env.LORE_DEBUG = "false";
+    signal?.throwIfAborted();
+    closeDB();
+    await resetPipelineState();
+    server = await startServer(loadConfig());
+    signal?.throwIfAborted();
+  } catch (error) {
+    try {
+      await teardown();
+    } catch (firstCleanupError) {
+      try {
+        await teardown();
+      } catch (secondCleanupError) {
+        const cleanupError = new AggregateError(
+          [firstCleanupError, secondCleanupError],
+          "live eval gateway cleanup retries failed",
+        );
+        throw new AggregateError(
+          [error, cleanupError],
+          "live eval gateway startup and cleanup failed",
+        );
+      }
+      throw error;
+    }
+    throw error;
   }
 
-  // Dynamic imports so env vars take effect
-  const { startServer } = await import("../../gateway/src/server");
-  const { loadConfig } = await import("../../gateway/src/config");
-  const { close: closeDB } = await import("@loreai/core");
-  const { resetPipelineState } = await import("../../gateway/src/pipeline");
-
-  closeDB();
-  await resetPipelineState();
-
-  // NO replay interceptor — requests go to real upstream
-  const config = loadConfig();
-  const server = await startServer(config);
   const baseURL = `http://127.0.0.1:${server.port}`;
-
   console.log(`  Live gateway started at ${baseURL} (db: ${dbPath})`);
-
   return {
     baseURL,
-    async chat(requestBody, headers) {
+    isReal: true,
+    async chat(requestBody, headers, signal) {
       return fetch(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: {
@@ -231,22 +396,10 @@ async function startLiveGateway(): Promise<GatewayHandle> {
           ...headers,
         },
         body: JSON.stringify(requestBody),
+        signal,
       });
     },
-    async teardown() {
-      server.stop();
-      closeDB();
-      await resetPipelineState();
-      // Clean up DB files
-      for (const suffix of ["", "-shm", "-wal"]) {
-        const file = `${dbPath}${suffix}`;
-        try {
-          if (existsSync(file)) unlinkSync(file);
-        } catch {
-          // best-effort
-        }
-      }
-    },
+    teardown: runTeardown,
   };
 }
 
@@ -346,6 +499,7 @@ export async function replaySession(
     stopAfterTurn?: number;
     sessionHeaders?: Record<string, string>;
     model?: string;
+    signal?: AbortSignal;
   },
 ): Promise<ReplayResult> {
   const turns = transcript.turns;
@@ -388,7 +542,7 @@ export async function replaySession(
       stream: false,
     };
 
-    const resp = await gateway.chat(requestBody, headers);
+    const resp = await gateway.chat(requestBody, headers, options?.signal);
     const data = (await resp.json()) as {
       id?: string;
       usage?: {
@@ -536,13 +690,14 @@ async function getBaselineContext(
   mode: BaselineMode,
   turns: ConversationTurn[],
   llm?: EvalLLMClient,
+  signal?: AbortSignal,
 ): Promise<string> {
   switch (mode) {
     case "tail-window":
       return tailWindowBaseline(turns);
     case "compaction": {
       if (!llm) return tailWindowBaseline(turns); // fallback in fixture mode
-      return compactionBaseline(turns, 80_000, llm);
+      return compactionBaseline(turns, 80_000, llm, 200_000, signal);
     }
     case "raw":
       return rawBaseline(turns);
@@ -575,7 +730,26 @@ async function askQuestionViaGateway(
   gateway: GatewayHandle,
   model: string,
   loreContext?: string,
+  signal?: AbortSignal,
 ): Promise<{ hypothesis: string; tokens: TokenUsage; recallInvoked: boolean }> {
+  const waitForDelay = (delayMs: number): Promise<void> => {
+    signal?.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        reject(signal?.reason);
+      };
+      timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, delayMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  };
+
   // When loreContext is provided, include it in the user message so the model
   // has the distillation observations and raw conversation context (mimicking
   // real Lore sessions where the gradient context manager provides these).
@@ -602,14 +776,17 @@ async function askQuestionViaGateway(
     // Anthropic's org limit is often 30K-80K tokens/min; each QA call
     // with LTM-injected system prompt can be 8K+ tokens.
     if (attempt > 0) {
+      signal?.throwIfAborted();
       const backoff = 30_000 * 2 ** (attempt - 1);
       console.warn(`  Gateway rate limited, retrying in ${backoff / 1000}s...`);
-      await new Promise((r) => setTimeout(r, backoff));
+      await waitForDelay(backoff);
     }
 
-    const resp = await gateway.chat(requestBody, {
-      "x-lore-no-store": "true",
-    });
+    const resp = await gateway.chat(
+      requestBody,
+      { "x-lore-no-store": "true" },
+      signal,
+    );
     const recallInvoked = resp.headers.get("x-lore-recall-invoked") === "true";
     const data = (await resp.json()) as {
       content?: Array<{ type: string; text?: string }>;
@@ -663,6 +840,7 @@ async function askQuestion(
   context: string,
   mode: BaselineMode,
   llm: EvalLLMClient,
+  signal?: AbortSignal,
 ): Promise<{ hypothesis: string; tokens: TokenUsage }> {
   const qaMode = mode.startsWith("lore") ? "lore" : "baseline";
   const prompt = buildQAPrompt(context, question, qaMode);
@@ -670,6 +848,7 @@ async function askQuestion(
   const result = await llm.prompt(QA_SYSTEM, prompt, {
     maxTokens: 2048,
     temperature: 0,
+    signal,
   });
 
   return {
@@ -737,7 +916,7 @@ async function replaySessionWithFixtures(
     if (interceptor) setUpstreamInterceptor(interceptor);
 
     try {
-      return await replaySession(session, gateway);
+      return await replaySession(session, gateway, { signal: config.signal });
     } finally {
       stopRecording();
       setUpstreamInterceptor(undefined);
@@ -769,7 +948,7 @@ async function replaySessionWithFixtures(
     setUpstreamInterceptor(getReplayInterceptor(fixtures));
 
     try {
-      return await replaySession(session, gateway);
+      return await replaySession(session, gateway, { signal: config.signal });
     } finally {
       setUpstreamInterceptor(undefined);
     }
@@ -789,7 +968,7 @@ async function replaySessionWithFixtures(
   setUpstreamInterceptor(scriptedInterceptor);
 
   try {
-    return await replaySession(session, gateway);
+    return await replaySession(session, gateway, { signal: config.signal });
   } finally {
     setUpstreamInterceptor(undefined);
   }
@@ -881,6 +1060,7 @@ export async function runScenario(
   gateway: GatewayHandle,
   llm?: EvalLLMClient,
 ): Promise<EvalResult[]> {
+  config.signal?.throwIfAborted();
   const results: EvalResult[] = [];
   const baselines = config.baselines.filter((b) =>
     scenario.applicableBaselines.includes(b),
@@ -900,26 +1080,32 @@ export async function runScenario(
     if (gateway.isReal !== false) {
       for (const session of scenario.sessions) {
         try {
+          config.signal?.throwIfAborted();
           await replaySessionWithFixtures(session, scenario, gateway, config);
 
           // Force synchronous curation via slash command.
           // This ensures knowledge entries are created/updated before
           // the next session starts — critical for preference evolution
           // where Session 2's curation must see Session 1's entries.
-          const curateResp = await gateway.chat({
-            model: config.model,
-            system: "",
-            messages: [{ role: "user", content: "/lore:curate" }],
-            tools: [],
-            max_tokens: 256,
-            stream: false,
-          });
+          const curateResp = await gateway.chat(
+            {
+              model: config.model,
+              system: "",
+              messages: [{ role: "user", content: "/lore:curate" }],
+              tools: [],
+              max_tokens: 256,
+              stream: false,
+            },
+            undefined,
+            config.signal,
+          );
           const curateData = (await curateResp.json()) as {
             content?: Array<{ text?: string }>;
           };
           const curateText = curateData.content?.[0]?.text ?? "";
           if (curateText) console.log(`  ${curateText}`);
         } catch (err) {
+          config.signal?.throwIfAborted();
           console.warn(
             `  Warning: replay failed for session ${session.id}: ${err instanceof Error ? err.message : err}`,
           );
@@ -940,6 +1126,7 @@ export async function runScenario(
             ` (available=${embedding.isAvailable()})`,
         );
       } catch (err) {
+        config.signal?.throwIfAborted();
         console.warn("  Warning: post-replay embedding backfill failed:", err);
       }
     }
@@ -949,6 +1136,7 @@ export async function runScenario(
 
     // Run each baseline — skip gateway-dependent baselines when no gateway
     for (const mode of baselines) {
+      config.signal?.throwIfAborted();
       // Gateway-based baselines require a real gateway with Lore processing.
       // Without it, distillation/LTM/recall haven't run, so testing "lore"
       // mode would just test an empty memory — not useful.
@@ -964,7 +1152,12 @@ export async function runScenario(
         continue;
       }
 
-      const context = await getBaselineContext(mode, allTurns, llm);
+      const context = await getBaselineContext(
+        mode,
+        allTurns,
+        llm,
+        config.signal,
+      );
 
       // For gateway-based baselines, build the Lore context once per baseline
       // (distillation + raw tail), not per question — it's the same for all questions.
@@ -979,6 +1172,7 @@ export async function runScenario(
 
       // Ask each question
       for (const q of scenario.questions) {
+        config.signal?.throwIfAborted();
         let hypothesis: string;
         let tokens: TokenUsage;
         let recallInvoked = false;
@@ -1001,19 +1195,29 @@ export async function runScenario(
             gateway,
             config.model,
             loreContext,
+            config.signal,
           );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
           recallInvoked = answer.recallInvoked;
         } else {
           // Non-gateway baselines: ask via direct LLM with rendered context
-          const answer = await askQuestion(q.question, context, mode, llm);
+          const answer = await askQuestion(
+            q.question,
+            context,
+            mode,
+            llm,
+            config.signal,
+          );
           hypothesis = answer.hypothesis;
           tokens = answer.tokens;
         }
 
         // Score with the judge (end-task quality)
-        const judgeResult = await judge(q, hypothesis, llm, { recallInvoked });
+        const judgeResult = await judge(q, hypothesis, llm, {
+          recallInvoked,
+          signal: config.signal,
+        });
 
         // Score retrieval quality objectively (justifier-free), independent of
         // the judge. Present only when the question declares ground-truth
@@ -1073,10 +1277,11 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
   const llm =
     config.mode === "live" ? createEvalLLMClient(resolveBackend()) : undefined;
 
-  const gateway = await connectGateway(config);
   const allResults: EvalResult[] = [];
+  let gateway: GatewayHandle | undefined;
 
   try {
+    gateway = await connectGateway(config);
     // Import scenario modules for selected dimensions, filtered by --scenarios
     let scenarioModules = await loadScenarios(config.dimensions);
     if (config.scenarios?.length) {
@@ -1105,7 +1310,7 @@ export async function runEval(config: EvalConfig): Promise<EvalResult[]> {
       );
     }
   } finally {
-    if (gateway.teardown) await gateway.teardown();
+    if (gateway?.teardown) await gateway.teardown();
   }
 
   return allResults;

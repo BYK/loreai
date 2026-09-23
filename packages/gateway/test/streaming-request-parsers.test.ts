@@ -14,6 +14,8 @@ import {
 } from "../src/translate/openai";
 import { STREAMING_PARSE_SPOOL_BYTES } from "../src/translate/streaming-request";
 import { createHarness, type Harness } from "./helpers/harness";
+import { digestChain } from "../src/chain-digest";
+import { encodeContextBoundary } from "../src/context-boundary";
 
 const headers = { authorization: "Bearer test" };
 
@@ -186,6 +188,153 @@ describe("streaming request parsers", () => {
         false,
       ),
     ).resolves.toEqual(parseGeminiRequest(body, headers, "gemini", false));
+  });
+
+  test("Anthropic resumes from a suffix-only messages array", async () => {
+    const prefixBody = {
+      model: "claude",
+      messages: [
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" },
+      ],
+    };
+    const prefix = parseAnthropicRequest(prefixBody, headers);
+    const source = prefix.sourceInput!;
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: source.itemCount,
+      inputDigest: source.inputDigest,
+      retainedItems: source.retainedItems,
+      sourceMessages: prefix.messages.length,
+      sourceDigest: digestChain(prefix.messages),
+    });
+    const resumed = await parseAnthropicRequestChunks(
+      chunks(
+        encoded({
+          model: "claude",
+          messages: [{ role: "user", content: "new question" }],
+        }),
+      ),
+      { ...headers, "x-lore-context-boundary": boundary },
+    );
+
+    expect(resumed.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "new question" }] },
+    ]);
+    expect(resumed.sourceInput).toMatchObject({
+      itemCount: 3,
+      sourcePrefix: {
+        messageCount: 2,
+        sourceDigest: digestChain(prefix.messages),
+      },
+    });
+  });
+
+  test("rejects a continuation that appends no source items", async () => {
+    const prefixBody = {
+      model: "claude",
+      messages: [{ role: "user", content: "old question" }],
+    };
+    const prefix = parseAnthropicRequest(prefixBody, headers);
+    const source = prefix.sourceInput;
+    if (!source) throw new Error("missing source input metadata");
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "anthropic",
+      inputItems: source.itemCount,
+      inputDigest: source.inputDigest,
+      retainedItems: 0,
+      sourceMessages: prefix.messages.length,
+      sourceDigest: digestChain(prefix.messages),
+    });
+
+    await expect(
+      parseAnthropicRequestChunks(
+        chunks(encoded({ model: "claude", messages: [] })),
+        { ...headers, "x-lore-context-boundary": boundary },
+      ),
+    ).rejects.toThrow("no new context items");
+  });
+
+  test("OpenAI retains its system preamble while resuming from a suffix", async () => {
+    const system = { role: "system", content: "stable system" };
+    const prefixBody = {
+      model: "gpt",
+      messages: [
+        system,
+        { role: "user", content: "old question" },
+        { role: "assistant", content: "old answer" },
+      ],
+    };
+    const prefix = parseOpenAIRequest(prefixBody, headers);
+    const source = prefix.sourceInput!;
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "openai",
+      inputItems: source.itemCount,
+      inputDigest: source.inputDigest,
+      retainedItems: source.retainedItems,
+      sourceMessages: prefix.messages.length,
+      sourceDigest: digestChain(prefix.messages),
+    });
+    const resumed = await parseOpenAIRequestChunks(
+      chunks(
+        encoded({
+          model: "gpt",
+          messages: [system, { role: "user", content: "new question" }],
+        }),
+      ),
+      { ...headers, "x-lore-context-boundary": boundary },
+    );
+
+    expect(resumed.system).toBe("stable system");
+    expect(resumed.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "new question" }] },
+    ]);
+    expect(resumed.sourceInput).toMatchObject({
+      itemCount: 4,
+      retainedItems: 1,
+      sourcePrefix: { messageCount: 2 },
+    });
+  });
+
+  test("Gemini resumes from a suffix-only contents array", async () => {
+    const prefixBody = {
+      contents: [
+        { role: "user", parts: [{ text: "old question" }] },
+        { role: "model", parts: [{ text: "old answer" }] },
+      ],
+    };
+    const prefix = parseGeminiRequest(prefixBody, headers, "gemini", false);
+    const source = prefix.sourceInput!;
+    const boundary = encodeContextBoundary({
+      v: 1,
+      protocol: "gemini",
+      inputItems: source.itemCount,
+      inputDigest: source.inputDigest,
+      retainedItems: source.retainedItems,
+      sourceMessages: prefix.messages.length,
+      sourceDigest: digestChain(prefix.messages),
+    });
+    const resumed = await parseGeminiRequestChunks(
+      chunks(
+        encoded({
+          contents: [{ role: "user", parts: [{ text: "new question" }] }],
+        }),
+      ),
+      { ...headers, "x-lore-context-boundary": boundary },
+      "gemini",
+      false,
+    );
+
+    expect(resumed.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "new question" }] },
+    ]);
+    expect(resumed.sourceInput).toMatchObject({
+      itemCount: 3,
+      sourcePrefix: { messageCount: 2 },
+    });
   });
 
   test("duplicate stream keys use the final array", async () => {

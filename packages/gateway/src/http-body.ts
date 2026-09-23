@@ -42,15 +42,32 @@ import { cancelAndReleaseReader } from "./stream/anthropic";
 export const MAX_HTTP_REQUEST_COMPRESSED_BYTES = 32 * 1024 * 1024;
 /** Maximum UTF-8/JSON bytes produced after Content-Encoding decoding. */
 export const MAX_HTTP_REQUEST_DECOMPRESSED_BYTES = 32 * 1024 * 1024;
+/** Higher bound for request bodies already resident in a trusted embedding host. */
+export const MAX_EMBEDDED_REQUEST_BODY_BYTES = 128 * 1024 * 1024;
+export const EMBEDDED_REQUEST_BODY_LIMITS = {
+  compressedBytes: MAX_EMBEDDED_REQUEST_BODY_BYTES,
+  decompressedBytes: MAX_EMBEDDED_REQUEST_BODY_BYTES,
+} as const;
+
+export type RequestBodyLimits = {
+  compressedBytes?: number;
+  decompressedBytes?: number;
+};
 
 export class HttpRequestBodyTooLargeError extends Error {
-  constructor(phase: "compressed" | "decompressed") {
-    const limit =
-      phase === "compressed"
-        ? MAX_HTTP_REQUEST_COMPRESSED_BYTES
-        : MAX_HTTP_REQUEST_DECOMPRESSED_BYTES;
+  readonly phase: "compressed" | "decompressed";
+  readonly limit: number;
+
+  constructor(
+    phase: "compressed" | "decompressed",
+    limit = phase === "compressed"
+      ? MAX_HTTP_REQUEST_COMPRESSED_BYTES
+      : MAX_HTTP_REQUEST_DECOMPRESSED_BYTES,
+  ) {
     super(`HTTP request ${phase} body exceeded ${limit} byte limit`);
     this.name = "HttpRequestBodyTooLargeError";
+    this.phase = phase;
+    this.limit = limit;
   }
 }
 
@@ -66,6 +83,7 @@ function outputLimitError(error: unknown): boolean {
 async function readRequestBodyBytes(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal,
+  maxBytes = MAX_HTTP_REQUEST_COMPRESSED_BYTES,
 ): Promise<Buffer> {
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
@@ -84,8 +102,8 @@ async function readRequestBodyBytes(
       }
       if (!value) continue;
       total += value.byteLength;
-      if (total > MAX_HTTP_REQUEST_COMPRESSED_BYTES) {
-        throw new HttpRequestBodyTooLargeError("compressed");
+      if (total > maxBytes) {
+        throw new HttpRequestBodyTooLargeError("compressed", maxBytes);
       }
       chunks.push(value);
     }
@@ -106,6 +124,7 @@ async function readRequestBodyBytes(
 async function* requestBodyChunks(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal,
+  maxBytes = MAX_HTTP_REQUEST_COMPRESSED_BYTES,
 ): AsyncGenerator<Uint8Array> {
   const reader = body.getReader();
   let completed = false;
@@ -123,8 +142,8 @@ async function* requestBodyChunks(
       }
       if (!value) continue;
       total += value.byteLength;
-      if (total > MAX_HTTP_REQUEST_COMPRESSED_BYTES) {
-        throw new HttpRequestBodyTooLargeError("compressed");
+      if (total > maxBytes) {
+        throw new HttpRequestBodyTooLargeError("compressed", maxBytes);
       }
       yield value;
     }
@@ -220,6 +239,7 @@ async function decompressRequestBody(
   bytes: Uint8Array,
   encoding: string,
   signal: AbortSignal,
+  maxBytes = MAX_HTTP_REQUEST_DECOMPRESSED_BYTES,
 ): Promise<Buffer> {
   signal.throwIfAborted();
   const decoder = (() => {
@@ -255,8 +275,8 @@ async function decompressRequestBody(
       signal.throwIfAborted();
       const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
       total += chunk.byteLength;
-      if (total > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
-        throw new HttpRequestBodyTooLargeError("decompressed");
+      if (total > maxBytes) {
+        throw new HttpRequestBodyTooLargeError("decompressed", maxBytes);
       }
       chunks.push(chunk);
     }
@@ -266,7 +286,7 @@ async function decompressRequestBody(
     signal.throwIfAborted();
     if (error instanceof HttpRequestBodyTooLargeError) throw error;
     if (outputLimitError(error)) {
-      throw new HttpRequestBodyTooLargeError("decompressed");
+      throw new HttpRequestBodyTooLargeError("decompressed", maxBytes);
     }
     throw error;
   } finally {
@@ -332,11 +352,17 @@ async function* decodedCompressedRequestChunks(
   body: ReadableStream<Uint8Array>,
   encoding: string,
   signal: AbortSignal,
+  limits: RequestBodyLimits = {},
 ): AsyncGenerator<Uint8Array> {
+  const compressedLimit =
+    limits.compressedBytes ?? MAX_HTTP_REQUEST_COMPRESSED_BYTES;
+  const decompressedLimit =
+    limits.decompressedBytes ?? MAX_HTTP_REQUEST_DECOMPRESSED_BYTES;
   const decoderAbort = new AbortController();
   const source = requestBodyChunks(
     body,
     AbortSignal.any([signal, decoderAbort.signal]),
+    compressedLimit,
   );
   const replayChunks: Uint8Array[] = [];
   const header = new Uint8Array(2);
@@ -403,8 +429,11 @@ async function* decodedCompressedRequestChunks(
         signal.throwIfAborted();
         const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
         total += chunk.byteLength;
-        if (total > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
-          throw new HttpRequestBodyTooLargeError("decompressed");
+        if (total > decompressedLimit) {
+          throw new HttpRequestBodyTooLargeError(
+            "decompressed",
+            decompressedLimit,
+          );
         }
         yield chunk;
       }
@@ -419,7 +448,10 @@ async function* decodedCompressedRequestChunks(
       signal.throwIfAborted();
       if (error instanceof HttpRequestBodyTooLargeError) throw error;
       if (outputLimitError(error)) {
-        throw new HttpRequestBodyTooLargeError("decompressed");
+        throw new HttpRequestBodyTooLargeError(
+          "decompressed",
+          decompressedLimit,
+        );
       }
       throw error;
     } finally {
@@ -443,15 +475,27 @@ async function* decodedCompressedRequestChunks(
 export async function* decodedRequestChunks(
   req: Request,
   signal: AbortSignal = req.signal,
+  limits: RequestBodyLimits = {},
 ): AsyncGenerator<Uint8Array> {
+  const compressedLimit =
+    limits.compressedBytes ?? MAX_HTTP_REQUEST_COMPRESSED_BYTES;
+  const decompressedLimit =
+    limits.decompressedBytes ?? MAX_HTTP_REQUEST_DECOMPRESSED_BYTES;
   const enc = normalizeRequestEncoding(req.headers.get("content-encoding"));
   if (!req.body) return;
   if (!enc) {
     let total = 0;
-    for await (const chunk of requestBodyChunks(req.body, signal)) {
+    for await (const chunk of requestBodyChunks(
+      req.body,
+      signal,
+      compressedLimit,
+    )) {
       total += chunk.byteLength;
-      if (total > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
-        throw new HttpRequestBodyTooLargeError("decompressed");
+      if (total > decompressedLimit) {
+        throw new HttpRequestBodyTooLargeError(
+          "decompressed",
+          decompressedLimit,
+        );
       }
       yield chunk;
     }
@@ -460,7 +504,7 @@ export async function* decodedRequestChunks(
   if (!isSupportedEncoding(enc)) {
     throw new Error(`Unsupported Content-Encoding: ${enc}`);
   }
-  yield* decodedCompressedRequestChunks(req.body, enc, signal);
+  yield* decodedCompressedRequestChunks(req.body, enc, signal, limits);
 }
 
 /**
@@ -498,13 +542,18 @@ export function compressBody(
 export async function decodeRequestBody(
   req: Request,
   signal: AbortSignal = req.signal,
+  limits: RequestBodyLimits = {},
 ): Promise<string> {
+  const compressedLimit =
+    limits.compressedBytes ?? MAX_HTTP_REQUEST_COMPRESSED_BYTES;
+  const decompressedLimit =
+    limits.decompressedBytes ?? MAX_HTTP_REQUEST_DECOMPRESSED_BYTES;
   const enc = normalizeRequestEncoding(req.headers.get("content-encoding"));
   if (!enc) {
     if (!req.body) return "";
-    const bytes = await readRequestBodyBytes(req.body, signal);
-    if (bytes.byteLength > MAX_HTTP_REQUEST_DECOMPRESSED_BYTES) {
-      throw new HttpRequestBodyTooLargeError("decompressed");
+    const bytes = await readRequestBodyBytes(req.body, signal, compressedLimit);
+    if (bytes.byteLength > decompressedLimit) {
+      throw new HttpRequestBodyTooLargeError("decompressed", decompressedLimit);
     }
     return bytes.toString("utf8");
   }
@@ -512,8 +561,13 @@ export async function decodeRequestBody(
     throw new Error(`Unsupported Content-Encoding: ${enc}`);
   }
   if (!req.body) return "";
-  const bytes = await readRequestBodyBytes(req.body, signal);
-  const decompressed = await decompressRequestBody(bytes, enc, signal);
+  const bytes = await readRequestBodyBytes(req.body, signal, compressedLimit);
+  const decompressed = await decompressRequestBody(
+    bytes,
+    enc,
+    signal,
+    decompressedLimit,
+  );
   signal.throwIfAborted();
   return decompressed.toString("utf8");
 }

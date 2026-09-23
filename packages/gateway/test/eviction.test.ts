@@ -47,6 +47,7 @@ function makeConfig(overrides?: Partial<GatewayConfig>): GatewayConfig {
     idleTimeoutSeconds: 60,
     sessionEvictionTimeoutSeconds: 1800,
     debug: false,
+    exposeProviderDiagnostics: false,
     hostedMode: false,
     remoteGateway: false,
     upstreamExtraHeaders: {},

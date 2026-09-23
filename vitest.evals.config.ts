@@ -3,6 +3,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["packages/core/eval/**/*.eval.ts"],
+    setupFiles: ["./packages/core/eval/setup.ts"],
+    globalSetup: ["./packages/core/test/global-setup.ts"],
     // Evals are slow — generous timeouts for gateway startup, session replay,
     // and multi-pass compaction at 2.3M tokens.
     testTimeout: 600_000, // 10 min per test
@@ -11,5 +13,10 @@ export default defineConfig({
     // Single-threaded — evals share a gateway process and temp DB.
     pool: "forks",
     poolOptions: { forks: { singleFork: true } },
+    env: {
+      NODE_ENV: "test",
+      SENTRY_ENABLED: "0",
+      LORE_DEBUG: "0",
+    },
   },
 });

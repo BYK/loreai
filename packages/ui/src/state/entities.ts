@@ -252,13 +252,46 @@ export function createEntitiesState({ client, repo, tracked }: EntitiesDeps) {
       setRebuild({
         phase: "error",
         dryRun: current.dryRun,
-        external: false,
+        external: current.external,
         error,
       });
+      return;
     }
-    // The rebuild POST resolves with `cancelled: true` when it notices; for
-    // an externally-started rebuild there is nothing to await — flip back so
-    // the next status check decides.
+
+    // For a rebuild started here, the POST response will report its terminal
+    // result. Keep the existing running state while it catches up. An external
+    // rebuild has no such response, so poll until the server confirms it stopped.
+    if (!current.external) {
+      setRebuild((r) =>
+        r.phase === "cancelling" ? { ...r, phase: "running" } : r,
+      );
+      return;
+    }
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const { active } = await tracked(() => client.getEntityRebuildStatus());
+        if (!active) {
+          setRebuild((r) =>
+            r.phase === "cancelling"
+              ? { phase: "idle", dryRun: false, external: false }
+              : r,
+          );
+          return;
+        }
+      } catch {
+        // Keep the running state if cancellation cannot be confirmed so the
+        // operator can retry rather than accidentally start another rebuild.
+        break;
+      }
+      if (attempt < 19) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    // If the operation is still active (or status could not be read), keep it
+    // visible and let the user retry cancellation; never leave it stuck in
+    // the disabled "cancelling" state.
     setRebuild((r) =>
       r.phase === "cancelling" ? { ...r, phase: "running" } : r,
     );

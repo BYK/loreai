@@ -934,6 +934,101 @@ describe("accumulateResponsesSSEStream", () => {
     ).rejects.toThrow("malformed Responses stream event");
   });
 
+  test("public validation does not treat function_call_output references as new calls", async () => {
+    const result = await accumulateResponsesSSEStream(
+      buildSSEResponse([
+        {
+          event: "response.output_item.added",
+          data: {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_parallel",
+              call_id: "call_parallel",
+              name: "read",
+              arguments: "{}",
+            },
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_parallel",
+              call_id: "call_parallel",
+              name: "read",
+              arguments: "{}",
+              status: "completed",
+            },
+          },
+        },
+        {
+          event: "response.output_item.added",
+          data: {
+            type: "response.output_item.added",
+            output_index: 1,
+            item: {
+              type: "function_call_output",
+              id: "fco_parallel",
+              call_id: "call_parallel",
+              output: "file contents",
+            },
+          },
+        },
+        {
+          event: "response.output_item.done",
+          data: {
+            type: "response.output_item.done",
+            output_index: 1,
+            item: {
+              type: "function_call_output",
+              id: "fco_parallel",
+              call_id: "call_parallel",
+              output: "file contents",
+              status: "completed",
+            },
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: {
+              id: "resp_parallel_output",
+              model: "gpt-4o",
+              status: "completed",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_parallel",
+                  call_id: "call_parallel",
+                  name: "read",
+                  arguments: "{}",
+                  status: "completed",
+                },
+                {
+                  type: "function_call_output",
+                  id: "fco_parallel",
+                  call_id: "call_parallel",
+                  output: "file contents",
+                  status: "completed",
+                },
+              ],
+            },
+          },
+        },
+      ]),
+      { validation: "public", stopAtTerminal: true },
+    );
+
+    expect(result.stopReason).toBe("tool_use");
+    expect(result.rawOutputItems).toHaveLength(2);
+  });
+
   test.each(["item-first", "call-first"])(
     "public validation rejects cross-namespace identity aliases (%s)",
     async (order) => {
@@ -3899,7 +3994,7 @@ describe("streamResponsesPassthrough", () => {
       () => {},
       undefined,
       "public",
-      abort.signal,
+      { signal: abort.signal },
     );
     await expect(downstream.text()).rejects.toMatchObject({
       name: "TimeoutError",
@@ -3947,7 +4042,7 @@ describe("streamResponsesPassthrough", () => {
       () => {},
       undefined,
       "public",
-      abort.signal,
+      { signal: abort.signal },
     );
     await new Promise((resolve) => setImmediate(resolve));
     abort.abort(new DOMException("deadline", "TimeoutError"));

@@ -580,6 +580,26 @@ describe("startServer configuration", () => {
     }
   });
 
+  test("a failed stop can be retried against the live listener", async () => {
+    let closeAttempts = 0;
+    const s = await startServer(makeConfig(), {
+      closeServer: async (boundServer) => {
+        closeAttempts++;
+        if (closeAttempts === 1) throw new Error("intentional close failure");
+        await new Promise<void>((resolve, reject) => {
+          boundServer.close((error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+      },
+    });
+
+    await expect(s.stop()).rejects.toThrow("intentional close failure");
+    await s.stop();
+    expect(closeAttempts).toBe(2);
+  });
+
   // Regression: a configured host that isn't assigned to any local interface
   // (e.g. a Tailscale IP from a tailnet you've left) used to fail the whole
   // bind with EADDRNOTAVAIL, which startGateway() then misreported as a port

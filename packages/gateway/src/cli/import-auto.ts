@@ -151,6 +151,7 @@ export async function maybeAutoImport(
     },
     resolveAuth,
     resolveModel(),
+    { hostedMode: gatewayConfig.hostedMode },
   );
 
   const job = (authedProviderID?: string) => {

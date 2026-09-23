@@ -5,9 +5,64 @@ import { log } from "@loreai/core";
 import {
   gatewayAccessHeadersForRemote,
   installEmbeddedGatewaySigtermHandler,
+  isLoopbackUrl,
+  prepareLocalUiAssets,
   shouldForwardUpstreamExtraHeader,
   surfaceGatewayUnavailable,
 } from "../src/internal";
+
+const gatewayMock = vi.hoisted(() => ({
+  prepareSourceUiAssets: vi.fn(),
+}));
+
+vi.mock("@loreai/gateway", () => gatewayMock);
+
+describe("source UI adapter bridge", () => {
+  afterEach(() => {
+    gatewayMock.prepareSourceUiAssets.mockReset();
+  });
+
+  test("logs and returns after a successful source staging result", async () => {
+    gatewayMock.prepareSourceUiAssets.mockResolvedValue({
+      attempted: true,
+      files: 17,
+      buildId: "build-a",
+    });
+
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+    expect(gatewayMock.prepareSourceUiAssets).toHaveBeenCalledOnce();
+  });
+
+  test("tolerates a failed, empty, or unavailable gateway bridge", async () => {
+    gatewayMock.prepareSourceUiAssets.mockResolvedValueOnce({
+      attempted: true,
+      files: 0,
+      buildId: null,
+      error: "temporary failure",
+    });
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+
+    gatewayMock.prepareSourceUiAssets.mockResolvedValueOnce({
+      attempted: true,
+      files: 0,
+      buildId: null,
+    });
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+
+    gatewayMock.prepareSourceUiAssets.mockImplementationOnce(() => {
+      throw new Error("bridge unavailable");
+    });
+    await expect(prepareLocalUiAssets()).resolves.toBeUndefined();
+  });
+
+  test("recognizes loopback URLs but not remote or malformed URLs", () => {
+    expect(isLoopbackUrl("http://127.0.0.1:3207")).toBe(true);
+    expect(isLoopbackUrl("http://[::1]:3207")).toBe(true);
+    expect(isLoopbackUrl("https://localhost/gateway")).toBe(true);
+    expect(isLoopbackUrl("https://lore.example/gateway")).toBe(false);
+    expect(isLoopbackUrl("not a URL")).toBe(false);
+  });
+});
 
 describe("embedded gateway SIGTERM", () => {
   function fakeHost() {

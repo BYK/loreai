@@ -20,12 +20,14 @@ import type {
   GatewayUsage,
 } from "../translate/types";
 import { ZERO_USAGE } from "../translate/types";
-import { asString } from "@loreai/core";
 import {
   buildGeminiResponseBody,
   geminiUsageFromMetadata,
   mapGeminiFinishReason,
   validateGeminiFunctionCallIdentity,
+  geminiPartToBlock,
+  geminiPartThoughtSignature,
+  type GeminiPart,
 } from "../translate/gemini";
 import {
   DEFAULT_MAX_SSE_FRAMES,
@@ -33,9 +35,17 @@ import {
   accumulateSSEResponse,
   cancelAndReleaseReader,
 } from "./anthropic";
+import type { SSEStreamOptions } from "./options";
 import { isRecord, validateGeminiUsageMetadata } from "../usage-validation";
 
-type GeminiPart = Record<string, unknown>;
+function hasGeminiThoughtSignature(block: GatewayContentBlock): boolean {
+  if (block.type === "thinking") return block.signature !== undefined;
+  if (block.type !== "text" && block.type !== "tool_use") return false;
+  return (
+    block.raw !== undefined &&
+    geminiPartThoughtSignature(block.raw) !== undefined
+  );
+}
 
 /**
  * Accumulate an upstream Gemini SSE (`?alt=sse`) response into a
@@ -45,11 +55,9 @@ type GeminiPart = Record<string, unknown>;
  */
 export async function accumulateGeminiSSEStream(
   upstreamResponse: Response,
-  opts: {
-    signal?: AbortSignal;
+  opts: SSEStreamOptions & {
     stopAtTerminal?: boolean;
     strict?: boolean;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
@@ -59,9 +67,7 @@ export async function accumulateGeminiSSEStream(
     throw new Error("Upstream response has no body");
   }
 
-  let textContent = "";
-  let thinkingContent = "";
-  const toolUses: Array<{ id: string; name: string; input: unknown }> = [];
+  const contentBlocks: GatewayContentBlock[] = [];
   let finishReason: unknown;
   let model = "";
   let responseId = "";
@@ -166,6 +172,14 @@ export async function accumulateGeminiSSEStream(
               ) {
                 malformed();
               }
+              if (
+                (part.thoughtSignature !== undefined &&
+                  typeof part.thoughtSignature !== "string") ||
+                (part.thought_signature !== undefined &&
+                  typeof part.thought_signature !== "string")
+              ) {
+                malformed();
+              }
               if (part.functionCall === undefined) continue;
               validateGeminiFunctionCallIdentity(
                 part.functionCall,
@@ -230,26 +244,82 @@ export async function accumulateGeminiSSEStream(
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
+      let frameHasValidPart = false;
       for (const p of parts) {
-        if (typeof p.text === "string") {
-          if (p.text) opts.onSemanticContent?.();
-          // Keep reasoning-summary parts (`thought: true`) out of the visible
-          // answer text — accumulate them into a separate thinking block.
-          if (p.thought === true) thinkingContent += p.text;
-          else textContent += p.text;
-        } else if (p.functionCall && typeof p.functionCall === "object") {
+        const parsedBlock = geminiPartToBlock(p);
+        if (!parsedBlock) continue;
+        const isFirstValidPart = !frameHasValidPart;
+        frameHasValidPart = true;
+        const signature = geminiPartThoughtSignature(p);
+        const block: GatewayContentBlock =
+          signature !== undefined &&
+          (parsedBlock.type === "text" || parsedBlock.type === "tool_use")
+            ? { ...parsedBlock, raw: p }
+            : parsedBlock;
+        if (
+          (block.type === "text" && block.text.length > 0) ||
+          (block.type === "thinking" && block.thinking.length > 0) ||
+          block.type === "tool_use"
+        ) {
           opts.onSemanticContent?.();
-          const fc = p.functionCall as {
-            id?: unknown;
-            name?: unknown;
-            args?: unknown;
-          };
-          const name = asString(fc.name);
-          toolUses.push({
-            id: asString(fc.id) || name,
-            name,
-            input: fc.args ?? {},
-          });
+        }
+
+        // Preserve the provider's part order. Only the first valid part in a
+        // frame can be a continuation of the preceding frame's part. Keep
+        // same-frame parts distinct, and never merge a newly signed part into
+        // an earlier block: each signature belongs to its own provider part.
+        // An unsigned part may continue an earlier signed part, retaining the
+        // signature on the accumulated block.
+        if (block.type === "text") {
+          const previous = contentBlocks.at(-1);
+          if (
+            previous?.type === "text" &&
+            isFirstValidPart &&
+            !hasGeminiThoughtSignature(block)
+          ) {
+            previous.text += block.text;
+            if (previous.raw !== undefined || block.raw !== undefined) {
+              const mergedRaw: Record<string, unknown> = {
+                ...previous.raw,
+                ...block.raw,
+                text: previous.text,
+              };
+              if (block.raw) {
+                const hasCamelSignature = Object.hasOwn(
+                  block.raw,
+                  "thoughtSignature",
+                );
+                const hasSnakeSignature = Object.hasOwn(
+                  block.raw,
+                  "thought_signature",
+                );
+                if (hasCamelSignature && !hasSnakeSignature) {
+                  delete mergedRaw.thought_signature;
+                } else if (hasSnakeSignature && !hasCamelSignature) {
+                  delete mergedRaw.thoughtSignature;
+                }
+              }
+              previous.raw = mergedRaw;
+            }
+          } else {
+            contentBlocks.push(block);
+          }
+        } else if (block.type === "thinking") {
+          const previous = contentBlocks.at(-1);
+          if (
+            previous?.type === "thinking" &&
+            isFirstValidPart &&
+            !hasGeminiThoughtSignature(block)
+          ) {
+            previous.thinking += block.thinking;
+            if (block.signature !== undefined) {
+              previous.signature = block.signature;
+            }
+          } else {
+            contentBlocks.push(block);
+          }
+        } else {
+          contentBlocks.push(block);
         }
       }
       if (first.finishReason != null) finishReason = first.finishReason;
@@ -283,24 +353,12 @@ export async function accumulateGeminiSSEStream(
     throw new Error("missing Gemini finishReason terminal");
   }
 
-  const blocks: GatewayContentBlock[] = [];
-  if (thinkingContent)
-    blocks.push({ type: "thinking", thinking: thinkingContent });
-  if (textContent) blocks.push({ type: "text", text: textContent });
-  for (const tu of toolUses) {
-    blocks.push({
-      type: "tool_use",
-      id: tu.id,
-      name: tu.name,
-      input: tu.input,
-    });
-  }
-
+  const hasToolCall = contentBlocks.some((block) => block.type === "tool_use");
   return {
     id: responseId,
     model,
-    content: blocks,
-    stopReason: mapGeminiFinishReason(finishReason, toolUses.length > 0),
+    content: contentBlocks,
+    stopReason: mapGeminiFinishReason(finishReason, hasToolCall),
     usage,
   };
 }
@@ -314,7 +372,7 @@ export async function accumulateGeminiSSEStream(
  */
 export function translateAnthropicStreamToGemini(
   anthropicResponse: Response,
-  opts: { strict?: boolean; signal?: AbortSignal } = {},
+  opts: SSEStreamOptions & { strict?: boolean } = {},
 ): Response {
   const downstreamAbort = new AbortController();
   const signal = opts.signal
@@ -359,6 +417,7 @@ export function translateAnthropicStreamToGemini(
           try {
             const resp = await accumulateSSEResponse(anthropicResponse, {
               signal,
+              inactivityMs: opts.inactivityMs,
               strict: opts.strict,
               stopAtTerminal: opts.strict,
             });

@@ -27,13 +27,14 @@ import type {
   GatewayUsage,
 } from "./types";
 import { blocksToText, forwardClientHeaders, ZERO_USAGE } from "./types";
-import { asString } from "@loreai/core";
+import { asString, digestChain } from "@loreai/core";
 import { extractAuth } from "../auth";
 import { safeTokenSum, validateGeminiUsageMetadata } from "../usage-validation";
 import {
   parseStreamedRequest,
   type StreamedItemsBuilder,
 } from "./streaming-request";
+import { parseContextBoundary } from "../context-boundary";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -41,7 +42,7 @@ const GEMINI_API_VERSION = "v1beta";
 /** Default max output tokens when a request omits `generationConfig.maxOutputTokens`. */
 const DEFAULT_GEMINI_MAX_TOKENS = 8192;
 
-type GeminiPart = Record<string, unknown>;
+export type GeminiPart = Record<string, unknown>;
 
 export interface GeminiFunctionCall {
   id?: string;
@@ -121,7 +122,13 @@ export function validateGeminiCandidateToolIdentities(
       if (
         (text !== undefined && typeof text !== "string") ||
         (thought !== undefined && typeof thought !== "boolean") ||
-        (text !== undefined && functionCall !== undefined)
+        (text !== undefined && functionCall !== undefined) ||
+        ((part as Record<string, unknown>).thoughtSignature !== undefined &&
+          typeof (part as Record<string, unknown>).thoughtSignature !==
+            "string") ||
+        ((part as Record<string, unknown>).thought_signature !== undefined &&
+          typeof (part as Record<string, unknown>).thought_signature !==
+            "string")
       ) {
         throw new Error(diagnostic);
       }
@@ -150,15 +157,31 @@ function partsText(container: unknown): string {
     .join("");
 }
 
+/** Return either spelling used by Gemini native/compatibility APIs. */
+export function geminiPartThoughtSignature(
+  part: GeminiPart,
+): string | undefined {
+  if (typeof part.thoughtSignature === "string") return part.thoughtSignature;
+  if (typeof part.thought_signature === "string") return part.thought_signature;
+  return undefined;
+}
+
 /** Map a single Gemini content part to a gateway content block. */
-function partToBlock(part: GeminiPart): GatewayContentBlock | null {
+export function geminiPartToBlock(
+  part: GeminiPart,
+): GatewayContentBlock | null {
+  const signature = geminiPartThoughtSignature(part);
   if (typeof part.text === "string") {
     // A `thought: true` part is the model's private reasoning summary
     // (thinkingConfig.includeThoughts). It must NOT be concatenated with the
     // visible answer — map it to a distinct thinking block so egress can keep
     // the `thought` flag and clients can tell reasoning from answer.
     if (part.thought === true) {
-      return { type: "thinking", thinking: part.text };
+      return {
+        type: "thinking",
+        thinking: part.text,
+        ...(signature !== undefined ? { signature } : {}),
+      };
     }
     return { type: "text", text: part.text };
   }
@@ -207,12 +230,40 @@ export function createGeminiContentsBuilder(): StreamedItemsBuilder<
       const parts = Array.isArray(content.parts)
         ? (content.parts as GeminiPart[])
         : [];
-      const blocks: GatewayContentBlock[] = [];
+      const visible: GatewayContentBlock[] = [];
+      const provenance: GatewayContentBlock[] = [];
+      const provenancePositions: number[] = [];
+      let hasRequestOnlyProvenance = false;
       for (const part of parts) {
-        const block = partToBlock(part);
-        if (block) blocks.push(block);
+        // Gemini thought summaries are request-only provenance. Native thought
+        // signatures on otherwise-visible parts are also retained verbatim so
+        // stable-layer replay can satisfy the provider's integrity check.
+        const thoughtOnly =
+          part.thought === true && typeof part.text === "string";
+        const block = geminiPartToBlock(part);
+        if (!block) continue;
+        if (thoughtOnly) {
+          hasRequestOnlyProvenance = true;
+          provenance.push({ type: "opaque", raw: part });
+          continue;
+        }
+        const signature = geminiPartThoughtSignature(part);
+        provenancePositions.push(provenance.length);
+        visible.push(block);
+        if (signature !== undefined) {
+          hasRequestOnlyProvenance = true;
+          provenance.push({ type: "opaque", raw: part });
+        } else {
+          provenance.push(block);
+        }
       }
-      messages.push({ role, content: blocks });
+      messages.push({
+        role,
+        content: visible,
+        ...(hasRequestOnlyProvenance
+          ? { provenanceContent: provenance, provenancePositions }
+          : {}),
+      });
     },
     finish() {
       return messages;
@@ -286,6 +337,12 @@ export function parseGeminiRequest(
     maxTokens,
     metadata,
     rawHeaders: { ...headers },
+    sourceInput: {
+      itemCount: rawContents.length,
+      inputDigest: digestChain(rawContents),
+      boundarySafe: rawContents.length > 0,
+      retainedItems: 0,
+    },
   };
 }
 
@@ -305,9 +362,15 @@ export function parseGeminiRequestChunks(
   model: string,
   stream: boolean,
 ): Promise<GatewayRequest> {
+  const boundary = parseContextBoundary(headers, "gemini");
   return parseStreamedRequest(chunks, {
     streamKey: "contents",
     captureKeys: GEMINI_STREAM_CAPTURE_KEYS,
+    contextBoundary: boundary,
+    describeBoundary: (messages) => ({
+      boundarySafe: messages.length > 0,
+      retainedItems: 0,
+    }),
     createItemsBuilder: createGeminiContentsBuilder,
     parseSync: (raw) => parseGeminiRequest(raw, headers, model, stream),
     assemble(raw, streamed) {
@@ -338,22 +401,35 @@ export function buildGeminiUpstreamUrl(
 function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
   switch (block.type) {
     case "text":
-      return block.text ? [{ text: block.text }] : [];
+      return block.raw ? [block.raw] : block.text ? [{ text: block.text }] : [];
     case "thinking":
       // Re-emit as a Gemini thought part (`text` + `thought: true`) so a
       // reasoning summary round-trips as reasoning — never merged into the
-      // visible answer text.
-      return block.thinking ? [{ text: block.thinking, thought: true }] : [];
+      // visible answer text. The signature is provider integrity metadata and
+      // must travel with the thought part unchanged.
+      return block.thinking
+        ? [
+            {
+              text: block.thinking,
+              thought: true,
+              ...(block.signature !== undefined
+                ? { thoughtSignature: block.signature }
+                : {}),
+            },
+          ]
+        : [];
     case "tool_use":
-      return [
-        {
-          functionCall: {
-            id: block.id,
-            name: block.name,
-            args: block.input ?? {},
-          },
-        },
-      ];
+      return block.raw
+        ? [block.raw]
+        : [
+            {
+              functionCall: {
+                id: block.id,
+                name: block.name,
+                args: block.input ?? {},
+              },
+            },
+          ];
     case "tool_result": {
       const text = blocksToText(block.content);
       let response: unknown;
@@ -375,6 +451,12 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       ];
     }
     case "opaque":
+      // Request-only provider-native blocks are continuation metadata for the
+      // protocol that produced them, not Gemini content. In particular,
+      // Anthropic redacted_thinking is opaque encrypted data and cannot be
+      // serialized as a Gemini Part without corrupting the response shape.
+      if (block.requestOnly || block.raw.type === "redacted_thinking")
+        return [];
       return [block.raw];
   }
 }
@@ -406,7 +488,8 @@ export function buildGeminiUpstreamRequest(
   for (const msg of req.messages) {
     const role = msg.role === "assistant" ? "model" : "user";
     const parts: GeminiPart[] = [];
-    for (const block of msg.content) parts.push(...blockToGeminiParts(block));
+    for (const block of msg.provenanceContent ?? msg.content)
+      parts.push(...blockToGeminiParts(block));
     if (parts.length > 0) contents.push({ role, parts });
   }
 
@@ -552,12 +635,18 @@ export function parseGeminiResponseJSON(
   const blocks: GatewayContentBlock[] = [];
   let hasToolCall = false;
   for (const p of parts) {
-    const block = partToBlock(p);
+    const block = geminiPartToBlock(p);
     if (!block) continue;
     if (block.type === "tool_use") {
       hasToolCall = true;
     }
-    blocks.push(block);
+    const signature = geminiPartThoughtSignature(p);
+    blocks.push(
+      signature !== undefined &&
+        (block.type === "text" || block.type === "tool_use")
+        ? { ...block, raw: p }
+        : block,
+    );
   }
 
   // Prompt-level block: Gemini returns NO candidates plus

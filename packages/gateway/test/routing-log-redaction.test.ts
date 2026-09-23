@@ -198,7 +198,62 @@ describe("routing log credential redaction", () => {
     expect(output).not.toContain("PRIVATE_FOREGROUND_REASON_MARKER");
   });
 
-  it("logs a fixed transport failure without exposing upstream content", async () => {
+  it.each([
+    {
+      exposed: false,
+      expected: "pipeline request failed: malformed OpenAI stream event",
+    },
+    {
+      exposed: true,
+      expected:
+        "pipeline request failed: malformed OpenAI stream event (rule=invalid-json)",
+    },
+  ])(
+    "logs only the categorical OpenAI validation rule unless opted out",
+    async ({ exposed, expected }) => {
+      const messages: string[] = [];
+      log.registerSink({
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: (message) => messages.push(message),
+        captureException: vi.fn(),
+      });
+      setUpstreamInterceptor(
+        async () =>
+          new Response("data: {not-json}\n\n", {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+      );
+      const config = loadConfig();
+      config.exposeProviderDiagnostics = exposed;
+
+      const response = await handleRequest(
+        {
+          protocol: "openai",
+          model: "gpt-test",
+          system: "You are a coding assistant.",
+          messages: [
+            { role: "user", content: [{ type: "text", text: "hello" }] },
+          ],
+          tools: [],
+          stream: true,
+          maxTokens: 64,
+          metadata: {},
+          rawHeaders: { "x-lore-agent": "coder" },
+        },
+        config,
+      );
+
+      expect(response.status).toBe(502);
+      expect(messages).toContain(expected);
+      expect(messages.join("\n")).not.toContain("not-json");
+    },
+  );
+
+  it("does not classify interceptor exceptions as upstream transport failures", async () => {
+    const credential = "PRIVATE_GATEWAY_CREDENTIAL_MARKER";
+    const privateCauseMessage = "PRIVATE_TRANSPORT_MESSAGE_MARKER";
     const messages: string[] = [];
     log.registerSink({
       info: vi.fn(),
@@ -207,13 +262,23 @@ describe("routing log credential redaction", () => {
       captureException: vi.fn(),
     });
     setUpstreamInterceptor(async () => {
-      throw new TypeError("fetch failed");
+      const connectionReset = Object.assign(new Error(privateCauseMessage), {
+        code: "ECONNRESET",
+      });
+      const socketError = Object.assign(new Error(privateCauseMessage), {
+        code: "UND_ERR_SOCKET",
+        errno: -104,
+        syscall: "connect",
+        hostname: "PRIVATE_TRANSPORT_HOSTNAME_MARKER",
+        cause: connectionReset,
+      });
+      throw new TypeError("fetch failed", { cause: socketError });
     });
 
     const response = await handleRequest(
       {
-        protocol: "anthropic",
-        model: "claude-test",
+        protocol: "openai",
+        model: "gemini-3.8-flash",
         system: "You are a coding assistant.",
         messages: [
           { role: "user", content: [{ type: "text", text: "hello" }] },
@@ -222,13 +287,92 @@ describe("routing log credential redaction", () => {
         stream: false,
         maxTokens: 64,
         metadata: {},
-        rawHeaders: { "x-lore-agent": "coder" },
+        rawHeaders: {
+          "x-lore-agent": "coder",
+          "x-lore-provider": "github-copilot",
+          authorization: `Bearer ${credential}`,
+        },
       },
       loadConfig(),
     );
 
     expect(response.status).toBe(502);
     expect(messages).toContain("pipeline request failed: fetch failed");
+    expect(
+      messages.some((message) => message.startsWith("upstream fetch failed")),
+    ).toBe(false);
+    expect(messages.join("\n")).not.toContain(credential);
+    expect(messages.join("\n")).not.toContain(privateCauseMessage);
+    expect(messages.join("\n")).not.toContain(
+      "PRIVATE_TRANSPORT_HOSTNAME_MARKER",
+    );
+  });
+
+  it("logs safe route metadata for an upstream 400 without its response body", async () => {
+    const credential = "PRIVATE_400_CREDENTIAL_MARKER";
+    const privateBodyMarker = "PRIVATE_400_RESPONSE_MESSAGE_MARKER";
+    const messages: string[] = [];
+    log.registerSink({
+      info: (message) => messages.push(message),
+      warn: (message) => messages.push(message),
+      error: (message) => messages.push(message),
+      captureException: vi.fn(),
+    });
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 400,
+              status: "INVALID_ARGUMENT",
+              message: privateBodyMarker,
+            },
+          }),
+          {
+            status: 400,
+            headers: {
+              "content-type": "application/json",
+              "x-github-request-id": "GHREQ-1234567890",
+            },
+          },
+        ),
+    );
+
+    const response = await handleRequest(
+      {
+        protocol: "openai",
+        model: "gemini-3.8-flash",
+        system: "You are a coding assistant.",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+        ],
+        tools: [],
+        stream: false,
+        maxTokens: 64,
+        metadata: {},
+        rawHeaders: {
+          "x-lore-agent": "coder",
+          "x-lore-provider": "github-copilot",
+          authorization: `Bearer ${credential}`,
+        },
+      },
+      loadConfig(),
+    );
+
+    expect(response.status).toBe(400);
+    const diagnostic = messages.find((message) =>
+      message.startsWith("upstream error: 400"),
+    );
+    expect(diagnostic).toContain("provider=github-copilot");
+    expect(diagnostic).toContain("model=gemini-3.8-flash");
+    expect(diagnostic).toContain("protocol=openai");
+    expect(diagnostic).toContain("host=api.githubcopilot.com");
+    expect(diagnostic).toContain("category=INVALID_ARGUMENT");
+    expect(diagnostic).toContain("requestId=GHREQ-1234567890");
+    expect(diagnostic).not.toContain("/chat/completions");
+    expect(messages.join("\n")).not.toContain(privateBodyMarker);
+    expect(messages.join("\n")).not.toContain(credential);
+    expect(await response.text()).not.toContain(privateBodyMarker);
   });
 
   it("sanitizes the configured worker initialization URL", async () => {

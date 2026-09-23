@@ -311,7 +311,15 @@ export function createGatewayApp(
 
   app.onError((e, c) => {
     const msg = e instanceof Error ? e.message : "Internal server error";
-    log.error(`uncaught error: ${msg}`);
+    const clientAborted =
+      e instanceof DOMException &&
+      e.name === "AbortError" &&
+      c.var.request.signal.aborted;
+    if (clientAborted) {
+      log.info(`client request ended before completion: ${msg}`);
+    } else {
+      log.error(`uncaught error: ${msg}`);
+    }
     if (c.var.managementPath) {
       return withManagementCors(
         errorResponseWithoutCors(500, "api_error", msg),

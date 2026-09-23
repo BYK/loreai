@@ -12,6 +12,7 @@ import {
 import type {
   SessionDetail,
   SessionPage,
+  SessionSearchPage,
   SessionSummary,
   TemporalMessage,
 } from "~/contracts";
@@ -67,6 +68,16 @@ export interface SessionReader {
   olderError: Accessor<unknown>;
   /** Fetch the next older page and prepend it. No-op when none is known. */
   loadOlder: () => Promise<void>;
+  /**
+   * One page of the server-side finder (`GET /sessions/:id/search`) for this
+   * session; rejects while the session's project path is unknown.
+   */
+  search: (
+    query: string,
+    cursor: string | null,
+    limit: number,
+    signal?: AbortSignal,
+  ) => Promise<SessionSearchPage>;
 }
 export function createSessionsState({
   client,
@@ -460,6 +471,22 @@ export function createSessionsState({
       }
     }
 
+    function search(
+      query: string,
+      cursor: string | null,
+      limit: number,
+      signal?: AbortSignal,
+    ): Promise<SessionSearchPage> {
+      const key = untrack(source);
+      if (!key) {
+        return Promise.reject(new Error("Session is not addressable yet"));
+      }
+      const { sid, path } = splitKey(key);
+      return tracked(() =>
+        client.searchSession(path, sid, query, cursor, limit, signal),
+      );
+    }
+
     return {
       loader,
       status: statusOf(loader),
@@ -473,6 +500,7 @@ export function createSessionsState({
       loadingOlder,
       olderError,
       loadOlder,
+      search,
     };
   }
 

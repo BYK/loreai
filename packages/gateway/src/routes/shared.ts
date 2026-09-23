@@ -1,8 +1,18 @@
 /** Helpers shared by the data-plane route modules. */
-import { log } from "@loreai/core";
+import {
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
+  log,
+  type ContextBoundaryProtocol,
+} from "@loreai/core";
 import type { GatewayConfig } from "../config";
 import type { GatewayRequest } from "../translate/types";
 import { handleRequest } from "../pipeline";
+import {
+  EMBEDDED_REQUEST_BODY_LIMITS,
+  HttpRequestBodyTooLargeError,
+  type RequestBodyLimits,
+} from "../http-body";
+import { StreamedRequestBoundaryMismatchError } from "../translate/streaming-request";
 import {
   closingErrorResponse,
   errorResponse,
@@ -23,13 +33,63 @@ export function parseFailure(e: unknown): Response {
  * the generic message; a translator's own error keeps its message.
  */
 export function invalidStreamedBody(e?: unknown): Response {
+  if (e instanceof StreamedRequestBoundaryMismatchError) {
+    const response = closingErrorResponse(
+      409,
+      "context_boundary_mismatch",
+      e.message,
+    );
+    response.headers.set(CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
+    return response;
+  }
+  if (e instanceof HttpRequestBodyTooLargeError) {
+    const limit = formatByteLimit(e.limit);
+    const phase = e.phase === "compressed" ? "compressed" : "decompressed";
+    return closingErrorResponse(
+      413,
+      "request_too_large",
+      `Request body exceeded the ${limit} ${phase} limit. Reduce the conversation history or start a new session.`,
+    );
+  }
   return closingErrorResponse(
     400,
     "invalid_request_error",
-    e instanceof Error && !(e instanceof SyntaxError)
-      ? e.message
-      : "Invalid JSON body",
+    streamedBodyErrorMessage(e),
   );
+}
+
+function streamedBodyErrorMessage(e?: unknown): string {
+  if (!(e instanceof Error) || e instanceof SyntaxError) {
+    return "Invalid JSON body";
+  }
+  if (e.message === "Parse Error") {
+    return "Request body could not be read completely; the client may have closed the connection while uploading the conversation. Retry the request.";
+  }
+  return e.message;
+}
+
+function formatByteLimit(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) {
+    return `${bytes / (1024 * 1024)} MiB`;
+  }
+  if (bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return `${bytes} bytes`;
+}
+
+/**
+ * Local Codex resumes can exceed the standard cap before the first boundary is
+ * established. Keep the larger allowance scoped to that ingress; every other
+ * protocol still uses the streamed parser but retains the public 32 MiB cap.
+ */
+export function requestBodyLimitsForConfig(
+  config: Pick<GatewayConfig, "hostedMode" | "remoteGateway">,
+  protocol: ContextBoundaryProtocol,
+): RequestBodyLimits | undefined {
+  return protocol === "openai-codex" &&
+    config.hostedMode === false &&
+    config.remoteGateway === false
+    ? EMBEDDED_REQUEST_BODY_LIMITS
+    : undefined;
 }
 
 /**

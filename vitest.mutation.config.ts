@@ -27,6 +27,7 @@ export default defineConfig({
       "packages/gateway/test/bedrock-routing.test.ts",
     ],
     setupFiles: ["./packages/core/test/setup.ts"],
+    globalSetup: ["./packages/core/test/global-setup.ts"],
     environment: "node",
     pool: "forks",
     testTimeout: 60_000,

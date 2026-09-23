@@ -40,6 +40,23 @@
  * `(created_at, id)` of the page's oldest message and is bound to the project
  * and session it was minted for.
  *
+ * Session search
+ * --------------
+ * `GET /sessions/:id/search?q=` (new route, #1857) is the in-session finder
+ * over `temporal_fts`: it answers with the ids of the messages that match,
+ * newest first, paged with the same `(created_at, id)` keyset and limits as
+ * the message pages:
+ *
+ *     { hits: [{ message_id, created_at, role, snippet, rank }], terms, mode,
+ *       total, next_cursor }
+ *
+ * `q` is tokenised the way the index is and matched as one phrase (`mode:
+ * "phrase"`), falling back to "every term anywhere" (`mode: "terms"`) when
+ * no message contains the phrase — the response says which, and the cursor
+ * pins the mode so later pages cannot switch semantics. `terms` echoes what
+ * was matched; an empty list means nothing in `q` was searchable. A missing
+ * `q` is 400. The cursor does not embed the query: the caller re-sends it.
+ *
  * Version history
  * ---------------
  * `GET /knowledge/:id/versions` follows the visibility of `GET /knowledge/:id`:
@@ -54,6 +71,7 @@ import {
   type KnowledgeSort,
   type MessageKeyset,
   type SessionKeyset,
+  type SessionSearchMode,
 } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
@@ -122,8 +140,18 @@ type MessageCursor = {
   id: string;
 };
 
+type SearchCursor = {
+  v: typeof CURSOR_VERSION;
+  kind: "search";
+  project: string;
+  session: string;
+  mode: SessionSearchMode;
+  created_at: number;
+  id: string;
+};
+
 function encodeCursor(
-  payload: KnowledgeCursor | SessionCursor | MessageCursor,
+  payload: KnowledgeCursor | SessionCursor | MessageCursor | SearchCursor,
 ): string {
   return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
@@ -234,6 +262,38 @@ function decodeMessageCursor(
     );
   }
   return { created_at: c.created_at, id: c.id };
+}
+
+function decodeSearchCursor(
+  token: string,
+  projectId: string,
+  sessionId: string,
+): { before: MessageKeyset; mode: SessionSearchMode } {
+  const c = decodeCursorObject(token);
+  if (
+    c.kind !== "search" ||
+    typeof c.project !== "string" ||
+    typeof c.session !== "string" ||
+    typeof c.id !== "string" ||
+    typeof c.created_at !== "number" ||
+    !Number.isFinite(c.created_at) ||
+    (c.mode !== "phrase" && c.mode !== "terms")
+  ) {
+    throw new BadRequest("invalid_cursor", "Malformed cursor");
+  }
+  if (c.project !== projectId) {
+    throw new BadRequest(
+      "invalid_cursor",
+      "Cursor was issued for a different project",
+    );
+  }
+  if (c.session !== sessionId) {
+    throw new BadRequest(
+      "invalid_cursor",
+      "Cursor was issued for a different session",
+    );
+  }
+  return { before: { created_at: c.created_at, id: c.id }, mode: c.mode };
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +516,73 @@ export function handleShowSessionCursor(
           })
         : null,
       message_count: page.total,
+    });
+  } catch (err) {
+    return toResponse(err);
+  }
+}
+
+/** Longest `q` the finder accepts; longer inputs are a 400, not a truncation. */
+const SEARCH_QUERY_MAX = 512;
+
+/**
+ * `GET /api/v1/sessions/:id/search?q=&limit=&cursor=`: paged hits of the
+ * in-session finder (see the module comment). The project is resolved by the
+ * dispatcher exactly like `GET /sessions/:id`.
+ */
+export function handleSearchSession(
+  url: URL,
+  project: { id: string; path: string },
+  sessionId: string,
+): Response {
+  try {
+    const q = url.searchParams.get("q");
+    if (q === null || q.trim() === "") {
+      throw new BadRequest(
+        "invalid_request",
+        "Session search requires ?q=<text>",
+      );
+    }
+    if (q.length > SEARCH_QUERY_MAX) {
+      throw new BadRequest(
+        "invalid_request",
+        `Search query longer than ${SEARCH_QUERY_MAX} characters`,
+      );
+    }
+    const limit = parseLimit(url, 100, 1000);
+    const token = url.searchParams.get("cursor");
+    const resume =
+      token !== null && token !== ""
+        ? decodeSearchCursor(token, project.id, sessionId)
+        : undefined;
+    const page = listQuery.searchSessionMessagesPage(project.path, sessionId, {
+      query: q,
+      limit,
+      before: resume?.before,
+      mode: resume?.mode,
+    });
+    return jsonResponse({
+      hits: page.items.map((hit) => ({
+        message_id: hit.id,
+        created_at: hit.created_at,
+        role: hit.role,
+        snippet: hit.snippet,
+        rank: hit.rank,
+      })),
+      terms: page.terms,
+      mode: page.mode,
+      total: page.total,
+      next_cursor: page.next
+        ? encodeCursor({
+            v: CURSOR_VERSION,
+            kind: "search",
+            project: project.id,
+            session: sessionId,
+            mode: page.mode,
+            created_at: page.next.created_at,
+            id: page.next.id,
+          })
+        : null,
     });
   } catch (err) {
     return toResponse(err);

@@ -29,6 +29,7 @@ import {
   toAnthropicStopReason,
 } from "../anthropic-protocol";
 import { isRecord, validateAnthropicUsage } from "../usage-validation";
+import type { SSEStreamOptions } from "./options";
 // NOTE: `estimateTokens` re-exported from `compaction.ts` is now the BPE-backed
 // helper from @loreai/core (see packages/core/src/tokenize.ts), no longer the
 // legacy length/4 heuristic.
@@ -78,7 +79,7 @@ export class SSEStreamLimitError extends Error {}
 /** Read one stream chunk while making abort and inactivity independently fatal. */
 export async function readStreamChunk(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  opts: { signal?: AbortSignal; inactivityMs?: number } = {},
+  opts: SSEStreamOptions = {},
 ): Promise<StreamChunkRead> {
   opts.signal?.throwIfAborted();
   const reads: Array<Promise<StreamChunkRead>> = [
@@ -149,12 +150,10 @@ export async function readStreamChunk(
  */
 export async function* parseSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  opts: {
+  opts: SSEStreamOptions & {
     maxEventBytes?: number;
     maxFrames?: number;
     frameCounter?: { count: number };
-    inactivityMs?: number;
-    signal?: AbortSignal;
     requireEventTerminator?: boolean;
     maxTotalBytes?: number;
     fatalUtf8?: boolean;
@@ -387,6 +386,7 @@ export function cancelAndReleaseReader(
 type AccumulatingBlock =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; raw: Record<string, unknown> }
   | { type: "tool_use"; id: string; name: string; partialJson: string };
 
 /** State machine that processes Anthropic SSE events and builds a GatewayResponse. */
@@ -630,6 +630,9 @@ export function createStreamAccumulator(options?: {
           signature: "",
         });
         break;
+      case "redacted_thinking":
+        blocks.set(index, { type: "redacted_thinking", raw: { ...block } });
+        break;
       case "tool_use":
         blocks.set(index, {
           type: "tool_use",
@@ -702,6 +705,13 @@ export function createStreamAccumulator(options?: {
         content.push(thinkingBlock);
         break;
       }
+      case "redacted_thinking":
+        content.push({
+          type: "opaque",
+          raw: block.raw,
+          requestOnly: true,
+        });
+        break;
       case "tool_use": {
         let input: unknown = {};
         if (block.partialJson) {
@@ -753,6 +763,13 @@ export function createStreamAccumulator(options?: {
               type: "thinking",
               thinking: block.thinking,
               ...(block.signature ? { signature: block.signature } : {}),
+            });
+            break;
+          case "redacted_thinking":
+            content.push({
+              type: "opaque",
+              raw: block.raw,
+              requestOnly: true,
             });
             break;
           case "tool_use": {
@@ -1961,11 +1978,9 @@ export class AnthropicSSEValidator {
  */
 export async function accumulateSSEResponse(
   response: Response,
-  opts: {
-    signal?: AbortSignal;
+  opts: SSEStreamOptions & {
     stopAtTerminal?: boolean;
     strict?: boolean;
-    inactivityMs?: number;
     maxFrames?: number;
     onSemanticContent?: () => void;
   } = {},

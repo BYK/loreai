@@ -21,14 +21,28 @@ export { storeTurnTemporal } from "./turn-temporal";
 export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { LoreMessageWithParts, LLMClient } from "@loreai/core";
+import type {
+  ContextBoundaryProtocol,
+  LoreMessageWithParts,
+  LLMClient,
+} from "@loreai/core";
 import {
+  CONTEXT_BOUNDARY_HEADER,
   FullSourceRequired,
+  CONTEXT_BOUNDARY_MISMATCH_HEADER,
   asString,
   estimateTokens as coreEstimateTokens,
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
+import {
+  encodeContextBoundary,
+  supportsContextBoundary,
+} from "./context-boundary";
+import {
+  SourceDeltaUnavailableError,
+  sourceCheckpointProtocol,
+} from "./source-checkpoint";
 import {
   load,
   config as loreConfig,
@@ -110,6 +124,7 @@ import {
 
 import type {
   GatewayRequest,
+  GatewayProtocol,
   GatewayResponse,
   GatewayMessage,
   GatewayContentBlock,
@@ -218,6 +233,7 @@ import {
 } from "./stream/openai-responses";
 import {
   accumulateOpenAISSEStream,
+  OpenAIStreamValidationError,
   translateAnthropicStreamToOpenAI,
 } from "./stream/openai";
 import {
@@ -254,9 +270,18 @@ import {
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
+  ensureSSEInactivityConfiguration,
+  foregroundSSEStreamOptions,
+  getSSEInactivityDeadlines,
+  resetSSEInactivityConfiguration,
+} from "./sse-inactivity";
+import type { SSEStreamOptions } from "./stream/options";
+import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
+  legacyContentForMessage,
+  visibleContentForMessage,
 } from "./temporal-adapter";
 import {
   canonicalWorkerProviderID,
@@ -422,6 +447,51 @@ import {
   parseResolveProjectResult,
   type ResolveProjectResult,
 } from "./synthetic-tools";
+
+function requestSourceMessageCount(req: GatewayRequest): number {
+  return (
+    (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + req.messages.length
+  );
+}
+
+function requestSourcePrefix(
+  req: GatewayRequest,
+): { sourceCount: number; sourceDigest: string } | undefined {
+  const prefix = req.sourceInput?.sourcePrefix;
+  return prefix
+    ? {
+        sourceCount: prefix.messageCount,
+        sourceDigest: prefix.sourceDigest,
+      }
+    : undefined;
+}
+
+function requestCheckpointProtocol(req: GatewayRequest): string {
+  if (!req.sourceInput || !supportsContextBoundary(req.rawHeaders)) {
+    return req.protocol;
+  }
+  return sourceCheckpointProtocol(requestContextBoundaryProtocol(req));
+}
+
+export function requestContextBoundaryProtocol(
+  req: GatewayRequest,
+): ContextBoundaryProtocol {
+  if (req.codex === true) return "openai-codex";
+  switch (req.protocol) {
+    case "anthropic":
+    case "openai":
+    case "openai-responses":
+    case "gemini":
+      return req.protocol;
+    case "vertex":
+      // Vertex Claude ingress uses the Anthropic request shape. Checkpoints
+      // therefore digest and validate the source transcript as Anthropic even
+      // though dispatch uses Vertex's :rawPredict transport.
+      return "anthropic";
+    default:
+      throw new Error("Unsupported context-boundary protocol");
+  }
+}
 
 /** Reserve the largest source set this untrusted recall input can expose. */
 function recallItemReservation(input: unknown): number {
@@ -597,7 +667,60 @@ function injectContextWarning(
     type: "text" as const,
     text,
   });
-  return { ...resp, content };
+
+  // Buffered Responses egress rebuilds from raw output items so encrypted
+  // reasoning stays byte-identical. Carry this gateway-owned warning into that
+  // same item list; otherwise the raw branch would silently discard it.
+  const rawOutputItems = resp.rawOutputItems
+    ? [...resp.rawOutputItems]
+    : undefined;
+  if (rawOutputItems) {
+    let rawInsertIdx = 0;
+    while (rawOutputItems[rawInsertIdx]?.type === "reasoning") {
+      rawInsertIdx++;
+    }
+    rawOutputItems.splice(rawInsertIdx, 0, {
+      type: "message",
+      id: `msg_${resp.id}_lore_context_warning`,
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text, annotations: [] }],
+    });
+  }
+
+  return {
+    ...resp,
+    content,
+    ...(rawOutputItems ? { rawOutputItems } : {}),
+  };
+}
+
+function hasAlignedGatewayProvenance(
+  message: GatewayMessage,
+  contentLength = message.content.length,
+): boolean {
+  const { provenanceContent, provenancePositions } = message;
+  if (provenanceContent === undefined && provenancePositions === undefined) {
+    return true;
+  }
+  if (provenanceContent === undefined || provenancePositions === undefined) {
+    return false;
+  }
+  if (provenancePositions.length !== contentLength) return false;
+
+  let previous = -1;
+  return provenancePositions.every((position) => {
+    if (
+      !Number.isSafeInteger(position) ||
+      position < 0 ||
+      position >= provenanceContent.length ||
+      position <= previous
+    ) {
+      return false;
+    }
+    previous = position;
+    return true;
+  });
 }
 
 /**
@@ -622,7 +745,70 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
         block.type === "text" &&
         block.text.startsWith(CONTEXT_WARNING_MARKER)
       ) {
+        const hasAlignedProvenance = hasAlignedGatewayProvenance(msg);
         msg.content.splice(i, 1);
+        // Request-only provenance is safe to replay only when its visible
+        // index mapping is complete. A malformed/legacy message may contain
+        // fewer positions than visible blocks; fail closed by retaining the
+        // visible transcript and dropping the opaque provenance rather than
+        // forwarding mismatched arrays to recall or an upstream translator.
+        if (!hasAlignedProvenance) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
+        const provenanceIndex = msg.provenancePositions?.[i];
+        const provenanceBlock =
+          provenanceIndex === undefined
+            ? undefined
+            : msg.provenanceContent?.[provenanceIndex];
+        const isMatchingProvenance =
+          provenanceBlock?.type === "text" &&
+          provenanceBlock.text.startsWith(CONTEXT_WARNING_MARKER);
+        const rawContent =
+          provenanceBlock?.type === "opaque" &&
+          provenanceBlock.raw.type === "message" &&
+          Array.isArray(provenanceBlock.raw.content)
+            ? provenanceBlock.raw.content
+            : undefined;
+        const rawHasWarning = rawContent?.some(
+          (part) =>
+            part &&
+            typeof part === "object" &&
+            !Array.isArray(part) &&
+            (part as Record<string, unknown>).type === "output_text" &&
+            typeof (part as Record<string, unknown>).text === "string" &&
+            ((part as Record<string, unknown>).text as string).startsWith(
+              CONTEXT_WARNING_MARKER,
+            ),
+        );
+        if (
+          provenanceIndex === undefined ||
+          !msg.provenanceContent ||
+          !msg.provenancePositions ||
+          !(
+            isMatchingProvenance ||
+            (provenanceBlock?.type === "opaque" && rawHasWarning)
+          )
+        ) {
+          // Removing a visible warning without removing its matching
+          // provenance block leaves the position map shifted. A malformed or
+          // mismatched legacy message must fail closed instead of letting
+          // recall mutate the wrong provider-native block later.
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+          break;
+        }
+        msg.provenanceContent.splice(provenanceIndex, 1);
+        msg.provenancePositions = msg.provenancePositions
+          .filter((_position, visibleIndex) => visibleIndex !== i)
+          .map((position) =>
+            position > provenanceIndex ? position - 1 : position,
+          );
+        if (msg.provenanceContent.length === 0) {
+          delete msg.provenanceContent;
+          delete msg.provenancePositions;
+        }
       }
       break; // only check the first non-thinking block
     }
@@ -884,6 +1070,7 @@ export async function resetPipelineState(opts?: {
 }): Promise<void> {
   if (pipelineResetPromise) return pipelineResetPromise;
   pipelineResetInProgress = true;
+  resetSSEInactivityConfiguration();
   const reset = (async () => {
     try {
       await resetPipelineStateInner(opts);
@@ -2621,6 +2808,87 @@ export function captureToolPairing400(input: {
  *
  * @internal Exported for tests.
  */
+function mergeAdjacentAssistantMessages(
+  earlier: GatewayMessage,
+  later: GatewayMessage,
+): GatewayMessage {
+  let visibleLead = 0;
+  while (
+    visibleLead < later.content.length &&
+    isReasoningBlock(later.content[visibleLead])
+  ) {
+    visibleLead++;
+  }
+
+  const hasProvenance =
+    earlier.provenanceContent !== undefined ||
+    later.provenanceContent !== undefined;
+
+  // `content` is the visible projection when provenance is present. A legacy
+  // or hand-built message may still carry the leading reasoning blocks in
+  // both arrays; keep those blocks in provenance only so the visible content
+  // and its position map have the same cardinality.
+  const content = hasProvenance
+    ? [...earlier.content, ...later.content.slice(visibleLead)]
+    : [
+        ...later.content.slice(0, visibleLead),
+        ...earlier.content,
+        ...later.content.slice(visibleLead),
+      ];
+  if (!hasProvenance) return { role: "assistant", content };
+
+  const earlierProvenance = [...(earlier.provenanceContent ?? earlier.content)];
+  const laterProvenance = [...(later.provenanceContent ?? later.content)];
+  const earlierPositions =
+    earlier.provenancePositions ??
+    earlier.content.map((_block, index) => index);
+  const laterPositions =
+    later.provenancePositions ?? later.content.map((_block, index) => index);
+
+  let provenanceInsertAt = 0;
+  while (
+    provenanceInsertAt < laterProvenance.length &&
+    isReasoningBlock(laterProvenance[provenanceInsertAt])
+  ) {
+    provenanceInsertAt++;
+  }
+
+  const provenanceContent = [
+    ...laterProvenance.slice(0, provenanceInsertAt),
+    ...earlierProvenance,
+    ...laterProvenance.slice(provenanceInsertAt),
+  ];
+
+  // Positions contain one entry per visible block, not one entry per
+  // leading reasoning block. Find the first position at or after the first
+  // visible provenance item instead of using `visibleLead` as an array
+  // offset. If a legacy message redundantly included reasoning in `content`,
+  // `laterPositions` still starts at the first visible block and must not
+  // consume that block as though it described the reasoning item.
+  const firstVisibleLaterPosition = laterPositions.findIndex(
+    (position) => position >= provenanceInsertAt,
+  );
+  const laterVisiblePositions =
+    firstVisibleLaterPosition === -1
+      ? []
+      : laterPositions.slice(firstVisibleLaterPosition);
+  const provenancePositions = [
+    ...earlierPositions.map((position) => provenanceInsertAt + position),
+    ...laterVisiblePositions.map((position) =>
+      position >= provenanceInsertAt
+        ? position + earlierProvenance.length
+        : position,
+    ),
+  ];
+
+  return {
+    role: "assistant",
+    content,
+    provenanceContent,
+    provenancePositions,
+  };
+}
+
 export function coalesceAdjacentAssistants(
   messages: GatewayMessage[],
 ): GatewayMessage[] {
@@ -2656,18 +2924,7 @@ export function coalesceAdjacentAssistants(
       // injectContextWarning insertion rule. `last` is the earlier message and
       // never itself leads with reasoning (it is the synthetic delta payload),
       // so only `m`'s leading run needs to be protected.
-      let lead = 0;
-      while (lead < m.content.length && isReasoningBlock(m.content[lead])) {
-        lead++;
-      }
-      merged[merged.length - 1] = {
-        role: "assistant",
-        content: [
-          ...m.content.slice(0, lead),
-          ...last.content,
-          ...m.content.slice(lead),
-        ],
-      };
+      merged[merged.length - 1] = mergeAdjacentAssistantMessages(last, m);
     } else {
       merged.push(m);
     }
@@ -2683,7 +2940,11 @@ export function coalesceAdjacentAssistants(
 function isReasoningBlock(block: GatewayContentBlock): boolean {
   return (
     block.type === "thinking" ||
-    (block.type === "opaque" && block.raw.type === "redacted_thinking")
+    (block.type === "opaque" &&
+      (block.raw.type === "thinking" ||
+        block.raw.type === "redacted_thinking" ||
+        block.raw.type === "reasoning" ||
+        block.raw.thought === true))
   );
 }
 
@@ -3942,9 +4203,16 @@ export function requestHasThinking(messages: GatewayMessage[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    for (const block of msg.content) {
+    const blocks = [...msg.content, ...(msg.provenanceContent ?? [])];
+    for (const block of blocks) {
       if (block.type === "thinking") return true;
-      if (block.type === "opaque" && block.raw.type === "redacted_thinking") {
+      if (block.type !== "opaque") continue;
+      if (
+        block.raw.type === "thinking" ||
+        block.raw.type === "redacted_thinking" ||
+        block.raw.type === "reasoning" ||
+        block.raw.thought === true
+      ) {
         return true;
       }
     }
@@ -4309,6 +4577,24 @@ async function initIfNeeded(
   log.info(`gateway pipeline initialized: ${projectPath}`);
 }
 
+/**
+ * Resolve the gateway's process-wide stream deadlines once, before routing
+ * creates any foreground abort scopes. Client-supplied project paths must not
+ * change these process-wide timers from one request to another, so local mode
+ * reads the gateway's launch directory and hosted mode uses environment values.
+ */
+async function ensureGatewaySSEDeadlineConfiguration(
+  config: GatewayConfig,
+  requestGeneration: number,
+): Promise<void> {
+  await ensureSSEInactivityConfiguration({
+    hostedMode: config.hostedMode,
+    isCurrent: () =>
+      !pipelineResetInProgress &&
+      requestGeneration === streamingPostResponseGeneration,
+  });
+}
+
 function getLLMClient(config: GatewayConfig): LLMClient {
   if (!llmClient) {
     const cfg = loreConfig();
@@ -4367,6 +4653,7 @@ function getLLMClient(config: GatewayConfig): LLMClient {
       {
         dedicatedWorkerKey: !!workerApiKey,
         vertexProject: config.vertexProject,
+        hostedMode: config.hostedMode,
       },
     );
 
@@ -5273,6 +5560,15 @@ function getOrCreateSession(
       !!persisted?.projectPath && persisted.projectPathProvisional === false;
     const persistedProvisional =
       !!persisted?.projectPath && persisted.projectPathProvisional === true;
+    const persistedAcceptedProvenanceLayer =
+      persisted?.lastAcceptedProvenanceLayer;
+    const acceptedProvenanceLayer =
+      persistedAcceptedProvenanceLayer !== undefined &&
+      Number.isInteger(persistedAcceptedProvenanceLayer) &&
+      persistedAcceptedProvenanceLayer >= -1 &&
+      persistedAcceptedProvenanceLayer <= 4
+        ? persistedAcceptedProvenanceLayer
+        : -1;
     state = {
       sessionID,
       // A freshly-seeded path from the cwd fallback is NOT a confident binding.
@@ -5293,6 +5589,9 @@ function getOrCreateSession(
         persisted?.credentialFingerprint || credentialFingerprint,
       storageTenantId,
       lastRequestTime: Date.now(),
+      ...(persisted
+        ? { lastAcceptedProvenanceLayer: acceptedProvenanceLayer }
+        : {}),
       lastUserTurnTime: 0,
       messageCount: persisted?.messageCount ?? 0,
       turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
@@ -5746,21 +6045,28 @@ async function adoptByFingerprint(input: {
       : incomingProjectId;
     if (!overlapProjectId) continue;
     const probeIDs = probeMessages.map(({ index, message }) => {
+      const visibleContent = visibleContentForMessage(message);
+      const legacyContent = legacyContentForMessage(message);
       const sourceID = deterministicID(
         c.session_id,
         message.role,
         index,
-        message.content,
+        visibleContent,
+      );
+      const legacySourceID = legacyDeterministicID(
+        message.role,
+        index,
+        visibleContent,
       );
       return temporal.storedMessageId({
         projectPath: overlapProjectPath,
         sessionID: c.session_id,
         sourceID,
-        legacySourceID: legacyDeterministicID(
-          message.role,
-          index,
-          message.content,
-        ),
+        legacySourceID,
+        legacySourceIDs: [
+          deterministicID(c.session_id, message.role, index, legacyContent),
+          legacyDeterministicID(message.role, index, legacyContent),
+        ],
       });
     });
     const overlap = countMatchingTemporalIds(
@@ -5986,7 +6292,7 @@ async function identifySession(
       projectPath,
       gitRemote: trustedAdoptionRemote(projectPath, headers),
       known,
-      msgCount: req.messages.length,
+      msgCount: requestSourceMessageCount(req),
       requestGeneration,
       config,
       credentialFingerprint,
@@ -6069,7 +6375,7 @@ async function identifySession(
   if (requestGeneration !== undefined) {
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
   }
-  const msgCount = req.messages.length;
+  const msgCount = requestSourceMessageCount(req);
 
   // Find the best matching session: same fingerprint + closest message count
   let bestMatch: { sid: string; countDiff: number } | null = null;
@@ -6187,6 +6493,271 @@ type ResolvedRequestUpstreamRoute = {
   effectiveUpstreamBase: string;
   bedrockMantle: boolean;
 };
+
+/** OpenCode Zen may append an empty choice frame after finish_reason. */
+function isOpenCodeZenOpenAIStream(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  if (route.effectiveProtocol !== "openai") return false;
+  try {
+    const url = new URL(route.effectiveUpstreamBase);
+    return url.hostname === "opencode.ai" && url.pathname.startsWith("/zen");
+  } catch {
+    return false;
+  }
+}
+
+function safeDiagnosticToken(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$/.test(value)
+    ? value
+    : undefined;
+}
+
+function upstreamHostForDiagnostics(upstreamBase: string): string {
+  try {
+    const host = new URL(upstreamBase).host;
+    return /^[A-Za-z0-9.:[\]_-]{1,191}$/.test(host) ? host : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function readErrorField(error: unknown, field: string): unknown {
+  if (
+    error === null ||
+    (typeof error !== "object" && typeof error !== "function")
+  ) {
+    return undefined;
+  }
+  try {
+    return (error as Record<string, unknown>)[field];
+  } catch {
+    return undefined;
+  }
+}
+
+const SAFE_UPSTREAM_TRANSPORT_CODES = new Set([
+  "EAI_AGAIN",
+  "EADDRNOTAVAIL",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "ERR_SOCKET_CLOSED",
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function errorCauseChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<object>();
+  let current = error;
+  for (let depth = 0; depth < 4; depth++) {
+    if (
+      current === null ||
+      (typeof current !== "object" && typeof current !== "function") ||
+      seen.has(current)
+    ) {
+      break;
+    }
+    seen.add(current);
+    chain.push(current);
+    current = readErrorField(current, "cause");
+  }
+  return chain;
+}
+
+function isUpstreamTransportFailure(
+  error: unknown,
+  signal?: AbortSignal,
+): error is Error {
+  if (!(error instanceof Error) || signal?.aborted) return false;
+  const chain = errorCauseChain(error);
+  if (
+    chain.some((entry) => {
+      const name = readErrorField(entry, "name");
+      const code = readErrorField(entry, "code");
+      return (
+        name === "AbortError" ||
+        name === "RedirectError" ||
+        (typeof code === "string" &&
+          (code === "ABORT_ERR" ||
+            code === "ERR_ABORTED" ||
+            code === "UND_ERR_ABORTED" ||
+            code.includes("REDIRECT")))
+      );
+    })
+  ) {
+    return false;
+  }
+  return chain.some((entry) => {
+    const code = readErrorField(entry, "code");
+    return typeof code === "string" && SAFE_UPSTREAM_TRANSPORT_CODES.has(code);
+  });
+}
+
+/** Keep transport diagnostics to stable error codes; never log messages or URLs. */
+function fetchFailureCauseSummary(error: unknown): string {
+  const chain = errorCauseChain(error);
+  const name = error instanceof TypeError ? "TypeError" : "Error";
+  const codes = [
+    ...new Set(
+      chain
+        .map((entry) => readErrorField(entry, "code"))
+        .filter(
+          (code): code is string =>
+            typeof code === "string" && SAFE_UPSTREAM_TRANSPORT_CODES.has(code),
+        ),
+    ),
+  ];
+  const errno = chain
+    .map((entry) => readErrorField(entry, "errno"))
+    .find(
+      (value): value is number | string =>
+        (typeof value === "number" && Number.isSafeInteger(value)) ||
+        (typeof value === "string" && /^-?[0-9]{1,10}$/.test(value)),
+    );
+  const syscall = chain
+    .map((entry) => safeDiagnosticToken(readErrorField(entry, "syscall")))
+    .find(Boolean);
+
+  return [
+    name ? `type=${name}` : undefined,
+    `causeCodes=${codes.length ? codes.join(">") : "none"}`,
+    errno !== undefined ? `errno=${errno}` : undefined,
+    syscall ? `syscall=${syscall}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+const SAFE_UPSTREAM_ERROR_CATEGORIES = new Set([
+  "aborted",
+  "api_error",
+  "authentication_error",
+  "bad_request",
+  "cancelled",
+  "context_length_exceeded",
+  "data_loss",
+  "failed_precondition",
+  "insufficient_quota",
+  "internal",
+  "invalid_argument",
+  "invalid_request_error",
+  "model_not_found",
+  "not_found",
+  "not_found_error",
+  "out_of_range",
+  "overloaded_error",
+  "permission_denied",
+  "permission_error",
+  "rate_limit_error",
+  "resource_exhausted",
+  "server_error",
+  "unauthenticated",
+  "unavailable",
+  "unimplemented",
+  "unknown",
+  "upstream_error",
+]);
+
+function safeUpstreamErrorCategory(errorBody: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(errorBody);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const payload = parsed as Record<string, unknown>;
+  const error =
+    payload.error && typeof payload.error === "object"
+      ? (payload.error as Record<string, unknown>)
+      : payload;
+  for (const value of [error.status, error.type, error.code]) {
+    if (
+      typeof value === "string" &&
+      SAFE_UPSTREAM_ERROR_CATEGORIES.has(value.toLowerCase())
+    ) {
+      return value;
+    }
+  }
+  const code = error.code;
+  if (
+    typeof code === "number" &&
+    Number.isInteger(code) &&
+    code >= 100 &&
+    code <= 599
+  ) {
+    return `HTTP_${code}`;
+  }
+  return undefined;
+}
+
+function safeUpstreamRequestId(headers: Headers): string | undefined {
+  for (const name of [
+    "x-request-id",
+    "request-id",
+    "x-github-request-id",
+    "x-openrouter-request-id",
+    "cf-ray",
+  ]) {
+    const value = headers.get(name)?.trim();
+    if (value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/.test(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function logUpstreamFetchFailure(
+  error: unknown,
+  req: GatewayRequest,
+  route: ResolvedRequestUpstreamRoute,
+  signal?: AbortSignal,
+): void {
+  if (!isUpstreamTransportFailure(error, signal)) return;
+  const provider = safeDiagnosticToken(route.providerID) ?? "none";
+  const model = safeDiagnosticToken(req.model) ?? "redacted";
+  log.error(
+    `upstream fetch failed (provider=${provider} model=${model} ` +
+      `protocol=${route.effectiveProtocol} ` +
+      `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)} ` +
+      `${fetchFailureCauseSummary(error)})`,
+  );
+}
+
+function logUpstreamResponseFailure(
+  status: number,
+  errorBody: string,
+  headers: Headers,
+  req: GatewayRequest,
+  route: ResolvedRequestUpstreamRoute,
+  sessionID: string,
+): void {
+  const details = [
+    `provider=${safeDiagnosticToken(route.providerID) ?? "none"}`,
+    `model=${safeDiagnosticToken(req.model) ?? "redacted"}`,
+    `protocol=${route.effectiveProtocol}`,
+    `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)}`,
+    `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
+  ];
+  const category = safeUpstreamErrorCategory(errorBody);
+  if (category) details.push(`category=${category}`);
+  const requestId = safeUpstreamRequestId(headers);
+  if (requestId) details.push(`requestId=${requestId}`);
+  log.error(`upstream error: ${status} (${details.join(" ")})`);
+}
 
 /**
  * Preserve the legacy process-global credential only for a local, unambiguous
@@ -6585,10 +7156,11 @@ async function forwardToUpstream(
   }
 
   // Verbatim endpoint passthrough (#1052): when the fetch interceptor preserved
-  // the client's original endpoint path (x-lore-upstream-path) AND we are a pure
+  // the client's original request target (pathname + query, carried under the
+  // wire-compatible x-lore-upstream-path name) AND we are a pure
   // passthrough — same host (headerUpstream is the highest-priority base, so it
   // equals effectiveUpstreamBase) and same wire protocol (no translation) — POST
-  // to the exact original endpoint instead of the reconstructed canonical path.
+  // to the exact original endpoint instead of the reconstructed canonical URL.
   // This is what lets providers whose endpoint omits `/v1` (GitHub Copilot's
   // `/chat/completions`) or uses a non-standard prefix work without an allowlist.
   // No-ops for the standard `/v1/...` case (verbatim == reconstructed), and the
@@ -6676,34 +7248,32 @@ async function forwardToUpstream(
 
   const effectiveInterceptor = interceptor ?? activeInterceptor;
 
-  const dispatch = (dispatchSignal?: AbortSignal): Promise<Response> =>
-    effectiveInterceptor
+  const dispatchUpstream = (dispatchSignal?: AbortSignal): Promise<Response> =>
+    responseAgainstAbort(async () => {
+      try {
+        return await upstreamFetch(url, {
+          method: "POST",
+          headers,
+          body: upstreamBody,
+          signal: dispatchSignal,
+        });
+      } catch (error) {
+        logUpstreamFetchFailure(error, req, route, dispatchSignal);
+        throw error;
+      }
+    }, dispatchSignal);
+
+  const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
+    return effectiveInterceptor
       ? responseAgainstAbort(
           () =>
             effectiveInterceptor(body, req.model, req.stream, () =>
-              responseAgainstAbort(
-                () =>
-                  upstreamFetch(url, {
-                    method: "POST",
-                    headers,
-                    body: upstreamBody,
-                    signal: dispatchSignal,
-                  }),
-                dispatchSignal,
-              ),
+              dispatchUpstream(dispatchSignal),
             ),
           dispatchSignal,
         )
-      : responseAgainstAbort(
-          () =>
-            upstreamFetch(url, {
-              method: "POST",
-              headers,
-              body: upstreamBody,
-              signal: dispatchSignal,
-            }),
-          dispatchSignal,
-        );
+      : dispatchUpstream(dispatchSignal);
+  };
 
   const response = await dispatch(signal);
   return { response, retry: dispatch, serializedBody, effectiveProtocol };
@@ -6937,7 +7507,7 @@ export function buildStreamingResponse(
       recallAbort.abort(
         new DOMException("recall stream deadline exceeded", "TimeoutError"),
       ),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
+    getSSEInactivityDeadlines().foregroundRequestTimeoutMs,
   );
   const clearRecallDeadline = (): void => clearTimeout(recallDeadline);
 
@@ -7033,8 +7603,7 @@ export function buildStreamingResponse(
           resetKeepalive();
           const validator = new AnthropicSSEValidator();
           const eventStream = parseSSEStream(reader, {
-            signal: streamSignal,
-            inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+            ...foregroundSSEStreamOptions(streamSignal),
             requireEventTerminator: true,
             fatalUtf8: true,
             maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -7559,8 +8128,7 @@ export function buildStreamingResponse(
                   event: contEvent,
                   data: contData,
                 } of parseSSEStream(contReader, {
-                  signal: streamSignal,
-                  inactivityMs: FOREGROUND_SSE_INACTIVITY_MS,
+                  ...foregroundSSEStreamOptions(streamSignal),
                   requireEventTerminator: true,
                   fatalUtf8: true,
                   maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -8113,7 +8681,9 @@ export function streamResponsesRecallAware(
   let streamBytes = 0;
   let hiddenRecallBytes = 0;
   const frameCounter = { count: 0 };
-  const sseInactivityMs = opts.sseInactivityMs ?? FOREGROUND_SSE_INACTIVITY_MS;
+  const sseInactivityMs =
+    opts.sseInactivityMs ??
+    getSSEInactivityDeadlines().foregroundSseInactivityMs;
   const maxPrincipalTransportRetries = 1;
   const maxRecallContinuationTransportRetries = 1;
 
@@ -12002,7 +12572,6 @@ export function streamResponsesRecallAware(
  */
 const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
-const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
 // A gateway-owned reason stays distinct from provider token-limit reasons and
 // maps to OpenCode's retryable `unknown` finish, preserving its agent loop.
 const PRINCIPAL_TRANSPORT_INCOMPLETE_REASON = "gateway_transport";
@@ -14122,6 +14691,11 @@ async function handleCompaction(
   trackOperation: (operation: Promise<unknown>) => void,
   claimSession: (sessionID: string) => Promise<void>,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before compaction.",
+    );
+  }
   const abortScope = createForegroundAbortScope(req.signal);
   try {
     const run = (signal: AbortSignal) => {
@@ -14590,10 +15164,17 @@ export async function handleCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
+    const requestGeneration = streamingPostResponseGeneration;
+    await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+    if (
+      pipelineResetInProgress ||
+      requestGeneration !== streamingPostResponseGeneration
+    ) {
+      return errorResponse(503, "Gateway pipeline generation changed");
+    }
     const preflight = preflightDirectCompactionSession(req, config);
     if (preflight) return preflight;
     streamingPostResponsesAccepting = true;
-    const requestGeneration = streamingPostResponseGeneration;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
       const response = await runActivePipelineRequest(
@@ -14867,8 +15448,15 @@ export async function handleResponsesCompactEndpoint(
     if (pipelineResetInProgress) {
       return errorResponse(503, "Gateway pipeline is resetting");
     }
-    streamingPostResponsesAccepting = true;
     const requestGeneration = streamingPostResponseGeneration;
+    await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+    if (
+      pipelineResetInProgress ||
+      requestGeneration !== streamingPostResponseGeneration
+    ) {
+      return errorResponse(503, "Gateway pipeline generation changed");
+    }
+    streamingPostResponsesAccepting = true;
     const abortScope = createForegroundAbortScope(req.signal);
     try {
       const response = await runActivePipelineRequest(
@@ -14913,6 +15501,14 @@ export async function passthroughResponsesCompact(
   trustedUpstreamBase?: string | null,
   parsedRequest?: GatewayRequest,
 ): Promise<Response> {
+  const requestGeneration = streamingPostResponseGeneration;
+  await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
   const abortScope = createForegroundAbortScope(callerSignal);
   if (hasConflictingAuthHeaders(rawHeaders)) {
     abortScope.dispose();
@@ -15077,7 +15673,8 @@ export async function passthroughResponsesCompact(
     );
   }
   const upstreamPath = extractUpstreamPathHeader(rawHeaders);
-  const compactPath = upstreamPath?.endsWith("/responses/compact")
+  const compactPathname = upstreamPath?.split("?", 1)[0];
+  const compactPath = compactPathname?.endsWith("/responses/compact")
     ? upstreamPath
     : undefined;
   const upstreamUrl = compactPath
@@ -15153,8 +15750,6 @@ export async function passthroughResponsesCompact(
 // Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
 
-const FOREGROUND_REQUEST_TIMEOUT_MS = 300_000;
-
 export function abortAwareDelay(
   delayMs: number,
   signal?: AbortSignal,
@@ -15202,11 +15797,13 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   const onCallerAbort = () => abort(caller?.reason);
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
-  const deadlineAt = Date.now() + FOREGROUND_REQUEST_TIMEOUT_MS;
+  const requestTimeoutMs =
+    getSSEInactivityDeadlines().foregroundRequestTimeoutMs;
+  const deadlineAt = Date.now() + requestTimeoutMs;
   const timer = setTimeout(
     () =>
       abort(new DOMException("foreground request timed out", "TimeoutError")),
-    FOREGROUND_REQUEST_TIMEOUT_MS,
+    requestTimeoutMs,
   );
   return {
     signal: controller.signal,
@@ -15445,15 +16042,19 @@ export function validatedMetaStream(
   response: Response,
   protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
   codex: boolean,
-  signal?: AbortSignal,
+  streamOptions: SSEStreamOptions = foregroundSSEStreamOptions(),
 ): Response {
+  const {
+    signal,
+    inactivityMs = getSSEInactivityDeadlines().foregroundSseInactivityMs,
+  } = streamOptions;
   if (protocol === "openai-responses") {
     return streamResponsesPassthrough(
       response,
       () => {},
       undefined,
       codex ? "codex" : "public",
-      signal,
+      { signal, inactivityMs },
     );
   }
   const abort = new AbortController();
@@ -15530,6 +16131,7 @@ export function validatedMetaStream(
             try {
               for await (const { event, data } of parseSSEStream(reader, {
                 signal: abort.signal,
+                inactivityMs,
                 requireEventTerminator: true,
                 fatalUtf8: true,
                 maxFrames: DEFAULT_MAX_SSE_FRAMES,
@@ -15546,6 +16148,7 @@ export function validatedMetaStream(
           } else if (protocol === "openai") {
             await accumulateOpenAISSEStream(response, {
               signal: abort.signal,
+              inactivityMs,
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
@@ -15554,6 +16157,7 @@ export function validatedMetaStream(
           } else {
             await accumulateGeminiSSEStream(response, {
               signal: abort.signal,
+              inactivityMs,
               strict: true,
               stopAtTerminal: true,
               onValidatedEvent: forward,
@@ -15594,6 +16198,11 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation cannot be forwarded without its retained prefix; retrying with the full conversation.",
+    );
+  }
   setSentryLightContext({ model: req.model });
 
   const abortScope = createForegroundAbortScope(req.signal);
@@ -15650,7 +16259,7 @@ async function handlePassthrough(
           upstreamResponse,
           wireProtocol,
           req.codex === true,
-          abortScope.signal,
+          foregroundSSEStreamOptions(abortScope.signal),
         ),
       );
     }
@@ -15688,7 +16297,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToOpenAI(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -15696,7 +16305,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToResponses(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -15704,7 +16313,7 @@ async function handlePassthrough(
         return withLimits(
           translateAnthropicStreamToGemini(anthropicSSE, {
             strict: true,
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
           }),
         );
       }
@@ -15713,26 +16322,26 @@ async function handlePassthrough(
     const resp = await preserveIncompleteResponsesTerminal(
       wireProtocol === "openai"
         ? accumulateOpenAISSEStream(upstreamResponse, {
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
             strict: true,
             stopAtTerminal: true,
             consumeUntilDone: true,
           })
         : wireProtocol === "openai-responses"
           ? accumulateResponsesSSEStream(upstreamResponse, {
-              signal: abortScope.signal,
+              ...foregroundSSEStreamOptions(abortScope.signal),
               validation: req.codex === true ? "codex" : "public",
               stopAtTerminal: true,
               requireCompletedTerminal: true,
             })
           : wireProtocol === "gemini"
             ? accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
             : accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               }),
@@ -15784,6 +16393,11 @@ async function handleProvisionalConversationTurn(
   downstreamSettled: Promise<void>,
   downstreamWasCancelled: () => boolean,
 ): Promise<Response> {
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before confirming a provisional session.",
+    );
+  }
   // Resolve and validate route intent once, but keep it private until the
   // provisional identity is confirmed by a complete response and client EOF.
   const requestUpstream = prepareRequestUpstream(req, config);
@@ -15819,26 +16433,29 @@ async function handleProvisionalConversationTurn(
     accumulated = req.stream
       ? forwarded.effectiveProtocol === "openai-responses"
         ? await accumulateResponsesSSEStream(upstreamResponse, {
-            signal: abortScope.signal,
+            ...foregroundSSEStreamOptions(abortScope.signal),
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           })
         : forwarded.effectiveProtocol === "openai"
           ? await accumulateOpenAISSEStream(upstreamResponse, {
-              signal: abortScope.signal,
+              ...foregroundSSEStreamOptions(abortScope.signal),
               strict: true,
               stopAtTerminal: true,
               consumeUntilDone: true,
+              allowPostTerminalNoop: isOpenCodeZenOpenAIStream(
+                requestUpstream.route,
+              ),
             })
           : forwarded.effectiveProtocol === "gemini"
             ? await accumulateGeminiSSEStream(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
             : await accumulateSSEResponse(upstreamResponse, {
-                signal: abortScope.signal,
+                ...foregroundSSEStreamOptions(abortScope.signal),
                 strict: true,
                 stopAtTerminal: true,
               })
@@ -15979,15 +16596,17 @@ async function handleProvisionalConversationTurn(
     const userIndex = req.messages.findLastIndex(
       (message) => message.role === "user",
     );
+    const absoluteUserIndex =
+      (req.sourceInput?.sourcePrefix?.messageCount ?? 0) + userIndex;
     const temporalInput: TurnTemporalInput = {
-      assistantIndex: req.messages.length,
+      assistantIndex: requestSourceMessageCount(req),
       ...(userIndex >= 0
         ? {
             latestUser: gatewayMessagesToLore(
               [req.messages[userIndex]],
               identified.sessionID,
-              userIndex,
-              userIndex,
+              absoluteUserIndex,
+              absoluteUserIndex,
             )[0],
           }
         : {}),
@@ -16052,7 +16671,7 @@ async function handleProvisionalConversationTurn(
         noStore,
       });
       saveSessionTracking(identified.sessionID, {
-        messageCount: req.messages.length,
+        messageCount: requestSourceMessageCount(req),
         turnsSinceCuration: persisted?.turnsSinceCuration ?? 0,
         consecutiveTextOnlyTurns: persisted?.consecutiveTextOnlyTurns ?? 0,
         projectPath,
@@ -16110,7 +16729,7 @@ async function handleProvisionalConversationTurn(
       state.fingerprint = identified.adoptionFingerprint;
     }
     if (pathResult.gitRemote) state.gitRemote = pathResult.gitRemote;
-    state.messageCount = req.messages.length;
+    state.messageCount = requestSourceMessageCount(req);
     state._dirty = true;
     if (credential) {
       captureLegacyGlobalAuth(req, config, credential);
@@ -16686,7 +17305,7 @@ async function handleConversationTurn(
   // Skip for sub-agent sessions (small context by design) and tool-less
   // requests (title-gen, summarization agents that resume with fresh context).
   const prevMsgCount = sessionState.messageCount;
-  const currMsgCount = req.messages.length;
+  const currMsgCount = requestSourceMessageCount(req);
   if (
     prevMsgCount > 10 &&
     currMsgCount < prevMsgCount * 0.5 &&
@@ -16803,7 +17422,7 @@ async function handleConversationTurn(
   // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
   const preparationTiming = new PreparationTiming(req);
   log.info(
-    `turn: session=${sessionID.slice(0, 16)} messages=${req.messages.length} ` +
+    `turn: session=${sessionID.slice(0, 16)} messages=${currMsgCount} ` +
       `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
       `subagent=${!!sessionState.isSubagent} ` +
       `source=${pathResult.source} ` +
@@ -17045,6 +17664,9 @@ async function handleConversationTurn(
     projectPath,
     noStore: suppressTemporalStorage,
     protocol: req.protocol,
+    checkpointProtocol: requestCheckpointProtocol(req),
+    checkpointBoundarySafe: req.sourceInput?.boundarySafe,
+    sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
   });
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -17491,6 +18113,11 @@ async function handleConversationTurn(
     req.signal,
   );
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
+  // transform() updates core's attempted layer before dispatch. Use the
+  // last layer whose request was accepted upstream instead: a synthetic
+  // response or failed request must not consume a compaction boundary.
+  const previousTransformLayer =
+    sessionState.lastAcceptedProvenanceLayer ?? null;
   let result;
   try {
     result = transform({
@@ -17515,7 +18142,10 @@ async function handleConversationTurn(
       projectPath,
       noStore: suppressTemporalStorage,
       protocol: req.protocol,
+      checkpointProtocol: requestCheckpointProtocol(req),
+      checkpointBoundarySafe: req.sourceInput?.boundarySafe,
       forceFull: true,
+      sourcePrefix: requestSourcePrefix(req),
       timing: preparationTiming,
     }));
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -17527,6 +18157,28 @@ async function handleConversationTurn(
     });
   }
   checkpoint?.finish(result.messages);
+  // This header is deliberately optimistic: the candidate checkpoint is not
+  // published until accepted-response bookkeeping succeeds after downstream
+  // EOF. The interceptor therefore caches only at EOF, and a follow-up that
+  // races or outlives publication must take the 409/full-replay path. Never
+  // treat possession of this token as proof that durable state already exists.
+  const contextBoundaryHeader =
+    req.sourceInput &&
+    supportsContextBoundary(req.rawHeaders) &&
+    req.sourceInput.boundarySafe &&
+    checkpoint &&
+    checkpoint.hasPendingPublication &&
+    !suppressTemporalStorage
+      ? encodeContextBoundary({
+          v: 1,
+          protocol: requestContextBoundaryProtocol(req),
+          inputItems: req.sourceInput.itemCount,
+          inputDigest: req.sourceInput.inputDigest,
+          retainedItems: req.sourceInput.retainedItems,
+          sourceMessages: requestSourceMessageCount(req),
+          sourceDigest: checkpoint.digest,
+        })
+      : undefined;
 
   // Drop trailing pure-text assistant messages to prevent prefill errors
   for (;;) {
@@ -17820,10 +18472,10 @@ async function handleConversationTurn(
   const transformedMessages = loreMessagesToGateway(
     result.messages,
     provenanceByMessageId,
-    !sourceWindow &&
-      result.messages.length === loreMessages.length &&
-      result.messages.every(
-        (message, index) => message.info.id === loreMessages[index]?.info.id,
+    shouldPreserveResponsesProvenance(previousTransformLayer, result.layer) &&
+      canReplayRequestProvenance(
+        req.protocol,
+        requestUpstreamRoute.effectiveProtocol,
       ),
   );
   removeOrphanedToolResults(transformedMessages);
@@ -18231,6 +18883,9 @@ async function handleConversationTurn(
     if (foregroundOwnershipTransferred) return response;
     foregroundOwnershipTransferred = true;
     copyUsageLimitHeaders(upstreamResponse.headers, response.headers);
+    if (contextBoundaryHeader && response.ok) {
+      response.headers.set(CONTEXT_BOUNDARY_HEADER, contextBoundaryHeader);
+    }
     return wrapBodyWithCleanup(
       response,
       releaseForeground,
@@ -18268,7 +18923,14 @@ async function handleConversationTurn(
       }
       log.warn("upstream error body read timed out");
     }
-    log.error(`upstream error: ${upstreamResponse.status}`);
+    logUpstreamResponseFailure(
+      upstreamResponse.status,
+      errorBody,
+      upstreamResponse.headers,
+      req,
+      requestUpstreamRoute,
+      sessionID,
+    );
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.
@@ -18316,6 +18978,20 @@ async function handleConversationTurn(
     return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
   }
 
+  // The provenance boundary is committed by the successful-response
+  // finalizers below, after the provider body has accumulated and durable
+  // response bookkeeping has succeeded. A 2xx status alone is not acceptance:
+  // streamed Responses can still end in `response.failed` or disconnect.
+  let acceptedProvenanceLayerCommitted = false;
+  const commitAcceptedProvenanceLayer = (): void => {
+    if (acceptedProvenanceLayerCommitted) return;
+    saveSessionTracking(sessionID, {
+      lastAcceptedProvenanceLayer: result.layer,
+    });
+    sessionState.lastAcceptedProvenanceLayer = result.layer;
+    acceptedProvenanceLayerCommitted = true;
+  };
+
   // Run the recall-interception loop over an already-accumulated
   // (internal Anthropic-format) GatewayResponse and return the client HTTP
   // response. Shared by the non-streaming path AND the OpenAI/openai-responses
@@ -18358,7 +19034,7 @@ async function handleConversationTurn(
         // finalizer, after downstream EOF, for buffered clients as well.
         finishStreaming(response);
       } else {
-        postResponse(
+        const persisted = postResponse(
           req,
           response,
           sessionState,
@@ -18369,6 +19045,7 @@ async function handleConversationTurn(
           suppressTemporalStorage,
           endGenAiSpan,
         );
+        if (persisted) commitAcceptedProvenanceLayer();
       }
     };
     const failRecall = (
@@ -18541,7 +19218,7 @@ async function handleConversationTurn(
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
-            signal,
+            ...foregroundSSEStreamOptions(signal),
             validation: currentModifiedReq.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -18773,6 +19450,7 @@ async function handleConversationTurn(
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
+                commitAcceptedProvenanceLayer();
               }),
             );
             recallPersistenceTransaction = undefined;
@@ -19082,7 +19760,7 @@ async function handleConversationTurn(
             },
             sessionState.sessionID,
             req.codex ? "codex" : "public",
-            foregroundAbort.signal,
+            foregroundSSEStreamOptions(foregroundAbort.signal),
           ),
         );
       }
@@ -19091,7 +19769,7 @@ async function handleConversationTurn(
       const captured = await awaitForeground(
         captureUnsuccessfulResponses(
           accumulateResponsesSSEStream(upstreamResponse, {
-            signal: foregroundAbort.signal,
+            ...foregroundSSEStreamOptions(foregroundAbort.signal),
             validation: req.codex ? "codex" : "public",
             stopAtTerminal: true,
             requireCompletedTerminal: true,
@@ -19123,10 +19801,12 @@ async function handleConversationTurn(
       // non-streaming Anthropic format (same pattern as non-stream path).
       const resp = await awaitForeground(
         accumulateOpenAISSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
           strict: true,
           stopAtTerminal: true,
           consumeUntilDone: true,
+          allowPostTerminalNoop:
+            isOpenCodeZenOpenAIStream(requestUpstreamRoute),
         }),
       );
       return finishWithRecall(resp);
@@ -19137,7 +19817,7 @@ async function handleConversationTurn(
       // the recall-aware finalizer (same buffered pattern as the OpenAI paths).
       const resp = await awaitForeground(
         accumulateGeminiSSEStream(upstreamResponse, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
           strict: true,
           stopAtTerminal: true,
         }),
@@ -19187,7 +19867,7 @@ async function handleConversationTurn(
     if (req.protocol === "openai") {
       return finishForeground(
         translateAnthropicStreamToOpenAI(anthropicSSE, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
           propagateErrors: true,
         }),
       );
@@ -19195,14 +19875,14 @@ async function handleConversationTurn(
     if (req.protocol === "openai-responses") {
       return finishForeground(
         translateAnthropicStreamToResponses(anthropicSSE, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
         }),
       );
     }
     if (req.protocol === "gemini") {
       return finishForeground(
         translateAnthropicStreamToGemini(anthropicSSE, {
-          signal: foregroundAbort.signal,
+          ...foregroundSSEStreamOptions(foregroundAbort.signal),
         }),
       );
     }
@@ -19238,6 +19918,50 @@ async function handleConversationTurn(
     );
   }
   return finishWithRecall(captured.response);
+}
+
+/**
+ * Decide whether request-only Responses provenance may cross this transform.
+ *
+ * Encrypted reasoning is deliberately not part of Lore messages, temporal
+ * storage, or embeddings. It is replayed only while the gradient layer is
+ * stable; a layer transition is a compaction boundary and intentionally drops
+ * the old wire provenance. A fresh in-memory session has no prior boundary
+ * (`null`) and may replay its supplied history; persisted sessions with the
+ * v89 `-1` sentinel fail closed until an upstream turn establishes one.
+ * Emergency Layer 4 never replays it.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function shouldPreserveResponsesProvenance(
+  previousLayer: number | null,
+  currentLayer: number,
+): boolean {
+  return (
+    currentLayer < 4 &&
+    (previousLayer === null || previousLayer === currentLayer)
+  );
+}
+
+/**
+ * Provider-native thinking/encrypted blocks are opaque and valid only on the
+ * same wire family that produced them. A cross-protocol request keeps its
+ * visible projection but drops request-only provenance rather than sending
+ * Anthropic blocks to Gemini, Gemini signatures to Anthropic, or Responses
+ * reasoning items to Chat Completions.
+ *
+ * Vertex and Bedrock use the Anthropic Messages body, so they share the
+ * Anthropic provenance family.
+ *
+ * @internal Exported for focused policy tests.
+ */
+export function canReplayRequestProvenance(
+  ingressProtocol: GatewayProtocol,
+  effectiveProtocol: GatewayProtocol,
+): boolean {
+  const family = (protocol: GatewayProtocol): string =>
+    protocol === "vertex" ? "anthropic" : protocol;
+  return family(ingressProtocol) === family(effectiveProtocol);
 }
 
 // ---------------------------------------------------------------------------
@@ -19323,13 +20047,10 @@ export function loreMessagesToGateway(
           });
           break;
         case "reasoning":
-          content.push({
-            type: "thinking",
-            thinking: (part as { text: string }).text ?? "",
-            ...((part as { signature?: string }).signature != null
-              ? { signature: (part as { signature?: string }).signature }
-              : undefined),
-          });
+          // Native/encrypted reasoning is request-only provenance. Older
+          // temporal rows may still contain a reasoning part from before that
+          // boundary existed; never promote it back into visible request
+          // content on replay.
           break;
         case "tool": {
           const toolPart = part as {
@@ -19439,12 +20160,13 @@ export function loreMessagesToGateway(
  * introduces orphaned references, this catches them before they reach the API.
  */
 /** @internal Exported for tests. */
-export function removeOrphanedToolResults(
-  messages: Array<{
-    role: "user" | "assistant";
-    content: GatewayContentBlock[];
-  }>,
-): void {
+function clearGatewayMessageProvenance(message: GatewayMessage): void {
+  delete message.provenanceContent;
+  delete message.provenancePositions;
+}
+
+/** @internal Exported for tests. */
+export function removeOrphanedToolResults(messages: GatewayMessage[]): void {
   // --- Pass 1: Remove orphaned tool_result blocks (tool_result → tool_use) ---
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -19466,6 +20188,11 @@ export function removeOrphanedToolResults(
       (b) => b.type !== "tool_result" || toolUseIds.has(b.toolUseId),
     );
     if (msg.content.length < before) {
+      // Provenance is serialized in preference to visible content by every
+      // same-family request builder. Once cleanup changes the visible tool
+      // sequence, retaining the old provider-native sequence could resurrect
+      // an orphaned tool call (and its encrypted reasoning) on the wire.
+      clearGatewayMessageProvenance(msg);
       log.warn(
         `removed ${before - msg.content.length} orphaned tool_result block(s) from message ${i}`,
       );
@@ -19503,6 +20230,7 @@ export function removeOrphanedToolResults(
       (b) => b.type !== "tool_use" || toolResultIds.has(b.id),
     );
     if (msg.content.length < before) {
+      clearGatewayMessageProvenance(msg);
       log.warn(
         `removed ${before - msg.content.length} orphaned tool_use block(s) from assistant message ${i}`,
       );
@@ -19553,6 +20281,11 @@ async function handleLoreSlashCommand(
 ): Promise<Response | null> {
   const text = lastUserTextTrimmed(req);
   if (!text.toLowerCase().startsWith("/lore:")) return null;
+  if (requestSourcePrefix(req)) {
+    throw new SourceDeltaUnavailableError(
+      "A checkpointed continuation must be replayed in full before running a slash command.",
+    );
+  }
 
   let state = findLiveSessionState(req, config, allSessions);
   const indexedSessionID = findIndexedSessionID(req, config);
@@ -20020,8 +20753,15 @@ async function handleRequestForTenant(
   if (pipelineResetInProgress) {
     return errorResponse(503, "Gateway pipeline is resetting");
   }
-  streamingPostResponsesAccepting = true;
   const requestGeneration = streamingPostResponseGeneration;
+  await ensureGatewaySSEDeadlineConfiguration(config, requestGeneration);
+  if (
+    pipelineResetInProgress ||
+    requestGeneration !== streamingPostResponseGeneration
+  ) {
+    return errorResponse(503, "Gateway pipeline generation changed");
+  }
+  streamingPostResponsesAccepting = true;
   let resolveDownstreamSettled: (() => void) | undefined;
   let downstreamCancelled = false;
   const downstreamSettled = new Promise<void>((resolve) => {
@@ -20139,14 +20879,22 @@ async function handleRequestInner(
     // task_result. Guarding structural detection on the sub-agent signal closes
     // that hole regardless of which header resolved the session.
     const isClaudeSubagent = isClaudeCodeSubagent(req.rawHeaders);
+    // A checkpointed continuation deliberately contains only the new suffix. Its
+    // small request-local message count must not look like a large session
+    // suddenly compacting. Pattern-based detection remains enabled because a
+    // suffix can still explicitly request compaction.
+    const isCheckpointContinuation =
+      req.sourceInput?.sourcePrefix !== undefined;
     const structuralCompaction =
-      !isClaudeSubagent && isStructuralCompaction(req, priorState);
+      !isClaudeSubagent &&
+      !isCheckpointContinuation &&
+      isStructuralCompaction(req, priorState);
     const patternDetection = structuralCompaction
       ? undefined
       : detectCompactionRequest(req);
     if (structuralCompaction || patternDetection?.detected) {
       const reason = structuralCompaction
-        ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${req.messages.length})`
+        ? `structural (prior=${priorState?.messageCount ?? "?"} curr=${requestSourceMessageCount(req)})`
         : patternDetection?.detected
           ? patternDetection.reason === "system-prompt"
             ? `pattern: system-prompt match "${patternDetection.pattern}"`
@@ -20155,7 +20903,7 @@ async function handleRequestInner(
               : `pattern: template-sections (${patternDetection.matchCount} matches)`
           : "unknown";
       log.info(
-        `compaction detected: ${reason} messages=${req.messages.length} tools=${req.tools.length}`,
+        `compaction detected: ${reason} messages=${requestSourceMessageCount(req)} tools=${req.tools.length}`,
       );
       return await handleCompaction(
         req,
@@ -20167,7 +20915,7 @@ async function handleRequestInner(
     }
 
     // --- Case 2: Meta request (title gen, summary, categorization, etc.) → passthrough ---
-    if (isMetaRequest(req)) {
+    if (isMetaRequest(req, requestSourceMessageCount(req))) {
       log.info(
         `meta request detected: messages=${req.messages.length} tools=${req.tools.length}` +
           ` maxTokens=${req.maxTokens} agent=${req.rawHeaders[LORE_AGENT_HEADER] ?? "none"}`,
@@ -20186,10 +20934,19 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    if (err instanceof SourceDeltaUnavailableError) {
+      const response = errorResponse(
+        409,
+        "The retained Lore context no longer matches the request prefix; retrying with the full conversation.",
+      );
+      response.headers.set(CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
+      return response;
+    }
     // Client disconnect / abort is benign — downgrade from error to info.
     const isAbort = err instanceof DOMException && err.name === "AbortError";
     if (isAbort) {
-      log.info("pipeline aborted (client disconnect)");
+      const reason = err.message ? `: ${err.message}` : "";
+      log.info(`pipeline aborted (client disconnect${reason})`);
       // Only surfaces to Sentry if the host was under pressure at abort time.
       captureClientAbortUnderPressure({
         startMs: requestStartMs,
@@ -20199,16 +20956,19 @@ async function handleRequestInner(
       // Only log fixed internal failures. Arbitrary parser/fetch messages can
       // contain upstream response content, which must never reach the log.
       const detail =
-        err instanceof Error &&
-        [
-          "fetch failed",
-          "malformed OpenAI stream event",
-          "missing OpenAI finish_reason terminal",
-          "missing OpenAI [DONE] terminal",
-          "Upstream response has no body",
-        ].includes(err.message)
-          ? `: ${err.message}`
-          : "";
+        err instanceof OpenAIStreamValidationError
+          ? config.exposeProviderDiagnostics
+            ? `: ${err.message} (rule=${err.rule})`
+            : `: ${err.message}`
+          : err instanceof Error &&
+              [
+                "fetch failed",
+                "missing OpenAI finish_reason terminal",
+                "missing OpenAI [DONE] terminal",
+                "Upstream response has no body",
+              ].includes(err.message)
+            ? `: ${err.message}`
+            : "";
       log.error(`pipeline request failed${detail}`);
     }
     return errorResponse(502, "Gateway request failed");

@@ -42,6 +42,22 @@ import type {
   GatewayContentBlock,
   GatewayMessage,
 } from "../src/translate/types";
+import type * as coreConfig from "../../core/src/config";
+
+// These tests assert on cache-stability of the system prefix, never on
+// vectors; skip the ONNX embedding provider so stored messages bypass the
+// embedding worker (the raw-window test alone spent ~40s in real inference).
+vi.mock("../../core/src/config", async (importOriginal) => {
+  const mod = await importOriginal<typeof coreConfig>();
+  return {
+    ...mod,
+    config: () => {
+      const c = mod.config();
+      c.search.embeddings.enabled = false;
+      return c;
+    },
+  };
+});
 
 function makeBody(
   userMessage: string,
@@ -1761,81 +1777,54 @@ describe("cache stability (e2e)", () => {
       const projectPath = `/tmp/lore-window-march-${Date.now()}`;
       const clientSessionID = `window-march-client-${Date.now()}`;
 
-      // Force a low layer-0 cap via project .lore.json so a ~125K session
-      // compresses to layer 1 (the raw-window pin path) deterministically —
-      // without depending on models.dev pricing being warm in the test. The
-      // pipeline calls config.load(projectPath) per request, so this is honored.
+      // Seed a small, fixed model budget so the layer-1 raw-window threshold is
+      // deterministic. The normal test model is a 1M-token model, which makes
+      // this fixture's raw history fit forever on some runs and turns the
+      // eviction assertion into a vacuous "all holds" check.
+      const TEST_MODEL = "cache-stability-eviction-fixture";
       const { mkdirSync, writeFileSync } = await import("node:fs");
       mkdirSync(projectPath, { recursive: true });
       writeFileSync(
         `${projectPath}/.lore.json`,
-        JSON.stringify({ budget: { maxLayer0Tokens: 40000 } }),
+        JSON.stringify({ budget: { maxLayer0Tokens: 12_000 } }),
       );
 
-      // A large BASE history (forces compression to layer 1 via the 40K cost
-      // cap) plus SMALL per-turn messages. Decoupling base size from per-turn
-      // growth is deliberate: the raw-window pin's chunked eviction can only be
-      // meaningfully tested when one turn's growth is a MODERATE fraction of the
-      // eviction chunk (~0.4 × rawBudget) — so the boundary holds for a few turns
-      // then advances in a step. Sized for the scale-correct budgets (Part B:
-      // body budgets divide by BODY_TOKEN_RATIO, so rawBudget is ~1.68× smaller
-      // than the pre-fix value; the old fixture used 8K-token messages whose
-      // single-pair growth (~16K) exceeded the post-fix eviction chunk, forcing a
-      // re-pin every turn — that was a knife-edge calibration to the old scale,
-      // not a real per-turn-march regression).
-      //
-      // Repeat counts inflated for BPE: "lorem ipsum dolor ".repeat(N) tokenizes
-      // "lorem ipsum dolor " is a deliberately chosen repeated phrase because it
-      // is HIGHLY compressible on every BPE encoding (the fragment is a single
-      // token repeated). Empirically measured on cl100k_base (the encoding
-      // used by gradient.ts default):
-      //
-      //   repeat(180)  →  542 BPE tokens   (≈ 3 chars/token)
-      //   repeat(1000) → 3002 BPE tokens   (≈ 3 chars/token)
-      //   repeat(1350) → 4052 BPE tokens   (≈ 3 chars/token)
-      //   repeat(2000) → 6002 BPE tokens   (≈ 3 chars/token)
-      //
-      // So the legacy 1350-repeat message is ~4052 BPE tokens (not ~8000), and
-      // the legacy 180-repeat message is ~542 BPE tokens (not ~1100). To
-      // reproduce the test's intent under BPE we need much larger repeat
-      // counts (2000 / 1000 here).
-      //
-      // `small` is sized so that ~13 small messages fill the layer-1 raw
-      // window's 75% eviction headroom (rawBudget × 0.75 / chars3scale). The
-      // 14th small message triggers a chunked eviction — that's the boundary
-      // advance the test observes (SOMETIMES, not every turn).
-      //
-      // NOTE: With the BPE-backed `estimateTokens`, the per-message token
-      // count is ~2x LOWER than the legacy chars/3 for this phrase (3002 vs
-      // 6000 chars/3 at repeat(1000)). The post-BPE budget math: rawBudget =
-      // bodyUsable × 0.4 ≈ 40K chars/3-scale tokens; rawFillBudget = rawBudget
-      // × 0.75 ≈ 30K; per-small-message BPE = 3002 → 1787 chars/3-scale →
-      // 30000/1787 ≈ 17 messages fit before eviction kicks in. Sized to
-      // 1000-repeat so 14 small messages tip just past the boundary. On
-      // non-repeating text the BPE ratio is closer to chars/3, so this
-      // tuning is conservative.
+      // The fixture uses the cl100k estimator used by the gateway's generic
+      // message path: `repeat(300)` is about 900 tokens and `repeat(180)` is
+      // about 540 tokens. With a 20K context and 4K output, layer 1 has a raw
+      // budget of roughly 6.4K tokens and evicts to 75% of that budget. A turn
+      // pair is therefore large enough to cross the eviction threshold, but
+      // small enough for the pinned boundary to hold between chunked evictions.
       const big = (label: string) =>
-        `${label} ${"lorem ipsum dolor ".repeat(2_000)}`;
+        `${label} ${"lorem ipsum dolor ".repeat(300)}`;
       const small = (label: string) =>
-        `${label} ${"lorem ipsum dolor ".repeat(1_000)}`;
+        `${label} ${"lorem ipsum dolor ".repeat(180)}`;
       const TOTAL_TURNS = 14;
-      const BASE_PAIRS = 14; // ~28 base messages × ~8K ≈ 224K → well over budget
+      const BASE_PAIRS = 14;
 
       const fixtures = Array.from({ length: TOTAL_TURNS }, (_, i) =>
         makeFixtureEntry({
           seq: i,
           requestMessages: [],
           responseText: small(`assistant reply ${i}`),
-          model: DEFAULT_MODEL,
-          // The layer-1 window is pinned (bounded by rawBudget), so the real
-          // input is ~constant turn-over-turn — a small drift keeps calibrate()
-          // tracking a stable overhead without collapsing usable.
-          inputTokens: 120_000 + i * 1_000,
-          outputTokens: 1_200,
+          model: TEST_MODEL,
+          // Keep replayed usage on the same scale as the fixed 20K model. A
+          // 120K usage value here would poison per-session calibration after
+          // turn one and force every later turn into emergency compression.
+          inputTokens: 7_000 + i * 50,
+          outputTokens: 300,
         }),
       );
 
       harness = await createHarness({ fixtures });
+      const { _setModelDataForTest } = await import("../src/worker-model");
+      _setModelDataForTest({
+        [TEST_MODEL]: {
+          id: TEST_MODEL,
+          cost: { input: 3, output: 15, cache_read: 0.3 },
+          limit: { context: 20_000, output: 4_000 },
+        },
+      });
 
       const {
         calibrate,
@@ -1868,11 +1857,9 @@ describe("cache stability (e2e)", () => {
         history.push(
           toGatewayMessage(textTurn("user", small(`turnuser${turn}end`))),
         );
-        const resp = await harness.chat(
-          makeGatewayBody(history),
-          "test-key",
-          headers,
-        );
+        const requestBody = makeGatewayBody(history);
+        requestBody.model = TEST_MODEL;
+        const resp = await harness.chat(requestBody, "test-key", headers);
         expect(resp.status).toBe(200);
         await resp.json();
         history.push(
@@ -1954,6 +1941,8 @@ describe("cache stability (e2e)", () => {
     } finally {
       if (prevIdleTimeout === undefined) delete process.env.LORE_IDLE_TIMEOUT;
       else process.env.LORE_IDLE_TIMEOUT = prevIdleTimeout;
+      const { clearModelDataCache } = await import("../src/worker-model");
+      clearModelDataCache();
     }
   }, 600_000);
 

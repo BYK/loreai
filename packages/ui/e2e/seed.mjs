@@ -106,6 +106,14 @@ const entries = [
     session: "e2e-session-expired",
   },
   {
+    category: "gotcha",
+    title: "Retained summaries stay readable",
+    content:
+      "When source messages expire, the retained distillation remains available from the knowledge detail.",
+    confidence: 0.76,
+    session: "e2e-session-summary",
+  },
+  {
     category: "pattern",
     title: "SQLite backups stay deterministic",
     content:
@@ -272,10 +280,22 @@ db.prepare(
   6.4,
   0.9,
 );
+db.prepare(
+  `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
+   VALUES (?, (SELECT id FROM projects WHERE name = 'lore'), ?, '', '[]', ?, '[]', 0, ?, ?, ?, ?, 'batch')`,
+).run(
+  "e2e-distillation-summary",
+  "e2e-session-summary",
+  "Retained summary for the expired session: the team chose WAL mode.",
+  24,
+  T0 + 10 * 60_000,
+  5.2,
+  0.8,
+);
 db.close();
 
 console.log(
-  `seeded ${entries.length + 1} knowledge entries, ${MESSAGES} messages and 1 distillation into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 1} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);

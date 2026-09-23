@@ -5,7 +5,11 @@ import { parseAnthropicRequestChunks } from "../translate/anthropic";
 import { decodedRequestChunks } from "../http-body";
 import { headersToRecord } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
-import { invalidStreamedBody, runPipeline } from "./shared";
+import {
+  invalidStreamedBody,
+  requestBodyLimitsForConfig,
+  runPipeline,
+} from "./shared";
 
 export async function handleAnthropicMessages(
   req: Request,
@@ -14,7 +18,11 @@ export async function handleAnthropicMessages(
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseAnthropicRequestChunks(
-      decodedRequestChunks(req, req.signal),
+      decodedRequestChunks(
+        req,
+        req.signal,
+        requestBodyLimitsForConfig(config, "anthropic"),
+      ),
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;

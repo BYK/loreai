@@ -98,9 +98,11 @@ describe("EntityPage", () => {
     mount(clientWith({ updateEntityMetadata }));
     const save = await screen.findByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
-    fireEvent.input(screen.getByTestId("entity-notes"), {
-      target: { value: "new note" },
-    });
+    const notes = screen.getByTestId("entity-notes") as HTMLTextAreaElement;
+    notes.value = "new note";
+    // A direct listener must see input events even when an integration
+    // primitive prevents them from bubbling (as happened in mobile e2e).
+    notes.dispatchEvent(new Event("input"));
     expect(save).toBeEnabled();
     fireEvent.click(save);
     await waitFor(() =>
