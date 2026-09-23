@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { unlinkSync, existsSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import {
   loopbackRequest,
   type LoopbackRequestInit,
@@ -328,15 +329,19 @@ describe("PATCH /api/v1/entities/:id", () => {
     expect(notJson.status).toBe(400);
   });
 
-  it("rejects oversized metadata bodies before parsing them", async () => {
+  it("rejects oversized decoded metadata bodies before parsing them", async () => {
     const e = await seedEntity({
       entityType: "tool",
       canonicalName: "large patch",
     });
+    const body = gzipSync(JSON.stringify({ notes: "x".repeat(16 * 1024) }));
     const res = await api(`/api/v1/entities/${e.id}`, {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: " ".repeat(16 * 1024 + 1),
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+      },
+      body,
     });
     expect(res.status).toBe(413);
     expect(((await res.json()) as { error: { type: string } }).error.type).toBe(
