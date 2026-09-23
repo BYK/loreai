@@ -488,7 +488,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
     getEntity(id: string, signal?: AbortSignal): Promise<EntityDetail> {
       return getJson(
-        `/entities/${encodeURIComponent(id)}`,
+        apiPath(["entities", id]),
         entityDetail,
         signal,
       );
@@ -533,7 +533,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     ): Promise<EntityDetail> {
       return mutateJson(
         "PATCH",
-        `/entities/${encodeURIComponent(id)}`,
+        apiPath(["entities", id]),
         patch,
         entityDetail,
         signal,
@@ -545,7 +545,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     ): Promise<{ deleted: boolean }> {
       return mutateJson(
         "DELETE",
-        `/entities/${encodeURIComponent(id)}`,
+        apiPath(["entities", id]),
         undefined,
         entityDeleted,
         signal,
