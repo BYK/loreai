@@ -97,7 +97,9 @@ describe("EntityPage", () => {
   });
 
   it("enables Save only when dirty and PATCHes the metadata", async () => {
-    const updateEntityMetadata = vi.fn(async () => detail());
+    const updateEntityMetadata = vi.fn(async () =>
+      detail({ metadata: { role: "engineer", notes: "new note" } }),
+    );
     mount(clientWith({ updateEntityMetadata }));
     const save = await screen.findByRole("button", { name: "Save" });
     expect(save).toBeDisabled();
@@ -114,6 +116,8 @@ describe("EntityPage", () => {
         expect.objectContaining({ notes: "new note" }),
       ),
     );
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(save).toBeDisabled();
   });
 
   it("surfaces a hosted-mode refusal as locked, not a broken form", async () => {
