@@ -267,10 +267,11 @@ export const EntityPage: Component<{ entityId: string }> = (props) => {
                         <li class="border-t border-line py-2 text-sm">
                           <a
                             class="text-accent underline"
-                            href={knowledgeHref(
-                              entry.project_id ?? "",
-                              entry.id,
-                            )}
+                            href={
+                              entry.project_id === null
+                                ? `/knowledge/${encodeURIComponent(entry.id)}`
+                                : knowledgeHref(entry.project_id, entry.id)
+                            }
                           >
                             {entry.title}
                           </a>{" "}
