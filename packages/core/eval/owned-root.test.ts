@@ -50,6 +50,36 @@ describe("standalone eval database ownership", () => {
     }
   });
 
+  test("restores the environment when owned-root cleanup fails", async () => {
+    const previous = {
+      LORE_TEST_DB_ROOT: process.env.LORE_TEST_DB_ROOT,
+      LORE_DB_PATH: process.env.LORE_DB_PATH,
+      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    };
+    let runRoot = "";
+
+    await expect(
+      withOwnedDatabaseRoot(
+        async () => {
+          const databaseRoot = process.env.LORE_TEST_DB_ROOT;
+          if (!databaseRoot) throw new Error("database root was not set");
+          runRoot = dirname(databaseRoot);
+          roots.add(runRoot);
+        },
+        {
+          removeRoot: async (_owned) => {
+            throw new Error("intentional cleanup failure");
+          },
+        },
+      ),
+    ).rejects.toThrow("intentional cleanup failure");
+
+    expect(process.env.LORE_TEST_DB_ROOT).toBe(previous.LORE_TEST_DB_ROOT);
+    expect(process.env.LORE_DB_PATH).toBe(previous.LORE_DB_PATH);
+    expect(process.env.XDG_DATA_HOME).toBe(previous.XDG_DATA_HOME);
+    await expect(lstat(runRoot)).resolves.toBeDefined();
+  });
+
   test("does not remove a replacement at the owned path", async () => {
     let runRoot = "";
     await withOwnedDatabaseRoot(async () => {

@@ -17,6 +17,7 @@ interface PreviousEnvironment {
 
 export interface OwnedDatabaseRootOptions {
   createRoot?: CreateOwnedRootOptions;
+  removeRoot?: (owned: OwnedPath) => Promise<void>;
 }
 
 function captureEnvironment(): PreviousEnvironment {
@@ -120,12 +121,14 @@ export async function withOwnedDatabaseRoot(
 
   cleanupInProgress = true;
   try {
-    if (owned) await removeOwnedPath(owned);
+    if (owned) await (options.removeRoot ?? removeOwnedPath)(owned);
     restoreEnvironment(previousEnvironment);
     cleanupComplete = true;
   } catch (error) {
     cleanupFailed = true;
     cleanupError = error;
+  } finally {
+    restoreEnvironment(previousEnvironment);
   }
   cleanupInProgress = false;
 
