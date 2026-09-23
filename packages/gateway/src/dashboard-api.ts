@@ -8,10 +8,7 @@
  */
 import { entities, isHostedMode, ltm } from "@loreai/core";
 
-import {
-  decodeRequestBody,
-  HttpRequestBodyTooLargeError,
-} from "./http-body";
+import { decodeRequestBody, HttpRequestBodyTooLargeError } from "./http-body";
 import { errorResponse, jsonResponse } from "./management-access";
 
 type EntityWithAliases = NonNullable<
