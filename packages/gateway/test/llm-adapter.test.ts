@@ -60,6 +60,7 @@ import {
   WORKER_RESPONSE_INACTIVITY_MS,
   getSSEInactivityDeadlines,
   resetSSEInactivityConfiguration,
+  setSSEDeadlineConfigurationPauseForTest,
 } from "../src/sse-inactivity";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import { workerModelCandidates } from "../src/worker-model";
@@ -933,6 +934,38 @@ describe("createGatewayLLMClient.prompt", () => {
       rmSync(workspaceRoot, { recursive: true, force: true });
       resetSSEInactivityConfiguration();
     }
+  });
+
+  test("does not send a worker request when reset invalidates deadline initialization", async () => {
+    mockFetch.mockReset();
+    let releaseInitialization: (() => void) | undefined;
+    let signalInitializationPaused: (() => void) | undefined;
+    const initializationPaused = new Promise<void>((resolve) => {
+      signalInitializationPaused = resolve;
+    });
+    const initializationRelease = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    setSSEDeadlineConfigurationPauseForTest(initializationRelease, () =>
+      signalInitializationPaused?.(),
+    );
+
+    const client = createGatewayLLMClient(
+      UPSTREAMS,
+      () => ({ scheme: "api-key", value: "sk-ant-test" }),
+      { providerID: "anthropic", modelID: "claude-test" },
+      { hostedMode: false },
+    );
+    const pending = client.prompt("system", "user", {
+      workerID: "lore-distill",
+    });
+
+    await initializationPaused;
+    resetSSEInactivityConfiguration();
+    releaseInitialization?.();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   test("Anthropic success returns text and records worker cost", async () => {

@@ -3424,9 +3424,15 @@ export function createGatewayLLMClient(
       // non-thrown failure from THIS call, not a stale one from a prior
       // successful or different-failure call.
       lastWorkerError = undefined;
-      await ensureSSEInactivityConfiguration({
+      const deadlinesAreCurrent = await ensureSSEInactivityConfiguration({
         hostedMode: factoryHostedMode,
       });
+      if (!deadlinesAreCurrent) {
+        throw new DOMException(
+          "Gateway reset before worker request started",
+          "AbortError",
+        );
+      }
       // `model` is mutable: on a 400 model-not-supported the retry loop swaps
       // in a same-provider backup. Protocol is still model-dependent (Copilot
       // serves GPT-5.6 on Responses and gpt-5-mini on Chat Completions), so a
