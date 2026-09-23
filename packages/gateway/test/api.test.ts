@@ -1955,76 +1955,70 @@ describe("GET /api/v1/knowledge/:id/versions", () => {
   });
 });
 
-
 describe("POST /api/v1/entities/rebuild single flight", () => {
-  it(
-    "rejects overlapping rebuilds and keeps cancellation tied to the active run",
-    async () => {
-      const { entityRebuild } = await import("@loreai/core");
-      let release: (() => void) | undefined;
-      const blocked = new Promise<void>((resolve) => {
-        release = resolve;
+  it("rejects overlapping rebuilds and keeps cancellation tied to the active run", async () => {
+    const { entityRebuild } = await import("@loreai/core");
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let rebuildSignal: AbortSignal | undefined;
+    const rebuild = vi
+      .spyOn(entityRebuild, "rebuildEntitiesFromHistory")
+      .mockImplementation(async ({ signal }) => {
+        rebuildSignal = signal;
+        entered?.();
+        await blocked;
+        return {} as never;
       });
-      let entered: (() => void) | undefined;
-      const started = new Promise<void>((resolve) => {
-        entered = resolve;
+
+    let first: Promise<Response> | undefined;
+    const start = () =>
+      api("/api/v1/entities/rebuild", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: "/test/api/entity-rebuild" }),
       });
-      let rebuildSignal: AbortSignal | undefined;
-      const rebuild = vi
-        .spyOn(entityRebuild, "rebuildEntitiesFromHistory")
-        .mockImplementation(async ({ signal }) => {
-          rebuildSignal = signal;
-          entered?.();
-          await blocked;
-          return {} as never;
-        });
+    try {
+      const firstRequest = start();
+      first = firstRequest;
+      await started;
 
-      let first: Promise<Response> | undefined;
-      const start = () =>
-        api("/api/v1/entities/rebuild", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ path: "/test/api/entity-rebuild" }),
-        });
-      try {
-        const firstRequest = start();
-        first = firstRequest;
-        await started;
+      const active = await apiJSON<{ active: boolean }>(
+        "/api/v1/entities/rebuild",
+      );
+      expect(active.active).toBe(true);
 
-        const active = await apiJSON<{ active: boolean }>(
-          "/api/v1/entities/rebuild",
-        );
-        expect(active.active).toBe(true);
+      const duplicate = await start();
+      expect(duplicate.status).toBe(409);
+      expect(
+        ((await duplicate.json()) as { error: { type: string } }).error.type,
+      ).toBe("conflict");
+      expect(rebuild).toHaveBeenCalledTimes(1);
 
-        const duplicate = await start();
-        expect(duplicate.status).toBe(409);
-        expect(
-          ((await duplicate.json()) as { error: { type: string } }).error.type,
-        ).toBe("conflict");
-        expect(rebuild).toHaveBeenCalledTimes(1);
+      const cancelled = await apiJSON<{ cancelled: boolean }>(
+        "/api/v1/entities/rebuild/cancel",
+        { method: "POST" },
+      );
+      expect(cancelled.cancelled).toBe(true);
+      expect(rebuildSignal?.aborted).toBe(true);
+      expect(
+        (await apiJSON<{ active: boolean }>("/api/v1/entities/rebuild")).active,
+      ).toBe(true);
 
-        const cancelled = await apiJSON<{ cancelled: boolean }>(
-          "/api/v1/entities/rebuild/cancel",
-          { method: "POST" },
-        );
-        expect(cancelled.cancelled).toBe(true);
-        expect(rebuildSignal?.aborted).toBe(true);
-        expect(
-          (await apiJSON<{ active: boolean }>("/api/v1/entities/rebuild"))
-            .active,
-        ).toBe(true);
-
-        release?.();
-        expect((await firstRequest).status).toBe(200);
-        expect(
-          (await apiJSON<{ active: boolean }>("/api/v1/entities/rebuild"))
-            .active,
-        ).toBe(false);
-      } finally {
-        release?.();
-        rebuild.mockRestore();
-        if (first) await first.catch(() => {});
-      }
-    },
-  );
+      release?.();
+      expect((await firstRequest).status).toBe(200);
+      expect(
+        (await apiJSON<{ active: boolean }>("/api/v1/entities/rebuild")).active,
+      ).toBe(false);
+    } finally {
+      release?.();
+      rebuild.mockRestore();
+      if (first) await first.catch(() => {});
+    }
+  });
 });
