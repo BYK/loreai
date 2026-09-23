@@ -9,6 +9,7 @@ import {
   resetPipelineState,
   setUpstreamInterceptor,
 } from "../src/pipeline";
+import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 import type { GatewayRequest } from "../src/translate/types";
 import { handleModelsPassthrough, startServer } from "../src/server";
 import { upstreamFetch } from "../src/fetch";
@@ -144,7 +145,7 @@ describe("foreground passthrough route aborts", () => {
           : handleResponsesCompactEndpoint(request, config);
 
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       const response = await pending;
       expect(response.status).toBe(502);
       expect(await response.text()).not.toContain("timed out");
@@ -386,7 +387,7 @@ describe("foreground passthrough route aborts", () => {
       );
       const pending = invoke();
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       const response = await pending;
       expect(response.status).toBe(502);
       expect(

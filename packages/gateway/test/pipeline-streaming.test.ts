@@ -72,6 +72,10 @@ import {
   streamingPostResponsePendingForTest,
   validatedMetaStream,
 } from "../src/pipeline";
+import {
+  FOREGROUND_REQUEST_TIMEOUT_MS,
+  FOREGROUND_SSE_INACTIVITY_MS,
+} from "../src/sse-inactivity";
 import { loadConfig as loadBaseConfig } from "../src/config";
 import { authFingerprint } from "../src/auth";
 import { getDegradationWarning } from "../src/worker-health";
@@ -621,9 +625,11 @@ describe("budget throttle cancellation", () => {
     const foreground = createForegroundAbortScope();
     let recorded = 0;
     let upstreamStarted = false;
+    // Throttle past the foreground deadline so the deadline must win the race.
+    const throttleDelayMs = FOREGROUND_REQUEST_TIMEOUT_MS + 60_000;
     const pending = (async () => {
       await completeBudgetThrottleDelay(
-        600_000,
+        throttleDelayMs,
         foreground.signal,
         () => recorded++,
       );
@@ -632,7 +638,7 @@ describe("budget throttle cancellation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(recorded).toBe(0);
     expect(upstreamStarted).toBe(false);
@@ -868,7 +874,7 @@ describe("Pipeline — streaming responses", () => {
     try {
       const downstream = buildStreamingResponse(upstream, () => {});
       await Promise.resolve();
-      await vi.advanceTimersByTimeAsync(120_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_SSE_INACTIVITY_MS);
       await expect(downstream.text()).rejects.toThrow(
         "SSE stream inactivity deadline exceeded",
       );
@@ -6458,7 +6464,7 @@ describe("Pipeline — streaming responses", () => {
         },
         loadLocalConfig(),
       );
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       const response = await pending;
       expect(response.status).toBe(502);
       await expect(response.text()).resolves.toContain(
@@ -6563,7 +6569,7 @@ describe("Pipeline — streaming responses", () => {
           loadLocalConfig(),
         );
         await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(300_000);
+        await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
         await expect(downstream.text()).rejects.toMatchObject({
           name: "TimeoutError",
         });

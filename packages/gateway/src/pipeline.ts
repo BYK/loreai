@@ -270,6 +270,10 @@ import {
   type RecallAwareAccumulator,
 } from "./stream/anthropic";
 import {
+  FOREGROUND_REQUEST_TIMEOUT_MS,
+  FOREGROUND_SSE_INACTIVITY_MS,
+} from "./sse-inactivity";
+import {
   gatewayMessagesToLore,
   deterministicID,
   legacyDeterministicID,
@@ -12295,7 +12299,6 @@ export function streamResponsesRecallAware(
  */
 const MAX_FOREGROUND_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_FOREGROUND_ERROR_BYTES = 64 * 1024;
-const FOREGROUND_SSE_INACTIVITY_MS = 120_000;
 // A gateway-owned reason stays distinct from provider token-limit reasons and
 // maps to OpenCode's retryable `unknown` finish, preserving its agent loop.
 const PRINCIPAL_TRANSPORT_INCOMPLETE_REASON = "gateway_transport";
@@ -15451,8 +15454,6 @@ export async function passthroughResponsesCompact(
 // ---------------------------------------------------------------------------
 // Case 2: Meta request passthrough (title gen, summaries, categorization, etc.)
 // ---------------------------------------------------------------------------
-
-const FOREGROUND_REQUEST_TIMEOUT_MS = 300_000;
 
 export function abortAwareDelay(
   delayMs: number,

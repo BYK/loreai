@@ -92,6 +92,15 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 |---|---|
 | `LORE_SHUTDOWN_TIMEOUT_MS` | Environment variable: LORE_SHUTDOWN_TIMEOUT_MS overrides the single process-wide deadline shared by signal-driven and authenticated-control shutdown. Values are milliseconds and are clamped to the minimum safe deadline; invalid values use the default. |
 
+## sse-inactivity
+
+| Variable | Description |
+|---|---|
+| `LORE_FOREGROUND_REQUEST_TIMEOUT_MS` | Wall-clock ceiling for a single foreground request: the hard abort of the whole relay (recall deadline + abort scope). Automatically raised to stay at least 60s above LORE_FOREGROUND_SSE_INACTIVITY_MS, so a request timeout can never make the inactivity deadline unreachable. Floored at 1000ms and capped at 2147483647ms; invalid values fall back to 900000. Env: LORE_FOREGROUND_REQUEST_TIMEOUT_MS. |
+| `LORE_FOREGROUND_SSE_INACTIVITY_MS` | How long the gateway tolerates upstream silence on a foreground relay before aborting it. Raise this for models whose extended-thinking phases emit nothing for minutes (Opus-class reasoning over large cached prompts), since a too-low value kills the stream mid-thinking and the client reports a connection loss rather than a stall. Positive integer ms; invalid values fall back to 600000. Floored at 1000 and capped to reserve 60s of request timeout headroom within Node's 32-bit timer ceiling. Env: LORE_FOREGROUND_SSE_INACTIVITY_MS. |
+| `LORE_WORKER_REQUEST_TIMEOUT_MS` | Wall-clock ceiling for a single background/auxiliary worker call. Automatically raised to stay at least 60s above LORE_WORKER_RESPONSE_INACTIVITY_MS. Floored at 1000ms and capped at 2147483647ms; invalid values fall back to 900000. Env: LORE_WORKER_REQUEST_TIMEOUT_MS. |
+| `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a background/auxiliary worker call tolerates upstream silence before aborting. Floored at 1000 and capped to reserve 60s of request timeout headroom within Node's 32-bit timer ceiling. Invalid values fall back to 600000. Env: LORE_WORKER_RESPONSE_INACTIVITY_MS. |
+
 ## Memory engine (`@loreai/core`)
 
 | Variable | Description |

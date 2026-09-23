@@ -52,6 +52,10 @@ import {
   _resetTemperatureUnsupportedModels,
   _resetThinkingUnsupportedModels,
 } from "../src/llm-adapter";
+import {
+  WORKER_REQUEST_TIMEOUT_MS,
+  WORKER_RESPONSE_INACTIVITY_MS,
+} from "../src/sse-inactivity";
 import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import { workerModelCandidates } from "../src/worker-model";
 import {
@@ -2552,7 +2556,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
       await rejected;
       expect(mockFetch).not.toHaveBeenCalled();
     } finally {
@@ -2627,7 +2631,7 @@ describe("createGatewayLLMClient.prompt", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
       await rejected;
       expect(tokenCalls).toBe(2);
     } finally {
@@ -6240,7 +6244,7 @@ describe("worker transport lifecycle remediation", () => {
       sessionID: "sess-inactivity-retry",
       workerID: "lore-distill",
     });
-    await vi.advanceTimersByTimeAsync(120_500);
+    await vi.advanceTimersByTimeAsync(WORKER_RESPONSE_INACTIVITY_MS + 500);
 
     await expect(pending).resolves.toBe("recovered");
     expect(cancelled).toBe(true);
@@ -6529,9 +6533,13 @@ describe("worker transport lifecycle remediation", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
-  test("one 300-second deadline covers fetch, retry delay, and every attempt", async () => {
+  test("one overall deadline covers fetch, retry delay, and every attempt", async () => {
     vi.useFakeTimers();
     let cancelled = false;
+    // Each attempt consumes almost the entire deadline, so only the first one
+    // can ever start: if the deadline were per-attempt rather than overall,
+    // the retry would launch and mockFetch would be called twice.
+    const attemptDurationMs = WORKER_REQUEST_TIMEOUT_MS - 1_000;
     mockFetch.mockImplementation(
       async () =>
         new Promise<Response>((resolve) => {
@@ -6547,7 +6555,7 @@ describe("worker transport lifecycle remediation", () => {
                   { status: 500, headers: { "retry-after": "32" } },
                 ),
               ),
-            299_000,
+            attemptDurationMs,
           );
         }),
     );
@@ -6559,7 +6567,7 @@ describe("worker transport lifecycle remediation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(299_000);
+    await vi.advanceTimersByTimeAsync(attemptDurationMs);
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(cancelled).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
@@ -6578,7 +6586,7 @@ describe("worker transport lifecycle remediation", () => {
     const rejected = expect(pending).rejects.toMatchObject({
       name: "TimeoutError",
     });
-    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(WORKER_REQUEST_TIMEOUT_MS);
     await rejected;
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });

@@ -33,6 +33,7 @@ import {
   buildAnthropicRequest,
   parseAnthropicRequest,
 } from "../src/translate/anthropic";
+import { FOREGROUND_REQUEST_TIMEOUT_MS } from "../src/sse-inactivity";
 
 describe("toVertexModelId", () => {
   test("passes through short ids that Vertex uses verbatim", () => {
@@ -518,7 +519,7 @@ describe("vertex-auth — ADC token seam", () => {
       const rejected = expect(pending).rejects.toMatchObject({
         name: "TimeoutError",
       });
-      await vi.advanceTimersByTimeAsync(300_000);
+      await vi.advanceTimersByTimeAsync(FOREGROUND_REQUEST_TIMEOUT_MS);
       await rejected;
       scope.dispose();
       expect(vi.getTimerCount()).toBe(0);
