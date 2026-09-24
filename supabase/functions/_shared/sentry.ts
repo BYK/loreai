@@ -7,12 +7,14 @@
 // PRIVACY: these functions handle GitHub provider_tokens and invite emails.
 // We NEVER attach PII to Sentry — no provider_token, no email address/body, no
 // GitHub user id reaches setTag/setExtra. Only non-sensitive scalars are tagged
-// (function_name, deployment, and boolean/status flags). sendDefaultPii is false.
+// (function_name, deployment, and boolean/status flags). The SDK's data
+// collection options are also explicitly deny-by-default below.
 //
 // The DSN is a Sentry public key (not a secret) and is hard-coded below. An
 // explicit SENTRY_DSN env var, if present, overrides it (e.g. for a staging
 // project); otherwise instrumentation is always on.
-import * as Sentry from "npm:@sentry/deno";
+import * as Sentry from "@sentry/deno";
+import { scrubErrorEvent, toError } from "./sentry-error.ts";
 
 // Sentry DSN for the Lore project (o275100). This is a public key, safe to
 // ship in client/server code — it only permits sending events, not reading them.
@@ -38,33 +40,35 @@ export function initSentry(functionName: string): void {
     environment: Deno.env.get("SENTRY_ENVIRONMENT") ?? "production",
     // These functions are short-lived request handlers — skip transactions.
     tracesSampleRate: 0,
-    // Never send request/response content or user IP-derived PII.
-    sendDefaultPii: false,
+    // Avoid default integrations such as console breadcrumbs and request
+    // capture; integrations: [] alone still appends to the SDK defaults.
+    defaultIntegrations: false,
     integrations: [],
+    // Never send request/response content or user IP-derived PII.
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: { request: false, response: false },
+      httpBodies: [],
+      urlQueryParams: false,
+      genAI: { inputs: false, outputs: false },
+      graphQL: { document: false, variables: false },
+      databaseQueryData: false,
+      queues: false,
+      stackFrameVariables: false,
+      frameContextLines: 0,
+    },
+    beforeBreadcrumb() {
+      return null;
+    },
+    beforeSend(event) {
+      return scrubErrorEvent(event);
+    },
   });
 
   Sentry.setTag("function_name", functionName);
   Sentry.setTag("deployment", "supabase-edge");
   initialized = true;
-}
-
-/**
- * Normalize a captured value into an Error. Supabase client errors
- * (e.g. PostgrestError) are plain objects, not Error instances; Sentry produces
- * weak events (missing/empty stack) for those, so we wrap them. Only scalar
- * message/hint are extracted — the raw object is NEVER JSON.stringify'd
- * because it may carry PII (query context, row contents).
- */
-function toError(err: unknown): Error {
-  if (err instanceof Error) return err;
-  if (typeof err === "string") return new Error(err);
-  const message =
-    (err as { message?: unknown })?.message ??
-    (err as { hint?: unknown })?.hint ??
-    "edge function error";
-  return new Error(
-    typeof message === "string" ? message : "edge function error",
-  );
 }
 
 /**

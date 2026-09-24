@@ -26,6 +26,8 @@ const SECRETS = [
   "prompt-title-marker",
   "entity-alias-marker",
   "/lore:private-command-marker",
+  "private request body marker",
+  "private response body marker",
 ];
 
 function expectNoSecrets(value: unknown): void {
@@ -40,8 +42,11 @@ describe("telemetry privacy boundary", () => {
       cookies: false,
       httpHeaders: { request: false, response: false },
       httpBodies: [],
-      queryParams: false,
+      urlQueryParams: false,
       genAI: { inputs: false, outputs: false },
+      graphQL: { document: false, variables: false },
+      databaseQueryData: false,
+      queues: false,
       stackFrameVariables: false,
       frameContextLines: 0,
     });
@@ -56,14 +61,29 @@ describe("telemetry privacy boundary", () => {
       },
       flush: () => Promise.resolve(true),
     }));
-    expect(options.sendDefaultPii).toBe(false);
+    expect(options).not.toHaveProperty("sendDefaultPii");
     expect(options.dataCollection).toEqual(SENTRY_DATA_COLLECTION);
-    expect(options.enableLogs).toBe(false);
+    expect(options).not.toHaveProperty("enableLogs");
     expect(options.beforeSend).toBeTypeOf("function");
     expect(options.beforeSendLog).toBeTypeOf("function");
     expect(options.beforeSendSpan).toBeTypeOf("function");
-    expect(options.beforeSendTransaction).toBeTypeOf("function");
+    expect(options).not.toHaveProperty("beforeSendTransaction");
     expect(options.beforeBreadcrumb).toBeTypeOf("function");
+
+    const span = {
+      trace_id: "1234567890abcdef1234567890abcdef",
+      span_id: "1234567890abcdef",
+      name: `GET https://api.invalid/?api_key=${SECRETS[2]}`,
+      start_timestamp: 1,
+      status: "ok",
+      is_segment: false,
+      attributes: {
+        "http.request.header.authorization": SECRETS[0],
+        "url.full": `https://api.invalid/?api_key=${SECRETS[2]}`,
+        alias: SECRETS[13],
+      },
+    } as Parameters<NonNullable<typeof options.beforeSendSpan>>[0];
+    expectNoSecrets(options.beforeSendSpan?.(span));
 
     const transport = options.transport?.({
       url: "https://sentry.invalid",
@@ -258,10 +278,13 @@ describe("telemetry privacy boundary", () => {
             authorization: "Bearer bearer-production-secret",
             "url.full":
               "https://example.com/v1/messages?key=query-production-secret",
+            "http.request.body.data": "private request body marker",
+            "http.response.body.data": "private response body marker",
           },
           span_id: "1234567890abcdef",
           trace_id: "1234567890abcdef1234567890abcdef",
           start_timestamp: 1,
+          status: "ok",
         },
       ],
     });

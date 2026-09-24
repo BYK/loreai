@@ -135,14 +135,11 @@ export function buildSentryOptions(
     // Lore proxies private prompts and provider credentials. Collection is
     // default-deny, and the hooks/transport below provide defense in depth for
     // SDK integrations that construct telemetry outside these defaults.
-    sendDefaultPii: false,
     dataCollection: SENTRY_DATA_COLLECTION,
 
-    // Capture transactions, but never export the application's free-form logs.
-    // Explicit metrics and fixed-message error telemetry are emitted at their
-    // designed call sites instead.
+    // Keep free-form application logs out of Sentry. Explicit metrics and
+    // fixed-message error telemetry are emitted at their designed call sites.
     tracesSampleRate: 1.0,
-    enableLogs: false,
 
     // Disable the NodeFetch integration. In the esbuild CJS bundle, the
     // vendored undici code inside @sentry/node has 100+ `let` declarations
@@ -159,17 +156,13 @@ export function buildSentryOptions(
       return null;
     },
 
-    // Defense in depth if a future integration creates logs despite enableLogs.
+    // Drop all SDK log records, including those from future integrations.
     beforeSendLog() {
       return null;
     },
 
     beforeSendSpan(span) {
       return scrubTelemetryValue(span);
-    },
-
-    beforeSendTransaction(event) {
-      return scrubTelemetryEvent(event);
     },
 
     // Drop transient network errors that are not actionable bugs.
@@ -210,7 +203,7 @@ if (sentryEnabled && !Sentry.isInitialized()) {
         {
           name: "sqlite query",
           op: "db",
-          attributes: { "db.system": "sqlite" },
+          attributes: { "db.system.name": "sqlite" },
           onlyIfParent: true,
         },
         fn,

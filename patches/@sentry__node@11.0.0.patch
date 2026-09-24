@@ -1,0 +1,158 @@
+diff --git a/build/cjs/index.js b/build/cjs/index.js
+index 46486cde674a33d1118158b6e152ddc85ca89b76..f83e8bfe300c5fba5901ebdc44a072982f621414 100644
+--- a/build/cjs/index.js
++++ b/build/cjs/index.js
+@@ -2,15 +2,6 @@ Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+ 
+ const index$5 = require('./integrations/http/index.js');
+ const index$7 = require('./integrations/node-fetch/index.js');
+-const index$2 = require('./integrations/fs/index.js');
+-const serverUtils = require('@sentry/server-utils');
+-const hapi = require('./integrations/tracing/hapi.js');
+-const koa = require('./integrations/tracing/koa.js');
+-const launchDarkly = require('./integrations/featureFlagShims/launchDarkly.js');
+-const openFeature = require('./integrations/featureFlagShims/openFeature.js');
+-const statsig = require('./integrations/featureFlagShims/statsig.js');
+-const unleash = require('./integrations/featureFlagShims/unleash.js');
+-const growthbook = require('./integrations/featureFlagShims/growthbook.js');
+ const index$4 = require('./sdk/index.js');
+ const initOtel = require('./sdk/initOtel.js');
+ const index$3 = require('./integrations/tracing/index.js');
+@@ -37,7 +28,6 @@ const nodeVersion = require('./nodeVersion.js');
+ const api = require('./sdk/api.js');
+ const http = require('./transports/http.js');
+ const module$1 = require('./utils/module.js');
+-const eve = require('./eve.js');
+ const httpServerIntegration = require('./integrations/http/httpServerIntegration.js');
+ const httpServerSpansIntegration = require('./integrations/http/httpServerSpansIntegration.js');
+ const processSession = require('./integrations/processSession.js');
+@@ -48,65 +38,6 @@ const index = require('./integrations/anr/index.js');
+ 
+ exports.httpIntegration = index$5.httpIntegration;
+ exports.nativeNodeFetchIntegration = index$7.nativeNodeFetchIntegration;
+-exports.fsIntegration = index$2.fsIntegration;
+-exports.SentryMastraExporter = serverUtils.SentryMastraExporter;
+-exports.amqplibIntegration = serverUtils.amqplibIntegration;
+-exports.anthropicAIIntegration = serverUtils.anthropicAIIntegration;
+-exports.createFlueInstrumentation = serverUtils.createFlueInstrumentation;
+-exports.createLangChainCallbackHandler = serverUtils.createLangChainCallbackHandler;
+-exports.dataloaderIntegration = serverUtils.dataloaderIntegration;
+-exports.eveConversationHook = serverUtils.eveConversationHook;
+-exports.eveIntegration = serverUtils.eveIntegration;
+-exports.expressErrorHandler = serverUtils.expressErrorHandler;
+-exports.expressIntegration = serverUtils.expressIntegration;
+-exports.fastifyIntegration = serverUtils.fastifyIntegration;
+-exports.firebaseIntegration = serverUtils.firebaseIntegration;
+-exports.genericPoolIntegration = serverUtils.genericPoolIntegration;
+-exports.getInstrumentedModuleNames = serverUtils.getInstrumentedModuleNames;
+-exports.getOtlpTracesEndpoint = serverUtils.getOtlpTracesEndpoint;
+-exports.googleGenAIIntegration = serverUtils.googleGenAIIntegration;
+-exports.graphqlIntegration = serverUtils.graphqlIntegration;
+-exports.groqIntegration = serverUtils.groqIntegration;
+-exports.hapiIntegration = serverUtils.hapiIntegration;
+-exports.instrumentAnthropicAiClient = serverUtils.instrumentAnthropicAiClient;
+-exports.instrumentGoogleGenAIClient = serverUtils.instrumentGoogleGenAIClient;
+-exports.instrumentLangChainEmbeddings = serverUtils.instrumentLangChainEmbeddings;
+-exports.instrumentMistralAiClient = serverUtils.instrumentMistralAiClient;
+-exports.instrumentOpenAiClient = serverUtils.instrumentOpenAiClient;
+-exports.instrumentStateGraph = serverUtils.instrumentStateGraph;
+-exports.instrumentStateGraphCompile = serverUtils.instrumentStateGraphCompile;
+-exports.kafkaIntegration = serverUtils.kafkaIntegration;
+-exports.knexIntegration = serverUtils.knexIntegration;
+-exports.koaIntegration = serverUtils.koaIntegration;
+-exports.langChainIntegration = serverUtils.langChainIntegration;
+-exports.langGraphIntegration = serverUtils.langGraphIntegration;
+-exports.lruMemoizerIntegration = serverUtils.lruMemoizerIntegration;
+-exports.mastraIntegration = serverUtils.mastraIntegration;
+-exports.mistralAIIntegration = serverUtils.mistralAIIntegration;
+-exports.mongoIntegration = serverUtils.mongoIntegration;
+-exports.mongooseIntegration = serverUtils.mongooseIntegration;
+-exports.mysql2Integration = serverUtils.mysql2Integration;
+-exports.mysqlIntegration = serverUtils.mysqlIntegration;
+-exports.openAIIntegration = serverUtils.openAIIntegration;
+-exports.openTelemetryIntegration = serverUtils.openTelemetryIntegration;
+-exports.postgresIntegration = serverUtils.postgresIntegration;
+-exports.postgresJsIntegration = serverUtils.postgresJsIntegration;
+-exports.prismaIntegration = serverUtils.prismaIntegration;
+-exports.redisIntegration = serverUtils.redisIntegration;
+-exports.setupExpressErrorHandler = serverUtils.setupExpressErrorHandler;
+-exports.setupFastifyErrorHandler = serverUtils.setupFastifyErrorHandler;
+-exports.tediousIntegration = serverUtils.tediousIntegration;
+-exports.togetherAIIntegration = serverUtils.togetherAIIntegration;
+-exports.vercelAIIntegration = serverUtils.vercelAIIntegration;
+-exports.setupHapiErrorHandler = hapi.setupHapiErrorHandler;
+-exports.setupKoaErrorHandler = koa.setupKoaErrorHandler;
+-exports.buildLaunchDarklyFlagUsedHandler = launchDarkly.buildLaunchDarklyFlagUsedHandlerShim;
+-exports.launchDarklyIntegration = launchDarkly.launchDarklyIntegrationShim;
+-exports.OpenFeatureIntegrationHook = openFeature.OpenFeatureIntegrationHookShim;
+-exports.openFeatureIntegration = openFeature.openFeatureIntegrationShim;
+-exports.statsigIntegration = statsig.statsigIntegrationShim;
+-exports.unleashIntegration = unleash.unleashIntegrationShim;
+-exports.growthbookIntegration = growthbook.growthbookIntegrationShim;
+ exports.getDefaultIntegrations = index$4.getDefaultIntegrations;
+ exports.getDefaultIntegrationsWithoutPerformance = index$4.getDefaultIntegrationsWithoutPerformance;
+ exports.init = index$4.init;
+@@ -220,7 +151,6 @@ exports.defaultStackParser = api.defaultStackParser;
+ exports.getSentryRelease = api.getSentryRelease;
+ exports.makeNodeTransport = http.makeNodeTransport;
+ exports.createGetModuleFromFilename = module$1.createGetModuleFromFilename;
+-exports.eveInstrumentation = eve.eveInstrumentation;
+ exports.httpServerIntegration = httpServerIntegration.httpServerIntegration;
+ exports.httpServerSpansIntegration = httpServerSpansIntegration.httpServerSpansIntegration;
+ exports.processSessionIntegration = processSession.processSessionIntegration;
+diff --git a/build/cjs/integrations/tracing/index.js b/build/cjs/integrations/tracing/index.js
+index 7734bbce353c3232b5783eb9b1414e3e811d312e..adadd08e055cbc909f6c2e5d6c50bd8e38e43e5b 100644
+--- a/build/cjs/integrations/tracing/index.js
++++ b/build/cjs/integrations/tracing/index.js
+@@ -1,9 +1,7 @@
+ Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+ 
+-const serverUtils = require('@sentry/server-utils');
+-
+ function getAutoPerformanceIntegrations() {
+-  return serverUtils.getTracingIntegrations();
++  return [];
+ }
+ 
+ exports.getAutoPerformanceIntegrations = getAutoPerformanceIntegrations;
+diff --git a/build/cjs/sdk/index.js b/build/cjs/sdk/index.js
+index 992ce033ecb00b26b5619301d33d3241cb10728b..549fdf2b6375b7d8f0313402508450e5b1a66189 100644
+--- a/build/cjs/sdk/index.js
++++ b/build/cjs/sdk/index.js
+@@ -48,20 +48,15 @@ function getBaseDefaultIntegrations() {
+     childProcess.childProcessIntegration(),
+     workerThreads.workerThreadsIntegration(),
+     processSession.processSessionIntegration(),
+-    modules.modulesIntegration(),
+-    // Framework-level integrations
+-    ...serverUtils.getErrorIntegrations()
++    modules.modulesIntegration()
+   ];
+ }
+ function getDefaultIntegrationsWithoutPerformance() {
+   return getBaseDefaultIntegrations();
+ }
+ function getDefaultIntegrations(options) {
+-  return [
+-    ...getDefaultIntegrationsWithoutPerformance(),
+-    // We only add tracing-only integrations if tracing is enabled
+-    ...core.hasSpansEnabled(options) ? serverUtils.getTracingIntegrations() : []
+-  ];
++  // Lore bundles only its built-in HTTP integrations.
++  return [...getDefaultIntegrationsWithoutPerformance()];
+ }
+ function init(options = {}) {
+   return _init(options, getDefaultIntegrations);
+diff --git a/build/esm/integrations/tracing/index.js b/build/esm/integrations/tracing/index.js
+index 3e3760e5da2fe092b51c3501c492d56901d9f3ff..c43d6da773cfe4b581486997419ab51e908f913b 100644
+--- a/build/esm/integrations/tracing/index.js
++++ b/build/esm/integrations/tracing/index.js
+@@ -1,7 +1,5 @@
+-import { getTracingIntegrations } from '@sentry/server-utils';
+-
+ function getAutoPerformanceIntegrations() {
+-  return getTracingIntegrations();
++  return [];
+ }
+ 
+ export { getAutoPerformanceIntegrations };

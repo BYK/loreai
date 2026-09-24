@@ -26,6 +26,9 @@ const sentryNodeEntry = createRequire(`${sentryBunEntry}/`).resolve(
   "@sentry/node",
 );
 const sentryNodeDir = dirname(sentryNodeEntry);
+const sentryServerUtilsEntry = createRequire(`${sentryNodeEntry}/`).resolve(
+  "@sentry/server-utils",
+);
 
 // ---------------------------------------------------------------------------
 // Assertions
@@ -91,55 +94,51 @@ console.log("\n@sentry/node CJS barrel (build/cjs/index.js):");
 
 const cjsBarrel = join(sentryNodeDir, "index.js");
 
-// Own integration modules that should be stripped from the CJS barrel.
-// Each marker uses a trailing delimiter (/ or .) to avoid substring
-// false-positives (e.g. "mysql" matching "mysql2", "mongo" matching "mongoose").
+// Optional integrations that should be stripped from the CJS barrel.
 const strippedOwnModules = [
-  // Framework/DB integrations
-  "./integrations/tracing/express.",
-  "./integrations/tracing/fastify/",
-  "./integrations/tracing/graphql/",
-  "./integrations/tracing/kafka/",
-  "./integrations/tracing/lrumemoizer/",
-  "./integrations/tracing/mongo/",
-  "./integrations/tracing/mongoose/",
-  "./integrations/tracing/mysql/",
-  "./integrations/tracing/mysql2/",
-  "./integrations/tracing/redis/",
-  "./integrations/tracing/postgres/",
-  "./integrations/tracing/postgresjs.",
-  "./integrations/tracing/prisma/",
-  "./integrations/tracing/hapi/",
-  "./integrations/tracing/hono/",
-  "./integrations/tracing/koa/",
-  "./integrations/tracing/connect/",
-  "./integrations/tracing/knex/",
-  "./integrations/tracing/tedious/",
-  "./integrations/tracing/genericPool/",
-  "./integrations/tracing/dataloader/",
-  "./integrations/tracing/amqplib/",
-  "./integrations/tracing/firebase/",
-  // AI tracing integrations
-  "./integrations/tracing/vercelai/",
-  "./integrations/tracing/openai/",
-  "./integrations/tracing/anthropic-ai/",
-  "./integrations/tracing/google-genai/",
-  "./integrations/tracing/langchain/",
-  "./integrations/tracing/langgraph/",
-  // Feature flag shims
+  "./integrations/fs/index.js",
+  "./integrations/tracing/hapi.js",
+  "./integrations/tracing/koa.js",
   "./integrations/featureFlagShims/",
-  // FS integration
-  "./integrations/fs/",
+  "./eve.js",
+  "SentryMastraExporter",
+  "expressIntegration",
+  "fastifyIntegration",
+  "eveInstrumentation",
 ];
 assertNotInFile(cjsBarrel, strippedOwnModules);
 
 // Must still have essential modules
 assertInFile(cjsBarrel, [
-  "./integrations/http.js",
+  "./integrations/http/index.js",
   "./integrations/node-fetch/",
   "./sdk/index.js",
   "@sentry/core",
-  "@sentry/node-core",
+  "@sentry/opentelemetry",
+]);
+
+// Node v11 moved optional integrations into @sentry/server-utils. Its CJS
+// barrel is narrowed to the two helpers required by the Node SDK runtime.
+console.log("\n@sentry/server-utils CJS barrel:");
+assertInFile(sentryServerUtilsEntry, [
+  "setAsyncLocalStorageAsyncContextStrategy",
+  "detectOrchestrionSetup",
+]);
+assertNotInFile(sentryServerUtilsEntry, [
+  "./integrations/index.js",
+  "getErrorIntegrations",
+  "getTracingIntegrations",
+  "SentryMastraExporter",
+]);
+
+// SDK defaults retain Sentry's base Node integrations but do not load
+// framework and database integrations that Lore does not use.
+console.log("\n@sentry/node SDK defaults:");
+const cjsSdkIndex = join(sentryNodeDir, "sdk", "index.js");
+assertInFile(cjsSdkIndex, ["modules.modulesIntegration()"]);
+assertNotInFile(cjsSdkIndex, [
+  "getErrorIntegrations",
+  "getTracingIntegrations",
 ]);
 
 // ESM barrel is intentionally NOT patched — re-export chains from
@@ -174,30 +173,9 @@ const esmTracingIndex = join(
   "index.js",
 );
 
-// Check both CJS and ESM tracing/index.js with the same marker list.
-// These are the integration names that getAutoPerformanceIntegrations()
-// originally called — none should remain after patching.
-const tracingMarkers = [
-  "expressIntegration",
-  "fastifyIntegration",
-  "mongoIntegration",
-  "redisIntegration",
-  "kafkaIntegration",
-  "prismaIntegration",
-  "openAIIntegration",
-  "vercelAIIntegration",
-  "langChainIntegration",
-  "langGraphIntegration",
-  "firebaseIntegration",
-];
-
 for (const file of [cjsTracingIndex, esmTracingIndex]) {
-  assertNotInFile(file, tracingMarkers);
-  // Must still export the function names (gutted to return empty arrays)
-  assertInFile(file, [
-    "getAutoPerformanceIntegrations",
-    "getOpenTelemetryInstrumentationToPreload",
-  ]);
+  assertNotInFile(file, ["@sentry/server-utils", "getTracingIntegrations"]);
+  assertInFile(file, ["getAutoPerformanceIntegrations", "return []"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,10 +184,10 @@ for (const file of [cjsTracingIndex, esmTracingIndex]) {
 console.log();
 if (failures > 0) {
   console.error(
-    `${failures} assertion(s) failed — the @sentry/node patch may be broken or outdated.`,
+    `${failures} assertion(s) failed — a Sentry v11 patch may be broken or outdated.`,
   );
   console.error(
-    "Regenerate: pnpm patch @sentry/node@<version>, apply changes, pnpm patch-commit.",
+    "Regenerate with pnpm patch / pnpm patch-commit for @sentry/node and @sentry/server-utils.",
   );
   process.exit(1);
 } else {

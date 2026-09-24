@@ -134,8 +134,8 @@ await esbuild.build({
 // Bun ESM bundle — for @loreai/opencode plugin running under Bun
 // ---------------------------------------------------------------------------
 // Uses conditions: ["bun"] so #db/driver resolves to driver.bun.ts (bun:sqlite).
-// Same @sentry/bun → @sentry/node remap as the CJS build — @sentry/node works
-// under Bun (proven by getsentry/cli which uses @sentry/node-core under Bun).
+// Same @sentry/bun → @sentry/node remap as the CJS build — Sentry's Node SDK
+// uses the Node APIs Bun provides and avoids Bun-only integration assumptions.
 // No Node.js polyfills needed — this runs natively under Bun.
 
 await esbuild.build({

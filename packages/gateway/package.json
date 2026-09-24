@@ -76,7 +76,7 @@
   "devDependencies": {
     "@loreai/core": "workspace:*",
     "@loreai/ui": "workspace:*",
-    "@sentry/bun": "^10.52.0",
+    "@sentry/bun": "^11.0.0",
     "@types/bun": "^1.2.0",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/semver": "^7.7.1",
