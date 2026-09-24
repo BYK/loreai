@@ -16,6 +16,7 @@ export interface EmbeddingOperationOptions {
 /** Stable phase names for orchestration callers (notably semantic lint). */
 export type EmbeddingAbortPhase =
   | "provider-readiness"
+  | "ltm-query"
   | "settle-document-embeds"
   | "knowledge-backfill";
 
@@ -133,6 +134,9 @@ export async function awaitEmbeddingOperation<T>(
         );
       };
       guard.signal.addEventListener("abort", onAbort, { once: true });
+      // Abort may fire between the initial check and listener registration.
+      // Recheck here so an uncooperative provider cannot strand this waiter.
+      if (guard.signal.aborted) onAbort();
     }
     if (guard.deadlineAt !== undefined) {
       timer = setTimeout(
