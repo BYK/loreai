@@ -15,6 +15,7 @@ import {
   resolveProfile,
   resolveProfileForSession,
   shouldWarm,
+  applyWarmingMode,
   checkCircuitBreaker,
   isCircuitBreakerTripped,
   getCircuitBreakerStatus,
@@ -24,6 +25,9 @@ import {
   warmupBucketKey,
   CIRCUIT_BREAKER_DECAY_MS,
   isWarmupAuthDisabled,
+  disableWarmupForAuth,
+  beginWarmup,
+  endWarmup,
   clearWarmupAuthDisabled,
   breakFraction,
   pSessionFinished,
@@ -69,6 +73,7 @@ import {
   setCacheSizeSnapshot,
   setCachePricing,
   evictSession,
+  getCacheStrategy,
   setPrefixChurnForTest,
   setLastTransformLayerForTest,
   PREFIX_CHURN_WARM_BLOCK,
@@ -863,12 +868,67 @@ describe("circuit breaker persistence", () => {
     // Simulate the old global-breaker latch persisted by a previous build.
     setKV(CB_KV_KEY, JSON.stringify({ tripped: true, failures: 3 }));
     _forceReloadForTest();
-    // No bucket should be considered tripped — the stale global flag is dropped.
+    // A read may ignore the legacy flag but must defer the KV rewrite.
     expect(getCircuitBreakerSummary().trippedCount).toBe(0);
-    // And the KV is rewritten to the empty v2 shape.
+    expect(getKV(CB_KV_KEY)).toBe(
+      JSON.stringify({ tripped: true, failures: 3 }),
+    );
+    // The next normal mutating access performs the deferred migration.
+    expect(isCircuitBreakerTripped(BUCKET)).toBe(false);
     const raw = getKV(CB_KV_KEY);
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw as string)).toEqual({ version: 2, buckets: {} });
+  });
+
+  test("idle maintenance migrates legacy breaker state with warming disabled", () => {
+    const priorEnv = process.env.LORE_WARMING_ENABLED;
+    process.env.LORE_WARMING_ENABLED = "0";
+    const legacy = JSON.stringify({ tripped: true, failures: 3 });
+    setKV(CB_KV_KEY, legacy);
+    _forceReloadForTest();
+
+    try {
+      expect(isWarmingEnabled()).toBe(false);
+      // A read-only dashboard snapshot sees but does not rewrite legacy state.
+      expect(getCircuitBreakerSummary().trippedCount).toBe(0);
+      expect(getKV(CB_KV_KEY)).toBe(legacy);
+
+      // startIdleScheduler runs this sweep before its global-enabled check, so
+      // disabled warming still completes the pending migration on the next tick.
+      expect(pruneExpiredCircuitBreakers()).toBe(0);
+      expect(JSON.parse(getKV(CB_KV_KEY) as string)).toEqual({
+        version: 2,
+        buckets: {},
+      });
+    } finally {
+      if (priorEnv === undefined) delete process.env.LORE_WARMING_ENABLED;
+      else process.env.LORE_WARMING_ENABLED = priorEnv;
+    }
+  });
+
+  test("read-only summary defers stale-bucket persistence until a mutating access", () => {
+    const stale = Date.now() - CIRCUIT_BREAKER_DECAY_MS - 1;
+    const fresh = Date.now();
+    const FRESH_BUCKET = "sFreshReadOnly\x1fm\x1fu";
+    const raw = JSON.stringify({
+      version: 2,
+      buckets: {
+        [BUCKET]: { trippedAt: stale },
+        [FRESH_BUCKET]: { trippedAt: fresh },
+      },
+    });
+    setKV(CB_KV_KEY, raw);
+    _forceReloadForTest();
+
+    expect(getCircuitBreakerSummary().trippedCount).toBe(1);
+    expect(getCircuitBreakerStatus(FRESH_BUCKET).tripped).toBe(true);
+    expect(getKV(CB_KV_KEY)).toBe(raw);
+
+    expect(isCircuitBreakerTripped(FRESH_BUCKET)).toBe(true);
+    const persisted = JSON.parse(getKV(CB_KV_KEY) as string) as {
+      buckets: Record<string, unknown>;
+    };
+    expect(Object.keys(persisted.buckets)).toEqual([FRESH_BUCKET]);
   });
 
   test("tripped buckets persist across a reload; failure counts do not", () => {
@@ -1131,6 +1191,41 @@ describe("shouldWarm", () => {
     for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
 
     expect(shouldWarm(state, profile, hist)).toBe(false);
+  });
+
+  test("an explicit stop survives the response path clearing the dead-session flag", () => {
+    const now = Date.now();
+    const state = makeSessionState({
+      lastRequestTime: now - 270_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 0,
+        totalWarmups: 0,
+        warmupHits: 0,
+        disabled: true,
+      },
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody(
+          '{"model":"claude-sonnet-4-20250514","max_tokens":16384,"stream":true,"messages":[{"role":"user","content":"test"}]}',
+        ),
+      },
+    });
+    // Session controls mark this separate durable flag; the next successful
+    // response clears `disabled` to revive survival-model-dead sessions.
+    applyWarmingMode(state, "stop");
+    if (!state.warmup) throw new Error("stop did not initialize warmup state");
+    state.warmup.disabled = false;
+
+    const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
+    const hist = createHistogram();
+    for (let i = 0; i < 50; i++) recordGap(hist, 360_000);
+
+    expect(shouldWarm(state, profile, hist, now)).toBe(false);
+    expect(computeWarmingSnapshot(state, now, true)).toMatchObject({
+      disabled: true,
+      notWarmingReason: "Warming stopped by user",
+    });
   });
 
   test("returns false when already warmed in this TTL window", () => {
@@ -1651,6 +1746,31 @@ describe("shouldWarm", () => {
 
     expect(shouldWarm(state, profile, hist, now)).toBe(false);
     expect(state.warmup?.disabled).toBe(true);
+  });
+
+  test("read-only warming snapshots neither mark a session dead nor store cache strategy", () => {
+    _resetForTest();
+    const now = Date.now();
+    const sid = `read-only-snapshot-${now}`;
+    const hist = createHistogram();
+    for (let i = 0; i < 100; i++) recordGap(hist, 5_000);
+    const state = makeSessionState({
+      sessionID: sid,
+      lastRequestTime: now - 275_000,
+      survivalModel: hist,
+      cacheAnalytics: {
+        ...makeCacheAnalytics(),
+        lastRequestBody: compressBody('{"test":true}'),
+      },
+    });
+    setCacheSizeSnapshot(sid, 580_000, 190_000);
+
+    const snapshot = computeWarmingSnapshot(state, now, true);
+
+    expect(snapshot.shouldWarmNow).toBe(false);
+    expect(state.warmup).toBeUndefined();
+    expect(getCacheStrategy(sid)).toBeNull();
+    evictSession(sid);
   });
 });
 
@@ -2610,6 +2730,35 @@ describe("global histogram persistence", () => {
     expect(hist.counts[3]).toBe(5);
   });
 
+  test("read-only snapshot merges oversized persisted rows before normalizing", () => {
+    const d = db();
+    const first = Array.from({ length: HISTOGRAM_BINS.length + 1 }, () => 0n);
+    const second = [...first];
+    first[0] = 100_000_000_000_000_000n;
+    second[3] = 10_000_000_000_000_000n;
+    const firstEncoded = encodeWarmupHistogram(first);
+    const secondEncoded = encodeWarmupHistogram(second);
+    d.query(
+      `INSERT INTO warmup_histograms
+         (project_id, time_slot, counts, total, updated_at)
+       VALUES (?, 'large-a', ?, ?, ?), (?, 'large-b', ?, ?, ?)`,
+    ).run(
+      pid,
+      firstEncoded.counts,
+      firstEncoded.total,
+      Date.now(),
+      pid,
+      secondEncoded.counts,
+      secondEncoded.total,
+      Date.now(),
+    );
+
+    const snapshot = getGlobalHistogramsSnapshot().get(pid);
+    if (!snapshot) throw new Error("expected a persisted histogram snapshot");
+    expect(snapshot.total).toBe(MAX_WARMUP_HISTOGRAM_TOTAL);
+    expect(snapshot.counts[0] / snapshot.counts[3]).toBeCloseTo(10, 8);
+  });
+
   test("keeps a safe persisted histogram when valid slot totals overflow in aggregate", () => {
     const d = db();
     const binCount = HISTOGRAM_BINS.length + 1;
@@ -3238,7 +3387,10 @@ describe("global histogram persistence", () => {
 
     expect(loadGlobalHistograms(targetPath)).toBe(targetId);
     expect(getGlobalHistogram(targetId).total).toBe(3);
-    expect(getGlobalHistogramsSnapshot().has(sourceId)).toBe(false);
+    // A read-only snapshot reflects persisted rows, even when the project has
+    // not been loaded into the process cache; the rolled-back source row is
+    // therefore visible with its original histogram.
+    expect(getGlobalHistogramsSnapshot().get(sourceId)?.total).toBe(7);
   });
 
   test("rolled-back merge notification cannot steal a later merge's dirty gap", () => {
@@ -4503,6 +4655,69 @@ describe("shouldWarm unified cache-economics flip (PR2b)", () => {
     evictSession(sid);
   });
 
+  test("dashboard snapshot reports amnesia as an idle-loop warmup skip", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000);
+    const state = makeWarmeableState(sid);
+    state.amnesia = true;
+
+    const snapshot = computeWarmingSnapshot(
+      state,
+      Date.now(),
+      true,
+      goodHist(),
+    );
+    expect(snapshot.shouldWarmNow).toBe(false);
+    expect(snapshot.notWarmingReason).toBe("Session amnesia is enabled");
+
+    evictSession(sid);
+  });
+
+  test("dashboard snapshot reports auth-disabled sessions as skipped", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000);
+    const state = makeWarmeableState(sid);
+    disableWarmupForAuth(sid);
+
+    try {
+      const snapshot = computeWarmingSnapshot(
+        state,
+        Date.now(),
+        true,
+        goodHist(),
+      );
+      expect(snapshot.shouldWarmNow).toBe(false);
+      expect(snapshot.notWarmingReason).toBe(
+        "Warmup skipped because upstream authentication is unavailable",
+      );
+    } finally {
+      clearWarmupAuthDisabled(sid);
+      evictSession(sid);
+    }
+  });
+
+  test("dashboard snapshot reports an active warmup as skipped", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000);
+    const state = makeWarmeableState(sid);
+    expect(beginWarmup(sid)).toBe(true);
+
+    try {
+      const snapshot = computeWarmingSnapshot(
+        state,
+        Date.now(),
+        true,
+        goodHist(),
+      );
+      expect(snapshot.shouldWarmNow).toBe(false);
+      expect(snapshot.notWarmingReason).toBe("Warmup already in progress");
+      expect(beginWarmup(sid)).toBe(false);
+    } finally {
+      endWarmup(sid);
+      evictSession(sid);
+    }
+  });
+
   test("cool-bust strategy blocks warming even when pReturns is high", () => {
     const sid = freshSession();
     // Large body, compaction available → cool-bust (cheap compact-on-return).
@@ -4512,6 +4727,35 @@ describe("shouldWarm unified cache-economics flip (PR2b)", () => {
     const profile = buildAnthropicProfile("claude-sonnet-4-20250514", "5m");
     // Even with a good histogram (high pReturns), cool-bust must block warming.
     expect(shouldWarm(state, profile, goodHist(), Date.now())).toBe(false);
+
+    evictSession(sid);
+  });
+
+  test("snapshot explains a confident cool-bust strategy", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 800_000, 100_000);
+    const now = Date.now();
+    const state = makeWarmeableState(sid);
+
+    const snapshot = computeWarmingSnapshot(state, now, true, goodHist());
+    expect(snapshot.shouldWarmNow).toBe(false);
+    expect(snapshot.notWarmingReason).toContain(
+      "Cache economics favors cooling and compacting",
+    );
+
+    evictSession(sid);
+  });
+
+  test("snapshot reports cache freshness before a strategy not yet actionable", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 800_000, 100_000);
+    const now = Date.now();
+    const state = makeWarmeableState(sid);
+    state.lastRequestTime = now - 60_000;
+
+    const snapshot = computeWarmingSnapshot(state, now, true, goodHist());
+    expect(snapshot.shouldWarmNow).toBe(false);
+    expect(snapshot.notWarmingReason).toBe("Cache still fresh");
 
     evictSession(sid);
   });
@@ -4680,6 +4924,36 @@ describe("shouldWarm Phase A freshness + Phase B continuation (PR2b coverage)", 
       lastWarmupAt: now - 300_000, // > cooldown (255s) → not double-warming
     });
     expect(shouldWarm(s, p, longGapHist(), now)).toBe(false);
+    evictSession(sid);
+  });
+
+  test("snapshot reports continuation cycle cap before low return probability", () => {
+    const sid = freshSession();
+    setCacheSizeSnapshot(sid, 10_000, 10_000);
+    const now = Date.now();
+    const p = profile();
+    const maxCycles = maxProfitableCycles(
+      p.cacheReadCostPerMTok,
+      p.cacheMissCostPerMTok,
+    );
+    const state = makeState(sid, now, 560_000, {
+      warmupCount: maxCycles,
+      totalWarmups: maxCycles,
+      warmupHits: maxCycles,
+      lastWarmupAt: now - 300_000,
+    });
+    const sparseReturnHist = createHistogram();
+    for (let i = 0; i < 97; i++) recordGap(sparseReturnHist, 100_000);
+    for (let i = 0; i < 3; i++) recordGap(sparseReturnHist, 700_000);
+
+    const snapshot = computeWarmingSnapshot(state, now, true, sparseReturnHist);
+    expect(snapshot.shouldWarmNow).toBe(false);
+    expect(snapshot.pReturns).toBeLessThan(MIN_RETURN_PROBABILITY_FLOOR);
+    expect(snapshot.pReturn).toBeGreaterThan(0.8);
+    expect(snapshot.notWarmingReason).toBe(
+      `Break-even exceeded (${maxCycles} >= ${maxCycles} cycles)`,
+    );
+
     evictSession(sid);
   });
 

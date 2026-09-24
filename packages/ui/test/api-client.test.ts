@@ -488,6 +488,49 @@ describe("api client: error classification", () => {
   });
 });
 
+describe("warming and costs API client", () => {
+  it("encodes session IDs and validates management mutation responses", async () => {
+    const { client, calls } = clientFor((url) => {
+      if (url.endsWith("/warming/settings"))
+        return json({ enabled: false, override: false });
+      if (url.endsWith("/warming/circuit-breaker/reset"))
+        return json({ reset: true, tripped_count: 0 });
+      if (url.endsWith("/warming/sessions/a%2Fb/mode"))
+        return json({
+          session_id: "a/b",
+          mode: "keep",
+          disabled: false,
+          force_keep_warm: true,
+        });
+      return json({ amount: 0, disabled: true });
+    });
+
+    expect(await client.setWarmingEnabled(false)).toEqual({
+      enabled: false,
+      override: false,
+    });
+    expect(await client.resetWarmingCircuitBreaker()).toEqual({
+      reset: true,
+      tripped_count: 0,
+    });
+    expect(await client.setSessionWarmingMode("a/b", "keep")).toMatchObject({
+      session_id: "a/b",
+      mode: "keep",
+      force_keep_warm: true,
+    });
+    expect(await client.setDailyBudget(0)).toEqual({
+      amount: 0,
+      disabled: true,
+    });
+    expect(calls).toEqual([
+      "/api/v1/warming/settings",
+      "/api/v1/warming/circuit-breaker/reset",
+      "/api/v1/warming/sessions/a%2Fb/mode",
+      "/api/v1/costs/budget",
+    ]);
+  });
+});
+
 describe("contradiction API client", () => {
   it("lists the open pairs from the management route", async () => {
     const response = {

@@ -41,6 +41,8 @@ import {
   sharingStatus,
   syncStatus,
   teamList,
+  costsSnapshot,
+  warmingSnapshot,
 } from "../../ui/src/contracts";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
 
@@ -497,6 +499,30 @@ describe("ui contracts against the real gateway", () => {
       "/api/v1/entities/rebuild",
       entityRebuildStatus,
     );
+  });
+
+  it("GET /warming", async () => {
+    const response = await api("/api/v1/warming");
+    expect(response.status).toBe(200);
+    expect(
+      parseContract("/warming", warmingSnapshot, await response.json()),
+    ).toMatchObject({
+      enabled: expect.any(Boolean),
+      sessions: expect.any(Array),
+      histograms: expect.any(Array),
+    });
+  });
+
+  it("GET /costs", async () => {
+    const response = await api("/api/v1/costs");
+    expect(response.status).toBe(200);
+    expect(
+      parseContract("/costs", costsSnapshot, await response.json()),
+    ).toMatchObject({
+      live: { session_count: expect.any(Number) },
+      historical: { session_count: expect.any(Number) },
+      daily: { entries: expect.any(Array) },
+    });
   });
 
   it("404 error envelope", async () => {

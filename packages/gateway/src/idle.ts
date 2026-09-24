@@ -72,6 +72,9 @@ import {
   pruneExpiredCircuitBreakers,
   warmupBucketKey,
   isWarmupAuthDisabled,
+  isWarmupInProgress,
+  beginWarmup,
+  endWarmup,
   clearWarmupAuthDisabled,
   resolveProfileForSession,
   blendedHistogramForSession,
@@ -142,6 +145,15 @@ function persistSessionCosts(sessionID: string): void {
       batchSavings: costs.batchSavings,
       avoidedCompactions: costs.counterfactual.avoidedCompactions,
       avoidedCompactionCost: costs.counterfactual.avoidedCompactionCost,
+      shadowContextTokens: costs._shadowContextInitialized
+        ? costs._shadowContextTokens
+        : undefined,
+      shadowLastActualInput: costs._shadowContextInitialized
+        ? costs._lastActualInput
+        : undefined,
+      shadowLastOutputTokens: costs._shadowContextInitialized
+        ? costs._lastOutputTokens
+        : undefined,
       // Per-bucket split so the worker overhead can be attributed to
       // distillation / curation / compaction / recall / warmup after the fact.
       workerBreakdown: costs.workers,
@@ -758,7 +770,9 @@ export function startIdleScheduler(
     for (const [sessionID, state] of sessions) {
       if (!warmingGloballyEnabled) break;
       if (state.amnesia) continue;
-      if (warmupInProgress.has(sessionID)) continue;
+      if (warmupInProgress.has(sessionID) || isWarmupInProgress(sessionID)) {
+        continue;
+      }
 
       // Skip sessions with stale auth credentials — warmup would just 401
       if (isWarmupAuthDisabled(sessionID)) continue;
@@ -793,6 +807,7 @@ export function startIdleScheduler(
       if (!shouldWarm(state, profile, blendedHist, now, warmingGloballyEnabled))
         continue;
 
+      if (!beginWarmup(sessionID)) continue;
       warmupInProgress.add(sessionID);
       executeWarmup(state, profile, config)
         .then((result) => {
@@ -810,7 +825,10 @@ export function startIdleScheduler(
             e,
           ),
         )
-        .finally(() => warmupInProgress.delete(sessionID));
+        .finally(() => {
+          warmupInProgress.delete(sessionID);
+          endWarmup(sessionID);
+        });
     }
 
     // Flush dirty global histograms to SQLite (debounced — runs at most

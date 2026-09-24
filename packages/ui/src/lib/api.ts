@@ -23,6 +23,9 @@ import {
   apiErrorBody,
   apiPath,
   cursorPage,
+  circuitBreakerResetResult,
+  costsSnapshot,
+  dailyBudgetResult,
   contradictionDecisionResult,
   contradictionListResponse,
   distillationDetail,
@@ -36,6 +39,7 @@ import {
   knowledgeEntry,
   knowledgeList,
   knowledgeVersionHistory,
+  sessionWarmingModeResult,
   parseContract,
   projectList,
   query,
@@ -49,8 +53,11 @@ import {
   sharingStatus,
   syncStatus,
   teamList,
+  warmingSettingsResult,
+  warmingSnapshot,
   type AccountStatus,
   type CursorPage,
+  type CostsSnapshot,
   type ContradictionDecision,
   type ContradictionDecisionResult,
   type ContradictionListResponse,
@@ -75,6 +82,7 @@ import {
   type SharingStatus,
   type SyncStatus,
   type TeamList,
+  type WarmingSnapshot,
 } from "~/contracts";
 
 export {
@@ -573,6 +581,66 @@ export function createApiClient(options: ApiClientOptions = {}) {
         signal,
       );
     },
+    getWarming(signal?: AbortSignal): Promise<WarmingSnapshot> {
+      return getJson("/warming", warmingSnapshot, signal);
+    },
+    setWarmingEnabled(
+      enabled: boolean,
+      signal?: AbortSignal,
+    ): Promise<{ enabled: boolean; override: boolean | null }> {
+      return mutateJson(
+        "PATCH",
+        "/warming/settings",
+        { enabled },
+        warmingSettingsResult,
+        signal,
+      );
+    },
+    resetWarmingCircuitBreaker(
+      signal?: AbortSignal,
+    ): Promise<{ reset: boolean; tripped_count: number }> {
+      return mutateJson(
+        "POST",
+        "/warming/circuit-breaker/reset",
+        undefined,
+        circuitBreakerResetResult,
+        signal,
+      );
+    },
+    setSessionWarmingMode(
+      sessionId: string,
+      mode: "keep" | "stop" | "auto",
+      signal?: AbortSignal,
+    ): Promise<{
+      session_id: string;
+      mode: "keep" | "stop" | "auto";
+      disabled: boolean;
+      force_keep_warm: boolean;
+    }> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["warming", "sessions", sessionId, "mode"]),
+        { mode },
+        sessionWarmingModeResult,
+        signal,
+      );
+    },
+    getCosts(signal?: AbortSignal): Promise<CostsSnapshot> {
+      return getJson("/costs", costsSnapshot, signal);
+    },
+    setDailyBudget(
+      amount: number,
+      signal?: AbortSignal,
+    ): Promise<{ amount: number; disabled: boolean }> {
+      return mutateJson(
+        "PATCH",
+        "/costs/budget",
+        { amount },
+        dailyBudgetResult,
+
+        signal,
+      );
+    },
     listContradictions(
       signal?: AbortSignal,
     ): Promise<ContradictionListResponse> {
@@ -589,6 +657,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
         apiPath(["contradictions", idA, idB]),
         { decision },
         contradictionDecisionResult,
+
         signal,
       );
     },

@@ -1307,6 +1307,7 @@ export function evaluateCacheStrategy(
   // can belong to a different session/model when a background warmer evaluates.
   pricing?: { readPerToken: number; writePerToken: number },
   now: number = Date.now(),
+  options: { updateState?: boolean } = {},
 ): CacheEconomicsResult | null {
   const state = sessionStates.get(sessionID);
   if (!state || state.cacheSizeFull <= 0) return null;
@@ -1323,7 +1324,9 @@ export function evaluateCacheStrategy(
     metaThreshold: survival.metaThreshold,
     metaDistillCostPerCall: survival.metaDistillCostPerCall,
   });
-  state.cacheStrategy = { result, decidedAt: now };
+  if (options.updateState !== false) {
+    state.cacheStrategy = { result, decidedAt: now };
+  }
   return result;
 }
 

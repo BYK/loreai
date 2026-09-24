@@ -121,6 +121,20 @@ describe("cache-strategy evaluator (single entry point)", () => {
     expect(stored?.decidedAt).toBeGreaterThan(0);
   });
 
+  test("read-only evaluation returns a result without storing it", () => {
+    const id = sid();
+    setCacheSizeSnapshot(id, 580_000, 190_000);
+    const result = evaluateCacheStrategy(
+      id,
+      { pReturn: 0.8, expectedCycles: 3, expectedFutureTurns: 20 },
+      PRICING,
+      123,
+      { updateState: false },
+    );
+    expect(result?.strategy).toBe("cool-bust");
+    expect(getCacheStrategy(id)).toBeNull();
+  });
+
   test("a small, likely-return session evaluates to hold-warm", () => {
     const id = sid();
     setCacheSizeSnapshot(id, 10_000, 10_000); // no compaction available

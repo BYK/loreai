@@ -367,6 +367,7 @@ import {
   creditWarmupHit,
   resetCircuitBreaker,
   setWarmingEnabled,
+  applyWarmingMode,
 } from "./cache-warmer";
 import {
   setSentryRequestContext,
@@ -15277,15 +15278,17 @@ function postResponseForTenant(
         }
       }
     }
-    // Reset warming state if session was marked dead or had active warming.
-    // Dead flag is cleared so the next break gets a fresh ROI analysis.
+    // Reset the survival-model dead flag if the user returns. A separate
+    // userStopped flag survives this reset when Stop was explicitly selected.
     // warmupCount is reset so the break-even cap starts from 0 on the next break.
     if (sessionState.warmup) {
       if (sessionState.warmup.disabled) {
         sessionState.warmup.disabled = false;
-        log.info(
-          `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
-        );
+        if (!sessionState.warmup.userStopped) {
+          log.info(
+            `cache-warmer: re-enabled session=${sessionID.slice(0, 16)} (user resumed)`,
+          );
+        }
       }
       if (
         sessionState.warmup.warmupCount > 0 &&
@@ -22344,26 +22347,7 @@ function handleWarmupSlashCommand(
 
   // Update session warmup state
   if (state) {
-    if (!state.warmup) {
-      state.warmup = {
-        lastWarmupAt: 0,
-        warmupCount: 0,
-        totalWarmups: 0,
-        warmupHits: 0,
-        disabled: false,
-      };
-    }
-    if (isStop) {
-      state.warmup.disabled = true;
-      state.warmup.forceKeepWarm = false;
-    } else if (isKeep) {
-      state.warmup.forceKeepWarm = true;
-      state.warmup.disabled = false;
-    } else {
-      // isAuto — return to normal survival-analysis mode
-      state.warmup.disabled = false;
-      state.warmup.forceKeepWarm = false;
-    }
+    applyWarmingMode(state, isStop ? "stop" : isKeep ? "keep" : "auto");
     const modeLabel = isStop ? "stopped" : isKeep ? "forced" : "auto";
     log.info(
       `cache-warmer: ${lower} received for session=${state.sessionID.slice(0, 16)} — ` +

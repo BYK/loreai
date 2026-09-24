@@ -20,6 +20,7 @@ import {
 import {
   log,
   data,
+  loadSessionCosts,
   loadAllSessionCosts,
   getKV,
   setKV,
@@ -96,6 +97,8 @@ export type SessionCosts = {
 
   /** Shadow context counter — tracks virtual uncompressed context growth for compaction estimation. */
   _shadowContextTokens: number;
+  /** Whether shadow context has been initialized for the current process. */
+  _shadowContextInitialized: boolean;
   /** Previous turn's actual (compressed) input tokens — for delta estimation. */
   _lastActualInput: number;
   /** Previous turn's output tokens (always uncompressed) — for growth estimation. */
@@ -487,11 +490,8 @@ const DAILY_BUDGET_KV_KEY = "daily_budget";
  * 3. 0 (disabled)
  */
 export function getDailyBudget(): number {
-  const envVal = process.env.LORE_DAILY_BUDGET;
-  if (envVal) {
-    const parsed = parseFloat(envVal);
-    if (parsed > 0) return parsed;
-  }
+  const envOverride = getDailyBudgetEnvOverride();
+  if (envOverride !== null) return parseFloat(envOverride);
   try {
     const dbVal = getKV(DAILY_BUDGET_KV_KEY);
     if (dbVal) {
@@ -502,6 +502,14 @@ export function getDailyBudget(): number {
     // DB not initialized yet (e.g., early startup) — fall through
   }
   return 0;
+}
+
+/** Return the environment override only when it supplies an effective budget. */
+export function getDailyBudgetEnvOverride(): string | null {
+  const envVal = process.env.LORE_DAILY_BUDGET?.trim();
+  if (!envVal) return null;
+  const parsed = parseFloat(envVal);
+  return Number.isFinite(parsed) && parsed > 0 ? envVal : null;
 }
 
 /**
@@ -557,16 +565,102 @@ function emptyCosts(): SessionCosts {
     },
     throttle: { events: 0, totalDelayMs: 0 },
     _shadowContextTokens: 0,
+    _shadowContextInitialized: false,
     _lastActualInput: 0,
     _lastOutputTokens: 0,
   };
+}
+
+function restorePersistedCosts(
+  costs: SessionCosts,
+  persisted: NonNullable<ReturnType<typeof loadSessionCosts>>,
+): void {
+  costs.conversation = {
+    cost: persisted.conversationCost,
+    inputTokens: persisted.inputTokens,
+    outputTokens: persisted.outputTokens,
+    cacheReadTokens: persisted.cacheReadTokens,
+    cacheWriteTokens: persisted.cacheWriteTokens,
+    turns: persisted.conversationTurns,
+  };
+
+  if (persisted.workerBreakdown) {
+    const restored = emptyCosts().workers;
+    for (const bucket of [
+      "distillation",
+      "curation",
+      "compaction",
+      "recall",
+      "warmup",
+    ] as const) {
+      const saved = persisted.workerBreakdown[bucket];
+      if (
+        saved &&
+        Number.isFinite(saved.cost) &&
+        Number.isInteger(saved.calls) &&
+        saved.calls >= 0
+      ) {
+        restored[bucket] = { cost: saved.cost, calls: saved.calls };
+      }
+    }
+    costs.workers = restored;
+  } else {
+    // Older snapshots have no bucket split. Preserve their aggregate in the
+    // best-effort distillation bucket, but retain warmup spend from the
+    // separate field present in every snapshot. Clamp both values so a
+    // malformed legacy row cannot produce negative bucket costs.
+    const aggregateWorkerCost = Number.isFinite(persisted.workerCost)
+      ? Math.max(0, persisted.workerCost)
+      : 0;
+    const knownWarmupCost = Number.isFinite(persisted.warmupCost)
+      ? Math.min(aggregateWorkerCost, Math.max(0, persisted.warmupCost))
+      : 0;
+    costs.workers.warmup.cost = knownWarmupCost;
+    costs.workers.distillation.cost = aggregateWorkerCost - knownWarmupCost;
+  }
+
+  costs.batchSavings = persisted.batchSavings;
+  costs.counterfactual = {
+    warmupSavings: persisted.warmupSavings,
+    warmupHits: persisted.warmupHits,
+    ttlSavings: persisted.ttlSavings,
+    ttlHits: persisted.ttlHits,
+    avoidedCompactions: persisted.avoidedCompactions,
+    avoidedCompactionCost: persisted.avoidedCompactionCost,
+  };
+
+  const shadowContext = persisted.shadowContextTokens;
+  const lastActualInput = persisted.shadowLastActualInput;
+  const lastOutputTokens = persisted.shadowLastOutputTokens;
+  if (
+    typeof shadowContext === "number" &&
+    Number.isSafeInteger(shadowContext) &&
+    shadowContext >= 0 &&
+    typeof lastActualInput === "number" &&
+    Number.isSafeInteger(lastActualInput) &&
+    lastActualInput >= 0 &&
+    typeof lastOutputTokens === "number" &&
+    Number.isSafeInteger(lastOutputTokens) &&
+    lastOutputTokens >= 0
+  ) {
+    costs._shadowContextTokens = shadowContext;
+    costs._lastActualInput = lastActualInput;
+    costs._lastOutputTokens = lastOutputTokens;
+    costs._shadowContextInitialized = true;
+  }
 }
 
 function getOrCreate(sessionID: string): SessionCosts {
   let costs = sessions.get(sessionID);
   if (!costs) {
     costs = emptyCosts();
+    const persisted = loadSessionCosts(sessionID);
+    if (persisted) restorePersistedCosts(costs, persisted);
     sessions.set(sessionID, costs);
+    // Historical snapshots omit live sessions when computed. Invalidate any
+    // earlier snapshot that included this session, after hydrating its saved
+    // lifetime costs so the live totals remain continuous across a resume.
+    invalidateHistoricalCache();
   }
   return costs;
 }
@@ -905,8 +999,9 @@ export function updateShadowContext(
   // No compression has happened yet, so the actual count is accurate.
   // NOTE: this check relies on recordConversationCost() having already
   // incremented turns for this turn (called earlier in postResponse).
-  if (costs.conversation.turns <= 1) {
+  if (!costs._shadowContextInitialized) {
     costs._shadowContextTokens = totalInputTokens;
+    costs._shadowContextInitialized = true;
     costs._lastActualInput = totalInputTokens;
     costs._lastOutputTokens = outputTokens;
     return;
@@ -1087,6 +1182,7 @@ export function deleteSessionCosts(sessionID: string): void {
 /** Clear all sessions (for testing). */
 export function clearAllCosts(): void {
   sessions.clear();
+  invalidateHistoricalCache();
   resetDailyBudgetState();
 }
 

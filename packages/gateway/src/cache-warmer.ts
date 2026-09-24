@@ -299,6 +299,7 @@ type BreakerEntry = {
 /** Per-bucket breaker state. Key = warmupBucketKey(state). */
 const circuitBreakers = new Map<string, BreakerEntry>();
 let circuitBreakersLoaded = false;
+let circuitBreakerCleanupPending = false;
 
 const CB_KV_KEY = "warmup_circuit_breaker";
 
@@ -327,39 +328,44 @@ function warmupUrlForLog(value: string): string {
 }
 
 /** Load tripped buckets from DB on first access (only tripped buckets persist). */
-function ensureCircuitBreakersLoaded(): void {
-  if (circuitBreakersLoaded) return;
-  circuitBreakersLoaded = true;
-  try {
-    const raw = getKV(CB_KV_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw) as {
-      version?: number;
-      buckets?: Record<string, { trippedAt?: number }>;
-    };
-    // Legacy v1 shape ({tripped, failures}) carried no bucket identity. A stale
-    // global flag must NOT permanently disable per-bucket warming, so drop it
-    // (rewrite the KV to the empty v2 shape). This also auto-clears any breaker
-    // latched by the old global implementation on first run of this build.
-    if (parsed.version !== 2 || !parsed.buckets) {
-      setKV(CB_KV_KEY, JSON.stringify({ version: 2, buckets: {} }));
-      return;
-    }
-    const now = Date.now();
-    let droppedStale = false;
-    for (const [bucket, entry] of Object.entries(parsed.buckets)) {
-      const trippedAt = entry.trippedAt ?? 0;
-      // Apply decay on load — drop buckets older than the decay window.
-      if (trippedAt > 0 && now - trippedAt < CIRCUIT_BREAKER_DECAY_MS) {
-        circuitBreakers.set(bucket, { failures: 0, tripped: true, trippedAt });
-      } else {
-        droppedStale = true;
+function ensureCircuitBreakersLoaded(persistCleanup = true): void {
+  if (!circuitBreakersLoaded) {
+    circuitBreakersLoaded = true;
+    try {
+      const raw = getKV(CB_KV_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          version?: number;
+          buckets?: Record<string, { trippedAt?: number }>;
+        };
+        // Legacy v1 shape ({tripped, failures}) carried no bucket identity.
+        // Defer migration if a dashboard read is the first access.
+        if (parsed.version !== 2 || !parsed.buckets) {
+          circuitBreakerCleanupPending = true;
+        } else {
+          const now = Date.now();
+          for (const [bucket, entry] of Object.entries(parsed.buckets)) {
+            const trippedAt = entry.trippedAt ?? 0;
+            // Apply decay on load — drop buckets older than the decay window.
+            if (trippedAt > 0 && now - trippedAt < CIRCUIT_BREAKER_DECAY_MS) {
+              circuitBreakers.set(bucket, {
+                failures: 0,
+                tripped: true,
+                trippedAt,
+              });
+            } else {
+              circuitBreakerCleanupPending = true;
+            }
+          }
+        }
       }
+    } catch {
+      // Corrupted value — start fresh.
     }
-    // Shrink the persisted set across restarts when stale buckets were dropped.
-    if (droppedStale) saveCircuitBreakers();
-  } catch {
-    // Corrupted value — start fresh.
+  }
+  if (persistCleanup && circuitBreakerCleanupPending) {
+    saveCircuitBreakers();
+    circuitBreakerCleanupPending = false;
   }
 }
 
@@ -415,7 +421,7 @@ export function getCircuitBreakerStatus(
   maxFailures: number;
   trippedAt: number;
 } {
-  ensureCircuitBreakersLoaded();
+  ensureCircuitBreakersLoaded(false);
   const entry = circuitBreakers.get(bucketKey);
   const decayed =
     !!entry?.tripped && now - entry.trippedAt >= CIRCUIT_BREAKER_DECAY_MS;
@@ -440,7 +446,7 @@ export function getCircuitBreakerSummary(now: number = Date.now()): {
   trippedCount: number;
   entries: Array<{ bucket: string; trippedAt: number }>;
 } {
-  ensureCircuitBreakersLoaded();
+  ensureCircuitBreakersLoaded(false);
   const entries: Array<{ bucket: string; trippedAt: number }> = [];
   for (const [bucket, entry] of circuitBreakers) {
     if (entry.tripped && now - entry.trippedAt < CIRCUIT_BREAKER_DECAY_MS) {
@@ -566,15 +572,55 @@ export function resetCircuitBreaker(bucketKey?: string): void {
  * Not persisted — on restart, sessions re-attempt naturally.
  */
 const authDisabledSessions = new Set<string>();
+const warmingSessionsInProgress = new Set<string>();
+
+export type WarmingMode = "keep" | "stop" | "auto";
+
+/** Apply the shared operator control used by the API and /lore:warm commands. */
+export function applyWarmingMode(state: SessionState, mode: WarmingMode): void {
+  state.warmup ??= {
+    lastWarmupAt: 0,
+    warmupCount: 0,
+    totalWarmups: 0,
+    warmupHits: 0,
+    disabled: false,
+  };
+  state.warmup.userStopped = mode === "stop";
+  state.warmup.disabled = mode === "stop";
+  state.warmup.forceKeepWarm = mode === "keep";
+  state._dirty = true;
+}
 
 /** Check if warmup is auth-disabled for a session. */
 export function isWarmupAuthDisabled(sessionID: string): boolean {
   return authDisabledSessions.has(sessionID);
 }
 
+/** Mark a session as unavailable for warmups after an upstream auth failure. */
+export function disableWarmupForAuth(sessionID: string): void {
+  authDisabledSessions.add(sessionID);
+}
+
 /** Clear warmup auth-disabled flag for a session (fresh credential arrived). */
 export function clearWarmupAuthDisabled(sessionID: string): void {
   authDisabledSessions.delete(sessionID);
+}
+
+/** Check whether a keepalive request is currently running for this session. */
+export function isWarmupInProgress(sessionID: string): boolean {
+  return warmingSessionsInProgress.has(sessionID);
+}
+
+/** Claim a session for one keepalive request; false means another loop owns it. */
+export function beginWarmup(sessionID: string): boolean {
+  if (warmingSessionsInProgress.has(sessionID)) return false;
+  warmingSessionsInProgress.add(sessionID);
+  return true;
+}
+
+/** Release the keepalive claim after the request settles. */
+export function endWarmup(sessionID: string): void {
+  warmingSessionsInProgress.delete(sessionID);
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,9 +1372,15 @@ export function shouldWarm(
   // loop callers (idle.ts) pass a value hoisted out of the loop so the KV read
   // for this global flag happens once, not once per session (N+1).
   warmingEnabled: boolean = isWarmingEnabled(),
+  readOnly = false,
+  decisionDetails?: { strategy: string | null; confident: boolean },
 ): boolean {
   // Per-bucket kill switch — always respected, even with /lore:warm:keep.
-  if (isCircuitBreakerTripped(warmupBucketKey(state), now)) return false;
+  const bucketKey = warmupBucketKey(state);
+  const breakerTripped = readOnly
+    ? getCircuitBreakerStatus(bucketKey, now).tripped
+    : isCircuitBreakerTripped(bucketKey, now);
+  if (breakerTripped) return false;
 
   // Sub-agent sessions are always exempt — they are too short-lived
   // for warming to be profitable, even with /lore:warm:keep force.
@@ -1341,6 +1393,10 @@ export function shouldWarm(
 
   // No stored body to replay — nothing to warm
   if (!state.cacheAnalytics.lastRequestBody) return false;
+
+  // Explicit operator stops survive the response path's reset of the
+  // survival-model `disabled` flag when a user returns to the session.
+  if (state.warmup?.userStopped) return false;
 
   // Prefix-churn gate. While meta-distillation is actively rewriting the
   // distilled prefix (messages[0/1]), a warmup is pure waste: it replays the
@@ -1543,6 +1599,7 @@ export function shouldWarm(
   // session state; the Phase A/B block below reads it via getCacheStrategy.
   // The LOG is still gated to the warmup margin for volume; the decision reads
   // the stored strategy regardless of when it was last logged.
+  let evaluatedStrategy: ReturnType<typeof evaluateCacheStrategy> = null;
   {
     const expectedCycles = expectedWarmupCycles(
       blendedHist,
@@ -1586,9 +1643,12 @@ export function shouldWarm(
         readPerToken: cacheReadCostPerMTok / 1_000_000,
         writePerToken: cacheMissCostPerMTok / 1_000_000,
       },
+      now,
+      { updateState: !readOnly },
     );
+    evaluatedStrategy = result;
     const inWarmupMargin = elapsed % ttlMs >= ttlMs - warmupMarginMs;
-    if (result?.confident && inWarmupMargin) {
+    if (result?.confident && inWarmupMargin && !readOnly) {
       const snap = getCacheSizeSnapshot(state.sessionID);
       const apiActual =
         (state.cacheAnalytics?.lastCacheRead ?? 0) +
@@ -1625,10 +1685,17 @@ export function shouldWarm(
   // this is the PRIMARY warm/no-warm decision (PR2b flip): `hold-warm` → warm,
   // `cool-bust`/`cool-full-write` → don't. Non-confident (no snapshot, non-finite
   // inputs) falls back to the legacy pReturns/threshold mechanics.
-  const econ = getCacheStrategy(state.sessionID);
-  const econConfident = econ?.result.confident === true;
+  const econResult =
+    evaluatedStrategy ?? getCacheStrategy(state.sessionID)?.result;
+  const econConfident = econResult?.confident === true;
+  if (decisionDetails) {
+    decisionDetails.strategy = econResult?.strategy ?? null;
+    decisionDetails.confident = econConfident;
+  }
   const econWantsWarming =
-    econ != null && econConfident && strategyWantsWarming(econ.result.strategy);
+    econResult != null &&
+    econConfident &&
+    strategyWantsWarming(econResult.strategy);
 
   // Determine if this is the initial commitment or a continuation
   const cyclesSpent = state.warmup?.warmupCount ?? 0;
@@ -1643,13 +1710,13 @@ export function shouldWarm(
 
     // PRIMARY: unified strategy says don't warm (cool-bust or cool-full-write).
     if (econConfident && !econWantsWarming) {
-      markDeadIfSurvivalLow(state, survivalAtIdle);
+      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
       return false;
     }
 
     // FALLBACK (no confident strategy): legacy pReturns/threshold gate.
     if (!econConfident && pReturns <= threshold) {
-      markDeadIfSurvivalLow(state, survivalAtIdle);
+      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
       return false;
     }
 
@@ -1661,20 +1728,20 @@ export function shouldWarm(
 
     // Hard break-even cap: stop if we've spent too many cycles
     if (cyclesSpent >= maxCycles) {
-      markDeadIfSurvivalLow(state, survivalAtIdle);
+      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
       return false;
     }
 
     // Session almost certainly finished — stop warming
     if (pFinished > 0.95) {
-      markDeadIfSurvivalLow(state, survivalAtIdle);
+      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
       return false;
     }
 
     // PRIMARY: unified strategy no longer wants warming (flipped from hold-warm
     // to cool-bust/full-write mid-break, e.g. after recalibration). Stop.
     if (econConfident && !econWantsWarming) {
-      markDeadIfSurvivalLow(state, survivalAtIdle);
+      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
       return false;
     }
 
@@ -1686,7 +1753,7 @@ export function shouldWarm(
         cacheMissCostPerMTok,
       );
       if (pReturns <= risingThreshold) {
-        markDeadIfSurvivalLow(state, survivalAtIdle);
+        markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
         return false;
       }
     }
@@ -1699,7 +1766,7 @@ export function shouldWarm(
       maxCycles - cyclesSpent,
     );
     if (cyclesSpent + remaining > maxCycles) {
-      markDeadIfSurvivalLow(state, survivalAtIdle);
+      markDeadIfSurvivalLow(state, survivalAtIdle, !readOnly);
       return false;
     }
 
@@ -1715,8 +1782,9 @@ export function shouldWarm(
 function markDeadIfSurvivalLow(
   state: SessionState,
   survivalAtIdle: number,
+  applyStateChange = true,
 ): void {
-  if (survivalAtIdle < DEAD_SESSION_THRESHOLD) {
+  if (applyStateChange && survivalAtIdle < DEAD_SESSION_THRESHOLD) {
     if (!state.warmup) {
       state.warmup = {
         lastWarmupAt: 0,
@@ -1800,14 +1868,24 @@ export function computeWarmingSnapshot(
   // See shouldWarm(): loop callers (the dashboard pages) pass a hoisted value
   // so the global warming-enabled KV read happens once, not once per session.
   warmingEnabled: boolean = isWarmingEnabled(),
+  suppliedGlobalHistogram?: InterTurnHistogram,
 ): WarmingSnapshot {
   const cfg = loreConfig();
   const idleMs = now - state.lastRequestTime;
 
   // Histograms
   const sessionHist = state.survivalModel ?? createHistogram();
-  const pid = loadGlobalHistograms(state.projectPath);
-  const globalHist = pid ? getGlobalHistogram(pid) : createHistogram();
+  let globalHist = suppliedGlobalHistogram;
+  if (!globalHist) {
+    const pid = projectId(state.projectPath);
+    const canonicalPid = pid
+      ? canonicalProjectId(pid, { committed: true })
+      : undefined;
+    globalHist = canonicalPid
+      ? getGlobalHistogramsSnapshot().get(canonicalPid)
+      : undefined;
+  }
+  globalHist ??= createHistogram();
   const blendedHist = blendHistograms(sessionHist, globalHist);
   const sessionWeight = Math.min(sessionHist.total / BLEND_PSEUDOCOUNT, 1.0);
 
@@ -1867,12 +1945,34 @@ export function computeWarmingSnapshot(
       : "none";
 
   // Decision + reason
+  const bucketKey = warmupBucketKey(state);
+  const circuitBreaker = getCircuitBreakerStatus(bucketKey, now);
+  const decisionDetails = { strategy: null as string | null, confident: false };
+  const idleSkipReason = state.amnesia
+    ? "Session amnesia is enabled"
+    : isWarmupInProgress(state.sessionID)
+      ? "Warmup already in progress"
+      : isWarmupAuthDisabled(state.sessionID)
+        ? "Warmup skipped because upstream authentication is unavailable"
+        : null;
   const warmNow =
-    profile != null && shouldWarm(state, profile, blendedHist, now);
+    idleSkipReason === null &&
+    profile != null &&
+    shouldWarm(
+      state,
+      profile,
+      blendedHist,
+      now,
+      warmingEnabled,
+      true,
+      decisionDetails,
+    );
 
   let notWarmingReason: string | null = null;
   if (!warmNow) {
-    if (isCircuitBreakerTripped(warmupBucketKey(state), now)) {
+    if (idleSkipReason) {
+      notWarmingReason = idleSkipReason;
+    } else if (circuitBreaker.tripped) {
       notWarmingReason = "Circuit breaker tripped";
     } else if (state.isSubagent) {
       notWarmingReason = "Sub-agent session (ephemeral)";
@@ -1880,6 +1980,8 @@ export function computeWarmingSnapshot(
       notWarmingReason = "Warming disabled (config/override)";
     } else if (!state.cacheAnalytics.lastRequestBody) {
       notWarmingReason = "No stored request body";
+    } else if (state.warmup?.userStopped) {
+      notWarmingReason = "Warming stopped by user";
     } else if (getPrefixChurnRate(state.sessionID) >= PREFIX_CHURN_WARM_BLOCK) {
       notWarmingReason = `Distilled prefix churning (churn=${getPrefixChurnRate(state.sessionID).toFixed(2)} >= ${PREFIX_CHURN_WARM_BLOCK}) — warmups would land as partials`;
     } else if (
@@ -1972,13 +2074,28 @@ export function computeWarmingSnapshot(
       notWarmingReason = `Session hit rate too low (${hitRate}% < ${(MIN_SESSION_HIT_RATE * 100).toFixed(0)}% after ${state.warmup?.totalWarmups} warmups)`;
     } else if (isFirstWindow && idleMs < ttlMs - warmupMarginMs) {
       notWarmingReason = "Cache still fresh";
-    } else if (pReturns <= thresholdVal) {
-      notWarmingReason = `P(returns) ${(pReturns * 100).toFixed(1)}% <= threshold ${(thresholdVal * 100).toFixed(1)}%`;
     } else if (!isFirstWindow && cyclesSpent >= maxCyclesVal) {
       notWarmingReason = `Break-even exceeded (${cyclesSpent} >= ${maxCyclesVal} cycles)`;
     } else if (!isFirstWindow && pFinished > 0.95) {
       notWarmingReason = `Session finished (P=${(pFinished * 100).toFixed(0)}%)`;
-    } else if (!isFirstWindow) {
+    } else if (
+      decisionDetails.confident &&
+      decisionDetails.strategy === "cool-bust"
+    ) {
+      notWarmingReason =
+        "Cache economics favors cooling and compacting on return";
+    } else if (
+      decisionDetails.confident &&
+      decisionDetails.strategy === "cool-full-write"
+    ) {
+      notWarmingReason = "Cache economics favors a full cache write on return";
+    } else if (
+      !decisionDetails.confident &&
+      isFirstWindow &&
+      pReturns <= thresholdVal
+    ) {
+      notWarmingReason = `P(returns) ${(pReturns * 100).toFixed(1)}% <= threshold ${(thresholdVal * 100).toFixed(1)}%`;
+    } else if (!isFirstWindow && !decisionDetails.confident) {
       const risingThresh = cumulativeCostThreshold(
         cyclesSpent + 1,
         profile.cacheReadCostPerMTok,
@@ -1987,8 +2104,18 @@ export function computeWarmingSnapshot(
       if (pReturns <= risingThresh) {
         notWarmingReason = `Rising threshold: P(returns) ${(pReturns * 100).toFixed(1)}% <= ${(risingThresh * 100).toFixed(1)}% at cycle ${cyclesSpent + 1}`;
       } else {
-        notWarmingReason = "Unknown";
+        const intoWindow = idleMs % ttlMs;
+        notWarmingReason =
+          intoWindow < ttlMs - warmupMarginMs
+            ? "Not in warmup window yet"
+            : "Unknown";
       }
+    } else if (!isFirstWindow) {
+      const intoWindow = idleMs % ttlMs;
+      notWarmingReason =
+        intoWindow < ttlMs - warmupMarginMs
+          ? "Not in warmup window yet"
+          : "Unknown";
     } else {
       notWarmingReason = "Unknown";
     }
@@ -2005,7 +2132,8 @@ export function computeWarmingSnapshot(
     totalWarmups: state.warmup?.totalWarmups ?? 0,
     warmupHits: state.warmup?.warmupHits ?? 0,
     lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
-    disabled: state.warmup?.disabled ?? false,
+    disabled:
+      state.warmup?.disabled === true || state.warmup?.userStopped === true,
     forceKeepWarm: state.warmup?.forceKeepWarm ?? false,
     sessionHistogram: sessionHist,
     globalHistogram: globalHist,
@@ -2029,11 +2157,12 @@ export function computeWarmingSnapshot(
     toolCallActive:
       state.lastStopReason === "tool_use" &&
       idleMs <= MAX_TOOL_CALL_WARMING_MS &&
-      !state.warmup?.disabled,
+      !state.warmup?.disabled &&
+      !state.warmup?.userStopped,
     // Decision
     shouldWarmNow: warmNow,
     notWarmingReason,
-    circuitBreaker: getCircuitBreakerStatus(warmupBucketKey(state), now),
+    circuitBreaker,
   };
 }
 
@@ -2232,7 +2361,7 @@ export async function executeWarmup(
       // On auth error, disable future warmups for this session until
       // a fresh credential arrives. Prevents unbounded 401 spam every 30s.
       if (response.status === 401 || response.status === 403) {
-        authDisabledSessions.add(state.sessionID);
+        disableWarmupForAuth(state.sessionID);
         markAuthStale(state.sessionID, state.lastUpstream?.providerID);
         recordWorkerFailure(state.sessionID, "cache-warmer", "auth-rejected");
         log.warn(
@@ -2792,13 +2921,64 @@ export function recordGlobalGap(projectPath: string, gapMs: number): void {
 // Dashboard helpers
 // ---------------------------------------------------------------------------
 
-/** Read-only snapshot of all loaded global histograms, keyed by project_id (for dashboard). */
+/**
+ * Read-only snapshot of persisted and pending global histograms, keyed by the
+ * canonical project_id. This avoids loading or reconciling the process cache
+ * and includes history even before an active session touches a project after
+ * restart.
+ */
 export function getGlobalHistogramsSnapshot(): ReadonlyMap<
   string,
   InterTurnHistogram
 > {
-  reconcileProjectMerges();
-  return globalHistograms;
+  const snapshot = new Map<string, InterTurnHistogram>();
+  const database = db();
+  if (databaseInTransaction(database)) {
+    // The DB connection can see writes that an outer transaction may still
+    // roll back. Use only the last process snapshot in that case.
+    for (const [pid, histogram] of globalHistograms) {
+      snapshot.set(pid, {
+        counts: [...histogram.counts],
+        total: histogram.total,
+      });
+    }
+    return snapshot;
+  }
+
+  const exactCountsByProject = new Map<string, bigint[]>();
+  const rows = database
+    .query(
+      "SELECT project_id, counts, CAST(total AS TEXT) AS total FROM warmup_histograms",
+    )
+    .all() as Array<{ project_id: string; counts: string; total: string }>;
+  for (const row of rows) {
+    const pid = canonicalProjectId(row.project_id, { committed: true });
+    if (!pid) continue;
+    const decoded = decodeWarmupHistogram(row.counts, row.total);
+    if (!decoded) continue;
+    const current =
+      exactCountsByProject.get(pid) ?? emptyWarmupHistogramCounts();
+    exactCountsByProject.set(pid, mergeWarmupHistogramCounts(current, decoded));
+  }
+
+  // Dirty histograms contain observations since the persisted base was
+  // loaded. Rebase them onto the canonical ID without changing dirty maps.
+  for (const [sourceId, dirty] of dirtyHistograms) {
+    const pid = canonicalProjectId(sourceId, { committed: true });
+    if (!pid) continue;
+    const current =
+      exactCountsByProject.get(pid) ?? emptyWarmupHistogramCounts();
+    const dirtyCounts = dirty.counts.map(BigInt);
+    exactCountsByProject.set(
+      pid,
+      mergeWarmupHistogramCounts(current, dirtyCounts),
+    );
+  }
+
+  for (const [pid, counts] of exactCountsByProject) {
+    snapshot.set(pid, normalizeWarmupHistogram(counts));
+  }
+  return snapshot;
 }
 
 // ---------------------------------------------------------------------------
@@ -2813,12 +2993,14 @@ export function getGlobalHistogramsSnapshot(): ReadonlyMap<
 export function _forceReloadForTest(): void {
   circuitBreakers.clear();
   circuitBreakersLoaded = false;
+  circuitBreakerCleanupPending = false;
 }
 
 /** @internal Reset module state for tests. */
 export function _resetForTest(): void {
   circuitBreakers.clear();
   circuitBreakersLoaded = true; // Mark as loaded so it doesn't re-read stale DB state
+  circuitBreakerCleanupPending = false;
   try {
     setKV(CB_KV_KEY, JSON.stringify({ version: 2, buckets: {} }));
   } catch {
@@ -2828,4 +3010,5 @@ export function _resetForTest(): void {
   dirtyProjects.clear();
   dirtyHistograms.clear();
   authDisabledSessions.clear();
+  warmingSessionsInProgress.clear();
 }
