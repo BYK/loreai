@@ -1,5 +1,6 @@
 import type { Component } from "solid-js";
 import { createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import { A } from "@solidjs/router";
 
 import type {
   ContradictionDecision,
@@ -64,6 +65,17 @@ export const ContradictionsPage: Component = () => {
           request.decision,
         ),
       );
+      if (request.decision !== "keep-both") {
+        const removedId =
+          request.decision === "keep-a" ? request.pair.id_b : request.pair.id_a;
+        try {
+          await ws.state.knowledge.remove(removedId);
+        } catch (reason) {
+          // Cache failure must not make a successful gateway decision look
+          // like a failed review action. The in-memory store is already clear.
+          console.warn("knowledge cache removal failed", reason);
+        }
+      }
       setData((previous) =>
         previous
           ? {
@@ -183,21 +195,21 @@ export const ContradictionsPage: Component = () => {
                       data-testid="contradiction-row"
                     >
                       <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold">
-                        <a
+                        <A
                           class="text-accent underline decoration-accent/40 underline-offset-2"
-                          href={"/knowledge/" + encodeURIComponent(pair.id_a)}
+                          href={`/knowledge/${encodeURIComponent(pair.id_a)}`}
                         >
                           {pair.title_a}
-                        </a>
+                        </A>
                         <span aria-hidden="true" class="text-gold">
                           ↔
                         </span>
-                        <a
+                        <A
                           class="text-accent underline decoration-accent/40 underline-offset-2"
-                          href={"/knowledge/" + encodeURIComponent(pair.id_b)}
+                          href={`/knowledge/${encodeURIComponent(pair.id_b)}`}
                         >
                           {pair.title_b}
-                        </a>
+                        </A>
                       </div>
                       <Show when={pair.rationale}>
                         {(rationale) => (

@@ -298,6 +298,48 @@ describe("knowledge state", () => {
     await closeLoreDb();
   });
 
+  it("evicts a permanently removed entry from memory and IndexedDB", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const repo = createKnowledgeRepo(db);
+    await repo.put(ENTRIES[0]!, "p1");
+    await repo.setCollection("p1", {
+      complete: true,
+      count: 1,
+      nextCursor: null,
+      fetchedAt: 0,
+    });
+    const notFound = new Error("knowledge entry no longer exists");
+    const client = {
+      getKnowledge: async () => {
+        throw notFound;
+      },
+      listProjectKnowledge: async () => {
+        throw new Error("offline");
+      },
+    } as unknown as ApiClient;
+    const state = createKnowledgeState({ client, repo, tracked });
+    state.store.reconcileOne(ENTRIES[0]!);
+    state.store.reconcileList("p1", [ENTRIES[0]!], { complete: true });
+
+    await state.remove("k1");
+    expect(state.store.select("k1")).toBeUndefined();
+    expect(state.store.selectList("p1")).toEqual([]);
+    expect(await repo.get("k1")).toBeUndefined();
+
+    const detail = createRoot(() => state.entry(() => "k1"));
+    await flush();
+    expect(detail.loader.data()).toBeUndefined();
+    expect(detail.loader.error()).toBe(notFound);
+
+    const list = createRoot(() => state.list(() => "p1"));
+    await flush();
+    expect(list.loader.data()).toEqual([]);
+    expect(list.status().partial).toBe(true);
+    await closeLoreDb();
+  });
+
   it("pages via listPaged with mergeCursorPage", async () => {
     const pages = [
       { items: [ENTRIES[0]!], next_cursor: "tok" },

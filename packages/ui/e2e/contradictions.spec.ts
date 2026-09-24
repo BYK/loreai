@@ -14,6 +14,14 @@ test.describe("contradictions (UI-08)", () => {
     await expect(row).toHaveCount(1);
     await expect(row).toContainText("Prefer deterministic ids");
     await expect(row).toContainText("Regenerate ids on every read");
+    const ruleLink = row.getByRole("link", {
+      name: "Prefer deterministic ids",
+    });
+    await expect(ruleLink).toHaveAttribute("href", /\/ui\/knowledge\/[^/]+$/);
+    await ruleLink.click();
+    await expect(page).toHaveURL(/\/ui\/knowledge\/[^/]+$/);
+    await page.goBack();
+    await expect(row).toBeVisible();
     await row.getByRole("button", { name: "Keep both" }).click();
     await expect(page.getByText("No open contradictions")).toBeVisible();
 

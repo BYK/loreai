@@ -39,9 +39,9 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
 
 function mount(client: ApiClient) {
   const history = createMemoryHistory();
-  history.set({ value: "/contradictions" });
+  history.set({ value: "/ui/contradictions" });
   return render(() => (
-    <MemoryRouter history={history}>
+    <MemoryRouter base="/ui" history={history}>
       <Route
         path="*"
         component={() => (
@@ -68,7 +68,7 @@ describe("ContradictionsPage", () => {
     expect(await screen.findByText("Rule A")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Rule A" })).toHaveAttribute(
       "href",
-      "/knowledge/logical-a",
+      "/ui/knowledge/logical-a",
     );
     expect(screen.getByTestId("contradiction-row")).toHaveTextContent(
       "These rules conflict.",
