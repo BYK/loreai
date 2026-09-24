@@ -359,7 +359,7 @@
 </tr>
 <tr>
 <td><code dir="auto">LORE_DISABLE_VEC_WORKER</code></td>
-<td>Kill switch: force the in-process vector-search path, disabling the off-thread read-worker pool. Default-on escape hatch, not opt-in.</td>
+<td>LORE_DISABLE_VEC_WORKER=1 disables the off-thread read-worker pool. Required foreground memory reads then return retryable 503; optional reads degrade. This never enables an unbounded synchronous scan.</td>
 </tr>
 <tr>
 <td><code dir="auto">LORE_EMBED_POOL_SIZE</code></td>
