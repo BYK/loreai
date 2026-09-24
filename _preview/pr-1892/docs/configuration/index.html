@@ -272,7 +272,7 @@
 <td>number</td>
 <td>—</td>
 <td>min 1000, max 60000</td>
-<td>Post-decode memory preparation budget in milliseconds. Default: 8000. LORE_MEMORY_PREPARATION_TIMEOUT_MS takes precedence at request admission. Expiry returns a retryable preparation error before forwarding an unsafe prompt.</td>
+<td>Post-decode memory preparation budget in milliseconds. Default: 8000. LORE_MEMORY_PREPARATION_TIMEOUT_MS takes precedence at request admission. A verified accepted source window and knowledge pin may continue on optional refresh expiry; otherwise preparation returns a retryable error.</td>
 </tr>
 <tr>
 <td><code dir="auto">workerResponseInactivityMs</code></td>
