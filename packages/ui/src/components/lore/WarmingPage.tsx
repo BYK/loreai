@@ -64,12 +64,11 @@ export const WarmingPage: Component = () => {
 
   const activeSessions = () =>
     (snapshot()?.sessions ?? []).filter((row) => row.warming !== null);
+  const userStopped = (row: WarmingSnapshot["sessions"][number]) =>
+    row.warming?.user_stopped ??
+    row.warming?.reason === "Warming stopped by user";
   const mode = (row: WarmingSnapshot["sessions"][number]) =>
-    row.warming?.disabled
-      ? "stop"
-      : row.warming?.force_keep_warm
-        ? "keep"
-        : "auto";
+    userStopped(row) ? "stop" : row.warming?.force_keep_warm ? "keep" : "auto";
 
   return (
     <div
@@ -308,11 +307,13 @@ export const WarmingPage: Component = () => {
                               <div class="font-medium">
                                 {row.warming?.should_warm
                                   ? "Warming now"
-                                  : row.warming?.disabled
+                                  : userStopped(row)
                                     ? "Stopped"
-                                    : row.warming?.phase === "none"
-                                      ? "Idle"
-                                      : "Waiting"}
+                                    : row.warming?.disabled
+                                      ? "Paused by survival"
+                                      : row.warming?.phase === "none"
+                                        ? "Idle"
+                                        : "Waiting"}
                               </div>
                               <div class="mt-0.5 text-muted">
                                 {row.warming?.reason ??
@@ -338,6 +339,7 @@ export const WarmingPage: Component = () => {
                                         !data().can_edit ||
                                         busy() === `session:${row.session_id}`
                                       }
+                                      aria-pressed={mode(row) === nextMode}
                                       aria-label={`${nextMode} warming for ${row.session_id}`}
                                       onClick={() =>
                                         void act(

@@ -75,6 +75,7 @@ const warmingData: WarmingSnapshot = {
         total_warmups: 4,
         warmup_hits: 2,
         disabled: false,
+        user_stopped: false,
         force_keep_warm: false,
         circuit_breaker: {
           tripped: false,
@@ -230,6 +231,61 @@ describe("WarmingPage", () => {
     );
   });
 
+  it("keeps a survival-disabled session in Auto mode", async () => {
+    const pausedData: WarmingSnapshot = {
+      ...warmingData,
+      sessions: warmingData.sessions.map((row) => ({
+        ...row,
+        warming: row.warming
+          ? {
+              ...row.warming,
+              disabled: true,
+              user_stopped: false,
+              reason: "Session paused by survival analysis",
+            }
+          : null,
+      })),
+    };
+    mountPage("warming", clientWith({ getWarming: async () => pausedData }));
+
+    expect(
+      await screen.findByRole("button", {
+        name: "auto warming for session-1",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: "stop warming for session-1" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("Paused by survival")).toBeInTheDocument();
+  });
+
+  it("recognizes an operator stop in an older snapshot", async () => {
+    const legacyData: WarmingSnapshot = {
+      ...warmingData,
+      sessions: warmingData.sessions.map((row) => {
+        if (!row.warming) return row;
+        const warming = { ...row.warming };
+        delete warming.user_stopped;
+        return {
+          ...row,
+          warming: {
+            ...warming,
+            disabled: true,
+            reason: "Warming stopped by user",
+          },
+        };
+      }),
+    };
+    mountPage("warming", clientWith({ getWarming: async () => legacyData }));
+
+    expect(
+      await screen.findByRole("button", {
+        name: "stop warming for session-1",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+  });
+
   it("warns when an action succeeds but refreshing the snapshot fails", async () => {
     let reads = 0;
     mountPage(
@@ -277,6 +333,28 @@ describe("CostsPage", () => {
       "Enter a daily budget between $0 and $1,000,000.",
     );
     expect(setBudget).not.toHaveBeenCalled();
+  });
+
+  it("accepts sub-cent budget amounts supported by the API", async () => {
+    const setBudget = vi.fn(async (amount: number) => ({
+      amount,
+      disabled: amount === 0,
+    }));
+    mountPage(
+      "costs",
+      clientWith({
+        getCosts: async () => costsData,
+        setDailyBudget: setBudget,
+      }),
+    );
+
+    const input = (await screen.findByLabelText(
+      "Daily budget in US dollars",
+    )) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "0.005" } });
+    expect(input.checkValidity()).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Save budget" }));
+    await waitFor(() => expect(setBudget).toHaveBeenCalledWith(0.005));
   });
 
   it("shows costs, history and per-session rows; saves and disables the budget", async () => {

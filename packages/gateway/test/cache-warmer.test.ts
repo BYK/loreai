@@ -1225,6 +1225,7 @@ describe("shouldWarm", () => {
     expect(computeWarmingSnapshot(state, now, true)).toMatchObject({
       disabled: true,
       notWarmingReason: "Warming stopped by user",
+      userStopped: true,
     });
   });
 
@@ -1772,6 +1773,55 @@ describe("shouldWarm", () => {
     expect(getCacheStrategy(sid)).toBeNull();
     evictSession(sid);
   });
+
+  test.each([
+    {
+      name: "too few turns",
+      messageCount: 4,
+      lastInputTokens: 100_000,
+      reason: "Too few turns (4 < 10)",
+    },
+    {
+      name: "too little context",
+      messageCount: 20,
+      lastInputTokens: 20_000,
+      reason: "Context too small (20k < 50k tokens)",
+    },
+    {
+      name: "context just below the minimum",
+      messageCount: 20,
+      lastInputTokens: 49_999,
+      reason: "Context too small (49k < 50k tokens)",
+    },
+  ])(
+    "does not advertise forced warming with $name",
+    ({ name, messageCount, lastInputTokens, reason }) => {
+      const now = Date.now();
+      const state = makeSessionState({
+        sessionID: `force-keep-snapshot-${name.replaceAll(" ", "-")}`,
+        lastRequestTime: now - 270_000,
+        messageCount,
+        lastInputTokens,
+        warmup: {
+          lastWarmupAt: 0,
+          warmupCount: 0,
+          totalWarmups: 0,
+          warmupHits: 0,
+          disabled: false,
+          forceKeepWarm: true,
+        },
+        cacheAnalytics: {
+          ...makeCacheAnalytics(),
+          lastRequestBody: compressBody('{"test":true}'),
+        },
+      });
+
+      const snapshot = computeWarmingSnapshot(state, now, true);
+
+      expect(snapshot.shouldWarmNow).toBe(false);
+      expect(snapshot.notWarmingReason).toBe(reason);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

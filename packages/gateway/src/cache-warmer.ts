@@ -1822,6 +1822,7 @@ export type WarmingSnapshot = {
   warmupHits: number;
   lastWarmupAt: number;
   disabled: boolean;
+  userStopped: boolean;
   forceKeepWarm: boolean;
   // Survival analysis
   sessionHistogram: InterTurnHistogram;
@@ -1955,8 +1956,15 @@ export function computeWarmingSnapshot(
       : isWarmupAuthDisabled(state.sessionID)
         ? "Warmup skipped because upstream authentication is unavailable"
         : null;
+  // Match the idle scheduler gates, which run before shouldWarm (including
+  // its forced-keep path).
+  const tooFewTurns = state.messageCount < MIN_TURNS_FOR_WARMING * 2;
+  const contextTooSmall =
+    (state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING;
   const warmNow =
     idleSkipReason === null &&
+    !tooFewTurns &&
+    !contextTooSmall &&
     profile != null &&
     shouldWarm(
       state,
@@ -1991,6 +1999,11 @@ export function computeWarmingSnapshot(
       notWarmingReason = `Emergency compaction (layer=${getLastTransformLayer(state.sessionID)} >= ${EMERGENCY_COMPACTION_LAYER}) — prefix re-renders every turn, warmups would land as partials`;
     } else if (!profile) {
       notWarmingReason = "No warming profile (non-Anthropic or unknown model)";
+    } else if (tooFewTurns) {
+      notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
+    } else if (contextTooSmall) {
+      const tokK = Math.floor((state.lastInputTokens ?? 0) / 1000);
+      notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
     } else if (state.warmup?.forceKeepWarm) {
       const maxCyc = maxProfitableCycles(
         profile.cacheReadCostPerMTok,
@@ -2009,12 +2022,7 @@ export function computeWarmingSnapshot(
     } else if (state.lastStopReason === "tool_use" && !state.warmup?.disabled) {
       // Mirror shouldWarm()'s tool-call entry: `toolCallActive && !disabled`.
       // If disabled=true, fall through to the normal path below.
-      if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
-        notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
-      } else if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) {
-        const tokK = Math.round((state.lastInputTokens ?? 0) / 1000);
-        notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
-      } else if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
+      if (idleMs > MAX_TOOL_CALL_WARMING_MS) {
         notWarmingReason = `Tool call exceeded max duration (${Math.round(idleMs / 60_000)}min > ${Math.round(MAX_TOOL_CALL_WARMING_MS / 60_000)}min)`;
       } else if (
         (state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
@@ -2055,13 +2063,8 @@ export function computeWarmingSnapshot(
         cooldownFor(state, ttlMs, warmupMarginMs)
     ) {
       notWarmingReason = "Already warmed in this TTL window";
-    } else if (state.messageCount < MIN_TURNS_FOR_WARMING * 2) {
-      notWarmingReason = `Too few turns (${state.messageCount} < ${MIN_TURNS_FOR_WARMING * 2})`;
-    } else if ((state.lastInputTokens ?? 0) < MIN_INPUT_TOKENS_FOR_WARMING) {
-      const tokK = Math.round((state.lastInputTokens ?? 0) / 1000);
-      notWarmingReason = `Context too small (${tokK}k < ${MIN_INPUT_TOKENS_FOR_WARMING / 1000}k tokens)`;
     } else if (state.warmup?.disabled) {
-      notWarmingReason = "Warming stopped (/lore:warm:stop)";
+      notWarmingReason = "Session paused by survival analysis";
     } else if (
       (state.warmup?.totalWarmups ?? 0) >= MIN_WARMUPS_FOR_ROI_CHECK &&
       (state.warmup?.warmupHits ?? 0) / (state.warmup?.totalWarmups ?? 1) <
@@ -2134,6 +2137,7 @@ export function computeWarmingSnapshot(
     lastWarmupAt: state.warmup?.lastWarmupAt ?? 0,
     disabled:
       state.warmup?.disabled === true || state.warmup?.userStopped === true,
+    userStopped: state.warmup?.userStopped === true,
     forceKeepWarm: state.warmup?.forceKeepWarm ?? false,
     sessionHistogram: sessionHist,
     globalHistogram: globalHist,

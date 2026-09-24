@@ -225,7 +225,7 @@ export const CostsPage: Component = () => {
                       type="number"
                       min="0"
                       max="1000000"
-                      step="0.01"
+                      step="any"
                       value={budgetValue()}
                       onInput={(event) =>
                         setBudgetValue(event.currentTarget.value)

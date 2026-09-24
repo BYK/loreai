@@ -1043,8 +1043,12 @@ predates the move from an embedded module to staged files, which took
   as ready. Persisted histogram rows are combined at exact integer precision
   before the dashboard snapshot normalizes their weights.
 - Per-session Stop is stored separately from the survival model's temporary
-  dead-session flag, so a returning user does not silently re-enable warming;
-  the UI and `/lore:warm:*` controls share the same persisted mode update.
+  dead-session flag. The warming snapshot exposes `user_stopped` separately
+  from effective `disabled` state, so the UI keeps dead sessions in Auto mode
+  and labels the survival pause correctly; the UI and `/lore:warm:*` controls
+  share the same persisted mode update.
+- Older warming snapshots without `user_stopped` retain Stop mode when their
+  stop reason says the operator disabled warming.
 - Session cost snapshots preserve the local shadow-context counters used for
   compaction estimates. Legacy rows leave those nullable fields empty, so the
   first resumed request seeds a fresh estimate safely.
@@ -1052,7 +1056,7 @@ predates the move from an embedded module to staged files, which took
   worker breakdown, and an empty budget form entry is rejected instead of
   being interpreted as the explicit zero-value disable action.
 - This slice adds no dependencies or package-version changes. Its focused
-  core/gateway regression command (424 passing) is:
+  core/gateway regression command (428 passing) is:
 
   ```sh
   pnpm exec vitest run \
@@ -1062,7 +1066,7 @@ predates the move from an embedded module to staged files, which took
     packages/gateway/test/operations-api.test.ts
   ```
 
-  The UI page tests run with `pnpm --filter @loreai/ui test` (490 passing on
+  The UI page tests run with `pnpm --filter @loreai/ui test` (493 passing on
   this revision).
 
   The PR also runs the standard root typecheck, lint, format, test and build

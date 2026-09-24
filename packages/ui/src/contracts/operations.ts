@@ -32,6 +32,7 @@ const sessionWarming = type({
   total_warmups: nonNegInt,
   warmup_hits: nonNegInt,
   disabled: "boolean",
+  "user_stopped?": "boolean",
   force_keep_warm: "boolean",
   circuit_breaker: sessionCircuitBreaker,
 });

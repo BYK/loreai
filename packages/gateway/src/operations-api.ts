@@ -140,6 +140,7 @@ type DashboardRow = {
     total_warmups: number;
     warmup_hits: number;
     disabled: boolean;
+    user_stopped: boolean;
     force_keep_warm: boolean;
     circuit_breaker: {
       tripped: boolean;
@@ -245,6 +246,7 @@ function dashboardRows(
             total_warmups: warm?.totalWarmups ?? 0,
             warmup_hits: warm?.warmupHits ?? 0,
             disabled: warm?.disabled === true || warm?.userStopped === true,
+            user_stopped: snapshot.userStopped,
             force_keep_warm: warm?.forceKeepWarm ?? false,
             circuit_breaker: {
               tripped: snapshot.circuitBreaker.tripped,

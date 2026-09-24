@@ -303,6 +303,95 @@ describe("read-only operations snapshots", () => {
       warmer._forceReloadForTest();
     }
   });
+
+  it("exposes survival disable separately from the operator-selected stop mode", async () => {
+    const pipeline = await import("../src/pipeline");
+    const sessionId = `operations-warming-mode-${Date.now()}`;
+    const active = pipeline.getActiveSessions() as unknown as Map<
+      string,
+      SessionState
+    >;
+    const state = {
+      sessionID: sessionId,
+      projectPath: `/tmp/${sessionId}`,
+      fingerprint: sessionId,
+      lastRequestTime: Date.now() - 270_000,
+      lastUserTurnTime: Date.now() - 270_000,
+      messageCount: 20,
+      turnsSinceCuration: 2,
+      consecutiveTextOnlyTurns: 0,
+      recallStore: new Map(),
+      cacheAnalytics: {
+        lastRequestBody: new Uint8Array([1]),
+        lastRequestBodyLength: 1,
+        lastCacheRead: 0,
+        lastCacheCreation: 0,
+        turnCount: 0,
+        bustCount: 0,
+      },
+      lastUpstream: {
+        url: "https://api.anthropic.com",
+        protocol: "anthropic" as const,
+        model: "claude-sonnet-4-20250514",
+        headers: {},
+      },
+      upstreamByProvider: new Map(),
+      resolvedConversationTTL: "5m" as const,
+      lastInputTokens: 100_000,
+      warmup: {
+        lastWarmupAt: 0,
+        warmupCount: 1,
+        totalWarmups: 1,
+        warmupHits: 0,
+        disabled: true,
+        userStopped: false,
+        forceKeepWarm: false,
+      },
+    } as unknown as SessionState;
+
+    try {
+      active.set(sessionId, state);
+      const automatic = await body<{
+        sessions: Array<{
+          session_id: string;
+          warming: {
+            disabled: boolean;
+            user_stopped: boolean;
+            reason: string | null;
+          } | null;
+        }>;
+      }>("/api/v1/warming");
+      expect(
+        automatic.sessions.find((row) => row.session_id === sessionId)?.warming,
+      ).toMatchObject({
+        disabled: true,
+        user_stopped: false,
+        reason: "Session paused by survival analysis",
+      });
+
+      if (!state.warmup) throw new Error("warmup state was not initialized");
+      state.warmup.userStopped = true;
+      const stopped = await body<{
+        sessions: Array<{
+          session_id: string;
+          warming: {
+            disabled: boolean;
+            user_stopped: boolean;
+            reason: string | null;
+          } | null;
+        }>;
+      }>("/api/v1/warming");
+      expect(
+        stopped.sessions.find((row) => row.session_id === sessionId)?.warming,
+      ).toMatchObject({
+        disabled: true,
+        user_stopped: true,
+        reason: "Warming stopped by user",
+      });
+    } finally {
+      active.delete(sessionId);
+    }
+  });
 });
 
 describe("cost snapshots for resumed sessions", () => {
