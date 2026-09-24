@@ -332,7 +332,7 @@ db.prepare(
 db.close();
 
 console.log(
-  `seeded ${entries.length + 5} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 1 + contradictionFixtureId} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);
