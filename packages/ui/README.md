@@ -31,6 +31,21 @@ server, Vitest); production builds drop them and their chunks from the route
 table, so the gateway's shipped bundle answers them with the SPA's
 not-found screen.
 
+### Contradiction review (#1823)
+
+The /ui/contradictions screen reads GET /api/v1/contradictions and submits
+PATCH /api/v1/contradictions/:idA/:idB decisions. It shows the newest 25 open
+pairs, matching the retired dashboard; resolving or dismissing a pair reveals
+the next older one. Keeping A or B asks for confirmation and removes the
+losing knowledge entry. Keeping both preserves both entries and marks the pair
+dismissed so the detector does not reopen it. The route stays behind the
+management boundary and writes are refused in hosted mode.
+
+Tests:
+- pnpm --filter @loreai/gateway exec vitest run test/dashboard-api.test.ts test/route-registry.test.ts
+- pnpm --filter @loreai/ui exec vitest run test/contradictions-page.test.tsx test/contracts.test.ts test/api-client.test.ts
+- pnpm --filter @loreai/ui test:e2e
+
 Reference documents:
 
 - [API inventory and gateway baseline](https://github.com/BYK/loreai/issues/1796#issuecomment-5736848368)

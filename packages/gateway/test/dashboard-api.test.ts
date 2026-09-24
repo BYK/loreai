@@ -5,8 +5,9 @@
  * Same harness as api.test.ts: a real gateway on an ephemeral port with an
  * isolated temp DB. No upstream interceptor — these endpoints never call LLMs.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { unlinkSync, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import {
   loopbackRequest,
@@ -77,6 +78,40 @@ async function seedEntity(input: {
 }): Promise<{ id: string }> {
   const { entities } = await import("@loreai/core");
   return entities.create(input);
+}
+
+async function seedContradictionPair(prefix: string): Promise<{
+  a: string;
+  b: string;
+  projectId: string;
+}> {
+  const { ensureProject, ltm } = await import("@loreai/core");
+  const projectPath = "/test/dashboard/contradictions/" + prefix;
+  const projectId = ensureProject(projectPath, prefix);
+  const a = ltm.create({
+    projectPath,
+    category: "decision",
+    title: prefix + " rule A",
+    content: "Follow rule A.",
+    scope: "project",
+    id: randomUUID(),
+  });
+  const b = ltm.create({
+    projectPath,
+    category: "decision",
+    title: prefix + " rule B",
+    content: "Follow rule B.",
+    scope: "project",
+    id: randomUUID(),
+  });
+  ltm.recordContradiction({
+    logicalIdA: a,
+    logicalIdB: b,
+    projectId,
+    similarity: 0.94,
+    rationale: "The two recorded directives cannot both be followed.",
+  });
+  return { a, b, projectId };
 }
 
 interface ListBody {
@@ -419,6 +454,179 @@ describe("GET /api/v1/entities/rebuild", () => {
   });
 });
 
+describe("GET/PATCH /api/v1/contradictions", () => {
+  it("shows the newest 25 pairs and exposes the next older after a decision", async () => {
+    const baseTime = Date.now();
+    let detectionTime = baseTime;
+    const dateNow = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => detectionTime);
+    const pairs: Array<{ a: string; b: string; projectId: string }> = [];
+    try {
+      for (let index = 0; index < 26; index++) {
+        detectionTime = baseTime + index * 1_000;
+        pairs.push(await seedContradictionPair(`list-${baseTime}-${index}`));
+      }
+    } finally {
+      dateNow.mockRestore();
+    }
+    const body = await apiJSON<{
+      contradictions: Array<{
+        id_a: string;
+        id_b: string;
+        title_a: string;
+        title_b: string;
+        similarity: number;
+        rationale: string | null;
+        detected_at: number;
+      }>;
+      total: number;
+    }>("/api/v1/contradictions");
+    const pairKey = (a: string, b: string) =>
+      a <= b ? `${a}:${b}` : `${b}:${a}`;
+    const responseKeys = body.contradictions.map((row) =>
+      pairKey(row.id_a, row.id_b),
+    );
+    const newestFirst = pairs.map((pair) => pairKey(pair.a, pair.b)).reverse();
+    const row = body.contradictions.find(
+      (candidate) => pairKey(candidate.id_a, candidate.id_b) === newestFirst[0],
+    );
+    expect(row).toMatchObject({
+      title_a: expect.any(String),
+      title_b: expect.any(String),
+      similarity: 0.94,
+      rationale: "The two recorded directives cannot both be followed.",
+    });
+    expect(body.total).toBe(26);
+    expect(body.contradictions).toHaveLength(25);
+    expect(responseKeys).toEqual(newestFirst.slice(0, 25));
+
+    const newest = pairs.at(-1);
+    if (!newest) throw new Error("the newest contradiction pair is missing");
+    const dismissed = await api(
+      `/api/v1/contradictions/${newest.a}/${newest.b}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "keep-both" }),
+      },
+    );
+    expect(dismissed.status).toBe(200);
+
+    const afterDecision = await apiJSON<typeof body>("/api/v1/contradictions");
+    expect(afterDecision.total).toBe(25);
+    expect(
+      afterDecision.contradictions.map((row) => pairKey(row.id_a, row.id_b)),
+    ).toEqual(newestFirst.slice(1));
+  });
+
+  it.each(["keep-a", "keep-b"] as const)(
+    "keeps the requested side for %s",
+    async (decision) => {
+      const { ltm } = await import("@loreai/core");
+      const pair = await seedContradictionPair(decision + "-" + Date.now());
+      const res = await api("/api/v1/contradictions/" + pair.a + "/" + pair.b, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        status: "resolved",
+        kept_id: decision === "keep-a" ? pair.a : pair.b,
+      });
+      expect(
+        ltm.getByLogical(decision === "keep-a" ? pair.a : pair.b),
+      ).not.toBeNull();
+      expect(
+        ltm.getByLogical(decision === "keep-a" ? pair.b : pair.a),
+      ).toBeNull();
+      expect(ltm.contradictionExists(pair.a, pair.b)).toBe(false);
+    },
+  );
+
+  it("keeps both and persists the dismissal so it is not re-judged", async () => {
+    const { ltm } = await import("@loreai/core");
+    const pair = await seedContradictionPair("keep-both-" + Date.now());
+    const res = await api("/api/v1/contradictions/" + pair.a + "/" + pair.b, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision: "keep-both" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "dismissed", kept_id: null });
+    expect(ltm.getByLogical(pair.a)).not.toBeNull();
+    expect(ltm.getByLogical(pair.b)).not.toBeNull();
+    expect(
+      ltm
+        .listOpenContradictions()
+        .some((row) => row.logicalIdA === pair.a && row.logicalIdB === pair.b),
+    ).toBe(false);
+    expect(
+      ltm.recordContradiction({
+        logicalIdA: pair.a,
+        logicalIdB: pair.b,
+        projectId: pair.projectId,
+        similarity: 0.99,
+        rationale: "redetected",
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects invalid decisions and never becomes a generic delete endpoint", async () => {
+    const { ltm } = await import("@loreai/core");
+    const pair = await seedContradictionPair("invalid-" + Date.now());
+    for (const body of [
+      JSON.stringify({ decision: "delete" }),
+      JSON.stringify({ decision: "keep-a", extra: true }),
+      "{",
+    ]) {
+      const res = await api("/api/v1/contradictions/" + pair.a + "/" + pair.b, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(res.status).toBe(400);
+    }
+
+    const unknown = await api(
+      "/api/v1/contradictions/" + pair.a + "/not-a-pair",
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "keep-a" }),
+      },
+    );
+    expect(unknown.status).toBe(404);
+    expect(ltm.getByLogical(pair.a)).not.toBeNull();
+    expect(ltm.getByLogical(pair.b)).not.toBeNull();
+  });
+
+  it("refuses review writes in hosted mode", async () => {
+    const { enableHostedMode, _resetHostedModeForTest, ltm } =
+      await import("@loreai/core");
+    const pair = await seedContradictionPair("hosted-" + Date.now());
+    enableHostedMode();
+    try {
+      const res = await api("/api/v1/contradictions/" + pair.a + "/" + pair.b, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "keep-a" }),
+      });
+      expect(res.status).toBe(403);
+      expect(
+        ((await res.json()) as { error: { type: string } }).error.type,
+      ).toBe("forbidden");
+      expect(ltm.getByLogical(pair.a)).not.toBeNull();
+      expect(ltm.getByLogical(pair.b)).not.toBeNull();
+    } finally {
+      _resetHostedModeForTest();
+    }
+  });
+});
+
 describe("management boundary", () => {
   it("hides the dashboard routes from non-loopback peers", async () => {
     const { startServer } = await import("../src/server");
@@ -432,6 +640,15 @@ describe("management boundary", () => {
     try {
       const remoteBase = `http://127.0.0.1:${remote.port}`;
       for (const init of [
+        { path: "/api/v1/contradictions", init: {} },
+        {
+          path: "/api/v1/contradictions/a/b",
+          init: {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ decision: "keep-a" }),
+          },
+        },
         { path: "/api/v1/entities", init: {} },
         { path: "/api/v1/entities/rebuild", init: {} },
         { path: "/api/v1/entities/x", init: {} },

@@ -11,6 +11,7 @@ import type { Type } from "arktype";
 import {
   accountStatus,
   apiErrorBody,
+  contradictionListResponse,
   ContractError,
   cursorPage,
   distillationDetail,
@@ -83,6 +84,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "entity-rebuild-status.json": {
     route: "/entities/rebuild",
     schema: entityRebuildStatus,
+  },
+  "contradictions-list.json": {
+    route: "/contradictions",
+    schema: contradictionListResponse,
   },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {

@@ -488,6 +488,47 @@ describe("api client: error classification", () => {
   });
 });
 
+describe("contradiction API client", () => {
+  it("lists the open pairs from the management route", async () => {
+    const response = {
+      contradictions: [
+        {
+          id_a: "a",
+          id_b: "b",
+          title_a: "Rule A",
+          title_b: "Rule B",
+          similarity: 0.94,
+          rationale: null,
+          detected_at: Date.UTC(2026, 8, 1),
+        },
+      ],
+      total: 1,
+    };
+    const { client, calls } = clientFor(() => json(response));
+    expect(await client.listContradictions()).toEqual(response);
+    expect(calls).toEqual(["/api/v1/contradictions"]);
+  });
+
+  it("PATCHes the encoded pair ids with the explicit decision", async () => {
+    let request: RequestInit | undefined;
+    const calls: string[] = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        calls.push(url);
+        request = init;
+        return json({ status: "resolved", kept_id: "a/b" });
+      },
+    });
+
+    await client.decideContradiction("a/b", "c?d", "keep-a");
+    expect(calls).toEqual(["/api/v1/contradictions/a%2Fb/c%3Fd"]);
+    expect(request?.method).toBe("PATCH");
+    expect(JSON.parse(request?.body as string)).toEqual({
+      decision: "keep-a",
+    });
+  });
+});
+
 describe("connection store", () => {
   it("starts as checking and follows read outcomes", () => {
     const store = createConnectionStore();

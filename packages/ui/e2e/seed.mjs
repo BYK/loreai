@@ -28,7 +28,7 @@ mkdirSync(lore, { recursive: true });
 mkdirSync(scratch, { recursive: true });
 
 core.ensureProject(lore, "lore", "github.com/BYK/loreai");
-core.ensureProject(scratch, "scratch", null);
+const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
 const entries = [
   {
@@ -257,6 +257,29 @@ const loreRepo = core.entities.create({
 core.entities.addRelation(ada.id, analyticalEngines.id, "colleague");
 core.entities.linkKnowledge(firstKnowledgeId, ada.id);
 void loreRepo;
+
+const conflictA = core.ltm.create({
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Prefer deterministic ids",
+  content: "Always preserve stable ids.",
+});
+const conflictB = core.ltm.create({
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Regenerate ids on every read",
+  content: "Always replace stable ids.",
+});
+core.ltm.recordContradiction({
+  logicalIdA: conflictA,
+  logicalIdB: conflictB,
+  projectId: scratchProjectId,
+  similarity: 0.94,
+  rationale:
+    "Stable identity cannot be preserved and replaced at the same time.",
+});
 
 core.close();
 

@@ -4855,20 +4855,32 @@ export function listOpenContradictions(
  * Set the status of a contradiction pair (canonicalized). Used by the dashboard
  * resolve/dismiss endpoints and the CLI. A "resolved" pair usually accompanies
  * a `remove()` of the losing entry (which also purges the row); "dismissed"
- * keeps both entries but suppresses the pair from future surfacing.
+ * keeps both entries but suppresses the pair from future surfacing. When
+ * `expectedStatus` is supplied, this is an atomic compare-and-set transition.
+ * Returns true if a row was updated.
  */
 export function setContradictionStatus(
   a0: string,
   b0: string,
   status: ContradictionStatus,
-): void {
+  expectedStatus?: ContradictionStatus,
+): boolean {
   const [a, b] = contradictionPairKey(a0, b0);
-  db()
+  const statusGuard = expectedStatus ? " AND status = ?" : "";
+  const result = db()
     .query(
       `UPDATE knowledge_contradictions SET status = ?, updated_at = ?
-       WHERE tenant_id = ? AND logical_id_a = ? AND logical_id_b = ?`,
+       WHERE tenant_id = ? AND logical_id_a = ? AND logical_id_b = ?${statusGuard}`,
     )
-    .run(status, Date.now(), currentTenantId(), a, b);
+    .run(
+      status,
+      Date.now(),
+      currentTenantId(),
+      a,
+      b,
+      ...(expectedStatus ? [expectedStatus] : []),
+    );
+  return result.changes > 0;
 }
 
 /**

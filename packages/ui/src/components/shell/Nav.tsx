@@ -186,6 +186,13 @@ export const Nav: Component<NavProps> = (props) => {
       >
         Entities
       </NavItem>
+      <NavItem
+        href="/contradictions"
+        active={location.pathname.startsWith("/contradictions")}
+        testId="nav-contradictions"
+      >
+        Contradictions
+      </NavItem>
       <div class="my-0.5 flex items-center justify-between gap-2 px-3 py-2.25 text-sm text-muted">
         <span>Sessions</span>
         <span class="text-[10px] uppercase tracking-wider">UI-05</span>

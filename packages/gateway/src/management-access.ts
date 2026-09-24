@@ -16,7 +16,7 @@ import { PROVIDER_AUTH_HEADER_NAMES } from "./auth";
 // Browser-origin policy
 // ---------------------------------------------------------------------------
 
-const CORS_METHODS = "GET, POST, DELETE, OPTIONS";
+const CORS_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
 
 /**
  * Data-plane responses are intentionally not CORS-enabled. Clone the response
