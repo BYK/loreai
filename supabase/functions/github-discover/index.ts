@@ -54,6 +54,7 @@ import {
   type RepoContributors,
 } from "./discover.ts";
 import { capture, initSentry, wrapHandler } from "../_shared/sentry.ts";
+import { captureReturnedError } from "../_shared/sentry-error.ts";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -154,7 +155,7 @@ Deno.serve(
       }
       selfGithubId = tokenOwner.id;
     } catch (e) {
-      await capture(e);
+      await capture(e, "github-discover.verify-token-owner");
       return json({ error: `github: ${(e as Error).message}` }, 502);
     }
 
@@ -171,7 +172,7 @@ Deno.serve(
         repos = await fetchUserRepos(providerToken, { apiUrl });
       }
     } catch (e) {
-      await capture(e);
+      await capture(e, "github-discover.list-repositories");
       return json({ error: `github: ${(e as Error).message}` }, 502);
     }
     repos = repos.slice(0, MAX_REPOS);
@@ -190,7 +191,7 @@ Deno.serve(
         rosters.push({ repo: `${repo.owner}/${repo.name}`, contributors });
       } catch (e) {
         // A transient error on one repo shouldn't sink the batch — log and skip.
-        await capture(e);
+        await capture(e, "github-discover.list-contributors");
         console.error(
           `contributors ${repo.owner}/${repo.name}:`,
           (e as Error).message,
@@ -210,7 +211,7 @@ Deno.serve(
         p_github_ids: githubIds,
       });
       if (error) {
-        await capture(error);
+        await capture(error, "github-discover.lookup-lore-users");
         console.error("lore_users_for_github_ids failed:", error.message);
         return json({ error: "lookup failed" }, 500);
       }
@@ -243,7 +244,7 @@ Deno.serve(
       for (const c of r.contributors) {
         const existing = byLogin.get(c.login);
         if (!existing)
-          byLogin.set(c.login, { login: c.login, githubId: c.githubId });
+          byLogin.set(c.login, { login: c.login, githubId: c.github_id });
       }
     }
     const contributors = Array.from(byLogin.values()).sort((a, b) =>
@@ -285,6 +286,7 @@ Deno.serve(
       if (mintResp.error || !mintResp.data) {
         await capture(
           mintResp.error ?? new Error("create_scope_invite no data"),
+          "github-discover.create-invite",
         );
         reports.push({
           login: c.login,
@@ -301,9 +303,14 @@ Deno.serve(
       let recipient: string | null = null;
       let resolvedVia: "lore_email" | "github_public_email" | null = null;
       try {
-        const { data: loreRows } = await admin.rpc(
+        const { data: loreRows, error: loreEmailError } = await admin.rpc(
           "lore_emails_for_github_ids",
           { p_github_ids: [c.githubId] },
+        );
+        await captureReturnedError(
+          loreEmailError,
+          "github-discover.lookup-lore-email",
+          capture,
         );
         if (
           Array.isArray(loreRows) &&
@@ -317,7 +324,7 @@ Deno.serve(
           }
         }
       } catch (e) {
-        await capture(e);
+        await capture(e, "github-discover.lookup-lore-email");
       }
       if (!recipient) {
         try {
@@ -332,7 +339,7 @@ Deno.serve(
             resolvedVia = "github_public_email";
           }
         } catch (e) {
-          await capture(e);
+          await capture(e, "github-discover.lookup-github-email");
         }
       }
 
@@ -357,7 +364,7 @@ Deno.serve(
         { body: { token, email: recipient } },
       );
       if (sendErr) {
-        await capture(sendErr);
+        await capture(sendErr, "github-discover.send-invite-email");
         reports.push({
           login: c.login,
           status: "send_failed",

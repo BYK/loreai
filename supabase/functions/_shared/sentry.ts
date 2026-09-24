@@ -14,7 +14,8 @@
 // explicit SENTRY_DSN env var, if present, overrides it (e.g. for a staging
 // project); otherwise instrumentation is always on.
 import * as Sentry from "@sentry/deno";
-import { scrubErrorEvent, toError } from "./sentry-error.ts";
+import { scrubErrorEvent, setFailureSiteTag, toError } from "./sentry-error.ts";
+import type { EdgeFunctionName, FailureSite } from "./sentry-error.ts";
 
 // Sentry DSN for the Lore project (o275100). This is a public key, safe to
 // ship in client/server code — it only permits sending events, not reading them.
@@ -30,7 +31,7 @@ let initialized = false;
  * @param functionName - e.g. "github-discover"; tagged on every event so
  *   issues are filterable per function in the Sentry UI.
  */
-export function initSentry(functionName: string): void {
+export function initSentry(functionName: EdgeFunctionName): void {
   if (initialized) return;
   const dsn = Deno.env.get("SENTRY_DSN") ?? SENTRY_DSN;
 
@@ -72,15 +73,20 @@ export function initSentry(functionName: string): void {
 }
 
 /**
- * Capture an exception to Sentry and await the flush so the event is sent even
- * in a short-lived edge runtime that terminates right after the call. No-op
- * when Sentry isn't initialized (no DSN). Non-Error values (e.g. Supabase
- * PostgrestError) are normalized to Error so Sentry gets a real stack — no
- * tokens/emails/ids are attached.
+ * Capture an exception to Sentry with a fixed failure-site tag, then await the
+ * flush so it is sent before a short-lived edge runtime terminates. The original
+ * message and stack are never forwarded; the tag preserves a safe operation
+ * identifier for diagnosis.
  */
-export async function capture(err: unknown): Promise<void> {
+export async function capture(
+  err: unknown,
+  failureSite: FailureSite,
+): Promise<void> {
   if (!Sentry.isInitialized()) return;
-  Sentry.captureException(toError(err));
+  Sentry.withScope((scope) => {
+    setFailureSiteTag(scope, failureSite);
+    Sentry.captureException(toError(err));
+  });
   await Sentry.flush(2000);
 }
 
@@ -92,14 +98,14 @@ export async function capture(err: unknown): Promise<void> {
  * function returns and the runtime terminates.
  */
 export function wrapHandler(
-  functionName: string,
+  functionName: EdgeFunctionName,
   handler: (req: Request) => Response | Promise<Response>,
 ): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     try {
       return await handler(req);
     } catch (err) {
-      await capture(err);
+      await capture(err, `${functionName}.unhandled`);
       return new Response(JSON.stringify({ error: "internal error" }), {
         status: 500,
         headers: { "content-type": "application/json" },

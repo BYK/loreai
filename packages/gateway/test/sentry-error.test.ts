@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  captureReturnedError,
   scrubErrorEvent,
+  setFailureSiteTag,
   toError,
 } from "../../../supabase/functions/_shared/sentry-error";
 
@@ -47,5 +49,43 @@ describe("Deno Sentry error normalization", () => {
       exception: { values: [{ value: "edge function error" }] },
       breadcrumbs: undefined,
     });
+  });
+
+  it("captures returned SDK errors at their fixed failure site", async () => {
+    const error = { message: "lookup failed" };
+    const captured: Array<[unknown, string]> = [];
+    const capture = async (value: unknown, failureSite: string) => {
+      captured.push([value, failureSite]);
+    };
+
+    await captureReturnedError(
+      error,
+      "github-discover.lookup-lore-email",
+      capture,
+    );
+    await captureReturnedError(
+      null,
+      "github-discover.lookup-lore-email",
+      capture,
+    );
+
+    expect(captured).toEqual([[error, "github-discover.lookup-lore-email"]]);
+  });
+
+  it("tags separate failures with fixed, safe call-site IDs", () => {
+    const tags: Array<[string, string]> = [];
+    const scope = {
+      setTag(key: string, value: string) {
+        tags.push([key, value]);
+      },
+    };
+
+    setFailureSiteTag(scope, "github-discover.list-contributors");
+    setFailureSiteTag(scope, "github-discover.lookup-lore-users");
+
+    expect(tags).toEqual([
+      ["failure_site", "github-discover.list-contributors"],
+      ["failure_site", "github-discover.lookup-lore-users"],
+    ]);
   });
 });

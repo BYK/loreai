@@ -145,7 +145,7 @@ Deno.serve(
           { p_github_ids: [ghId] },
         );
         if (loreErr) {
-          await capture(loreErr);
+          await capture(loreErr, "send-invite-email.lookup-lore-email");
           console.error("lore_emails_for_github_ids failed:", loreErr.message);
           // Continue — public email below may still work.
         } else if (
@@ -191,7 +191,7 @@ Deno.serve(
       .eq("token", capability)
       .maybeSingle();
     if (invErr) {
-      await capture(invErr);
+      await capture(invErr, "send-invite-email.lookup-invite");
       console.error("pending_invites read failed:", invErr.message);
       return json({ error: "lookup failed" }, 500);
     }
@@ -225,7 +225,7 @@ Deno.serve(
         apiUrl: smtpApiUrl,
       });
     } catch (e) {
-      await capture(e);
+      await capture(e, "send-invite-email.send-smtp");
       console.error("smtp2go send failed:", (e as Error).message);
       return json({ error: "send failed" }, 502);
     }
