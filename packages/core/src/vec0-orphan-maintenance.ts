@@ -2,7 +2,11 @@
 import { db, isCurrentDatabase } from "./db";
 import { isVecAvailable } from "./db/vec";
 import { readStorageMode } from "./db/vec-store";
-import { READ_JOB_TIMED_OUT, tryPoolRead } from "./vector-pool";
+import {
+  READ_JOB_PRESSURED,
+  READ_JOB_TIMED_OUT,
+  tryPoolRead,
+} from "./vector-pool";
 
 const TABLES = [
   { vec: "knowledge_vec", key: "id", source: "id", base: "knowledge_current" },
@@ -63,19 +67,26 @@ export function startVec0OrphanMaintenance(
       // shadow metadata is safe; all writes go through the virtual table API.
       // Materialize BEFORE testing liveness: LIMIT on orphan matches alone
       // would still walk an entire healthy corpus. No vectors cross the RPC.
-      const result = await tryPoolRead({
-        sql: `WITH page AS MATERIALIZED (
+      const result = await tryPoolRead(
+        {
+          sql: `WITH page AS MATERIALIZED (
           SELECT rowid AS cursor, id FROM ${table.vec}_rowids
           WHERE rowid > ? ORDER BY rowid LIMIT ?
         ) SELECT page.cursor, page.id,
           NOT EXISTS (SELECT 1 FROM ${table.base} b WHERE b.id = v.${table.source}) AS orphan
           FROM page CROSS JOIN ${table.vec} v ON v.${table.key} = page.id
           ORDER BY page.cursor`,
-        params: [cursor, VEC0_ORPHAN_PAGE_SIZE],
-        mode: "all",
-      });
+          params: [cursor, VEC0_ORPHAN_PAGE_SIZE],
+          mode: "all",
+        },
+        { priority: "background" },
+      );
       if (!current()) return;
-      if (!result || result === READ_JOB_TIMED_OUT) {
+      if (
+        !result ||
+        result === READ_JOB_TIMED_OUT ||
+        result === READ_JOB_PRESSURED
+      ) {
         delay = RETRY_INTERVAL_MS;
         return;
       }

@@ -140,6 +140,8 @@ export {
   shutdownVectorPool,
   shutdownVectorPoolAsync,
   DEFAULT_VECTOR_POOL_SHUTDOWN_DEADLINE_MS,
+  setReadPoolTelemetryHook,
+  type ReadPoolTelemetry,
 } from "./vector-pool";
 export { load, config, type LoreConfig } from "./config";
 export {

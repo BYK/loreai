@@ -6,12 +6,18 @@ import {
   offloadAll,
   offloadAllOrTimeout,
   offloadGet,
+  READ_JOB_PRESSURED,
   READ_JOB_TIMED_OUT,
   READ_JOB_UNAVAILABLE,
+  ReadPreparationUnavailableError,
+  requireReadRows,
 } from "../src/read-offload";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
+  MAX_PENDING_READ_JOBS,
+  shutdownVectorPool,
+  tryPoolRead,
   vectorSearchTimeoutMs,
 } from "../src/vector-pool";
 import type {
@@ -124,6 +130,27 @@ describe("read-offload worker-timeout degradation (#1006)", () => {
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await p).toBeNull();
   });
+});
+
+it("surfaces queue pressure to required reads and never rescans optional SQL in-process", async () => {
+  poolHanging();
+  const held = [
+    tryPoolRead({ sql: "SELECT 1", params: [], mode: "all" }),
+    tryPoolRead({ sql: "SELECT 2", params: [], mode: "all" }),
+  ];
+  const pending = Array.from({ length: MAX_PENDING_READ_JOBS }, () =>
+    tryPoolRead({ sql: "SELECT 3", params: [], mode: "all" }),
+  );
+  // The writer query has a row; an accidental fallback would return it.
+  expect(await offloadAll("SELECT 'WRITER' AS x", [])).toEqual([]);
+  expect(await offloadGet("SELECT 'WRITER' AS x", [])).toBeNull();
+  const failure = await offloadAllOrTimeout("SELECT 'WRITER' AS x", []);
+  expect(failure).toBe(READ_JOB_PRESSURED);
+  expect(() => requireReadRows(failure, "knowledge")).toThrowError(
+    new ReadPreparationUnavailableError("knowledge", "pressure"),
+  );
+  shutdownVectorPool();
+  await Promise.all([...held, ...pending]);
 });
 
 describe("offloadAllOrTimeout (surfaces the timeout instead of degrading)", () => {

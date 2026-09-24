@@ -34,6 +34,7 @@ import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
   setupReadPathTimingCapture,
+  setupReadPoolTelemetryCapture,
   setupRecallContinuationFailureCapture,
   setupPrincipalTransportFailureCapture,
   setupVecReadLatencyCapture,
@@ -126,6 +127,7 @@ export async function startServer(
   // Wire read-path timing (forSession/recall) to Sentry (#966 B). Same
   // idempotency guarantee — the hook is assigned, not stacked.
   setupReadPathTimingCapture();
+  setupReadPoolTelemetryCapture();
 
   // Wire vector KNN read-latency to Sentry (#1065 — confirm the vec0 win). Same
   // idempotency guarantee — the hook is assigned, not stacked.

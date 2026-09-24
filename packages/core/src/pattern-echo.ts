@@ -171,6 +171,7 @@ async function _detect(input: {
     vec,
     pid,
     MAX_CANDIDATES,
+    { priority: "background", signal: input.signal },
   );
   input.signal?.throwIfAborted();
 

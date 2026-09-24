@@ -603,6 +603,7 @@ export function setupEmbeddingFailureCapture(): void {
 // ---------------------------------------------------------------------------
 
 import { setReadPathTimingHook, type ReadPathTiming } from "@loreai/core";
+import { setReadPoolTelemetryHook, type ReadPoolTelemetry } from "@loreai/core";
 import { setVecReadLatencyHook, type VecReadLatencySample } from "@loreai/core";
 
 /**
@@ -650,6 +651,65 @@ export function setupReadPathTimingCapture(): void {
       );
     } catch {
       // Telemetry must never break the read path.
+    }
+  });
+}
+
+/** Queue state and per-job outcomes, with fixed labels and no SQL, vectors or
+ * tenant identifiers. Admission pressure is visible separately from service
+ * latency so queueing can be distinguished from slow SQLite work. */
+export function setupReadPoolTelemetryCapture(): void {
+  setReadPoolTelemetryHook((sample: ReadPoolTelemetry) => {
+    if (!Sentry.isInitialized()) return;
+    try {
+      const attributes = {
+        family: sample.family,
+        priority: sample.priority,
+        outcome: sample.outcome,
+      };
+      Sentry.metrics.distribution(
+        "lore.read_pool.pending_count",
+        sample.pendingCount,
+        { attributes },
+      );
+      Sentry.metrics.distribution(
+        "lore.read_pool.pending_bytes",
+        sample.pendingBytes,
+        { unit: "byte", attributes },
+      );
+      Sentry.metrics.distribution(
+        "lore.read_pool.running_count",
+        sample.runningCount,
+        { attributes },
+      );
+      Sentry.metrics.distribution(
+        "lore.read_pool.retiring_count",
+        sample.retiringCount,
+        { attributes },
+      );
+      Sentry.metrics.distribution(
+        "lore.read_pool.oldest_pending_ms",
+        sample.oldestPendingMs,
+        { unit: "millisecond", attributes },
+      );
+      if (sample.outcome === "started" && sample.queueMs !== undefined)
+        Sentry.metrics.distribution("lore.read_pool.queue_ms", sample.queueMs, {
+          unit: "millisecond",
+          attributes,
+        });
+      if (
+        (sample.outcome === "ok" ||
+          sample.outcome === "error" ||
+          sample.outcome === "timeout") &&
+        sample.serviceMs !== undefined
+      )
+        Sentry.metrics.distribution(
+          "lore.read_pool.service_ms",
+          sample.serviceMs,
+          { unit: "millisecond", attributes },
+        );
+    } catch {
+      // Telemetry must never break worker admission.
     }
   });
 }
