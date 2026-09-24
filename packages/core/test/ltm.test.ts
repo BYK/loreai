@@ -584,8 +584,13 @@ describe("ltm.forSession", () => {
       await embedStarted;
       controller.abort(new DOMException("client disconnected", "AbortError"));
       const outcome = await Promise.race([
-        selection.then(() => "resolved", () => "aborted"),
-        new Promise<string>((resolve) => setTimeout(() => resolve("stuck"), 500)),
+        selection.then(
+          () => "resolved",
+          () => "aborted",
+        ),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve("stuck"), 500),
+        ),
       ]);
       expect(outcome).toBe("aborted");
       expect(signal?.aborted).toBe(true);
