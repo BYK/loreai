@@ -753,6 +753,47 @@ describe("bounded read-pool admission (#1739)", () => {
     await Promise.all([...held, ...background, foreground]);
   });
 
+  it("reports one terminal outcome for an aborted running read that later replies", async () => {
+    const posted: Array<{ worker: FakeWorker; id: number; sql: string }> = [];
+    const terminal: string[] = [];
+    setReadPoolTelemetryHook((sample) => {
+      if (!["admitted", "started", "pressure"].includes(sample.outcome)) {
+        terminal.push(sample.outcome);
+      }
+    });
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) =>
+        posted.push({ worker, id: msg.id, sql: msg.spec.sql }),
+      ),
+    );
+    const controller = new AbortController();
+    const aborted = tryPoolRead(job("aborted"), {
+      signal: controller.signal,
+    });
+    const companion = tryPoolRead(job("companion"));
+    expect(posted).toHaveLength(2);
+
+    controller.abort();
+    expect(await aborted).toBe(READ_JOB_TIMED_OUT);
+    const queued = tryPoolRead(job("after-abort"));
+    expect(readPoolStats()).toMatchObject({
+      runningCount: 2,
+      pendingCount: 1,
+    });
+    expect(posted).toHaveLength(2);
+
+    posted[0].worker.replyRead(posted[0].id, []);
+    expect(posted[2].sql).toBe("SELECT 'after-abort'");
+    expect(readPoolStats()).toMatchObject({
+      runningCount: 2,
+      pendingCount: 0,
+    });
+    expect(terminal).toEqual(["cancelled"]);
+    shutdownVectorPool();
+    await Promise.all([companion, queued]);
+    expect(terminal).toEqual(["cancelled", "unavailable", "unavailable"]);
+  });
+
   it("rejects a byte-oversized job before a worker sees its payload", async () => {
     const posted: string[] = [];
     _setTestVectorWorkerFactory(

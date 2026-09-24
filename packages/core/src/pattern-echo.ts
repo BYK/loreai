@@ -167,13 +167,28 @@ async function _detect(input: {
 
   // Step 2: Search for similar distillations across the project (wide net)
   const pid = ensureProject(input.projectPath);
+  let pressured = false;
   const hits = await embedding.vectorSearchAllDistillations(
     vec,
     pid,
     MAX_CANDIDATES,
-    { priority: "background", signal: input.signal },
+    {
+      priority: "background",
+      signal: input.signal,
+      onPressure: () => {
+        pressured = true;
+      },
+    },
   );
   input.signal?.throwIfAborted();
+  if (pressured) {
+    // A refused search learned nothing. Let the next segment retry, but never
+    // clear a newer attempt's cooldown if this one was still in flight.
+    if (lastExtraction.get(input.sessionID)?.owner === input.cooldownOwner) {
+      lastExtraction.delete(input.sessionID);
+    }
+    return;
+  }
 
   // Step 3: Filter candidates — above lower threshold, exclude self
   const candidates = hits.filter(

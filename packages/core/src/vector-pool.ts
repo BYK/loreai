@@ -484,8 +484,10 @@ function finishPending(
   p.state = "settled";
   clearTimeout(p.timer);
   if (p.signal && p.onAbort) p.signal.removeEventListener("abort", p.onAbort);
-  emitPoolTelemetry(p, outcome);
+  // A running abort already reported its terminal outcome to the caller and
+  // telemetry, but still owns this worker until its reply (or retirement).
   if (p.callerSettled) return;
+  emitPoolTelemetry(p, outcome);
   p.callerSettled = true;
   if (error) p.reject(error);
   else p.resolve(value);
@@ -919,7 +921,7 @@ async function dispatchToPool(
       p.onAbort = () => {
         if (p.state === "queued")
           finishPending(p, "cancelled", POOL_REQUEST_TIMED_OUT);
-        else if (p.state === "running") {
+        else if (p.state === "running" && !p.callerSettled) {
           // Do not free the native worker: it still runs this SQL. Its deadline
           // remains armed and retires it if the job does not finish.
           resolveCaller(p, POOL_REQUEST_TIMED_OUT);

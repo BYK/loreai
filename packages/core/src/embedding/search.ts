@@ -26,11 +26,17 @@ import {
   VECTOR_SEARCH_TIMED_OUT,
 } from "../vector-pool";
 
+type VectorSearchOptions = ReadPoolRequestOptions & {
+  /** Lets a background caller distinguish refused admission from a real
+   * empty result, without changing the optional-read policy for others. */
+  onPressure?: () => void;
+};
+
 async function poolOrInProcess(
   spec: VectorQuerySpec,
   queryEmbedding: Float32Array,
   failurePhase?: ReadPreparationUnavailableError["phase"],
-  options?: ReadPoolRequestOptions,
+  options?: VectorSearchOptions,
 ): Promise<VectorHit[] | DistillationVectorHit[]> {
   const started = performance.now();
   const cohort = resolveReadMode(readStorageMode(db()), isVecAvailable());
@@ -43,6 +49,12 @@ async function poolOrInProcess(
       return [];
     }
     if (pooled === VECTOR_SEARCH_PRESSURED) {
+      // An observer must not turn an optional-read refusal into an exception.
+      try {
+        options?.onPressure?.();
+      } catch {
+        // Keep the normal pressure policy even if a caller's observer fails.
+      }
       if (failurePhase)
         throw new ReadPreparationUnavailableError(failurePhase, "pressure");
       return [];
@@ -125,7 +137,7 @@ export async function vectorSearchAllDistillations(
   queryEmbedding: Float32Array,
   projectId: string,
   limit = 20,
-  options?: ReadPoolRequestOptions,
+  options?: VectorSearchOptions,
 ): Promise<DistillationVectorHit[]> {
   return (await poolOrInProcess(
     { kind: "allDistillations", projectId, limit },
