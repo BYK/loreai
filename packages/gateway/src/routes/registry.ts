@@ -17,6 +17,7 @@ import { openaiRoutes } from "./openai";
 import { compactRoutes } from "./compact";
 import { modelsRoutes } from "./models";
 import { controlRoutes } from "./control";
+import { dashboardRoutes } from "./dashboard";
 import { managementRoutes } from "./management";
 import { geminiRoutes } from "./gemini";
 import { bedrockRoutes } from "./bedrock";
@@ -31,6 +32,7 @@ export const ROUTE_MODULES: readonly RouteModule[] = [
   compactRoutes,
   modelsRoutes,
   controlRoutes,
+  dashboardRoutes,
   managementRoutes,
   geminiRoutes,
   bedrockRoutes,

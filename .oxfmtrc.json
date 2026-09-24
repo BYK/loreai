@@ -25,7 +25,7 @@
     "**/eval/data",
     "**/eval/fixtures",
     "**/eval/results",
-    "packages/ui/test/fixtures",
+    "**/test/fixtures",
     "**/*.md",
     "**/*.mdx",
     "**/*.markdown",

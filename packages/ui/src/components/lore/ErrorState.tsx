@@ -15,6 +15,12 @@ export function errorStateFor(
         Only the machine running the gateway can access this view.
       </StateCard>
     );
+  if (isApiError(error) && error.kind === "forbidden")
+    return (
+      <StateCard kind="locked" title="Not available in hosted mode">
+        The hosted gateway refuses this action; run a local gateway to use it.
+      </StateCard>
+    );
   if (isApiError(error) && error.kind === "not_found")
     return <StateCard kind="error" title={`${what} not found`} />;
   if (isApiError(error) && error.status === 400)

@@ -4,7 +4,7 @@
  * Uses a real gateway server on an ephemeral port with an isolated temp DB.
  * No upstream interceptor needed — these endpoints don't call LLM APIs.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { unlinkSync, existsSync } from "node:fs";
 import { zstdCompressSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
@@ -1952,5 +1952,73 @@ describe("GET /api/v1/knowledge/:id/versions", () => {
     expect(err.error.type).toBe("not_found");
     const notRoute = await api("/api/v1/knowledge/abc/nope");
     expect(notRoute.status).toBe(404);
+  });
+});
+
+describe("POST /api/v1/entities/rebuild single flight", () => {
+  it("rejects overlapping rebuilds and keeps cancellation tied to the active run", async () => {
+    const { entityRebuild } = await import("@loreai/core");
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let rebuildSignal: AbortSignal | undefined;
+    const rebuild = vi
+      .spyOn(entityRebuild, "rebuildEntitiesFromHistory")
+      .mockImplementation(async ({ signal }) => {
+        rebuildSignal = signal;
+        entered?.();
+        await blocked;
+        return {} as never;
+      });
+
+    let first: Promise<Response> | undefined;
+    const start = () =>
+      api("/api/v1/entities/rebuild", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: "/test/api/entity-rebuild" }),
+      });
+    try {
+      const firstRequest = start();
+      first = firstRequest;
+      await started;
+
+      const active = await apiJSON<{ active: boolean }>(
+        "/api/v1/entities/rebuild",
+      );
+      expect(active.active).toBe(true);
+
+      const duplicate = await start();
+      expect(duplicate.status).toBe(409);
+      expect(
+        ((await duplicate.json()) as { error: { type: string } }).error.type,
+      ).toBe("conflict");
+      expect(rebuild).toHaveBeenCalledTimes(1);
+
+      const cancelled = await apiJSON<{ cancelled: boolean }>(
+        "/api/v1/entities/rebuild/cancel",
+        { method: "POST" },
+      );
+      expect(cancelled.cancelled).toBe(true);
+      expect(rebuildSignal?.aborted).toBe(true);
+      expect(
+        (await apiJSON<{ active: boolean }>("/api/v1/entities/rebuild")).active,
+      ).toBe(true);
+
+      release?.();
+      expect((await firstRequest).status).toBe(200);
+      expect(
+        (await apiJSON<{ active: boolean }>("/api/v1/entities/rebuild")).active,
+      ).toBe(false);
+    } finally {
+      release?.();
+      rebuild.mockRestore();
+      if (first) await first.catch(() => {});
+    }
   });
 });

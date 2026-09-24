@@ -20,8 +20,11 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId/sessions/:sessionId` | #1801 session reader |
 | `/ui/projects/:projectId/search` | Scoped recall results with expansion disabled |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
+| `/ui/entities` (`?type=`, `?cursor=`) | Entity list with type filter, keyset paging and the rebuild card |
+| `/ui/entities/:entityId` | Entity detail: aliases, role/description/notes editing, relations, referencing knowledge, delete |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
 | `/ui/_compat` | **Dev/test only** — #1796 compatibility smoke page |
+
 
 Dev/test-only routes are mounted when `import.meta.env.DEV` is set (Vite dev
 server, Vitest); production builds drop them and their chunks from the route
@@ -406,11 +409,12 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, `test/entities-list.test.tsx`, `test/entity-page.test.tsx`, `test/entities-rebuild.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
+
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -998,17 +1002,21 @@ predates the move from an embedded module to staged files, which took
   authoritative for projects, knowledge, sessions and distillations.
 - The browser holds **derived, disposable** state only: route, theme, pane
   layout, an IndexedDB cache of API responses (`src/db/`, database
-  `lore-ui` v2) and local working state (`drafts`, `pendingChanges` —
+  `lore-ui` v3) and local working state (`drafts`, `pendingChanges` —
   per-device, never merged into entity stores). Anything in IndexedDB can
   be deleted without loss of Lore data; a reset never touches the server.
-- The SPA calls the **read** routes only (`GET /api/v1/projects`,
+- The SPA calls the **read** routes (`GET /api/v1/projects`,
   `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),
-  `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations and
-  the folk status routes), with same-origin `fetch`, no credentials, and
-  runtime validation of every response (`arktype`, `src/contracts/`;
-  timestamps are epoch milliseconds). A 2xx body that fails its contract
-  throws `ContractError` (an `ApiError` of kind `invalid`) — never a silent
-  coercion.
+  `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations,
+  entities and the folk status routes), and since UI-08 the entity
+  **write** routes too (`PATCH`/`DELETE /api/v1/entities/:id`, `POST
+  /api/v1/entities/rebuild` + `/rebuild/cancel`) — same-origin `fetch`,
+  no credentials, and runtime validation of every response (`arktype`,
+  `src/contracts/`; timestamps are epoch milliseconds). Writes reconcile
+  the returned detail into the store and the IndexedDB projection; a
+  delete removes the row and invalidates the cached list. A 2xx body
+  that fails its contract throws `ContractError` (an `ApiError` of kind
+  `invalid`) — never a silent coercion.
 - Every loader races the cache read against the server fetch: a cached
   answer renders immediately as `stale` (the `StaleBadge`), the server
   answer replaces it; a server failure keeps the cached rows and flips the
@@ -1020,8 +1028,9 @@ predates the move from an embedded module to staged files, which took
   record for `messageBlocks`: a missing block (or a missing record from a
   legacy write) marks the cached history `partial`.
 - `src/lib/api.ts` classifies failures for the shell: network error →
-  `unreachable`; 401/403 or a **bodyless** 404 (the gateway's way of hiding
-  management routes from non-loopback peers) → `unauthorized`; a JSON 404 →
+  `unreachable`; 401, a bodyless 403 or a **bodyless** 404 (the gateway's
+  way of hiding management routes from non-loopback peers) → `unauthorized`;
+  a JSON 403 → `forbidden` (the hosted-mode refusal); a JSON 404 →
   `not_found`; a 2xx body that fails validation → `invalid`.
 - `src/db/open.ts` degrades instead of failing: missing IndexedDB, a
   `blocked` open (3 s timeout), a corrupted/missing-store database or a
@@ -1087,6 +1096,41 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Long lists | — | `@tanstack/solid-virtual` | #1799 / #1801 |
 | Local cache, drafts | — | `idb` | #1798 |
 | Charts (cost / compression / latency) | — | not shipped; optional Plot work deferred | #1800 |
+| Entity list, detail + rebuild card | `EntitiesPage`, `EntityPage`, `RebuildCard` (in `EntitiesPage`) | `ListRow`, `Select`, `TextField`, `Badge`, `ConfirmDialog` | UI-08 |
+| Destructive / expensive action confirmation | `ConfirmDialog` (`components/ui`) | Kobalte `Dialog`, `role="alertdialog"` | UI-08 |
+
+## Legacy dashboard parity (UI-08, #1823)
+
+The retired server-rendered dashboard is being rebuilt screen by screen on
+top of `/api/v1`. Status:
+
+- [x] **Entities** — list ordered by type/name with keyset paging and a type
+  filter; detail with aliases, metadata editing (role/description/notes,
+  other keys preserved), relations, referencing knowledge and delete;
+  rebuild card (preview / rebuild all / cancel) with the honest cost copy
+  and a per-project result table. — **PR1 (this change)**
+- [ ] Dashboard — live sessions table with warming + cost columns
+- [ ] Project actions — rename, move sessions, delete session, delete
+  distillation, clear, delete project
+- [ ] User knowledge — dedup merge/dismiss suggestions, contradiction
+  keep-A / keep-B / keep-both
+- [ ] Knowledge detail actions — move knowledge, delete
+- [ ] Session detail — warming section, quota section, cost summary
+- [ ] Distillation detail — delete
+- [ ] Search + search detail *(UI-04 covers the current search surface)*
+- [ ] Costs — totals, per-session, historical estimates, daily costs,
+  budget set/disable, worker breakdown
+- [ ] Warming — global enable/disable, circuit-breaker reset, per-session
+  keep/stop/auto, histograms
+- [ ] Import history — no legacy page existed (API only,
+  `GET /api/v1/import/history`); #1823 adds a screen for it
+
+Already covered by earlier slices: project overview (UI-04), knowledge
+list/document (UI-04/05), session reader (UI-06), search (UI-04). The
+legacy dashboard pieces #1823 deliberately excludes — entity/knowledge
+dedup suggestion rows, delete session/distillation buttons, move
+knowledge, the live dashboard table — are out-of-scope follow-ups.
+
 
 ## Design tokens: website → UI mapping
 

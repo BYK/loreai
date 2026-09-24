@@ -10,6 +10,7 @@ export {
   LORE_DB_NAME,
   LORE_DB_VERSION,
   MESSAGE_BLOCK_SIZE,
+  type CachedEntity,
   type CachedRecord,
   type CollectionState,
   type CachedStoreName,
@@ -34,7 +35,13 @@ import type {
 } from "~/contracts";
 
 import { createRepository, type Repository } from "./repository";
-import type { LoreUiDb, MessageBlock } from "./schema";
+import type { CachedEntity, LoreUiDb, MessageBlock } from "./schema";
+
+export function createEntitiesRepo(
+  db: LoreUiDb | null,
+): Repository<CachedEntity> {
+  return createRepository<CachedEntity>(db, "entities", (e) => e.id);
+}
 
 export function createProjectsRepo(
   db: LoreUiDb | null,

@@ -201,6 +201,64 @@ describe("api client: error classification", () => {
     expect(error.status).toBe(status);
   });
 
+  it("classifies a plain-text 403 as generic HTTP, not hosted mode", async () => {
+    const { client } = clientFor(
+      () => new Response("proxy access denied", { status: 403 }),
+    );
+    const error = await failure(client.listProjects());
+    expect(error.kind).toBe("http");
+    expect(error.status).toBe(403);
+    expect(error.message).toBe("proxy access denied");
+  });
+
+  it("treats a JSON-bodied 403 as `forbidden` (hosted-mode refusal)", async () => {
+    const { client } = clientFor(() =>
+      json(
+        {
+          type: "error",
+          error: { type: "forbidden", message: "Not available in hosted mode" },
+        },
+        403,
+      ),
+    );
+    const error = await failure(client.deleteEntity("e1"));
+    expect(error.kind).toBe("forbidden");
+    expect(error.status).toBe(403);
+    expect(error.message).toBe("Not available in hosted mode");
+  });
+
+  it("sends PATCH with a JSON body for entity metadata updates", async () => {
+    const seen: { method?: string; body?: string; ct?: string } = {};
+    const detail = {
+      entity: {
+        id: "e1",
+        entity_type: "person",
+        canonical_name: "Ada",
+        project_id: null,
+        cross_project: true,
+        aliases: [],
+        created_at: 1700000000000,
+        updated_at: 1700000000000,
+        metadata: { role: "x" },
+      },
+      relations: [],
+      knowledge: [],
+    };
+    const client = createApiClient({
+      fetch: async (_url, init) => {
+        seen.method = init?.method;
+        seen.body = init?.body as string;
+        seen.ct = new Headers(init?.headers).get("content-type") ?? undefined;
+        return json(detail);
+      },
+    });
+    const updated = await client.updateEntityMetadata("e1", { role: "x" });
+    expect(seen.method).toBe("PATCH");
+    expect(seen.body).toBe(JSON.stringify({ role: "x" }));
+    expect(seen.ct).toBe("application/json");
+    expect(updated.entity.metadata).toEqual({ role: "x" });
+  });
+
   it("treats the gateway's bodyless 404 (hidden management route) as `unauthorized`", async () => {
     const { client } = clientFor(() => new Response(null, { status: 404 }));
     expect((await failure(client.listProjects())).kind).toBe("unauthorized");

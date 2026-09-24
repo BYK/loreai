@@ -1,0 +1,27 @@
+{
+  "entity": {
+    "id": "<uuid-0>",
+    "entity_type": "person",
+    "canonical_name": "Ada Contract",
+    "project_id": "<uuid-1>",
+    "cross_project": true,
+    "aliases": [
+      "ada.lovelace@analytical-engines.example.com"
+    ],
+    "created_at": 1700000000000,
+    "updated_at": 1700000001000,
+    "metadata": {
+      "role": "engineer",
+      "notes": "Writes the contract fixtures."
+    }
+  },
+  "relations": [],
+  "knowledge": [
+    {
+      "id": "<uuid-2>",
+      "title": "Contracts are validated at the edge",
+      "category": "decision",
+      "project_id": "<uuid-1>"
+    }
+  ]
+}

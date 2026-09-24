@@ -1,5 +1,5 @@
 /**
- * IndexedDB schema for the UI cache (`lore-ui`, version 2).
+ * IndexedDB schema for the UI cache (`lore-ui`, version 3).
  *
  * Everything in the entity stores is a disposable projection of `/api/v1`
  * responses — the gateway's SQLite store is the only authority. `drafts` and
@@ -10,6 +10,8 @@
 import type { DBSchema, IDBPDatabase } from "idb";
 
 import type {
+  EntityDetail,
+  EntityListItem,
   KnowledgeEntry,
   ProjectSummary,
   SessionSummary,
@@ -19,7 +21,7 @@ import type {
 import type { LocalDraft, PendingChange } from "./local";
 
 export const LORE_DB_NAME = "lore-ui";
-export const LORE_DB_VERSION = 2;
+export const LORE_DB_VERSION = 3;
 
 /** A cached API record plus bookkeeping for TTL and LRU eviction. */
 export interface CachedRecord<T> {
@@ -57,6 +59,7 @@ export type CachedStoreName =
   | "projects"
   | "knowledge"
   | "sessions"
+  | "entities"
   | "messageBlocks";
 
 // `type` (not `interface`) so it is assignable to idb's index-key signature.
@@ -90,6 +93,12 @@ export interface LoreUiSchema extends DBSchema {
     value: CachedRecord<SessionSummary>;
     indexes: CachedStoreIndexes;
   };
+  /** Cached entity rows + details. scope = "all", key = entity id. */
+  entities: {
+    key: string;
+    value: CachedRecord<CachedEntity>;
+    indexes: CachedStoreIndexes;
+  };
   /** Cached session message blocks. scope = session key, key = `${sessionKey}#${index}`. */
   messageBlocks: {
     key: string;
@@ -112,5 +121,16 @@ export interface LoreUiSchema extends DBSchema {
     indexes: { "by-created": number };
   };
 }
+
+/**
+ * One row in the `entities` store: `item` is the list-row projection every
+ * write fills (so the cached first page never loses a detail-written row),
+ * `detail` is present only once the detail route has been fetched.
+ */
+export type CachedEntity = {
+  id: string;
+  item: EntityListItem;
+  detail?: EntityDetail;
+};
 
 export type LoreUiDb = IDBPDatabase<LoreUiSchema>;

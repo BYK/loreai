@@ -312,7 +312,7 @@ export function update(
   id: string,
   input: {
     canonicalName?: string;
-    metadata?: Record<string, unknown>;
+    metadata?: Record<string, unknown> | null;
     crossProject?: boolean;
   },
 ): void {
@@ -326,7 +326,9 @@ export function update(
   }
   if (input.metadata !== undefined) {
     sets.push("metadata = ?");
-    params.push(JSON.stringify(input.metadata));
+    params.push(
+      input.metadata === null ? null : JSON.stringify(input.metadata),
+    );
   }
   if (input.crossProject !== undefined) {
     sets.push("cross_project = ?");
