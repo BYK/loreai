@@ -1079,13 +1079,13 @@ function forProjectId(pid: string, includeCross: boolean): EntityWithAliases[] {
 export async function forProjectOffloaded(
   projectPath: string,
   includeCross = true,
+  signal?: AbortSignal,
 ): Promise<EntityWithAliases[]> {
   const pid = ensureProject(projectPath);
   const { sql, params } = forProjectEntityQuery(pid, includeCross);
-  const rows = requireReadRows(
-    await offloadAllOrTimeout(sql, params),
-    "entities",
-  ) as Entity[];
+  const result = await offloadAllOrTimeout(sql, params, { signal });
+  signal?.throwIfAborted();
+  const rows = requireReadRows(result, "entities") as Entity[];
   return withAliases(rows);
 }
 
@@ -2069,10 +2069,13 @@ export function entitiesForSession(
 export async function entitiesForSessionOffloaded(
   projectPath: string,
   maxInject?: number,
+  signal?: AbortSignal,
 ): Promise<EntityWithAliases[]> {
   const cap = maxInject ?? config().knowledge.maxEntityInject;
   if (cap === 0) return [];
-  return rankEntitiesForSession(await forProjectOffloaded(projectPath), cap);
+  const rows = await forProjectOffloaded(projectPath, true, signal);
+  signal?.throwIfAborted();
+  return rankEntitiesForSession(rows, cap);
 }
 
 // ---------------------------------------------------------------------------

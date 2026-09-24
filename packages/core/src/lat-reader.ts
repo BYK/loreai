@@ -354,7 +354,9 @@ export async function scoreForSession(
   projectPath: string,
   sessionContext: string,
   maxTokens: number,
+  signal?: AbortSignal,
 ): Promise<LatSection[]> {
+  signal?.throwIfAborted();
   if (!hasLatDir(projectPath)) return [];
 
   const pid = ensureProject(projectPath);
@@ -379,10 +381,13 @@ export async function scoreForSession(
          AND s.project_id = ?
          ORDER BY rank`,
         [q, pid],
+        { signal },
       ),
       "lat",
     ) as Array<LatSection & { rank: number }>;
+    signal?.throwIfAborted();
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof ReadPreparationUnavailableError) throw error;
     return [];
   }

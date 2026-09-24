@@ -201,6 +201,15 @@ export const LoreConfig = z.object({
         .describe(
           "Foreground whole-request deadline in milliseconds. Default: 900000. Automatically raised to at least 60000ms above foregroundSseInactivityMs. Environment variable LORE_FOREGROUND_REQUEST_TIMEOUT_MS takes precedence.",
         ),
+      memoryPreparationTimeoutMs: z
+        .number()
+        .int()
+        .min(1_000)
+        .max(60_000)
+        .optional()
+        .describe(
+          "Post-decode memory preparation budget in milliseconds. Default: 8000. LORE_MEMORY_PREPARATION_TIMEOUT_MS takes precedence at request admission. A verified accepted source window and knowledge pin may continue on optional refresh expiry; otherwise preparation returns a retryable error.",
+        ),
       workerResponseInactivityMs: z
         .number()
         .int()

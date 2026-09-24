@@ -22,6 +22,9 @@ import { runReadJob } from "../src/read-job";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
+  readPoolStats,
+  shutdownVectorPool,
+  tryPoolRead,
   vectorSearchTimeoutMs,
 } from "../src/vector-pool";
 import type {
@@ -312,6 +315,40 @@ describe("prewarmDistillationSnapshot (#1082)", () => {
     ).toBeNull();
 
     evictSession(SESSION);
+  });
+
+  it("removes a queued prewarm when preparation expires without clearing the running worker slots", async () => {
+    const sessionID = freshSession();
+    seedDistillation(sessionID, "queued-1", "stored observation", 100);
+    installFactory(() => new HangingReadWorker());
+    const filler = { sql: "SELECT 1", params: [], mode: "all" } as const;
+    const running = [
+      tryPoolRead({ ...filler, params: [] }),
+      tryPoolRead({ ...filler, params: [] }),
+    ];
+    const controller = new AbortController();
+    const prewarm = prewarmDistillationSnapshot(
+      PROJECT,
+      sessionID,
+      [userMsg("u1", sessionID)],
+      controller.signal,
+    );
+    expect(readPoolStats()).toMatchObject({
+      runningCount: 2,
+      pendingCount: 1,
+    });
+    controller.abort(new DOMException("preparation expired", "TimeoutError"));
+    await expect(prewarm).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(readPoolStats()).toMatchObject({
+      runningCount: 2,
+      pendingCount: 0,
+    });
+    expect(
+      inspectSessionState(sessionID)?.distillationSnapshot ?? null,
+    ).toBeNull();
+    shutdownVectorPool();
+    await Promise.all(running);
+    evictSession(sessionID);
   });
 
   it("returns immediately for a session-less input", async () => {

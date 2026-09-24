@@ -77,6 +77,7 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | Variable | Description |
 |---|---|
 | `LORE_BATCH_DISABLED` | Disables the batch-queue wrapper for non-urgent worker calls (distillation, curation, embedding). With batching on, the gateway groups these calls and submits them via the Anthropic Message Batches API for ~50% cost savings. Set `LORE_BATCH_DISABLED=1` to bypass batching and dispatch each call immediately (useful for low-latency debugging or when the upstream rejects batch submissions). Env: `LORE_BATCH_DISABLED=1`. |
+| `LORE_MEMORY_PREPARATION_TIMEOUT_MS` | Override the normal-turn memory preparation budget at admission. Values from 1000–60000 ms are accepted; invalid values use .lore.json or the 8000 ms default. This budget ends before upstream generation. |
 
 ## runtime-files
 

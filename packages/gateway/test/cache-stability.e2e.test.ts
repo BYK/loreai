@@ -499,6 +499,429 @@ describe("cache stability (e2e)", () => {
     expect(harness.upstreamBodies()[1]).toContain("Emergency retry gotcha");
   });
 
+  it("rolls back a Layer 4 refresh when the preparation clock expires before the delta is sent", async () => {
+    const turns = Array.from({ length: 2 }, (_, i) => ({
+      userMessage: `Layer 4 deadline turn ${i}: continue.`,
+      assistantText: `Layer 4 deadline answer ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-layer4-deadline-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `layer4-deadline-${Date.now()}`,
+    };
+    const { ltm, loadSessionTracking, setForceMinLayer } =
+      await import("@loreai/core");
+    const first = await harness.chat(
+      makeBody(turns[0].userMessage),
+      "test-key",
+      headers,
+    );
+    expect(first.status).toBe(200);
+    await first.json();
+    const sessionID =
+      harness.queryDB<{ session_id: string }>(
+        "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+      )[0]?.session_id ?? "";
+    expect(sessionID).not.toBe("");
+    ltm.create({
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Layer 4 unsent deadline gotcha",
+      content: "Keep this knowledge available for the retried turn.",
+      session: sessionID,
+    });
+    const secondBody = makeBody(turns[1].userMessage, [
+      { role: "user", content: turns[0].userMessage },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: turns[0].assistantText }],
+      },
+    ]);
+    setForceMinLayer(4, sessionID);
+    const actualNow = Date.now.bind(Date);
+    let clockAdvanceMs = 0;
+    const clock = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => actualNow() + clockAdvanceMs);
+    const original = ltm.forSession;
+    let contextReads = 0;
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation(async (...args) => {
+        const result = await original(...args);
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          contextReads++;
+          if (contextReads === 2) clockAdvanceMs = 61_000;
+        }
+        return result;
+      });
+    try {
+      const failed = await harness.chat(secondBody, "test-key", headers);
+      expect(failed.status).toBe(503);
+      expect(await failed.text()).toContain(
+        "Memory preparation is temporarily unavailable",
+      );
+      expect(contextReads).toBe(2);
+      expect(harness.upstreamBodies()).toHaveLength(1);
+      expect(loadSessionTracking(sessionID)?.ltmPinKeys).toBeNull();
+    } finally {
+      selection.mockRestore();
+      clock.mockRestore();
+    }
+
+    const retry = await harness.chat(secondBody, "test-key", headers);
+    expect(retry.status).toBe(200);
+    await retry.json();
+    expect(harness.upstreamBodies()).toHaveLength(2);
+    expect(harness.upstreamBodies()[1]).toContain(
+      "Layer 4 unsent deadline gotcha",
+    );
+  });
+
+  it.each([0, 4])(
+    "uses an accepted source window and pinned knowledge at layer %i when optional refresh is slow",
+    async (forcedLayer) => {
+      const turns = Array.from({ length: 3 }, (_, i) => ({
+        userMessage: `Accepted fallback turn ${i}: continue.`,
+        assistantText: `Accepted fallback answer ${i}.`,
+      }));
+      harness = await createHarness({
+        fixtures: makeConversationFixtures(turns),
+      });
+      const projectPath = `/tmp/lore-accepted-fallback-${Date.now()}`;
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": `accepted-fallback-${Date.now()}`,
+      };
+      const {
+        ltm,
+        loadSessionTracking,
+        listSessionPromptDeltas,
+        setForceMinLayer,
+      } = await import("@loreai/core");
+      const {
+        evictContextSelectionCacheForTest,
+        acceptedKnowledgeProofForTest,
+      } = await import("../src/pipeline");
+      const first = await harness.chat(
+        makeBody(turns[0].userMessage),
+        "test-key",
+        headers,
+      );
+      expect(first.status).toBe(200);
+      await first.json();
+      const sessionID =
+        harness.queryDB<{ session_id: string }>(
+          "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+        )[0]?.session_id ?? "";
+      expect(sessionID).not.toBe("");
+      const entryId = ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Accepted fallback gotcha",
+        content: "Keep the validated pinned knowledge in the current prompt.",
+        session: sessionID,
+      });
+      const history = [
+        { role: "user", content: turns[0].userMessage },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: turns[0].assistantText }],
+        },
+      ];
+      const second = await harness.chat(
+        makeBody(turns[1].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(second.status).toBe(200);
+      await second.json();
+      expect(loadSessionTracking(sessionID)?.ltmPinKeys).toContain(entryId);
+      expect(listSessionPromptDeltas(sessionID).length).toBeGreaterThan(0);
+      expect(acceptedKnowledgeProofForTest(sessionID)).toBe(true);
+      evictContextSelectionCacheForTest(sessionID);
+      if (forcedLayer === 4) setForceMinLayer(4, sessionID);
+      const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      const selection = vi
+        .spyOn(ltm, "forSession")
+        .mockImplementation((_project, _session, _budget, options) =>
+          options?.excludeCategories?.includes("preference")
+            ? new Promise((_, reject) => {
+                const abort = () => reject(options.signal?.reason);
+                options.signal?.addEventListener("abort", abort, {
+                  once: true,
+                });
+                if (options.signal?.aborted) abort();
+              })
+            : Promise.resolve([]),
+        );
+      try {
+        const third = await harness.chat(
+          makeBody(turns[2].userMessage, [
+            ...history,
+            { role: "user", content: turns[1].userMessage },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: turns[1].assistantText }],
+            },
+          ]),
+          "test-key",
+          headers,
+        );
+        expect(third.status).toBe(200);
+        await third.json();
+        expect(harness.upstreamBodies()).toHaveLength(3);
+        expect(harness.upstreamBodies()[2]).toContain(
+          "Accepted fallback gotcha",
+        );
+        expect(harness.upstreamBodies()[2]).toContain(turns[2].userMessage);
+        expect(loadSessionTracking(sessionID)?.ltmPinKeys).toContain(entryId);
+      } finally {
+        selection.mockRestore();
+        if (priorTimeout === undefined)
+          delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+        else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
+      }
+    },
+  );
+
+  it("rejects accepted-window fallback after an unaccepted delta rewrites the same sequence", async () => {
+    const turns = Array.from({ length: 2 }, (_, i) => ({
+      userMessage: `Delta proof turn ${i}: continue.`,
+      assistantText: `Delta proof answer ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-delta-proof-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `delta-proof-${Date.now()}`,
+    };
+    const { ltm, listSessionPromptDeltas, loadSessionTracking } =
+      await import("@loreai/core");
+    const {
+      evictContextSelectionCacheForTest,
+      acceptedKnowledgeProofForTest,
+      setUpstreamInterceptor,
+    } = await import("../src/pipeline");
+    const first = await harness.chat(
+      makeBody(turns[0].userMessage),
+      "test-key",
+      headers,
+    );
+    expect(first.status).toBe(200);
+    await first.json();
+    const sessionID =
+      harness.queryDB<{ session_id: string }>(
+        "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+      )[0]?.session_id ?? "";
+    expect(sessionID).not.toBe("");
+    const entryId = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Original accepted delta",
+      content: "Original memory value for this session.",
+      session: sessionID,
+    });
+    const history = [
+      { role: "user", content: turns[0].userMessage },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: turns[0].assistantText }],
+      },
+    ];
+    const second = await harness.chat(
+      makeBody(turns[1].userMessage, history),
+      "test-key",
+      headers,
+    );
+    expect(second.status).toBe(200);
+    await second.json();
+    expect(acceptedKnowledgeProofForTest(sessionID)).toBe(true);
+    const accepted = listSessionPromptDeltas(sessionID);
+    expect(accepted.length).toBeGreaterThan(0);
+    const acceptedPin = loadSessionTracking(sessionID)?.ltmPinKeys;
+    expect(acceptedPin).toContain(entryId);
+
+    ltm.update(entryId, {
+      content: "Changed value that the provider rejected.",
+    });
+    evictContextSelectionCacheForTest(sessionID);
+    let forwarded = 0;
+    setUpstreamInterceptor(async () => {
+      forwarded++;
+      return new Response('{"error":{"type":"server_error"}}', {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const thirdBody = makeBody("Retry this same current turn.", [
+      ...history,
+      { role: "user", content: turns[1].userMessage },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: turns[1].assistantText }],
+      },
+    ]);
+    try {
+      const failed = await harness.chat(thirdBody, "test-key", headers);
+      expect(failed.status).toBe(500);
+      await failed.text();
+      const unsent = listSessionPromptDeltas(sessionID);
+      expect(unsent.at(-1)?.seq).toBe(accepted.at(-1)?.seq);
+      expect(unsent.at(-1)?.content).not.toBe(accepted.at(-1)?.content);
+      expect(loadSessionTracking(sessionID)?.ltmPinKeys).toBe(acceptedPin);
+
+      evictContextSelectionCacheForTest(sessionID);
+      const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      const selection = vi
+        .spyOn(ltm, "forSession")
+        .mockImplementation((_project, _session, _budget, options) =>
+          options?.excludeCategories?.includes("preference")
+            ? new Promise((_, reject) => {
+                const abort = () => reject(options.signal?.reason);
+                options.signal?.addEventListener("abort", abort, {
+                  once: true,
+                });
+                if (options.signal?.aborted) abort();
+              })
+            : Promise.resolve([]),
+        );
+      try {
+        const retry = await harness.chat(thirdBody, "test-key", headers);
+        expect(retry.status).toBe(503);
+        await retry.text();
+        expect(forwarded).toBe(1);
+      } finally {
+        selection.mockRestore();
+        if (priorTimeout === undefined)
+          delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+        else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
+      }
+    } finally {
+      setUpstreamInterceptor(undefined);
+    }
+  });
+
+  it("uses completed knowledge selection when synchronous scoring passes the optional cutoff", async () => {
+    const turns = Array.from({ length: 3 }, (_, i) => ({
+      userMessage: `Completed selection turn ${i}: continue.`,
+      assistantText: `Completed selection answer ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-completed-selection-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `completed-selection-${Date.now()}`,
+    };
+    const { ltm, listSessionPromptDeltas } = await import("@loreai/core");
+    const { evictContextSelectionCacheForTest, acceptedKnowledgeProofForTest } =
+      await import("../src/pipeline");
+    const first = await harness.chat(
+      makeBody(turns[0].userMessage),
+      "test-key",
+      headers,
+    );
+    expect(first.status).toBe(200);
+    await first.json();
+    const sessionID =
+      harness.queryDB<{ session_id: string }>(
+        "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+      )[0]?.session_id ?? "";
+    expect(sessionID).not.toBe("");
+    const entryId = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Completed selection gotcha",
+      content: "Original accepted knowledge.",
+      session: sessionID,
+    });
+    const history = [
+      { role: "user", content: turns[0].userMessage },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: turns[0].assistantText }],
+      },
+    ];
+    const second = await harness.chat(
+      makeBody(turns[1].userMessage, history),
+      "test-key",
+      headers,
+    );
+    expect(second.status).toBe(200);
+    await second.json();
+    expect(acceptedKnowledgeProofForTest(sessionID)).toBe(true);
+    const acceptedDeltas = listSessionPromptDeltas(sessionID);
+    expect(acceptedDeltas.length).toBeGreaterThan(0);
+
+    ltm.update(entryId, {
+      content: "Updated after optional cutoff must await the next turn.",
+    });
+    evictContextSelectionCacheForTest(sessionID);
+    const previousTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+    process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "60000";
+    const start = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+    const original = ltm.forSession;
+    let selected = false;
+    let selectedUpdated = false;
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation(async (...args) => {
+        const entries = await original(...args);
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          selected = true;
+          selectedUpdated = entries.some((entry) =>
+            entry.content.includes("Updated after optional cutoff"),
+          );
+          // Exceed the optional cutoff while leaving 900 ms of shared budget.
+          clock.mockReturnValue(start + 59_100);
+        }
+        return entries;
+      });
+    try {
+      const third = await harness.chat(
+        makeBody(turns[2].userMessage, [
+          ...history,
+          { role: "user", content: turns[1].userMessage },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: turns[1].assistantText }],
+          },
+        ]),
+        "test-key",
+        headers,
+      );
+      expect(selected).toBe(true);
+      expect(selectedUpdated).toBe(true);
+      expect(third.status).toBe(200);
+      await third.json();
+      expect(harness.upstreamBodies()).toHaveLength(3);
+      expect(listSessionPromptDeltas(sessionID)).not.toEqual(acceptedDeltas);
+      expect(harness.upstreamBodies()[2]).toContain(
+        "Updated after optional cutoff",
+      );
+    } finally {
+      selection.mockRestore();
+      clock.mockRestore();
+      if (previousTimeout === undefined)
+        delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = previousTimeout;
+    }
+  });
+
   it("guard rejects synthetic distilled-prefix message rewrites", () => {
     // Regression for the gap in #748: accepting every messages[N] divergence
     // lets meta-distillation rewrites at messages[0/1] pass as "tail" growth.

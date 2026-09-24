@@ -1,9 +1,18 @@
 import { describe, test, expect, beforeEach } from "vitest";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { db, ensureProject } from "../src/db";
 import * as latReader from "../src/lat-reader";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
+import {
+  _resetVectorPoolForTest,
+  _setTestVectorWorkerFactory,
+  readPoolStats,
+  shutdownVectorPool,
+  tryPoolRead,
+} from "../src/vector-pool";
+import type { VectorWorkerInitData } from "../src/vector-worker-types";
 
 const FIXTURES_DIR = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -191,6 +200,51 @@ More detail follows.
         });
       } finally {
         delete process.env.LORE_DISABLE_VEC_WORKER;
+      }
+    });
+
+    test("a preparation deadline removes a queued lat.md read without releasing running slots", async () => {
+      class HangingReadWorker extends EventEmitter {
+        unref(): void {}
+        postMessage(): void {}
+        terminate(): Promise<number> {
+          this.emit("exit", 0);
+          return Promise.resolve(0);
+        }
+      }
+      latReader.refresh(PROJECT);
+      _resetVectorPoolForTest();
+      _setTestVectorWorkerFactory(
+        (() => new HangingReadWorker()) as unknown as (
+          data: VectorWorkerInitData,
+        ) => never,
+      );
+      const filler = { sql: "SELECT 1", params: [], mode: "all" as const };
+      const running = [tryPoolRead(filler), tryPoolRead(filler)];
+      const controller = new AbortController();
+      try {
+        const selection = latReader.scoreForSession(
+          PROJECT,
+          "authentication middleware pipeline",
+          5000,
+          controller.signal,
+        );
+        expect(readPoolStats()).toMatchObject({
+          runningCount: 2,
+          pendingCount: 1,
+        });
+        controller.abort(
+          new DOMException("preparation expired", "TimeoutError"),
+        );
+        await expect(selection).rejects.toMatchObject({ name: "TimeoutError" });
+        expect(readPoolStats()).toMatchObject({
+          runningCount: 2,
+          pendingCount: 0,
+        });
+      } finally {
+        shutdownVectorPool();
+        await Promise.all(running);
+        _setTestVectorWorkerFactory(null);
       }
     });
   });
