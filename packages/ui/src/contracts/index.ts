@@ -9,6 +9,7 @@ export * from "./page";
 export * from "./folk";
 export * from "./parse";
 export * from "./entities";
+export * from "./contradictions";
 export * from "./recall";
 export * from "./knowledge-query";
 export * from "./url";

@@ -514,7 +514,7 @@ describe("management route access control", () => {
       method: "OPTIONS",
       headers: {
         origin,
-        "access-control-request-method": "POST",
+        "access-control-request-method": "PATCH",
         "access-control-request-headers": "content-type",
       },
     });
@@ -523,6 +523,9 @@ describe("management route access control", () => {
     expect(response.headers.get("access-control-allow-origin")).toBe(origin);
     expect(response.headers.get("access-control-allow-origin")).not.toBe("*");
     expect(response.headers.get("vary")).toContain("Origin");
+    expect(response.headers.get("access-control-allow-methods")).toContain(
+      "PATCH",
+    );
   });
 
   test("keeps no-Origin health and data-plane routes reachable remotely", async () => {

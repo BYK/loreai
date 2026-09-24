@@ -28,7 +28,7 @@ mkdirSync(lore, { recursive: true });
 mkdirSync(scratch, { recursive: true });
 
 core.ensureProject(lore, "lore", "github.com/BYK/loreai");
-core.ensureProject(scratch, "scratch", null);
+const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
 const entries = [
   {
@@ -258,6 +258,43 @@ core.entities.addRelation(ada.id, analyticalEngines.id, "colleague");
 core.entities.linkKnowledge(firstKnowledgeId, ada.id);
 void loreRepo;
 
+let contradictionFixtureId = 0;
+const nextContradictionFixtureId = () =>
+  `01996200-1823-7000-8000-${(++contradictionFixtureId).toString(16).padStart(12, "0")}`;
+
+for (const viewport of ["Desktop", "Mobile"]) {
+  for (const run of [1, 2]) {
+    const label = `${viewport} run ${run}`;
+    const conflictA = core.ltm.create({
+      // Similar titles are fuzzy-deduplicated by ltm.create unless the fixture
+      // supplies explicit ids. Each browser project and retry needs its own
+      // independently dismissible pair.
+      id: nextContradictionFixtureId(),
+      projectPath: scratch,
+      scope: "project",
+      category: "decision",
+      title: `Prefer deterministic ids (${label})`,
+      content: `Always preserve stable ids on ${label.toLowerCase()}.`,
+    });
+    const conflictB = core.ltm.create({
+      id: nextContradictionFixtureId(),
+      projectPath: scratch,
+      scope: "project",
+      category: "decision",
+      title: `Regenerate ids on every read (${label})`,
+      content: `Always replace stable ids on ${label.toLowerCase()}.`,
+    });
+    core.ltm.recordContradiction({
+      logicalIdA: conflictA,
+      logicalIdB: conflictB,
+      projectId: scratchProjectId,
+      similarity: 0.94,
+      rationale:
+        "Stable identity cannot be preserved and replaced at the same time.",
+    });
+  }
+}
+
 core.close();
 
 // One gen-0 distillation over the first ten messages, written the way
@@ -295,7 +332,7 @@ db.prepare(
 db.close();
 
 console.log(
-  `seeded ${entries.length + 1} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 1 + contradictionFixtureId} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);

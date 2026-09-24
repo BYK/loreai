@@ -1,0 +1,14 @@
+{
+  "contradictions": [
+    {
+      "id_a": "019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      "id_b": "019e18ec-e328-76c4-9c3c-09dbe8d51c6d",
+      "title_a": "Use stable ids",
+      "title_b": "Regenerate ids",
+      "similarity": 0.94,
+      "rationale": "The recorded rules conflict.",
+      "detected_at": 1790863200000
+    }
+  ],
+  "total": 1
+}

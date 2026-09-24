@@ -23,6 +23,8 @@ import {
   apiErrorBody,
   apiPath,
   cursorPage,
+  contradictionDecisionResult,
+  contradictionListResponse,
   distillationDetail,
   distillationList,
   entityDeleted,
@@ -49,6 +51,9 @@ import {
   teamList,
   type AccountStatus,
   type CursorPage,
+  type ContradictionDecision,
+  type ContradictionDecisionResult,
+  type ContradictionListResponse,
   type DistillationDetail,
   type DistillationSummary,
   type EntityDetail,
@@ -565,6 +570,25 @@ export function createApiClient(options: ApiClientOptions = {}) {
         apiPath(["entities", id]),
         undefined,
         entityDeleted,
+        signal,
+      );
+    },
+    listContradictions(
+      signal?: AbortSignal,
+    ): Promise<ContradictionListResponse> {
+      return getJson("/contradictions", contradictionListResponse, signal);
+    },
+    decideContradiction(
+      idA: string,
+      idB: string,
+      decision: ContradictionDecision,
+      signal?: AbortSignal,
+    ): Promise<ContradictionDecisionResult> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["contradictions", idA, idB]),
+        { decision },
+        contradictionDecisionResult,
         signal,
       );
     },

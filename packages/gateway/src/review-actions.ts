@@ -4,11 +4,10 @@
  * a detected contradiction (#1123) and accepting or rejecting a dedup
  * suggestion with calibration feedback (#462).
  *
- * These used to live inline in the legacy server-rendered dashboard. They are
- * kept here, without any HTTP surface, so the CLI and a future management
- * route can share the same guarded behaviour.
+ * These used to live inline in the legacy server-rendered dashboard. They stay
+ * here so the CLI and management routes share the same guarded behaviour.
  */
-import { entities, ltm } from "@loreai/core";
+import { entities, ltm, withTransaction } from "@loreai/core";
 
 const REVIEW_SOURCE = "dashboard" as const;
 
@@ -21,10 +20,9 @@ export function resolveKnowledgeRef(id: string): ltm.KnowledgeEntry | null {
 }
 
 /**
- * Keep one side of a recorded contradiction and remove the other. Only acts on
- * a real, recorded pair so this can never become a generic "delete any entry"
- * — `contradictionExists` is order-independent. `ltm.remove()` also purges the
- * pair row, so the contradiction leaves the open list either way.
+ * Keep one side of an open recorded contradiction and remove the other. The
+ * open-pair check and removal run in one immediate transaction so two gateway
+ * processes cannot apply conflicting decisions to the same pair.
  *
  * Both ids may be stale version ids; the pair table is keyed on logical ids,
  * so they are canonicalised first.
@@ -38,21 +36,28 @@ export function resolveContradiction(
   const keep = ltm.logicalIdOf(keepId);
   const remove = ltm.logicalIdOf(removeId);
   if (keep === remove) return false;
-  if (!ltm.contradictionExists(keep, remove)) return false;
-  if (!ltm.getByLogical(remove)) return false;
-  ltm.remove(remove);
-  return true;
+  return withTransaction(() => {
+    const [pairA, pairB] = ltm.contradictionPairKey(keep, remove);
+    const stillOpen = ltm
+      .listOpenContradictions()
+      .some((pair) => pair.logicalIdA === pairA && pair.logicalIdB === pairB);
+    if (!stillOpen || !ltm.getByLogical(remove)) return false;
+    ltm.remove(remove);
+    return true;
+  });
 }
 
 /**
- * Keep both entries: mark the pair dismissed so it stops surfacing and is never
- * re-judged by the detector. Accepts stale version ids like `resolveContradiction`.
+ * Keep both entries: atomically dismiss an open pair so it stops surfacing and
+ * is never re-judged by the detector. Returns false if another reviewer already
+ * changed the pair. Accepts stale version ids like `resolveContradiction`.
  */
-export function dismissContradiction(idA: string, idB: string): void {
-  ltm.setContradictionStatus(
+export function dismissContradiction(idA: string, idB: string): boolean {
+  return ltm.setContradictionStatus(
     ltm.logicalIdOf(idA),
     ltm.logicalIdOf(idB),
     "dismissed",
+    "open",
   );
 }
 

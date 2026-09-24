@@ -8,6 +8,7 @@
  */
 import { entities, isHostedMode, ltm } from "@loreai/core";
 
+import { dismissContradiction, resolveContradiction } from "./review-actions";
 import { decodeRequestBody, HttpRequestBodyTooLargeError } from "./http-body";
 import { errorResponse, jsonResponse } from "./management-access";
 
@@ -40,6 +41,10 @@ function toListItem(e: EntityWithAliases) {
 }
 
 type EntityListItem = ReturnType<typeof toListItem>;
+
+const MAX_OPEN_CONTRADICTIONS = 25;
+const MAX_CONTRADICTION_DECISION_BODY_BYTES = 2 * 1024;
+const CONTRADICTION_DECISIONS = new Set(["keep-a", "keep-b", "keep-both"]);
 
 /** Metadata is stored as JSON text; malformed rows report null, never 500. */
 function parseMetadata(raw: string | null): Record<string, unknown> | null {
@@ -205,6 +210,142 @@ export function handleListEntities(url: URL): Response {
       : null;
 
   return jsonResponse({ entities: items, next_cursor, total: all.length });
+}
+
+/**
+ * `GET /api/v1/contradictions` — the newest open pairs, capped at the same 25
+ * rows the legacy dashboard rendered. Resolving or dismissing a row exposes
+ * the next older pair on the next read.
+ */
+export function handleListContradictions(): Response {
+  const all = ltm.listOpenContradictions();
+  return jsonResponse({
+    contradictions: all.slice(0, MAX_OPEN_CONTRADICTIONS).map((pair) => ({
+      id_a: pair.logicalIdA,
+      id_b: pair.logicalIdB,
+      title_a: pair.titleA,
+      title_b: pair.titleB,
+      similarity: pair.similarity,
+      rationale: pair.rationale,
+      detected_at: pair.detectedAt,
+    })),
+    total: all.length,
+  });
+}
+
+function decodeContradictionId(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+/** `PATCH /api/v1/contradictions/:idA/:idB` — keep one side or both. */
+export async function handleContradictionRequest(
+  req: Request,
+  url: URL,
+): Promise<Response> {
+  if (req.method !== "PATCH") {
+    return errorResponse(
+      404,
+      "not_found",
+      `No API route for ${req.method} ${url.pathname}`,
+    );
+  }
+  if (isHostedMode()) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Contradiction review is not available in hosted mode.",
+    );
+  }
+
+  const match = /^\/api\/v1\/contradictions\/([^/]+)\/([^/]+)$/.exec(
+    url.pathname,
+  );
+  const idA = match ? decodeContradictionId(match[1]) : null;
+  const idB = match ? decodeContradictionId(match[2]) : null;
+  if (idA === null || idB === null || idA === "" || idB === "") {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Contradiction ids must be valid URL path segments",
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(
+      await decodeRequestBody(req, req.signal, {
+        compressedBytes: MAX_CONTRADICTION_DECISION_BODY_BYTES,
+        decompressedBytes: MAX_CONTRADICTION_DECISION_BODY_BYTES,
+      }),
+    );
+  } catch (error) {
+    if (error instanceof HttpRequestBodyTooLargeError) {
+      return errorResponse(
+        413,
+        "invalid_request",
+        `Decision body exceeds ${MAX_CONTRADICTION_DECISION_BODY_BYTES} bytes`,
+      );
+    }
+    return errorResponse(400, "invalid_request", "Invalid JSON body");
+  }
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 1 ||
+    !("decision" in body) ||
+    typeof body.decision !== "string" ||
+    !CONTRADICTION_DECISIONS.has(body.decision)
+  ) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Body must contain one decision: keep-a, keep-b, or keep-both",
+    );
+  }
+
+  const logicalA = ltm.logicalIdOf(idA);
+  const logicalB = ltm.logicalIdOf(idB);
+  const [canonicalA, canonicalB] = ltm.contradictionPairKey(logicalA, logicalB);
+  const isOpen = ltm
+    .listOpenContradictions()
+    .some(
+      (pair) =>
+        pair.logicalIdA === canonicalA && pair.logicalIdB === canonicalB,
+    );
+  if (!isOpen) {
+    return errorResponse(404, "not_found", "Open contradiction not found");
+  }
+
+  const decision = body.decision;
+  if (decision === "keep-both") {
+    if (!dismissContradiction(idA, idB)) {
+      return errorResponse(
+        409,
+        "conflict",
+        "The contradiction changed before the decision was applied",
+      );
+    }
+    return jsonResponse({ status: "dismissed", kept_id: null });
+  }
+
+  const keepId = decision === "keep-a" ? idA : idB;
+  const removeId = decision === "keep-a" ? idB : idA;
+  if (!resolveContradiction(keepId, removeId)) {
+    return errorResponse(
+      409,
+      "conflict",
+      "The contradiction changed before the decision was applied",
+    );
+  }
+  return jsonResponse({
+    status: "resolved",
+    kept_id: ltm.logicalIdOf(keepId),
+  });
 }
 
 /** `GET /api/v1/entities/:id`. */

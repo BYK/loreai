@@ -137,6 +137,16 @@ describe("contradiction decisions (#1123)", () => {
     expect(ltm.get(a)).not.toBeNull();
   });
 
+  it("resolve is a no-op if another reviewer already dismissed the pair", () => {
+    const { a, b } = seedPair("Concurrent rule A", "Concurrent rule B");
+    ltm.setContradictionStatus(a, b, "dismissed");
+
+    expect(resolveContradiction(a, b)).toBe(false);
+    expect(ltm.getByLogical(a)).not.toBeNull();
+    expect(ltm.getByLogical(b)).not.toBeNull();
+    expect(ltm.listOpenContradictions()).toHaveLength(0);
+  });
+
   it("resolve accepts superseded version ids for either side", () => {
     const { a, b } = seedPair("Rule five", "Rule six");
     const staleA = staleVersionId(a);
@@ -163,11 +173,12 @@ describe("contradiction decisions (#1123)", () => {
     expect(ltm.listOpenContradictions()).toHaveLength(1);
   });
 
-  it("dismiss accepts superseded version ids", () => {
+  it("dismiss accepts superseded version ids and refuses a second decision", () => {
     const { a, b } = seedPair("Rule nine", "Rule ten");
     const staleB = staleVersionId(b);
 
-    dismissContradiction(a, staleB);
+    expect(dismissContradiction(a, staleB)).toBe(true);
+    expect(dismissContradiction(a, staleB)).toBe(false);
 
     expect(ltm.listOpenContradictions()).toHaveLength(0);
     expect(ltm.getByLogical(a)).not.toBeNull();

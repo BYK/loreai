@@ -47,6 +47,20 @@ export const dashboardRoutes: RouteModule = {
         wrap((dash, _req, url) => dash.handleListEntities(url)),
       ),
     );
+    app.get(
+      "/api/v1/contradictions",
+      ctx.declaredMethodsOnly(
+        ["GET"],
+        wrap((dash) => dash.handleListContradictions()),
+      ),
+    );
+    app.patch(
+      "/api/v1/contradictions/:idA/:idB",
+      ctx.declaredMethodsOnly(
+        ["PATCH"],
+        wrap((dash, req, url) => dash.handleContradictionRequest(req, url)),
+      ),
+    );
     // Literal before `:id` so "rebuild" is never read as an entity id.
     app.get(
       "/api/v1/entities/rebuild",

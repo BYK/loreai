@@ -167,6 +167,24 @@ describe("contradiction store", () => {
     expect(ltm.listOpenContradictions(P)).toHaveLength(0);
   });
 
+  it("changes a contradiction only when its expected current status matches", async () => {
+    const P = "/test/contra/status-transition";
+    const a = await seed(P, "Use the stable id", "stable id", v(1, 0, 0));
+    const b = await seed(P, "Regenerate every id", "new id", v(1, 0, 0));
+    ltm.recordContradiction({
+      logicalIdA: a,
+      logicalIdB: b,
+      projectId: ensureProject(P),
+      similarity: 0.98,
+      rationale: "Stable ids cannot both be preserved and replaced.",
+    });
+
+    expect(ltm.setContradictionStatus(a, b, "dismissed", "open")).toBe(true);
+    expect(ltm.setContradictionStatus(a, b, "dismissed", "open")).toBe(false);
+    expect(ltm.listOpenContradictions(P)).toHaveLength(0);
+    expect(ltm.contradictionExists(a, b)).toBe(true);
+  });
+
   it("cleared pairs are recorded but never surfaced", () => {
     ltm.recordContradictionCleared({
       logicalIdA: "c1",

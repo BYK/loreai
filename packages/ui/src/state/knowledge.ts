@@ -222,6 +222,11 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     listPaged,
     entry,
     versions,
+    /** Evict a permanently removed entry from memory and IndexedDB. */
+    async remove(id: string): Promise<void> {
+      store.remove(id);
+      await repo.delete(id);
+    },
     select: (id: string) => store.select(id),
     selectList: (projectId: string) => store.selectList(projectId),
     store,

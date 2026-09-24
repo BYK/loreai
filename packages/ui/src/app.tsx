@@ -81,6 +81,14 @@ export const routes: RouteDefinition[] = [
     ),
   },
   {
+    path: "/contradictions",
+    component: lazy(() =>
+      import("./routes/Contradictions").then((m) => ({
+        default: m.ContradictionsRoute,
+      })),
+    ),
+  },
+  {
     path: "/entities/:entityId",
     component: lazy(() =>
       import("./routes/Entities").then((m) => ({
