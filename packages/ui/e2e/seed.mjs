@@ -258,28 +258,33 @@ core.entities.addRelation(ada.id, analyticalEngines.id, "colleague");
 core.entities.linkKnowledge(firstKnowledgeId, ada.id);
 void loreRepo;
 
-const conflictA = core.ltm.create({
-  projectPath: scratch,
-  scope: "project",
-  category: "decision",
-  title: "Prefer deterministic ids",
-  content: "Always preserve stable ids.",
-});
-const conflictB = core.ltm.create({
-  projectPath: scratch,
-  scope: "project",
-  category: "decision",
-  title: "Regenerate ids on every read",
-  content: "Always replace stable ids.",
-});
-core.ltm.recordContradiction({
-  logicalIdA: conflictA,
-  logicalIdB: conflictB,
-  projectId: scratchProjectId,
-  similarity: 0.94,
-  rationale:
-    "Stable identity cannot be preserved and replaced at the same time.",
-});
+for (const viewport of ["Desktop", "Mobile"]) {
+  for (const run of [1, 2]) {
+    const label = `${viewport} run ${run}`;
+    const conflictA = core.ltm.create({
+      projectPath: scratch,
+      scope: "project",
+      category: "decision",
+      title: `Prefer deterministic ids (${label})`,
+      content: `Always preserve stable ids on ${label.toLowerCase()}.`,
+    });
+    const conflictB = core.ltm.create({
+      projectPath: scratch,
+      scope: "project",
+      category: "decision",
+      title: `Regenerate ids on every read (${label})`,
+      content: `Always replace stable ids on ${label.toLowerCase()}.`,
+    });
+    core.ltm.recordContradiction({
+      logicalIdA: conflictA,
+      logicalIdB: conflictB,
+      projectId: scratchProjectId,
+      similarity: 0.94,
+      rationale:
+        "Stable identity cannot be preserved and replaced at the same time.",
+    });
+  }
+}
 
 core.close();
 
@@ -318,7 +323,7 @@ db.prepare(
 db.close();
 
 console.log(
-  `seeded ${entries.length + 1} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 5} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);
