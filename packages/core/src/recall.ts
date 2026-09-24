@@ -35,7 +35,7 @@ import {
 import {
   offloadAll,
   offloadAllOrTimeout,
-  READ_JOB_TIMED_OUT,
+  isReadJobFailure,
 } from "./read-offload";
 import { inline } from "./markdown";
 
@@ -320,7 +320,7 @@ async function searchDistillationsScored(input: {
         // Staleness-tolerant distillation FTS scan — offload off the event loop
         // (#966 B). The selected columns are lean (no embedding BLOB).
         const rows = await offloadAllOrTimeout(ftsSQL, params);
-        if (rows === READ_JOB_TIMED_OUT) return null;
+        if (isReadJobFailure(rows)) return null;
         return rows as ScoredDistillation[];
       },
       input.termWeights,

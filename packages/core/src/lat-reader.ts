@@ -16,9 +16,10 @@ import type { Heading, Paragraph, Text } from "mdast";
 import { db, ensureProject } from "./db";
 import { sha256 } from "#db/driver";
 import {
-  offloadAll,
   offloadAllOrTimeout,
-  READ_JOB_TIMED_OUT,
+  isReadJobFailure,
+  ReadPreparationUnavailableError,
+  requireReadRows,
 } from "./read-offload";
 import { extractTopTerms, runRelaxedSearchAsync } from "./search";
 import * as log from "./log";
@@ -333,7 +334,7 @@ export async function searchScored(input: {
         // Staleness-tolerant lat.md FTS scan — offload off the event loop
         // (#966 B). Columns are lean (no embedding BLOB).
         const rows = await offloadAllOrTimeout(ftsSQL, [matchExpr, pid, limit]);
-        if (rows === READ_JOB_TIMED_OUT) return null;
+        if (isReadJobFailure(rows)) return null;
         return rows as ScoredLatSection[];
       },
       input.termWeights,
@@ -364,10 +365,12 @@ export async function scoreForSession(
 
   let results: Array<LatSection & { rank: number }>;
   try {
-    // Offload the BM25 OR-scan to the read-worker pool (in-process fallback).
+    // The BM25 scan contributes to the durable LTM selection, so a failed
+    // worker cannot be mistaken for a real empty lat.md result.
     // lat_sections is not written on the hot path → staleness-tolerant. #966 B.
-    results = (await offloadAll(
-      `SELECT s.id, s.project_id, s.file, s.heading, s.depth, s.content,
+    results = requireReadRows(
+      await offloadAllOrTimeout(
+        `SELECT s.id, s.project_id, s.file, s.heading, s.depth, s.content,
                 s.content_hash, s.first_paragraph, s.updated_at,
                 bm25(lat_sections_fts, 6.0, 2.0) as rank
          FROM lat_sections_fts f
@@ -375,9 +378,12 @@ export async function scoreForSession(
          WHERE lat_sections_fts MATCH ?
          AND s.project_id = ?
          ORDER BY rank`,
-      [q, pid],
-    )) as Array<LatSection & { rank: number }>;
-  } catch {
+        [q, pid],
+      ),
+      "lat",
+    ) as Array<LatSection & { rank: number }>;
+  } catch (error) {
+    if (error instanceof ReadPreparationUnavailableError) throw error;
     return [];
   }
 

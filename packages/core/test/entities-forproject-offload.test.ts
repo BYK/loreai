@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as entities from "../src/entities";
+import { ReadPreparationUnavailableError } from "../src/read-offload";
 import { runReadJob } from "../src/read-job";
 import {
   _resetVectorPoolForTest,
@@ -15,10 +16,9 @@ import type {
 
 // #1081: entities.forProjectOffloaded / entitiesForSessionOffloaded are
 // off-thread twins of the sync catalog scans used to build the frozen system[1]
-// entities block. They must return EXACTLY what the sync path returns — the
-// offload is a pure "run the same scan off-thread when possible" optimization,
-// with an in-process fallback on worker timeout (never a spurious empty, which
-// would be frozen for the session).
+// entities block. They return the same rows on success; a worker failure stops
+// prompt preparation rather than freezing an empty
+// block or rerunning the unbounded scan in-process.
 
 const PROJECT = "/test/entities-forproject-offload";
 
@@ -135,7 +135,7 @@ describe("entities.forProjectOffloaded (#1081)", () => {
     expect(offloaded).toEqual(sync);
   });
 
-  it("on a worker TIMEOUT falls back to the full in-process scan (never a spurious empty)", async () => {
+  it("on a worker timeout refuses to freeze an empty entity catalog", async () => {
     seed();
     const expected = entities.forProject(PROJECT, true);
     expect(expected.length).toBeGreaterThan(0);
@@ -143,13 +143,11 @@ describe("entities.forProjectOffloaded (#1081)", () => {
     installFactory(() => new HangingReadWorker());
     vi.useFakeTimers();
     const p = entities.forProjectOffloaded(PROJECT, true);
+    const rejected = expect(p).rejects.toBeInstanceOf(
+      ReadPreparationUnavailableError,
+    );
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
-    const got = await p;
-    expect(got.map((e) => e.id)).toEqual(expected.map((e) => e.id));
-    // Aliases still attached on the fallback path.
-    expect(
-      got.find((e) => e.canonical_name === "acme-service")?.aliases.length,
-    ).toBeGreaterThan(0);
+    await rejected;
   });
 });
 

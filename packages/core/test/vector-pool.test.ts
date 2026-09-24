@@ -267,6 +267,21 @@ describe("vector-pool structural-failure latch (review #989)", () => {
     expect(FakeWorker.instances.length).toBe(spawnedAtLatch);
   });
 
+  it("late success from a retired reader cannot clear the structural failure streak", async () => {
+    _setTestVectorWorkerFactory(factoryReturning((w) => w.die()));
+    const first = await tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    expect(first).toBeNull();
+    const retired = FakeWorker.instances[0];
+    for (let i = 0; i < 12; i++) {
+      retired.reply(9999, []); // A stale reply is not a healthy new worker.
+      expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
+    }
+    const spawnedAtLatch = FakeWorker.instances.length;
+    retired.reply(9999, []);
+    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
+    expect(FakeWorker.instances.length).toBe(spawnedAtLatch);
+  });
+
   it("terminates a dead worker instead of leaking its thread", async () => {
     _setTestVectorWorkerFactory(
       factoryReturning((w, msg) => w.reply(msg.id, [])),

@@ -19,7 +19,7 @@ import { ftsQuery, ftsQueryOr, EMPTY_QUERY, filterTerms } from "./search";
 import {
   offloadAll,
   offloadAllOrTimeout,
-  READ_JOB_TIMED_OUT,
+  requireReadRows,
 } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import { config } from "./config";
@@ -1067,17 +1067,9 @@ function forProjectId(pid: string, includeCross: boolean): EntityWithAliases[] {
  * main event loop on the first-turn stable-block critical path. #1081 (mirrors
  * ltm.forProjectOffloaded / #1080).
  *
- * The result is ALWAYS the same set `forProject` would return — purely "run the
- * same scan off-thread when possible", never a behavior change:
- *   - pool available   → a worker runs the entity scan; we hydrate its rows.
- *   - pool unavailable → `offloadAllOrTimeout` falls back to the identical
- *                        in-process query.
- *   - worker TIMEOUT   → we re-run the entity scan IN-PROCESS rather than
- *                        degrade to []. This feeds the DURABLY FROZEN system[1]
- *                        entities block; a spuriously-empty result there would
- *                        be frozen for the whole session, so correctness wins
- *                        over the "never re-block on timeout" rule for this
- *                        small, once-per-session scan (same rationale as #1080).
+ * On success this matches `forProject`. Worker failure rejects before the
+ * durable system[1] entities block is frozen; a synchronous retry of an
+ * unbounded scan could stall all foreground requests.
  *
  * Only the heaviest (unbounded) entity scan is offloaded; the bounded alias
  * load stays in-process via `withAliases`, so aliases are always attached
@@ -1090,13 +1082,9 @@ export async function forProjectOffloaded(
 ): Promise<EntityWithAliases[]> {
   const pid = ensureProject(projectPath);
   const { sql, params } = forProjectEntityQuery(pid, includeCross);
-  const offloaded = await offloadAllOrTimeout(sql, params);
-  const rows = (
-    offloaded === READ_JOB_TIMED_OUT
-      ? db()
-          .query(sql)
-          .all(...params)
-      : offloaded
+  const rows = requireReadRows(
+    await offloadAllOrTimeout(sql, params),
+    "entities",
   ) as Entity[];
   return withAliases(rows);
 }

@@ -1,10 +1,13 @@
 import { EventEmitter } from "node:events";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { close, db } from "../src/db";
 import {
   offloadAll,
   offloadAllOrTimeout,
   offloadGet,
   READ_JOB_TIMED_OUT,
+  READ_JOB_UNAVAILABLE,
 } from "../src/read-offload";
 import {
   _resetVectorPoolForTest,
@@ -69,7 +72,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("read-offload in-process fallback (no pool)", () => {
+describe("read-offload test-only in-process mode (no worker factory)", () => {
   // With no test worker factory installed the pool is inert (NODE_ENV=test), so
   // both helpers must run the query against the real db() connection.
   it("offloadAll runs the query in-process and returns the rows", async () => {
@@ -80,13 +83,6 @@ describe("read-offload in-process fallback (no pool)", () => {
   it("offloadGet runs the query in-process and returns the single row", async () => {
     const row = await offloadGet("SELECT ? AS x", ["only"]);
     expect(row).toEqual({ x: "only" });
-  });
-
-  it("falls back in-process even with LORE_DISABLE_VEC_WORKER=1 set", async () => {
-    process.env.LORE_DISABLE_VEC_WORKER = "1";
-    poolReturning([{ x: "should-not-be-used" }]);
-    const rows = await offloadAll("SELECT ? AS x", ["real"]);
-    expect(rows).toEqual([{ x: "real" }]);
   });
 });
 
@@ -149,5 +145,109 @@ describe("offloadAllOrTimeout (surfaces the timeout instead of degrading)", () =
     const p = offloadAllOrTimeout("SELECT 'in-process' AS x", []);
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await p).toBe(READ_JOB_TIMED_OUT);
+  });
+});
+
+describe("read-offload unavailable worker policy (#1736)", () => {
+  it("never reruns a heavy read on the gateway thread when the worker is disabled", async () => {
+    poolReturning([{ x: "worker" }]);
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    // Each SQL query would return a row if it ran against the writer DB.
+    expect(await offloadAll("SELECT 'writer' AS x", [])).toEqual([]);
+    expect(await offloadGet("SELECT 'writer' AS x", [])).toBeNull();
+    expect(await offloadAllOrTimeout("SELECT 'writer' AS x", [])).toBe(
+      READ_JOB_UNAVAILABLE,
+    );
+  });
+
+  it("does not synchronously scan after a spawn failure or a broken-pool latch", async () => {
+    let spawnAttempts = 0;
+    _setTestVectorWorkerFactory(() => {
+      spawnAttempts++;
+      throw new Error("worker unavailable");
+    });
+    expect(await offloadAllOrTimeout("SELECT 'writer' AS x", [])).toBe(
+      READ_JOB_UNAVAILABLE,
+    );
+    const atLatch = spawnAttempts;
+    expect(atLatch).toBeGreaterThan(0);
+    expect(await offloadAllOrTimeout("SELECT 'writer' AS x", [])).toBe(
+      READ_JOB_UNAVAILABLE,
+    );
+    expect(spawnAttempts).toBe(atLatch);
+  });
+
+  it("recovers after a per-query worker error without a main-thread retry", async () => {
+    let failures = 0;
+    class RecoveringReadWorker extends FakeReadWorker {
+      override postMessage(msg: VectorWorkerInbound): void {
+        if (msg.type === "read" && failures++ === 0) {
+          this.emit("message", {
+            type: "error",
+            id: msg.id,
+            error: "query failed",
+          });
+        } else {
+          super.postMessage(msg);
+        }
+      }
+    }
+    _setTestVectorWorkerFactory(
+      (() => new RecoveringReadWorker([{ x: "worker" }])) as unknown as (
+        d: VectorWorkerInitData,
+      ) => never,
+    );
+    expect(await offloadAllOrTimeout("SELECT 'writer' AS x", [])).toBe(
+      READ_JOB_UNAVAILABLE,
+    );
+    expect(await offloadAllOrTimeout("SELECT 'writer' AS x", [])).toEqual([
+      { x: "worker" },
+    ]);
+  });
+
+  it("discards an in-flight reply from a replaced database and spawns a fresh reader", async () => {
+    const original = process.env.LORE_DB_PATH;
+    if (!original) throw new Error("test database path unavailable");
+    db(); // Open writer A before its read workers.
+    const replacement = join(
+      dirname(original),
+      "replacement-for-read-offload.db",
+    );
+    let replyFromA: (() => void) | undefined;
+    const paths: string[] = [];
+    class DatabaseReadWorker extends FakeReadWorker {
+      constructor(private readonly path: string) {
+        super([{ x: path }]);
+      }
+      override postMessage(msg: VectorWorkerInbound): void {
+        if (msg.type !== "read") return;
+        if (this.path === original && !replyFromA) {
+          replyFromA = () => super.postMessage(msg);
+        } else {
+          super.postMessage(msg);
+        }
+      }
+    }
+    _setTestVectorWorkerFactory(((data: VectorWorkerInitData) => {
+      paths.push(data.dbPath);
+      return new DatabaseReadWorker(data.dbPath);
+    }) as unknown as (data: VectorWorkerInitData) => never);
+    try {
+      const pending = offloadAllOrTimeout("SELECT 'writer' AS x", []);
+      expect(replyFromA).toBeTypeOf("function");
+      close();
+      process.env.LORE_DB_PATH = replacement;
+      db(); // Writer B opens before the old worker's reply arrives.
+      replyFromA?.();
+      expect(await pending).toBe(READ_JOB_UNAVAILABLE);
+      expect(await offloadAllOrTimeout("SELECT 'writer' AS x", [])).toEqual([
+        { x: replacement },
+      ]);
+      expect(paths).toContain(original);
+      expect(paths).toContain(replacement);
+    } finally {
+      close();
+      process.env.LORE_DB_PATH = original;
+    }
   });
 });

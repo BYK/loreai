@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { db, ensureProject } from "../src/db";
 import * as latReader from "../src/lat-reader";
+import { ReadPreparationUnavailableError } from "../src/read-offload";
 
 const FIXTURES_DIR = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -171,6 +172,26 @@ More detail follows.
 
       // Should have 0-1 sections with such a tight budget
       expect(sections.length).toBeLessThanOrEqual(2);
+    });
+
+    test("worker unavailability does not turn a previously selected section into an empty result", async () => {
+      latReader.refresh(PROJECT);
+      const context = "authentication middleware pipeline request handling";
+      expect(
+        (await latReader.scoreForSession(PROJECT, context, 5000)).length,
+      ).toBeGreaterThan(0);
+      process.env.LORE_DISABLE_VEC_WORKER = "1";
+      try {
+        await expect(
+          latReader.scoreForSession(PROJECT, context, 5000),
+        ).rejects.toMatchObject({
+          name: ReadPreparationUnavailableError.name,
+          phase: "lat",
+          reason: "unavailable",
+        });
+      } finally {
+        delete process.env.LORE_DISABLE_VEC_WORKER;
+      }
     });
   });
 });
