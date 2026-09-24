@@ -319,8 +319,7 @@ export async function handlePatchEntity(
     if (value === null) delete metadata[key];
     else metadata[key] = value;
   }
-  const updatedMetadata =
-    Object.keys(metadata).length > 0 ? metadata : null;
+  const updatedMetadata = Object.keys(metadata).length > 0 ? metadata : null;
   entities.update(id, { metadata: updatedMetadata });
   const updated = entities.getWithAliases(id);
   if (!updated) {
