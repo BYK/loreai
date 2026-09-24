@@ -1472,7 +1472,8 @@ export function computeHistoricalEstimates(
     const unrolledCostSessions = db()
       .query(
         `SELECT session_id FROM session_state AS s
-         WHERE s.updated_at >= ?
+         WHERE s.amnesia = 1
+           AND s.updated_at >= ?
            AND instr(COALESCE(s.project_path, ''), '__tmp_agents_file__') = 0
            AND (s.conversation_turns > 0 OR s.warmup_savings > 0 OR
                 s.warmup_cost > 0 OR s.ttl_savings > 0 OR s.batch_savings > 0)`,
