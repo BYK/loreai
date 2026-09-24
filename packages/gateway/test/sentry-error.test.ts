@@ -9,11 +9,16 @@ describe("Deno Sentry error normalization", () => {
     const error = new Error(
       "safe first line\nprovider_token=private-token user@example.com",
     );
+    error.stack =
+      "Error: safe first line\nprovider_token=private-token user@example.com\n" +
+      "    at upstream (https://api.invalid/?token=stack-token)";
     const normalized = toError(error);
     expect(normalized).not.toBe(error);
     expect(normalized.message).toBe("edge function error");
+    expect(normalized.stack).toContain("toError");
     expect(normalized.stack).not.toContain("private-token");
     expect(normalized.stack).not.toContain("user@example.com");
+    expect(normalized.stack).not.toContain("stack-token");
 
     expect(toError("string error").message).toBe("edge function error");
     expect(toError({ message: "provider_token=private-token" }).message).toBe(

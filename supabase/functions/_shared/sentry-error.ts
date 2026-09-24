@@ -1,26 +1,11 @@
 /**
- * Normalize a captured value into a privacy-safe Error. Error messages and
- * Supabase message/hint fields may contain credentials or user data, so never
- * forward them. Keep only the original Error's stack frames for diagnosis.
+ * Normalize a captured value into a privacy-safe Error. Error messages,
+ * Supabase fields, and even custom stack frames may contain credentials or user
+ * data, so never forward the original value. The new Error supplies a local
+ * stack that identifies this capture boundary without copying source payloads.
  */
-export function toError(err: unknown): Error {
-  const error = new Error("edge function error");
-  if (err instanceof Error && typeof err.stack === "string") {
-    try {
-      // V8 stacks start with Error.prototype.toString(), which may span
-      // multiple lines when the original message contains newlines.
-      const originalHeader = Error.prototype.toString.call(err);
-      if (err.stack.startsWith(originalHeader)) {
-        const frames = err.stack
-          .slice(originalHeader.length)
-          .replace(/^\n/, "");
-        if (frames) error.stack = `${error.name}: ${error.message}\n${frames}`;
-      }
-    } catch {
-      // Retain the safe local stack if reading the original stack fails.
-    }
-  }
-  return error;
+export function toError(_err: unknown): Error {
+  return new Error("edge function error");
 }
 
 export interface PrivacySafeErrorEvent {
