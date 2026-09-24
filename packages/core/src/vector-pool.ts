@@ -20,18 +20,16 @@
  *       · the result, on success;
  *       · `null` when the pool is disabled/broken/errored → caller applies its
  *         failure policy (unit-test fallback or production degrade/fail);
- *       · a TIMED_OUT sentinel when the worker was alive but too slow, or pool
- *         shutdown has begun → caller returns an EMPTY result WITHOUT re-running
- *         the scan on the main thread (re-running re-blocks the loop — the #1006
- *         stall bug, and during shutdown could race SQLite close). A wedged
- *         worker is terminated so the pool recovers; a timeout is slowness, not
- *         a structural failure, so it never latches the pool broken.
+ *       · TIMED_OUT on deadline/abort/shutdown or PRESSURED on full admission.
+ *         Optional work degrades; required preparation fails retryably. Neither
+ *         runs a scan on the main thread. A wedged running worker is retired.
  *   - In tests the pool is inert unless a worker factory is installed via
  *     `_setTestVectorWorkerFactory` (so unit tests keep pure in-process
  *     behavior and never spawn a real worker).
  */
 
 import { Worker } from "node:worker_threads";
+import { performance } from "node:perf_hooks";
 import { config } from "./config";
 import { dbPath, dbReadGeneration } from "./db";
 import * as log from "./log";
@@ -59,24 +57,28 @@ const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS = 10_000;
  *  used but the request exceeded {@link vectorSearchTimeoutMs}, or when pool
  *  shutdown has begun. Distinct from
  *  `null` — which means the pool was disabled / broken / errored and the caller
- *  applies its failure policy. On a timeout the caller must instead return
- *  an empty result and leave the main thread free. */
+ *  applies its failure policy. Required reads fail preparation; optional reads
+ *  return an empty result without a main-thread scan. */
 export const VECTOR_SEARCH_TIMED_OUT = Symbol("vector-search-timed-out");
 
 /** The read-job analogue of {@link VECTOR_SEARCH_TIMED_OUT}: resolved (never
  *  rejected) by {@link tryPoolRead} when a worker was used but the read exceeded
  *  the timeout, or when pool shutdown has begun. Distinct from `null` (pool
  *  disabled/broken/errored → caller applies its failure policy). On timeout
- *  the caller must DEGRADE to an empty result —
- *  re-running the same scan in-process would re-block the loop the offload
- *  exists to keep free (#1006). The wedged worker is terminated either way. */
+ *  optional reads degrade and required reads fail preparation. A queued
+ *  deadline drops only that job; a wedged running worker is retired. */
 export const READ_JOB_TIMED_OUT = Symbol("read-job-timed-out");
+/** Queue admission rejected a read without posting it to a worker. */
+export const READ_JOB_PRESSURED = Symbol("read-job-pressured");
+/** Queue admission rejected a search without posting it to a worker. */
+export const VECTOR_SEARCH_PRESSURED = Symbol("vector-search-pressured");
 
 /** Internal marker the per-request timer resolves the dispatch Promise with, so
  *  {@link dispatchToPool} can distinguish a timeout from a worker reply payload
  *  (which is never a symbol). Not exported — callers see the per-family
  *  sentinels above. */
 const POOL_REQUEST_TIMED_OUT = Symbol("pool-request-timed-out");
+const POOL_REQUEST_UNAVAILABLE = Symbol("pool-request-unavailable");
 
 /** Resolve the per-request vector-search timeout. Read per call (not cached)
  *  to match the kill-switch env pattern. */
@@ -97,6 +99,53 @@ export function vectorSearchTimeoutMs(): number {
  *  unblock the main loop, not to parallelize an infrequent, sub-ms scan. */
 const DEFAULT_POOL_SIZE = 2;
 
+/** Host-side waiting room. In-flight jobs are separately capped at one per
+ * worker; no worker receives a second message while it is running SQL. */
+export const MAX_PENDING_READ_JOBS = 128;
+export const MAX_PENDING_READ_BYTES = 8 * 1024 * 1024;
+const MAX_BACKGROUND_PENDING_JOBS = 32;
+const MAX_BACKGROUND_PENDING_BYTES = 2 * 1024 * 1024;
+const FOREGROUND_WEIGHT = 4;
+
+export type ReadPoolPriority = "foreground" | "background";
+export interface ReadPoolRequestOptions {
+  priority?: ReadPoolPriority;
+  /** Abort a queued request before dispatch. Running SQL keeps its worker slot
+   * until it finishes or its deadline retires the worker. */
+  signal?: AbortSignal;
+}
+
+export interface ReadPoolStats {
+  pendingCount: number;
+  pendingBytes: number;
+  runningCount: number;
+  retiringCount: number;
+  oldestPendingMs: number;
+}
+
+export interface ReadPoolTelemetry extends ReadPoolStats {
+  family: "read" | "search";
+  priority: ReadPoolPriority;
+  outcome:
+    | "admitted"
+    | "pressure"
+    | "started"
+    | "ok"
+    | "error"
+    | "timeout"
+    | "cancelled"
+    | "unavailable";
+  queueMs?: number;
+  serviceMs?: number;
+}
+
+let readPoolTelemetryHook: ((sample: ReadPoolTelemetry) => void) | null = null;
+export function setReadPoolTelemetryHook(
+  hook: ((sample: ReadPoolTelemetry) => void) | null,
+): void {
+  readPoolTelemetryHook = hook;
+}
+
 /** Consecutive structural failures (worker death / load failure / reader-open
  *  failure) — with no healthy reply in between — that latch the pool broken.
  *  A persistently unresolvable worker (missing bundle, bad DB path) would
@@ -114,6 +163,17 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  id: number;
+  message: VectorWorkerInbound;
+  priority: ReadPoolPriority;
+  bytes: number;
+  enqueuedAt: number;
+  startedAt?: number;
+  owner?: PoolWorker;
+  state: "queued" | "running" | "settled";
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  callerSettled: boolean;
 }
 
 interface PoolWorker {
@@ -123,6 +183,15 @@ interface PoolWorker {
 }
 
 let workers: PoolWorker[] = [];
+let foregroundQueue: Pending[] = [];
+let backgroundQueue: Pending[] = [];
+let pendingBytes = 0;
+let backgroundBytes = 0;
+let consecutiveForeground = 0;
+let pumping = false;
+/** A retiring native worker still consumes a physical slot until termination
+ * is confirmed. Never create fictitious capacity on a caller timeout. */
+let retiringVectorWorkers = new Set<ShutdownableVectorWorker>();
 let nextRequestId = 0;
 /** Latched true after spawning fails — stops per-call retry storms. */
 let poolBroken = false;
@@ -229,33 +298,290 @@ function spawnWorker(initData: VectorWorkerInitData): Worker {
   return new Worker(workerUrl, { workerData: initData });
 }
 
+export function readPoolStats(): ReadPoolStats {
+  const pending = [...foregroundQueue, ...backgroundQueue];
+  return {
+    pendingCount: pending.length,
+    pendingBytes,
+    runningCount: workers.reduce((n, w) => n + w.inflight.size, 0),
+    retiringCount: retiringVectorWorkers.size,
+    oldestPendingMs: pending.length
+      ? Math.max(
+          0,
+          performance.now() - Math.min(...pending.map((p) => p.enqueuedAt)),
+        )
+      : 0,
+  };
+}
+
+function emitPoolTelemetry(
+  p: Pending,
+  outcome: ReadPoolTelemetry["outcome"],
+): void {
+  if (!readPoolTelemetryHook) return;
+  try {
+    readPoolTelemetryHook({
+      ...readPoolStats(),
+      family: p.message.type === "search" ? "search" : "read",
+      priority: p.priority,
+      outcome,
+      queueMs:
+        p.startedAt === undefined ? undefined : p.startedAt - p.enqueuedAt,
+      serviceMs:
+        p.startedAt === undefined ? undefined : performance.now() - p.startedAt,
+    });
+  } catch {
+    // Telemetry cannot interrupt admission or worker lifecycle.
+  }
+}
+
+/** Charge the actual structured-clone payload retained by the host queue.
+ * String lengths use UTF-8 bytes; binary payloads use their byte length. */
+function messageBytes(message: VectorWorkerInbound): number {
+  if (message.type === "shutdown") return 0;
+  if (message.type === "search") {
+    if (!(message.embedding instanceof Float32Array))
+      throw new TypeError("invalid vector embedding");
+    return (
+      128 +
+      message.embedding.byteLength +
+      Buffer.byteLength(JSON.stringify(snapshotVectorSpec(message.spec)))
+    );
+  }
+  if (
+    typeof message.spec.sql !== "string" ||
+    !Array.isArray(message.spec.params) ||
+    (message.spec.mode !== "all" && message.spec.mode !== "get")
+  )
+    throw new TypeError("invalid read job");
+  return (
+    128 +
+    Buffer.byteLength(message.spec.sql) +
+    message.spec.params.reduce<number>((total, param) => {
+      if (!validReadParam(param)) throw new TypeError("invalid read parameter");
+      return (
+        total +
+        32 +
+        (param instanceof Uint8Array
+          ? param.byteLength
+          : Buffer.byteLength(String(param)))
+      );
+    }, 0)
+  );
+}
+
+function validReadParam(param: unknown): boolean {
+  return (
+    param === null ||
+    param instanceof Uint8Array ||
+    ["string", "number", "bigint", "boolean"].includes(typeof param)
+  );
+}
+
+/** Copy only protocol fields. Extra runtime properties (including binary
+ * buffers invisible to JSON size accounting) must never enter the queue. */
+function snapshotVectorSpec(spec: VectorQuerySpec): VectorQuerySpec {
+  if (typeof spec.limit !== "number")
+    throw new TypeError("invalid vector limit");
+  switch (spec.kind) {
+    case "knowledge": {
+      if (spec.tenantId !== undefined && typeof spec.tenantId !== "string")
+        throw new TypeError("invalid tenant id");
+      if (
+        spec.excludeCategories !== undefined &&
+        (!Array.isArray(spec.excludeCategories) ||
+          !spec.excludeCategories.every(
+            (category) => typeof category === "string",
+          ))
+      )
+        throw new TypeError("invalid vector categories");
+      return {
+        kind: "knowledge",
+        limit: spec.limit,
+        tenantId: spec.tenantId,
+        excludeCategories: spec.excludeCategories?.slice(),
+      };
+    }
+    case "entities":
+    case "distillations":
+      if (spec.tenantId !== undefined && typeof spec.tenantId !== "string")
+        throw new TypeError("invalid tenant id");
+      return { kind: spec.kind, limit: spec.limit, tenantId: spec.tenantId };
+    case "allDistillations":
+      if (typeof spec.projectId !== "string")
+        throw new TypeError("invalid project id");
+      return {
+        kind: "allDistillations",
+        limit: spec.limit,
+        projectId: spec.projectId,
+      };
+    case "temporal":
+      if (
+        typeof spec.projectId !== "string" ||
+        (spec.sessionId !== undefined && typeof spec.sessionId !== "string")
+      )
+        throw new TypeError("invalid temporal scope");
+      return {
+        kind: "temporal",
+        limit: spec.limit,
+        projectId: spec.projectId,
+        sessionId: spec.sessionId,
+      };
+  }
+  throw new TypeError("invalid vector kind");
+}
+
+/** Capture the request at admission. Queued callers may mutate their input
+ * before dispatch; in particular, a tiny typed-array view must not retain (or
+ * cause structuredClone to copy) a huge backing buffer in the waiting room. */
+function snapshotMessage(message: VectorWorkerInbound): VectorWorkerInbound {
+  if (message.type === "search")
+    return {
+      ...message,
+      spec: snapshotVectorSpec(message.spec),
+      embedding: new Float32Array(message.embedding),
+    };
+  if (message.type === "read")
+    return {
+      ...message,
+      spec: {
+        sql: message.spec.sql,
+        mode: message.spec.mode,
+        params: message.spec.params.map((param) =>
+          param instanceof Uint8Array ? new Uint8Array(param) : param,
+        ),
+      },
+    };
+  return message;
+}
+
+function removeQueued(p: Pending): void {
+  const queue = p.priority === "foreground" ? foregroundQueue : backgroundQueue;
+  const index = queue.indexOf(p);
+  if (index < 0) return;
+  queue.splice(index, 1);
+  pendingBytes -= p.bytes;
+  if (p.priority === "background") backgroundBytes -= p.bytes;
+}
+
+function resolveCaller(p: Pending, value: unknown): void {
+  if (p.callerSettled) return;
+  p.callerSettled = true;
+  p.resolve(value);
+}
+
+/** Remove ownership before settling; late worker replies cannot complete a
+ * request twice or release a slot that a different job now occupies. */
+function finishPending(
+  p: Pending,
+  outcome: ReadPoolTelemetry["outcome"],
+  value: unknown,
+  error?: Error,
+): void {
+  if (p.state === "settled") return;
+  if (p.state === "queued") removeQueued(p);
+  else p.owner?.inflight.delete(p.id);
+  p.state = "settled";
+  clearTimeout(p.timer);
+  if (p.signal && p.onAbort) p.signal.removeEventListener("abort", p.onAbort);
+  // A running abort already reported its terminal outcome to the caller and
+  // telemetry, but still owns this worker until its reply (or retirement).
+  if (p.callerSettled) return;
+  emitPoolTelemetry(p, outcome);
+  p.callerSettled = true;
+  if (error) p.reject(error);
+  else p.resolve(value);
+}
+
+function drainQueued(
+  value: unknown,
+  outcome: ReadPoolTelemetry["outcome"],
+): void {
+  for (const p of [...foregroundQueue, ...backgroundQueue]) {
+    finishPending(p, outcome, value);
+  }
+  consecutiveForeground = 0;
+}
+
+function takeNext(): Pending | undefined {
+  if (!backgroundQueue.length) consecutiveForeground = 0;
+  const pickBackground =
+    backgroundQueue.length > 0 &&
+    (foregroundQueue.length === 0 ||
+      consecutiveForeground >= FOREGROUND_WEIGHT);
+  const queue = pickBackground ? backgroundQueue : foregroundQueue;
+  const p = queue[0];
+  if (!p) return undefined;
+  removeQueued(p);
+  consecutiveForeground = pickBackground ? 0 : consecutiveForeground + 1;
+  return p;
+}
+
+/** Only idle workers receive messages. A synchronous fake worker may reply
+ * inside postMessage, so a bounded loop drains newly freed slots without
+ * recursively dispatching into the same worker. */
+function pumpQueue(): void {
+  if (poolBroken) {
+    drainQueued(POOL_REQUEST_UNAVAILABLE, "unavailable");
+    return;
+  }
+  if (pumping || shuttingDown) return;
+  pumping = true;
+  try {
+    refreshPoolDatabaseGeneration();
+    const live = ensurePool();
+    if (poolBroken) {
+      drainQueued(POOL_REQUEST_UNAVAILABLE, "unavailable");
+      return;
+    }
+    let assigned = true;
+    while (assigned && (foregroundQueue.length || backgroundQueue.length)) {
+      assigned = false;
+      for (const pw of live) {
+        if (pw.dead || pw.inflight.size) continue;
+        const p = takeNext();
+        if (!p) break;
+        assigned = true;
+        p.state = "running";
+        p.owner = pw;
+        p.startedAt = performance.now();
+        pw.inflight.set(p.id, p);
+        emitPoolTelemetry(p, "started");
+        try {
+          pw.worker.postMessage(p.message);
+        } catch (error) {
+          markDead(
+            pw,
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          terminateRetiredVectorWorker(pw.worker);
+        }
+      }
+    }
+  } catch (error) {
+    drainQueued(POOL_REQUEST_UNAVAILABLE, "unavailable");
+    log.info(
+      "read worker queue dispatch failed:",
+      error instanceof Error ? error.message : String(error),
+    );
+  } finally {
+    pumping = false;
+  }
+}
+
 /** Reject and clear every in-flight request on a worker. Used for STRUCTURAL
  *  deaths (crash / `error` / `exit` / init-error / shutdown): the worker is
  *  genuinely gone, so each caller applies its unavailable policy. */
 function failAll(pw: PoolWorker, err: Error): void {
-  for (const [, p] of pw.inflight) {
-    clearTimeout(p.timer);
-    p.reject(err);
-  }
-  pw.inflight.clear();
+  for (const p of pw.inflight.values())
+    finishPending(p, "unavailable", null, err);
 }
 
-/** Resolve every in-flight request on a worker with the timeout marker (NOT a
- *  rejection) and clear them. Used when a worker is retired for a TIMEOUT: the
- *  requests queued behind the wedged synchronous scan must DEGRADE to an empty
- *  result, exactly like the request that actually blew the timeout. Rejecting
- *  them instead (the old `failAll` behavior) used to route each one to the
- *  in-process fallback, re-blocking the
- *  main thread with the very synchronous scans the offload exists to avoid —
- *  the #1006 stall, amplified once the whole recall FTS fan-out shares the pool
- *  (Seer PR #1005 r3480447643). A timeout is slowness, not breakage, so (like
- *  {@link retireTimedOutWorker}) this never counts a structural failure. */
+/** Resolve the one running request on a timed-out worker without triggering a
+ * main-thread scan. Queued requests retain independent deadlines on the host. */
 function timeoutAll(pw: PoolWorker): void {
-  for (const [, p] of pw.inflight) {
-    clearTimeout(p.timer);
-    p.resolve(POOL_REQUEST_TIMED_OUT);
-  }
-  pw.inflight.clear();
+  for (const p of pw.inflight.values())
+    finishPending(p, "timeout", POOL_REQUEST_TIMED_OUT);
 }
 
 function trackVectorWorkerShutdown(
@@ -269,8 +595,14 @@ function trackVectorWorkerShutdown(
 }
 
 function terminateRetiredVectorWorker(worker: ShutdownableVectorWorker): void {
+  const retiring = retiringVectorWorkers;
+  if (retiring.has(worker)) return;
+  retiring.add(worker);
   trackVectorWorkerShutdown(worker, async () => {
     await worker.terminate();
+    retiring.delete(worker);
+    // The native thread has exited: its physical slot can now be reused.
+    if (retiring === retiringVectorWorkers) pumpQueue();
   });
 }
 
@@ -290,27 +622,21 @@ async function settleRetiredVectorWorkers(deadlineMs: number): Promise<void> {
  * timeout can't be interrupted from JS — terminating the worker is the only way
  * to reclaim the thread it's pinning (V8 tears it down once the in-progress
  * native call returns). The immediate, guaranteed effect is de-routing: marking
- * it `dead` drops it from {@link leastBusy} and {@link ensurePool} right away.
- * Leaving it running while we delete the in-flight entry — the pre-cancellation
- * behavior — made the still-busy worker look idle to {@link leastBusy}, so new
- * searches piled up behind the stuck scan in its message queue.
- * {@link ensurePool} respawns a fresh worker on the next call, restoring
- * capacity.
+ * it `dead` prevents further dispatch to it. The host queue holds subsequent
+ * work until termination is confirmed and a physical slot is available.
  *
  * Crucially this is NOT counted as a structural failure: a timeout is slowness,
  * not a broken worker, and latching the pool broken after repeated timeouts
  * would leave every foreground heavy read unavailable. Setting `dead` first makes
  * the terminate()-induced `exit` handler's {@link markDead} a no-op, so the
- * structural-failure latch is never touched. Collateral in-flight requests on
- * the same worker are RESOLVED as timeouts (see {@link timeoutAll}) — never
- * rejected — so their callers degrade to an empty result instead of re-running
- * the scan on the main thread (Seer PR #1005 r3480447643).
+ * structural-failure latch is never touched. Only one job is posted per worker.
  */
 function retireTimedOutWorker(pw: PoolWorker): void {
   if (pw.dead) return;
   pw.dead = true;
   timeoutAll(pw);
   terminateRetiredVectorWorker(pw.worker);
+  pumpQueue();
 }
 
 /**
@@ -323,10 +649,15 @@ function recordStructuralFailure(): void {
   structuralFailures++;
   if (structuralFailures < MAX_STRUCTURAL_FAILURES) return;
   poolBroken = true;
+  drainQueued(POOL_REQUEST_UNAVAILABLE, "unavailable");
   log.info(
     "vector worker pool disabled (repeated worker failures) — heavy reads degraded",
   );
   for (const w of workers) {
+    if (!w.dead) {
+      w.dead = true;
+      failAll(w, new Error("vector worker pool disabled"));
+    }
     terminateRetiredVectorWorker(w.worker);
   }
   workers = [];
@@ -342,11 +673,14 @@ function markDead(pw: PoolWorker, err: Error): void {
   pw.dead = true;
   failAll(pw, err);
   recordStructuralFailure();
+  if (foregroundQueue.length || backgroundQueue.length) pumpQueue();
 }
 
 function makeWorker(): PoolWorker | null {
+  let spawned: Worker | undefined;
   try {
     const worker = spawnWorker({ dbPath: dbPath() });
+    spawned = worker;
     const pw: PoolWorker = { worker, inflight: new Map(), dead: false };
     // Don't keep the process alive for a background read worker.
     worker.unref();
@@ -362,9 +696,8 @@ function makeWorker(): PoolWorker | null {
           structuralFailures = 0;
           const pending = pw.inflight.get(msg.id);
           if (pending) {
-            pw.inflight.delete(msg.id);
-            clearTimeout(pending.timer);
-            pending.resolve(msg.hits);
+            finishPending(pending, "ok", msg.hits);
+            pumpQueue();
           }
           break;
         }
@@ -373,9 +706,8 @@ function makeWorker(): PoolWorker | null {
           structuralFailures = 0;
           const pending = pw.inflight.get(msg.id);
           if (pending) {
-            pw.inflight.delete(msg.id);
-            clearTimeout(pending.timer);
-            pending.resolve(msg.rows);
+            finishPending(pending, "ok", msg.rows);
+            pumpQueue();
           }
           break;
         }
@@ -384,9 +716,8 @@ function makeWorker(): PoolWorker | null {
           // request; the worker keeps serving. Caller applies its failure policy.
           const pending = pw.inflight.get(msg.id);
           if (pending) {
-            pw.inflight.delete(msg.id);
-            clearTimeout(pending.timer);
-            pending.reject(new Error(msg.error));
+            finishPending(pending, "error", null, new Error(msg.error));
+            pumpQueue();
           }
           break;
         }
@@ -412,6 +743,14 @@ function makeWorker(): PoolWorker | null {
     // Synchronous spawn failure (e.g. unresolvable worker URL). Latch broken so
     // we stop trying — heavy reads follow their failure policy until restart.
     poolBroken = true;
+    drainQueued(POOL_REQUEST_UNAVAILABLE, "unavailable");
+    for (const pw of workers) {
+      pw.dead = true;
+      failAll(pw, new Error("read worker pool spawn failed"));
+      terminateRetiredVectorWorker(pw.worker);
+    }
+    if (spawned) terminateRetiredVectorWorker(spawned);
+    workers = [];
     log.info(
       "vector worker pool disabled (spawn failed):",
       err instanceof Error ? err.message : String(err),
@@ -437,7 +776,7 @@ function ensurePool(): PoolWorker[] {
   }
   workers = workers.filter((w) => !w.dead);
   const target = desiredPoolSize();
-  while (workers.length < target) {
+  while (workers.length + retiringVectorWorkers.size < target) {
     const pw = makeWorker();
     if (!pw) break; // poolBroken latched
     workers.push(pw);
@@ -452,6 +791,7 @@ function refreshPoolDatabaseGeneration(): void {
   const generation = dbReadGeneration();
   if (activeDbReadGeneration === generation) return;
   if (activeDbReadGeneration !== null) {
+    drainQueued(POOL_REQUEST_UNAVAILABLE, "unavailable");
     for (const pw of workers) {
       pw.dead = true;
       failAll(pw, new Error("read worker database replaced"));
@@ -464,45 +804,32 @@ function refreshPoolDatabaseGeneration(): void {
   activeDbReadGeneration = generation;
 }
 
-/** Pick the live worker with the fewest in-flight requests. */
-function leastBusy(live: PoolWorker[]): PoolWorker | null {
-  let best: PoolWorker | null = null;
-  for (const w of live) {
-    if (w.dead) continue;
-    if (!best || w.inflight.size < best.inflight.size) best = w;
-  }
-  return best;
-}
-
-/** Discriminated outcome of {@link dispatchToPool}. `ok` carries the worker's
- *  reply payload; `unavailable` means apply failure policy; `timeout` means degrade to
- *  empty (the worker was wedged and has been retired); `shutting-down` also
- *  degrades to empty, because fallback work could race the writer close. */
+/** `ok` carries a reply; `pressure` is bounded admission refusal. Timeouts
+ * and shutdown never authorize a synchronous fallback. */
 type DispatchResult =
   | { status: "ok"; value: unknown }
   | { status: "unavailable" }
   | { status: "timeout" }
+  | { status: "pressure" }
   | { status: "shutting-down" };
 
 /**
- * Dispatch one request to the least-busy live worker and await its reply.
+ * Admit one request into the bounded host queue and await its worker reply.
  * Shared by {@link tryPoolVectorSearch} and {@link tryPoolRead}; NEVER throws.
  *
  * `makeMessage(id)` builds the typed inbound message. `label` is the human
  * request-family name ("vector worker search" / "read worker job") used in the
  * timeout log so incident triage can grep per-family wording.
  *
- * On timeout the worker is alive but too slow: we resolve `{status:"timeout"}`
- * (NOT reject → NOT in-process fallback, which would re-block the loop — the
- * #1006 stall bug) and terminate the wedged worker via
- * {@link retireTimedOutWorker} so the pool recovers. A timeout is slowness, not
- * a structural failure, so the broken-latch is never touched. Anything else
+ * A queued timeout drops only that job; a running timeout retires its worker.
+ * Both resolve `{status:"timeout"}` without a synchronous fallback. Anything else
  * (disabled pool, no worker, per-request error, postMessage throw, unexpected
  * throw) yields `{status:"unavailable"}` and the caller applies its failure policy.
  */
 async function dispatchToPool(
   makeMessage: (id: number) => VectorWorkerInbound,
   label: string,
+  options: ReadPoolRequestOptions = {},
 ): Promise<DispatchResult> {
   // Once shutdown owns the worker set, neither spawn a replacement nor route
   // this DB-capable operation to the synchronous main-thread fallback.
@@ -515,48 +842,111 @@ async function dispatchToPool(
   // unavailable and the caller applies its failure policy.
   try {
     const live = ensurePool();
-    const pw = leastBusy(live);
-    if (!pw) return { status: "unavailable" };
+    if (poolBroken || (!live.length && !retiringVectorWorkers.size))
+      return { status: "unavailable" };
+
+    if (options.signal?.aborted) return { status: "timeout" };
 
     const id = nextRequestId++;
     const timeoutMs = vectorSearchTimeoutMs();
+    const original = makeMessage(id);
+    const estimatedBytes = messageBytes(original);
+    // Runtime validation matters for JS callers: arbitrary strings must not
+    // bypass accounting or become unbounded telemetry attributes.
+    const priority: ReadPoolPriority =
+      options.priority === "background" ? "background" : "foreground";
+    const pendingCount = foregroundQueue.length + backgroundQueue.length;
+    const pressure =
+      estimatedBytes > MAX_PENDING_READ_BYTES ||
+      pendingCount >= MAX_PENDING_READ_JOBS ||
+      pendingBytes + estimatedBytes > MAX_PENDING_READ_BYTES ||
+      (priority === "background" &&
+        (backgroundQueue.length >= MAX_BACKGROUND_PENDING_JOBS ||
+          backgroundBytes + estimatedBytes > MAX_BACKGROUND_PENDING_BYTES));
+    if (pressure) {
+      emitPoolTelemetry(
+        {
+          message: original,
+          priority,
+          enqueuedAt: performance.now(),
+          startedAt: undefined,
+        } as Pending,
+        "pressure",
+      );
+      return { status: "pressure" };
+    }
+
+    const message = snapshotMessage(original);
+    const bytes = messageBytes(message);
+    // Defensive against getters/mutation during cloning; the queue accounts
+    // for the retained snapshot, never for a caller-owned mutable view.
+    if (
+      bytes > MAX_PENDING_READ_BYTES ||
+      pendingBytes + bytes > MAX_PENDING_READ_BYTES ||
+      (priority === "background" &&
+        backgroundBytes + bytes > MAX_BACKGROUND_PENDING_BYTES)
+    )
+      return { status: "pressure" };
+
     const settled = await new Promise<unknown>((resolve, reject) => {
+      const p: Pending = {
+        id,
+        message,
+        priority,
+        bytes,
+        enqueuedAt: performance.now(),
+        state: "queued",
+        resolve,
+        reject,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+        signal: options.signal,
+        callerSettled: false,
+      };
       const timer = setTimeout(() => {
-        pw.inflight.delete(id);
-        // Resolve the timeout marker (don't reject → don't fall back
-        // in-process): the worker is alive but slow; re-running this scan on the
-        // main thread re-blocks the event loop. Then cancel the doomed query by
-        // terminating its (uninterruptible, synchronously-scanning) worker so
-        // the pool recovers instead of piling new work behind the stuck scan.
-        log.info(
-          `${label} timed out after ${timeoutMs}ms — terminating the wedged worker without re-running in-process`,
-        );
-        resolve(POOL_REQUEST_TIMED_OUT);
-        retireTimedOutWorker(pw);
+        if (p.state === "queued") {
+          finishPending(p, "timeout", POOL_REQUEST_TIMED_OUT);
+        } else if (p.state === "running" && p.owner) {
+          log.info(
+            `${label} timed out after ${timeoutMs}ms — terminating the wedged worker without re-running in-process`,
+          );
+          retireTimedOutWorker(p.owner);
+        }
       }, timeoutMs);
       // The worker is already unref'd (makeWorker), so an in-flight request must
       // not be the thing that keeps the event loop alive: unref the timeout too,
       // or a pending request delays process exit by up to the timeout on
       // shutdown. (review #989)
-      timer.unref();
-      pw.inflight.set(id, { resolve, reject, timer });
-      try {
-        pw.worker.postMessage(makeMessage(id));
-      } catch (err) {
-        // The worker died in the window after leastBusy() picked it. Clean up
-        // the timer + inflight entry (don't leak them) and fall back.
-        clearTimeout(timer);
-        pw.inflight.delete(id);
-        reject(err instanceof Error ? err : new Error(String(err)));
+      timer.unref?.();
+      p.timer = timer;
+      p.onAbort = () => {
+        if (p.state === "queued")
+          finishPending(p, "cancelled", POOL_REQUEST_TIMED_OUT);
+        else if (p.state === "running" && !p.callerSettled) {
+          // Do not free the native worker: it still runs this SQL. Its deadline
+          // remains armed and retires it if the job does not finish.
+          resolveCaller(p, POOL_REQUEST_TIMED_OUT);
+          emitPoolTelemetry(p, "cancelled");
+        }
+      };
+      foregroundQueueOrBackground(p).push(p);
+      pendingBytes += bytes;
+      if (priority === "background") backgroundBytes += bytes;
+      if (options.signal) {
+        options.signal.addEventListener("abort", p.onAbort, { once: true });
+        if (options.signal.aborted) p.onAbort();
+      }
+      if (p.state === "queued") {
+        emitPoolTelemetry(p, "admitted");
+        pumpQueue();
       }
     });
     // A writer close/reopen can happen while this job runs, even before the
     // next dispatch notices the new generation. Never return stale rows from
     // the old reader as a successful snapshot for the new database.
     if (dbReadGeneration() !== readGeneration) return { status: "unavailable" };
-    return settled === POOL_REQUEST_TIMED_OUT
-      ? { status: "timeout" }
-      : { status: "ok", value: settled };
+    if (settled === POOL_REQUEST_TIMED_OUT) return { status: "timeout" };
+    if (settled === POOL_REQUEST_UNAVAILABLE) return { status: "unavailable" };
+    return { status: "ok", value: settled };
   } catch (err) {
     // shutdownVectorPoolAsync rejects in-flight work via failAll(). Treat that
     // transition as closed admission, not as a reason to run the same SQLite
@@ -568,6 +958,10 @@ async function dispatchToPool(
     );
     return { status: "unavailable" };
   }
+}
+
+function foregroundQueueOrBackground(p: Pending): Pending[] {
+  return p.priority === "foreground" ? foregroundQueue : backgroundQueue;
 }
 
 /**
@@ -582,15 +976,20 @@ async function dispatchToPool(
 export async function tryPoolVectorSearch(
   spec: VectorQuerySpec,
   embedding: Float32Array,
-): Promise<Hits | null | typeof VECTOR_SEARCH_TIMED_OUT> {
+  options?: ReadPoolRequestOptions,
+): Promise<
+  Hits | null | typeof VECTOR_SEARCH_TIMED_OUT | typeof VECTOR_SEARCH_PRESSURED
+> {
   const r = await dispatchToPool(
     (id) => ({ type: "search", id, spec, embedding }),
     "vector worker search",
+    options,
   );
   if (r.status === "timeout" || r.status === "shutting-down") {
     return VECTOR_SEARCH_TIMED_OUT;
   }
   if (r.status === "unavailable") return null;
+  if (r.status === "pressure") return VECTOR_SEARCH_PRESSURED;
   // A successful search always returns an array (never null), so the unwrap to
   // Hits is safe.
   return r.value as Hits;
@@ -609,15 +1008,23 @@ export async function tryPoolVectorSearch(
  */
 export async function tryPoolRead(
   spec: ReadJobSpec,
-): Promise<{ rows: unknown } | null | typeof READ_JOB_TIMED_OUT> {
+  options?: ReadPoolRequestOptions,
+): Promise<
+  | { rows: unknown }
+  | null
+  | typeof READ_JOB_TIMED_OUT
+  | typeof READ_JOB_PRESSURED
+> {
   const r = await dispatchToPool(
     (id) => ({ type: "read", id, spec }),
     "read worker job",
+    options,
   );
   if (r.status === "timeout" || r.status === "shutting-down") {
     return READ_JOB_TIMED_OUT;
   }
   if (r.status === "unavailable") return null;
+  if (r.status === "pressure") return READ_JOB_PRESSURED;
   return { rows: r.value };
 }
 
@@ -872,6 +1279,7 @@ export async function checkReadOffload(
  *  Use {@link shutdownVectorPoolAsync} on the graceful path. */
 export function shutdownVectorPool(): void {
   shuttingDown = true;
+  drainQueued(POOL_REQUEST_TIMED_OUT, "timeout");
   for (const pw of workers) {
     failAll(pw, new Error("vector pool shutting down"));
     try {
@@ -936,6 +1344,7 @@ export function shutdownVectorPoolAsync(
 ): Promise<void> {
   if (vectorPoolShutdownPromise) return vectorPoolShutdownPromise;
   shuttingDown = true;
+  drainQueued(POOL_REQUEST_TIMED_OUT, "timeout");
   // Snapshot the current worker list, then drop our reference so a stray
   // postMessage from a dead worker can't see the pool as "still alive".
   const live = workers;
@@ -1019,6 +1428,14 @@ export function _resetVectorPoolForTest(): void {
   shutdownVectorPool();
   vectorPoolShutdownPromise = null;
   retiredVectorWorkers = new OwnedRetirements<ShutdownableVectorWorker>();
+  retiringVectorWorkers = new Set<ShutdownableVectorWorker>();
+  foregroundQueue = [];
+  backgroundQueue = [];
+  pendingBytes = 0;
+  backgroundBytes = 0;
+  consecutiveForeground = 0;
+  pumping = false;
+  readPoolTelemetryHook = null;
   poolBroken = false;
   nextRequestId = 0;
   structuralFailures = 0;

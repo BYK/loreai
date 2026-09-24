@@ -15,25 +15,32 @@
 
 import { db } from "./db";
 import type { ReadParam } from "./read-job";
+import type { ReadPoolRequestOptions } from "./vector-pool";
 import {
   inProcessReadFallbackForTest,
+  READ_JOB_PRESSURED,
   READ_JOB_TIMED_OUT,
   tryPoolRead,
 } from "./vector-pool";
 
 // Re-exported so callers that coordinate several reads (e.g. forSession's two
 // candidate scans) can detect a per-read timeout and degrade them together.
-export { READ_JOB_TIMED_OUT } from "./vector-pool";
+export { READ_JOB_PRESSURED, READ_JOB_TIMED_OUT } from "./vector-pool";
 
 /** Worker unavailable/disabled/broken is different from a query timeout.
  * Neither is a trustworthy empty result for required prompt preparation. */
 export const READ_JOB_UNAVAILABLE = Symbol("read-job-unavailable");
 export type ReadJobFailure =
   | typeof READ_JOB_TIMED_OUT
+  | typeof READ_JOB_PRESSURED
   | typeof READ_JOB_UNAVAILABLE;
 
 export function isReadJobFailure(value: unknown): value is ReadJobFailure {
-  return value === READ_JOB_TIMED_OUT || value === READ_JOB_UNAVAILABLE;
+  return (
+    value === READ_JOB_TIMED_OUT ||
+    value === READ_JOB_PRESSURED ||
+    value === READ_JOB_UNAVAILABLE
+  );
 }
 
 /** Fixed diagnostic; callers must not put SQL, row data or tenant IDs here. */
@@ -46,7 +53,7 @@ export class ReadPreparationUnavailableError extends Error {
       | "references"
       | "context"
       | "lat",
-    readonly reason: "timeout" | "unavailable",
+    readonly reason: "timeout" | "pressure" | "unavailable",
   ) {
     super(`Read preparation unavailable (${phase}: ${reason})`);
     this.name = "ReadPreparationUnavailableError";
@@ -60,7 +67,11 @@ export function requireReadRows(
   if (isReadJobFailure(result)) {
     throw new ReadPreparationUnavailableError(
       phase,
-      result === READ_JOB_TIMED_OUT ? "timeout" : "unavailable",
+      result === READ_JOB_TIMED_OUT
+        ? "timeout"
+        : result === READ_JOB_PRESSURED
+          ? "pressure"
+          : "unavailable",
     );
   }
   return result;
@@ -82,7 +93,7 @@ export async function offloadAll(
   params: ReadParam[],
 ): Promise<unknown[]> {
   const res = await tryPoolRead({ sql, params, mode: "all" });
-  if (res === READ_JOB_TIMED_OUT) return [];
+  if (res === READ_JOB_TIMED_OUT || res === READ_JOB_PRESSURED) return [];
   if (res) return res.rows as unknown[];
   if (!inProcessReadFallbackForTest()) return [];
   return db()
@@ -102,9 +113,10 @@ export async function offloadAll(
 export async function offloadAllOrTimeout(
   sql: string,
   params: ReadParam[],
+  options?: ReadPoolRequestOptions,
 ): Promise<unknown[] | ReadJobFailure> {
-  const res = await tryPoolRead({ sql, params, mode: "all" });
-  if (res === READ_JOB_TIMED_OUT) return READ_JOB_TIMED_OUT;
+  const res = await tryPoolRead({ sql, params, mode: "all" }, options);
+  if (res === READ_JOB_TIMED_OUT || res === READ_JOB_PRESSURED) return res;
   if (res) return res.rows as unknown[];
   if (!inProcessReadFallbackForTest()) return READ_JOB_UNAVAILABLE;
   return db()
@@ -124,7 +136,7 @@ export async function offloadGet(
   params: ReadParam[],
 ): Promise<unknown> {
   const res = await tryPoolRead({ sql, params, mode: "get" });
-  if (res === READ_JOB_TIMED_OUT) return null;
+  if (res === READ_JOB_TIMED_OUT || res === READ_JOB_PRESSURED) return null;
   if (res) return res.rows;
   if (!inProcessReadFallbackForTest()) return null;
   return db()

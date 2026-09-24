@@ -2428,6 +2428,7 @@ function isBlanketEligible(entry: KnowledgeEntry, pid: string): boolean {
  */
 async function scoreEntriesFTS(
   sessionContext: string,
+  signal?: AbortSignal,
 ): Promise<Map<string, number>> {
   const terms = extractTopTerms(sessionContext);
   if (!terms.length) return new Map();
@@ -2449,6 +2450,7 @@ async function scoreEntriesFTS(
           AND k.tenant_id = ?
           AND COALESCE(m.confidence, 1.0) > 0.2`,
         [title, content, category, q, currentTenantId()],
+        { signal },
       ),
       "knowledge",
     ) as Array<{
@@ -2471,6 +2473,7 @@ async function scoreEntriesFTS(
     }
     return scoreMap;
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof ReadPreparationUnavailableError) throw error;
     return new Map();
   }
@@ -2628,14 +2631,17 @@ export async function forSession(
        ORDER BY confidence DESC, updated_at DESC`;
   const [projectRows, crossRows] = await timer.await(
     Promise.all([
-      offloadAllOrTimeout(projectSql, [
-        currentTenantId(),
-        pid,
-        ...categoryParams,
-      ]),
-      offloadAllOrTimeout(crossSql, [currentTenantId(), ...categoryParams]),
+      offloadAllOrTimeout(
+        projectSql,
+        [currentTenantId(), pid, ...categoryParams],
+        { signal: options?.signal },
+      ),
+      offloadAllOrTimeout(crossSql, [currentTenantId(), ...categoryParams], {
+        signal: options?.signal,
+      }),
     ]),
   );
+  options?.signal?.throwIfAborted();
   // If EITHER scan fails, reject before injecting or freezing a partial set.
   // The caller can retry once the worker recovers; no synchronous scan or
   // authoritative "no knowledge" decision runs on this failure path.
@@ -2703,7 +2709,10 @@ export async function forSession(
     const foreignPrefs = crossEntries.filter((e) => !isBlanketEligible(e, pid));
     let relevantForeign: KnowledgeEntry[] = [];
     if (foreignPrefs.length && options?.contextHint?.trim()) {
-      const ftsScores = await scoreEntriesFTS(options.contextHint);
+      const ftsScores = await scoreEntriesFTS(
+        options.contextHint,
+        options.signal,
+      );
       relevantForeign = foreignPrefs.filter(
         (e) => (ftsScores.get(e.id) ?? 0) > 0,
       );
@@ -2828,7 +2837,9 @@ export async function forSession(
         clearTimeout(deadlineTimer);
       }
       const hits = await timer.await(
-        embedding.vectorSearch(contextVec, 50, excludeFilter, "knowledge"),
+        embedding.vectorSearch(contextVec, 50, excludeFilter, "knowledge", {
+          signal: options?.signal,
+        }),
         "vectorSearch",
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
@@ -2851,7 +2862,7 @@ export async function forSession(
       // Hybrid scoring: vector search only covers entries with stored embeddings.
       // Entries without embeddings (e.g. newly created, async embed not yet done)
       // fall back to FTS5 so they aren't invisible to scoring.
-      const ftsScores = await scoreEntriesFTS(sessionContext);
+      const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);
 
       // Relevance floor: a VECTOR-ONLY signal must clear minRelevance to count
       // as a match. Otherwise a near-orthogonal entry (e.g. a watchOS gotcha
@@ -2905,7 +2916,7 @@ export async function forSession(
         .map((e) => ({ entry: e, score: scoreOf(e) }));
     } else {
       // Vector failed — fall through to FTS5
-      const ftsScores = await scoreEntriesFTS(sessionContext);
+      const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);
       ({ scoredProject, scoredCross } = scoreFTS(
         projectEntries,
         crossEntries,
@@ -2914,7 +2925,7 @@ export async function forSession(
     }
   } else if (sessionContext.trim().length > 20) {
     // Embeddings unavailable — use FTS5 BM25 as fallback
-    const ftsScores = await scoreEntriesFTS(sessionContext);
+    const ftsScores = await scoreEntriesFTS(sessionContext, options?.signal);
     ({ scoredProject, scoredCross } = scoreFTS(
       projectEntries,
       crossEntries,
@@ -2961,6 +2972,7 @@ export async function forSession(
         options.includeContextSources,
         options.contextSourceLimit ?? CONTEXT_SOURCE_LIMIT,
         sessionID,
+        options.signal,
       ),
       "vectorSearch",
     );
@@ -3169,6 +3181,7 @@ async function loadContextSourceCandidates(
   sources: ContextSource[],
   limit: number,
   _sessionID?: string,
+  signal?: AbortSignal,
 ): Promise<Scored[]> {
   const out: Scored[] = [];
   // Same relevance floor as knowledge: don't fold in a distillation/temporal
@@ -3240,6 +3253,7 @@ async function loadContextSourceCandidates(
           contextVec,
           limit * 4,
           "context",
+          { signal },
         );
         for (const h of hits) {
           // Match the knowledge path's floor semantics: a context source must
@@ -3266,6 +3280,7 @@ async function loadContextSourceCandidates(
             ORDER BY rank
             LIMIT ?`,
             [ftsMatch, pid, limit * 4],
+            { signal },
           ),
           "context",
         ) as Array<{ id: string; rank: number }>;
@@ -3321,6 +3336,7 @@ async function loadContextSourceCandidates(
         }
       }
     } catch (err) {
+      signal?.throwIfAborted();
       if (err instanceof ReadPreparationUnavailableError) throw err;
       log.warn(
         "forSession: distillation context source failed (non-fatal):",
@@ -3343,6 +3359,7 @@ async function loadContextSourceCandidates(
           limit,
           undefined,
           "context",
+          { signal },
         );
         for (const h of hits) {
           if (h.similarity <= 0 || h.similarity < minRelevance) continue;
@@ -3367,6 +3384,7 @@ async function loadContextSourceCandidates(
             ORDER BY rank
             LIMIT ?`,
             [ftsMatch, pid, limit * 4],
+            { signal },
           ),
           "context",
         ) as Array<{ id: string; rank: number }>;
@@ -3427,6 +3445,7 @@ async function loadContextSourceCandidates(
         }
       }
     } catch (err) {
+      signal?.throwIfAborted();
       if (err instanceof ReadPreparationUnavailableError) throw err;
       log.warn("forSession: temporal context source failed (non-fatal):", err);
     }

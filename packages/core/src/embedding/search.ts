@@ -20,23 +20,43 @@ import {
 } from "../vector-query";
 import {
   inProcessReadFallbackForTest,
+  type ReadPoolRequestOptions,
   tryPoolVectorSearch,
+  VECTOR_SEARCH_PRESSURED,
   VECTOR_SEARCH_TIMED_OUT,
 } from "../vector-pool";
+
+type VectorSearchOptions = ReadPoolRequestOptions & {
+  /** Lets a background caller distinguish refused admission from a real
+   * empty result, without changing the optional-read policy for others. */
+  onPressure?: () => void;
+};
 
 async function poolOrInProcess(
   spec: VectorQuerySpec,
   queryEmbedding: Float32Array,
   failurePhase?: ReadPreparationUnavailableError["phase"],
+  options?: VectorSearchOptions,
 ): Promise<VectorHit[] | DistillationVectorHit[]> {
   const started = performance.now();
   const cohort = resolveReadMode(readStorageMode(db()), isVecAvailable());
   try {
-    const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
+    const pooled = await tryPoolVectorSearch(spec, queryEmbedding, options);
     // Never repeat a timed-out worker scan on the event loop.
     if (pooled === VECTOR_SEARCH_TIMED_OUT) {
       if (failurePhase)
         throw new ReadPreparationUnavailableError(failurePhase, "timeout");
+      return [];
+    }
+    if (pooled === VECTOR_SEARCH_PRESSURED) {
+      // An observer must not turn an optional-read refusal into an exception.
+      try {
+        options?.onPressure?.();
+      } catch {
+        // Keep the normal pressure policy even if a caller's observer fails.
+      }
+      if (failurePhase)
+        throw new ReadPreparationUnavailableError(failurePhase, "pressure");
       return [];
     }
     if (pooled !== null) return pooled;
@@ -74,6 +94,7 @@ export async function vectorSearch(
   limit = 10,
   excludeCategories?: string[],
   selectionPhase?: ReadPreparationUnavailableError["phase"],
+  options?: ReadPoolRequestOptions,
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
     {
@@ -84,6 +105,7 @@ export async function vectorSearch(
     },
     queryEmbedding,
     selectionPhase,
+    options,
   );
 }
 
@@ -101,11 +123,13 @@ export async function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
   selectionPhase?: ReadPreparationUnavailableError["phase"],
+  options?: ReadPoolRequestOptions,
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
     { kind: "distillations", tenantId: currentTenantId(), limit },
     queryEmbedding,
     selectionPhase,
+    options,
   );
 }
 
@@ -113,10 +137,13 @@ export async function vectorSearchAllDistillations(
   queryEmbedding: Float32Array,
   projectId: string,
   limit = 20,
+  options?: VectorSearchOptions,
 ): Promise<DistillationVectorHit[]> {
   return (await poolOrInProcess(
     { kind: "allDistillations", projectId, limit },
     queryEmbedding,
+    undefined,
+    options,
   )) as DistillationVectorHit[];
 }
 
@@ -126,10 +153,12 @@ export async function vectorSearchTemporal(
   limit = 10,
   sessionId?: string,
   selectionPhase?: ReadPreparationUnavailableError["phase"],
+  options?: ReadPoolRequestOptions,
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
     { kind: "temporal", projectId, limit, sessionId },
     queryEmbedding,
     selectionPhase,
+    options,
   );
 }

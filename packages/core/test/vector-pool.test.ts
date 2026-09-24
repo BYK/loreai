@@ -1,12 +1,24 @@
 import { EventEmitter } from "node:events";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { close, db } from "../src/db";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
   checkReadOffload,
   checkVecWorker,
+  MAX_PENDING_READ_BYTES,
+  MAX_PENDING_READ_JOBS,
+  readPoolStats,
+  setReadPoolTelemetryHook,
+  READ_JOB_PRESSURED,
   READ_JOB_TIMED_OUT,
   shutdownVectorPool,
+  shutdownVectorPoolAsync,
   tryPoolRead,
   tryPoolVectorSearch,
   VECTOR_SEARCH_TIMED_OUT,
@@ -28,8 +40,14 @@ class FakeWorker extends EventEmitter {
   readonly index: number;
 
   constructor(
-    readonly onSearch: (w: FakeWorker, msg: { id: number }) => void,
-    readonly onRead?: (w: FakeWorker, msg: { id: number }) => void,
+    readonly onSearch: (
+      w: FakeWorker,
+      msg: Extract<VectorWorkerInbound, { type: "search" }>,
+    ) => void,
+    readonly onRead?: (
+      w: FakeWorker,
+      msg: Extract<VectorWorkerInbound, { type: "read" }>,
+    ) => void,
   ) {
     super();
     this.index = FakeWorker.instances.length;
@@ -69,7 +87,10 @@ class FakeWorker extends EventEmitter {
 }
 
 function factoryReturning(
-  onSearch: (w: FakeWorker, msg: { id: number }) => void,
+  onSearch: (
+    w: FakeWorker,
+    msg: Extract<VectorWorkerInbound, { type: "search" }>,
+  ) => void,
 ): (d: VectorWorkerInitData) => never {
   return (() => new FakeWorker(onSearch)) as unknown as (
     d: VectorWorkerInitData,
@@ -77,7 +98,10 @@ function factoryReturning(
 }
 
 function factoryReturningRead(
-  onRead: (w: FakeWorker, msg: { id: number }) => void,
+  onRead: (
+    w: FakeWorker,
+    msg: Extract<VectorWorkerInbound, { type: "read" }>,
+  ) => void,
 ): (d: VectorWorkerInitData) => never {
   return (() => new FakeWorker(() => {}, onRead)) as unknown as (
     d: VectorWorkerInitData,
@@ -448,18 +472,11 @@ describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
     ]);
   });
 
-  it("degrades collateral in-flight requests on a timed-out worker as TIMEOUT (never null/in-process)", async () => {
+  it("times out a queued search without posting it behind a wedged worker", async () => {
     vi.useFakeTimers();
-    // Pool size is 2 (DEFAULT_POOL_SIZE). Park a request on each worker, then a
-    // third lands back on worker 0 (leastBusy tie → first). When worker 0's first
-    // request times out, worker 0 is terminated. The THIRD request — collateral,
-    // which never itself exceeded the timeout — must RESOLVE as the timeout
-    // sentinel so its caller degrades to empty, NOT reject → null. Pre-fix
-    // (failAll rejected collateral) it became null → the caller re-ran the scan
-    // synchronously in-process, re-blocking the main thread — the #1006 stall,
-    // amplified once the whole recall FTS fan-out shares the pool (Seer #1005
-    // r3480447643). Asserting the sentinel (not null) is the non-vacuous guard:
-    // reverting to `failAll(pw, …)` in retireTimedOutWorker fails this.
+    // The third search remains host-queued and its deadline expires without
+    // sending it to a busy worker. It must retain the no-synchronous-fallback
+    // timeout contract, even when the first worker is retired.
     const seen: number[] = [];
     _setTestVectorWorkerFactory(
       factoryReturning((w) => {
@@ -470,8 +487,8 @@ describe("vector-pool timeout cancellation (#1006 follow-up)", () => {
     first.catch(() => {});
     const filler = tryPoolVectorSearch(KNOWLEDGE, QUERY); // → worker 1
     filler.catch(() => {});
-    const collateral = tryPoolVectorSearch(KNOWLEDGE, QUERY); // → worker 0 (2 in-flight)
-    expect(seen).toEqual([0, 1, 0]);
+    const collateral = tryPoolVectorSearch(KNOWLEDGE, QUERY);
+    expect(seen).toEqual([0, 1]);
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await first).toBe(VECTOR_SEARCH_TIMED_OUT);
     expect(await collateral).toBe(VECTOR_SEARCH_TIMED_OUT);
@@ -539,14 +556,8 @@ describe("vector-pool generic read jobs (tryPoolRead)", () => {
     expect(served?.terminated).toBe(true);
   });
 
-  it("degrades a collateral read on a timed-out worker as READ_JOB_TIMED_OUT (not null/in-process)", async () => {
-    // The PR2 recall fan-out routes its FTS scans through offloadAllOrTimeout,
-    // which re-runs the scan IN-PROCESS only on a bare null; READ_JOB_TIMED_OUT
-    // makes it degrade to empty instead. A collateral read queued behind a
-    // wedged scan must therefore resolve the sentinel, not null — otherwise one
-    // slow temporal FTS scan re-blocks the event loop with every other recall
-    // sub-query sharing that worker (Seer #1005 r3480447643). This is the read
-    // analogue of the vector collateral test above.
+  it("times out a queued read without posting it behind a wedged worker", async () => {
+    // Host-queued reads retain the no-synchronous-fallback timeout contract.
     vi.useFakeTimers();
     const seen: number[] = [];
     _setTestVectorWorkerFactory(
@@ -558,8 +569,8 @@ describe("vector-pool generic read jobs (tryPoolRead)", () => {
     first.catch(() => {});
     const filler = tryPoolRead(READ_JOB); // → worker 1
     filler.catch(() => {});
-    const collateral = tryPoolRead(READ_JOB); // → worker 0 (2 in-flight)
-    expect(seen).toEqual([0, 1, 0]);
+    const collateral = tryPoolRead(READ_JOB);
+    expect(seen).toEqual([0, 1]);
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
     expect(await first).toBe(READ_JOB_TIMED_OUT);
     expect(await collateral).toBe(READ_JOB_TIMED_OUT);
@@ -574,6 +585,513 @@ describe("vector-pool generic read jobs (tryPoolRead)", () => {
     expect(afterFirst).toBeGreaterThan(0);
     await tryPoolRead(READ_JOB);
     expect(FakeWorker.instances.length).toBe(afterFirst);
+  });
+});
+
+describe("bounded read-pool admission (#1739)", () => {
+  const job = (name: string): ReadJobSpec => ({
+    sql: `SELECT '${name}'`,
+    params: [],
+    mode: "all",
+  });
+
+  it("bounds queued jobs and bytes, reporting pressure without posting rejected work", async () => {
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((_w, msg) => {
+        posted.push(msg.spec.sql);
+      }),
+    );
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const pending = Array.from({ length: MAX_PENDING_READ_JOBS }, (_, i) =>
+      tryPoolRead(job(`queued-${i}`)),
+    );
+    const rejected = await tryPoolRead(job("rejected"));
+    expect(rejected).toBe(READ_JOB_PRESSURED);
+    expect(readPoolStats().pendingCount).toBe(MAX_PENDING_READ_JOBS);
+    expect(readPoolStats().pendingBytes).toBeLessThanOrEqual(
+      MAX_PENDING_READ_BYTES,
+    );
+    expect(readPoolStats().runningCount).toBe(2);
+    expect(posted).toEqual(["SELECT 'held-0'", "SELECT 'held-1'"]);
+    shutdownVectorPool();
+    await Promise.all([...held, ...pending]);
+  });
+
+  it("reserves foreground admission and schedules background fairly under sustained foreground load", async () => {
+    const posted: Array<{ worker: FakeWorker; id: number; name: string }> = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) => {
+        posted.push({ worker, id: msg.id, name: msg.spec.sql });
+      }),
+    );
+    const initial = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const background = Array.from({ length: 4 }, (_, i) =>
+      tryPoolRead(job(`background-${i}`), { priority: "background" }),
+    );
+    const foreground = Array.from({ length: 12 }, (_, i) =>
+      tryPoolRead(job(`foreground-${i}`)),
+    );
+    expect(posted).toHaveLength(2);
+    posted[0].worker.replyRead(posted[0].id, []);
+    expect(posted[2].name).toBe("SELECT 'foreground-0'");
+    for (let i = 2; i < 8; i++) {
+      posted[i].worker.replyRead(posted[i].id, []);
+    }
+    expect(posted.slice(2, 8).some((p) => p.name.includes("background"))).toBe(
+      true,
+    );
+    shutdownVectorPool();
+    await Promise.all([...initial, ...background, ...foreground]);
+  });
+
+  it("expires and aborts queued jobs without posting them or retiring a busy worker", async () => {
+    vi.useFakeTimers();
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((_w, msg) => {
+        posted.push(msg.spec.sql);
+      }),
+    );
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const controller = new AbortController();
+    const aborted = tryPoolRead(job("aborted"), { signal: controller.signal });
+    controller.abort();
+    expect(await aborted).toBe(READ_JOB_TIMED_OUT);
+    expect(posted).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
+    expect(FakeWorker.instances.slice(0, 2).every((w) => w.terminated)).toBe(
+      true,
+    );
+    expect(await Promise.all(held)).toEqual([
+      READ_JOB_TIMED_OUT,
+      READ_JOB_TIMED_OUT,
+    ]);
+    expect(posted).not.toContain("SELECT 'aborted'");
+  });
+
+  it("expires a queued deadline without retiring either worker running another job", async () => {
+    vi.useFakeTimers();
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((_w, msg) => {
+        posted.push(msg.spec.sql);
+      }),
+    );
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = "1000";
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    process.env.LORE_VEC_SEARCH_TIMEOUT_MS = "10";
+    const queued = tryPoolRead(job("queued-short"));
+    await vi.advanceTimersByTimeAsync(11);
+    expect(await queued).toBe(READ_JOB_TIMED_OUT);
+    expect(posted).toEqual(["SELECT 'held-0'", "SELECT 'held-1'"]);
+    expect(FakeWorker.instances.every((worker) => !worker.terminated)).toBe(
+      true,
+    );
+    expect(readPoolStats()).toMatchObject({ pendingCount: 0, runningCount: 2 });
+    shutdownVectorPool();
+    await Promise.all(held);
+  });
+
+  it("keeps a retired worker's physical slot occupied until termination is confirmed", async () => {
+    vi.useFakeTimers();
+    const posted: string[] = [];
+    const release: Array<() => void> = [];
+    _setTestVectorWorkerFactory((() => {
+      const worker = new FakeWorker(
+        () => {},
+        (w, msg) => {
+          posted.push(msg.spec.sql);
+          if (msg.spec.sql.includes("queued")) w.replyRead(msg.id, []);
+        },
+      );
+      worker.terminate = () =>
+        new Promise<number>((resolve) => {
+          release.push(() => {
+            worker.terminated = true;
+            worker.die(0);
+            resolve(0);
+          });
+        });
+      return worker;
+    }) as unknown as (d: VectorWorkerInitData) => never);
+
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    await vi.advanceTimersByTimeAsync(100);
+    const queued = tryPoolRead(job("queued"));
+    await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() - 100);
+    expect(await Promise.all(held)).toEqual([
+      READ_JOB_TIMED_OUT,
+      READ_JOB_TIMED_OUT,
+    ]);
+    expect(posted).toEqual(["SELECT 'held-0'", "SELECT 'held-1'"]);
+    expect(readPoolStats().pendingCount).toBe(1);
+    expect(release).toHaveLength(2);
+    expect(readPoolStats().retiringCount).toBe(2);
+    release[0]();
+    await vi.waitFor(() => expect(posted).toContain("SELECT 'queued'"));
+    expect(await queued).toEqual({ rows: [] });
+    release[1]();
+  });
+
+  it("reserves queue space for foreground work when background admission fills", async () => {
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((_w, msg) => posted.push(msg.spec.sql)),
+    );
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const background = Array.from({ length: 32 }, (_, i) =>
+      tryPoolRead(job(`background-${i}`), { priority: "background" }),
+    );
+    expect(
+      await tryPoolRead(job("over-background-cap"), { priority: "background" }),
+    ).toBe(READ_JOB_PRESSURED);
+    const foreground = tryPoolRead(job("foreground"));
+    expect(readPoolStats().pendingCount).toBe(33);
+    expect(posted).toHaveLength(2);
+    shutdownVectorPool();
+    await Promise.all([...held, ...background, foreground]);
+  });
+
+  it("reports one terminal outcome for an aborted running read that later replies", async () => {
+    const posted: Array<{ worker: FakeWorker; id: number; sql: string }> = [];
+    const terminal: string[] = [];
+    setReadPoolTelemetryHook((sample) => {
+      if (!["admitted", "started", "pressure"].includes(sample.outcome)) {
+        terminal.push(sample.outcome);
+      }
+    });
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) =>
+        posted.push({ worker, id: msg.id, sql: msg.spec.sql }),
+      ),
+    );
+    const controller = new AbortController();
+    const aborted = tryPoolRead(job("aborted"), {
+      signal: controller.signal,
+    });
+    const companion = tryPoolRead(job("companion"));
+    expect(posted).toHaveLength(2);
+
+    controller.abort();
+    expect(await aborted).toBe(READ_JOB_TIMED_OUT);
+    const queued = tryPoolRead(job("after-abort"));
+    expect(readPoolStats()).toMatchObject({
+      runningCount: 2,
+      pendingCount: 1,
+    });
+    expect(posted).toHaveLength(2);
+
+    posted[0].worker.replyRead(posted[0].id, []);
+    expect(posted[2].sql).toBe("SELECT 'after-abort'");
+    expect(readPoolStats()).toMatchObject({
+      runningCount: 2,
+      pendingCount: 0,
+    });
+    expect(terminal).toEqual(["cancelled"]);
+    shutdownVectorPool();
+    await Promise.all([companion, queued]);
+    expect(terminal).toEqual(["cancelled", "unavailable", "unavailable"]);
+  });
+
+  it("rejects a byte-oversized job before a worker sees its payload", async () => {
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((_w, msg) => posted.push(msg.spec.sql)),
+    );
+    const result = await tryPoolRead({
+      sql: "SELECT ?",
+      params: [new Uint8Array(MAX_PENDING_READ_BYTES + 1)],
+      mode: "all",
+    });
+    expect(result).toBe(READ_JOB_PRESSURED);
+    expect(posted).toEqual([]);
+    expect(readPoolStats().pendingBytes).toBe(0);
+  });
+
+  it("copies queued payloads and tightens typed-array views before accounting them", async () => {
+    const posted: Array<{
+      worker: FakeWorker;
+      msg: Extract<VectorWorkerInbound, { type: "read" }>;
+    }> = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) => {
+        posted.push({ worker, msg });
+      }),
+    );
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const backing = new Uint8Array(MAX_PENDING_READ_BYTES * 2);
+    backing[3] = 7;
+    const narrow = backing.subarray(3, 4);
+    const spec: ReadJobSpec = {
+      sql: "SELECT ?",
+      params: [narrow],
+      mode: "all",
+    };
+    const queued = tryPoolRead(spec);
+    spec.sql = "SELECT 'mutated'";
+    spec.params.push(new Uint8Array(MAX_PENDING_READ_BYTES));
+    narrow[0] = 9;
+    expect(readPoolStats().pendingBytes).toBeLessThan(1024);
+    posted[0].worker.replyRead(posted[0].msg.id, []);
+    const actual = posted[2].msg.spec;
+    expect(actual.sql).toBe("SELECT ?");
+    expect(actual.params).toHaveLength(1);
+    expect(actual.params[0]).toEqual(new Uint8Array([7]));
+    expect((actual.params[0] as Uint8Array).buffer.byteLength).toBe(1);
+    posted[2].worker.replyRead(posted[2].msg.id, []);
+    await queued;
+    shutdownVectorPool();
+    await Promise.all(held);
+  });
+
+  it("snapshots a queued vector spec and embedding before caller mutation", async () => {
+    const posted: Array<{
+      worker: FakeWorker;
+      msg: Extract<VectorWorkerInbound, { type: "search" }>;
+    }> = [];
+    _setTestVectorWorkerFactory(
+      factoryReturning((worker, msg) => {
+        posted.push({ worker, msg });
+      }),
+    );
+    const held = [
+      tryPoolVectorSearch(KNOWLEDGE, QUERY),
+      tryPoolVectorSearch(KNOWLEDGE, QUERY),
+    ];
+    const spec = {
+      kind: "knowledge" as const,
+      limit: 1,
+      excludeCategories: ["original"],
+    };
+    const backing = new Float32Array(1024 * 1024);
+    backing[4] = 0.5;
+    const narrow = backing.subarray(4, 5);
+    const queued = tryPoolVectorSearch(spec, narrow);
+    spec.limit = 99;
+    spec.excludeCategories[0] = "mutated";
+    narrow[0] = 0.9;
+    posted[0].worker.reply(posted[0].msg.id, []);
+    expect(posted[2].msg.spec).toEqual({
+      kind: "knowledge",
+      limit: 1,
+      excludeCategories: ["original"],
+    });
+    expect(posted[2].msg.embedding).toEqual(new Float32Array([0.5]));
+    expect(posted[2].msg.embedding.buffer.byteLength).toBe(4);
+    posted[2].worker.reply(posted[2].msg.id, []);
+    await queued;
+    shutdownVectorPool();
+    await Promise.all(held);
+  });
+
+  it("drops extra binary spec fields and keeps malformed priorities off telemetry", async () => {
+    const posted: Array<{
+      worker: FakeWorker;
+      msg: Extract<VectorWorkerInbound, { type: "search" }>;
+    }> = [];
+    const priorities: string[] = [];
+    setReadPoolTelemetryHook((sample) => priorities.push(sample.priority));
+    _setTestVectorWorkerFactory(
+      factoryReturning((worker, msg) => posted.push({ worker, msg })),
+    );
+    const held = [
+      tryPoolVectorSearch(KNOWLEDGE, QUERY),
+      tryPoolVectorSearch(KNOWLEDGE, QUERY),
+    ];
+    const spec = {
+      ...KNOWLEDGE,
+      extra: new ArrayBuffer(MAX_PENDING_READ_BYTES * 4),
+    };
+    const queued = tryPoolVectorSearch(spec, QUERY, {
+      priority: "tenant-secret" as "foreground",
+    });
+    expect(readPoolStats().pendingBytes).toBeLessThan(1024);
+    posted[0].worker.reply(posted[0].msg.id, []);
+    expect(Object.keys(posted[2].msg.spec)).not.toContain("extra");
+    expect(priorities.every((priority) => priority === "foreground")).toBe(
+      true,
+    );
+    posted[2].worker.reply(posted[2].msg.id, []);
+    await queued;
+    shutdownVectorPool();
+    await Promise.all(held);
+  });
+
+  it("does not strand an admitted job when the second worker fails to spawn", async () => {
+    let spawned = 0;
+    _setTestVectorWorkerFactory((() => {
+      if (++spawned === 2) throw new Error("second slot unavailable");
+      return new FakeWorker(
+        () => {},
+        () => {},
+      );
+    }) as unknown as (d: VectorWorkerInitData) => Worker);
+    expect(await tryPoolRead(job("first"))).toBeNull();
+    expect(readPoolStats()).toMatchObject({ pendingCount: 0, runningCount: 0 });
+    expect(spawned).toBe(2);
+    expect(FakeWorker.instances[0].terminated).toBe(true);
+  });
+
+  it("drains queued work on database replacement and serves new work on fresh workers", async () => {
+    db();
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) => {
+        posted.push(msg.spec.sql);
+        if (msg.spec.sql.includes("fresh"))
+          worker.replyRead(msg.id, [{ generation: "new" }]);
+      }),
+    );
+    const old = [
+      tryPoolRead(job("old-0")),
+      tryPoolRead(job("old-1")),
+      tryPoolRead(job("old-queued")),
+    ];
+    close();
+    db();
+    const fresh = tryPoolRead(job("fresh"));
+    expect(await Promise.all(old)).toEqual([null, null, null]);
+    expect(await fresh).toEqual({ rows: [{ generation: "new" }] });
+    expect(posted).toEqual([
+      "SELECT 'old-0'",
+      "SELECT 'old-1'",
+      "SELECT 'fresh'",
+    ]);
+  });
+
+  it("drains queued jobs before graceful shutdown without posting them", async () => {
+    const posted: string[] = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((_worker, msg) => {
+        posted.push(msg.spec.sql);
+      }),
+    );
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const queued = tryPoolRead(job("queued"));
+    await shutdownVectorPoolAsync(10);
+    expect(await Promise.all([...held, queued])).toEqual([
+      READ_JOB_TIMED_OUT,
+      READ_JOB_TIMED_OUT,
+      READ_JOB_TIMED_OUT,
+    ]);
+    expect(posted).toEqual(["SELECT 'held-0'", "SELECT 'held-1'"]);
+    expect(readPoolStats()).toMatchObject({ pendingCount: 0, runningCount: 0 });
+  });
+
+  it("reports admission, queue age and service timing through the read-pool hook", async () => {
+    vi.useFakeTimers();
+    const samples: Array<{
+      outcome: string;
+      pendingCount: number;
+      oldestPendingMs: number;
+      queueMs?: number;
+      serviceMs?: number;
+    }> = [];
+    setReadPoolTelemetryHook((sample) => samples.push(sample));
+    const posted: Array<{ worker: FakeWorker; id: number }> = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) => {
+        posted.push({ worker, id: msg.id });
+      }),
+    );
+    const held = [tryPoolRead(job("held-0")), tryPoolRead(job("held-1"))];
+    const queued = tryPoolRead(job("queued"));
+    expect(
+      samples.some(
+        (sample) => sample.outcome === "admitted" && sample.pendingCount === 1,
+      ),
+    ).toBe(true);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(readPoolStats().oldestPendingMs).toBeGreaterThanOrEqual(0);
+    posted[0].worker.replyRead(posted[0].id, []);
+    const started = samples.find(
+      (sample) =>
+        sample.outcome === "started" &&
+        sample.queueMs !== undefined &&
+        sample.queueMs > 0,
+    );
+    expect(started?.queueMs).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(20);
+    posted[2].worker.replyRead(posted[2].id, []);
+    expect(
+      samples.some(
+        (sample) => sample.outcome === "ok" && (sample.serviceMs ?? 0) > 0,
+      ),
+    ).toBe(true);
+    await queued;
+    shutdownVectorPool();
+    await Promise.all(held);
+  });
+
+  it("keeps a running aborted job charged until its reply, then serves the next job once", async () => {
+    const posted: Array<{ worker: FakeWorker; id: number; sql: string }> = [];
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) => {
+        posted.push({ worker, id: msg.id, sql: msg.spec.sql });
+      }),
+    );
+    const controller = new AbortController();
+    const aborted = tryPoolRead(job("running"), { signal: controller.signal });
+    const filler = tryPoolRead(job("filler"));
+    const next = tryPoolRead(job("next"));
+    controller.abort();
+    expect(await aborted).toBe(READ_JOB_TIMED_OUT);
+    expect(readPoolStats()).toMatchObject({ pendingCount: 1, runningCount: 2 });
+    expect(posted).toHaveLength(2);
+    posted[0].worker.replyRead(posted[0].id, []);
+    posted[0].worker.replyRead(posted[0].id, [{ id: "late" }]);
+    expect(posted.map((p) => p.sql)).toEqual([
+      "SELECT 'running'",
+      "SELECT 'filler'",
+      "SELECT 'next'",
+    ]);
+    posted[2].worker.replyRead(posted[2].id, [{ id: "once" }]);
+    expect(await next).toEqual({ rows: [{ id: "once" }] });
+    shutdownVectorPool();
+    await filler;
+  });
+
+  it("round-trips queued SQL through the production worker bundle", async () => {
+    const bundle = new URL(
+      "../../gateway/dist/vector-worker.cjs",
+      import.meta.url,
+    );
+    if (!existsSync(bundle))
+      throw new Error(
+        "Build the gateway bundle before the real-worker smoke test",
+      );
+    const dir = mkdtempSync(join(tmpdir(), "lore-read-pool-"));
+    const previousPath = process.env.LORE_DB_PATH;
+    try {
+      const path = join(dir, "smoke.db");
+      const db = new DatabaseSync(path);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.close();
+      process.env.LORE_DB_PATH = path;
+      _setTestVectorWorkerFactory(
+        (data) => new Worker(bundle, { workerData: data }),
+      );
+      const requests = [
+        tryPoolRead(job("one")),
+        tryPoolRead(job("two")),
+        tryPoolRead(job("three")),
+      ];
+      expect(readPoolStats()).toMatchObject({
+        runningCount: 2,
+        pendingCount: 1,
+      });
+      expect(await Promise.all(requests)).toEqual([
+        { rows: [{ "'one'": "one" }] },
+        { rows: [{ "'two'": "two" }] },
+        { rows: [{ "'three'": "three" }] },
+      ]);
+      await shutdownVectorPoolAsync();
+    } finally {
+      if (previousPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = previousPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

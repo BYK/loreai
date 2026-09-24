@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as embedding from "../src/embedding";
@@ -7,7 +8,15 @@ import {
   PATTERN_COOLDOWN_MS,
 } from "../src/pattern-echo";
 import * as log from "../src/log";
+import type { ReadJobSpec } from "../src/read-job";
 import type { LLMClient } from "../src/types";
+import {
+  _resetVectorPoolForTest,
+  _setTestVectorWorkerFactory,
+  readPoolStats,
+  tryPoolRead,
+} from "../src/vector-pool";
+import type { VectorWorkerInbound } from "../src/vector-worker-types";
 
 // pattern-echo runs two jobs at the gen-0 distillation hook: (1) embed + store
 // the segment (the embedDistillation() replacement — must always run so recall
@@ -180,6 +189,74 @@ describe("pattern-echo cooldown", () => {
     expect(searchSpy).toHaveBeenCalledOnce();
   });
 
+  it("retries pattern search after the real background read queue refuses admission", async () => {
+    searchSpy.mockRestore();
+    const pid = ensureProject(PROJECT);
+    insertDistill("p1", pid, "s-pressure");
+    insertDistill("p2", pid, "s-pressure");
+    const base = {
+      observations: "obs",
+      projectPath: PROJECT,
+      sessionID: "s-pressure",
+      llm: stubLLM(),
+    };
+
+    const held: Array<{ worker: HeldReadWorker; id: number }> = [];
+    let pauseReads = true;
+    let searchesPosted = 0;
+    class HeldReadWorker extends EventEmitter {
+      unref(): void {}
+      postMessage(msg: VectorWorkerInbound): void {
+        if (msg.type === "read") {
+          if (pauseReads) held.push({ worker: this, id: msg.id });
+          else
+            this.emit("message", { type: "read-result", id: msg.id, rows: [] });
+        } else if (msg.type === "search") {
+          searchesPosted++;
+          this.emit("message", { type: "result", id: msg.id, hits: [] });
+        }
+      }
+      terminate(): Promise<number> {
+        this.emit("exit", 0);
+        return Promise.resolve(0);
+      }
+    }
+
+    _resetVectorPoolForTest();
+    _setTestVectorWorkerFactory((() => new HeldReadWorker()) as never);
+    try {
+      const filler: ReadJobSpec = { sql: "SELECT 1", params: [], mode: "all" };
+      const running = [tryPoolRead(filler), tryPoolRead(filler)];
+      const queued = Array.from({ length: 32 }, () =>
+        tryPoolRead(filler, { priority: "background" }),
+      );
+      expect(readPoolStats()).toMatchObject({
+        pendingCount: 32,
+        runningCount: 2,
+      });
+
+      // The search itself takes the real pool path, and is refused by the
+      // background admission cap. No worker receives that search.
+      await detectPatternEchoes({ ...base, distillId: "p1" });
+      expect(searchesPosted).toBe(0);
+
+      pauseReads = false;
+      for (const { worker, id } of held) {
+        worker.emit("message", { type: "read-result", id, rows: [] });
+      }
+      await Promise.all([...running, ...queued]);
+      expect(readPoolStats().pendingCount).toBe(0);
+
+      // A fresh segment in the same session must be able to search now.
+      await detectPatternEchoes({ ...base, distillId: "p2" });
+      expect(searchesPosted).toBe(1);
+      expect(embedSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      _setTestVectorWorkerFactory(null);
+      _resetVectorPoolForTest();
+    }
+  });
+
   it("rolls back its cooldown when cancellation interrupts an armed attempt", async () => {
     const pid = ensureProject(PROJECT);
     insertDistill("c1", pid, "s-cancel");
@@ -257,6 +334,45 @@ describe("pattern-echo cooldown", () => {
       await olderAttempt;
 
       await detectPatternEchoes({ ...base, distillId: "o3" });
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not clear a newer cooldown owner when an older search is pressured", async () => {
+    vi.useFakeTimers();
+    try {
+      const pid = ensureProject(PROJECT);
+      insertDistill("old-p", pid, "s-pressure-owner");
+      insertDistill("new-p", pid, "s-pressure-owner");
+      insertDistill("next-p", pid, "s-pressure-owner");
+      let refuseOlder!: () => void;
+      searchSpy.mockImplementationOnce(
+        (...args: Parameters<typeof embedding.vectorSearchAllDistillations>) =>
+          new Promise((resolve) => {
+            refuseOlder = () => {
+              args[3]?.onPressure?.();
+              resolve([]);
+            };
+          }),
+      );
+      const base = {
+        observations: "obs",
+        projectPath: PROJECT,
+        sessionID: "s-pressure-owner",
+        llm: stubLLM(),
+      };
+
+      const olderAttempt = detectPatternEchoes({ ...base, distillId: "old-p" });
+      await vi.waitFor(() => expect(searchSpy).toHaveBeenCalledTimes(1));
+      vi.advanceTimersByTime(PATTERN_COOLDOWN_MS + 1);
+      await detectPatternEchoes({ ...base, distillId: "new-p" });
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+
+      refuseOlder();
+      await olderAttempt;
+      await detectPatternEchoes({ ...base, distillId: "next-p" });
       expect(searchSpy).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();

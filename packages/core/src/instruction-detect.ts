@@ -207,6 +207,7 @@ export async function findRepeatedInstructions(input: {
         candidateEmbeddings[i],
         pid,
         20,
+        { priority: "background" },
       );
       for (const hit of hits) {
         if (
