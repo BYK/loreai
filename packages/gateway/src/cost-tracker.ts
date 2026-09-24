@@ -1465,15 +1465,14 @@ export function computeHistoricalEstimates(
       });
     }
 
-    // Amnesia sessions intentionally leave no temporal messages, so they have
-    // no session_rollup row. Preserve their recent persisted spend in the
-    // aggregate without exposing session-level data or counting live sessions
-    // and sessions already represented by a rollup twice.
+    // Amnesia and no-store sessions intentionally leave no temporal messages,
+    // so they have no session_rollup row. Preserve their recent persisted spend
+    // without exposing session-level data or counting live sessions and
+    // sessions already represented by a rollup twice.
     const unrolledCostSessions = db()
       .query(
         `SELECT session_id FROM session_state AS s
-         WHERE s.amnesia = 1
-           AND s.updated_at >= ?
+         WHERE s.updated_at >= ?
            AND instr(COALESCE(s.project_path, ''), '__tmp_agents_file__') = 0
            AND (s.conversation_turns > 0 OR s.warmup_savings > 0 OR
                 s.warmup_cost > 0 OR s.ttl_savings > 0 OR s.batch_savings > 0)`,

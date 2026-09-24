@@ -554,6 +554,55 @@ describe("cost snapshots for resumed sessions", () => {
     }
   });
 
+  it("keeps no-store session spend without an amnesia flag or transcript", async () => {
+    const core = await import("@loreai/core");
+    const tracker = await import("../src/cost-tracker");
+    const sessionId = `operations-no-store-cost-${Date.now()}`;
+    // Per-request no-store leaves amnesia false and writes no temporal messages.
+    core.saveSessionTracking(sessionId, { amnesia: false });
+    core.saveSessionCosts(sessionId, {
+      conversationCost: 1.25,
+      workerCost: 0,
+      conversationTurns: 1,
+      inputTokens: 50_000,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+    tracker.invalidateHistoricalCache();
+
+    try {
+      const response = await body<{
+        totals: { combined_session_count: number; spend: number };
+        historical: {
+          session_count: number;
+          persisted_conversation_cost: number;
+        };
+      }>("/api/v1/costs");
+
+      expect(response.historical).toMatchObject({
+        session_count: 1,
+        persisted_conversation_cost: 1.25,
+      });
+      expect(response.totals.combined_session_count).toBe(1);
+      expect(response.totals.spend).toBeCloseTo(1.25);
+    } finally {
+      core
+        .db()
+        .query("DELETE FROM session_state WHERE session_id = ?")
+        .run(sessionId);
+      tracker.invalidateHistoricalCache();
+    }
+  });
+
   it("counts recent persisted spend when the session rollup is outside the scan window", async () => {
     const core = await import("@loreai/core");
     const tracker = await import("../src/cost-tracker");

@@ -1056,15 +1056,17 @@ predates the move from an embedded module to staged files, which took
   worker breakdown, and an empty budget form entry is rejected instead of
   being interpreted as the explicit zero-value disable action.
 - Recent persisted snapshots absent from the rolling session-rollup scan,
-  including amnesia sessions, remain in historical cost totals. Live sessions
-  and sessions already represented in the scan are excluded from this fallback.
+  including amnesia and no-store sessions, remain in historical cost totals.
+  Live sessions and sessions already represented in the scan are excluded from
+  this fallback.
 - This slice adds no dependencies or package-version changes. Its focused
-  core/gateway regression command (430 passing) is:
+  core/gateway regression command (440 passing) is:
 
   ```sh
   pnpm exec vitest run \
     packages/core/test/db.test.ts \
     packages/gateway/test/cache-warmer.test.ts \
+    packages/gateway/test/cost-tracker-historical.test.ts \
     packages/gateway/test/cost-tracker-per-model-compaction.test.ts \
     packages/gateway/test/operations-api.test.ts
   ```

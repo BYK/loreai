@@ -62,11 +62,11 @@ describe("computeHistoricalEstimates (session_rollup read path #981)", () => {
   beforeEach(() => {
     // The core test harness creates ONE DB per file (not per test), so rows
     // accumulate across tests; computeHistoricalEstimates aggregates EVERY
-    // session in the DB. Wipe the source + rollup tables so each test's totals
-    // are deterministic. Deleting the source rows fires the rollup DELETE
-    // triggers; the explicit session_rollup wipe is belt-and-suspenders.
+    // session in the DB. Wipe the source, rollup, and persisted cost tables so
+    // each test's totals are deterministic. Deleting source rows fires the
+    // rollup DELETE triggers; the explicit rollup wipe is belt-and-suspenders.
     db().exec(
-      "DELETE FROM temporal_messages; DELETE FROM distillations; DELETE FROM session_rollup;",
+      "DELETE FROM temporal_messages; DELETE FROM distillations; DELETE FROM session_rollup; DELETE FROM session_state;",
     );
     // The estimate is memoized for 5 min in module state — clear it or a later
     // test would read the previous test's result.
