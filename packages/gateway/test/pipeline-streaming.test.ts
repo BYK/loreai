@@ -44,6 +44,7 @@ vi.mock("../src/worker-health", async (importOriginal) => {
 
 import {
   acquireMemoryPreparation,
+  acceptedKnowledgeProofForTest,
   activePipelineRequestCountForTest,
   buildStreamingResponse,
   abortAwareDelay,
@@ -1128,19 +1129,20 @@ describe("Pipeline — streaming responses", () => {
   });
 
   it("checks the wall clock when synchronous work starves the preparation timer", () => {
-    const now = vi.spyOn(Date, "now");
     const start = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(start);
     const preparation = createMemoryPreparationScope(
       new AbortController().signal,
       1000,
     );
     try {
-      now.mockReturnValue(start + 1001);
+      vi.setSystemTime(start + 1001);
       expect(() => preparation.assertActive()).toThrow();
       expect(preparation.expired()).toBe(true);
     } finally {
-      now.mockRestore();
       preparation.dispose();
+      vi.useRealTimers();
     }
   });
 
@@ -4379,6 +4381,97 @@ describe("Pipeline — streaming responses", () => {
     } finally {
       setRecallPersistenceCommitObserverForTest(undefined);
       ltm.remove(knowledgeId);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("does not accept a knowledge pin when the streaming savepoint release fails", async () => {
+    const alias = "failed-knowledge-release-session";
+    const projectPath = "/test/failed-knowledge-release";
+    setUpstreamInterceptor(
+      async () =>
+        new Response(validResponsesSSE("resp_failed_release", "answer"), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    );
+    const first = makeResponsesRequest({
+      sessionHeaders: { "x-lore-session-id": alias },
+      messages: [{ role: "user", content: [{ type: "text", text: "first" }] }],
+    });
+    first.rawHeaders["x-lore-project"] = projectPath;
+
+    try {
+      expect(
+        await (await handleRequest(first, loadLocalConfig())).text(),
+      ).toContain("event: response.completed");
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      const sessionID = state?.sessionID ?? "";
+      await new Promise<void>((resolve) => {
+        scheduleStreamingPostResponseForTest(sessionID, resolve, resolve);
+      });
+      ltm.create({
+        projectPath,
+        scope: "project",
+        category: "gotcha",
+        title: "Failed release knowledge",
+        content: "This knowledge must not become accepted.",
+        session: sessionID,
+      });
+
+      // The orphan FK is inserted inside postResponseForTenant's callback.
+      // SQLite rejects RELEASE of the outermost savepoint, after that callback
+      // returns, then rolls its writes back. A callback-time error would not
+      // exercise the accepted-pin commit boundary.
+      db().exec(`
+        CREATE TEMP TABLE release_fault_parent (id INTEGER PRIMARY KEY);
+        CREATE TEMP TABLE release_fault_child (
+          parent_id INTEGER REFERENCES release_fault_parent(id)
+            DEFERRABLE INITIALLY DEFERRED
+        );
+      `);
+      let postResponseCalls = 0;
+      setPostResponseStartObserverForTest(() => {
+        postResponseCalls++;
+        db()
+          .query("INSERT INTO temp.release_fault_child(parent_id) VALUES (1)")
+          .run();
+      });
+      const second = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": alias },
+        messages: [
+          { role: "user", content: [{ type: "text", text: "first" }] },
+          { role: "assistant", content: [{ type: "text", text: "answer" }] },
+          { role: "user", content: [{ type: "text", text: "second" }] },
+        ],
+      });
+      second.rawHeaders["x-lore-project"] = projectPath;
+      expect(
+        await (await handleRequest(second, loadLocalConfig())).text(),
+      ).toContain("event: response.completed");
+      await new Promise<void>((resolve) => {
+        scheduleStreamingPostResponseForTest(sessionID, resolve, resolve);
+      });
+      expect(postResponseCalls).toBe(1);
+      expect(listSessionPromptDeltas(sessionID).length).toBeGreaterThan(0);
+      expect(acceptedKnowledgeProofForTest(sessionID)).toBe(false);
+      expect(
+        (
+          db()
+            .query("SELECT COUNT(*) AS count FROM temp.release_fault_child")
+            .get() as {
+            count: number;
+          }
+        ).count,
+      ).toBe(0);
+    } finally {
+      setPostResponseStartObserverForTest(undefined);
+      db().exec(
+        "DROP TABLE IF EXISTS temp.release_fault_child; DROP TABLE IF EXISTS temp.release_fault_parent",
+      );
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }

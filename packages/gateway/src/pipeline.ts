@@ -1195,6 +1195,7 @@ async function resetPipelineStateInner(opts?: {
   ltmPinnedText.clear();
   lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
+  acceptedKnowledgePins.clear();
   stableLtmInFlight.clear();
   sessionLifecycleAborts.clear();
   streamingPostResponseWaiters.clear();
@@ -3795,7 +3796,74 @@ const stableLtmInFlight = new Map<
   string,
   { promise: Promise<void>; controller: AbortController; waiters: number }
 >();
+// A pin is eligible for the fast fallback only after successful response
+// finalization. Session tracking/delta rows alone may belong to a failed 2xx
+// stream, so they are insufficient proof that the model saw those bytes.
+type AcceptedKnowledgeProof = {
+  projectID: string;
+  keys: string;
+  formatted: string;
+  deltaDigest: string;
+};
+const acceptedKnowledgePins = new Map<string, AcceptedKnowledgeProof>();
 const sessionLifecycleAborts = new Map<string, AbortController>();
+
+function acceptedKnowledgeDeltaDigest(
+  deltas: ReturnType<typeof listSessionPromptDeltas>,
+  projectID: string,
+  keys: string[],
+): string | undefined {
+  if (
+    !deltas.length ||
+    deltas.some(
+      (delta) =>
+        delta.projectID !== projectID ||
+        !parseMessageInsertSelector(delta.selector) ||
+        !parseDeltaMessages(delta.content).length,
+    )
+  )
+    return undefined;
+  const surfaced = new Set(
+    deltas.flatMap(
+      (delta) =>
+        parseDeltaMutation(delta.selector)?.changed.map((c) => c.id) ?? [],
+    ),
+  );
+  if ([...entryKeyIds(keys)].some((id) => !surfaced.has(id))) return undefined;
+  return createHash("sha256")
+    .update(JSON.stringify(deltas.map((d) => [d.seq, d.selector, d.content])))
+    .digest("hex");
+}
+
+function acceptedKnowledgeCandidate(
+  sessionID: string,
+  projectPath: string,
+): AcceptedKnowledgeProof | undefined {
+  const pin = ltmPinnedText.get(sessionID);
+  if (!pin?.entryKeys?.length) return undefined;
+  const projectID = ensureProject(projectPath);
+  const deltaDigest = acceptedKnowledgeDeltaDigest(
+    listSessionPromptDeltas(sessionID),
+    projectID,
+    pin.entryKeys,
+  );
+  if (!deltaDigest) return undefined;
+  return {
+    projectID,
+    keys: JSON.stringify(pin.entryKeys),
+    formatted: pin.formatted,
+    deltaDigest,
+  };
+}
+
+/** Test seam: force a context refresh without losing accepted-response proof. */
+export function evictContextSelectionCacheForTest(sessionID: string): void {
+  ltmSessionCache.delete(sessionID);
+}
+
+export function acceptedKnowledgeProofForTest(sessionID: string): boolean {
+  return acceptedKnowledgePins.has(sessionID);
+}
 
 function sessionLifecycleSignal(sessionID: string): AbortSignal {
   let controller = sessionLifecycleAborts.get(sessionID);
@@ -3828,6 +3896,7 @@ function evictStableLtmSession(sessionID: string): void {
 }
 
 function evictPipelineSessionState(sessionID: string): void {
+  acceptedKnowledgePins.delete(sessionID);
   // Keep the persisted header→session mapping warm. Eviction removes only the
   // heavy live state; dropping this index would force an unbounded DB reload on
   // the next request and would make state-changing slash commands unable to
@@ -17102,6 +17171,7 @@ export function createMemoryPreparationScope(
   assertActive: () => void;
   dispose: () => void;
   deadlineAt: number;
+  timeoutMs: number;
 } {
   const controller = new AbortController();
   const deadlineAt = Date.now() + timeoutMs;
@@ -17123,6 +17193,7 @@ export function createMemoryPreparationScope(
       signal.throwIfAborted();
     },
     deadlineAt,
+    timeoutMs,
     dispose: () => {
       disposed = true;
       clearTimeout(timer);
@@ -17133,7 +17204,8 @@ export function createMemoryPreparationScope(
 function memoryPreparationTimeoutMs(): number {
   /** Override the normal-turn memory preparation budget at admission.
    * Values from 1000–60000 ms are accepted; invalid values use .lore.json
-   * or the 8000 ms default. This budget ends before upstream generation. */
+   * or the 8000 ms default. This budget ends before upstream generation.
+   */
   const raw = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
   if (raw && /^\d+$/.test(raw)) {
     const value = Number(raw);
@@ -19123,7 +19195,10 @@ async function handleConversationTurnPrepared(
     cache: ltmSessionCache.get(sessionID),
     pin: ltmPinnedText.get(sessionID),
   };
+  let usedAcceptedWindowFallback = false;
   if (cfg.knowledge.enabled) {
+    const acceptedWindowFallback = Symbol("accepted source and knowledge pin");
+    let stable = stableLtmCache.get(sessionID);
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
     let pinDirty = false;
@@ -19166,7 +19241,6 @@ async function handleConversationTurnPrepared(
       // Uses a dedicated budget independent of context-bound LTM. The known-
       // entities block is folded in here (not system[2]) so it is available on
       // turn 1.
-      let stable = stableLtmCache.get(sessionID);
       if (!stable) {
         // Single-flight: a client header-timeout retry burst can fire several
         // concurrent identical turns at a cold session. Without dedup they ALL
@@ -19258,21 +19332,89 @@ async function handleConversationTurnPrepared(
           );
           // Exclude preferences — they're already in system[1]
           const overflowSink: ltm.KnowledgeEntry[] = [];
-          const contextEntries = await ltm.forSession(
-            projectPath,
-            sessionID,
-            contextBudget,
-            {
-              signal: req.signal,
-              excludeCategories: ["preference"],
-              ...(contextHint ? { contextHint } : {}),
-              ...(stickyIds.size ? { stickyIds } : {}),
-              ...(cfg.knowledge.contextSources?.length
-                ? { includeContextSources: cfg.knowledge.contextSources }
-                : {}),
-              overflowSink,
-            },
-          );
+          // Reserve a small remainder for required prewarm and transform. A
+          // previously accepted checkpoint plus its durable knowledge delta
+          // can safely replay its pinned selection while this optional refresh
+          // is late; otherwise the shared deadline fails closed with 503.
+          const acceptedPin = ltmPinnedText.get(sessionID);
+          const acceptedProof = acceptedKnowledgePins.get(sessionID);
+          const existingDeltas = listSessionPromptDeltas(sessionID);
+          const currentProjectID = ensureProject(projectPath);
+          const deltaDigest = acceptedPin?.entryKeys
+            ? acceptedKnowledgeDeltaDigest(
+                existingDeltas,
+                currentProjectID,
+                acceptedPin.entryKeys,
+              )
+            : undefined;
+          const canReplayAcceptedPin =
+            !!checkpoint?.base &&
+            !!acceptedPin?.entryKeys?.length &&
+            !!acceptedProof &&
+            acceptedProof.projectID === currentProjectID &&
+            acceptedProof.keys === JSON.stringify(acceptedPin.entryKeys) &&
+            acceptedProof.formatted === acceptedPin.formatted &&
+            !!deltaDigest &&
+            deltaDigest === acceptedProof.deltaDigest;
+          const optionalDeadlineMs = canReplayAcceptedPin
+            ? Math.max(
+                0,
+                preparation.deadlineAt -
+                  Date.now() -
+                  Math.min(1_000, preparation.timeoutMs / 5),
+              )
+            : undefined;
+          if (optionalDeadlineMs === 0) throw acceptedWindowFallback;
+          const optionalController = new AbortController();
+          const optionalTimer =
+            optionalDeadlineMs === undefined
+              ? undefined
+              : setTimeout(
+                  () =>
+                    optionalController.abort(
+                      new DOMException(
+                        "optional memory refresh timed out",
+                        "TimeoutError",
+                      ),
+                    ),
+                  optionalDeadlineMs,
+                );
+          optionalTimer?.unref?.();
+          let contextEntries: ltm.KnowledgeEntry[];
+          try {
+            const optionalSignal = AbortSignal.any([
+              req.signal!,
+              optionalController.signal,
+            ]);
+            contextEntries = await promiseAgainstAbort(
+              () =>
+                ltm.forSession(projectPath, sessionID, contextBudget, {
+                  signal: optionalSignal,
+                  excludeCategories: ["preference"],
+                  ...(contextHint ? { contextHint } : {}),
+                  ...(stickyIds.size ? { stickyIds } : {}),
+                  ...(cfg.knowledge.contextSources?.length
+                    ? { includeContextSources: cfg.knowledge.contextSources }
+                    : {}),
+                  overflowSink,
+                }),
+              optionalSignal,
+            );
+          } catch (error) {
+            if (error === acceptedWindowFallback) throw error;
+            if (
+              canReplayAcceptedPin &&
+              optionalController.signal.aborted &&
+              !req.signal?.aborted
+            )
+              throw acceptedWindowFallback;
+            throw error;
+          } finally {
+            if (optionalTimer) clearTimeout(optionalTimer);
+          }
+          // A completed selection may have already recorded session-injection
+          // writes. Only an abort before completion can replay the accepted
+          // pin; preparation.assertActive() still enforces the shared deadline.
           assertCurrentPipelineGeneration(req.signal, requestGeneration);
           freshContextEntries = contextEntries;
           freshContextOverflow = overflowSink.map((e) => ({
@@ -19484,12 +19626,19 @@ async function handleConversationTurnPrepared(
       setLtmTokens(stable?.tokenCount ?? 0, sessionID);
     } catch (e) {
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      // Missing worker data cannot be treated as an authoritative empty LTM
-      // selection: doing so could freeze a partial stable block or supersede
-      // pinned knowledge. The outer handler returns a retryable 503.
-      if (e instanceof ReadPreparationUnavailableError) throw e;
-      log.error("LTM injection failed:", e);
-      setLtmTokens(0, sessionID);
+      if (e === acceptedWindowFallback) {
+        preparation.assertActive();
+        usedAcceptedWindowFallback = true;
+        preparationTiming.metric("accepted_window_fallback", 1);
+        setLtmTokens(stable?.tokenCount ?? 0, sessionID);
+      } else {
+        // Missing worker data cannot be treated as an authoritative empty LTM
+        // selection: doing so could freeze a partial stable block or supersede
+        // pinned knowledge. The outer handler returns a retryable 503.
+        if (e instanceof ReadPreparationUnavailableError) throw e;
+        log.error("LTM injection failed:", e);
+        setLtmTokens(0, sessionID);
+      }
     } finally {
       consumeCameOutOfIdle(sessionID);
     }
@@ -19672,7 +19821,11 @@ async function handleConversationTurnPrepared(
   // (system[1]) is kept pinned — Layer 4 busts the prompt cache anyway, so
   // system[1] will be re-written, but keeping the same content means the
   // NEXT turn's prefix matches and gets a cache read.
-  if (result.refreshLtm && cfg.knowledge.enabled) {
+  if (
+    result.refreshLtm &&
+    cfg.knowledge.enabled &&
+    !usedAcceptedWindowFallback
+  ) {
     try {
       const ltmFraction = cfg.budget.ltm;
       // Per-session overhead (Bug 1, lever 2). Sub-agents keep the smaller
@@ -20384,6 +20537,10 @@ async function handleConversationTurnPrepared(
     foregroundAbort.dispose();
   };
 
+  // Snapshot the exact provisional pin and delta bytes used by this request.
+  // Another turn may start after headers arrive, before this body finalizes.
+  const knowledgeOnWire = acceptedKnowledgeCandidate(sessionID, projectPath);
+
   let upstreamResult: UpstreamResult;
   try {
     preparationTiming.upstreamStart();
@@ -20514,12 +20671,28 @@ async function handleConversationTurnPrepared(
   // response bookkeeping has succeeded. A 2xx status alone is not acceptance:
   // streamed Responses can still end in `response.failed` or disconnect.
   let acceptedProvenanceLayerCommitted = false;
-  const commitAcceptedProvenanceLayer = (): void => {
+  const persistAcceptedProvenanceLayer = (): void => {
     if (acceptedProvenanceLayerCommitted) return;
     saveSessionTracking(sessionID, {
       lastAcceptedProvenanceLayer: result.layer,
     });
+  };
+  const commitAcceptedProvenanceLayer = (): void => {
+    if (acceptedProvenanceLayerCommitted) return;
     sessionState.lastAcceptedProvenanceLayer = result.layer;
+    const current = acceptedKnowledgeCandidate(sessionID, projectPath);
+    if (
+      knowledgeOnWire &&
+      current &&
+      knowledgeOnWire.projectID === current.projectID &&
+      knowledgeOnWire.keys === current.keys &&
+      knowledgeOnWire.formatted === current.formatted &&
+      knowledgeOnWire.deltaDigest === current.deltaDigest
+    ) {
+      acceptedKnowledgePins.set(sessionID, knowledgeOnWire);
+    } else {
+      acceptedKnowledgePins.delete(sessionID);
+    }
     acceptedProvenanceLayerCommitted = true;
   };
 
@@ -20579,7 +20752,10 @@ async function handleConversationTurnPrepared(
           suppressTemporalStorage,
           endGenAiSpan,
         );
-        if (persisted) commitAcceptedProvenanceLayer();
+        if (persisted) {
+          persistAcceptedProvenanceLayer();
+          commitAcceptedProvenanceLayer();
+        }
       }
     };
     const failRecall = (
@@ -21063,9 +21239,12 @@ async function handleConversationTurnPrepared(
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
-                commitAcceptedProvenanceLayer();
+                persistAcceptedProvenanceLayer();
               }),
             );
+            // The savepoint RELEASE can still fail after its callback returns.
+            // Record the in-memory accepted pin only once the writes commit.
+            commitAcceptedProvenanceLayer();
             recallPersistenceTransaction = undefined;
           } catch (error) {
             rollbackRecallPersistence();

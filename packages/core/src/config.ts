@@ -208,7 +208,7 @@ export const LoreConfig = z.object({
         .max(60_000)
         .optional()
         .describe(
-          "Post-decode memory preparation budget in milliseconds. Default: 8000. LORE_MEMORY_PREPARATION_TIMEOUT_MS takes precedence at request admission. Expiry returns a retryable preparation error before forwarding an unsafe prompt.",
+          "Post-decode memory preparation budget in milliseconds. Default: 8000. LORE_MEMORY_PREPARATION_TIMEOUT_MS takes precedence at request admission. A verified accepted source window and knowledge pin may continue on optional refresh expiry; otherwise preparation returns a retryable error.",
         ),
       workerResponseInactivityMs: z
         .number()
