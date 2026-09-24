@@ -8,6 +8,7 @@
  * postResponse storage.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import * as core from "@loreai/core";
 import {
   distillation,
   db,
@@ -42,11 +43,13 @@ vi.mock("../src/worker-health", async (importOriginal) => {
 });
 
 import {
+  acquireMemoryPreparation,
   activePipelineRequestCountForTest,
   buildStreamingResponse,
   abortAwareDelay,
   completeBudgetThrottleDelay,
   createForegroundAbortScope,
+  createMemoryPreparationScope,
   detachedPipelineRequestCountForTest,
   evictLiveSessionForTest,
   getActiveSessions,
@@ -1066,6 +1069,191 @@ describe("Pipeline — streaming responses", () => {
   afterEach(() => harness?.teardown());
   afterEach(() => vi.mocked(getDegradationWarning).mockReset());
   afterEach(() => vi.mocked(Sentry.startInactiveSpan).mockReset());
+
+  it("bounds a stalled stable-memory selection before upstream with one preparation deadline", async () => {
+    const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+    process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response("unexpected upstream call");
+    });
+    const selection = vi.spyOn(ltm, "forSession").mockImplementation(
+      (_project, _session, _budget, options) =>
+        new Promise((_, reject) => {
+          const signal = options?.signal;
+          const abort = () => reject(signal?.reason);
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        }),
+    );
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "memory-preparation-deadline" },
+      });
+      request.stream = false;
+      const started = performance.now();
+      const response = await handleRequest(request, loadLocalConfig());
+      expect(response.status).toBe(503);
+      expect(await response.text()).toContain(
+        "Memory preparation is temporarily unavailable",
+      );
+      expect(performance.now() - started).toBeLessThan(3_000);
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      selection.mockRestore();
+      setUpstreamInterceptor(undefined);
+      if (priorTimeout === undefined)
+        delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps the absolute foreground lifetime after preparation succeeds", async () => {
+    const caller = new AbortController();
+    const foreground = createForegroundAbortScope(caller.signal);
+    const preparation = createMemoryPreparationScope(foreground.signal, 10);
+    try {
+      preparation.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(preparation.expired()).toBe(false);
+      expect(foreground.signal.aborted).toBe(false);
+      caller.abort(new DOMException("client disconnected", "AbortError"));
+      expect(foreground.signal.aborted).toBe(true);
+    } finally {
+      preparation.dispose();
+      foreground.dispose();
+    }
+  });
+
+  it("checks the wall clock when synchronous work starves the preparation timer", () => {
+    const now = vi.spyOn(Date, "now");
+    const start = Date.now();
+    const preparation = createMemoryPreparationScope(
+      new AbortController().signal,
+      1000,
+    );
+    try {
+      now.mockReturnValue(start + 1001);
+      expect(() => preparation.assertActive()).toThrow();
+      expect(preparation.expired()).toBe(true);
+    } finally {
+      now.mockRestore();
+      preparation.dispose();
+    }
+  });
+
+  it("keeps a queued preparation slot after its waiter aborts", async () => {
+    const sessionID = "aborted-middle-preparation-waiter";
+    const first = new AbortController();
+    const middle = new AbortController();
+    const last = new AbortController();
+    const releaseFirst = await acquireMemoryPreparation(
+      sessionID,
+      first.signal,
+    );
+    const queued = acquireMemoryPreparation(sessionID, middle.signal);
+    middle.abort(new DOMException("client disconnected", "AbortError"));
+    await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+    let entered = false;
+    const third = acquireMemoryPreparation(sessionID, last.signal).then(
+      (release) => {
+        entered = true;
+        return release;
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(entered).toBe(false);
+    releaseFirst();
+    const releaseThird = await third;
+    expect(entered).toBe(true);
+    releaseThird();
+  });
+
+  it("restores an unsent knowledge pin when prewarm exhausts the shared budget", async () => {
+    const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+    const sessionHeaders = { "x-lore-session-id": "prewarm-rollback-deadline" };
+    const projectPath = "/tmp/lore-1741-prewarm-rollback";
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE(`rollback_${upstreamCalls}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const request = (text: string) => {
+      const req = makeResponsesRequest({
+        sessionHeaders,
+        messages: [{ role: "user", content: [{ type: "text", text }] }],
+      });
+      req.rawHeaders["x-lore-project"] = projectPath;
+      return req;
+    };
+    let entryId: string | undefined;
+    let prewarm: { mockRestore(): void } | undefined;
+    try {
+      await (
+        await handleRequest(request("begin session"), loadLocalConfig())
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      const state = [...getActiveSessions().values()].find(
+        (candidate) =>
+          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+      );
+      expect(state).toBeDefined();
+      entryId = ltm.create({
+        projectPath,
+        category: "gotcha",
+        title: "Rollback pending knowledge",
+        content: "A deadline must not mark unsent knowledge as delivered",
+        scope: "project",
+      });
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      prewarm = vi
+        .spyOn(core, "prewarmDistillationSnapshot")
+        .mockImplementation(
+          (_project, _session, _messages, signal) =>
+            new Promise((_, reject) => {
+              const abort = () => reject(signal?.reason);
+              signal?.addEventListener("abort", abort, { once: true });
+              if (signal?.aborted) abort();
+            }),
+        );
+      const failed = await handleRequest(
+        request("continue the task"),
+        loadLocalConfig(),
+      );
+      expect(failed.status).toBe(503);
+      await failed.text();
+      expect(upstreamCalls).toBe(1);
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.ltmPinKeys,
+      ).toBeNull();
+      prewarm.mockRestore();
+      prewarm = undefined;
+      const retry = await handleRequest(
+        request("continue the task"),
+        loadLocalConfig(),
+      );
+      expect(retry.status).toBe(200);
+      await retry.text();
+      expect(loadSessionTracking(state?.sessionID ?? "")?.ltmPinKeys).toContain(
+        entryId,
+      );
+      expect(
+        listSessionPromptDeltas(state?.sessionID ?? "").length,
+      ).toBeGreaterThan(0);
+    } finally {
+      prewarm?.mockRestore();
+      if (entryId) ltm.remove(entryId);
+      setUpstreamInterceptor(undefined);
+      if (priorTimeout === undefined)
+        delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
+      await resetPipelineState();
+    }
+  });
 
   it("returns a retryable preparation error before upstream when required worker data is unavailable", async () => {
     let upstreamCalls = 0;

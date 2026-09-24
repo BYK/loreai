@@ -154,11 +154,13 @@ export async function prepareSemanticMessages(input: {
   /** Whether the raw protocol item seam is safe for a future suffix. */
   checkpointBoundarySafe?: boolean;
   forceFull?: boolean;
+  signal?: AbortSignal;
   sourcePrefix?: {
     sourceCount: number;
     sourceDigest: string;
   };
 }) {
+  input.signal?.throwIfAborted();
   const { timing } = input;
   for (const key of Object.keys(timing.counts) as Array<
     keyof typeof timing.counts
@@ -208,6 +210,7 @@ export async function prepareSemanticMessages(input: {
       (visible, provenance) => tokenCache.count(visible, provenance),
     ),
   );
+  input.signal?.throwIfAborted();
   const raw = checkpoint?.base ? [...checkpoint.base.raw, ...suffix] : suffix;
   const loreMessages = checkpoint ? structuredClone(raw) : raw;
   const temporalInput = timing.measure("temporal_input", () =>
@@ -231,6 +234,7 @@ export async function prepareSemanticMessages(input: {
   }> = [];
   timing.counts.messages = loreMessages.length;
   for (const [index, message] of loreMessages.entries()) {
+    input.signal?.throwIfAborted();
     timing.counts.parts += message.parts.length;
     let results = 0;
     for (const part of message.parts)
@@ -262,12 +266,14 @@ export async function prepareSemanticMessages(input: {
       readOnly: input.noStore,
     }),
   );
+  input.signal?.throwIfAborted();
   const ids = checkpoint?.storedIds ?? new Map<string, string>();
   for (const [id, stored] of newIds) ids.set(id, stored);
   timing.measure("resolve_tools", () =>
     resolveToolResults(loreMessages, (m) => ids.get(m.info.id) ?? m.info.id),
   );
   checkpoint?.capture(raw, loreMessages, ids, provenanceByMessageId);
+  input.signal?.throwIfAborted();
   // Publish before yielding; cache writes never wait for another writer.
   tokenCache.persist();
   const delta = process.cpuUsage(cpu);

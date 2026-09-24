@@ -2136,13 +2136,13 @@ function loadDistillations(
 async function loadDistillationsOffloaded(
   projectPath: string,
   sessionID: string,
+  signal?: AbortSignal,
 ): Promise<Distillation[]> {
   const pid = ensureProject(projectPath);
   const { sql, params } = distillationsQuery(pid, sessionID);
-  const rows = requireReadRows(
-    await offloadAllOrTimeout(sql, params),
-    "distillations",
-  );
+  const result = await offloadAllOrTimeout(sql, params, { signal });
+  signal?.throwIfAborted();
+  const rows = requireReadRows(result, "distillations");
   return (rows as RawDistillationRow[]).map(hydrateDistillationRow);
 }
 
@@ -2231,7 +2231,7 @@ export async function prewarmDistillationSnapshot(
   const snapshot = sessState.distillationSnapshot;
   if (snapshot && snapshot.lastUserMsgId === lastUserMsgId) return;
 
-  const rows = await loadDistillationsOffloaded(projectPath, sessionID);
+  const rows = await loadDistillationsOffloaded(projectPath, sessionID, signal);
   signal?.throwIfAborted();
 
   sessState.distillationSnapshot = { rows, lastUserMsgId };

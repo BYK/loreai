@@ -1189,6 +1189,7 @@ async function resetPipelineStateInner(opts?: {
   ambiguousHeaderSessionKeys.clear();
   provisionalHeaderSessionIndex.clear();
   identityAdmissionTails.clear();
+  memoryPreparationTails.clear();
   headerSessionIndexHydrated = false;
   ltmSessionCache.clear();
   ltmPinnedText.clear();
@@ -1568,6 +1569,45 @@ async function withIdentityAdmission<T>(
     if (identityAdmissionTails.get(key) === tail) {
       identityAdmissionTails.delete(key);
     }
+  }
+}
+
+// Knowledge pins are provisional until the corresponding prompt is accepted.
+// Serialize preparation for a session so an overlapping retry cannot observe
+// another request's unsent pin as if its delta had reached upstream.
+const memoryPreparationTails = new Map<string, Promise<void>>();
+
+export async function acquireMemoryPreparation(
+  sessionID: string,
+  signal: AbortSignal,
+): Promise<() => void> {
+  const previous = memoryPreparationTails.get(sessionID);
+  let complete!: () => void;
+  const own = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  const tail = previous ? previous.then(() => own) : own;
+  memoryPreparationTails.set(sessionID, tail);
+  // A queued waiter can abort before its predecessor releases. Its tail must
+  // remain visible until the predecessor also settles, or a third request
+  // could enter concurrently with the original owner.
+  void tail.then(() => {
+    if (memoryPreparationTails.get(sessionID) === tail)
+      memoryPreparationTails.delete(sessionID);
+  });
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    complete();
+  };
+  try {
+    if (previous) await promiseAgainstAbort(() => previous, signal);
+    signal.throwIfAborted();
+    return release;
+  } catch (error) {
+    release();
+    throw error;
   }
 }
 
@@ -3751,7 +3791,10 @@ const stableLtmCache = new Map<
  * Keyed by sessionID. Entries are deleted on settle (the settled value goes
  * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
  */
-const stableLtmInFlight = new Map<string, Promise<void>>();
+const stableLtmInFlight = new Map<
+  string,
+  { promise: Promise<void>; controller: AbortController; waiters: number }
+>();
 const sessionLifecycleAborts = new Map<string, AbortController>();
 
 function sessionLifecycleSignal(sessionID: string): AbortSignal {
@@ -3776,6 +3819,11 @@ function evictStableLtmSession(sessionID: string): void {
     ?.abort(new DOMException("stable LTM session was evicted", "AbortError"));
   sessionLifecycleAborts.delete(sessionID);
   stableLtmCache.delete(sessionID);
+  stableLtmInFlight
+    .get(sessionID)
+    ?.controller.abort(
+      new DOMException("stable LTM session was evicted", "AbortError"),
+    );
   stableLtmInFlight.delete(sessionID);
 }
 
@@ -3836,27 +3884,50 @@ export async function singleFlightStableLtm(
   // cache-only check avoids a redundant recompute on the next call.
   const cached = stableLtmCache.get(sessionID);
   if (cached) return cached;
-  const inFlight = stableLtmInFlight.get(sessionID);
-  if (inFlight) {
-    await promiseAgainstAbort(() => inFlight, callerSignal);
-    return stableLtmCache.get(sessionID);
-  }
-  const signal = stableLtmComputeSignal(sessionID);
-  let promise!: Promise<void>;
-  promise = (async () => {
-    try {
-      const result = await promiseAgainstAbort(() => compute(signal), signal);
-      signal.throwIfAborted();
-      if (result) stableLtmCache.set(sessionID, result);
-    } finally {
-      if (stableLtmInFlight.get(sessionID) === promise) {
-        stableLtmInFlight.delete(sessionID);
+  callerSignal?.throwIfAborted();
+  let inFlight = stableLtmInFlight.get(sessionID);
+  if (!inFlight) {
+    const controller = new AbortController();
+    const signal = AbortSignal.any([
+      stableLtmComputeSignal(sessionID),
+      controller.signal,
+    ]);
+    const entry = {
+      promise: undefined as unknown as Promise<void>,
+      controller,
+      waiters: 0,
+    };
+    entry.promise = (async () => {
+      try {
+        const result = await promiseAgainstAbort(() => compute(signal), signal);
+        signal.throwIfAborted();
+        if (result) stableLtmCache.set(sessionID, result);
+      } finally {
+        if (stableLtmInFlight.get(sessionID) === entry)
+          stableLtmInFlight.delete(sessionID);
       }
+    })();
+    stableLtmInFlight.set(sessionID, entry);
+    inFlight = entry;
+  }
+  inFlight.waiters++;
+  try {
+    await promiseAgainstAbort(() => inFlight.promise, callerSignal);
+    return stableLtmCache.get(sessionID);
+  } finally {
+    inFlight.waiters--;
+    if (
+      inFlight.waiters === 0 &&
+      stableLtmInFlight.get(sessionID) === inFlight
+    ) {
+      // The final caller has departed; cancel queued read jobs, but the pool
+      // continues to account for any read already executing in a worker.
+      inFlight.controller.abort(
+        new DOMException("stable LTM has no waiting request", "AbortError"),
+      );
+      stableLtmInFlight.delete(sessionID);
     }
-  })();
-  stableLtmInFlight.set(sessionID, promise);
-  await promiseAgainstAbort(() => promise, callerSignal);
-  return stableLtmCache.get(sessionID);
+  }
 }
 
 /**
@@ -3901,6 +3972,7 @@ async function computeStableLtm(
       const sessionEntities = await entities.entitiesForSessionOffloaded(
         projectPath,
         cfg.knowledge.maxEntityInject,
+        signal,
       );
       if (sessionEntities.length) {
         const formattedEntities = entities.formatForPrompt(sessionEntities);
@@ -3919,7 +3991,7 @@ async function computeStableLtm(
   // Project-knowledge catalog (#917 "A") — compact recall-by-id index.
   let knowledgeTocText = "";
   try {
-    const catalog = (await ltm.forProjectOffloaded(projectPath, false))
+    const catalog = (await ltm.forProjectOffloaded(projectPath, false, signal))
       .filter((e) => e.category !== "preference")
       .map((e) => ({ id: e.id, category: e.category, title: e.title }));
     knowledgeTocText = buildKnowledgeCatalogText(
@@ -17019,6 +17091,58 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   };
 }
 
+/** One budget for every pre-upstream memory step, independent of the later
+ * upstream/recall lifetime. Disposing it never cancels accepted work. */
+export function createMemoryPreparationScope(
+  caller: AbortSignal,
+  timeoutMs: number,
+): {
+  signal: AbortSignal;
+  expired: () => boolean;
+  assertActive: () => void;
+  dispose: () => void;
+  deadlineAt: number;
+} {
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + timeoutMs;
+  let disposed = false;
+  const expire = () =>
+    controller.abort(
+      new DOMException("memory preparation timed out", "TimeoutError"),
+    );
+  const timer = setTimeout(expire, timeoutMs);
+  timer.unref?.();
+  const signal = AbortSignal.any([caller, controller.signal]);
+  return {
+    signal,
+    expired: () =>
+      controller.signal.aborted || (!disposed && Date.now() >= deadlineAt),
+    assertActive: () => {
+      if (!disposed && Date.now() >= deadlineAt && !controller.signal.aborted)
+        expire();
+      signal.throwIfAborted();
+    },
+    deadlineAt,
+    dispose: () => {
+      disposed = true;
+      clearTimeout(timer);
+    },
+  };
+}
+
+function memoryPreparationTimeoutMs(): number {
+  /** Override the normal-turn memory preparation budget at admission.
+   * Values from 1000–60000 ms are accepted; invalid values use .lore.json
+   * or the 8000 ms default. This budget ends before upstream generation. */
+  const raw = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+  if (raw && /^\d+$/.test(raw)) {
+    const value = Number(raw);
+    if (Number.isSafeInteger(value) && value >= 1_000 && value <= 60_000)
+      return value;
+  }
+  return loreConfig().timeouts.memoryPreparationTimeoutMs ?? 8_000;
+}
+
 export function wrapBodyWithCleanup(
   response: Response,
   cleanup: () => void,
@@ -18154,6 +18278,64 @@ async function handleConversationTurn(
   claimSession: (sessionID: string) => Promise<void>,
   onSessionIdentified?: (sessionID: string) => void,
 ): Promise<Response> {
+  // Start the absolute lifetime before identity, model metadata, LTM or
+  // prewarm can wait. The short budget ends before intentional throttling and
+  // upstream generation; each nested read receives the same signal.
+  const foregroundAbort = createForegroundAbortScope(req.signal);
+  const preparation = createMemoryPreparationScope(
+    foregroundAbort.signal,
+    memoryPreparationTimeoutMs(),
+  );
+  const rollback: { preparation?: () => void; release?: () => void } = {};
+  let responseReturned = false;
+  try {
+    const response = await handleConversationTurnPrepared(
+      { ...req, signal: preparation.signal },
+      config,
+      requestOrder,
+      requestGeneration,
+      downstreamSettled,
+      downstreamWasCancelled,
+      downstreamCompleted,
+      claimSession,
+      foregroundAbort,
+      preparation,
+      rollback,
+      onSessionIdentified,
+    );
+    responseReturned = true;
+    return wrapBodyWithCleanup(
+      response,
+      foregroundAbort.dispose,
+      foregroundAbort.signal,
+    );
+  } catch (error) {
+    rollback.preparation?.();
+    if (preparation.expired() && !foregroundAbort.signal.aborted) {
+      throw new ReadPreparationUnavailableError("context", "timeout");
+    }
+    throw error;
+  } finally {
+    preparation.dispose();
+    rollback.release?.();
+    if (!responseReturned) foregroundAbort.dispose();
+  }
+}
+
+async function handleConversationTurnPrepared(
+  req: GatewayRequest,
+  config: GatewayConfig,
+  requestOrder: number,
+  requestGeneration: number,
+  downstreamSettled: Promise<void>,
+  downstreamWasCancelled: () => boolean,
+  downstreamCompleted: () => boolean,
+  claimSession: (sessionID: string) => Promise<void>,
+  foregroundAbort: ReturnType<typeof createForegroundAbortScope>,
+  preparation: ReturnType<typeof createMemoryPreparationScope>,
+  rollback: { preparation?: () => void; release?: () => void },
+  onSessionIdentified?: (sessionID: string) => void,
+): Promise<Response> {
   if (
     pipelineResetInProgress ||
     requestGeneration !== streamingPostResponseGeneration
@@ -18189,6 +18371,7 @@ async function handleConversationTurn(
     return { identified: result, claimed, revalidateConfirmedIdentity };
   });
   const { identified } = admitted;
+  preparation.assertActive();
   const { sessionID, isNew, tier } = identified;
   try {
     onSessionIdentified?.(sessionID);
@@ -18225,6 +18408,7 @@ async function handleConversationTurn(
   // strip it before either the provisional verifier or full pipeline forwards.
   stripContextMarkers(req.messages);
   if (identified.provisionalIdentity) {
+    preparation.dispose();
     const preUpstreamPause = pipelinePreUpstreamPauseForTest;
     if (preUpstreamPause) {
       preUpstreamPause.onWait();
@@ -18232,7 +18416,7 @@ async function handleConversationTurn(
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
     }
     return handleProvisionalConversationTurn(
-      req,
+      { ...req, signal: foregroundAbort.signal },
       config,
       identified,
       pathResult,
@@ -18242,6 +18426,10 @@ async function handleConversationTurn(
       downstreamWasCancelled,
     );
   }
+  rollback.release = await acquireMemoryPreparation(
+    sessionID,
+    preparation.signal,
+  );
   const legacyGlobalProvider = cred
     ? captureLegacyGlobalAuth(req, config, cred)
     : undefined;
@@ -18672,7 +18860,8 @@ async function handleConversationTurn(
   // to make the budget below read real model data, not fallback. (Secondary
   // getModelEntrySync sites — worker selection, cost metrics — intentionally
   // keep using the sync fallback on the very first turn; they self-correct.)
-  await ensureModelDataReady();
+  await promiseAgainstAbort(() => ensureModelDataReady(), req.signal);
+  preparation.assertActive();
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
   // Price the session model from the provider it is actually routed to (the
   // X-Lore-Provider header), not the flat last-write-wins entry — a bare id
@@ -18883,6 +19072,7 @@ async function handleConversationTurn(
     checkpoint,
   } = await prepareSemanticMessages({
     messages: req.messages,
+    signal: req.signal,
     sessionID,
     projectPath,
     noStore: suppressTemporalStorage,
@@ -18892,6 +19082,7 @@ async function handleConversationTurn(
     sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
   });
+  preparation.assertActive();
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
 
   // --- 6. LTM injection (system[1] stable prefix + durable-delta context LTM) ---
@@ -19329,10 +19520,40 @@ async function handleConversationTurn(
     setLtmTokens(0, sessionID);
     consumeCameOutOfIdle(sessionID);
   }
-  const contextAfterStep6 = {
+  let contextAfterSelection = {
     cache: ltmSessionCache.get(sessionID),
     pin: ltmPinnedText.get(sessionID),
   };
+  // Selection is provisional until the prompt reaches upstream. An expired
+  // prewarm must not make a retry believe this knowledge was already emitted.
+  rollback.preparation = () => {
+    if (
+      ltmSessionCache.get(sessionID) !== contextAfterSelection.cache ||
+      ltmPinnedText.get(sessionID) !== contextAfterSelection.pin
+    )
+      return;
+    if (contextBeforeStep6.cache)
+      ltmSessionCache.set(sessionID, contextBeforeStep6.cache);
+    else ltmSessionCache.delete(sessionID);
+    if (contextBeforeStep6.pin)
+      ltmPinnedText.set(sessionID, contextBeforeStep6.pin);
+    else ltmPinnedText.delete(sessionID);
+    if (
+      contextBeforeStep6.cache !== contextAfterSelection.cache ||
+      contextBeforeStep6.pin !== contextAfterSelection.pin
+    ) {
+      saveSessionTracking(sessionID, {
+        ltmCacheText: contextBeforeStep6.cache?.formatted ?? null,
+        ltmCacheTokens: contextBeforeStep6.cache?.tokenCount ?? null,
+        ltmPinText: contextBeforeStep6.pin?.formatted ?? null,
+        ltmPinTokens: contextBeforeStep6.pin?.tokenCount ?? null,
+        ltmPinKeys: contextBeforeStep6.pin?.entryKeys
+          ? JSON.stringify(contextBeforeStep6.pin.entryKeys)
+          : null,
+      });
+    }
+  };
+  preparation.assertActive();
 
   // --- 7. Gradient transform on messages ---
   // loreMessages was built + resolved once before the LTM block (step 6) so the
@@ -19344,6 +19565,7 @@ async function handleConversationTurn(
   // snapshot transform() reads, so its loadDistillationsCached hits the cache
   // instead of the DB. A worker failure aborts preparation before transform()
   // can run the unbounded scan synchronously.
+  preparation.assertActive();
   await prewarmDistillationSnapshot(
     projectPath,
     sessionID,
@@ -19358,6 +19580,7 @@ async function handleConversationTurn(
     sessionState.lastAcceptedProvenanceLayer ?? null;
   let result;
   try {
+    preparation.assertActive();
     result = transform({
       messages: loreMessages,
       projectPath,
@@ -19376,6 +19599,7 @@ async function handleConversationTurn(
       checkpoint,
     } = await prepareSemanticMessages({
       messages: req.messages,
+      signal: req.signal,
       sessionID,
       projectPath,
       noStore: suppressTemporalStorage,
@@ -19394,6 +19618,7 @@ async function handleConversationTurn(
       budget: modelBudget,
     });
   }
+  preparation.assertActive();
   checkpoint?.finish(result.messages);
   // This header is deliberately optimistic: the candidate checkpoint is not
   // published until accepted-response bookkeeping succeeds after downstream
@@ -19667,8 +19892,8 @@ async function handleConversationTurn(
         // appended. Roll those provisional values back on an aborted turn.
         // Do not overwrite another in-flight request's newer selection.
         if (
-          ltmSessionCache.get(sessionID) === contextAfterStep6.cache &&
-          ltmPinnedText.get(sessionID) === contextAfterStep6.pin
+          ltmSessionCache.get(sessionID) === contextAfterSelection.cache &&
+          ltmPinnedText.get(sessionID) === contextAfterSelection.pin
         ) {
           if (contextBeforeStep6.cache) {
             ltmSessionCache.set(sessionID, contextBeforeStep6.cache);
@@ -19697,6 +19922,15 @@ async function handleConversationTurn(
       log.error("LTM refresh on emergency layer failed:", e);
     }
   }
+
+  // Layer 4 may replace both provisional references after step 6. A deadline
+  // at the next boundary must restore the accepted baseline before any durable
+  // prompt delta is appended or an unsent pin can be mistaken for delivery.
+  contextAfterSelection = {
+    cache: ltmSessionCache.get(sessionID),
+    pin: ltmPinnedText.get(sessionID),
+  };
+  preparation.assertActive();
 
   // --- 7c. (removed) Context health note ---
   // Previously a per-turn "Context health" note was appended to system[2] when
@@ -19815,22 +20049,28 @@ async function handleConversationTurn(
         // (identity-independent), so accuracy is preserved; only a line ref whose
         // basename wasn't pre-listed degrades to 'unknown' (neutral).
         let block = buildSyntheticToolUseBlock(target);
+        let probeIncludesRefcheck = false;
         if (
           target.kind === "shell" &&
           cfg.knowledge.enabled &&
           cfg.knowledge.referenceValidation
         ) {
           try {
-            const peek = await ltm.peekProjectRefsOffloaded(projectPath);
+            const peek = await ltm.peekProjectRefsOffloaded(
+              projectPath,
+              Date.now(),
+              req.signal,
+            );
             assertCurrentPipelineGeneration(req.signal, requestGeneration);
             if (!peek.gated && peek.refs.length > 0) {
               block = buildCombinedResolveRefcheckBlock(
                 target,
                 buildRefcheckProbeScript(peek.refs),
               );
-              sessionState.refcheckInProbe = true;
+              probeIncludesRefcheck = true;
             }
           } catch (error) {
+            preparation.assertActive();
             if (!(error instanceof ReadPreparationUnavailableError))
               throw error;
             // Reference validation is optional here; the resolver still runs
@@ -19838,6 +20078,9 @@ async function handleConversationTurn(
             log.info("reference probe read unavailable; deferring refcheck");
           }
         }
+        const syntheticResponse = syntheticToolUseResponse(req, block);
+        preparation.assertActive();
+        sessionState.refcheckInProbe = probeIncludesRefcheck;
         sessionState.syntheticResolveState =
           target.kind === "read" ? "readPending" : "shellPending";
         sessionState.syntheticResolveToolUseId = block.id;
@@ -19849,9 +20092,13 @@ async function handleConversationTurn(
         );
         // SHORT-CIRCUIT: do NOT forward upstream. Return our own tool_use
         // response so the client harness executes the probe locally.
-        return syntheticToolUseResponse(req, block);
+        rollback.preparation?.();
+        rollback.preparation = undefined;
+        rollback.release();
+        return syntheticResponse;
       }
       // No usable tool — give up permanently for this session.
+      preparation.assertActive();
       sessionState.syntheticResolveState = "done";
     }
   }
@@ -20017,10 +20264,12 @@ async function handleConversationTurn(
     distilledPrefixLength: result.distilledTokens > 0 ? 2 : 0,
   };
 
-  // The throttle is part of the foreground request's absolute lifetime. Start
-  // the shared scope before delaying so the 300-second deadline includes both
-  // the wait and every later upstream/recall phase.
-  const foregroundAbort = createForegroundAbortScope(modifiedReq.signal);
+  // Memory preparation is complete; its short timer cannot cancel generation.
+  // The absolute foreground lifetime started at turn admission and still
+  // covers deliberate throttling and every later upstream/recall phase.
+  preparation.assertActive();
+  preparation.dispose();
+  modifiedReq.signal = foregroundAbort.signal;
 
   // --- Daily budget + OAuth quota throttle ---
   // Apply an invisible proxy-level sleep to slow the agent when approaching
@@ -20181,6 +20430,9 @@ async function handleConversationTurn(
   const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
 
   if (!upstreamResponse.ok) {
+    rollback.preparation?.();
+    rollback.preparation = undefined;
+    rollback.release?.();
     const errorBodySignal = AbortSignal.any([
       foregroundAbort.signal,
       AbortSignal.timeout(foregroundErrorBodyTimeoutMs),
@@ -20254,6 +20506,8 @@ async function handleConversationTurn(
     endGenAiSpan();
     return finishForeground(sanitizedUpstreamErrorResponse(upstreamResponse));
   }
+  rollback.preparation = undefined;
+  rollback.release?.();
 
   // The provenance boundary is committed by the successful-response
   // finalizers below, after the provider body has accumulated and durable

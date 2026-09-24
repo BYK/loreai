@@ -186,4 +186,34 @@ describe("singleFlightStableLtm", () => {
     });
     expect(compute).toHaveBeenCalledTimes(1);
   });
+
+  test("the final departing caller cancels queued compute and a retry starts fresh", async () => {
+    vi.resetModules();
+    const { singleFlightStableLtm } = await import("../src/pipeline");
+    const caller = new AbortController();
+    let oldSignal: AbortSignal | undefined;
+    const abandoned = singleFlightStableLtm(
+      "session-final-waiter",
+      async (signal) => {
+        oldSignal = signal;
+        await new Promise<void>((_, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+        return { formatted: "abandoned", tokenCount: 1 };
+      },
+      caller.signal,
+    );
+    await vi.waitFor(() => expect(oldSignal).toBeDefined());
+    caller.abort(new DOMException("preparation expired", "TimeoutError"));
+    await expect(abandoned).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(oldSignal?.aborted).toBe(true);
+    await expect(
+      singleFlightStableLtm("session-final-waiter", async () => ({
+        formatted: "fresh",
+        tokenCount: 2,
+      })),
+    ).resolves.toEqual({ formatted: "fresh", tokenCount: 2 });
+  });
 });

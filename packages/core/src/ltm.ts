@@ -1306,13 +1306,13 @@ export function forProject(
 export async function forProjectOffloaded(
   projectPath: string,
   includeCross = true,
+  signal?: AbortSignal,
 ): Promise<KnowledgeEntry[]> {
   const pid = ensureProject(projectPath);
   const { sql, params } = forProjectQuery(pid, includeCross);
-  const rows = requireReadRows(
-    await offloadAllOrTimeout(sql, params),
-    "knowledge",
-  );
+  const result = await offloadAllOrTimeout(sql, params, { signal });
+  signal?.throwIfAborted();
+  const rows = requireReadRows(result, "knowledge");
   return (rows as Record<string, unknown>[]).map(
     hydrateKnowledgeEntry,
   ) as KnowledgeEntry[];
@@ -1875,15 +1875,18 @@ export function peekProjectRefs(
 export async function peekProjectRefsOffloaded(
   projectPath: string,
   now: number = Date.now(),
+  signal?: AbortSignal,
 ): Promise<{ gated: boolean; refs: Reference[] }> {
+  signal?.throwIfAborted();
   const pid = ensureProject(projectPath);
   if (refcheckGated(pid, now)) return { gated: true, refs: [] };
 
   const params: ReadParam[] = [pid, DEAD_CONFIDENCE_FLOOR];
   const rows = requireReadRows(
-    await offloadAllOrTimeout(PROJECT_REFS_SQL, params),
+    await offloadAllOrTimeout(PROJECT_REFS_SQL, params, { signal }),
     "references",
   ) as Array<{ title: string; content: string }>;
+  signal?.throwIfAborted();
   return { gated: false, refs: dedupeProjectRefs(rows) };
 }
 
@@ -3041,6 +3044,7 @@ export async function forSession(
       projectPath,
       sessionContext,
       maxTokens - used,
+      options?.signal,
     );
     for (const section of latSections) {
       if (used >= maxTokens) break;
