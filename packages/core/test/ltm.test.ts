@@ -13,6 +13,12 @@ import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
 import { config } from "../src/config";
+import { ReadPreparationUnavailableError } from "../src/read-offload";
+import { runReadJob } from "../src/read-job";
+import type {
+  VectorWorkerInbound,
+  VectorWorkerInitData,
+} from "../src/vector-worker-types";
 import {
   dropEmbeddingColumn,
   ensureVec0Store,
@@ -622,11 +628,10 @@ describe("ltm.forSession", () => {
     expect(found?.cross_project).toBe(0);
   });
 
-  test("degrades to [] when a candidate-scan worker times out (#1006 symmetric degrade)", async () => {
+  test("fails without freezing empty knowledge when both candidate scans time out", async () => {
     // Force the read-worker pool ON with a worker that receives the candidate
-    // scans but NEVER replies → both scans time out. forSession must degrade the
-    // whole LTM injection to [] rather than re-run the wedged scans on the main
-    // thread (re-blocking the loop) or inject a lopsided partial set.
+    // scans but NEVER replies → both scans time out. It must reject before
+    // changing the pinned selection or re-running a scan on the main thread.
     ltm.create({
       projectPath: PROJ,
       category: "decision",
@@ -653,9 +658,12 @@ describe("ltm.forSession", () => {
     vi.useFakeTimers();
     try {
       const p = ltm.forSession(PROJ, SESSION, 10_000);
+      const rejected = expect(p).rejects.toBeInstanceOf(
+        ReadPreparationUnavailableError,
+      );
       // Advance past the per-request timeout so both candidate scans time out.
       await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
-      expect(await p).toEqual([]);
+      await rejected;
     } finally {
       vi.useRealTimers();
       _setTestVectorWorkerFactory(null);
@@ -663,11 +671,10 @@ describe("ltm.forSession", () => {
     }
   });
 
-  test("degrades to [] when ONLY ONE candidate scan times out (symmetric, guards ||)", async () => {
+  test("fails when only one candidate scan times out (no lopsided knowledge set)", async () => {
     // Asymmetric case: the project scan's worker wedges (times out) while the
-    // cross scan resolves (its worker errors → in-process fallback). forSession
-    // must still degrade to [] rather than inject the lopsided cross-only set.
-    // Guards the `||` symmetric check (a `&&` would proceed with a partial set).
+    // cross scan's worker fails. Neither partial result may replace the pinned
+    // knowledge set.
     ltm.create({
       projectPath: PROJ,
       category: "decision",
@@ -688,13 +695,12 @@ describe("ltm.forSession", () => {
       postMessage(msg: { type: string; id: number }): void {
         if (msg.type !== "read") return;
         // Dispatch order is [project → worker 0, cross → worker 1]. Worker 0
-        // hangs (project scan times out); worker 1 reports a per-request error so
-        // the cross scan falls back in-process (a NON-timeout resolution).
+        // hangs (project scan times out); worker 1 reports a per-request error.
         if (this.i === 0) return;
         this.emit("message", {
           type: "error",
           id: msg.id,
-          error: "force in-process fallback",
+          error: "worker read failed",
         });
       }
     }
@@ -704,8 +710,11 @@ describe("ltm.forSession", () => {
     vi.useFakeTimers();
     try {
       const p = ltm.forSession(PROJ, SESSION, 10_000);
+      const rejected = expect(p).rejects.toBeInstanceOf(
+        ReadPreparationUnavailableError,
+      );
       await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
-      expect(await p).toEqual([]);
+      await rejected;
     } finally {
       vi.useRealTimers();
       _setTestVectorWorkerFactory(null);
@@ -873,6 +882,134 @@ describe("ltm.forSession", () => {
     expect(titles).toContain("TypeScript strict mode caveat");
     // Kubernetes entry should not appear (no match with TypeScript context)
     expect(titles).not.toContain("Kubernetes deployment pattern");
+  });
+
+  test("failed FTS cannot remove a previously relevant foreign entry from selection", async () => {
+    const foreignId = ltm.create({
+      projectPath: "/test/ltm/foreign-forsession",
+      category: "gotcha",
+      title: "Mango orchid deployment rules",
+      content: "Mango orchid deployment requires the extra access check",
+      scope: "project",
+      crossProject: true,
+    });
+    const contextHint = "Review the mango orchid deployment access rules now";
+    const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(false);
+    try {
+      const selected = await ltm.forSession(PROJ, SESSION, 10_000, {
+        contextHint,
+      });
+      expect(selected.map((entry) => entry.id)).toContain(foreignId);
+
+      class FailingFtsReadWorker extends EventEmitter {
+        unref(): void {}
+        postMessage(msg: VectorWorkerInbound): void {
+          if (msg.type !== "read") return;
+          if (msg.spec.sql.includes("FROM knowledge_fts")) {
+            this.emit("message", {
+              type: "error",
+              id: msg.id,
+              error: "injected FTS query failure",
+            });
+          } else {
+            this.emit("message", {
+              type: "read-result",
+              id: msg.id,
+              rows: runReadJob(db(), msg.spec),
+            });
+          }
+        }
+        terminate(): Promise<number> {
+          this.emit("exit", 0);
+          return Promise.resolve(0);
+        }
+      }
+      _resetVectorPoolForTest();
+      _setTestVectorWorkerFactory(
+        (() => new FailingFtsReadWorker()) as unknown as (
+          data: VectorWorkerInitData,
+        ) => never,
+      );
+      await expect(
+        ltm.forSession(PROJ, SESSION, 10_000, { contextHint }),
+      ).rejects.toMatchObject({
+        name: ReadPreparationUnavailableError.name,
+        phase: "knowledge",
+        reason: "unavailable",
+      });
+    } finally {
+      _setTestVectorWorkerFactory(null);
+      _resetVectorPoolForTest();
+      available.mockRestore();
+    }
+  });
+
+  test("failed vector worker cannot remove a semantic-only foreign selection", async () => {
+    const foreignId = ltm.create({
+      projectPath: "/test/ltm/foreign-vector-selection",
+      category: "gotcha",
+      title: "Hydra namespace rule",
+      content: "Hydra namespace placement requires an isolation boundary",
+      scope: "project",
+      crossProject: true,
+    });
+    const contextHint = "Investigate release tracing and scheduler contention";
+    const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    const embed = vi
+      .spyOn(embedding, "embed")
+      .mockResolvedValue([new Float32Array([1, 0, 0])]);
+    const vector = vi
+      .spyOn(embedding, "vectorSearch")
+      .mockResolvedValue([{ id: foreignId, similarity: 0.95 }]);
+    try {
+      const selected = await ltm.forSession(PROJ, SESSION, 10_000, {
+        contextHint,
+      });
+      expect(selected.map((entry) => entry.id)).toContain(foreignId);
+      vector.mockRestore();
+
+      class FailingVectorReadWorker extends EventEmitter {
+        unref(): void {}
+        postMessage(msg: VectorWorkerInbound): void {
+          if (msg.type === "read") {
+            this.emit("message", {
+              type: "read-result",
+              id: msg.id,
+              rows: runReadJob(db(), msg.spec),
+            });
+          } else if (msg.type === "search") {
+            this.emit("message", {
+              type: "error",
+              id: msg.id,
+              error: "injected vector worker failure",
+            });
+          }
+        }
+        terminate(): Promise<number> {
+          this.emit("exit", 0);
+          return Promise.resolve(0);
+        }
+      }
+      _resetVectorPoolForTest();
+      _setTestVectorWorkerFactory(
+        (() => new FailingVectorReadWorker()) as unknown as (
+          data: VectorWorkerInitData,
+        ) => never,
+      );
+      await expect(
+        ltm.forSession(PROJ, SESSION, 10_000, { contextHint }),
+      ).rejects.toMatchObject({
+        name: ReadPreparationUnavailableError.name,
+        phase: "knowledge",
+        reason: "unavailable",
+      });
+    } finally {
+      _setTestVectorWorkerFactory(null);
+      _resetVectorPoolForTest();
+      vector.mockRestore();
+      embed.mockRestore();
+      available.mockRestore();
+    }
   });
 
   test("falls back to top entries by confidence when no session context", async () => {
@@ -1409,10 +1546,7 @@ describe("ltm.forProjectOffloaded (#1080)", () => {
     expect(offloaded).toEqual(expected);
   });
 
-  test("on a worker TIMEOUT falls back to the full in-process scan (never a spurious empty)", async () => {
-    // The frozen system[1] catalog / compaction summary must reflect the real
-    // knowledge set. A pool timeout must NOT yield [] (which would be frozen for
-    // the whole session) — forProjectOffloaded re-runs the scan in-process.
+  test("on a worker timeout fails before freezing an empty catalog or scanning synchronously", async () => {
     seed();
     const expected = ltm.forProject(PROJ, true);
     expect(expected.length).toBeGreaterThan(0);
@@ -1431,8 +1565,11 @@ describe("ltm.forProjectOffloaded (#1080)", () => {
     _setTestVectorWorkerFactory((() => new HangingWorker()) as never);
     vi.useFakeTimers();
     const p = ltm.forProjectOffloaded(PROJ, true);
+    const rejected = expect(p).rejects.toBeInstanceOf(
+      ReadPreparationUnavailableError,
+    );
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
-    expect((await p).map((e) => e.id)).toEqual(expected.map((e) => e.id));
+    await rejected;
   });
 });
 

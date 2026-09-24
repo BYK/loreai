@@ -14,12 +14,12 @@
  *
  * Safety model (this is shipped behind a DEFAULT-ON kill switch, not opt-in):
  *   - `search.embeddings.workerOffload` (config, default true) and the
- *     `LORE_DISABLE_VEC_WORKER=1` env var both gate the pool off → callers run
- *     the in-process path (current behavior).
+ *     `LORE_DISABLE_VEC_WORKER=1` env var gate the pool off. Heavy production
+ *     reads then degrade or fail preparation, rather than scanning synchronously.
  *   - `tryPoolVectorSearch()` / `tryPoolRead()` NEVER throw. They resolve:
  *       · the result, on success;
- *       · `null` when the pool is disabled/broken/errored → caller runs the
- *         in-process path;
+ *       · `null` when the pool is disabled/broken/errored → caller applies its
+ *         failure policy (unit-test fallback or production degrade/fail);
  *       · a TIMED_OUT sentinel when the worker was alive but too slow, or pool
  *         shutdown has begun → caller returns an EMPTY result WITHOUT re-running
  *         the scan on the main thread (re-running re-blocks the loop — the #1006
@@ -33,7 +33,7 @@
 
 import { Worker } from "node:worker_threads";
 import { config } from "./config";
-import { dbPath } from "./db";
+import { dbPath, dbReadGeneration } from "./db";
 import * as log from "./log";
 import { OwnedRetirements } from "./owned-retirements";
 import type { ReadJobSpec } from "./read-job";
@@ -59,15 +59,15 @@ const DEFAULT_VECTOR_SEARCH_TIMEOUT_MS = 10_000;
  *  used but the request exceeded {@link vectorSearchTimeoutMs}, or when pool
  *  shutdown has begun. Distinct from
  *  `null` — which means the pool was disabled / broken / errored and the caller
- *  SHOULD run the in-process path. On a timeout the caller must instead return
+ *  applies its failure policy. On a timeout the caller must instead return
  *  an empty result and leave the main thread free. */
 export const VECTOR_SEARCH_TIMED_OUT = Symbol("vector-search-timed-out");
 
 /** The read-job analogue of {@link VECTOR_SEARCH_TIMED_OUT}: resolved (never
  *  rejected) by {@link tryPoolRead} when a worker was used but the read exceeded
  *  the timeout, or when pool shutdown has begun. Distinct from `null` (pool
- *  disabled/broken/errored → run the
- *  query in-process). On a timeout the caller must DEGRADE to an empty result —
+ *  disabled/broken/errored → caller applies its failure policy). On timeout
+ *  the caller must DEGRADE to an empty result —
  *  re-running the same scan in-process would re-block the loop the offload
  *  exists to keep free (#1006). The wedged worker is terminated either way. */
 export const READ_JOB_TIMED_OUT = Symbol("read-job-timed-out");
@@ -100,8 +100,8 @@ const DEFAULT_POOL_SIZE = 2;
 /** Consecutive structural failures (worker death / load failure / reader-open
  *  failure) — with no healthy reply in between — that latch the pool broken.
  *  A persistently unresolvable worker (missing bundle, bad DB path) would
- *  otherwise respawn on every call; latching makes it fall back to the
- *  in-process path for the rest of the process. */
+ *  otherwise respawn on every call; latching prevents repeated expensive
+ *  attempts for the rest of the process. */
 const MAX_STRUCTURAL_FAILURES = 6;
 
 type Hits = VectorHit[] | DistillationVectorHit[];
@@ -128,6 +128,7 @@ let nextRequestId = 0;
 let poolBroken = false;
 /** Consecutive structural failures since the last healthy reply. */
 let structuralFailures = 0;
+let activeDbReadGeneration: number | null = null;
 /** True while shutting the pool down, so terminate()-induced exits aren't
  *  counted as structural failures. */
 let shuttingDown = false;
@@ -150,8 +151,9 @@ export function _setTestVectorWorkerFactory(
 /** Whether the pool should be used at all. */
 function poolEnabled(): boolean {
   if (poolBroken) return false;
-  // Kill switch: force the in-process vector-search path, disabling the
-  // off-thread read-worker pool. Default-on escape hatch, not opt-in.
+  // LORE_DISABLE_VEC_WORKER=1 disables the off-thread read-worker pool.
+  // Required foreground memory reads then return retryable 503; optional
+  // reads degrade. This never enables an unbounded synchronous scan.
   if (process.env.LORE_DISABLE_VEC_WORKER === "1") return false;
   // With a test factory installed the pool is explicitly under test.
   if (testWorkerFactory) return true;
@@ -159,6 +161,17 @@ function poolEnabled(): boolean {
   // never attempt a real spawn (which can't resolve the .ts worker in vitest).
   if (process.env.NODE_ENV === "test") return false;
   return config().search.embeddings.workerOffload !== false;
+}
+
+/** Unit tests without a worker factory intentionally exercise the legacy
+ * in-process query path. Production never treats worker failure or a disabled
+ * worker as permission to execute an unbounded scan on the gateway thread. */
+export function inProcessReadFallbackForTest(): boolean {
+  return (
+    process.env.NODE_ENV === "test" &&
+    !testWorkerFactory &&
+    process.env.LORE_DISABLE_VEC_WORKER !== "1"
+  );
 }
 
 function desiredPoolSize(): number {
@@ -218,8 +231,7 @@ function spawnWorker(initData: VectorWorkerInitData): Worker {
 
 /** Reject and clear every in-flight request on a worker. Used for STRUCTURAL
  *  deaths (crash / `error` / `exit` / init-error / shutdown): the worker is
- *  genuinely gone, so the rejection routes each caller to the in-process
- *  fallback where it still gets a correct result. */
+ *  genuinely gone, so each caller applies its unavailable policy. */
 function failAll(pw: PoolWorker, err: Error): void {
   for (const [, p] of pw.inflight) {
     clearTimeout(p.timer);
@@ -232,8 +244,8 @@ function failAll(pw: PoolWorker, err: Error): void {
  *  rejection) and clear them. Used when a worker is retired for a TIMEOUT: the
  *  requests queued behind the wedged synchronous scan must DEGRADE to an empty
  *  result, exactly like the request that actually blew the timeout. Rejecting
- *  them instead (the old `failAll` behavior) routed each one to the in-process
- *  fallback in `offloadAllOrTimeout` / `tryPoolVectorSearch`, re-blocking the
+ *  them instead (the old `failAll` behavior) used to route each one to the
+ *  in-process fallback, re-blocking the
  *  main thread with the very synchronous scans the offload exists to avoid —
  *  the #1006 stall, amplified once the whole recall FTS fan-out shares the pool
  *  (Seer PR #1005 r3480447643). A timeout is slowness, not breakage, so (like
@@ -287,8 +299,7 @@ async function settleRetiredVectorWorkers(deadlineMs: number): Promise<void> {
  *
  * Crucially this is NOT counted as a structural failure: a timeout is slowness,
  * not a broken worker, and latching the pool broken after repeated timeouts
- * would send every caller back to the in-process path — reintroducing the very
- * main-thread stall the timeout exists to prevent. Setting `dead` first makes
+ * would leave every foreground heavy read unavailable. Setting `dead` first makes
  * the terminate()-induced `exit` handler's {@link markDead} a no-op, so the
  * structural-failure latch is never touched. Collateral in-flight requests on
  * the same worker are RESOLVED as timeouts (see {@link timeoutAll}) — never
@@ -305,8 +316,7 @@ function retireTimedOutWorker(pw: PoolWorker): void {
 /**
  * Count a structural failure (worker death / load failure / reader-open
  * failure). After MAX_STRUCTURAL_FAILURES in a row with no healthy reply, latch
- * the pool broken and terminate any survivors so callers fall back to the
- * in-process path for the rest of the process instead of respawn-storming.
+ * the pool broken and terminate any survivors instead of respawn-storming.
  */
 function recordStructuralFailure(): void {
   if (shuttingDown || poolBroken) return;
@@ -314,7 +324,7 @@ function recordStructuralFailure(): void {
   if (structuralFailures < MAX_STRUCTURAL_FAILURES) return;
   poolBroken = true;
   log.info(
-    "vector worker pool disabled (repeated worker failures) — using in-process vector search",
+    "vector worker pool disabled (repeated worker failures) — heavy reads degraded",
   );
   for (const w of workers) {
     terminateRetiredVectorWorker(w.worker);
@@ -342,6 +352,10 @@ function makeWorker(): PoolWorker | null {
     worker.unref();
 
     worker.on("message", (msg: VectorWorkerOutbound) => {
+      // A retired reader can report a late success after its database was
+      // replaced. It must neither serve a stale result nor clear the current
+      // generation's structural-failure streak.
+      if (pw.dead) return;
       switch (msg.type) {
         case "result": {
           // A healthy reply clears the structural-failure streak.
@@ -367,7 +381,7 @@ function makeWorker(): PoolWorker | null {
         }
         case "error": {
           // Per-request failure (NOT a worker death) — reject just this
-          // request; the worker keeps serving. Caller falls back in-process.
+          // request; the worker keeps serving. Caller applies its failure policy.
           const pending = pw.inflight.get(msg.id);
           if (pending) {
             pw.inflight.delete(msg.id);
@@ -396,7 +410,7 @@ function makeWorker(): PoolWorker | null {
     return pw;
   } catch (err) {
     // Synchronous spawn failure (e.g. unresolvable worker URL). Latch broken so
-    // we stop trying — callers fall back to in-process for the process lifetime.
+    // we stop trying — heavy reads follow their failure policy until restart.
     poolBroken = true;
     log.info(
       "vector worker pool disabled (spawn failed):",
@@ -431,6 +445,25 @@ function ensurePool(): PoolWorker[] {
   return workers;
 }
 
+/** A reopened writer may point to a new database (or a replacement at the
+ * same path). Retire all readers from the prior writer generation before
+ * dispatching another query; reset a broken latch so the new DB can recover. */
+function refreshPoolDatabaseGeneration(): void {
+  const generation = dbReadGeneration();
+  if (activeDbReadGeneration === generation) return;
+  if (activeDbReadGeneration !== null) {
+    for (const pw of workers) {
+      pw.dead = true;
+      failAll(pw, new Error("read worker database replaced"));
+      terminateRetiredVectorWorker(pw.worker);
+    }
+    workers = [];
+    poolBroken = false;
+    structuralFailures = 0;
+  }
+  activeDbReadGeneration = generation;
+}
+
 /** Pick the live worker with the fewest in-flight requests. */
 function leastBusy(live: PoolWorker[]): PoolWorker | null {
   let best: PoolWorker | null = null;
@@ -442,7 +475,7 @@ function leastBusy(live: PoolWorker[]): PoolWorker | null {
 }
 
 /** Discriminated outcome of {@link dispatchToPool}. `ok` carries the worker's
- *  reply payload; `unavailable` means run in-process; `timeout` means degrade to
+ *  reply payload; `unavailable` means apply failure policy; `timeout` means degrade to
  *  empty (the worker was wedged and has been retired); `shutting-down` also
  *  degrades to empty, because fallback work could race the writer close. */
 type DispatchResult =
@@ -465,7 +498,7 @@ type DispatchResult =
  * {@link retireTimedOutWorker} so the pool recovers. A timeout is slowness, not
  * a structural failure, so the broken-latch is never touched. Anything else
  * (disabled pool, no worker, per-request error, postMessage throw, unexpected
- * throw) yields `{status:"unavailable"}` and the caller runs in-process.
+ * throw) yields `{status:"unavailable"}` and the caller applies its failure policy.
  */
 async function dispatchToPool(
   makeMessage: (id: number) => VectorWorkerInbound,
@@ -474,10 +507,12 @@ async function dispatchToPool(
   // Once shutdown owns the worker set, neither spawn a replacement nor route
   // this DB-capable operation to the synchronous main-thread fallback.
   if (shuttingDown) return { status: "shutting-down" };
+  refreshPoolDatabaseGeneration();
+  const readGeneration = dbReadGeneration();
   if (!poolEnabled()) return { status: "unavailable" };
   // Everything below is wrapped so the "never throws" contract holds by
   // construction — any unexpected throw (e.g. from ensurePool) resolves to
-  // unavailable and the caller runs the in-process path.
+  // unavailable and the caller applies its failure policy.
   try {
     const live = ensurePool();
     const pw = leastBusy(live);
@@ -494,7 +529,7 @@ async function dispatchToPool(
         // terminating its (uninterruptible, synchronously-scanning) worker so
         // the pool recovers instead of piling new work behind the stuck scan.
         log.info(
-          `${label} timed out after ${timeoutMs}ms — terminating the wedged worker, returning empty (not re-running in-process)`,
+          `${label} timed out after ${timeoutMs}ms — terminating the wedged worker without re-running in-process`,
         );
         resolve(POOL_REQUEST_TIMED_OUT);
         retireTimedOutWorker(pw);
@@ -515,6 +550,10 @@ async function dispatchToPool(
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+    // A writer close/reopen can happen while this job runs, even before the
+    // next dispatch notices the new generation. Never return stale rows from
+    // the old reader as a successful snapshot for the new database.
+    if (dbReadGeneration() !== readGeneration) return { status: "unavailable" };
     return settled === POOL_REQUEST_TIMED_OUT
       ? { status: "timeout" }
       : { status: "ok", value: settled };
@@ -524,7 +563,7 @@ async function dispatchToPool(
     // operation in-process while the writer is being closed.
     if (shuttingDown) return { status: "shutting-down" };
     log.info(
-      `${label} failed; using in-process fallback:`,
+      `${label} failed; degrading off-thread read:`,
       err instanceof Error ? err.message : String(err),
     );
     return { status: "unavailable" };
@@ -534,8 +573,8 @@ async function dispatchToPool(
 /**
  * Run a vector search on the pool. Resolves to:
  *   - the hits, on success;
- *   - `null` when the pool is disabled/unavailable/failed → the caller runs the
- *     in-process path;
+ *   - `null` when the pool is disabled/unavailable/failed → the caller applies
+ *     its failure policy;
  *   - {@link VECTOR_SEARCH_TIMED_OUT} when the request timed out → the caller
  *     returns an empty result WITHOUT re-running the scan on the main thread.
  * Never rejects.
@@ -562,8 +601,8 @@ export async function tryPoolVectorSearch(
  *   - `{ rows }` (row array for `mode:"all"`, single row or null for "get") on
  *     success — the `{ rows }` wrapper disambiguates a `.get()` no-row null from
  *     "pool unavailable";
- *   - `null` when the pool is disabled/unavailable/failed → the caller runs the
- *     same job in-process;
+ *   - `null` when the pool is disabled/unavailable/failed → the caller applies
+ *     its failure policy;
  *   - {@link READ_JOB_TIMED_OUT} when the read timed out → the caller DEGRADES
  *     to an empty result WITHOUT re-running the scan on the main thread.
  * Never rejects.
@@ -983,5 +1022,6 @@ export function _resetVectorPoolForTest(): void {
   poolBroken = false;
   nextRequestId = 0;
   structuralFailures = 0;
+  activeDbReadGeneration = null;
   shuttingDown = false;
 }

@@ -206,7 +206,7 @@ Vector embedding search provider, model, and dimensions.
 | `model` | string | `"nomic-ai/nomic-embed-text-v1.5"` |  | Model ID for the embedding provider. Default depends on provider. |
 | `dimensions` | number | `768` | min 64, max 2048 | Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768. |
 | `queryTimeoutMs` | number | `1500` | min 100, max 60000 | Maximum foreground LTM query-embedding wait in milliseconds, including worker startup and queueing. FTS is used on expiry. Default: 1500. |
-| `workerOffload` | boolean | `true` |  | Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path. |
+| `workerOffload` | boolean | `true` |  | Run heavy reads on a read-worker pool off the main event loop. Default true; when disabled, required memory preparation returns a retryable 503 rather than scanning on the gateway thread. |
 | `workerPoolSize` | number | `2` | min 1, max 16 | Number of read-worker threads for off-thread vector search. Default: 2. |
 | `embedPoolSize` | number | — | min 1, max 8 | Number of local embedding worker threads (each loads its own ~137MB model). Default: memory-gated (1–2). Override with LORE_EMBED_POOL_SIZE. |
 | `backfillCpuDuty` | number | — | min 0.1, max 1 | Legacy temporal backfill duty setting. Durable temporal admission no longer performs inference; the bounded scheduler controls embedding concurrency. |

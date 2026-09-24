@@ -9,6 +9,7 @@ import {
   vi,
 } from "vitest";
 import { db, ensureProject } from "../src/db";
+import { ReadPreparationUnavailableError } from "../src/read-offload";
 import {
   calibrate,
   evictSession,
@@ -33,8 +34,8 @@ import type { LoreMessage, LoreMessageWithParts } from "../src/types";
 // snapshot OFF-THREAD before the sync transform() runs. It must populate the
 // SAME per-session snapshot transform() reads with byte-identical rows, respect
 // the turn-boundary cache key, and — critically — leave the snapshot UNtouched
-// on a worker timeout so transform() falls back to the identical sync load
-// (never freeze an empty snapshot).
+// on a worker timeout so the pipeline can return a retryable error before
+// transform() performs an unbounded synchronous reload.
 
 const PROJECT = "/test/gradient-distill-prewarm";
 
@@ -289,7 +290,7 @@ describe("prewarmDistillationSnapshot (#1082)", () => {
     evictSession(SESSION);
   });
 
-  it("leaves the snapshot UNtouched on a worker timeout (transform falls back)", async () => {
+  it("fails closed without a synchronous reload on a worker timeout", async () => {
     const SESSION = freshSession();
     seedDistillation(SESSION, "t-1", "would load if the pool answered", 100);
 
@@ -298,8 +299,11 @@ describe("prewarmDistillationSnapshot (#1082)", () => {
     const p = prewarmDistillationSnapshot(PROJECT, SESSION, [
       userMsg("u1", SESSION),
     ]);
+    const rejected = expect(p).rejects.toBeInstanceOf(
+      ReadPreparationUnavailableError,
+    );
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
-    await p;
+    await rejected;
 
     // Snapshot NOT populated — a spurious empty snapshot would make transform()
     // drop the distilled prefix for the whole turn.

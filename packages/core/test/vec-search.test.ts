@@ -82,6 +82,15 @@ describe("sqlite-vec extension loading", () => {
     const hits = await vectorSearch(new Float32Array([1, 0, 0]), 1);
     expect(hits.length).toBe(1);
     expect(hits[0].similarity).toBeCloseTo(1.0, 5); // vec (normalized), not 2.0 (raw dot)
+
+    // An explicitly disabled read worker must not scan this same vector table
+    // synchronously on the gateway thread, even though the writer can do so.
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    try {
+      expect(await vectorSearch(new Float32Array([1, 0, 0]), 1)).toEqual([]);
+    } finally {
+      delete process.env.LORE_DISABLE_VEC_WORKER;
+    }
   });
 });
 

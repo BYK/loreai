@@ -13,7 +13,9 @@ import {
   db,
   getDailyCostForDay,
   ltm,
+  ReadPreparationUnavailableError,
   loadSessionTracking,
+  listSessionPromptDeltas,
   saveSessionTracking,
   temporal,
 } from "@loreai/core";
@@ -1064,6 +1066,115 @@ describe("Pipeline — streaming responses", () => {
   afterEach(() => harness?.teardown());
   afterEach(() => vi.mocked(getDegradationWarning).mockReset());
   afterEach(() => vi.mocked(Sentry.startInactiveSpan).mockReset());
+
+  it("returns a retryable preparation error before upstream when required worker data is unavailable", async () => {
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response("unexpected upstream call");
+    });
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockRejectedValue(
+        new ReadPreparationUnavailableError("knowledge", "unavailable"),
+      );
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "read-worker-unavailable" },
+      });
+      request.stream = false;
+      const response = await handleRequest(request, loadLocalConfig());
+      expect(response.status).toBe(503);
+      const body = await response.text();
+      expect(body).toContain("Memory preparation is temporarily unavailable");
+      expect(body).not.toContain("knowledge");
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      selection.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("preserves a pinned knowledge delta when the next selection worker fails", async () => {
+    const sessionHeaders = { "x-lore-session-id": "pinned-read-failure" };
+    const projectPath = "/tmp/lore-1736-pinned-read-failure";
+    const entryId = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Pinned read failure regression",
+      content: "Keep this selected knowledge while a later read worker fails",
+      scope: "project",
+    });
+    let upstreamCalls = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCalls++;
+      return new Response(validResponsesSSE(`pinned_read_${upstreamCalls}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    let selection: { mockRestore(): void } | undefined;
+    try {
+      const request = (message: string) => {
+        const req = makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: message }] },
+          ],
+        });
+        req.rawHeaders["x-lore-project"] = projectPath;
+        return req;
+      };
+      await (
+        await handleRequest(request("begin session"), loadLocalConfig())
+      ).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const second = request("continue with the current project");
+      await (await handleRequest(second, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const state = [...getActiveSessions().values()].find(
+        (candidate) =>
+          candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+      );
+      expect(state).toBeDefined();
+      const sessionID = state?.sessionID ?? "";
+      const priorPin = loadSessionTracking(sessionID)?.ltmPinKeys;
+      const priorDeltas = listSessionPromptDeltas(sessionID);
+      expect(priorPin).toContain(entryId);
+      expect(priorDeltas.length).toBeGreaterThan(0);
+
+      saveSessionTracking(sessionID, {
+        ltmCacheText: null,
+        ltmCacheTokens: null,
+      });
+      expect(evictLiveSessionForTest(second)).toBe(true);
+      const original = ltm.forSession;
+      selection = vi.spyOn(ltm, "forSession").mockImplementation((...args) => {
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          return Promise.reject(
+            new ReadPreparationUnavailableError("knowledge", "unavailable"),
+          );
+        }
+        return original(...args);
+      });
+      const response = await handleRequest(
+        request("continue after the failed worker"),
+        loadLocalConfig(),
+      );
+      expect(response.status).toBe(503);
+      expect(upstreamCalls).toBe(2);
+      expect(loadSessionTracking(sessionID)?.ltmPinKeys).toBe(priorPin);
+      expect(listSessionPromptDeltas(sessionID)).toEqual(priorDeltas);
+    } finally {
+      selection?.mockRestore();
+      setUpstreamInterceptor(undefined);
+      ltm.remove(entryId);
+      await resetPipelineState();
+    }
+  });
 
   it("does not deadlock when an OpenAI translator drops Anthropic lifecycle frames", async () => {
     const anthropic = buildStreamingResponse(

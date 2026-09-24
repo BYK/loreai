@@ -2951,6 +2951,12 @@ export function dbPath(): string {
 }
 
 let instance: Database | undefined;
+let readGeneration = 0;
+/** Changes whenever the writer connection opens or closes, so read workers
+ * cannot keep serving rows from a replaced database. */
+export function dbReadGeneration(): number {
+  return readGeneration;
+}
 /** Read-only identity check for deferred derived-cache writes; never opens a DB. */
 export function isCurrentDatabase(connection: Database): boolean {
   return instance === connection;
@@ -3066,6 +3072,7 @@ export function db(): Database {
     | undefined;
   instanceFilePath = mainDatabase?.file || undefined;
   instance = dbTracingDisabled ? database : tracedDatabase(database);
+  readGeneration++;
   return instance;
 }
 
@@ -4710,6 +4717,7 @@ export function close() {
     }
     instance.close();
     instance = undefined;
+    readGeneration++;
   }
   instanceFilePath = undefined;
   // The sqlite-vec extension is loaded per-connection; reset loader state so a

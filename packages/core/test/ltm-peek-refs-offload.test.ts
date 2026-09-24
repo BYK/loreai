@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
+import { ReadPreparationUnavailableError } from "../src/read-offload";
 import { runReadJob } from "../src/read-job";
 import {
   _resetVectorPoolForTest,
@@ -15,9 +16,9 @@ import type {
 
 // #1083: peekProjectRefsOffloaded runs the unbounded knowledge scan off-thread
 // (the cheap 24h rate-gate read and extractReferences CPU stay in-process). It
-// must return the same {gated, refs} peekProjectRefs would, offload the scan
-// only when NOT gated, and re-run in-process on a worker timeout (never a
-// spuriously-empty ref set).
+// must return the same {gated, refs} peekProjectRefs would on success, offload
+// only when NOT gated, and report worker failure instead of running an
+// unbounded scan in-process or returning a false empty ref set.
 
 class ServingReadWorker extends EventEmitter {
   static sqls: string[] = [];
@@ -131,7 +132,7 @@ describe("ltm.peekProjectRefsOffloaded (#1083)", () => {
     ).toBe(false);
   });
 
-  it("on a worker TIMEOUT re-runs the scan in-process (never a spurious empty)", async () => {
+  it("on a worker timeout rejects instead of rescanning or reporting empty refs", async () => {
     const PROJECT = freshProject();
     openGate(PROJECT);
     seedRefEntry(PROJECT, "check src/gamma.ts:2 and run `pnpm run test`");
@@ -141,12 +142,12 @@ describe("ltm.peekProjectRefsOffloaded (#1083)", () => {
     installFactory(() => new HangingReadWorker());
     vi.useFakeTimers();
     const p = ltm.peekProjectRefsOffloaded(PROJECT);
+    const rejection = expect(p).rejects.toMatchObject({
+      name: ReadPreparationUnavailableError.name,
+      phase: "references",
+      reason: "timeout",
+    });
     await vi.advanceTimersByTimeAsync(vectorSearchTimeoutMs() + 1);
-    const got = await p;
-
-    expect(got.gated).toBe(false);
-    expect(new Set(got.refs.map((r) => r.raw))).toEqual(
-      new Set(expected.refs.map((r) => r.raw)),
-    );
+    await rejection;
   });
 });

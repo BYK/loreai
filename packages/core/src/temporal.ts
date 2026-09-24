@@ -8,7 +8,7 @@ import {
 } from "./db";
 import { deleteEmbeddings } from "./db/vec-store";
 import { runRelaxedSearch, runRelaxedSearchAsync } from "./search";
-import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
+import { offloadAllOrTimeout, isReadJobFailure } from "./read-offload";
 import { sanitizeSurrogates } from "./markdown";
 import * as log from "./log";
 import {
@@ -1026,7 +1026,7 @@ export async function searchScored(input: {
         // — the real 3.5–7.5s main-thread blocker (#966 B). Offload it; a worker
         // timeout aborts the cascade (null) instead of re-blocking the loop.
         const rows = await offloadAllOrTimeout(ftsSQL, params);
-        if (rows === READ_JOB_TIMED_OUT) return null;
+        if (isReadJobFailure(rows)) return null;
         return rows as ScoredTemporalMessage[];
       },
       input.termWeights,

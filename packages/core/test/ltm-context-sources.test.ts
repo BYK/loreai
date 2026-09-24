@@ -1,9 +1,20 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import { uuidv7 } from "uuidv7";
 import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
 import { config } from "../src/config";
+import { ReadPreparationUnavailableError } from "../src/read-offload";
+import { runReadJob } from "../src/read-job";
+import {
+  _resetVectorPoolForTest,
+  _setTestVectorWorkerFactory,
+} from "../src/vector-pool";
+import type {
+  VectorWorkerInbound,
+  VectorWorkerInitData,
+} from "../src/vector-worker-types";
 
 /**
  * forSession `includeContextSources`: relevance-ranked distillation + temporal
@@ -93,7 +104,66 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
 
   afterEach(() => {
     for (const s of spies) s.mockRestore();
+    _setTestVectorWorkerFactory(null);
+    _resetVectorPoolForTest();
   });
+
+  test.each([
+    ["distillation", "distillation_fts"],
+    ["temporal", "temporal_fts"],
+  ] as const)(
+    "failed %s FTS cannot silently remove pinned context",
+    async (source, table) => {
+      vi.mocked(embedding.vectorSearchDistillations).mockResolvedValue([]);
+      vi.mocked(embedding.vectorSearchTemporal).mockResolvedValue([]);
+      const opts = {
+        excludeCategories: ["preference"],
+        contextHint: HINT,
+        includeContextSources: [source],
+      };
+      const baseline = await ltm.forSession(PROJ, undefined, 4000, opts);
+      expect(baseline.map((entry) => entry.id)).toContain(
+        source === "distillation" ? `d:${distId}` : `t:${tempId}`,
+      );
+
+      class FailingSourceReadWorker extends EventEmitter {
+        unref(): void {}
+        postMessage(msg: VectorWorkerInbound): void {
+          if (msg.type !== "read") return;
+          if (msg.spec.sql.includes(`FROM ${table}`)) {
+            this.emit("message", {
+              type: "error",
+              id: msg.id,
+              error: "injected context FTS failure",
+            });
+          } else {
+            this.emit("message", {
+              type: "read-result",
+              id: msg.id,
+              rows: runReadJob(db(), msg.spec),
+            });
+          }
+        }
+        terminate(): Promise<number> {
+          this.emit("exit", 0);
+          return Promise.resolve(0);
+        }
+      }
+      _resetVectorPoolForTest();
+      _setTestVectorWorkerFactory(
+        (() => new FailingSourceReadWorker()) as unknown as (
+          data: VectorWorkerInitData,
+        ) => never,
+      );
+      await expect(
+        ltm.forSession(PROJ, undefined, 4000, opts),
+      ).rejects.toMatchObject({
+        name: ReadPreparationUnavailableError.name,
+        phase: "context",
+        reason: "unavailable",
+      });
+    },
+  );
 
   test("folds relevance-ranked distillation + temporal facts into the selection", async () => {
     const result = await ltm.forSession(PROJ, undefined, 4000, {

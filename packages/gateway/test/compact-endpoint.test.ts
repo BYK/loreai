@@ -3,7 +3,8 @@
  * the Pi plugin). Focuses on strict session preflight and request validation
  * after a session has been authenticated.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { ltm, ReadPreparationUnavailableError, temporal } from "@loreai/core";
 import type { Harness } from "./helpers/harness";
 import { createHarness } from "./helpers/harness";
 import {
@@ -161,6 +162,46 @@ describe("POST /v1/compact", () => {
       error: "invalid_request",
       message: "project_path is required",
     });
+  });
+
+  it("returns a retryable error when the knowledge scan fails during compaction", async () => {
+    harness = await createHarness({
+      fixtures: [
+        makeFixtureEntry({
+          seq: 0,
+          requestMessages: [
+            { role: "user", content: "Establish this session." },
+          ],
+          responseText: "Session established.",
+          model: DEFAULT_MODEL,
+        }),
+      ],
+    });
+    const sessionID = "compact-read-worker-unavailable";
+    expect((await establishSession(harness, sessionID)).status).toBe(200);
+    const undistilled = vi
+      .spyOn(temporal, "undistilledCount")
+      .mockReturnValue(0);
+    const lookup = vi
+      .spyOn(ltm, "forProjectOffloaded")
+      .mockRejectedValue(
+        new ReadPreparationUnavailableError("knowledge", "unavailable"),
+      );
+    try {
+      const resp = await postCompact(
+        harness,
+        JSON.stringify({ project_path: process.cwd() }),
+        sessionID,
+      );
+      expect(resp.status).toBe(503);
+      expect(await resp.json()).toEqual({
+        error: "compaction_failed",
+        message: "Compaction temporarily unavailable",
+      });
+    } finally {
+      lookup.mockRestore();
+      undistilled.mockRestore();
+    }
   });
 
   it("returns 404 when no active session exists for the project", async () => {

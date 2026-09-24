@@ -120,6 +120,7 @@ import {
   resolveWorkspaces,
   currentTenantId,
   withTenant,
+  ReadPreparationUnavailableError,
 } from "@loreai/core";
 
 import type {
@@ -3908,6 +3909,9 @@ async function computeStableLtm(
         }
       }
     } catch (err) {
+      // Stable system[1] is pinned for the session: never cache a partially
+      // populated block because a worker was unavailable on its first load.
+      if (err instanceof ReadPreparationUnavailableError) throw err;
       log.warn("entity injection failed (non-fatal):", err);
     }
   }
@@ -3923,6 +3927,7 @@ async function computeStableLtm(
       STABLE_KNOWLEDGE_TOC_MAX,
     );
   } catch (err) {
+    if (err instanceof ReadPreparationUnavailableError) throw err;
     log.warn("knowledge catalog injection failed (non-fatal):", err);
   }
 
@@ -15943,7 +15948,8 @@ function directCompactionFailureResponse(
   log.error(`${route} error:`, error);
   const unavailable =
     error instanceof StreamingPostResponseWaitCapacityError ||
-    error instanceof PipelineCapacityError;
+    error instanceof PipelineCapacityError ||
+    error instanceof ReadPreparationUnavailableError;
   const aborted =
     error instanceof DOMException &&
     (error.name === "AbortError" || error.name === "TimeoutError");
@@ -16345,14 +16351,7 @@ async function handleCompactEndpointInner(
       headers: { "content-type": "application/json" },
     });
   } catch (err) {
-    log.error("compact endpoint error:", err);
-    return new Response(
-      JSON.stringify({
-        error: "compaction_failed",
-        message: "Compaction failed",
-      }),
-      { status: 500, headers: { "content-type": "application/json" } },
-    );
+    return directCompactionFailureResponse("compact endpoint", err);
   }
 }
 
@@ -19287,6 +19286,10 @@ async function handleConversationTurn(
       setLtmTokens(stable?.tokenCount ?? 0, sessionID);
     } catch (e) {
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
+      // Missing worker data cannot be treated as an authoritative empty LTM
+      // selection: doing so could freeze a partial stable block or supersede
+      // pinned knowledge. The outer handler returns a retryable 503.
+      if (e instanceof ReadPreparationUnavailableError) throw e;
       log.error("LTM injection failed:", e);
       setLtmTokens(0, sessionID);
     } finally {
@@ -19328,8 +19331,8 @@ async function handleConversationTurn(
   // sync transform() below would otherwise run an unbounded distillation scan on
   // this pre-upstream critical path. prewarm populates the same per-session
   // snapshot transform() reads, so its loadDistillationsCached hits the cache
-  // instead of the DB. On a pool timeout it's a no-op and transform() falls back
-  // to the identical in-process load.
+  // instead of the DB. A worker failure aborts preparation before transform()
+  // can run the unbounded scan synchronously.
   await prewarmDistillationSnapshot(
     projectPath,
     sessionID,
@@ -19775,14 +19778,22 @@ async function handleConversationTurn(
           cfg.knowledge.enabled &&
           cfg.knowledge.referenceValidation
         ) {
-          const peek = await ltm.peekProjectRefsOffloaded(projectPath);
-          assertCurrentPipelineGeneration(req.signal, requestGeneration);
-          if (!peek.gated && peek.refs.length > 0) {
-            block = buildCombinedResolveRefcheckBlock(
-              target,
-              buildRefcheckProbeScript(peek.refs),
-            );
-            sessionState.refcheckInProbe = true;
+          try {
+            const peek = await ltm.peekProjectRefsOffloaded(projectPath);
+            assertCurrentPipelineGeneration(req.signal, requestGeneration);
+            if (!peek.gated && peek.refs.length > 0) {
+              block = buildCombinedResolveRefcheckBlock(
+                target,
+                buildRefcheckProbeScript(peek.refs),
+              );
+              sessionState.refcheckInProbe = true;
+            }
+          } catch (error) {
+            if (!(error instanceof ReadPreparationUnavailableError))
+              throw error;
+            // Reference validation is optional here; the resolver still runs
+            // and a later request can retry the read without freezing [] refs.
+            log.info("reference probe read unavailable; deferring refcheck");
           }
         }
         sessionState.syntheticResolveState =
@@ -22317,6 +22328,13 @@ async function handleRequestInner(
       );
       response.headers.set(CONTEXT_BOUNDARY_MISMATCH_HEADER, "true");
       return response;
+    }
+    if (err instanceof ReadPreparationUnavailableError) {
+      log.warn(`pipeline preparation degraded: ${err.phase} ${err.reason}`);
+      return errorResponse(
+        503,
+        "Memory preparation is temporarily unavailable; retry the request.",
+      );
     }
     // Client disconnect / abort is benign — downgrade from error to info.
     const isAbort = err instanceof DOMException && err.name === "AbortError";

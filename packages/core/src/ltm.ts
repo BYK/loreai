@@ -37,7 +37,9 @@ import {
 import {
   offloadAll,
   offloadAllOrTimeout,
-  READ_JOB_TIMED_OUT,
+  isReadJobFailure,
+  ReadPreparationUnavailableError,
+  requireReadRows,
 } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import { ReadPathTimer } from "./read-telemetry";
@@ -1293,21 +1295,10 @@ export function forProject(
  * scan through the read-worker pool so this unbounded scan doesn't block the
  * main event loop on the first-turn / compaction critical path. #1080.
  *
- * The result is ALWAYS the same set `forProject` would return — this is purely
- * a "run the same query off-thread when possible" optimization, never a
- * behavior change:
- *   - pool available   → a worker runs the scan; we hydrate its rows.
- *   - pool unavailable → `offloadAllOrTimeout` falls back to the identical
- *                        in-process query (same SQL + params).
- *   - worker TIMEOUT   → we re-run the scan IN-PROCESS rather than degrade to
- *                        an empty set. This is deliberate and differs from the
- *                        per-turn `forSession` path (which drops to [] on
- *                        timeout, #1006): `forProject` feeds the DURABLY FROZEN
- *                        system[1] knowledge catalog and the offline-compaction
- *                        summary. A spuriously-empty result there would be
- *                        frozen for the whole session / baked into the summary,
- *                        so correctness wins over the "never re-block on
- *                        timeout" rule for this small, once-per-session scan.
+ * When the worker succeeds its result matches `forProject`. On failure this
+ * rejects with a typed preparation error: a spuriously-empty catalog would be
+ * frozen into system[1] or baked into an offline-compaction summary, whereas
+ * retrying the unbounded scan in-process would block the gateway event loop.
  *
  * `ensureProject()` may write, so it stays on the main thread (as read-offload
  * requires); only the read itself is offloaded.
@@ -1318,13 +1309,10 @@ export async function forProjectOffloaded(
 ): Promise<KnowledgeEntry[]> {
   const pid = ensureProject(projectPath);
   const { sql, params } = forProjectQuery(pid, includeCross);
-  const rows = await offloadAllOrTimeout(sql, params);
-  if (rows === READ_JOB_TIMED_OUT) {
-    return db()
-      .query(sql)
-      .all(...params)
-      .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
-  }
+  const rows = requireReadRows(
+    await offloadAllOrTimeout(sql, params),
+    "knowledge",
+  );
   return (rows as Record<string, unknown>[]).map(
     hydrateKnowledgeEntry,
   ) as KnowledgeEntry[];
@@ -1880,10 +1868,9 @@ export function peekProjectRefs(
  * cheap single-row rate-gate read and the `extractReferences` CPU stay on the
  * main thread (the pool only runs SQL).
  *
- * Returns the same result `peekProjectRefs` would: on a worker TIMEOUT the scan
- * is re-run in-process rather than degrading to an empty ref set, so the
- * synthetic-probe driver never silently skips a drift check because of a
- * transient pool stall. `ensureProject()` (may write) stays on the main thread.
+ * Returns the same result `peekProjectRefs` would on success. A worker failure
+ * rejects so the synthetic-probe driver can defer reference validation without
+ * reporting a false empty set. `ensureProject()` stays on the main thread.
  */
 export async function peekProjectRefsOffloaded(
   projectPath: string,
@@ -1893,13 +1880,9 @@ export async function peekProjectRefsOffloaded(
   if (refcheckGated(pid, now)) return { gated: true, refs: [] };
 
   const params: ReadParam[] = [pid, DEAD_CONFIDENCE_FLOOR];
-  const offloaded = await offloadAllOrTimeout(PROJECT_REFS_SQL, params);
-  const rows = (
-    offloaded === READ_JOB_TIMED_OUT
-      ? db()
-          .query(PROJECT_REFS_SQL)
-          .all(...params)
-      : offloaded
+  const rows = requireReadRows(
+    await offloadAllOrTimeout(PROJECT_REFS_SQL, params),
+    "references",
   ) as Array<{ title: string; content: string }>;
   return { gated: false, refs: dedupeProjectRefs(rows) };
 }
@@ -2453,18 +2436,22 @@ async function scoreEntriesFTS(
   const { title, content, category } = ftsWeights();
 
   try {
-    // Offload the BM25 OR-scan to the read-worker pool (in-process fallback).
+    // Offload the BM25 OR-scan to the read-worker pool. It contributes to a
+    // durable selection, so worker failure must not look like zero matches.
     // knowledge_fts is not written on the hot path → staleness-tolerant. #966 B.
-    const results = (await offloadAll(
-      `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
+    const results = requireReadRows(
+      await offloadAllOrTimeout(
+        `SELECT k.id, bm25(knowledge_fts, ?, ?, ?) as rank
           FROM knowledge_fts f
           CROSS JOIN knowledge k ON k.rowid = f.rowid
          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
           WHERE knowledge_fts MATCH ?
           AND k.tenant_id = ?
           AND COALESCE(m.confidence, 1.0) > 0.2`,
-      [title, content, category, q, currentTenantId()],
-    )) as Array<{
+        [title, content, category, q, currentTenantId()],
+      ),
+      "knowledge",
+    ) as Array<{
       id: string;
       rank: number;
     }>;
@@ -2483,7 +2470,8 @@ async function scoreEntriesFTS(
       scoreMap.set(r.id, norm);
     }
     return scoreMap;
-  } catch {
+  } catch (error) {
+    if (error instanceof ReadPreparationUnavailableError) throw error;
     return new Map();
   }
 }
@@ -2628,8 +2616,8 @@ export async function forSession(
 
   // --- 1 & 2. Load project-specific + cross-project candidates ---
   // These two unbounded `knowledge_current` scans are the heaviest synchronous
-  // reads on this per-turn path. Offload them to the read-worker pool (with an
-  // in-process fallback) and run them in parallel, so the main event loop stays
+  // reads on this per-turn path. Offload them to the read-worker pool and run
+  // them in parallel, so the main event loop stays
   // free while a worker scans. Knowledge is not written on the hot per-message
   // path, so a worker's read-only snapshot is safe (staleness-tolerant). #966 B.
   const projectSql = `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
@@ -2648,23 +2636,15 @@ export async function forSession(
       offloadAllOrTimeout(crossSql, [currentTenantId(), ...categoryParams]),
     ]),
   );
-  // Symmetric degrade: if EITHER scan's worker wedged (timeout), drop the whole
-  // LTM injection for this turn rather than inject a lopsided partial set (e.g.
-  // cross-project entries without the usually-more-relevant project-specific
-  // half). Re-running the wedged scan in-process would re-block the loop the
-  // offload exists to keep free (#1006); the next turn retries against a freshly
-  // respawned worker. A 10s timeout on these small-table scans is near-impossible
-  // in practice — this is a safety valve, not a common path.
-  if (projectRows === READ_JOB_TIMED_OUT || crossRows === READ_JOB_TIMED_OUT) {
-    timer.emit("forSession", 0);
-    return [];
-  }
-  const projectEntries = (projectRows as Record<string, unknown>[]).map(
-    hydrateKnowledgeEntry,
-  ) as KnowledgeEntry[];
-  const crossEntries = (crossRows as Record<string, unknown>[]).map(
-    hydrateKnowledgeEntry,
-  ) as KnowledgeEntry[];
+  // If EITHER scan fails, reject before injecting or freezing a partial set.
+  // The caller can retry once the worker recovers; no synchronous scan or
+  // authoritative "no knowledge" decision runs on this failure path.
+  const projectEntries = (
+    requireReadRows(projectRows, "knowledge") as Record<string, unknown>[]
+  ).map(hydrateKnowledgeEntry) as KnowledgeEntry[];
+  const crossEntries = (
+    requireReadRows(crossRows, "knowledge") as Record<string, unknown>[]
+  ).map(hydrateKnowledgeEntry) as KnowledgeEntry[];
 
   // Empty-knowledge fast path (new project, or all entries below the
   // confidence floor). Emit before returning so the FASTEST path is
@@ -2848,12 +2828,13 @@ export async function forSession(
         clearTimeout(deadlineTimer);
       }
       const hits = await timer.await(
-        embedding.vectorSearch(contextVec, 50, excludeFilter),
+        embedding.vectorSearch(contextVec, 50, excludeFilter, "knowledge"),
         "vectorSearch",
       );
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {
       options?.signal?.throwIfAborted();
+      if (err instanceof ReadPreparationUnavailableError) throw err;
       if (
         err instanceof EmbeddingAbortError &&
         err.phase === "ltm-query" &&
@@ -3177,8 +3158,9 @@ const RECALLED_TEMPORAL_MAX_CHARS = 2000;
  * stickyIds hysteresis + deterministic packing (cache-stable). Ids use recall-id
  * form (`d:<id>`, `t:<id>`); category is RECALLED_CONTEXT_CATEGORY so the caller
  * excludes them from knowledge-only side effects. Temporal search is
- * project-wide (not session-scoped) so cross-session facts surface. Best-effort:
- * any source failure is logged and skipped, never throwing on the hot path.
+ * project-wide (not session-scoped) so cross-session facts surface. Unexpected
+ * source errors are logged and skipped; worker failure aborts selection before
+ * previously pinned context can be interpreted as removed.
  */
 async function loadContextSourceCandidates(
   pid: string,
@@ -3257,6 +3239,7 @@ async function loadContextSourceCandidates(
         const hits = await embedding.vectorSearchDistillations(
           contextVec,
           limit * 4,
+          "context",
         );
         for (const h of hits) {
           // Match the knowledge path's floor semantics: a context source must
@@ -3273,16 +3256,19 @@ async function loadContextSourceCandidates(
       // via the join to distillations). Surfaces facts whenever the vector index
       // is empty/unavailable, or a keyword-relevant row the vector missed.
       if (ftsMatch) {
-        const ftsRows = (await offloadAll(
-          `SELECT d.id AS id, bm25(distillation_fts) AS rank
+        const ftsRows = requireReadRows(
+          await offloadAllOrTimeout(
+            `SELECT d.id AS id, bm25(distillation_fts) AS rank
              FROM distillation_fts f
              CROSS JOIN distillations d ON d.rowid = f.rowid
             WHERE distillation_fts MATCH ?
               AND d.archived = 0 AND d.project_id = ?
             ORDER BY rank
             LIMIT ?`,
-          [ftsMatch, pid, limit * 4],
-        )) as Array<{ id: string; rank: number }>;
+            [ftsMatch, pid, limit * 4],
+          ),
+          "context",
+        ) as Array<{ id: string; rank: number }>;
         // BM25 rank is negative (more negative = better). Min-max normalize to
         // 0–1 so FTS and cosine live on the same scale before the max-merge. An
         // FTS keyword hit is inherently relevant → not subject to minRelevance.
@@ -3335,6 +3321,7 @@ async function loadContextSourceCandidates(
         }
       }
     } catch (err) {
+      if (err instanceof ReadPreparationUnavailableError) throw err;
       log.warn(
         "forSession: distillation context source failed (non-fatal):",
         err,
@@ -3354,6 +3341,8 @@ async function loadContextSourceCandidates(
           contextVec,
           pid,
           limit,
+          undefined,
+          "context",
         );
         for (const h of hits) {
           if (h.similarity <= 0 || h.similarity < minRelevance) continue;
@@ -3368,16 +3357,19 @@ async function loadContextSourceCandidates(
       // join to temporal_messages). Surfaces cross-session facts whenever the
       // vector index is empty/unavailable.
       if (ftsMatch) {
-        const ftsRows = (await offloadAll(
-          `SELECT m.id AS id, bm25(temporal_fts) AS rank
+        const ftsRows = requireReadRows(
+          await offloadAllOrTimeout(
+            `SELECT m.id AS id, bm25(temporal_fts) AS rank
              FROM temporal_fts f
              CROSS JOIN temporal_messages m ON m.rowid = f.rowid
             WHERE temporal_fts MATCH ?
               AND m.project_id = ?
             ORDER BY rank
             LIMIT ?`,
-          [ftsMatch, pid, limit * 4],
-        )) as Array<{ id: string; rank: number }>;
+            [ftsMatch, pid, limit * 4],
+          ),
+          "context",
+        ) as Array<{ id: string; rank: number }>;
         if (ftsRows.length) {
           const ranks = ftsRows.map((r) => r.rank);
           const minRank = Math.min(...ranks);
@@ -3435,6 +3427,7 @@ async function loadContextSourceCandidates(
         }
       }
     } catch (err) {
+      if (err instanceof ReadPreparationUnavailableError) throw err;
       log.warn("forSession: temporal context source failed (non-fatal):", err);
     }
   }
@@ -3673,7 +3666,7 @@ export async function searchScored(input: {
         // (#966 B). KNOWLEDGE_COLS_K excludes the embedding BLOB, so the rows are
         // structured-clone-safe across the worker boundary.
         const rows = await offloadAllOrTimeout(ftsSQL, params);
-        if (rows === READ_JOB_TIMED_OUT) return null;
+        if (isReadJobFailure(rows)) return null;
         // Hydrate metadata (#627 Phase 1) on the main thread; hydrateKnowledgeEntry
         // preserves the extra `rank` column via spread, so ScoredKnowledgeEntry holds.
         return (rows as Record<string, unknown>[]).map(
@@ -3736,7 +3729,7 @@ export async function searchScoredOtherProjects(input: {
         // Staleness-tolerant cross-project knowledge FTS scan — offload off the
         // event loop (#966 B). KNOWLEDGE_COLS_K excludes the embedding BLOB.
         const rows = await offloadAllOrTimeout(ftsSQL, params);
-        if (rows === READ_JOB_TIMED_OUT) return null;
+        if (isReadJobFailure(rows)) return null;
         // Hydrate metadata (#627 Phase 1) on the main thread — see searchScored above.
         return (rows as Record<string, unknown>[]).map(
           hydrateKnowledgeEntry,

@@ -15,7 +15,7 @@ import {
 import { config } from "./config";
 import { formatDistillations } from "./prompt";
 import { normalize } from "./markdown";
-import { offloadAllOrTimeout, READ_JOB_TIMED_OUT } from "./read-offload";
+import { offloadAllOrTimeout, requireReadRows } from "./read-offload";
 import type { ReadParam } from "./read-job";
 import * as log from "./log";
 import { estimateTokens } from "./tokenize";
@@ -2131,18 +2131,18 @@ function loadDistillations(
 // session-length-growing) distillation scan through the read-worker pool so it
 // doesn't block the main event loop on the pre-upstream critical path. #1082.
 //
-// Returns the same rows `loadDistillations(projectPath, sessionID)` would, or
-// `null` on a worker TIMEOUT — the caller (prewarm) then leaves the snapshot
-// untouched so `transform()`'s in-process `loadDistillationsCached` does the
-// identical sync load (no behavior change, just no offload benefit that turn).
+// On a worker failure, stop preparation before synchronous transform can
+// reload this unbounded snapshot on the gateway thread.
 async function loadDistillationsOffloaded(
   projectPath: string,
   sessionID: string,
-): Promise<Distillation[] | null> {
+): Promise<Distillation[]> {
   const pid = ensureProject(projectPath);
   const { sql, params } = distillationsQuery(pid, sessionID);
-  const rows = await offloadAllOrTimeout(sql, params);
-  if (rows === READ_JOB_TIMED_OUT) return null;
+  const rows = requireReadRows(
+    await offloadAllOrTimeout(sql, params),
+    "distillations",
+  );
   return (rows as RawDistillationRow[]).map(hydrateDistillationRow);
 }
 
@@ -2205,12 +2205,11 @@ function lastUserMessageId(messages: MessageWithParts[]): string | null {
  * `loadDistillationsCached` then finds a matching snapshot and returns it
  * WITHOUT touching the DB.
  *
- * Zero behavior change — the rows and ordering are exactly what the sync load
- * would produce:
+ * On success the rows and ordering are exactly what the sync load would produce:
  *   - cache hit (same last user message → still in a tool-call chain): no-op.
- *   - cache miss + pool serves/falls back in-process: snapshot populated.
- *   - cache miss + worker TIMEOUT: snapshot left untouched, so `transform()`
- *     does the identical in-process load (no offload benefit this turn).
+ *   - cache miss + worker serves: snapshot populated.
+ *   - worker unavailable/timeout: fail preparation before transform can
+ *     synchronously scan or freeze an empty prefix.
  *
  * Uses the same `getSessionState(sessionID)` singleton `transform()` reads, so
  * the populated snapshot is visible to it. `ensureProject()` runs on the main
@@ -2234,7 +2233,6 @@ export async function prewarmDistillationSnapshot(
 
   const rows = await loadDistillationsOffloaded(projectPath, sessionID);
   signal?.throwIfAborted();
-  if (rows === null) return; // worker timeout → let transform() do the sync load
 
   sessState.distillationSnapshot = { rows, lastUserMsgId };
   log.info(

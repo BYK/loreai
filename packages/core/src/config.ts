@@ -709,15 +709,15 @@ export const LoreConfig = z.object({
             .describe(
               "Maximum foreground LTM query-embedding wait in milliseconds, including worker startup and queueing. FTS is used on expiry. Default: 1500.",
             ),
-          /** Run vector searches on a read-worker pool (off the main event
-           *  loop) instead of synchronously on the main thread. Default: true.
-           *  This is a kill switch, not opt-in — set to false to force the
-           *  in-process path if the pool ever misbehaves. */
+          /** Run heavy read jobs on a read-worker pool, off the main event
+           *  loop. Default: true. Disabling the pool makes required memory
+           *  preparation fail with a retryable 503 rather than block the
+           *  gateway with a synchronous scan. */
           workerOffload: z
             .boolean()
             .default(true)
             .describe(
-              "Run vector searches on a read-worker pool off the main event loop. Kill switch (default true); set false to force the in-process path.",
+              "Run heavy reads on a read-worker pool off the main event loop. Default true; when disabled, required memory preparation returns a retryable 503 rather than scanning on the gateway thread.",
             ),
           /** Number of read-worker threads in the vector-search pool. Each owns
            *  its own read-only DB connection. Default: 2. */

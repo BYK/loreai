@@ -9,6 +9,7 @@ import {
   TEMPORAL_PARTITION_MODE_KEY,
 } from "../db/vec-store";
 import * as log from "../log";
+import { ReadPreparationUnavailableError } from "../read-offload";
 import { currentTenantId } from "../tenant";
 import { recordVecReadLatency } from "../vec-latency";
 import {
@@ -17,19 +18,33 @@ import {
   type VectorHit,
   type VectorQuerySpec,
 } from "../vector-query";
-import { tryPoolVectorSearch, VECTOR_SEARCH_TIMED_OUT } from "../vector-pool";
+import {
+  inProcessReadFallbackForTest,
+  tryPoolVectorSearch,
+  VECTOR_SEARCH_TIMED_OUT,
+} from "../vector-pool";
 
 async function poolOrInProcess(
   spec: VectorQuerySpec,
   queryEmbedding: Float32Array,
+  failurePhase?: ReadPreparationUnavailableError["phase"],
 ): Promise<VectorHit[] | DistillationVectorHit[]> {
   const started = performance.now();
   const cohort = resolveReadMode(readStorageMode(db()), isVecAvailable());
   try {
     const pooled = await tryPoolVectorSearch(spec, queryEmbedding);
     // Never repeat a timed-out worker scan on the event loop.
-    if (pooled === VECTOR_SEARCH_TIMED_OUT) return [];
+    if (pooled === VECTOR_SEARCH_TIMED_OUT) {
+      if (failurePhase)
+        throw new ReadPreparationUnavailableError(failurePhase, "timeout");
+      return [];
+    }
     if (pooled !== null) return pooled;
+    if (!inProcessReadFallbackForTest()) {
+      if (failurePhase)
+        throw new ReadPreparationUnavailableError(failurePhase, "unavailable");
+      return [];
+    }
 
     const readMode = resolveReadMode(readStorageMode(db()), isVecAvailable());
     const temporalPartitionMode =
@@ -43,6 +58,8 @@ async function poolOrInProcess(
         temporalPartitionMode,
       );
     } catch (error) {
+      if (failurePhase)
+        throw new ReadPreparationUnavailableError(failurePhase, "unavailable");
       // Native vec0 failures degrade this recall to FTS rather than crashing.
       log.error("in-process vector search failed; returning empty:", error);
       return [];
@@ -56,6 +73,7 @@ export async function vectorSearch(
   queryEmbedding: Float32Array,
   limit = 10,
   excludeCategories?: string[],
+  selectionPhase?: ReadPreparationUnavailableError["phase"],
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
     {
@@ -65,6 +83,7 @@ export async function vectorSearch(
       excludeCategories,
     },
     queryEmbedding,
+    selectionPhase,
   );
 }
 
@@ -81,10 +100,12 @@ export async function vectorSearchEntities(
 export async function vectorSearchDistillations(
   queryEmbedding: Float32Array,
   limit = 10,
+  selectionPhase?: ReadPreparationUnavailableError["phase"],
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
     { kind: "distillations", tenantId: currentTenantId(), limit },
     queryEmbedding,
+    selectionPhase,
   );
 }
 
@@ -104,9 +125,11 @@ export async function vectorSearchTemporal(
   projectId: string,
   limit = 10,
   sessionId?: string,
+  selectionPhase?: ReadPreparationUnavailableError["phase"],
 ): Promise<VectorHit[]> {
   return poolOrInProcess(
     { kind: "temporal", projectId, limit, sessionId },
     queryEmbedding,
+    selectionPhase,
   );
 }

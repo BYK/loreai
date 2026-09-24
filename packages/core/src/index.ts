@@ -245,6 +245,7 @@ export {
   isHostedMode,
   _resetHostedModeForTest,
 } from "./hosted";
+export { ReadPreparationUnavailableError } from "./read-offload";
 export {
   transform,
   estimateMessages,
