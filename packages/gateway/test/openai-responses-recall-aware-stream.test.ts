@@ -10811,6 +10811,34 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain("visible before recall");
     expect(out).toContain("recovered");
     expect(out).not.toContain("response.failed");
+
+    const frames = out
+      .trim()
+      .split("\n\n")
+      .map((frame) => {
+        const event = frame.match(/^event: (.+)$/m)?.[1];
+        const data = frame.match(/^data: (.+)$/m)?.[1];
+        return {
+          event,
+          data: data === undefined ? undefined : JSON.parse(data),
+        };
+      });
+    const outputItemEvents = frames.filter(
+      ({ event }) =>
+        event === "response.output_item.added" ||
+        event === "response.output_item.done",
+    );
+    expect(outputItemEvents.map(({ data }) => data?.output_index)).toEqual([
+      0, 0, 1, 1,
+    ]);
+    const terminal = frames.find(({ event }) => event === "response.completed");
+    expect(terminal?.data?.response?.output).toHaveLength(2);
+    expect(terminal?.data?.response?.output[0]).toMatchObject({
+      id: "msg_sparse_visible",
+    });
+    expect(terminal?.data?.response?.output[1]?.content?.[0]).toMatchObject({
+      text: "recovered",
+    });
   });
 
   test("keeps private recovery reasoning out of the client projection", async () => {
