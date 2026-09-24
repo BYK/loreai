@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
+import { config } from "../src/config";
+import * as ltm from "../src/ltm";
 import {
   embed,
   embedInTokenBatches,
@@ -289,6 +291,50 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes[0].embedIds).toHaveLength(1);
     fakes[0].completeNext();
     await expect(reused).resolves.toHaveLength(1);
+  });
+
+  it("lets LTM fall back while its queued query leaves document work and the worker intact", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const cfg = config().search.embeddings;
+    const savedTimeout = cfg.queryTimeoutMs;
+    cfg.queryTimeoutMs = 100;
+
+    const document = embed(["document in progress"], "document");
+    await flush();
+    const selection = ltm.forSession(
+      "/test/ltm/queued-query",
+      undefined,
+      500,
+      {
+        contextHint: "This session is discussing SQLite WAL and concurrency",
+        includeContextSources: ["distillation"],
+      },
+    );
+    try {
+      await flush();
+      expect(recallEmbedsInFlight()).toBe(1);
+      expect(fakes).toHaveLength(1);
+      expect(fakes[0].embedIds).toHaveLength(1);
+
+      await expect(selection).resolves.toEqual([]);
+      expect(recallEmbedsInFlight()).toBe(0);
+      expect(fakes[0].gotShutdown).toBe(false);
+      expect(fakes[0].embedIds).toHaveLength(1);
+
+      fakes[0].completeNext();
+      await expect(document).resolves.toHaveLength(1);
+      const reused = embed(["next document"], "document");
+      await flush();
+      expect(fakes).toHaveLength(1);
+      fakes[0].completeNext();
+      await expect(reused).resolves.toHaveLength(1);
+    } finally {
+      cfg.queryTimeoutMs = savedTimeout;
+      fakes[0]?.completeAll();
+      await Promise.allSettled([selection, document]);
+    }
   });
 
   it("settles an executing caller without releasing capacity or restarting the worker", async () => {

@@ -697,6 +697,18 @@ export const LoreConfig = z.object({
             .describe(
               "Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768.",
             ),
+          /** Maximum foreground wait for the optional LTM query embedding,
+           *  including local worker initialization and queueing. On expiry,
+           *  LTM ranks with FTS instead. Background embeds are unaffected. */
+          queryTimeoutMs: z
+            .number()
+            .int()
+            .min(100)
+            .max(60_000)
+            .default(1_500)
+            .describe(
+              "Maximum foreground LTM query-embedding wait in milliseconds, including worker startup and queueing. FTS is used on expiry. Default: 1500.",
+            ),
           /** Run vector searches on a read-worker pool (off the main event
            *  loop) instead of synchronously on the main thread. Default: true.
            *  This is a kill switch, not opt-in — set to false to force the
@@ -750,6 +762,7 @@ export const LoreConfig = z.object({
           provider: "local",
           model: "nomic-ai/nomic-embed-text-v1.5",
           dimensions: 768,
+          queryTimeoutMs: 1_500,
           workerOffload: true,
           workerPoolSize: 2,
         })
@@ -832,6 +845,7 @@ export const LoreConfig = z.object({
         provider: "local" as const,
         model: "nomic-ai/nomic-embed-text-v1.5",
         dimensions: 768,
+        queryTimeoutMs: 1_500,
         workerOffload: true,
         workerPoolSize: 2,
       },

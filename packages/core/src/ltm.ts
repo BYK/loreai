@@ -30,6 +30,11 @@ import {
 } from "./search";
 import * as embedding from "./embedding";
 import {
+  awaitEmbeddingOperation,
+  createEmbeddingAbortGuard,
+  EmbeddingAbortError,
+} from "./embedding/contract";
+import {
   offloadAll,
   offloadAllOrTimeout,
   READ_JOB_TIMED_OUT,
@@ -2812,10 +2817,36 @@ export async function forSession(
     // that keyword-based FTS5 misses.
     let vectorScores: Map<string, number>;
     try {
-      [contextVec] = await timer.await(
-        embedding.embed([sessionContext], "query"),
-        "embed",
+      // A query is optional enrichment. Bound its entire caller wait (including
+      // initialization and the pool queue) independently of the worker-owned
+      // execution watchdog. A detached local request keeps its native work
+      // charged to the pool until completion; FTS can proceed immediately.
+      const queryDeadline = new AbortController();
+      const deadlineTimer = setTimeout(
+        () =>
+          queryDeadline.abort(
+            new DOMException(
+              "LTM query embedding deadline exceeded",
+              "TimeoutError",
+            ),
+          ),
+        config().search.embeddings.queryTimeoutMs,
       );
+      const querySignal = options?.signal
+        ? AbortSignal.any([options.signal, queryDeadline.signal])
+        : queryDeadline.signal;
+      try {
+        querySignal.throwIfAborted();
+        [contextVec] = await timer.await(
+          awaitEmbeddingOperation(
+            embedding.embed([sessionContext], "query", querySignal),
+            createEmbeddingAbortGuard("ltm-query", { signal: querySignal }),
+          ),
+          "embed",
+        );
+      } finally {
+        clearTimeout(deadlineTimer);
+      }
       const hits = await timer.await(
         embedding.vectorSearch(contextVec, 50, excludeFilter),
         "vectorSearch",
@@ -2823,7 +2854,15 @@ export async function forSession(
       vectorScores = new Map(hits.map((h) => [h.id, h.similarity]));
     } catch (err) {
       options?.signal?.throwIfAborted();
-      log.warn("Vector scoring failed, falling back to FTS5:", err);
+      if (
+        err instanceof EmbeddingAbortError &&
+        err.phase === "ltm-query" &&
+        err.code === "deadline-exceeded"
+      ) {
+        log.info("LTM query embedding deadline exceeded; using FTS5");
+      } else {
+        log.warn("Vector scoring failed, falling back to FTS5:", err);
+      }
       vectorScores = new Map();
     }
 

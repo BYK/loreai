@@ -494,6 +494,106 @@ describe("ltm.forSession", () => {
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 
+  test("a stalled query embed expires into FTS even when its provider ignores abort", async () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title: "SQLite WAL",
+      content: "Use SQLite WAL for session state and concurrent reads",
+      scope: "project",
+    });
+    const cfg = config().search.embeddings;
+    const savedTimeout = cfg.queryTimeoutMs;
+    cfg.queryTimeoutMs = 100;
+    const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    const vectorSearch = vi.spyOn(embedding, "vectorSearch");
+    let releaseEmbed!: (vectors: Float32Array[]) => void;
+    const pending = new Promise<Float32Array[]>((resolve) => {
+      releaseEmbed = resolve;
+    });
+    let started!: () => void;
+    const embedStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let signal: AbortSignal | undefined;
+    const embed = vi
+      .spyOn(embedding, "embed")
+      .mockImplementation((_texts, _type, s) => {
+        signal = s;
+        started();
+        return pending;
+      });
+    const selection = ltm.forSession(PROJ, SESSION, 10_000, {
+      contextHint: "SQLite WAL for session state and concurrent reads",
+    });
+    try {
+      await embedStarted;
+      const result = await Promise.race([
+        selection,
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("query embed remained unbounded")), 500),
+        ),
+      ]);
+      expect(signal?.aborted).toBe(true);
+      expect(vectorSearch).not.toHaveBeenCalled();
+      expect(result.map((entry) => entry.id)).toContain(id);
+    } finally {
+      releaseEmbed([new Float32Array(config().search.embeddings.dimensions)]);
+      await selection.catch(() => {});
+      cfg.queryTimeoutMs = savedTimeout;
+      embed.mockRestore();
+      vectorSearch.mockRestore();
+      available.mockRestore();
+    }
+  });
+
+  test("client abort interrupts a stalled query without starting FTS fallback", async () => {
+    ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title: "SQLite WAL",
+      content: "Use SQLite WAL for session state and concurrent reads",
+      scope: "project",
+    });
+    const available = vi.spyOn(embedding, "isAvailable").mockReturnValue(true);
+    let releaseEmbed!: (vectors: Float32Array[]) => void;
+    const pending = new Promise<Float32Array[]>((resolve) => {
+      releaseEmbed = resolve;
+    });
+    let started!: () => void;
+    const embedStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let signal: AbortSignal | undefined;
+    const embed = vi
+      .spyOn(embedding, "embed")
+      .mockImplementation((_texts, _type, s) => {
+        signal = s;
+        started();
+        return pending;
+      });
+    const controller = new AbortController();
+    const selection = ltm.forSession(PROJ, SESSION, 10_000, {
+      contextHint: "SQLite WAL for session state and concurrent reads",
+      signal: controller.signal,
+    });
+    try {
+      await embedStarted;
+      controller.abort(new DOMException("client disconnected", "AbortError"));
+      const outcome = await Promise.race([
+        selection.then(() => "resolved", () => "aborted"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("stuck"), 500)),
+      ]);
+      expect(outcome).toBe("aborted");
+      expect(signal?.aborted).toBe(true);
+    } finally {
+      releaseEmbed([new Float32Array(config().search.embeddings.dimensions)]);
+      await selection.catch(() => {});
+      embed.mockRestore();
+      available.mockRestore();
+    }
+  });
+
   test("returns project-specific entries regardless of session context", async () => {
     ltm.create({
       projectPath: PROJ,
