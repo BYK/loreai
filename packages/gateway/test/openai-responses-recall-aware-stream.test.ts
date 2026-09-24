@@ -397,6 +397,95 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
+  test("preserves completed Codex items when recall continuation terminal output is empty", async () => {
+    const followUp = streamFrom([
+      created("resp_empty_continuation", "gpt-5.6-terra"),
+      textItem(0, "Done", "msg_empty_continuation"),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_empty_continuation",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [],
+        },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_empty_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_empty_principal"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "anchor",
+          resultText: "results",
+        }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("Done");
+    expect(out).not.toContain("response.failed");
+  });
+
+  test("forwards standard hosted-tool lifecycle deltas", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_hosted_tool", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "code_interpreter_call",
+            id: "ci_hosted_tool",
+            status: "in_progress",
+          },
+        }),
+        sseEvent("response.code_interpreter_call_code.delta", {
+          output_index: 0,
+          item_id: "ci_hosted_tool",
+          delta: "print(1)",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "code_interpreter_call",
+            id: "ci_hosted_tool",
+            status: "completed",
+          },
+        }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_hosted_tool",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "code_interpreter_call",
+                id: "ci_hosted_tool",
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not be called");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("response.code_interpreter_call_code.delta");
+    expect(out).not.toContain("response.failed");
+  });
+
   test("accepts a partial Codex terminal output after streamed items", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([
@@ -10645,6 +10734,83 @@ describe("streamResponsesRecallAware", () => {
     expect(completions[0]?.successful).toBe(true);
     expect(commits).toBe(1);
     expect(rollbacks).toBe(0);
+  });
+
+  test("accepts a statusless Codex recovery message", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_statusless_recovery", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_statusless_recovery"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "anchor",
+          resultText: "results",
+        }),
+        runFollowUp: async () => {
+          throw new Error("follow-up unavailable");
+        },
+        runRecovery: async () => ({
+          id: "resp_statusless_recovery_result",
+          model: "gpt-5.6-terra",
+          content: [],
+          rawOutputItems: [
+            {
+              type: "message",
+              id: "msg_statusless_recovery",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Done" }],
+            },
+          ],
+          stopReason: "end_turn",
+        }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("Done");
+    expect(out).not.toContain("response.failed");
+  });
+
+  test("recovers after hidden recall output follows a sparse visible index", async () => {
+    let recoveryCalls = 0;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_sparse_recovery", "gpt-5.6-terra"),
+        textItem(7, "visible before recall", "msg_sparse_visible"),
+        recallCall(9, { query: "architecture" }),
+        completed("resp_sparse_recovery"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "anchor",
+          resultText: "results",
+        }),
+        runFollowUp: async () => {
+          throw new Error("follow-up unavailable");
+        },
+        runRecovery: async () => {
+          recoveryCalls++;
+          return {
+            id: "resp_sparse_recovery_result",
+            model: "gpt-5.6-terra",
+            content: [{ type: "text" as const, text: "recovered" }],
+            stopReason: "end_turn",
+          };
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(recoveryCalls).toBe(1);
+    expect(out).toContain("visible before recall");
+    expect(out).toContain("recovered");
+    expect(out).not.toContain("response.failed");
   });
 
   test("keeps private recovery reasoning out of the client projection", async () => {

@@ -13130,22 +13130,12 @@ export function streamResponsesRecallAware(
             (recallDetected ||
               continuationAttempted ||
               err instanceof RecallContinuationFailure);
-          const visibleSourceIndices = [
-            ...new Set([...state.rawItems.keys(), ...state.items.keys()]),
-          ]
-            .filter(
-              (index) =>
-                !recallIndices.has(index) && !unresolvedToolIndices.has(index),
-            )
-            .sort((left, right) => left - right);
-          const visibleProjectionIsStable = visibleSourceIndices.every(
-            (sourceIndex, publicIndex) => sourceIndex === publicIndex,
-          );
+          // Recovery items are appended after every source index, so sparse
+          // visible indices do not reindex output already sent to the client.
           if (
             recallFailure &&
             opts.runRecovery &&
             recoverySeed &&
-            visibleProjectionIsStable &&
             !signal.aborted
           ) {
             const recoveryStateBaseline = state;

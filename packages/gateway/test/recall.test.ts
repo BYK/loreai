@@ -3753,6 +3753,17 @@ describe("final recall continuation output", () => {
     }
   });
 
+  test.each(["stop", "length", "content_filter"])(
+    "accepts usable provider stop reason %j",
+    (stopReason) => {
+      const response = makeResponse(
+        [{ type: "text", text: "Useful answer" }],
+        stopReason,
+      );
+      expect(isUsableRecallContinuation(response)).toBe(true);
+    },
+  );
+
   test("buffered refusal provenance does not duplicate its normalized text", () => {
     const refusal = {
       type: "message",
