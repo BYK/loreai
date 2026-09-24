@@ -20,6 +20,7 @@ import {
 import {
   log,
   data,
+  db,
   loadSessionCosts,
   loadAllSessionCosts,
   getKV,
@@ -1300,7 +1301,9 @@ export function computeHistoricalEstimates(
     const allSessions = data.listSessionRollups({
       sinceMs: scanCutoffMs,
     });
-
+    const sessionsWithRollups = new Set(
+      allSessions.map((session) => session.session_id),
+    );
     for (const sess of allSessions) {
       // Skip test sessions (created by the test suite)
       if (sess.project_path.includes("__tmp_agents_file__")) continue;
@@ -1460,6 +1463,52 @@ export function computeHistoricalEstimates(
         model,
         persisted: sessionPersisted,
       });
+    }
+
+    // Amnesia sessions intentionally leave no temporal messages, so they have
+    // no session_rollup row. Preserve their recent persisted spend in the
+    // aggregate without exposing session-level data or counting live sessions
+    // and sessions already represented by a rollup twice.
+    const unrolledCostSessions = db()
+      .query(
+        `SELECT session_id FROM session_state AS s
+         WHERE s.updated_at >= ?
+           AND instr(COALESCE(s.project_path, ''), '__tmp_agents_file__') = 0
+           AND (s.conversation_turns > 0 OR s.warmup_savings > 0 OR
+                s.warmup_cost > 0 OR s.ttl_savings > 0 OR s.batch_savings > 0)`,
+      )
+      .all(scanCutoffMs) as Array<{ session_id: string }>;
+
+    for (const { session_id: sessionID } of unrolledCostSessions) {
+      if (sessions.has(sessionID) || sessionsWithRollups.has(sessionID))
+        continue;
+      const persisted = persistedCosts.get(sessionID);
+      if (!persisted) continue;
+
+      totals.sessionCount++;
+      totals.persistedConversationCost += persisted.conversationCost;
+      totals.totalWorkerCost += persisted.workerCost;
+      totals.warmupSavings += persisted.warmupSavings;
+      totals.warmupCost += persisted.warmupCost;
+      totals.warmupHits += persisted.warmupHits;
+      totals.ttlSavings += persisted.ttlSavings;
+      totals.ttlHits += persisted.ttlHits;
+      totals.batchSavings += persisted.batchSavings;
+      totals.avoidedCompactions += persisted.avoidedCompactions;
+      totals.avoidedCompactionCost += persisted.avoidedCompactionCost;
+
+      const breakdown = persisted.workerBreakdown;
+      if (breakdown) {
+        for (const task of [
+          "distillation",
+          "curation",
+          "compaction",
+          "recall",
+        ] as const) {
+          totals.workerBreakdown[task].cost += breakdown[task]?.cost ?? 0;
+          totals.workerBreakdown[task].calls += breakdown[task]?.calls ?? 0;
+        }
+      }
     }
   } catch (e) {
     log.error("cost-tracker: historical estimate computation failed:", e);

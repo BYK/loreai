@@ -496,6 +496,136 @@ describe("cost snapshots for resumed sessions", () => {
       core.data.deleteProject(projectId);
     }
   });
+
+  it("keeps recent amnesia-session spend in historical totals after eviction", async () => {
+    const core = await import("@loreai/core");
+    const tracker = await import("../src/cost-tracker");
+    const sessionId = `operations-amnesia-cost-${Date.now()}`;
+    core.saveSessionTracking(sessionId, { amnesia: true });
+    core.saveSessionCosts(sessionId, {
+      conversationCost: 2,
+      workerCost: 0.5,
+      conversationTurns: 1,
+      inputTokens: 100_000,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+      workerBreakdown: {
+        distillation: { cost: 0.5, calls: 1 },
+        curation: { cost: 0, calls: 0 },
+        compaction: { cost: 0, calls: 0 },
+        recall: { cost: 0, calls: 0 },
+        warmup: { cost: 0, calls: 0 },
+      },
+    });
+    tracker.invalidateHistoricalCache();
+
+    try {
+      const response = await body<{
+        totals: { combined_session_count: number; spend: number };
+        historical: {
+          session_count: number;
+          persisted_conversation_cost: number;
+          total_worker_cost: number;
+        };
+      }>("/api/v1/costs");
+
+      expect(response.historical).toMatchObject({
+        session_count: 1,
+        persisted_conversation_cost: 2,
+        total_worker_cost: 0.5,
+      });
+      expect(response.totals.combined_session_count).toBe(1);
+      expect(response.totals.spend).toBeCloseTo(2.5);
+    } finally {
+      core
+        .db()
+        .query("DELETE FROM session_state WHERE session_id = ?")
+        .run(sessionId);
+      tracker.invalidateHistoricalCache();
+    }
+  });
+
+  it("counts recent persisted spend when the session rollup is outside the scan window", async () => {
+    const core = await import("@loreai/core");
+    const tracker = await import("../src/cost-tracker");
+    const sessionId = `operations-amnesia-stale-cost-${Date.now()}`;
+    const projectPath = `/tmp/${sessionId}`;
+    const projectId = core.ensureProject(projectPath, "Amnesia stale cost");
+    const oldMessageAt = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    core
+      .db()
+      .query(
+        `INSERT INTO temporal_messages
+           (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, ?, 'user', 'older transcript', 10, 0, ?, NULL)`,
+      )
+      .run(
+        `operations-amnesia-stale-msg-${sessionId}`,
+        projectId,
+        sessionId,
+        oldMessageAt,
+      );
+    core.saveSessionTracking(sessionId, {
+      amnesia: true,
+      projectPath,
+      projectPathProvisional: false,
+    });
+    core.saveSessionCosts(sessionId, {
+      conversationCost: 1,
+      workerCost: 0,
+      conversationTurns: 1,
+      inputTokens: 50_000,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+    tracker.invalidateHistoricalCache();
+
+    try {
+      const response = await body<{
+        totals: { combined_session_count: number; spend: number };
+        historical: {
+          session_count: number;
+          persisted_conversation_cost: number;
+        };
+      }>("/api/v1/costs");
+
+      expect(response.historical).toMatchObject({
+        session_count: 1,
+        persisted_conversation_cost: 1,
+      });
+      expect(response.totals.combined_session_count).toBe(1);
+      expect(response.totals.spend).toBeCloseTo(1);
+    } finally {
+      core
+        .db()
+        .query("DELETE FROM session_state WHERE session_id = ?")
+        .run(sessionId);
+      core
+        .db()
+        .query("DELETE FROM temporal_messages WHERE session_id = ?")
+        .run(sessionId);
+      tracker.invalidateHistoricalCache();
+      core.data.deleteProject(projectId);
+    }
+  });
 });
 
 describe("operations rows for project path aliases", () => {

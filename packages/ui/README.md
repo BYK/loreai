@@ -1055,8 +1055,11 @@ predates the move from an embedded module to staged files, which took
 - Resumed legacy cost snapshots retain their known warmup spend in the live
   worker breakdown, and an empty budget form entry is rejected instead of
   being interpreted as the explicit zero-value disable action.
+- Recent persisted snapshots absent from the rolling session-rollup scan,
+  including amnesia sessions, remain in historical cost totals. Live sessions
+  and sessions already represented in the scan are excluded from this fallback.
 - This slice adds no dependencies or package-version changes. Its focused
-  core/gateway regression command (428 passing) is:
+  core/gateway regression command (430 passing) is:
 
   ```sh
   pnpm exec vitest run \
