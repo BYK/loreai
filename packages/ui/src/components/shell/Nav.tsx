@@ -202,6 +202,22 @@ export const Nav: Component<NavProps> = (props) => {
         <span class="text-[10px] uppercase tracking-wider">UI-08</span>
       </div>
 
+      <NavHeading>Operations</NavHeading>
+      <NavItem
+        href="/warming"
+        active={location.pathname.startsWith("/warming")}
+        testId="nav-warming"
+      >
+        Cache warming
+      </NavItem>
+      <NavItem
+        href="/costs"
+        active={location.pathname.startsWith("/costs")}
+        testId="nav-costs"
+      >
+        Cost intelligence
+      </NavItem>
+
       <ConnectionStatus class="mt-auto border-t border-line px-3 pt-4" />
     </nav>
   );

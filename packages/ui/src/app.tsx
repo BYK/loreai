@@ -81,6 +81,18 @@ export const routes: RouteDefinition[] = [
     ),
   },
   {
+    path: "/warming",
+    component: lazy(() =>
+      import("./routes/Operations").then((m) => ({ default: m.WarmingRoute })),
+    ),
+  },
+  {
+    path: "/costs",
+    component: lazy(() =>
+      import("./routes/Operations").then((m) => ({ default: m.CostsRoute })),
+    ),
+  },
+  {
     path: "/contradictions",
     component: lazy(() =>
       import("./routes/Contradictions").then((m) => ({

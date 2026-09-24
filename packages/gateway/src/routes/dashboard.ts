@@ -40,6 +40,24 @@ export const dashboardRoutes: RouteModule = {
       };
     };
 
+    const wrapOperations = (
+      fn: (
+        ops: typeof import("../operations-api"),
+        req: Request,
+        url: URL,
+        c: GatewayContext,
+      ) => Response | Promise<Response>,
+    ) => {
+      return async (c: GatewayContext) => {
+        const ops = await import("../operations-api");
+        const req = c.var.request;
+        return withManagementCors(
+          await fn(ops, req, new URL(req.url), c),
+          c.var.allowedManagementOrigin,
+        );
+      };
+    };
+
     app.get(
       "/api/v1/entities",
       ctx.declaredMethodsOnly(
@@ -78,5 +96,60 @@ export const dashboardRoutes: RouteModule = {
         ),
       );
     }
+
+    app.get(
+      "/api/v1/warming",
+      ctx.declaredMethodsOnly(
+        ["GET"],
+        wrapOperations((ops) => ops.handleGetWarming(ctx.config.hostedMode)),
+      ),
+    );
+    app.patch(
+      "/api/v1/warming/settings",
+      ctx.declaredMethodsOnly(
+        ["PATCH"],
+        wrapOperations((ops, req) =>
+          ops.handleSetWarmingEnabled(req, ctx.config.hostedMode),
+        ),
+      ),
+    );
+    app.post(
+      "/api/v1/warming/circuit-breaker/reset",
+      ctx.declaredMethodsOnly(
+        ["POST"],
+        wrapOperations((ops) =>
+          ops.handleResetCircuitBreaker(ctx.config.hostedMode),
+        ),
+      ),
+    );
+    app.patch(
+      "/api/v1/warming/sessions/:sessionId/mode",
+      ctx.declaredMethodsOnly(
+        ["PATCH"],
+        wrapOperations((ops, req, _url, c) =>
+          ops.handleSetSessionWarmingMode(
+            req,
+            c.req.param("sessionId") ?? "",
+            ctx.config.hostedMode,
+          ),
+        ),
+      ),
+    );
+    app.get(
+      "/api/v1/costs",
+      ctx.declaredMethodsOnly(
+        ["GET"],
+        wrapOperations((ops) => ops.handleGetCosts(ctx.config.hostedMode)),
+      ),
+    );
+    app.patch(
+      "/api/v1/costs/budget",
+      ctx.declaredMethodsOnly(
+        ["PATCH"],
+        wrapOperations((ops, req) =>
+          ops.handleSetDailyBudget(req, ctx.config.hostedMode),
+        ),
+      ),
+    );
   },
 };

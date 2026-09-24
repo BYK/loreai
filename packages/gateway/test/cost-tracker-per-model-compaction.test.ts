@@ -9,6 +9,7 @@ import {
   resetDailyBudgetState,
   updateShadowContext,
 } from "../src/cost-tracker";
+import { saveSessionCosts } from "@loreai/core";
 
 const WORKER = "__test_worker_model__";
 const PRICING_MODEL = "__test_fake_model__";
@@ -153,5 +154,74 @@ describe("updateShadowContext uses the client-metered threshold (#983, #1214)", 
     expect(
       getSessionCosts("s-minimax")?.counterfactual.avoidedCompactions,
     ).toBe(1);
+  });
+
+  test("resuming a session continues its persisted shadow context", () => {
+    const sessionID = `resume-shadow-${crypto.randomUUID()}`;
+    saveSessionCosts(sessionID, {
+      conversationCost: 0,
+      workerCost: 0,
+      conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+      shadowContextTokens: 160_000,
+      shadowLastActualInput: 40_000,
+      shadowLastOutputTokens: 10_000,
+    });
+
+    // Simulate process restart: the database row remains while process-local
+    // accumulators are discarded.
+    clearAllCosts();
+    updateShadowContext(sessionID, 50_000, 5_000, WORKER);
+
+    const resumed = getSessionCosts(sessionID);
+    expect(resumed?._shadowContextInitialized).toBe(true);
+    expect(resumed?._shadowContextTokens).toBe(POST_COMPACTION_CONTEXT);
+    expect(resumed?.counterfactual.avoidedCompactions).toBe(1);
+  });
+
+  test("resuming a legacy snapshot preserves its separately stored warmup cost", () => {
+    const sessionID = `resume-legacy-cost-${crypto.randomUUID()}`;
+    saveSessionCosts(sessionID, {
+      conversationCost: 0,
+      workerCost: 0.4,
+      conversationTurns: 5,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0.1,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+
+    // Hydration happens on the first resumed request after process-local state
+    // is cleared. The old snapshot has an aggregate plus a separate warmup
+    // field, but predates the per-worker breakdown.
+    clearAllCosts();
+    recordConversationCost(sessionID, PRICING_MODEL, USAGE);
+
+    const resumed = getSessionCosts(sessionID);
+    expect(resumed?.workers.warmup.cost).toBeCloseTo(0.1);
+    expect(resumed?.workers.distillation.cost).toBeCloseTo(0.3);
+    expect(
+      resumed &&
+        resumed.workers.warmup.cost + resumed.workers.distillation.cost,
+    ).toBeCloseTo(0.4);
   });
 });

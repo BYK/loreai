@@ -18,6 +18,11 @@ export default defineConfig({
     include: ["test/**/*.test.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["./test/setup.ts"],
+    server: {
+      deps: {
+        inline: ["@solidjs/router", "@kobalte/core", "solid-prevent-scroll"],
+      },
+    },
     testTimeout: 30_000,
     env: {
       NODE_ENV: "test",

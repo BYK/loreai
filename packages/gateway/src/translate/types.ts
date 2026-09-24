@@ -786,6 +786,8 @@ export type WarmupState = {
   warmupHits: number;
   /** Session marked as dead — survival dropped below threshold. Resets on real request. */
   disabled: boolean;
+  /** Operator selected Stop; unlike `disabled`, this survives a user return. */
+  userStopped?: boolean;
   /** User explicitly requested keep-warm via /lore:warm:keep command. Bypasses survival analysis. */
   forceKeepWarm?: boolean;
   /**

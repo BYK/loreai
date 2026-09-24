@@ -147,6 +147,24 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
+  test("v90 adds nullable session cost shadow-context columns", () => {
+    const columns = db()
+      .query("PRAGMA table_info(session_state)")
+      .all() as Array<{ name: string; notnull: number }>;
+    const shadowColumns = new Map(
+      columns
+        .filter((column) => column.name.startsWith("cost_shadow_"))
+        .map((column) => [column.name, column.notnull]),
+    );
+    expect(shadowColumns).toEqual(
+      new Map([
+        ["cost_shadow_context_tokens", 0],
+        ["cost_shadow_last_actual_input", 0],
+        ["cost_shadow_last_output_tokens", 0],
+      ]),
+    );
+  });
+
   test("v85 creates the local temporal queue without re-arming completed legacy progress", () => {
     const database = db();
     database.exec(`
@@ -2306,10 +2324,15 @@ describe("db", () => {
       batchSavings: 0.56,
       avoidedCompactions: 2,
       avoidedCompactionCost: 0.78,
+      shadowContextTokens: 182000,
+      shadowLastActualInput: 44000,
+      shadowLastOutputTokens: 6000,
+      workerBreakdown: undefined,
     };
     saveSessionCosts(sid, snapshot);
     const loaded = loadSessionCosts(sid);
     expect(loaded).toEqual(snapshot);
+    expect(loadAllSessionCosts().get(sid)).toEqual(snapshot);
   });
 
   test("saveSessionCosts round-trips input/output token buckets", () => {

@@ -2082,6 +2082,14 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   -- restarted session fails closed until an upstream request is accepted.
   ALTER TABLE session_state ADD COLUMN last_accepted_provenance_layer INTEGER NOT NULL DEFAULT -1;
   `,
+  `
+  -- Version 90: preserve the gateway's virtual uncompressed context estimate
+  -- across session resumes. Nullable values keep legacy sessions distinguishable
+  -- so the tracker can seed them from the first resumed request.
+  ALTER TABLE session_state ADD COLUMN cost_shadow_context_tokens INTEGER;
+  ALTER TABLE session_state ADD COLUMN cost_shadow_last_actual_input INTEGER;
+  ALTER TABLE session_state ADD COLUMN cost_shadow_last_output_tokens INTEGER;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -5639,6 +5647,10 @@ export type SessionCostSnapshot = {
    * readers fall back to the aggregate `workerCost`.
    */
   workerBreakdown?: WorkerCostBreakdown;
+  /** Gateway-only compaction estimate state. Null/absent for legacy snapshots. */
+  shadowContextTokens?: number;
+  shadowLastActualInput?: number;
+  shadowLastOutputTokens?: number;
 };
 
 /**
@@ -5656,8 +5668,10 @@ export function saveSessionCosts(
          input_tokens, output_tokens,
          cache_read_tokens, cache_write_tokens,
          warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
-         avoided_compactions, avoided_compaction_cost, worker_breakdown)
-       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         avoided_compactions, avoided_compaction_cost, worker_breakdown,
+         cost_shadow_context_tokens, cost_shadow_last_actual_input,
+         cost_shadow_last_output_tokens)
+       VALUES (?, COALESCE((SELECT force_min_layer FROM session_state WHERE session_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          conversation_cost = excluded.conversation_cost,
          worker_cost = excluded.worker_cost,
@@ -5675,6 +5689,9 @@ export function saveSessionCosts(
          avoided_compactions = excluded.avoided_compactions,
          avoided_compaction_cost = excluded.avoided_compaction_cost,
          worker_breakdown = excluded.worker_breakdown,
+         cost_shadow_context_tokens = excluded.cost_shadow_context_tokens,
+         cost_shadow_last_actual_input = excluded.cost_shadow_last_actual_input,
+         cost_shadow_last_output_tokens = excluded.cost_shadow_last_output_tokens,
          updated_at = excluded.updated_at`,
     )
     .run(
@@ -5697,6 +5714,9 @@ export function saveSessionCosts(
       costs.avoidedCompactions,
       costs.avoidedCompactionCost,
       costs.workerBreakdown ? JSON.stringify(costs.workerBreakdown) : null,
+      costs.shadowContextTokens ?? null,
+      costs.shadowLastActualInput ?? null,
+      costs.shadowLastOutputTokens ?? null,
     );
 }
 
@@ -5729,7 +5749,9 @@ export function loadSessionCosts(
               input_tokens, output_tokens,
               cache_read_tokens, cache_write_tokens,
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
-              avoided_compactions, avoided_compaction_cost, worker_breakdown
+              avoided_compactions, avoided_compaction_cost, worker_breakdown,
+              cost_shadow_context_tokens, cost_shadow_last_actual_input,
+              cost_shadow_last_output_tokens
        FROM session_state WHERE session_id = ?`,
     )
     .get(sessionID) as {
@@ -5749,6 +5771,9 @@ export function loadSessionCosts(
     avoided_compactions: number;
     avoided_compaction_cost: number;
     worker_breakdown: string | null;
+    cost_shadow_context_tokens: number | null;
+    cost_shadow_last_actual_input: number | null;
+    cost_shadow_last_output_tokens: number | null;
   } | null;
   if (!row) return null;
   return {
@@ -5768,6 +5793,9 @@ export function loadSessionCosts(
     avoidedCompactions: row.avoided_compactions,
     avoidedCompactionCost: row.avoided_compaction_cost,
     workerBreakdown: parseWorkerBreakdown(row.worker_breakdown),
+    shadowContextTokens: row.cost_shadow_context_tokens ?? undefined,
+    shadowLastActualInput: row.cost_shadow_last_actual_input ?? undefined,
+    shadowLastOutputTokens: row.cost_shadow_last_output_tokens ?? undefined,
   };
 }
 
@@ -5782,7 +5810,9 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
               input_tokens, output_tokens,
               cache_read_tokens, cache_write_tokens,
               warmup_savings, warmup_cost, warmup_hits, ttl_savings, ttl_hits, batch_savings,
-              avoided_compactions, avoided_compaction_cost, worker_breakdown
+              avoided_compactions, avoided_compaction_cost, worker_breakdown,
+              cost_shadow_context_tokens, cost_shadow_last_actual_input,
+              cost_shadow_last_output_tokens
        FROM session_state
        WHERE conversation_turns > 0 OR warmup_savings > 0 OR warmup_cost > 0 OR ttl_savings > 0 OR batch_savings > 0`,
     )
@@ -5804,6 +5834,9 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
     avoided_compactions: number;
     avoided_compaction_cost: number;
     worker_breakdown: string | null;
+    cost_shadow_context_tokens: number | null;
+    cost_shadow_last_actual_input: number | null;
+    cost_shadow_last_output_tokens: number | null;
   }>;
   const result = new Map<string, SessionCostSnapshot>();
   for (const row of rows) {
@@ -5824,6 +5857,9 @@ export function loadAllSessionCosts(): Map<string, SessionCostSnapshot> {
       avoidedCompactions: row.avoided_compactions,
       avoidedCompactionCost: row.avoided_compaction_cost,
       workerBreakdown: parseWorkerBreakdown(row.worker_breakdown),
+      shadowContextTokens: row.cost_shadow_context_tokens ?? undefined,
+      shadowLastActualInput: row.cost_shadow_last_actual_input ?? undefined,
+      shadowLastOutputTokens: row.cost_shadow_last_output_tokens ?? undefined,
     });
   }
   return result;

@@ -22,6 +22,8 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
 | `/ui/entities` (`?type=`, `?cursor=`) | Entity list with type filter, keyset paging and the rebuild card |
 | `/ui/entities/:entityId` | Entity detail: aliases, role/description/notes editing, relations, referencing knowledge, delete |
+| `/ui/warming` | Global cache-warming status, circuit-breaker reset, live-session controls and project histograms |
+| `/ui/costs` | Live and historical costs, worker breakdown, daily trend and budget controls |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
 | `/ui/_compat` | **Dev/test only** — #1796 compatibility smoke page |
 
@@ -1027,11 +1029,53 @@ predates the move from an embedded module to staged files, which took
   **write** routes too (`PATCH`/`DELETE /api/v1/entities/:id`, `POST
   /api/v1/entities/rebuild` + `/rebuild/cancel`) — same-origin `fetch`,
   no credentials, and runtime validation of every response (`arktype`,
-  `src/contracts/`; timestamps are epoch milliseconds). Writes reconcile
-  the returned detail into the store and the IndexedDB projection; a
-  delete removes the row and invalidates the cached list. A 2xx body
+  `src/contracts/`; timestamps are epoch milliseconds). The warming and cost
+  screens add `GET /api/v1/warming`, `PATCH /warming/settings`,
+  `PATCH /warming/sessions/:id/mode`, `POST /warming/circuit-breaker/reset`,
+  `GET /costs`, and `PATCH /costs/budget`; management writes are refused in
+  hosted mode, and environment-owned settings stay read-only. Entity writes
+  reconcile the returned detail into the store and IndexedDB; a delete
+  removes the row and invalidates the cached list. A 2xx body
   that fails its contract throws `ContractError` (an `ApiError` of kind
   `invalid`) — never a silent coercion.
+- Warming status snapshots honor the idle scheduler's privacy, in-progress and
+  auth-disabled skip gates; `should_warm` never advertises a skipped session
+  as ready. Persisted histogram rows are combined at exact integer precision
+  before the dashboard snapshot normalizes their weights.
+- Per-session Stop is stored separately from the survival model's temporary
+  dead-session flag. The warming snapshot exposes `user_stopped` separately
+  from effective `disabled` state, so the UI keeps dead sessions in Auto mode
+  and labels the survival pause correctly; the UI and `/lore:warm:*` controls
+  share the same persisted mode update.
+- Older warming snapshots without `user_stopped` retain Stop mode when their
+  stop reason says the operator disabled warming.
+- Session cost snapshots preserve the local shadow-context counters used for
+  compaction estimates. Legacy rows leave those nullable fields empty, so the
+  first resumed request seeds a fresh estimate safely.
+- Resumed legacy cost snapshots retain their known warmup spend in the live
+  worker breakdown, and an empty budget form entry is rejected instead of
+  being interpreted as the explicit zero-value disable action.
+- Recent persisted snapshots absent from the rolling session-rollup scan,
+  including amnesia and no-store sessions, remain in historical cost totals.
+  Live sessions and sessions already represented in the scan are excluded from
+  this fallback.
+- This slice adds no dependencies or package-version changes. Its focused
+  core/gateway regression command (440 passing) is:
+
+  ```sh
+  pnpm exec vitest run \
+    packages/core/test/db.test.ts \
+    packages/gateway/test/cache-warmer.test.ts \
+    packages/gateway/test/cost-tracker-historical.test.ts \
+    packages/gateway/test/cost-tracker-per-model-compaction.test.ts \
+    packages/gateway/test/operations-api.test.ts
+  ```
+
+  The UI page tests run with `pnpm --filter @loreai/ui test` (493 passing on
+  this revision).
+
+  The PR also runs the standard root typecheck, lint, format, test and build
+  gates.
 - Every loader races the cache read against the server fetch: a cached
   answer renders immediately as `stale` (the `StaleBadge`), the server
   answer replaces it; a server failure keeps the cached rows and flips the
@@ -1110,8 +1154,10 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Shared loading/error/locked states | `ErrorState` | `StateCard`, retry/first-page actions | #1799 |
 | Long lists | — | `@tanstack/solid-virtual` | #1799 / #1801 |
 | Local cache, drafts | — | `idb` | #1798 |
-| Charts (cost / compression / latency) | — | not shipped; optional Plot work deferred | #1800 |
+| Charts (cost / compression / latency) | CSS bars for daily costs and warming histograms; no chart library | Plot work deferred | UI-08 |
 | Entity list, detail + rebuild card | `EntitiesPage`, `EntityPage`, `RebuildCard` (in `EntitiesPage`) | `ListRow`, `Select`, `TextField`, `Badge`, `ConfirmDialog` | UI-08 |
+| Cache warming controls + histograms | `WarmingPage` | global toggle, breaker reset, per-session modes | UI-08 |
+| Cost intelligence + daily budget | `CostsPage` | live/historical totals, workers, budget | UI-08 |
 | Destructive / expensive action confirmation | `ConfirmDialog` (`components/ui`) | Kobalte `Dialog`, `role="alertdialog"` | UI-08 |
 
 ## Legacy dashboard parity (UI-08, #1823)
@@ -1133,10 +1179,10 @@ top of `/api/v1`. Status:
 - [ ] Session detail — warming section, quota section, cost summary
 - [ ] Distillation detail — delete
 - [ ] Search + search detail *(UI-04 covers the current search surface)*
-- [ ] Costs — totals, per-session, historical estimates, daily costs,
-  budget set/disable, worker breakdown
-- [ ] Warming — global enable/disable, circuit-breaker reset, per-session
-  keep/stop/auto, histograms
+- [x] Costs — totals, per-session, historical estimates, daily costs,
+  budget set/disable, worker breakdown. — **PR3 (this change)**
+- [x] Warming — global enable/disable, circuit-breaker reset, per-session
+  keep/stop/auto, project histograms. — **PR3 (this change)**
 - [ ] Import history — no legacy page existed (API only,
   `GET /api/v1/import/history`); #1823 adds a screen for it
 
@@ -1144,7 +1190,7 @@ Already covered by earlier slices: project overview (UI-04), knowledge
 list/document (UI-04/05), session reader (UI-06), search (UI-04). The
 legacy dashboard pieces #1823 deliberately excludes — entity/knowledge
 dedup suggestion rows, delete session/distillation buttons, move
-knowledge, the live dashboard table — are out-of-scope follow-ups.
+knowledge and the aggregate home dashboard — are out-of-scope follow-ups.
 
 
 ## Design tokens: website → UI mapping
