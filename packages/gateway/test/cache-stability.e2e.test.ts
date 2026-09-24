@@ -332,6 +332,93 @@ describe("cache stability (e2e)", () => {
     resetCalibration();
     if (harness) await harness.teardown();
   });
+  it("retries a Layer 4 turn when the emergency knowledge refresh loses its read worker", async () => {
+    const turns = Array.from({ length: 3 }, (_, i) => ({
+      userMessage: `Emergency refresh turn ${i}: continue.`,
+      assistantText: `Emergency refresh answer ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+
+    const projectPath = `/tmp/lore-emergency-read-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `emergency-read-${Date.now()}`,
+    };
+    const {
+      ltm,
+      getLastLayer,
+      ReadPreparationUnavailableError,
+      setForceMinLayer,
+    } = await import("@loreai/core");
+    const history: unknown[] = [];
+    let sessionID = "";
+
+    for (let i = 0; i < 2; i++) {
+      const response = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(response.status).toBe(200);
+      await response.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+      if (i === 0) {
+        sessionID =
+          harness.queryDB<{ session_id: string }>(
+            "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+          )[0]?.session_id ?? "";
+        expect(sessionID).not.toBe("");
+        ltm.create({
+          projectPath,
+          scope: "project",
+          category: "gotcha",
+          title: "Emergency refresh gotcha",
+          content:
+            "Newly relevant knowledge to refresh after the context reset.",
+          session: sessionID,
+        });
+      }
+    }
+
+    setForceMinLayer(4, sessionID);
+    const original = ltm.forSession;
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation((...args) => {
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          return Promise.reject(
+            new ReadPreparationUnavailableError("knowledge", "unavailable"),
+          );
+        }
+        return original(...args);
+      });
+    const response = await harness.chat(
+      makeBody(turns[2].userMessage, history),
+      "test-key",
+      headers,
+    );
+
+    // The transform ran, so this was the refresh read after Layer 4 rather
+    // than an earlier step-6 selection failure.
+    expect(getLastLayer(sessionID)).toBe(4);
+    expect(
+      selection.mock.calls.filter((call) =>
+        call[3]?.excludeCategories?.includes("preference"),
+      ),
+    ).toHaveLength(1);
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain(
+      "Memory preparation is temporarily unavailable",
+    );
+    expect(harness.upstreamBodies()).toHaveLength(2);
+  });
+
   it("guard rejects synthetic distilled-prefix message rewrites", () => {
     // Regression for the gap in #748: accepting every messages[N] divergence
     // lets meta-distillation rewrites at messages[0/1] pass as "tail" growth.

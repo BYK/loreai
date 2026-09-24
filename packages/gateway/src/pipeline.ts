@@ -19649,9 +19649,11 @@ async function handleConversationTurn(
       }
     } catch (e) {
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      // On error, leave the step-6 LTM state intact (cache, pin, text)
-      // so the turn proceeds with the pre-refresh knowledge rather than
-      // an inconsistent state. The next turn will retry via step 6.
+      // A missing required worker read cannot be interpreted as a successful
+      // refresh. Let the outer handler return a retryable 503 before upstream.
+      if (e instanceof ReadPreparationUnavailableError) throw e;
+      // For unrelated refresh errors, leave the step-6 LTM state intact
+      // (cache, pin, text) and retry on the next turn.
       log.error("LTM refresh on emergency layer failed:", e);
     }
   }
