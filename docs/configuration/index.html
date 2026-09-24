@@ -590,7 +590,7 @@
 <tr>
 <td><code dir="auto">embeddings</code></td>
 <td>object</td>
-<td><code dir="auto">{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768,"workerOffload":true,"workerPoolSize":2}</code></td>
+<td><code dir="auto">{"enabled":true,"provider":"local","model":"nomic-ai/nomic-embed-text-v1.5","dimensions":768,"queryTimeoutMs":1500,"workerOffload":true,"workerPoolSize":2}</code></td>
 <td></td>
 <td>Vector embedding search provider, model, and dimensions.</td>
 </tr>
@@ -679,6 +679,13 @@
 <td><code dir="auto">768</code></td>
 <td>min 64, max 2048</td>
 <td>Embedding dimensions. Default: 768 (local) / 1024 (voyage) / 1536 (openai). Local Nomic v1.5 supports Matryoshka: 64, 128, 256, 512, 768.</td>
+</tr>
+<tr>
+<td><code dir="auto">queryTimeoutMs</code></td>
+<td>number</td>
+<td><code dir="auto">1500</code></td>
+<td>min 100, max 60000</td>
+<td>Maximum foreground LTM query-embedding wait in milliseconds, including worker startup and queueing. FTS is used on expiry. Default: 1500.</td>
 </tr>
 <tr>
 <td><code dir="auto">workerOffload</code></td>
