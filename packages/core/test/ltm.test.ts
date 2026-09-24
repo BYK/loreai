@@ -531,7 +531,10 @@ describe("ltm.forSession", () => {
       const result = await Promise.race([
         selection,
         new Promise<never>((_resolve, reject) =>
-          setTimeout(() => reject(new Error("query embed remained unbounded")), 500),
+          setTimeout(
+            () => reject(new Error("query embed remained unbounded")),
+            500,
+          ),
         ),
       ]);
       expect(signal?.aborted).toBe(true);

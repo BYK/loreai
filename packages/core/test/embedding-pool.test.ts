@@ -303,15 +303,10 @@ describe("EmbeddingPool dispatch (#999)", () => {
 
     const document = embed(["document in progress"], "document");
     await flush();
-    const selection = ltm.forSession(
-      "/test/ltm/queued-query",
-      undefined,
-      500,
-      {
-        contextHint: "This session is discussing SQLite WAL and concurrency",
-        includeContextSources: ["distillation"],
-      },
-    );
+    const selection = ltm.forSession("/test/ltm/queued-query", undefined, 500, {
+      contextHint: "This session is discussing SQLite WAL and concurrency",
+      includeContextSources: ["distillation"],
+    });
     try {
       await flush();
       expect(recallEmbedsInFlight()).toBe(1);
