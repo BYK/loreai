@@ -9,6 +9,7 @@
  *  - Response stripping
  */
 import { describe, test, expect, vi } from "vitest";
+import { log } from "@loreai/core";
 import {
   LORE_COMMIT_REMINDER,
   accumulateOpenAINonStreamJSON,
@@ -28,9 +29,11 @@ import {
   hasOtherToolUse,
   clientHasRecallTool,
   buildRecallFollowUpRequest,
+  buildRecallRecoveryRequest,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
+  runRecallRecovery,
   type RecallFollowUpCtx,
   buildRecallMarker,
   buildRecallAnchor,
@@ -268,6 +271,47 @@ describe("executeRecall malformed input", () => {
     expect(result.result).toBe(
       "Recall search failed. The memory system encountered an error.",
     );
+  });
+
+  test("logs malformed recall input through a fixed error envelope", async () => {
+    const errors: string[] = [];
+    const captured: Error[] = [];
+    const sentinel = "private recall query\nprovider diagnostic";
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: (message) => errors.push(message),
+      captureException: (error) => {
+        if (error instanceof Error) captured.push(error);
+      },
+    });
+
+    try {
+      await executeRecall(
+        {
+          type: "tool_use",
+          id: "recall-private-log",
+          name: RECALL_TOOL_NAME,
+          input: { [sentinel]: true },
+        },
+        process.cwd(),
+        "private-log-input",
+      );
+      expect(errors).toEqual(["gateway recall execution failed"]);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.name).toBe("RecallExecutionError");
+      expect(captured[0]?.message).toBe("gateway recall execution failed");
+      expect(`${captured[0]?.message}\n${captured[0]?.stack}`).not.toContain(
+        sentinel,
+      );
+    } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
   });
 });
 
@@ -845,6 +889,115 @@ describe("buildRecallFollowUpRequest", () => {
       expect(req.tools.map((tool) => tool.name)).toEqual(["Read", "recall"]);
       expect(req.metadata.tool_choice).toBe(choice);
       expect(req.extras?.tool_choice).toBe(choice);
+    },
+  );
+
+  test.each([
+    ["anthropic", { tool_choice: { type: "tool", name: "recall" } }],
+    ["openai", { tool_choice: { type: "function", name: "recall" } }],
+    ["openai-responses", { tool_choice: { type: "function", name: "recall" } }],
+    ["vertex", { tool_choice: { type: "tool", name: "recall" } }],
+    ["gemini", { toolConfig: { functionCallingConfig: { mode: "ANY" } } }],
+  ] as const)(
+    "builds an isolated %s recovery request without recall or forced controls",
+    (protocol, metadata) => {
+      const recall = makeRecallToolUse("recover this task");
+      const request = makeRequest(
+        [{ role: "user", content: [{ type: "text", text: "finish" }] }],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      request.protocol = protocol;
+      request.metadata = {
+        ...metadata,
+        cachedContent: "cachedContents/private",
+      };
+      request.extras = {
+        tool_choice: { type: "function", name: "recall" },
+        prompt_cache_key: "private-cache-key",
+      };
+      const original = structuredClone(request);
+
+      const recovery = buildRecallRecoveryRequest(
+        request,
+        makeResponse(
+          [
+            {
+              type: "thinking",
+              thinking: "preserve this reasoning",
+              signature: "signed",
+            },
+            { type: "text", text: "already delivered answer prefix" },
+            {
+              type: "tool_use",
+              id: "call_delivered_read",
+              name: "Read",
+              input: { path: "README.md" },
+            },
+            recall,
+          ],
+          "tool_use",
+        ),
+        "accepted recall result",
+        recall,
+        true,
+      );
+
+      expect(recovery).not.toBe(request);
+      expect(recovery.tools.map((tool) => tool.name)).toEqual(["Read"]);
+      expect(recovery.metadata).not.toHaveProperty("tool_choice");
+      expect(recovery.metadata).not.toHaveProperty("toolConfig");
+      expect(recovery.metadata).not.toHaveProperty("cachedContent");
+      expect(recovery.extras).not.toHaveProperty("tool_choice");
+      expect(recovery.extras).not.toHaveProperty("prompt_cache_key");
+      expect(recovery.stream).toBe(true);
+      expect(recovery.messages.at(-2)?.content).toContainEqual(
+        expect.objectContaining({
+          type: "thinking",
+          thinking: "preserve this reasoning",
+          signature: "signed",
+        }),
+      );
+      expect(recovery.messages.at(-2)?.content).toContainEqual(
+        expect.objectContaining({
+          type: "tool_use",
+          id: recall.id,
+          name: "recall",
+        }),
+      );
+      expect(recovery.messages.at(-1)?.content).toContainEqual(
+        expect.objectContaining({
+          type: "tool_result",
+          toolUseId: recall.id,
+          toolName: "recall",
+          content: expect.arrayContaining([
+            { type: "text", text: "accepted recall result" },
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining("Continue the user's task"),
+            }),
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining("already delivered answer prefix"),
+            }),
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining('tool Read: {"path":"README.md"}'),
+            }),
+          ]),
+        }),
+      );
+      expect(
+        recovery.messages
+          .at(-2)
+          ?.content.filter(
+            (block) =>
+              block.type === "tool_use" && block.id === "call_delivered_read",
+          ),
+      ).toEqual([]);
+      expect(request).toEqual(original);
     },
   );
 
@@ -1616,12 +1769,24 @@ describe("runRecallFollowUpJSON", () => {
   });
 
   test("throws on content-type mismatch (SSE instead of JSON)", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new TextEncoder().encode("data: test\n\n"));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
     const ctx: RecallFollowUpCtx = {
       forward: async () => ({
-        response: new Response("data: test\n\n", {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        }),
+        response,
         effectiveProtocol: "anthropic",
       }),
       parseJSON: () => {
@@ -1638,6 +1803,7 @@ describe("runRecallFollowUpJSON", () => {
         recallBlock,
       ),
     ).rejects.toThrow("recall follow-up expected JSON but got SSE");
+    await vi.waitFor(() => expect(cancelled).toBe(true));
   });
 
   test("abort settles when JSON follow-up setup ignores its signal", async () => {
@@ -1865,6 +2031,234 @@ describe("runRecallFollowUpStreamAccumulated", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(bodyCancelled).toBe(true);
   });
+});
+
+describe("recall follow-up error-body privacy", () => {
+  const recallBlock = makeRecallToolUse("test query");
+  const resp = makeResponse([recallBlock], "tool_use");
+  const hostile = "private recall query\nprovider diagnostic";
+
+  test.each(["streaming", "json", "accumulated-sse"] as const)(
+    "%s logs only a fixed category when a non-OK body reader throws",
+    async (mode) => {
+      const warnings: string[] = [];
+      log.registerSink({
+        info: () => {},
+        warn: (message) => warnings.push(message),
+        error: () => {},
+        captureException: () => {},
+      });
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            throw new Error(hostile);
+          },
+        }),
+        { status: 503 },
+      );
+      const ctx: RecallFollowUpCtx = {
+        forward: async () => ({ response, effectiveProtocol: "anthropic" }),
+        parseJSON: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+        parseSSE: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+      };
+
+      try {
+        const result =
+          mode === "streaming"
+            ? await runRecallFollowUpStreaming(
+                ctx,
+                makeRequest(),
+                resp,
+                "recall results",
+                recallBlock,
+              )
+            : mode === "json"
+              ? await runRecallFollowUpJSON(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                )
+              : await runRecallFollowUpStreamAccumulated(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                );
+        expect(result).toMatchObject({ ok: false, status: 503, detail: "" });
+        expect(warnings).toEqual([
+          "recall follow-up error body could not be read",
+        ]);
+        expect(JSON.stringify(warnings)).not.toContain(hostile);
+      } finally {
+        log.registerSink({
+          info: () => {},
+          warn: () => {},
+          error: () => {},
+          captureException: () => {},
+        });
+      }
+    },
+  );
+
+  test.each(["streaming", "json", "accumulated-sse"] as const)(
+    "%s bounds a stalled non-OK diagnostic body without awaiting cancellation",
+    async (mode) => {
+      vi.useFakeTimers();
+      const warnings: string[] = [];
+      let cancelCalled = false;
+      log.registerSink({
+        info: () => {},
+        warn: (message) => warnings.push(message),
+        error: () => {},
+        captureException: () => {},
+      });
+      const response = new Response(
+        new ReadableStream<Uint8Array>({
+          pull() {
+            return new Promise(() => {});
+          },
+          cancel() {
+            cancelCalled = true;
+            return new Promise(() => {});
+          },
+        }),
+        { status: 503 },
+      );
+      const ctx: RecallFollowUpCtx = {
+        forward: async () => ({ response, effectiveProtocol: "anthropic" }),
+        parseJSON: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+        parseSSE: () => {
+          throw new Error("should not parse a non-OK response");
+        },
+      };
+
+      try {
+        const pending =
+          mode === "streaming"
+            ? runRecallFollowUpStreaming(
+                ctx,
+                makeRequest(),
+                resp,
+                "recall results",
+                recallBlock,
+              )
+            : mode === "json"
+              ? runRecallFollowUpJSON(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                )
+              : runRecallFollowUpStreamAccumulated(
+                  ctx,
+                  makeRequest(),
+                  resp,
+                  "recall results",
+                  recallBlock,
+                );
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await expect(pending).resolves.toMatchObject({
+          ok: false,
+          status: 503,
+          detail: "",
+        });
+        expect(cancelCalled).toBe(true);
+        expect(warnings).toEqual([
+          "recall follow-up error body could not be read",
+        ]);
+      } finally {
+        vi.useRealTimers();
+        log.registerSink({
+          info: () => {},
+          warn: () => {},
+          error: () => {},
+          captureException: () => {},
+        });
+      }
+    },
+  );
+});
+
+describe("runRecallRecovery", () => {
+  const recallBlock = makeRecallToolUse("recovery query");
+  const resp = makeResponse([recallBlock], "tool_use");
+
+  test.each([false, true])(
+    "couples stream:%s to one no-recall forward and its matching parser",
+    async (stream) => {
+      let forwards = 0;
+      let jsonParses = 0;
+      let sseParses = 0;
+      let captured: GatewayRequest | undefined;
+      let capturedSignal: AbortSignal | undefined;
+      const controller = new AbortController();
+      const continuation = makeResponse(
+        [{ type: "text", text: "recovered answer" }],
+        "end_turn",
+      );
+      const request = makeRequest(
+        [],
+        [
+          { name: "Read", description: "Read", inputSchema: {} },
+          { name: "recall", description: "Recall", inputSchema: {} },
+        ],
+      );
+      request.codex = stream;
+      const ctx: RecallFollowUpCtx = {
+        forward: async (forwarded, signal) => {
+          forwards++;
+          captured = forwarded;
+          capturedSignal = signal;
+          return {
+            response: new Response(stream ? "data: ok\n\n" : "{}", {
+              headers: {
+                "content-type": stream
+                  ? "text/event-stream"
+                  : "application/json",
+              },
+            }),
+            effectiveProtocol: "openai-responses",
+          };
+        },
+        parseJSON: async () => {
+          jsonParses++;
+          return continuation;
+        },
+        parseSSE: async () => {
+          sseParses++;
+          return continuation;
+        },
+      };
+
+      const result = await runRecallRecovery(
+        ctx,
+        request,
+        resp,
+        "accepted result",
+        recallBlock,
+        stream,
+        controller.signal,
+      );
+
+      expect(result.ok).toBe(true);
+      expect(forwards).toBe(1);
+      expect([jsonParses, sseParses]).toEqual(stream ? [0, 1] : [1, 0]);
+      expect(captured?.stream).toBe(stream);
+      expect(captured?.tools.map((tool) => tool.name)).toEqual(["Read"]);
+      expect(capturedSignal).toBe(controller.signal);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -3459,6 +3853,29 @@ describe("final recall continuation output", () => {
       ),
     ).toBe(expected);
   });
+
+  test.each([
+    ["end_turn", true],
+    ["tool_use", true],
+    ["stop_sequence", true],
+    ["refusal", true],
+    ["max_tokens", false],
+    ["pause_turn", false],
+    ["model_context_window_exceeded", false],
+    ["failed", false],
+    ["cancelled", false],
+    ["incomplete", false],
+  ] as const)(
+    "requires an allowlisted successful stop reason: %s",
+    (stopReason, expected) => {
+      expect(
+        isUsableRecallContinuation({
+          ...makeResponse([{ type: "text", text: "usable answer" }]),
+          stopReason,
+        }),
+      ).toBe(expected);
+    },
+  );
 });
 
 test.each(["max_tokens", "pause_turn", "model_context_window_exceeded"])(

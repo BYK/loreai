@@ -25,6 +25,7 @@ import type {
   GatewayTool,
   GatewayUsage,
 } from "./types";
+import { sanitizeCodexRateLimitEvents } from "../codex-rate-limits";
 import {
   blocksToText,
   forwardClientHeaders,
@@ -1260,7 +1261,9 @@ function buildOpenAIResponsesStreamResponse(resp: GatewayResponse): Response {
 
       // Buffered Codex responses still carry subscription windows and credits.
       // These values are independent of the token usage Lore may rescale.
-      for (const quota of resp.codexRateLimits ?? []) {
+      for (const quota of sanitizeCodexRateLimitEvents(
+        resp.codexRateLimits ?? [],
+      )) {
         emit("codex.rate_limits", quota);
       }
 

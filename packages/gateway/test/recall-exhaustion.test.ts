@@ -230,6 +230,15 @@ describe.each([
       "refusal",
       "unfinished",
     ] as const)("final result %s", async (mode) => {
+      const requiresRecovery =
+        (!stream ||
+          (protocol === "openai-responses" &&
+            stream &&
+            upstreamProtocol === "openai-responses")) &&
+        (mode === "recall" ||
+          mode === "failed" ||
+          mode === "reasoning" ||
+          mode === "unfinished");
       let recallCalls = 0;
       vi.mocked(executeRecall).mockImplementation(async () => {
         recallCalls++;
@@ -300,13 +309,16 @@ describe.each([
       };
       let calls = 0;
       let lastBody: Record<string, unknown> | undefined;
+      let recoveryBody: Record<string, unknown> | undefined;
       let firstBody: Record<string, unknown> | undefined;
       setUpstreamInterceptor(async (body) => {
         calls++;
         const requestBody = body as Record<string, unknown>;
         firstBody ??= structuredClone(requestBody);
-        expect(requestBody.tools).toEqual(firstBody.tools);
-        expect(requestBody.tool_choice).toEqual(firstBody.tool_choice);
+        if (calls <= MAX_RECALL_DEPTH + 1) {
+          expect(requestBody.tools).toEqual(firstBody.tools);
+          expect(requestBody.tool_choice).toEqual(firstBody.tool_choice);
+        }
         if (calls === MAX_RECALL_DEPTH + 1) {
           lastBody = requestBody;
           if (mode === "failed")
@@ -318,6 +330,15 @@ describe.each([
             requestBody.stream === true,
             calls,
             mode === "parallel" ? "answer" : mode,
+          );
+        }
+        if (calls === MAX_RECALL_DEPTH + 2 && requiresRecovery) {
+          recoveryBody = requestBody;
+          return upstream(
+            upstreamProtocol,
+            requestBody.stream === true,
+            calls,
+            "answer",
           );
         }
         return upstream(
@@ -333,7 +354,7 @@ describe.each([
         expect(vi.mocked(executeRecall)).not.toHaveBeenCalled();
         expect(calls).toBe(1);
       } else {
-        expect(calls).toBe(MAX_RECALL_DEPTH + 1);
+        expect(calls).toBe(MAX_RECALL_DEPTH + (requiresRecovery ? 2 : 1));
         expect(vi.mocked(executeRecall)).toHaveBeenCalledTimes(
           MAX_RECALL_DEPTH,
         );
@@ -342,11 +363,34 @@ describe.each([
         expect(JSON.stringify(lastBody)).toContain(
           "The recall budget for this turn has been used",
         );
+        if (requiresRecovery) {
+          const recoveryTools = Array.isArray(recoveryBody?.tools)
+            ? recoveryBody.tools
+                .filter(
+                  (tool): tool is Record<string, unknown> =>
+                    tool !== null &&
+                    typeof tool === "object" &&
+                    !Array.isArray(tool),
+                )
+                .map((tool) => tool.name)
+            : [];
+          expect(recoveryTools).toContain("Read");
+          expect(recoveryTools).not.toContain("recall");
+          expect(recoveryBody).not.toHaveProperty("tool_choice");
+          expect(JSON.stringify(recoveryBody)).not.toContain(
+            `query ${calls - 1}`,
+          );
+        }
       }
-      if (mode === "answer" || mode === "tool" || mode === "refusal") {
+      if (
+        mode === "answer" ||
+        mode === "tool" ||
+        mode === "refusal" ||
+        requiresRecovery
+      ) {
         expect(response.status).toBe(200);
         expect(body).toContain(
-          mode === "answer"
+          mode === "answer" || requiresRecovery
             ? "Finished the task."
             : mode === "refusal"
               ? "I cannot help with that."

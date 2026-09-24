@@ -58,6 +58,7 @@ import {
   resetPipelineState,
   scheduleStreamingPostResponseForTest,
   setPipelinePreUpstreamPauseForTest,
+  setPipelineResponseReadFailureForTest,
   setMaxActivePipelineRequestsForTest,
   setMaxDetachedPipelineRequestsForTest,
   setPipelineResetSettleTimeoutForTest,
@@ -553,16 +554,44 @@ describe("non-stream recall usage aggregation", () => {
           { headers: { "content-type": "application/json" } },
         );
       }
+      if (call === 2) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_failed_json_recall_followup",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status: "failed",
+            output: [],
+            usage: { input_tokens: 1_000, output_tokens: 100 },
+            error: { type: "server_error", message: "provider failed" },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
       return new Response(
         JSON.stringify({
-          id: "resp_failed_json_recall_followup",
+          id: "resp_recovered_json_recall",
           object: "response",
           created_at: 0,
           model: "gpt-5.6-sol",
-          status: "failed",
-          output: [],
-          usage: { input_tokens: 1_000, output_tokens: 100 },
-          error: { type: "server_error", message: "provider failed" },
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_recovered_json_recall",
+              role: "assistant",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: "recovered answer",
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          usage: { input_tokens: 0, output_tokens: 0 },
         }),
         { headers: { "content-type": "application/json" } },
       );
@@ -581,7 +610,6 @@ describe("non-stream recall usage aggregation", () => {
         (candidate) => candidate.headerSessionId === "failed-json-recall-usage",
       );
       expect(state).toBeDefined();
-      // Buffered recall commits usage in the deferred finalizer after EOF.
       await vi.waitFor(() =>
         expect(
           getSessionCosts(state?.sessionID ?? "")?.conversation,
@@ -597,6 +625,300 @@ describe("non-stream recall usage aggregation", () => {
       clearAllCosts();
     }
   });
+
+  it.each([
+    "tool",
+    "malformed",
+    "repeated-recall",
+    "overflow",
+    "failed-overflow",
+    "recall-plus-text",
+    "reasoning-only",
+  ] as const)(
+    "%s recovery makes exactly one no-recall synthesis request after a failed JSON continuation",
+    async (recoveryOutcome) => {
+      clearAllCosts();
+      let call = 0;
+      const upstreamBodies: Record<string, unknown>[] = [];
+      setUpstreamInterceptor(async (body) => {
+        call++;
+        upstreamBodies.push(body as Record<string, unknown>);
+        if (call === 1) {
+          return new Response(
+            JSON.stringify({
+              id: "resp_failed_json_recall",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_failed_json_recall",
+                  call_id: "call_failed_json_recall",
+                  name: "recall",
+                  arguments: JSON.stringify({
+                    query: "failed json recall usage",
+                  }),
+                  status: "completed",
+                },
+              ],
+              usage: {
+                input_tokens:
+                  recoveryOutcome === "repeated-recall" ? 120_000 : 10,
+                output_tokens: 1,
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (call === 2) {
+          if (recoveryOutcome === "repeated-recall") {
+            return new Response(
+              JSON.stringify({
+                id: "resp_repeated_final_recall",
+                object: "response",
+                created_at: 0,
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [
+                  {
+                    type: "function_call",
+                    id: "fc_private_repeated_recall",
+                    call_id: "call_private_repeated_recall",
+                    name: "recall",
+                    arguments: JSON.stringify({
+                      query: "private repeated recall query",
+                    }),
+                    status: "completed",
+                  },
+                ],
+                usage: { input_tokens: 1_000, output_tokens: 100 },
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              id: "resp_failed_json_recall_followup",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "failed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_private_partial",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: "private failed partial",
+                      annotations: [],
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 1_000, output_tokens: 100 },
+              error: {
+                type: "server_error",
+                message: "private provider failed",
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (recoveryOutcome === "malformed") {
+          return new Response("{not valid recovery json", {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (recoveryOutcome === "recall-plus-text") {
+          return new Response(
+            JSON.stringify({
+              id: "resp_recovery_recall_plus_text",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_private_recovery_text",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    { type: "output_text", text: "usable private text" },
+                  ],
+                },
+                {
+                  type: "function_call",
+                  id: "fc_private_recovery_recall",
+                  call_id: "call_private_recovery_recall",
+                  name: "recall",
+                  arguments: JSON.stringify({
+                    query: "private recovery query",
+                  }),
+                  status: "completed",
+                },
+              ],
+              usage: { input_tokens: 20, output_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        if (recoveryOutcome === "reasoning-only") {
+          return new Response(
+            JSON.stringify({
+              id: "resp_recovery_reasoning_only",
+              object: "response",
+              created_at: 0,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "reasoning",
+                  id: "rs_private_recovery",
+                  summary: [
+                    {
+                      type: "summary_text",
+                      text: "private recovery reasoning",
+                    },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 20, output_tokens: 2 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            id: "resp_recovered_json_recall",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status:
+              recoveryOutcome === "failed-overflow" ? "failed" : "completed",
+            output:
+              recoveryOutcome === "failed-overflow"
+                ? []
+                : [
+                    {
+                      type: "function_call",
+                      id: "fc_recovery_read",
+                      call_id: "call_recovery_read",
+                      name: "read",
+                      arguments: JSON.stringify({ path: "README.md" }),
+                      status: "completed",
+                    },
+                  ],
+            usage:
+              recoveryOutcome === "overflow" ||
+              recoveryOutcome === "failed-overflow"
+                ? { input_tokens: Number.MAX_SAFE_INTEGER, output_tokens: 0 }
+                : { input_tokens: 20, output_tokens: 2 },
+            ...(recoveryOutcome === "failed-overflow"
+              ? {
+                  error: {
+                    type: "server_error",
+                    message: "private failed recovery diagnostic",
+                  },
+                }
+              : {}),
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": "failed-json-recall-usage" },
+        });
+        request.stream = false;
+        request.rawHeaders["x-lore-no-store"] = "true";
+        request.extras = {
+          tool_choice: { type: "function", name: "recall" },
+          prompt_cache_key: "private-cache-key",
+        };
+        const response = await handleRequest(request, loadLocalConfig());
+        const body = await response.text();
+        expect(call).toBe(3);
+        expect(body).not.toContain("private failed partial");
+        expect(body).not.toContain("private provider failed");
+        expect(body).not.toContain("private failed recovery diagnostic");
+        expect(body).not.toContain("usable private text");
+        expect(body).not.toContain("private recovery query");
+        expect(body).not.toContain("private recovery reasoning");
+        expect(body).not.toContain("private repeated recall query");
+        expect(body).not.toContain("fc_private_repeated_recall");
+        expect(body).not.toContain('"name":"recall"');
+
+        const recoveryBody = upstreamBodies[2];
+        expect(recoveryBody).toBeDefined();
+        expect(recoveryBody).not.toHaveProperty("tool_choice");
+        expect(recoveryBody).not.toHaveProperty("prompt_cache_key");
+        expect(recoveryBody?.tools).toEqual([
+          expect.objectContaining({ name: "read" }),
+        ]);
+        expect(JSON.stringify(recoveryBody?.input)).toContain(
+          '"name":"recall"',
+        );
+        expect(JSON.stringify(recoveryBody?.input)).not.toContain(
+          "private repeated recall query",
+        );
+        expect(JSON.stringify(recoveryBody)).toContain(
+          "accepted recall results",
+        );
+        if (
+          recoveryOutcome === "malformed" ||
+          recoveryOutcome === "overflow" ||
+          recoveryOutcome === "failed-overflow" ||
+          recoveryOutcome === "recall-plus-text" ||
+          recoveryOutcome === "reasoning-only"
+        ) {
+          expect(response.status).toBe(502);
+          expect(body).toContain("Recall continuation failed");
+        } else {
+          expect(response.status).toBe(200);
+          expect(body).toContain("call_recovery_read");
+          expect(body).toContain('"name":"read"');
+        }
+        const state = [...getActiveSessions().values()].find(
+          (candidate) =>
+            candidate.headerSessionId === "failed-json-recall-usage",
+        );
+        expect(state).toBeDefined();
+        // Buffered recall commits usage in the deferred finalizer after EOF.
+        await vi.waitFor(() =>
+          expect(
+            getSessionCosts(state?.sessionID ?? "")?.conversation,
+          ).toMatchObject({
+            inputTokens:
+              recoveryOutcome === "tool" ||
+              recoveryOutcome === "recall-plus-text" ||
+              recoveryOutcome === "reasoning-only"
+                ? 1_030
+                : recoveryOutcome === "repeated-recall"
+                  ? 121_020
+                  : 1_010,
+            outputTokens:
+              recoveryOutcome === "malformed" ||
+              recoveryOutcome === "overflow" ||
+              recoveryOutcome === "failed-overflow"
+                ? 101
+                : 103,
+            turns: 1,
+          }),
+        );
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearAllCosts();
+      }
+    },
+  );
 });
 
 describe("budget throttle cancellation", () => {
@@ -3570,6 +3892,106 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("synthesizes a real native Responses answer after a failed recall continuation", async () => {
+    const alias = "native-recall-recovery-alias";
+    const knowledgeId = ltm.create({
+      projectPath: "/test/responses-recall-recovery/origin",
+      category: "gotcha",
+      title: "Native recovery terms",
+      content:
+        "one two three four five six seven eight nine native recovery terms",
+      scope: "project",
+      crossProject: true,
+    });
+    const upstreamBodies: Record<string, unknown>[] = [];
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async (body) => {
+      upstreamCall++;
+      upstreamBodies.push(body as Record<string, unknown>);
+      if (upstreamCall === 1) {
+        return new Response(
+          recallResponsesSSE(
+            "resp_native_recovery_principal",
+            "one two three four five six seven eight nine native recovery terms",
+          ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (upstreamCall === 2) {
+        return new Response("private follow-up diagnostic", { status: 503 });
+      }
+      return new Response(
+        validResponsesSSE(
+          "resp_private_recovery_synthesis",
+          "real native recovered answer",
+          { input_tokens: 20, output_tokens: 4 },
+        ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-session-affinity": alias },
+      });
+      request.extras = {
+        tool_choice: { type: "function", name: "recall" },
+        prompt_cache_key: "private-cache-key",
+      };
+      const response = await handleRequest(request, loadLocalConfig());
+      const output = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(upstreamCall).toBe(3);
+      expect(output.match(/^event: response\.created$/gm)).toHaveLength(1);
+      expect(output.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(output).toContain("real native recovered answer");
+      expect(output).not.toContain("response.failed");
+      expect(output).not.toContain("[lore:context-warning]");
+      expect(output).not.toContain("private follow-up diagnostic");
+      expect(output).not.toContain("resp_private_recovery_synthesis");
+      const sequenceNumbers = [
+        ...output.matchAll(/"sequence_number":(\d+)/g),
+      ].map((match) => Number(match[1]));
+      expect(sequenceNumbers).toEqual(sequenceNumbers.map((_, index) => index));
+      expect(
+        new Set(
+          [...output.matchAll(/"output_index":(\d+)/g)].map((match) =>
+            Number(match[1]),
+          ),
+        ),
+      ).toEqual(new Set([0]));
+
+      const recoveryBody = upstreamBodies[2];
+      expect(recoveryBody).toBeDefined();
+      expect(recoveryBody).not.toHaveProperty("tool_choice");
+      expect(recoveryBody).not.toHaveProperty("prompt_cache_key");
+      expect(recoveryBody?.tools).toEqual([
+        expect.objectContaining({ name: "read" }),
+      ]);
+      expect(JSON.stringify(recoveryBody)).toContain(
+        "Continue the user's task using the accepted recall results",
+      );
+      expect(JSON.stringify(recoveryBody)).toContain("native recovery terms");
+
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      await vi.waitFor(() => {
+        expect(state?.recallStore.size).toBe(0);
+        expect(ltm.transferCount(knowledgeId)).toBeGreaterThan(0);
+      });
+      expect(
+        loadSessionTracking(state?.sessionID ?? "")?.recallStore,
+      ).toBeNull();
+    } finally {
+      ltm.remove(knowledgeId);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("rolls back all DB effects when recall commit fails", async () => {
     const alias = "failed-recall-commit-atomicity-alias";
     const knowledgeId = ltm.create({
@@ -3745,6 +4167,96 @@ describe("Pipeline — streaming responses", () => {
       expect(ltm.transferCount(knowledgeId)).toBeGreaterThan(0);
     } finally {
       ltm.remove(knowledgeId);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rolls back recall persistence when downstream reading errors before EOF", async () => {
+    const alias = "deadline-before-recall-eof-alias";
+    const knowledgeId = ltm.create({
+      projectPath: "/test/responses-recall-atomicity/deadline-origin",
+      category: "gotcha",
+      title: "Deadline recall persistence terms",
+      content: "one two three four five six seven eight nine deadline terms",
+      scope: "project",
+      crossProject: true,
+    });
+    let upstreamCall = 0;
+    setUpstreamInterceptor(async () => {
+      upstreamCall++;
+      return new Response(
+        upstreamCall === 1
+          ? recallResponsesSSE(
+              "resp_deadline_recall_persistence",
+              "one two three four five six seven eight nine deadline terms",
+            )
+          : validResponsesSSE(
+              "resp_deadline_recall_persistence_final",
+              "final answer",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: { "x-session-affinity": alias },
+        }),
+        loadLocalConfig(),
+      );
+      const reader = response.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let output = "";
+      while (!output.includes("event: response.completed")) {
+        const chunk = await reader?.read();
+        expect(chunk?.done).toBe(false);
+        if (chunk?.value)
+          output += decoder.decode(chunk.value, { stream: true });
+      }
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === alias,
+      );
+      expect(state).toBeDefined();
+      const trackingBeforeError = loadSessionTracking(state?.sessionID ?? "");
+      const temporalBeforeError = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+
+      setPipelineResponseReadFailureForTest({
+        afterChunks: 0,
+        error: new DOMException("downstream read failed", "NetworkError"),
+      });
+      await expect(reader?.read()).rejects.toMatchObject({
+        name: "NetworkError",
+      });
+      await vi.waitFor(() =>
+        expect(streamingPostResponsePendingForTest()).toBe(0),
+      );
+
+      const trackingAfterError = loadSessionTracking(state?.sessionID ?? "");
+      const temporalAfterError = db()
+        .query(
+          "SELECT COUNT(*) AS count FROM temporal_messages WHERE session_id = ?",
+        )
+        .get(state?.sessionID ?? "") as { count: number };
+      expect(upstreamCall).toBe(2);
+      expect(state?.recallStore.size).toBe(0);
+      expect(trackingAfterError?.recallStore).toBe(
+        trackingBeforeError?.recallStore ?? null,
+      );
+      expect(trackingAfterError?.messageCount).toBe(
+        trackingBeforeError?.messageCount,
+      );
+      expect(temporalAfterError.count).toBe(temporalBeforeError.count);
+      expect(ltm.transferCount(knowledgeId)).toBe(0);
+    } finally {
+      ltm.remove(knowledgeId);
+      setPipelineResponseReadFailureForTest(undefined);
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }

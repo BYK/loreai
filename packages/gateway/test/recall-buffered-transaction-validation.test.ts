@@ -187,13 +187,13 @@ describe.each(["anthropic", "openai", "openai-responses"] as const)(
       await response.text();
       await settled();
       const state = stateFor(alias);
-      expect(calls).toBe(FINAL_RECALL_CALL);
+      expect(calls).toBe(FINAL_RECALL_CALL + 1);
       expect(state.recallStore.size).toBe(0);
       expect(getSessionCosts(state.sessionID)?.conversation).toMatchObject({
         inputTokens:
-          TEST_RECALL_EXECUTION_CAP * 3 + (usageKind === "valid" ? 1000 : 0),
+          TEST_RECALL_EXECUTION_CAP * 3 + (usageKind === "valid" ? 2000 : 0),
         outputTokens:
-          TEST_RECALL_EXECUTION_CAP * 2 + (usageKind === "valid" ? 100 : 0),
+          TEST_RECALL_EXECUTION_CAP * 2 + (usageKind === "valid" ? 200 : 0),
         turns: 1,
       });
     });

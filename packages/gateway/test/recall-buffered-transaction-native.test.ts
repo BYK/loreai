@@ -360,7 +360,15 @@ describe.each([
             await response.text();
           }
           await settled();
-          expect(calls).toBe(FINAL_RECALL_CALL);
+          expect(calls).toBe(
+            stream &&
+              client === "openai-responses" &&
+              upstreamProtocol === "openai-responses"
+              ? FINAL_RECALL_CALL + 1
+              : stream
+                ? FINAL_RECALL_CALL
+                : FINAL_RECALL_CALL + 1,
+          );
           expect(
             db()
               .query(

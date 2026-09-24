@@ -10587,6 +10587,129 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
     expect(out).not.toContain("lore_marker");
   });
+
+  test("synthesizes a response after an accepted recall continuation fails", async () => {
+    let commits = 0;
+    let rollbacks = 0;
+    let recoveryCalls = 0;
+    const completions: Array<{
+      response: GatewayResponse;
+      successful: boolean;
+    }> = [];
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_recovery_principal", "gpt-5.6-terra"),
+        sseEvent("codex.rate_limits", { plan_type: "principal_plan" }),
+        recallCall(0, { query: "architecture" }),
+        completed("resp_recovery_principal"),
+      ]),
+      {
+        onComplete: (response, successful) => {
+          completions.push({ response, successful });
+        },
+        onRecall: async ({ query }) => ({
+          anchorText: buildAnchor(query),
+          resultText: "private recall result",
+          commit: () => commits++,
+          rollback: () => rollbacks++,
+        }),
+        runFollowUp: async () => {
+          throw new Error("follow-up unavailable");
+        },
+        runRecovery: async () => {
+          recoveryCalls++;
+          return {
+            id: "resp_recovered_synthesis",
+            model: "gpt-5.6-terra",
+            content: [{ type: "text" as const, text: "recovered answer" }],
+            rawOutputItems: [],
+            stopReason: "end_turn",
+            usage: { inputTokens: 5, outputTokens: 3 },
+            codexRateLimits: [
+              { type: "codex.rate_limits", plan_type: "recovery_plan" },
+            ],
+          };
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(recoveryCalls).toBe(1);
+    expect(out).toContain("recovered answer");
+    expect(out).toContain("response.completed");
+    expect(out).not.toContain("response.failed");
+    expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain("private recall result");
+    expect(out).not.toContain("lore-recall");
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.successful).toBe(true);
+    expect(commits).toBe(1);
+    expect(rollbacks).toBe(0);
+  });
+
+  test("keeps private recovery reasoning out of the client projection", async () => {
+    let completedResponse: GatewayResponse | undefined;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_recovery_refusal", "gpt-5.6-terra"),
+        recallCall(0, { query: "private refusal query" }),
+        completed("resp_recovery_refusal"),
+      ]),
+      {
+        onComplete: (response, successful) => {
+          expect(successful).toBe(true);
+          completedResponse = response;
+        },
+        onRecall: async ({ query }) => ({
+          anchorText: buildAnchor(query),
+          resultText: "private refusal result",
+        }),
+        runFollowUp: async () => {
+          throw new Error("follow-up unavailable");
+        },
+        runRecovery: async () => ({
+          id: "resp_raw_recovery_refusal",
+          model: "gpt-5.6-terra",
+          content: [],
+          rawOutputItems: [
+            {
+              type: "reasoning",
+              id: "rs_recovery_refusal",
+              status: "completed",
+              summary: [
+                { type: "summary_text", text: "private recovery reasoning" },
+              ],
+            },
+            {
+              type: "message",
+              id: "msg_recovery_refusal",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "refusal", refusal: "cannot comply" }],
+            },
+          ],
+          stopReason: "end_turn",
+        }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("cannot comply");
+    expect(out).not.toContain("private refusal query");
+    expect(out).not.toContain("private refusal result");
+    expect(out).not.toContain("resp_raw_recovery_refusal");
+    expect(out).not.toContain("rs_recovery_refusal");
+    expect(out).not.toContain("msg_recovery_refusal");
+    expect(JSON.stringify(completedResponse)).not.toContain(
+      "resp_raw_recovery_refusal",
+    );
+    expect(JSON.stringify(completedResponse)).not.toContain(
+      "rs_recovery_refusal",
+    );
+    expect(JSON.stringify(completedResponse)).not.toContain(
+      "msg_recovery_refusal",
+    );
+  });
 });
 
 /** Minimal marker builder (mirrors buildRecallMarker's shape). */

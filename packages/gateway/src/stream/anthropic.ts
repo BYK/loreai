@@ -1983,6 +1983,7 @@ export async function accumulateSSEResponse(
     strict?: boolean;
     maxFrames?: number;
     onSemanticContent?: () => void;
+    requireSuccessfulCompletion?: boolean;
   } = {},
 ): Promise<GatewayResponse> {
   const accumulator = createStreamAccumulator();
@@ -2196,5 +2197,16 @@ export async function accumulateSSEResponse(
   }
   if (opts.stopAtTerminal) strictValidator?.assertDone();
 
-  return accumulator.getResponse();
+  const accumulated = accumulator.getResponse();
+  if (
+    opts.requireSuccessfulCompletion &&
+    (!accumulated.id ||
+      !accumulated.model ||
+      !["end_turn", "tool_use", "stop_sequence", "refusal"].includes(
+        accumulated.stopReason,
+      ))
+  ) {
+    throw new Error("upstream Anthropic request did not complete");
+  }
+  return accumulated;
 }
