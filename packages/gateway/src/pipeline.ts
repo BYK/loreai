@@ -18925,6 +18925,13 @@ async function handleConversationTurn(
         overflow?: Array<{ id: string; category: string; title: string }>;
       }
     | undefined;
+  // Step 6 may pin a new context selection before its durable delta is sent.
+  // If a later required read fails, restore this committed baseline so a retry
+  // reselects and emits the knowledge instead of treating it as already sent.
+  const contextBeforeStep6 = {
+    cache: ltmSessionCache.get(sessionID),
+    pin: ltmPinnedText.get(sessionID),
+  };
   if (cfg.knowledge.enabled) {
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
@@ -19322,6 +19329,10 @@ async function handleConversationTurn(
     setLtmTokens(0, sessionID);
     consumeCameOutOfIdle(sessionID);
   }
+  const contextAfterStep6 = {
+    cache: ltmSessionCache.get(sessionID),
+    pin: ltmPinnedText.get(sessionID),
+  };
 
   // --- 7. Gradient transform on messages ---
   // loreMessages was built + resolved once before the LTM block (step 6) so the
@@ -19651,7 +19662,36 @@ async function handleConversationTurn(
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
       // A missing required worker read cannot be interpreted as a successful
       // refresh. Let the outer handler return a retryable 503 before upstream.
-      if (e instanceof ReadPreparationUnavailableError) throw e;
+      if (e instanceof ReadPreparationUnavailableError) {
+        // Step 6 persisted its cache/pin before the pending prompt delta was
+        // appended. Roll those provisional values back on an aborted turn.
+        // Do not overwrite another in-flight request's newer selection.
+        if (
+          ltmSessionCache.get(sessionID) === contextAfterStep6.cache &&
+          ltmPinnedText.get(sessionID) === contextAfterStep6.pin
+        ) {
+          if (contextBeforeStep6.cache) {
+            ltmSessionCache.set(sessionID, contextBeforeStep6.cache);
+          } else {
+            ltmSessionCache.delete(sessionID);
+          }
+          if (contextBeforeStep6.pin) {
+            ltmPinnedText.set(sessionID, contextBeforeStep6.pin);
+          } else {
+            ltmPinnedText.delete(sessionID);
+          }
+          saveSessionTracking(sessionID, {
+            ltmCacheText: contextBeforeStep6.cache?.formatted ?? null,
+            ltmCacheTokens: contextBeforeStep6.cache?.tokenCount ?? null,
+            ltmPinText: contextBeforeStep6.pin?.formatted ?? null,
+            ltmPinTokens: contextBeforeStep6.pin?.tokenCount ?? null,
+            ltmPinKeys: contextBeforeStep6.pin?.entryKeys
+              ? JSON.stringify(contextBeforeStep6.pin.entryKeys)
+              : null,
+          });
+        }
+        throw e;
+      }
       // For unrelated refresh errors, leave the step-6 LTM state intact
       // (cache, pin, text) and retry on the next turn.
       log.error("LTM refresh on emergency layer failed:", e);

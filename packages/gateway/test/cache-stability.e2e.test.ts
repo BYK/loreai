@@ -419,6 +419,86 @@ describe("cache stability (e2e)", () => {
     expect(harness.upstreamBodies()).toHaveLength(2);
   });
 
+  it("reselects an unsent first knowledge delta after a failed Layer 4 refresh", async () => {
+    const turns = Array.from({ length: 2 }, (_, i) => ({
+      userMessage: `First injection retry turn ${i}: continue.`,
+      assistantText: `First injection retry answer ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-emergency-first-injection-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `emergency-first-injection-${Date.now()}`,
+    };
+    const {
+      ltm,
+      getLastLayer,
+      loadSessionTracking,
+      ReadPreparationUnavailableError,
+      setForceMinLayer,
+    } = await import("@loreai/core");
+
+    const first = await harness.chat(
+      makeBody(turns[0].userMessage),
+      "test-key",
+      headers,
+    );
+    expect(first.status).toBe(200);
+    await first.json();
+    const sessionID =
+      harness.queryDB<{ session_id: string }>(
+        "SELECT session_id FROM session_state ORDER BY updated_at DESC LIMIT 1",
+      )[0]?.session_id ?? "";
+    expect(sessionID).not.toBe("");
+    ltm.create({
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Emergency retry gotcha",
+      content: "This must reach the provider on the retried turn.",
+      session: sessionID,
+    });
+    const history = [
+      { role: "user", content: turns[0].userMessage },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: turns[0].assistantText }],
+      },
+    ];
+    const secondBody = makeBody(turns[1].userMessage, history);
+    setForceMinLayer(4, sessionID);
+    const original = ltm.forSession;
+    let contextReads = 0;
+    const selection = vi
+      .spyOn(ltm, "forSession")
+      .mockImplementation((...args) => {
+        if (args[3]?.excludeCategories?.includes("preference")) {
+          contextReads++;
+          if (contextReads === 2) {
+            return Promise.reject(
+              new ReadPreparationUnavailableError("knowledge", "unavailable"),
+            );
+          }
+        }
+        return original(...args);
+      });
+    const failed = await harness.chat(secondBody, "test-key", headers);
+    expect(failed.status).toBe(503);
+    expect(contextReads).toBe(2);
+    expect(getLastLayer(sessionID)).toBe(4);
+    expect(harness.upstreamBodies()).toHaveLength(1);
+    expect(loadSessionTracking(sessionID)?.ltmPinKeys).toBeNull();
+    selection.mockRestore();
+
+    const retry = await harness.chat(secondBody, "test-key", headers);
+    expect(retry.status).toBe(200);
+    await retry.json();
+    expect(harness.upstreamBodies()).toHaveLength(2);
+    expect(harness.upstreamBodies()[1]).toContain("Emergency retry gotcha");
+  });
+
   it("guard rejects synthetic distilled-prefix message rewrites", () => {
     // Regression for the gap in #748: accepting every messages[N] divergence
     // lets meta-distillation rewrites at messages[0/1] pass as "tail" growth.
