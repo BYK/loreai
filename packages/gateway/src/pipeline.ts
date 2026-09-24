@@ -12938,7 +12938,9 @@ export function streamResponsesRecallAware(
             const chunk = encoder.encode(
               formatResponsesEvent(
                 event,
-                projected === undefined ? data : JSON.stringify(projected),
+                projected === undefined
+                  ? publicData
+                  : JSON.stringify(projected),
               ),
             );
             if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {

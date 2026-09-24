@@ -524,6 +524,108 @@ describe("non-stream recall usage aggregation", () => {
     }
   });
 
+  it("accounts typed failed JSON recall follow-up usage in the fallback turn", async () => {
+    clearAllCosts();
+    let call = 0;
+    setUpstreamInterceptor(async () => {
+      call++;
+      if (call === 1) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_failed_json_recall",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_failed_json_recall",
+                call_id: "call_failed_json_recall",
+                name: "recall",
+                arguments: JSON.stringify({
+                  query: "failed json recall usage",
+                }),
+                status: "completed",
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 1 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (call === 2) {
+        return new Response(
+          JSON.stringify({
+            id: "resp_failed_json_recall_followup",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status: "failed",
+            output: [],
+            usage: { input_tokens: 1_000, output_tokens: 100 },
+            error: { type: "server_error", message: "provider failed" },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          id: "resp_recovered_json_recall",
+          object: "response",
+          created_at: 0,
+          model: "gpt-5.6-sol",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_recovered_json_recall",
+              role: "assistant",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: "recovered answer",
+                  annotations: [],
+                },
+              ],
+            },
+          ],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "failed-json-recall-usage" },
+      });
+      request.stream = false;
+      request.rawHeaders["x-lore-no-store"] = "true";
+      const response = await handleRequest(request, loadLocalConfig());
+      expect(response.status).toBe(200);
+      await response.text();
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === "failed-json-recall-usage",
+      );
+      expect(state).toBeDefined();
+      await vi.waitFor(() =>
+        expect(
+          getSessionCosts(state?.sessionID ?? "")?.conversation,
+        ).toMatchObject({
+          inputTokens: 1_010,
+          outputTokens: 101,
+          turns: 1,
+        }),
+      );
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearAllCosts();
+    }
+  });
+
   it.each([
     "tool",
     "malformed",
