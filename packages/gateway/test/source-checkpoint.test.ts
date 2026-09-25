@@ -154,6 +154,30 @@ it("converts only the appended suffix after warm and database-reopen resumes", a
   }
 });
 
+it("publishes a source checkpoint for the 7228-message benchmark profile", async () => {
+  setModelLimits({ context: 1_000_000, output: 2_000 });
+  setMaxLayer0Tokens(190_000);
+  const source = Array.from({ length: 7_228 }, (_, index) => ({
+    role: index % 2 ? ("assistant" as const) : ("user" as const),
+    content: [
+      {
+        type: "text" as const,
+        text: `benchmark message ${index} ${"context ".repeat(12)}`,
+      },
+    ],
+  }));
+
+  accept(
+    (await prepare(source, false, "context/openai-responses", true)).prepared,
+  );
+
+  const checkpoint = db()
+    .query("SELECT payload, checksum FROM source_windows WHERE session_id = ?")
+    .get(sessionID) as { payload: Uint8Array | null; checksum: string | null };
+  expect(checkpoint.payload).not.toBeNull();
+  expect(checkpoint.checksum).toMatch(/^[0-9a-f]{64}$/);
+});
+
 it("accepts a suffix against the retained Lore checkpoint", async () => {
   setModelLimits({ context: 1_000_000, output: 2_000 });
   setMaxLayer0Tokens(500_000);

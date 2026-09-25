@@ -35,6 +35,7 @@
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "evals": "vitest run --config vitest.evals.config.ts",
+    "benchmark:mixed-load": "node --conditions=development --import tsx packages/gateway/benchmark/mixed-load/run.ts",
     "eval:semantic-lint": "node --import tsx packages/core/eval/semantic-lint/run.ts",
     "premutation": "pnpm --filter @loreai/gateway run bundle",
     "mutation": "stryker run",
