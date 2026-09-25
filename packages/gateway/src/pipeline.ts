@@ -20181,7 +20181,7 @@ async function handleConversationTurnPrepared(
     modifiedReq.metadata = {
       ...modifiedReq.metadata,
       tool_choice: withParallelToolUseDisabled(
-        modifiedReq.metadata.tool_choice,
+        modifiedReq.metadata?.tool_choice,
       ),
     };
   }

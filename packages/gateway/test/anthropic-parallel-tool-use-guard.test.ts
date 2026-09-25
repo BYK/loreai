@@ -60,7 +60,9 @@ describe("withParallelToolUseDisabled", () => {
   });
 
   it("does not add the flag to an explicit none choice", () => {
-    expect(withParallelToolUseDisabled({ type: "none" })).toBeUndefined();
+    expect(withParallelToolUseDisabled({ type: "none" })).toEqual({
+      type: "none",
+    });
   });
 
   it("normalizes malformed choices to auto", () => {

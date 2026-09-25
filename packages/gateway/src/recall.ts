@@ -117,7 +117,7 @@ export function withParallelToolUseDisabled(
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const choice = { ...(value as Record<string, unknown>) };
     if (choice.type === "none") {
-      return undefined;
+      return choice;
     }
     if (
       choice.type === "auto" ||
