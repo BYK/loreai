@@ -106,6 +106,30 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
 
 export const RECALL_TOOL_NAME = "recall";
 
+/**
+ * Prevent an Anthropic-compatible model from issuing parallel recall calls.
+ * Explicitly disabling tools remains authoritative; malformed or missing
+ * choices fall back to the valid `auto` shape.
+ */
+export function withParallelToolUseDisabled(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const choice = { ...(value as Record<string, unknown>) };
+    if (choice.type === "none") {
+      return choice;
+    }
+    if (
+      choice.type === "auto" ||
+      choice.type === "any" ||
+      choice.type === "tool"
+    ) {
+      return { ...choice, disable_parallel_tool_use: true };
+    }
+  }
+  return { type: "auto", disable_parallel_tool_use: true };
+}
+
 /** @deprecated Compatibility alias for the policy's emergency execution ceiling. */
 export const MAX_RECALL_DEPTH = MAX_RECALL_EXECUTIONS;
 export const MAX_RECALL_STORE_ENTRIES = 128;

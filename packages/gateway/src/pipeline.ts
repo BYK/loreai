@@ -201,6 +201,7 @@ import {
 import {
   bedrockMantleUrl,
   isBedrockMantleDispatch,
+  isBedrockMantleHost,
   toMantleModelId,
 } from "./translate/bedrock";
 import { buildVertexUpstream, vertexHost } from "./translate/vertex";
@@ -417,6 +418,7 @@ import {
 import {
   RECALL_GATEWAY_TOOL,
   RECALL_TOOL_NAME,
+  withParallelToolUseDisabled,
   executeRecall,
   findRecallToolUse,
   hasRecallToolUse,
@@ -20292,12 +20294,26 @@ async function handleConversationTurnPrepared(
     modifiedReq.tools = [...modifiedReq.tools, recallTool];
   }
   if (
-    modifiedReq.protocol === "openai-responses" &&
+    requestUpstreamRoute.effectiveProtocol === "openai-responses" &&
     clientHasRecallTool(modifiedReq.tools)
   ) {
     modifiedReq.extras = {
       ...modifiedReq.extras,
       parallel_tool_calls: false,
+    };
+  }
+  if (
+    clientHasRecallTool(modifiedReq.tools) &&
+    (requestUpstreamRoute.effectiveProtocol === "anthropic" ||
+      requestUpstreamRoute.effectiveProtocol === "vertex") &&
+    !requestUpstreamRoute.bedrockMantle &&
+    !isBedrockMantleHost(requestUpstreamRoute.effectiveUpstreamBase)
+  ) {
+    modifiedReq.metadata = {
+      ...modifiedReq.metadata,
+      tool_choice: withParallelToolUseDisabled(
+        modifiedReq.metadata?.tool_choice,
+      ),
     };
   }
 

@@ -113,6 +113,13 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
         max_tokens: 1024,
         stream: false,
         messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            name: "bash",
+            description: "run a command",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
       }),
     });
 
@@ -124,6 +131,13 @@ describe("X-Lore-Provider: vertex routing (Vertex AI Claude)", () => {
     // model + stream are removed (model is in the URL; the verb selects stream).
     expect("model" in (capturedBody ?? {})).toBe(false);
     expect("stream" in (capturedBody ?? {})).toBe(false);
+    expect(capturedBody?.tools).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "recall" })]),
+    );
+    expect(capturedBody?.tool_choice).toEqual({
+      type: "auto",
+      disable_parallel_tool_use: true,
+    });
     // req.model (client-facing id) is unchanged for session/cache tracking.
     expect(capturedModel).toBe("claude-opus-4-8");
 

@@ -105,6 +105,13 @@ describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
         max_tokens: 1024,
         stream: false,
         messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            name: "bash",
+            description: "run a command",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
       }),
     });
 
@@ -115,6 +122,10 @@ describe("X-Lore-Provider: bedrock routing (bedrock-mantle)", () => {
     // Anthropic body would keep the bare `claude-…` id.
     expect(capturedBody).toBeDefined();
     expect(capturedBody?.model).toBe("anthropic.claude-3-5-sonnet-20241022");
+    expect(capturedBody?.tools).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "recall" })]),
+    );
+    expect(capturedBody?.tool_choice).toBeUndefined();
     // It is plain Anthropic — NOT the runtime InvokeModel sentinel.
     expect("anthropic_version" in (capturedBody ?? {})).toBe(false);
     // req.model (the client-facing id) is unchanged for session/cache tracking.
