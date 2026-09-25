@@ -2510,6 +2510,8 @@ export const RECALLED_CONTEXT_CATEGORY = "recalled";
 export type ForSessionOptions = {
   /** Abort stale request work before reinforcement/transfer side effects. */
   signal?: AbortSignal;
+  /** Let a caller record side effects only when it consumes a queued result. */
+  deferEffects?: boolean;
   /** Caller-provided context (e.g., user's current message) for relevance
    *  scoring when no session context exists in the DB yet. */
   contextHint?: string;
@@ -2750,17 +2752,8 @@ export async function forSession(
     // preference injected into system[1] every turn would still age out and be
     // pruned by decayProject/pruneDeadEntries after the grace window — silently
     // deleting an actively-used directive. Resets the decay clock only.
-    options?.signal?.throwIfAborted();
-    try {
-      markInjected(result.map((e) => e.id));
-      recordSessionInjections(sessionID, projectPath, result);
-    } catch (err) {
-      options?.signal?.throwIfAborted();
-      log.warn(
-        "forSession(preference): reinforcement failed (non-fatal):",
-        err,
-      );
-    }
+    if (!options?.deferEffects)
+      recordPreferenceEffects(projectPath, sessionID, result, options?.signal);
     timer.emit("forSession", projectEntries.length + crossEntries.length);
     return result;
   }
@@ -3092,43 +3085,8 @@ export async function forSession(
   // (project_id === pid) are not transfers; lat.md synthetics are skipped (they
   // are not knowledge rows). The in-memory throttle bounds writes so this
   // every-message path does not hammer SQLite.
-  options?.signal?.throwIfAborted();
-  try {
-    for (const entry of result) {
-      if (entry.category === "lat.md") continue;
-      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
-      if (entry.cross_project !== 1) continue;
-      if (!entry.project_id || entry.project_id === pid) continue;
-      if (!shouldRecordTransfer(sessionID, entry.logical_id, pid)) continue;
-      recordTransfer({
-        knowledgeId: entry.logical_id,
-        recalledInProjectId: pid,
-      });
-    }
-  } catch (err) {
-    options?.signal?.throwIfAborted();
-    log.warn("forSession: transfer recording failed (non-fatal):", err);
-  }
-
-  // --- 8. Reinforce injected entries (confidence lifecycle) ---
-  // Being selected for the prompt resets each entry's decay clock — it is "still
-  // relevant" — WITHOUT bumping confidence (that would re-flatten everything to
-  // 1.0 and destroy the decay signal). lat.md synthetics are not knowledge rows.
-  options?.signal?.throwIfAborted();
-  try {
-    // Only real knowledge rows get reinforced / recorded — lat.md and
-    // recalled-context synthetics are not knowledge and have no confidence
-    // lifecycle or session-injection semantics.
-    const knowledgeResult = result.filter(
-      (e) =>
-        e.category !== "lat.md" && e.category !== RECALLED_CONTEXT_CATEGORY,
-    );
-    markInjected(knowledgeResult.map((e) => e.id));
-    recordSessionInjections(sessionID, projectPath, knowledgeResult);
-  } catch (err) {
-    options?.signal?.throwIfAborted();
-    log.warn("forSession: reinforcement failed (non-fatal):", err);
-  }
+  if (!options?.deferEffects)
+    recordForSessionEffects(projectPath, sessionID, result, options?.signal);
 
   // --- 9. Surface the budget-overflow tail (#917) ---
   // Entries that were relevance-scored (`allScored`) but didn't make the
@@ -3150,6 +3108,65 @@ export async function forSession(
 
   timer.emit("forSession", projectEntries.length + crossEntries.length);
   return result;
+}
+
+/** Record transfer and reinforcement only after a queued selection is used. */
+export function recordForSessionEffects(
+  projectPath: string,
+  sessionID: string | undefined,
+  result: KnowledgeEntry[],
+  signal?: AbortSignal,
+): void {
+  signal?.throwIfAborted();
+  try {
+    const pid = ensureProject(projectPath);
+    for (const entry of result) {
+      if (entry.category === "lat.md") continue;
+      if (entry.category === RECALLED_CONTEXT_CATEGORY) continue;
+      if (entry.cross_project !== 1) continue;
+      if (!entry.project_id || entry.project_id === pid) continue;
+      if (!shouldRecordTransfer(sessionID, entry.logical_id, pid)) continue;
+      recordTransfer({
+        knowledgeId: entry.logical_id,
+        recalledInProjectId: pid,
+      });
+    }
+  } catch (err) {
+    signal?.throwIfAborted();
+    log.warn("forSession: transfer recording failed (non-fatal):", err);
+  }
+
+  // Being selected resets the decay clock without changing confidence.
+  signal?.throwIfAborted();
+  try {
+    const knowledgeResult = result.filter(
+      (e) =>
+        e.category !== "lat.md" && e.category !== RECALLED_CONTEXT_CATEGORY,
+    );
+    markInjected(knowledgeResult.map((e) => e.id));
+    recordSessionInjections(sessionID, projectPath, knowledgeResult);
+  } catch (err) {
+    signal?.throwIfAborted();
+    log.warn("forSession: reinforcement failed (non-fatal):", err);
+  }
+}
+
+/** Record preference reinforcement once a live foreground uses the stable
+ * block. Unlike context selection, preferences do not record transfers. */
+export function recordPreferenceEffects(
+  projectPath: string,
+  sessionID: string | undefined,
+  result: KnowledgeEntry[],
+  signal?: AbortSignal,
+): void {
+  signal?.throwIfAborted();
+  try {
+    markInjected(result.map((e) => e.id));
+    recordSessionInjections(sessionID, projectPath, result);
+  } catch (err) {
+    signal?.throwIfAborted();
+    log.warn("forSession(preference): reinforcement failed (non-fatal):", err);
+  }
 }
 
 /** Cap on the inline size of a single recalled temporal message (chars). */

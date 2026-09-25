@@ -192,24 +192,29 @@ function sourceDigests(
   messages: GatewayMessage[],
   previousCount?: number,
   chained = false,
+  speculativeCount?: number,
 ) {
   if (chained) {
     let digest = CHAIN_DIGEST_SEED;
     let previous: string | undefined;
+    let speculative: string | undefined;
     for (let i = 0; i < messages.length; i++) {
       digest = extendChainDigest(digest, messages[i]);
       if (i + 1 === previousCount) previous = digest;
+      if (i + 1 === speculativeCount) speculative = digest;
     }
-    return { previous, current: digest };
+    return { previous, speculative, current: digest };
   }
   const hash = createHash("sha256");
   let previous: string | undefined;
+  let speculative: string | undefined;
   for (let i = 0; i < messages.length; i++) {
     const encoded = JSON.stringify(messages[i]);
     hash.update(`${Buffer.byteLength(encoded)}:`).update(encoded);
     if (i + 1 === previousCount) previous = hash.copy().digest("hex");
+    if (i + 1 === speculativeCount) speculative = hash.copy().digest("hex");
   }
-  return { previous, current: hash.digest("hex") };
+  return { previous, speculative, current: hash.digest("hex") };
 }
 
 function crossesToolBoundary(
@@ -236,6 +241,7 @@ export class SourceCheckpoint {
   readonly base?: Payload;
   readonly digest: string;
   readonly reason: Reason;
+  readonly verifiedSpeculativePrefix: boolean = false;
   private next?: Payload;
   private raw: LoreMessageWithParts[] = [];
   private resolvedTokens: number[] = [];
@@ -263,6 +269,7 @@ export class SourceCheckpoint {
       sourceCount: number;
       sourceDigest: string;
     };
+    speculativePrefix?: { sourceCount: number; sourceDigest: string };
     timing: PreparationTiming;
   }) {
     const contextProtocol = isContextCheckpointProtocol(input.protocol);
@@ -326,8 +333,16 @@ export class SourceCheckpoint {
     }
 
     const hashes = input.timing.measure("source_validation", () =>
-      sourceDigests(input.messages, candidate?.sourceCount, contextProtocol),
+      sourceDigests(
+        input.messages,
+        candidate?.sourceCount,
+        contextProtocol,
+        input.speculativePrefix?.sourceCount,
+      ),
     );
+    this.verifiedSpeculativePrefix =
+      !!input.speculativePrefix &&
+      hashes.speculative === input.speculativePrefix.sourceDigest;
     this.digest = hashes.current;
     let reason: Reason = input.noStore
       ? "disabled"

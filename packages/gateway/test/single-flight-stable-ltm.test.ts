@@ -187,33 +187,72 @@ describe("singleFlightStableLtm", () => {
     expect(compute).toHaveBeenCalledTimes(1);
   });
 
-  test("the final departing caller cancels queued compute and a retry starts fresh", async () => {
+  test("the final departing caller leaves compute queued and a retry reattaches", async () => {
     vi.resetModules();
     const { singleFlightStableLtm } = await import("../src/pipeline");
     const caller = new AbortController();
-    let oldSignal: AbortSignal | undefined;
+    let ownerSignal: AbortSignal | undefined;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const compute = vi.fn(async (signal: AbortSignal) => {
+      ownerSignal = signal;
+      await blocked;
+      return { formatted: "retained", tokenCount: 1 };
+    });
     const abandoned = singleFlightStableLtm(
       "session-final-waiter",
-      async (signal) => {
-        oldSignal = signal;
-        await new Promise<void>((_, reject) => {
-          signal.addEventListener("abort", () => reject(signal.reason), {
-            once: true,
-          });
-        });
-        return { formatted: "abandoned", tokenCount: 1 };
-      },
+      compute,
       caller.signal,
     );
-    await vi.waitFor(() => expect(oldSignal).toBeDefined());
+    await vi.waitFor(() => expect(ownerSignal).toBeDefined());
     caller.abort(new DOMException("preparation expired", "TimeoutError"));
     await expect(abandoned).rejects.toMatchObject({ name: "TimeoutError" });
-    expect(oldSignal?.aborted).toBe(true);
-    await expect(
-      singleFlightStableLtm("session-final-waiter", async () => ({
-        formatted: "fresh",
-        tokenCount: 2,
-      })),
-    ).resolves.toEqual({ formatted: "fresh", tokenCount: 2 });
+    expect(ownerSignal?.aborted).toBe(false);
+    const retry = singleFlightStableLtm("session-final-waiter", compute);
+    release();
+    await expect(retry).resolves.toEqual({
+      formatted: "retained",
+      tokenCount: 1,
+    });
+    expect(compute).toHaveBeenCalledOnce();
+  });
+
+  test("an abandoned result is held for a matching retry, not pinned for a different turn", async () => {
+    vi.resetModules();
+    const { singleFlightStableLtm } = await import("../src/pipeline");
+    const caller = new AbortController();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => (release = resolve));
+    const firstCompute = vi.fn(async () => {
+      await blocked;
+      return { formatted: "old request", tokenCount: 2 };
+    });
+    const abandoned = singleFlightStableLtm(
+      "session-conditional",
+      firstCompute,
+      caller.signal,
+      "old-hint",
+    );
+    await vi.waitFor(() => expect(firstCompute).toHaveBeenCalledOnce());
+    caller.abort(new DOMException("deadline", "TimeoutError"));
+    await expect(abandoned).rejects.toMatchObject({ name: "TimeoutError" });
+    release();
+    await vi.waitFor(async () => {
+      // The first computation has finished, but its request was never sent.
+      const newCompute = vi.fn(async () => ({
+        formatted: "new request",
+        tokenCount: 3,
+      }));
+      const value = await singleFlightStableLtm(
+        "session-conditional",
+        newCompute,
+        undefined,
+        "new-hint",
+      );
+      expect(value?.formatted).toBe("new request");
+      expect(newCompute).toHaveBeenCalledOnce();
+    });
   });
 });

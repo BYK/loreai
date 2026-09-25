@@ -1112,6 +1112,99 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("reattaches a context selection after a caller leaves without recording phantom injections", async () => {
+    const projectPath = `/tmp/lore-context-queue-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `context-queue-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const selectedId = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Queued context selection",
+      content: "Use the returned context after the retry",
+      scope: "project",
+    });
+    const overflowId = ltm.create({
+      projectPath,
+      category: "decision",
+      title: "Overflow context choice",
+      content: "Available through recall",
+      scope: "project",
+    });
+    const bodies: string[] = [];
+    setUpstreamInterceptor(async (body) => {
+      bodies.push(typeof body === "string" ? body : JSON.stringify(body));
+      return new Response(validResponsesSSE(`queue_${bodies.length}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    let selection: { mockRestore(): void } | undefined;
+    try {
+      const initial = makeResponsesRequest({ sessionHeaders });
+      await (await handleRequest(initial, loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      expect(sessionID).toBeDefined();
+      const secondRequest = () =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: "continue" }] },
+            { role: "assistant", content: [{ type: "text", text: "okay" }] },
+            { role: "user", content: [{ type: "text", text: "next" }] },
+          ],
+        });
+      let release!: (entries: ltm.KnowledgeEntry[]) => void;
+      const original = ltm.forSession;
+      let calls = 0;
+      selection = vi.spyOn(ltm, "forSession").mockImplementation((...args) => {
+        if (!args[3]?.excludeCategories?.includes("preference"))
+          return original(...args);
+        calls++;
+        args[3].overflowSink?.push(ltm.get(overflowId)!);
+        return new Promise((resolve) => (release = resolve));
+      });
+      const caller = new AbortController();
+      const abandoned = secondRequest();
+      abandoned.signal = caller.signal;
+      const firstAttempt = handleRequest(abandoned, loadLocalConfig());
+      await vi.waitFor(() => expect(calls).toBe(1));
+      caller.abort(new DOMException("client disconnected", "AbortError"));
+      await firstAttempt;
+      expect(bodies).toHaveLength(1);
+      expect(loadSessionTracking(sessionID!)?.ltmPinKeys).toBeFalsy();
+      const injectionCount = () =>
+        (
+          db()
+            .query(
+              "SELECT COUNT(*) AS n FROM knowledge_session_injections WHERE session_id = ?",
+            )
+            .get(sessionID) as { n: number }
+        ).n;
+      expect(injectionCount()).toBe(0);
+      release([ltm.get(selectedId)!]);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(injectionCount()).toBe(0);
+
+      const retry = await handleRequest(secondRequest(), loadLocalConfig());
+      expect(retry.status).toBe(200);
+      await retry.text();
+      expect(calls).toBe(1);
+      expect(injectionCount()).toBe(1);
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1]).toContain("Queued context selection");
+      expect(bodies[1]).toContain("Overflow context choice");
+    } finally {
+      selection?.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("keeps the absolute foreground lifetime after preparation succeeds", async () => {
     const caller = new AbortController();
     const foreground = createForegroundAbortScope(caller.signal);
