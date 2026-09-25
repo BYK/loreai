@@ -1,0 +1,31 @@
+{
+  "origin": "Synthetic documents derived from existing DEC-1 and MSR-1 eval scenarios; not production memory or a representative sample.",
+  "documents": [
+    {"id":"d01","source":"decision","text":"Initial architecture choice: PostgreSQL for the datastore, operated as a separate database service."},
+    {"id":"d02","source":"decision","text":"Final architecture decision: use SQLite (better-sqlite3), because the product ships as one self-contained edge binary without an external database process."},
+    {"id":"d03","source":"decision","text":"Initial response cache lifetime was 30 seconds; under load that caused a thundering herd of upstream refetches."},
+    {"id":"d04","source":"decision","text":"Final cache policy: CACHE_TTL_SECONDS = 300, or 5 minutes; the source tolerates that staleness and upstream refetches drop."},
+    {"id":"d05","source":"temporal","text":"Users received 'Too many login attempts, please try again in 15 minutes' after other users signed in through OAuth. Email/password login was incorrectly limited."},
+    {"id":"d06","source":"temporal","text":"Added tests/auth/rate-limiter-oauth.test.ts with cases for OAuth callback exclusion and email based login limits."},
+    {"id":"d07","source":"distillation","text":"JWT was chosen over server sessions because both a React web client and a React Native mobile application use the API. Tokens avoid shared session storage."},
+    {"id":"d08","source":"temporal","text":"The rate limiter originally keyed counters by req.ip, unintentionally grouping users behind a NAT. It now uses req.body?.email ?? req.ip."},
+    {"id":"d09","source":"knowledge","text":"Passwords use bcrypt with 12 salt rounds. The implementation resides in src/auth/password.ts; Argon2 was considered."},
+    {"id":"d10","source":"distillation","text":"OAuth uses PKCE rather than implicit grant; the mobile application is a public client and one flow can serve web and mobile."},
+    {"id":"d11","source":"temporal","text":"A different regression caused OAuth callback state to expire after 15 minutes; the sign in rate limiter was functioning correctly."},
+    {"id":"d12","source":"knowledge","text":"The billing API limits password reset attempts by client IP address. This is unrelated to the login rate limiter."},
+    {"id":"d13","source":"entity","text":"Auth team's runbook owns OAuth callback routing and the PKCE verifier. The release manifest lists the login regression tests."},
+    {"id":"d14","source":"temporal","text":"A previous auth proposal specified session cookies and an Argon2 hash in src/auth/password-old.ts; both were superseded."}
+  ],
+  "queries": [
+    {"id":"dec1-q1-current-datastore","text":"What datastore does this project currently use, and why?","relevant":["d02"],"stale":["d01"],"anchor":"SQLite"},
+    {"id":"dec1-q2-datastore-negctl","text":"Name the datastore currently in use. Answer with only the datastore in effect now — no history.","relevant":["d02"],"stale":["d01"],"anchor":"SQLite"},
+    {"id":"dec1-q3-current-ttl","text":"What is the current response-cache TTL, and why was it set that way?","relevant":["d04"],"stale":["d03"],"anchor":"300"},
+    {"id":"dec1-q4-ttl-value-negctl","text":"In one line, what number is CACHE_TTL_SECONDS set to right now? Answer with only the current value, no history.","relevant":["d04"],"stale":["d03"],"anchor":"CACHE_TTL_SECONDS = 300"},
+    {"id":"msr1-q1","text":"What was the specific regression symptom reported by users?","relevant":["d05"],"stale":["d11"],"anchor":"Too many login attempts"},
+    {"id":"msr1-q2","text":"What test file was created to cover the rate limiter and OAuth interaction?","relevant":["d06"],"stale":["d13"],"anchor":"tests/auth/rate-limiter-oauth.test.ts"},
+    {"id":"msr1-q3","text":"In the original auth implementation, why was JWT chosen over session cookies?","relevant":["d07"],"stale":["d14"],"anchor":"JWT"},
+    {"id":"msr1-q4","text":"What was the rate limiter bug found in the first auth session?","relevant":["d08"],"stale":["d12"],"anchor":"req.ip"},
+    {"id":"msr1-q5","text":"What password hashing algorithm was chosen and what file contains the implementation?","relevant":["d09"],"stale":["d14"],"anchor":"src/auth/password.ts"},
+    {"id":"msr1-q6","text":"Why was PKCE chosen over implicit grant for the OAuth flow?","relevant":["d10"],"stale":["d13"],"anchor":"public client"}
+  ]
+}
