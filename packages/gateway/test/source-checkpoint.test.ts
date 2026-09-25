@@ -42,6 +42,7 @@ import type {
 import { semanticHistory } from "./fixtures/semantic-history";
 import { digestChain } from "../src/chain-digest";
 import { sourceCheckpointProtocol } from "../src/source-checkpoint";
+import { clearSpeculativeSource } from "../src/speculative-source";
 const projectPath = "/test/source-checkpoint";
 const sessionID = "source-checkpoint";
 const storage = {
@@ -59,6 +60,7 @@ const messages: GatewayMessage[] = Array.from({ length: 5580 }, (_, i) => ({
   ],
 }));
 beforeEach(() => {
+  clearSpeculativeSource();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-09-08T00:00:00Z"));
   db().exec("DELETE FROM source_windows; DELETE FROM temporal_messages");
@@ -69,8 +71,103 @@ beforeEach(() => {
   setMaxLayer0Tokens(8000);
 });
 afterEach(() => {
+  clearSpeculativeSource();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+it("jumps to the verified last-seen index after an unaccepted long preparation", async () => {
+  const long = messages;
+  const first = await prepare(long);
+  expect(first.timing.observations.source_converted_messages).toBe(5580);
+  expect(new SourceWindowStore(storage).load()).toBeUndefined();
+
+  const repeated = await prepare(long);
+  expect(repeated.timing.observations.source_speculative_jump).toBe(5580);
+  expect(repeated.timing.observations.source_converted_messages).toBe(0);
+  expect(repeated.prepared.temporalInput.latestUser).toEqual(
+    first.prepared.temporalInput.latestUser,
+  );
+
+  const appended = await prepare([
+    ...long,
+    { role: "user", content: [{ type: "text", text: "new suffix" }] },
+  ]);
+  expect(appended.timing.observations.source_speculative_jump).toBe(5580);
+  expect(appended.timing.observations.source_converted_messages).toBe(1);
+  expect(new SourceWindowStore(storage).load()).toBeUndefined();
+});
+
+it("rejects a speculative jump when history was edited despite the same last ID", async () => {
+  const long = messages.slice(0, 2700);
+  await prepare(long);
+  const edited = structuredClone(long);
+  edited[0].content = [{ type: "text", text: "historical edit" }];
+  const replay = await prepare(edited);
+  expect(replay.timing.observations.source_speculative_jump).toBeUndefined();
+  expect(replay.timing.observations.source_converted_messages).toBe(2700);
+  const retry = await prepare(edited);
+  expect(retry.timing.observations.source_speculative_jump).toBe(2700);
+  expect(retry.timing.observations.source_converted_messages).toBe(0);
+});
+
+it("replaces a long speculative prefix after the client compacts its history", async () => {
+  await prepare(messages.slice(0, 2700));
+  const shorter = messages.slice(0, 500);
+  expect(
+    (await prepare(shorter)).timing.observations.source_converted_messages,
+  ).toBe(500);
+  const retry = await prepare(shorter);
+  expect(retry.timing.observations.source_speculative_jump).toBe(500);
+  expect(retry.timing.observations.source_converted_messages).toBe(0);
+});
+
+it("resolves a new tool result across the speculative jump", async () => {
+  const prefix: GatewayMessage[] = [
+    ...messages.slice(0, 80),
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "call-new", name: "read", input: {} }],
+    },
+  ];
+  await prepare(prefix);
+  const source: GatewayMessage[] = [
+    ...prefix,
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          toolUseId: "call-new",
+          content: [{ type: "text", text: "file contents" }],
+        },
+      ],
+    },
+  ];
+  const jumped = await prepare(source);
+  expect(jumped.timing.observations.source_converted_messages).toBe(1);
+  const full = await prepare(source, true);
+  // Tool-result placeholder parts use fresh UUIDs on each conversion; the
+  // cross-boundary resolution and all other content must still agree.
+  const withoutGeneratedPartIDs = (
+    value: typeof jumped.prepared.loreMessages,
+  ) =>
+    value.map((message) => ({
+      ...message,
+      parts: message.parts.map((part) =>
+        (part.type === "tool" && part.tool === "result") ||
+        (part.type === "text" &&
+          typeof part.text === "string" &&
+          part.text.startsWith("[tool results provided]"))
+          ? { ...part, id: "generated" }
+          : part,
+      ),
+    }));
+  expect(withoutGeneratedPartIDs(jumped.prepared.loreMessages)).toEqual(
+    withoutGeneratedPartIDs(full.prepared.loreMessages),
+  );
+  expect(jumped.prepared.temporalInput.latestUser).toEqual(
+    full.prepared.temporalInput.latestUser,
+  );
 });
 async function prepare(
   source: GatewayMessage[],
@@ -318,6 +415,9 @@ it("reconciles historical edits even when the old boundary is unchanged", async 
   const { prepared, timing } = await prepare(edited);
   expect(prepared.sourceWindow).toBeUndefined();
   expect(timing.observations.source_converted_messages).toBe(5580);
+  const retried = await prepare(edited);
+  expect(retried.timing.observations.source_speculative_jump).toBe(5580);
+  expect(retried.timing.observations.source_converted_messages).toBe(0);
 });
 
 it.each(["rewind", "protocol", "corrupt", "adapter"])(

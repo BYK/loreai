@@ -12,6 +12,11 @@ import {
 } from "@loreai/core";
 import { gatewayMessagesToLore, resolveToolResults } from "./temporal-adapter";
 import { captureTurnTemporalInput } from "./turn-temporal";
+import {
+  findSpeculativeSource,
+  rememberSpeculativeSource,
+  SPECULATIVE_SOURCE_MAX_MESSAGES,
+} from "./speculative-source";
 import type { GatewayMessage, GatewayRequest } from "./translate/types";
 
 type Stage =
@@ -174,20 +179,54 @@ export async function prepareSemanticMessages(input: {
       "A context suffix cannot be prepared without its retained Lore checkpoint; retrying with the full conversation.",
     );
   }
+  const speculative =
+    input.protocol && !input.noStore && !input.sourcePrefix && !input.forceFull
+      ? findSpeculativeSource({
+          sessionID: input.sessionID,
+          projectPath: input.projectPath,
+          protocol: input.checkpointProtocol ?? input.protocol,
+          messages: input.messages,
+        })
+      : undefined;
   const checkpoint =
     input.protocol && !input.noStore
       ? new SourceCheckpoint({
           ...input,
           protocol: input.checkpointProtocol ?? input.protocol,
           boundarySafe: input.checkpointBoundarySafe,
+          speculativePrefix: speculative
+            ? {
+                sourceCount: speculative.sourceCount,
+                sourceDigest: speculative.sourceDigest,
+              }
+            : undefined,
         })
+      : undefined;
+  const reuse =
+    speculative &&
+    checkpoint?.verifiedSpeculativePrefix &&
+    (checkpoint.reason === "hit" ||
+      checkpoint.reason === "missing" ||
+      ((checkpoint.reason === "history" ||
+        checkpoint.reason === "protocol" ||
+        checkpoint.reason === "tool_boundary") &&
+        speculative.fallbackReason === checkpoint.reason &&
+        !checkpoint.base &&
+        speculative.offset === 0 &&
+        speculative.raw.length === speculative.sourceCount)) &&
+    speculative.sourceCount > checkpoint.convertedFrom &&
+    speculative.offset === checkpoint.offset
+      ? speculative
       : undefined;
   const tokenCache = new SemanticTokenCache({
     ...input,
     retainUnused: !!checkpoint?.base,
   });
   const convertedFrom =
-    checkpoint?.convertedFrom ?? input.sourcePrefix?.sourceCount ?? 0;
+    reuse?.sourceCount ??
+    checkpoint?.convertedFrom ??
+    input.sourcePrefix?.sourceCount ??
+    0;
   const sourceCount =
     (input.sourcePrefix?.sourceCount ?? 0) + input.messages.length;
   const suffixMessages = input.sourcePrefix
@@ -211,15 +250,22 @@ export async function prepareSemanticMessages(input: {
     ),
   );
   input.signal?.throwIfAborted();
-  const raw = checkpoint?.base ? [...checkpoint.base.raw, ...suffix] : suffix;
+  const raw = reuse
+    ? [...reuse.raw, ...suffix]
+    : checkpoint?.base
+      ? [...checkpoint.base.raw, ...suffix]
+      : suffix;
   const loreMessages = checkpoint ? structuredClone(raw) : raw;
   const temporalInput = timing.measure("temporal_input", () =>
     captureTurnTemporalInput(raw, sourceCount, checkpoint),
   );
   timing.metric("source_converted_messages", suffix.length);
   timing.metric("source_total_messages", sourceCount);
+  if (reuse) timing.metric("source_speculative_jump", convertedFrom);
   const provenanceByMessageId = timing.measure("provenance", () => {
-    const provenance = checkpoint?.storedProvenance ?? new Map();
+    const provenance = reuse
+      ? new Map(reuse.provenance)
+      : (checkpoint?.storedProvenance ?? new Map());
     for (const [id, value] of responsesProvenanceByMessageId(
       suffixMessages,
       suffix,
@@ -267,13 +313,35 @@ export async function prepareSemanticMessages(input: {
     }),
   );
   input.signal?.throwIfAborted();
-  const ids = checkpoint?.storedIds ?? new Map<string, string>();
+  const ids = reuse
+    ? new Map(reuse.ids)
+    : (checkpoint?.storedIds ?? new Map<string, string>());
   for (const [id, stored] of newIds) ids.set(id, stored);
   timing.measure("resolve_tools", () =>
     resolveToolResults(loreMessages, (m) => ids.get(m.info.id) ?? m.info.id),
   );
   checkpoint?.capture(raw, loreMessages, ids, provenanceByMessageId);
   input.signal?.throwIfAborted();
+  if (
+    checkpoint &&
+    !input.sourcePrefix &&
+    !input.noStore &&
+    raw.length >= 64 &&
+    raw.length <= SPECULATIVE_SOURCE_MAX_MESSAGES
+  ) {
+    rememberSpeculativeSource(input.sessionID, {
+      projectPath: input.projectPath,
+      protocol: input.checkpointProtocol ?? input.protocol!,
+      sourceCount,
+      sourceDigest: checkpoint.digest,
+      fallbackReason: checkpoint.reason,
+      lastMessageID: raw.at(-1)!.info.id,
+      offset: checkpoint.offset,
+      raw,
+      ids,
+      provenance: provenanceByMessageId,
+    });
+  }
   // Publish before yielding; cache writes never wait for another writer.
   tokenCache.persist();
   const delta = process.cpuUsage(cpu);

@@ -444,6 +444,8 @@ import {
 } from "./recall";
 import { upstreamFetch } from "./fetch";
 import { promiseAgainstAbort, responseAgainstAbort } from "./abort-race";
+import { PreparationQueue } from "./preparation-queue";
+import { clearSpeculativeSource } from "./speculative-source";
 import {
   buildUpstreamRouteContext,
   decodeRequestBody,
@@ -1112,6 +1114,9 @@ async function resetPipelineStateInner(opts?: {
   await pipelineResetPauseForTest;
   const resetReason = new DOMException("gateway pipeline reset", "AbortError");
   pipelineGenerationAbort.abort(resetReason);
+  stableLtmPreparation.cancelAll();
+  pendingPreferenceEffects.clear();
+  clearSpeculativeSource();
   const foregroundControllers = [...activeForegroundAbortControllers];
   activeForegroundAbortControllers.clear();
   for (const controller of foregroundControllers) {
@@ -1199,7 +1204,6 @@ async function resetPipelineStateInner(opts?: {
   lastSavedDedupDecisions.clear();
   stableLtmCache.clear();
   acceptedKnowledgePins.clear();
-  stableLtmInFlight.clear();
   sessionLifecycleAborts.clear();
   streamingPostResponseWaiters.clear();
   // Shut down the batch queue before clearing the client. On process exit
@@ -3774,6 +3778,42 @@ const stableLtmCache = new Map<
   string,
   { formatted: string; tokenCount: number }
 >();
+type StableLtmResult = {
+  formatted: string;
+  tokenCount: number;
+  preferenceEffects?: { projectPath: string; entries: ltm.KnowledgeEntry[] };
+};
+const pendingPreferenceEffects = new Map<
+  string,
+  { projectPath: string; entries: ltm.KnowledgeEntry[] }
+>();
+
+function applyPendingPreferenceEffects(
+  sessionID: string,
+  signal?: AbortSignal,
+): void {
+  if (!signal) return; // idle precompute has not injected a prompt
+  signal.throwIfAborted();
+  const key = `${sessionID}\x1f${currentTenantId()}`;
+  const pending = pendingPreferenceEffects.get(key);
+  if (!pending) return;
+  ltm.recordPreferenceEffects(
+    pending.projectPath,
+    sessionID,
+    pending.entries,
+    signal,
+  );
+  pendingPreferenceEffects.delete(key);
+  // An idle warm result remains volatile until an actual foreground uses it.
+  // Persisting it earlier would restore a frozen block after restart without
+  // the in-memory pending effects and credit an unsent selection.
+  const stable = stableLtmCache.get(sessionID);
+  if (stable)
+    saveSessionTracking(sessionID, {
+      stableLtmText: stable.formatted,
+      stableLtmTokens: stable.tokenCount,
+    });
+}
 
 /**
  * Single-flight memoizer for the per-session stable-LTM recompute.
@@ -3787,18 +3827,20 @@ const stableLtmCache = new Map<
  * recompute the block independently and thrash the DB — which compounds the
  * very latency that caused the retries.
  *
- * The settled cache (stableLtmCache) only helps the NEXT turn. This map dedups
- * concurrent in-flight recomputes so a burst of retries shares ONE compute and
- * the session recovers (headers flush, retries stop) instead of re-entering the
- * slow path.
- *
- * Keyed by sessionID. Entries are deleted on settle (the settled value goes
- * into stableLtmCache), so a LATER miss after a restart recomputes fresh.
+ * The gateway owns the compute after callers leave. Retried turns join its
+ * bounded queue instead of repeatedly cancelling and restarting the scans.
+ * A completed value moves into stableLtmCache; no unaccepted prompt is sent.
  */
-const stableLtmInFlight = new Map<
-  string,
-  { promise: Promise<void>; controller: AbortController; waiters: number }
->();
+const readPreparation = new PreparationQueue(
+  2,
+  8,
+  5 * 60_000,
+  5_000,
+  5 * 60_000,
+);
+/** Both read paths share one two-job budget on a four-core host. */
+const stableLtmPreparation = readPreparation;
+const contextLtmPreparation = readPreparation;
 // A pin is eligible for the fast fallback only after successful response
 // finalization. Session tracking/delta rows alone may belong to a failed 2xx
 // stream, so they are insufficient proof that the model saw those bytes.
@@ -3890,15 +3932,14 @@ function evictStableLtmSession(sessionID: string): void {
     ?.abort(new DOMException("stable LTM session was evicted", "AbortError"));
   sessionLifecycleAborts.delete(sessionID);
   stableLtmCache.delete(sessionID);
-  stableLtmInFlight
-    .get(sessionID)
-    ?.controller.abort(
-      new DOMException("stable LTM session was evicted", "AbortError"),
-    );
-  stableLtmInFlight.delete(sessionID);
+  stableLtmPreparation.cancelPrefix(`${sessionID}\x1f`);
+  for (const key of pendingPreferenceEffects.keys())
+    if (key.startsWith(`${sessionID}\x1f`))
+      pendingPreferenceEffects.delete(key);
 }
 
 function evictPipelineSessionState(sessionID: string): void {
+  clearSpeculativeSource(sessionID);
   acceptedKnowledgePins.delete(sessionID);
   // Keep the persisted header→session mapping warm. Eviction removes only the
   // heavy live state; dropping this index would force an unbounded DB reload on
@@ -3938,75 +3979,72 @@ export function evictIdlePipelineSessionsForTest(
 }
 
 /**
- * Run a stable-LTM compute under single-flight dedup for a session. If a
- * compute is already in flight for the session, await it and return its
- * settled cache value; otherwise run `compute`, set the settled cache, and
- * clear the in-flight entry. The cache is always populated BEFORE the in-flight
- * promise resolves, so a concurrent awaiter re-reads it race-free.
+ * Run stable LTM in the gateway-owned queue. A caller's deadline only stops
+ * that caller waiting; the same session's retry joins the queued compute.
  */
 export async function singleFlightStableLtm(
   sessionID: string,
-  compute: (
-    signal: AbortSignal,
-  ) => Promise<{ formatted: string; tokenCount: number } | undefined>,
+  compute: (signal: AbortSignal) => Promise<StableLtmResult | undefined>,
   callerSignal?: AbortSignal,
+  selectionKey = "default",
 ): Promise<{ formatted: string; tokenCount: number } | undefined> {
   // Cache hit — fast path. Reading the cache FIRST is essential: a previous
   // caller may have already settled and deleted its in-flight entry, so a
   // cache-only check avoids a redundant recompute on the next call.
   const cached = stableLtmCache.get(sessionID);
-  if (cached) return cached;
+  if (cached) {
+    applyPendingPreferenceEffects(sessionID, callerSignal);
+    return cached;
+  }
   callerSignal?.throwIfAborted();
-  let inFlight = stableLtmInFlight.get(sessionID);
-  if (!inFlight) {
-    const controller = new AbortController();
-    const signal = AbortSignal.any([
-      stableLtmComputeSignal(sessionID),
-      controller.signal,
-    ]);
-    const entry = {
-      promise: undefined as unknown as Promise<void>,
-      controller,
-      waiters: 0,
-    };
-    entry.promise = (async () => {
-      try {
-        const result = await promiseAgainstAbort(() => compute(signal), signal);
-        signal.throwIfAborted();
-        if (result) stableLtmCache.set(sessionID, result);
-      } finally {
-        if (stableLtmInFlight.get(sessionID) === entry)
-          stableLtmInFlight.delete(sessionID);
-      }
-    })();
-    stableLtmInFlight.set(sessionID, entry);
-    inFlight = entry;
-  }
-  inFlight.waiters++;
-  try {
-    await promiseAgainstAbort(() => inFlight.promise, callerSignal);
-    return stableLtmCache.get(sessionID);
-  } finally {
-    inFlight.waiters--;
-    if (
-      inFlight.waiters === 0 &&
-      stableLtmInFlight.get(sessionID) === inFlight
-    ) {
-      // The final caller has departed; cancel queued read jobs, but the pool
-      // continues to account for any read already executing in a worker.
-      inFlight.controller.abort(
-        new DOMException("stable LTM has no waiting request", "AbortError"),
+  const result = await stableLtmPreparation.run(
+    `${sessionID}\x1f${currentTenantId()}\x1fstable\x1f${selectionKey}`,
+    async (owner) => {
+      const signal = AbortSignal.any([
+        stableLtmComputeSignal(sessionID),
+        owner,
+      ]);
+      const result = await promiseAgainstAbort(() => compute(signal), signal);
+      signal.throwIfAborted();
+      return result;
+    },
+    callerSignal,
+  );
+  callerSignal?.throwIfAborted();
+  if (result && !stableLtmCache.has(sessionID)) {
+    stableLtmCache.set(sessionID, result);
+    if (result.preferenceEffects)
+      pendingPreferenceEffects.set(
+        `${sessionID}\x1f${currentTenantId()}`,
+        result.preferenceEffects,
       );
-      stableLtmInFlight.delete(sessionID);
-    }
+    else if (callerSignal)
+      saveSessionTracking(sessionID, {
+        stableLtmText: result.formatted,
+        stableLtmTokens: result.tokenCount,
+      });
   }
+  applyPendingPreferenceEffects(sessionID, callerSignal);
+  return stableLtmCache.get(sessionID);
+}
+
+function stableLtmSelectionKey(
+  projectPath: string,
+  contextHint: string | undefined,
+  prefBudget: number,
+  maxEntityInject: number,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([projectPath, contextHint, prefBudget, maxEntityInject]),
+    )
+    .digest("hex");
 }
 
 /**
  * Compute the stable-LTM system[1] block (preferences + known entities +
- * project-knowledge catalog) for a session. Extracted from the turn pipeline so
- * it can be single-flighted across concurrent retries. Sets stableLtmCache +
- * persisted tracking before returning (matching the original inline behavior).
+ * project-knowledge catalog) for a session. Return a selection that a live
+ * caller can pin and persist after it is consumed.
  */
 async function computeStableLtm(
   sessionID: string,
@@ -4016,10 +4054,11 @@ async function computeStableLtm(
   prefBudget: number,
   signal?: AbortSignal,
   requestGeneration?: number,
-): Promise<{ formatted: string; tokenCount: number } | undefined> {
+): Promise<StableLtmResult | undefined> {
   const prefEntries = await ltm.forSession(projectPath, sessionID, prefBudget, {
     signal,
     categories: ["preference"],
+    deferEffects: true,
     ...(contextHint ? { contextHint } : {}),
   });
   const prefText = prefEntries.length
@@ -4089,12 +4128,11 @@ async function computeStableLtm(
     signal?.throwIfAborted();
   }
   const tokenCount = formatted ? coreEstimateTokens(formatted) : 0;
-  const stable = { formatted, tokenCount };
-  stableLtmCache.set(sessionID, stable);
-  saveSessionTracking(sessionID, {
-    stableLtmText: formatted,
-    stableLtmTokens: tokenCount,
-  });
+  const stable = {
+    formatted,
+    tokenCount,
+    preferenceEffects: { projectPath, entries: prefEntries },
+  };
   return stable;
 }
 
@@ -4140,17 +4178,27 @@ async function precomputeStableLtmForIdleSession(
     log.info(
       `idle precompute: warming stable LTM for session ${sessionID.slice(0, 16)} (pref=${prefBudget})`,
     );
-    await singleFlightStableLtm(sessionID, (signal) =>
-      computeStableLtm(
-        sessionID,
+    await singleFlightStableLtm(
+      sessionID,
+      (signal) =>
+        computeStableLtm(
+          sessionID,
+          projectPath,
+          cfg,
+          undefined,
+          prefBudget,
+          signal,
+          requestGeneration,
+        ),
+      undefined,
+      stableLtmSelectionKey(
         projectPath,
-        cfg,
         undefined,
         prefBudget,
-        signal,
-        requestGeneration,
+        cfg.knowledge.maxEntityInject,
       ),
     );
+    // A warm block stays in memory until a foreground turn consumes it.
   } catch (err) {
     log.warn(
       `idle precompute: stable LTM warm failed for ${sessionID.slice(0, 16)}: ${
@@ -19329,9 +19377,9 @@ async function handleConversationTurnPrepared(
     pin: ltmPinnedText.get(sessionID),
   };
   let usedAcceptedWindowFallback = false;
+  let stable: { formatted: string; tokenCount: number } | undefined;
   if (cfg.knowledge.enabled) {
     const acceptedWindowFallback = Symbol("accepted source and knowledge pin");
-    let stable = stableLtmCache.get(sessionID);
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
     let pinDirty = false;
@@ -19374,29 +19422,29 @@ async function handleConversationTurnPrepared(
       // Uses a dedicated budget independent of context-bound LTM. The known-
       // entities block is folded in here (not system[2]) so it is available on
       // turn 1.
-      if (!stable) {
-        // Single-flight: a client header-timeout retry burst can fire several
-        // concurrent identical turns at a cold session. Without dedup they ALL
-        // recompute the heavy stable block (ltm.forSession ×2 + entity fetch +
-        // catalog scan) independently, compounding the very latency that caused
-        // the retries. Share one in-flight compute; the settled value lands in
-        // stableLtmCache before the promise resolves, so re-reading is race-free.
-        stable = await singleFlightStableLtm(
-          sessionID,
-          (signal) =>
-            computeStableLtm(
-              sessionID,
-              projectPath,
-              cfg,
-              contextHint,
-              prefBudget,
-              signal,
-              requestGeneration,
-            ),
-          req.signal,
-        );
-        assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      }
+      // Always enter the cache-aware wrapper: an idle-warmed hit must commit
+      // preference effects and persist the block when this turn consumes it.
+      stable = await singleFlightStableLtm(
+        sessionID,
+        (signal) =>
+          computeStableLtm(
+            sessionID,
+            projectPath,
+            cfg,
+            contextHint,
+            prefBudget,
+            signal,
+            requestGeneration,
+          ),
+        req.signal,
+        stableLtmSelectionKey(
+          projectPath,
+          contextHint,
+          prefBudget,
+          cfg.knowledge.maxEntityInject,
+        ),
+      );
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       stableLtmText = stable?.formatted;
 
       // Fallback for a genuinely-new but already-large session (no prior session
@@ -19464,7 +19512,7 @@ async function handleConversationTurnPrepared(
             ltmPinnedText.get(sessionID)?.entryKeys,
           );
           // Exclude preferences — they're already in system[1]
-          const overflowSink: ltm.KnowledgeEntry[] = [];
+          let overflowSink: ltm.KnowledgeEntry[] = [];
           // Reserve a small remainder for required prewarm and transform. A
           // previously accepted checkpoint plus its durable knowledge delta
           // can safely replay its pinned selection while this optional refresh
@@ -19514,25 +19562,67 @@ async function handleConversationTurnPrepared(
                 );
           optionalTimer?.unref?.();
           let contextEntries: ltm.KnowledgeEntry[];
+          const contextKey =
+            checkpoint && !suppressTemporalStorage
+              ? `${sessionID}\x1f${currentTenantId()}\x1fcontext\x1f${createHash(
+                  "sha256",
+                )
+                  .update(
+                    JSON.stringify([
+                      projectPath,
+                      currentProjectID,
+                      checkpoint.digest,
+                      contextBudget,
+                      contextHint,
+                      [...stickyIds].sort(),
+                      cfg.knowledge.contextSources,
+                    ]),
+                  )
+                  .digest("hex")}`
+              : undefined;
           try {
             const optionalSignal = AbortSignal.any([
               req.signal!,
               optionalController.signal,
             ]);
-            contextEntries = await promiseAgainstAbort(
-              () =>
-                ltm.forSession(projectPath, sessionID, contextBudget, {
-                  signal: optionalSignal,
+            const select = async (signal: AbortSignal) => {
+              const overflow: ltm.KnowledgeEntry[] = [];
+              const entries = await ltm.forSession(
+                projectPath,
+                sessionID,
+                contextBudget,
+                {
+                  signal,
                   excludeCategories: ["preference"],
                   ...(contextHint ? { contextHint } : {}),
                   ...(stickyIds.size ? { stickyIds } : {}),
                   ...(cfg.knowledge.contextSources?.length
                     ? { includeContextSources: cfg.knowledge.contextSources }
                     : {}),
-                  overflowSink,
-                }),
-              optionalSignal,
-            );
+                  overflowSink: overflow,
+                  deferEffects: true,
+                },
+              );
+              return { entries, overflow };
+            };
+            const selection = contextKey
+              ? await contextLtmPreparation.run(
+                  contextKey,
+                  (owner) =>
+                    select(
+                      AbortSignal.any([
+                        owner,
+                        stableLtmComputeSignal(sessionID),
+                      ]),
+                    ),
+                  optionalSignal,
+                )
+              : await promiseAgainstAbort(
+                  () => select(optionalSignal),
+                  optionalSignal,
+                );
+            contextEntries = selection.entries;
+            overflowSink = selection.overflow;
           } catch (error) {
             if (error === acceptedWindowFallback) throw error;
             if (
@@ -19545,10 +19635,18 @@ async function handleConversationTurnPrepared(
           } finally {
             if (optionalTimer) clearTimeout(optionalTimer);
           }
-          // A completed selection may have already recorded session-injection
-          // writes. Only an abort before completion can replay the accepted
-          // pin; preparation.assertActive() still enforces the shared deadline.
+          // Detached selection is read-only. Apply injection bookkeeping only
+          // for a live caller against the same project incarnation.
           assertCurrentPipelineGeneration(req.signal, requestGeneration);
+          if (ensureProject(projectPath) !== currentProjectID)
+            throw new ReadPreparationUnavailableError("context", "pressure");
+          ltm.recordForSessionEffects(
+            projectPath,
+            sessionID,
+            contextEntries,
+            req.signal,
+          );
+          if (contextKey) contextLtmPreparation.consume(contextKey);
           freshContextEntries = contextEntries;
           freshContextOverflow = overflowSink.map((e) => ({
             id: e.id,

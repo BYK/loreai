@@ -500,6 +500,67 @@ describe("ltm.forSession", () => {
     db().query("DELETE FROM distillations WHERE project_id = ?").run(pid);
   });
 
+  test("deferred context selection records no injection until consumed", async () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "decision",
+      title: "Selection delayed across a client retry",
+      content: "The session should only credit an actually consumed choice",
+      scope: "project",
+    });
+    db()
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
+      .run(id);
+    db()
+      .query("DELETE FROM knowledge_session_injections WHERE session_id = ?")
+      .run(SESSION);
+    const selected = await ltm.forSession(PROJ, SESSION, 10_000, {
+      deferEffects: true,
+    });
+    expect(selected.map((entry) => entry.id)).toContain(id);
+    const injections = () =>
+      (
+        db()
+          .query(
+            "SELECT COUNT(*) AS count FROM knowledge_session_injections WHERE session_id = ?",
+          )
+          .get(SESSION) as { count: number }
+      ).count;
+    expect(injections()).toBe(0);
+    expect(ltm.get(id)?.last_reinforced_at).toBe(1000);
+    ltm.recordForSessionEffects(PROJ, SESSION, selected);
+    expect(injections()).toBe(1);
+    expect(ltm.get(id)?.last_reinforced_at).toBeGreaterThan(1000);
+  });
+
+  test("deferred preference selection waits for a live consumer", async () => {
+    const id = ltm.create({
+      projectPath: PROJ,
+      category: "preference",
+      title: "Only reinforce if a prompt uses the selection",
+      content: "Prefer short explanations",
+      scope: "project",
+    });
+    db()
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = 1000 WHERE logical_id = (SELECT logical_id FROM knowledge WHERE id = ?)",
+      )
+      .run(id);
+    db()
+      .query("DELETE FROM knowledge_session_injections WHERE session_id = ?")
+      .run(SESSION);
+    const selected = await ltm.forSession(PROJ, SESSION, 10_000, {
+      categories: ["preference"],
+      deferEffects: true,
+    });
+    expect(selected.map((entry) => entry.id)).toContain(id);
+    expect(ltm.get(id)?.last_reinforced_at).toBe(1000);
+    ltm.recordPreferenceEffects(PROJ, SESSION, selected);
+    expect(ltm.get(id)?.last_reinforced_at).toBeGreaterThan(1000);
+  });
+
   test("a stalled query embed expires into FTS even when its provider ignores abort", async () => {
     const id = ltm.create({
       projectPath: PROJ,
