@@ -1,13 +1,14 @@
 /** Host-owned queue and pool for local embedding workers. */
 
 import { createHash } from "node:crypto";
-import { freemem } from "node:os";
+import { availableParallelism, freemem } from "node:os";
 import { config } from "../config";
 import * as log from "../log";
 import {
   EMBED_POOL_ABS_MAX,
   PER_WORKER_MEM_BUDGET_BYTES,
   clampFreeToContainerLimit,
+  cpuLimitedEmbedPoolSize,
   desiredEmbedPoolSize,
 } from "../embedding-cap";
 import {
@@ -207,9 +208,9 @@ export class EmbeddingPool implements EmbeddingProvider {
         Math.min(configuredEmbedPoolSize() ?? 1, EMBED_POOL_ABS_MAX),
       );
     } else {
-      this.ceiling = desiredEmbedPoolSize(
-        this.liveFreemem(),
-        configuredEmbedPoolSize(),
+      this.ceiling = cpuLimitedEmbedPoolSize(
+        desiredEmbedPoolSize(this.liveFreemem(), configuredEmbedPoolSize()),
+        availableParallelism(),
       );
     }
   }

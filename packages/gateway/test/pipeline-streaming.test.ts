@@ -1096,6 +1096,7 @@ describe("Pipeline — streaming responses", () => {
       const started = performance.now();
       const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
       expect(await response.text()).toContain(
         "Memory preparation is temporarily unavailable",
       );
@@ -1275,6 +1276,7 @@ describe("Pipeline — streaming responses", () => {
       request.stream = false;
       const response = await handleRequest(request, loadLocalConfig());
       expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
       const body = await response.text();
       expect(body).toContain("Memory preparation is temporarily unavailable");
       expect(body).not.toContain("knowledge");

@@ -129,6 +129,20 @@ export function desiredEmbedPoolSize(
   return Math.min(ceiling, affordable);
 }
 
+/** Bound the memory-sized pool by CPU capacity, reserving one CPU for the
+ * gateway and other foreground work. A single worker remains possible on a
+ * one-CPU host. Called with cgroup-aware os.availableParallelism(). */
+export function cpuLimitedEmbedPoolSize(
+  memorySizedWorkers: number,
+  parallelism: number,
+): number {
+  const cpus =
+    Number.isFinite(parallelism) && parallelism >= 1
+      ? Math.floor(parallelism)
+      : 1;
+  return Math.min(memorySizedWorkers, Math.max(1, cpus - 1));
+}
+
 /**
  * Clamp host-reported free memory to the container's cgroup memory limit.
  *

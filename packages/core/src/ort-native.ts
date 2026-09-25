@@ -58,7 +58,8 @@ export function resolveNativeOrtBindingPath(fromPath: string): string | null {
 
 /**
  * Intra-op thread count to hand native ONNX Runtime, or `undefined` to leave
- * ORT's own default in place.
+ * ORT's own default in place. `poolWorkers` is the memory-gated worker ceiling,
+ * so a host with multiple embedding workers does not give each worker every CPU.
  *
  * Native ORT sizes its intra-op pool to `std::thread::hardware_concurrency()`
  * (the HOST physical-core count), which is cgroup-CPU-blind. In a CPU-quota'd
@@ -67,19 +68,16 @@ export function resolveNativeOrtBindingPath(fromPath: string): string | null {
  * threads → wasted RSS (the axis PR #1168's memory clamp doesn't cover) plus
  * context-switch thrash against the quota.
  *
- * `os.availableParallelism()` is cgroup-CPU-aware (libuv `uv_available_parallelism`:
- * cgroup v2 `cpu.max`, v1 CFS quota, `sched_getaffinity`). We cap ONLY when the
- * process is genuinely restricted — `availableParallelism() < os.cpus().length`
- * (the logical-core count `os.cpus()` reports from the host). On an unconstrained
- * host the two are equal, so we return `undefined` and never touch ORT's default;
- * critically, this also avoids RAISING the thread count above ORT's physical-core
- * default on a hyper-threaded host (where logical > physical). So this is a
- * strict no-op except inside a CPU-limited container, where it returns the
- * quota-sized count (floored at 1) to stop the oversubscription.
+ * `os.availableParallelism()` is cgroup-CPU-aware. Reserve one share for the
+ * gateway and divide the budget among the possible embedding workers. On a
+ * larger unrestricted host with just one worker, leave ORT's own physical-core
+ * default in place; this also avoids raising that default on hyper-threaded
+ * hosts. Multiple workers must each get a fraction even without a CPU quota.
  */
 export function nativeIntraOpThreads(
   parallelism: number = availableParallelism(),
   logicalCpus: number = cpus().length,
+  poolWorkers = 1,
 ): number | undefined {
   const avail =
     Number.isFinite(parallelism) && parallelism >= 1
@@ -89,5 +87,11 @@ export function nativeIntraOpThreads(
     Number.isFinite(logicalCpus) && logicalCpus >= 1
       ? Math.floor(logicalCpus)
       : avail;
-  return avail < total ? avail : undefined;
+  if (avail > total) return undefined;
+  const workers =
+    Number.isFinite(poolWorkers) && poolWorkers >= 1
+      ? Math.floor(poolWorkers)
+      : 1;
+  if (avail > 4 && avail === total && workers === 1) return undefined;
+  return Math.max(1, Math.floor(avail / (workers + 1)));
 }

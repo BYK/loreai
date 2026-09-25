@@ -574,10 +574,13 @@ export class LocalProvider implements EmbeddingProvider {
         // carries one) — but size it to current free memory too, so even that
         // fallback path can't drive a native over-allocation.
         maxTokens: this.effectiveMaxTokens(),
-        // Cgroup-CPU-aware native ORT intra-op cap, computed here on the main
-        // thread (the worker can't value-import ort-native). undefined = no-op
-        // (unconstrained host); applied on the native path only in the worker.
-        intraOpThreads: nativeIntraOpThreads(),
+        // Share small hosts' CPU budget across the memory-gated pool, reserving
+        // room for the gateway. Applied to native ORT only in the worker.
+        intraOpThreads: nativeIntraOpThreads(
+          undefined,
+          undefined,
+          this.memDivisor,
+        ),
         vendorModel: vendor ? { localModelPath: vendor.localModelPath } : null,
         // Snapshot the host's silence state — the worker's own `globalThis`
         // can't see the main thread's flag (re-read on every OOM respawn).
