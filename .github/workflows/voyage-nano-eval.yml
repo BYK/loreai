@@ -6,10 +6,6 @@ on:
     paths:
       - '.github/workflows/voyage-nano-eval.yml'
       - 'packages/core/eval/voyage-nano/**'
-  pull_request:
-    paths:
-      - '.github/workflows/voyage-nano-eval.yml'
-      - 'packages/core/eval/voyage-nano/**'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +17,7 @@ jobs:
     timeout-minutes: 90
     env:
       HF_HUB_DISABLE_TELEMETRY: '1'
-      HF_HOME: ${{ runner.temp }}/voyage-nano-hf
+      HF_HOME: /tmp/voyage-nano-hf
       LORE_EVAL_ORT_THREADS: '2'
       LORE_EVAL_THREADS: '2'
     steps:
