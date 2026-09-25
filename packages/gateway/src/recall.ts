@@ -1190,10 +1190,9 @@ function hasResponsesRefusal(item: Record<string, unknown>): boolean {
 /** A final recall continuation must give the client an answer, refusal, or tool handoff. */
 export function isUsableRecallContinuation(resp: GatewayResponse): boolean {
   if (
-    resp.stopReason !== "end_turn" &&
-    resp.stopReason !== "tool_use" &&
-    resp.stopReason !== "stop_sequence" &&
-    resp.stopReason !== "refusal"
+    !["end_turn", "tool_use", "stop_sequence", "refusal", "stop"].includes(
+      resp.stopReason,
+    )
   )
     return false;
   // A usable sibling must not hide an undispatchable tool call. Validate every
@@ -1297,7 +1296,10 @@ export function projectRecallRecoveryResponse(
   if (resp.rawOutputItems) {
     rawOutputItems = [];
     for (const rawItem of resp.rawOutputItems) {
-      if (!isRecord(rawItem) || rawItem.status !== "completed")
+      if (
+        !isRecord(rawItem) ||
+        (rawItem.status !== undefined && rawItem.status !== "completed")
+      )
         return undefined;
       if (
         rawItem.type === "message" &&

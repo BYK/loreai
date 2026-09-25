@@ -11671,6 +11671,88 @@ export function streamResponsesRecallAware(
         const recallIndices = new Set<number>();
         const unresolvedToolIndices = new Set<number>();
         const referenceIndices = new Map<number, ReferenceLifecycle>();
+        const publicRecallIndices = new Set<number>();
+        const queuedAnchorIndices = new Set<number>();
+        const forwardedOutputIndices = new Map<number, number>();
+        const forwardedSourceOrder: number[] = [];
+        const publicOutputIndexFor = (sourceIndex: number): number => {
+          const visibleIndices = [
+            ...new Set([...state.rawItems.keys(), ...state.items.keys()]),
+          ]
+            .filter(
+              (index) =>
+                !unresolvedToolIndices.has(index) &&
+                (!recallIndices.has(index) || publicRecallIndices.has(index)),
+            )
+            .sort((a, b) => a - b);
+          const publicIndex = visibleIndices.indexOf(sourceIndex);
+          if (publicIndex < 0) {
+            throw new Error("missing public Responses output index");
+          }
+          const previousIndex = forwardedOutputIndices.get(sourceIndex);
+          if (previousIndex !== undefined && previousIndex !== publicIndex) {
+            throw new Error("Responses output index changed after forwarding");
+          }
+          const lastForwardedSourceIndex = forwardedSourceOrder.at(-1);
+          if (
+            previousIndex === undefined &&
+            lastForwardedSourceIndex !== undefined &&
+            sourceIndex < lastForwardedSourceIndex
+          ) {
+            throw new Error("Responses output index changed after forwarding");
+          }
+          if (previousIndex === undefined)
+            forwardedSourceOrder.push(sourceIndex);
+          forwardedOutputIndices.set(sourceIndex, publicIndex);
+          return publicIndex;
+        };
+        const formatForwardedEvent = (
+          event: string,
+          serializedData: string,
+          sourceIndex?: number,
+        ): Uint8Array => {
+          if (sourceIndex === undefined) {
+            return encoder.encode(formatResponsesEvent(event, serializedData));
+          }
+          const parsed = JSON.parse(serializedData) as Record<string, unknown>;
+          return encoder.encode(
+            formatResponsesEvent(
+              event,
+              JSON.stringify({
+                ...parsed,
+                output_index: publicOutputIndexFor(sourceIndex),
+              }),
+            ),
+          );
+        };
+        const remapOutputIndexChunk = (
+          chunk: Uint8Array,
+          sourceIndex: number,
+        ): Uint8Array => {
+          const publicIndex = publicOutputIndexFor(sourceIndex);
+          const text = new TextDecoder().decode(chunk);
+          let output = "";
+          for (const frame of text.split("\n\n")) {
+            if (!frame) continue;
+            const lines = frame.split("\n");
+            const eventLine = lines.find((line) => line.startsWith("event: "));
+            const dataLineIndex = lines.findIndex((line) =>
+              line.startsWith("data: "),
+            );
+            if (!eventLine || dataLineIndex < 0) {
+              output += `${frame}\n\n`;
+              continue;
+            }
+            const data = lines[dataLineIndex].slice("data: ".length);
+            const parsed = JSON.parse(data) as Record<string, unknown>;
+            lines[dataLineIndex] = `data: ${JSON.stringify({
+              ...parsed,
+              output_index: publicIndex,
+            })}`;
+            output += `${lines.join("\n")}\n\n`;
+          }
+          return encoder.encode(output);
+        };
 
         const retainedStateBaseline = retainedStateBytes;
         const hiddenRecallBaseline = hiddenRecallBytes;
@@ -11695,6 +11777,7 @@ export function streamResponsesRecallAware(
           const deferredEvents: Array<{
             chunk: Uint8Array;
             candidateIndex?: number;
+            sourceIndex?: number;
           }> = [];
           let deferredBytes = 0;
           const discardDeferredCandidate = (outputIndex: number): void => {
@@ -11886,7 +11969,19 @@ export function streamResponsesRecallAware(
               unresolvedToolIndices.size === 0
             ) {
               for (const deferred of deferredEvents) {
-                if (!(await enqueuePrincipal(deferred.chunk, true))) break;
+                const deferredChunk =
+                  deferred.candidateIndex === undefined
+                    ? deferred.sourceIndex === undefined
+                      ? deferred.chunk
+                      : remapOutputIndexChunk(
+                          deferred.chunk,
+                          deferred.sourceIndex,
+                        )
+                    : remapOutputIndexChunk(
+                        deferred.chunk,
+                        deferred.candidateIndex,
+                      );
+                if (!(await enqueuePrincipal(deferredChunk, true))) break;
               }
               deferredEvents.length = 0;
               deferredBytes = 0;
@@ -12110,7 +12205,11 @@ export function streamResponsesRecallAware(
               // budget. Count it once before its first recall is admitted;
               // continuation streams are accounted for after each follow-up.
               recallBudget.recordUsage(state.usage);
-              const transactionalEvents: Uint8Array[] = [];
+              type TransactionalEvent = {
+                chunk: Uint8Array;
+                sourceIndex?: number;
+              };
+              const transactionalEvents: TransactionalEvent[] = [];
               let transactionalBytes = 0;
               const reserveTransactionalBytes = (chunk: Uint8Array): void => {
                 transactionalBytes += chunk.byteLength;
@@ -12118,9 +12217,12 @@ export function streamResponsesRecallAware(
                   throw new RecallContinuationFailure("resource_limit");
                 }
               };
-              const queueTransactional = (chunk: Uint8Array): void => {
+              const queueTransactional = (
+                chunk: Uint8Array,
+                sourceIndex?: number,
+              ): void => {
                 reserveTransactionalBytes(chunk);
-                transactionalEvents.push(chunk);
+                transactionalEvents.push({ chunk, sourceIndex });
               };
               for (const recall of pendingRecalls) {
                 const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
@@ -12184,14 +12286,22 @@ export function streamResponsesRecallAware(
                     id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
                     text: executed.anchorText,
                   });
+                  queuedAnchorIndices.add(recall.outputIndex);
                   queueTransactional(anchorChunk);
                   for (const deferred of deferredEvents) {
-                    queueTransactional(deferred.chunk);
+                    queueTransactional(
+                      deferred.chunk,
+                      deferred.sourceIndex ?? deferred.candidateIndex,
+                    );
                   }
                 } else {
+                  queuedAnchorIndices.add(recall.outputIndex);
                   queueTransactional(anchorChunk);
                   for (const deferred of deferredEvents) {
-                    queueTransactional(deferred.chunk);
+                    queueTransactional(
+                      deferred.chunk,
+                      deferred.sourceIndex ?? deferred.candidateIndex,
+                    );
                   }
                 }
                 deferredEvents.length = 0;
@@ -12258,12 +12368,14 @@ export function streamResponsesRecallAware(
                       const heldContinuationEvents: Array<{
                         chunk: Uint8Array;
                         candidateIndex?: number;
+                        sourceIndex?: number;
                         transactional: boolean;
                       }> = [];
                       let deferredContinuationBytes = 0;
                       const holdContinuation = (
                         chunk: Uint8Array,
                         candidateIndex?: number,
+                        sourceIndex?: number,
                       ): void => {
                         const transactional = candidateIndex === undefined;
                         if (transactional) reserveTransactionalBytes(chunk);
@@ -12281,6 +12393,7 @@ export function streamResponsesRecallAware(
                           ...(candidateIndex !== undefined
                             ? { candidateIndex }
                             : {}),
+                          ...(sourceIndex !== undefined ? { sourceIndex } : {}),
                         });
                       };
                       const discardContinuationCandidate = (
@@ -12316,9 +12429,12 @@ export function streamResponsesRecallAware(
                       const flushHeldContinuation = (): void => {
                         for (const held of heldContinuationEvents) {
                           if (held.transactional) {
-                            transactionalEvents.push(held.chunk);
+                            transactionalEvents.push({
+                              chunk: held.chunk,
+                              sourceIndex: held.sourceIndex,
+                            });
                           } else {
-                            queueTransactional(held.chunk);
+                            queueTransactional(held.chunk, held.sourceIndex);
                           }
                         }
                         heldContinuationEvents.length = 0;
@@ -12576,7 +12692,11 @@ export function streamResponsesRecallAware(
                               );
                             }
                             if (isContUnresolvedTool && !isContRecall) {
-                              holdContinuation(hiddenChunk, ci);
+                              holdContinuation(
+                                hiddenChunk,
+                                ci,
+                                shiftedOutputIndex(ci, contIndex),
+                              );
                             }
                             if (ce === "response.output_item.done") {
                               if (isContRecall) {
@@ -12706,8 +12826,12 @@ export function streamResponsesRecallAware(
                               contRecallIndices.size > 0 ||
                               contUnresolvedToolIndices.size > 0
                             ) {
-                              holdContinuation(shifted);
-                            } else queueTransactional(shifted);
+                              holdContinuation(
+                                shifted,
+                                undefined,
+                                shiftedIndex,
+                              );
+                            } else queueTransactional(shifted, shiftedIndex);
                           } else if (
                             ce !== "message" &&
                             (ce !== "codex.rate_limits" || publicCodexRateLimit)
@@ -13034,7 +13158,17 @@ export function streamResponsesRecallAware(
                 continuationFailureCategory = "delivery";
               }
               clearKeepalive();
-              for (const chunk of transactionalEvents) {
+              for (const index of queuedAnchorIndices) {
+                publicRecallIndices.add(index);
+              }
+              for (const transactional of transactionalEvents) {
+                const chunk =
+                  transactional.sourceIndex === undefined
+                    ? transactional.chunk
+                    : remapOutputIndexChunk(
+                        transactional.chunk,
+                        transactional.sourceIndex,
+                      );
                 if (!(await safeEnqueue(chunk))) {
                   throw new Error(
                     "client disconnected while delivering recall continuation",
@@ -13082,22 +13216,26 @@ export function streamResponsesRecallAware(
             if (event === "codex.rate_limits" && !publicCodexRateLimit) {
               continue;
             }
-            const chunk = encoder.encode(
-              formatResponsesEvent(
-                event,
-                projected === undefined
-                  ? publicData
-                  : JSON.stringify(projected),
-              ),
+            const shouldDefer =
+              recallIndices.size > 0 || unresolvedToolIndices.size > 0;
+            const chunk = formatForwardedEvent(
+              event,
+              projected === undefined ? publicData : JSON.stringify(projected),
+              shouldDefer ? undefined : outputIndex,
             );
-            if (recallIndices.size > 0 || unresolvedToolIndices.size > 0) {
+            if (shouldDefer) {
               deferredBytes += chunk.byteLength;
               if (deferredBytes > maxDeferredBytes) {
                 throw new SSEStreamLimitError(
                   "recall stream exceeded deferred event limit",
                 );
               }
-              deferredEvents.push({ chunk });
+              deferredEvents.push({
+                chunk,
+                ...(outputIndex !== undefined
+                  ? { sourceIndex: outputIndex }
+                  : {}),
+              });
             } else {
               const enqueued = await enqueuePrincipal(
                 chunk,
@@ -13277,22 +13415,12 @@ export function streamResponsesRecallAware(
             (recallDetected ||
               continuationAttempted ||
               err instanceof RecallContinuationFailure);
-          const visibleSourceIndices = [
-            ...new Set([...state.rawItems.keys(), ...state.items.keys()]),
-          ]
-            .filter(
-              (index) =>
-                !recallIndices.has(index) && !unresolvedToolIndices.has(index),
-            )
-            .sort((left, right) => left - right);
-          const visibleProjectionIsStable = visibleSourceIndices.every(
-            (sourceIndex, publicIndex) => sourceIndex === publicIndex,
-          );
+          // Recovery items are appended after every source index, so sparse
+          // visible indices do not reindex output already sent to the client.
           if (
             recallFailure &&
             opts.runRecovery &&
             recoverySeed &&
-            visibleProjectionIsStable &&
             !signal.aborted
           ) {
             const recoveryStateBaseline = state;

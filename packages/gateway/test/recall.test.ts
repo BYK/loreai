@@ -3753,6 +3753,45 @@ describe("final recall continuation output", () => {
     }
   });
 
+  test('accepts usable provider stop reason "stop"', () => {
+    const response = makeResponse(
+      [{ type: "text", text: "Useful answer" }],
+      "stop",
+    );
+    expect(isUsableRecallContinuation(response)).toBe(true);
+  });
+
+  test.each(["length", "content_filter"])(
+    "rejects a truncated parsed Responses continuation with %j",
+    (stopReason) => {
+      const response = accumulateResponsesNonStreamJSON({
+        id: "resp_truncated_recall",
+        model: "gpt-test",
+        status: "incomplete",
+        incomplete_details: {
+          reason: stopReason === "length" ? "max_output_tokens" : stopReason,
+        },
+        output: [
+          {
+            type: "message",
+            id: "msg_truncated_recall",
+            role: "assistant",
+            status: "incomplete",
+            content: [{ type: "output_text", text: "The solution is to" }],
+          },
+        ],
+        usage: { input_tokens: 4, output_tokens: 5 },
+      });
+      expect(response.stopReason).toBe(
+        stopReason === "length" ? "max_tokens" : stopReason,
+      );
+      expect(response.content).toEqual([
+        { type: "text", text: "The solution is to" },
+      ]);
+      expect(isUsableRecallContinuation(response)).toBe(false);
+    },
+  );
+
   test("buffered refusal provenance does not duplicate its normalized text", () => {
     const refusal = {
       type: "message",
@@ -3859,6 +3898,9 @@ describe("final recall continuation output", () => {
     ["tool_use", true],
     ["stop_sequence", true],
     ["refusal", true],
+    ["stop", true],
+    ["length", false],
+    ["content_filter", false],
     ["max_tokens", false],
     ["pause_turn", false],
     ["model_context_window_exceeded", false],
