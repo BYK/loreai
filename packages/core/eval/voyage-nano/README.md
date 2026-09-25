@@ -12,9 +12,9 @@ signals, budgets and workload pressure that require separate tests.
 ## Run
 
 The [Voyage Nano retrieval pilot workflow](../../../../.github/workflows/voyage-nano-eval.yml)
-runs on PRs changing this fixture and can be triggered manually from the
-default branch. It downloads public weights on a GitHub-hosted CPU runner and
-uploads the synthetic vectors, dependency versions and scored report. The
+runs on pushes to its evaluation branch and can be triggered manually once it
+is on the default branch. It downloads public weights on a GitHub-hosted CPU
+runner and uploads the synthetic vectors, dependency versions and scored report. The
 runner's timings are useful for comparing models in that runner only; they
 cannot establish whether Nano resolves #1898 on the four-core homelab.
 
