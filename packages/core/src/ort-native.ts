@@ -68,11 +68,11 @@ export function resolveNativeOrtBindingPath(fromPath: string): string | null {
  * threads → wasted RSS (the axis PR #1168's memory clamp doesn't cover) plus
  * context-switch thrash against the quota.
  *
- * `os.availableParallelism()` is cgroup-CPU-aware. On hosts with at most four
- * available CPUs, reserve one share for the gateway and divide the rest among
- * possible embedding workers. On larger hosts keep the previous behavior:
- * clamp to a CPU quota, but leave unrestricted hosts at ORT's own physical-core
- * default. Never raise ORT's default on a hyper-threaded host.
+ * `os.availableParallelism()` is cgroup-CPU-aware. Reserve one share for the
+ * gateway and divide the budget among the possible embedding workers. On a
+ * larger unrestricted host with just one worker, leave ORT's own physical-core
+ * default in place; this also avoids raising that default on hyper-threaded
+ * hosts. Multiple workers must each get a fraction even without a CPU quota.
  */
 export function nativeIntraOpThreads(
   parallelism: number = availableParallelism(),
@@ -87,12 +87,11 @@ export function nativeIntraOpThreads(
     Number.isFinite(logicalCpus) && logicalCpus >= 1
       ? Math.floor(logicalCpus)
       : avail;
-  if (avail <= 4) {
-    const workers =
-      Number.isFinite(poolWorkers) && poolWorkers >= 1
-        ? Math.floor(poolWorkers)
-        : 1;
-    return Math.max(1, Math.floor(avail / (workers + 1)));
-  }
-  return avail < total ? avail : undefined;
+  if (avail > total) return undefined;
+  const workers =
+    Number.isFinite(poolWorkers) && poolWorkers >= 1
+      ? Math.floor(poolWorkers)
+      : 1;
+  if (avail > 4 && avail === total && workers === 1) return undefined;
+  return Math.max(1, Math.floor(avail / (workers + 1)));
 }

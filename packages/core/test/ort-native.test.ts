@@ -57,9 +57,16 @@ describe("nativeIntraOpThreads", () => {
     expect(nativeIntraOpThreads(2, 8, 2)).toBe(1);
     expect(nativeIntraOpThreads(1, 1, 2)).toBe(1);
   });
-  test("leaves larger unrestricted hosts at ORT's default", () => {
+  test("shares larger CPU quotas across workers without oversubscribing", () => {
+    expect(nativeIntraOpThreads(8, 32, 2)).toBe(2);
+    expect(nativeIntraOpThreads(8, 32, 1)).toBe(4);
+    expect(nativeIntraOpThreads(8, 8, 2)).toBe(2);
+    expect(nativeIntraOpThreads(16, 16, 2)).toBe(5);
+  });
+
+  test("leaves a single worker on a larger unrestricted host at ORT's default", () => {
     expect(nativeIntraOpThreads(8, 8)).toBeUndefined();
-    expect(nativeIntraOpThreads(16, 16, 2)).toBeUndefined();
+    expect(nativeIntraOpThreads(16, 16)).toBeUndefined();
   });
 
   test("returns undefined when avail exceeds logical (never raises threads)", () => {
