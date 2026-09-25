@@ -433,12 +433,10 @@ async function loadPipeline(): Promise<void> {
   // CPU backend (multi-threaded). The npm dist-only bundle redirects
   // onnxruntime-node → onnxruntime-web, which serves "cpu" via its WASM+SIMD
   // backend (API-compatible).
-  // Native ORT sizes its intra-op thread pool to the HOST core count, which is
-  // cgroup-CPU-blind — a CPU-quota'd container oversubscribes (one memory arena
-  // per thread → RSS inflation). The main thread computed the cgroup-aware cap
+  // Native ORT's host-sized thread pool can starve the gateway when several
+  // workers share a small CPU budget. The main thread computes a pool-aware cap
   // (nativeIntraOpThreads() → WorkerInitData.intraOpThreads; the worker runs as
-  // raw .ts and can't value-import ort-native — see maxTokens above), a strict
-  // no-op on unconstrained hosts. Apply it on the native path only — WASM is
+  // raw .ts and can't value-import ort-native). Apply it to native only — WASM is
   // already forced single-thread via env above; `globals` (captured above) only
   // carries __LORE_NPM_WASM_PATHS__ when the npm bundle fell back to WASM, so
   // every other path (SEA vendorModel, native binding, dev/test) is native.

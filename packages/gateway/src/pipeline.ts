@@ -22934,10 +22934,12 @@ async function handleRequestInner(
     }
     if (err instanceof ReadPreparationUnavailableError) {
       log.warn(`pipeline preparation degraded: ${err.phase} ${err.reason}`);
-      return errorResponse(
+      const response = errorResponse(
         503,
         "Memory preparation is temporarily unavailable; retry the request.",
       );
+      response.headers.set("retry-after", "5");
+      return response;
     }
     // Client disconnect / abort is benign — downgrade from error to info.
     const isAbort = err instanceof DOMException && err.name === "AbortError";

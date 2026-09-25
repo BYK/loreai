@@ -12,6 +12,7 @@ import {
   backoffEmbedCap,
   clampEmbedCap,
   clampFreeToContainerLimit,
+  cpuLimitedEmbedPoolSize,
   desiredEmbedPoolSize,
   memoryModelEmbedCap,
   reconcileEmbedCap,
@@ -22,6 +23,15 @@ import {
 
 const GB = 1024 * 1024 * 1024;
 const MB = 1024 * 1024;
+
+describe("cpuLimitedEmbedPoolSize", () => {
+  it("reserves one CPU for the gateway even with a large configured pool", () => {
+    expect(cpuLimitedEmbedPoolSize(8, 4)).toBe(3);
+    expect(cpuLimitedEmbedPoolSize(8, 2)).toBe(1);
+    expect(cpuLimitedEmbedPoolSize(2, 4)).toBe(2);
+    expect(cpuLimitedEmbedPoolSize(2, 1)).toBe(1);
+  });
+});
 
 describe("clampFreeToContainerLimit", () => {
   it("is a no-op when unconstrained (constrained <= 0)", () => {

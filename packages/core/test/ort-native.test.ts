@@ -51,11 +51,15 @@ describe("ort-native runtime resolution", () => {
 });
 
 describe("nativeIntraOpThreads", () => {
-  test("returns undefined on an unconstrained host (avail == logical) — no-op", () => {
-    // ORT keeps its own physical-core default; we must not touch it.
-    expect(nativeIntraOpThreads(4, 4)).toBeUndefined();
+  test("reserves CPU for the gateway and sibling workers on small hosts", () => {
+    expect(nativeIntraOpThreads(4, 4, 2)).toBe(1);
+    expect(nativeIntraOpThreads(4, 4, 1)).toBe(2);
+    expect(nativeIntraOpThreads(2, 8, 2)).toBe(1);
+    expect(nativeIntraOpThreads(1, 1, 2)).toBe(1);
+  });
+  test("leaves larger unrestricted hosts at ORT's default", () => {
     expect(nativeIntraOpThreads(8, 8)).toBeUndefined();
-    expect(nativeIntraOpThreads(1, 1)).toBeUndefined();
+    expect(nativeIntraOpThreads(16, 16, 2)).toBeUndefined();
   });
 
   test("returns undefined when avail exceeds logical (never raises threads)", () => {
@@ -67,12 +71,12 @@ describe("nativeIntraOpThreads", () => {
 
   test("caps to the cgroup-limited parallelism inside a CPU-quota'd container", () => {
     // 2 vCPU quota on an 8-core host → cap intra-op threads to 2, not 8.
-    expect(nativeIntraOpThreads(2, 8)).toBe(2);
+    expect(nativeIntraOpThreads(2, 8)).toBe(1);
     expect(nativeIntraOpThreads(1, 16)).toBe(1);
   });
 
   test("floors fractional / invalid parallelism, never below 1", () => {
-    expect(nativeIntraOpThreads(2.9, 8)).toBe(2);
+    expect(nativeIntraOpThreads(2.9, 8)).toBe(1);
     expect(nativeIntraOpThreads(0, 8)).toBe(1);
     expect(nativeIntraOpThreads(Number.NaN, 8)).toBe(1);
     expect(nativeIntraOpThreads(-4, 8)).toBe(1);
