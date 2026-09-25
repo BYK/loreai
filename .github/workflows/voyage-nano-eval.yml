@@ -1,0 +1,87 @@
+name: Voyage Nano retrieval pilot
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/voyage-nano-eval.yml'
+      - 'packages/core/eval/voyage-nano/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      HF_HOME: ${{ runner.temp }}/voyage-nano-hf
+      LORE_EVAL_ORT_THREADS: '2'
+      LORE_EVAL_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Nomic runtime
+        run: pnpm install --frozen-lockfile
+      - name: Install CPU-only Nano runtime
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.4'
+          python -m pip install 'sentence-transformers>=5,<6'
+          python -m pip freeze > "$RUNNER_TEMP/voyage-nano-requirements.txt"
+      - name: Embed with Nomic INT8
+        run: |
+          mkdir -p "$RUNNER_TEMP/voyage-nano-results"
+          node packages/core/eval/voyage-nano/embed-nomic.mjs \
+            packages/core/eval/voyage-nano/cases.json \
+            "$RUNNER_TEMP/voyage-nano-results/nomic-768.json"
+      - name: Embed with Voyage Nano 512 and 1024
+        run: |
+          python packages/core/eval/voyage-nano/embed-nano.py \
+            packages/core/eval/voyage-nano/cases.json \
+            "$RUNNER_TEMP/voyage-nano-results/nano-512.json" --dimensions 512
+          python packages/core/eval/voyage-nano/embed-nano.py \
+            packages/core/eval/voyage-nano/cases.json \
+            "$RUNNER_TEMP/voyage-nano-results/nano-1024.json" --dimensions 1024
+      - name: Score synthetic retrieval fixture
+        run: |
+          python packages/core/eval/voyage-nano/score.py \
+            packages/core/eval/voyage-nano/cases.json \
+            "$RUNNER_TEMP/voyage-nano-results/nomic-768.json" \
+            "$RUNNER_TEMP/voyage-nano-results/nano-512.json" \
+            "$RUNNER_TEMP/voyage-nano-results/nano-1024.json" \
+            > "$RUNNER_TEMP/voyage-nano-results/report.json"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads((Path(os.environ['RUNNER_TEMP']) / 'voyage-nano-results/report.json').read_text())
+          print('## Voyage Nano pilot — synthetic fixture only')
+          print('These 10 questions and 14 documents do not measure Lore end-to-end recall or four-session contention.')
+          print('| Model | Vector recall@5 | RRF recall@5 | Load ms | CPU ms | Peak RSS MiB |')
+          print('| --- | ---: | ---: | ---: | ---: | ---: |')
+          for run in report['runs']:
+              timing = run['timings']
+              print(f"| {run['model']} ({run['dimensions']}) | {run['vectorOnly']['recall@5']:.2f} | "
+                    f"{run['ftsVectorRrfProxy']['recall@5']:.2f} | {timing['loadMs']:.0f} | "
+                    f"{timing['cpuMs']:.0f} | {timing['peakRssBytes'] / 1048576:.0f} |")
+          PY
+      - name: Upload synthetic vectors, report and dependency versions
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: voyage-nano-pilot-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/voyage-nano-results/*.json
+            ${{ runner.temp }}/voyage-nano-requirements.txt
+          if-no-files-found: warn
+          retention-days: 14
