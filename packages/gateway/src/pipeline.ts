@@ -17,6 +17,11 @@ import {
   PreparationTiming,
   prepareSemanticMessages,
 } from "./semantic-preparation";
+import {
+  clearBenchmarkTiming,
+  observeBenchmarkFailure,
+  observeBenchmarkUpstreamStart,
+} from "./benchmark-timing";
 export { storeTurnTemporal } from "./turn-temporal";
 export { responsesProvenanceByMessageId } from "./semantic-preparation";
 import { createHash } from "node:crypto";
@@ -20690,6 +20695,7 @@ async function handleConversationTurnPrepared(
 
   let upstreamResult: UpstreamResult;
   try {
+    observeBenchmarkUpstreamStart(req);
     preparationTiming.upstreamStart();
     upstreamResult = await forwardToUpstream(
       modifiedReq,
@@ -20699,6 +20705,7 @@ async function handleConversationTurnPrepared(
       foregroundAbort.signal,
       requestUpstreamRoute,
     );
+    clearBenchmarkTiming(req);
   } catch (error) {
     releaseForeground();
     throw error;
@@ -22924,6 +22931,7 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    observeBenchmarkFailure(req, err);
     if (err instanceof SourceDeltaUnavailableError) {
       const response = errorResponse(
         409,

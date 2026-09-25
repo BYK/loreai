@@ -17,6 +17,10 @@ import { decodedRequestChunks } from "../http-body";
 import { headersToRecord, withoutCors } from "../management-access";
 import { DATA_PLANE, type RouteModule } from "./types";
 import {
+  beginBenchmarkDecode,
+  finishBenchmarkDecode,
+} from "../benchmark-timing";
+import {
   invalidStreamedBody,
   requestBodyLimitsForConfig,
   runPipeline,
@@ -52,6 +56,7 @@ export async function handleOpenAIResponses(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
+  const benchmarkTiming = beginBenchmarkDecode(req);
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseOpenAIResponsesRequestChunks(
@@ -63,6 +68,7 @@ export async function handleOpenAIResponses(
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
+    finishBenchmarkDecode(gatewayReq, benchmarkTiming);
   } catch (e) {
     return invalidStreamedBody(e);
   }
@@ -80,6 +86,7 @@ export async function handleOpenAICodexResponses(
   req: Request,
   config: GatewayConfig,
 ): Promise<Response> {
+  const benchmarkTiming = beginBenchmarkDecode(req);
   let gatewayReq: GatewayRequest;
   try {
     gatewayReq = await parseOpenAICodexRequestChunks(
@@ -91,6 +98,7 @@ export async function handleOpenAICodexResponses(
       headersToRecord(req.headers),
     );
     gatewayReq.signal = req.signal;
+    finishBenchmarkDecode(gatewayReq, benchmarkTiming);
   } catch (e) {
     return invalidStreamedBody(e);
   }

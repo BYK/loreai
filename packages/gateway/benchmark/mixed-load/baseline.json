@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "issue": "BYK/loreai#1733",
+  "seed": 1733,
+  "profiles": [
+    {
+      "name": "responses-5580",
+      "messageCount": 5580,
+      "activeWindowTargetTokens": 190000
+    },
+    {
+      "name": "responses-7228",
+      "messageCount": 7228,
+      "activeWindowTargetTokens": 190000
+    }
+  ],
+  "referenceTargets": {
+    "postDecodeToUpstreamP95Ms": 2000,
+    "healthP95Ms": 250
+  },
+  "ciGates": {
+    "universalTimingThresholds": false,
+    "distinctServingProcesses": true,
+    "boundedTemporalQueue": true,
+    "boundedReadQueue": true,
+    "cancellationBounded": true,
+    "scenarioBehavior": true,
+    "currentToolPairsPreserved": true,
+    "outputParity": true,
+    "provenanceParity": true,
+    "sanitizedUnavailableRead": true,
+    "durableWriteOrdering": true
+  },
+  "scenarios": [
+    "idle-backlog",
+    "foreground-during-backlog",
+    "embeddings-unavailable",
+    "embeddings-hung",
+    "read-workers-unavailable",
+    "read-workers-slow",
+    "cancellation",
+    "concurrent-sessions"
+  ]
+}
