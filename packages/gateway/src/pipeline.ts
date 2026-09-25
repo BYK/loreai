@@ -7111,11 +7111,19 @@ function resolveRequestUpstreamRoute(
     : effectiveProtocol === "vertex"
       ? `https://${vertexHost(config.vertexRegion)}`
       : null;
+  // Model-prefix routing identifies the wire protocol, but the configured
+  // Anthropic base is the administrator's destination override. Keep explicit
+  // caller/provider routes above this fallback while allowing proxies and taps
+  // configured through LORE_UPSTREAM_ANTHROPIC to receive claude-* requests.
+  const modelUpstreamBase =
+    effectiveProtocol === "anthropic" && modelRoute?.protocol === "anthropic"
+      ? config.upstreamAnthropic
+      : modelRoute?.url;
   const effectiveUpstreamBase =
     headerUpstream ??
     selfBuiltUpstreamUrl ??
     providerRoute?.url ??
-    modelRoute?.url ??
+    modelUpstreamBase ??
     (effectiveProtocol === "anthropic"
       ? config.upstreamAnthropic
       : effectiveProtocol === "gemini"
@@ -19020,21 +19028,7 @@ async function handleConversationTurnPrepared(
     authFingerprint: cred ? authFingerprint(cred) : null,
     sessionID,
     model: req.model,
-    upstreamUrl: (() => {
-      const hdrUp = extractUpstreamUrlHeader(req.rawHeaders);
-      if (hdrUp) return hdrUp;
-      const pid = extractProviderHeader(req.rawHeaders);
-      if (pid) {
-        const pr = resolveProviderRoute(pid);
-        if (pr?.url) return pr.url;
-      }
-      return (
-        resolveUpstreamRoute(req.model)?.url ??
-        (req.protocol === "anthropic"
-          ? config.upstreamAnthropic
-          : config.upstreamOpenAI)
-      );
-    })(),
+    upstreamUrl: requestUpstreamRoute.effectiveUpstreamBase,
     port: config.port,
     projectPath,
   });
