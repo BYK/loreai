@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "artifactKind": "ci-contract",
+  "issue": "BYK/loreai#1733",
+  "profiles": [
+    {
+      "name": "responses-5580",
+      "sourceNormalizedMessages": 5580,
+      "activeWindowTargetTokens": 190000,
+      "seed": 1733
+    },
+    {
+      "name": "responses-7228",
+      "sourceNormalizedMessages": 7228,
+      "activeWindowTargetTokens": 190000,
+      "seed": 1734
+    }
+  ],
+  "referenceTargets": {
+    "postDecodeToUpstreamP95Ms": 2000,
+    "healthP95Ms": 250
+  },
+  "ciGates": {
+    "universalTimingThresholds": false,
+    "normalizedSourceCount": true,
+    "activeWindowMeasured": true,
+    "distinctServingProcesses": true,
+    "processTwoDidNotReseed": true,
+    "barriersReached": true,
+    "faultsHeldDuringForeground": true,
+    "releasesSettled": true,
+    "boundedTemporalQueue": true,
+    "boundedReadQueue": true,
+    "healthExact": true,
+    "phasePersistenceExact": true,
+    "processPersistenceExact": true,
+    "currentToolPairsExact": true,
+    "exactUpstreamHashes": true,
+    "noFabricatedProviderUsage": true,
+    "readScenarioExact": true,
+    "cancellationExact": true,
+    "embeddingOwnershipExact": true
+  },
+  "scenarios": [
+    "idle-backlog",
+    "foreground-during-backlog",
+    "embeddings-unavailable",
+    "embeddings-hung",
+    "read-workers-unavailable",
+    "read-workers-slow",
+    "cancellation",
+    "concurrent-sessions"
+  ]
+}

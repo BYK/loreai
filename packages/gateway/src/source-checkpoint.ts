@@ -30,7 +30,7 @@ export function sourceCheckpointProtocol(
 function isContextCheckpointProtocol(protocol: string): boolean {
   return protocol.startsWith(SOURCE_CHECKPOINT_PROTOCOL_PREFIX);
 }
-export const SOURCE_WINDOW_MAX_MESSAGES = 2048;
+export const SOURCE_WINDOW_MAX_MESSAGES = 8192;
 const PREFIX_COUNTS = 4096;
 const BLOOM_BYTES = 65_536;
 type Provenance = Pick<

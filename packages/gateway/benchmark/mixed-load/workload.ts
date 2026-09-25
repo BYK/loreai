@@ -1,3 +1,7 @@
+import { estimateMessages } from "@loreai/core";
+import { gatewayMessagesToLore } from "../../src/temporal-adapter";
+import { parseOpenAIResponsesRequest } from "../../src/translate/openai-responses";
+
 export const REFERENCE_TARGETS = Object.freeze({
   postDecodeToUpstreamP95Ms: 2_000,
   healthP95Ms: 250,
@@ -48,6 +52,7 @@ export interface WorkloadOptions {
   knowledgeEntries?: number;
   vectorEntries?: number;
   backlogEntries?: number;
+  enforceActiveWindow?: boolean;
 }
 
 export interface WorkloadParameters {
@@ -55,12 +60,17 @@ export interface WorkloadParameters {
   messageCount: number;
   seed: number;
   activeWindowTargetTokens: number;
-  activeWindowTokens: number;
+  sourceInputItems: number;
+  sourceNormalizedMessages: number;
+  sourceEstimatedTokens: number;
+  activeWindowLowerBoundTokens: number;
+  activeWindowUpperBoundTokens: number;
   currentTurnToolPairs: number;
   largeToolOutputBytes: number;
   knowledgeEntries: number;
   vectorEntries: number;
   backlogEntries: number;
+  enforceActiveWindow: boolean;
 }
 
 export interface GeneratedResponsesWorkload {
@@ -134,18 +144,20 @@ export function generateResponsesWorkload(
   }))
     requireNonNegativeInteger(name, value);
 
-  const tailItems = currentTurnToolPairs * 2;
-  if (
-    options.messageCount < tailItems + 4 ||
-    (options.messageCount - tailItems) % 4 !== 0
-  )
-    throw new Error(
-      "messageCount minus current-turn tool items must be a positive multiple of four",
-    );
+  if (options.messageCount < 5)
+    throw new Error("messageCount must leave room for history and a tool pair");
+  if (currentTurnToolPairs < 1)
+    throw new Error("currentTurnToolPairs must be positive");
 
   const next = xorshift32(options.seed);
   const input: ResponsesInputItem[] = [];
-  const completedTurns = (options.messageCount - tailItems) / 4;
+  // A completed Responses turn normalizes to four gateway messages: user,
+  // assistant tool call (with reasoning provenance), user tool result, then a
+  // plain assistant boundary. The boundary prevents old tool chains from being
+  // classified as part of the protected current turn.
+  // Consecutive current-turn calls and results normalize to two messages.
+  const historyMessages = options.messageCount - 2;
+  const completedTurns = Math.floor(historyMessages / 4);
   for (let turn = 0; turn < completedTurns; turn++) {
     const callId = `call-${options.seed}-${turn}`;
     input.push(
@@ -177,28 +189,60 @@ export function generateResponsesWorkload(
       call_id: callId,
       output: `synthetic-output-${turn}\n${deterministicText(next, outputBytes)}`,
     };
-    input.push(output);
+    input.push(output, {
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: `Completed synthetic inspection ${turn}.`,
+        },
+      ],
+    });
   }
 
+  const remainder = historyMessages - completedTurns * 4;
+  if (remainder >= 1)
+    input.push({
+      type: "message",
+      role: "user",
+      content: `Deterministic remainder ${options.seed}.`,
+    });
+  if (remainder >= 2)
+    input.push({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Remainder acknowledged." }],
+    });
+  if (remainder >= 3)
+    input.push({
+      type: "message",
+      role: "user",
+      content: `Deterministic second remainder ${options.seed}.`,
+    });
+
+  // Preserve the real Responses shape for a parallel current turn: every call
+  // first, followed by every matching result in the same order.
   for (let pair = 0; pair < currentTurnToolPairs; pair++) {
     const callId = `current-${options.seed}-${pair}`;
-    input.push(
-      {
-        type: "function_call",
-        call_id: callId,
-        name: "read_file",
-        arguments: JSON.stringify({ path: `current-${pair}.ts` }),
-      },
-      {
-        type: "function_call_output",
-        call_id: callId,
-        output: `current-output-${pair}\n${deterministicText(next, 512)}`,
-      },
-    );
+    input.push({
+      type: "function_call",
+      call_id: callId,
+      name: "read_file",
+      arguments: JSON.stringify({ path: `current-${pair}.ts` }),
+    });
+  }
+  for (let pair = 0; pair < currentTurnToolPairs; pair++) {
+    const callId = `current-${options.seed}-${pair}`;
+    input.push({
+      type: "function_call_output",
+      call_id: callId,
+      output: `current-output-${pair}\n${deterministicText(next, 512)}`,
+    });
   }
 
   const body: ResponsesWorkloadBody = {
-    model: "gpt-5.4-mini",
+    model: "benchmark-mixed-load-190k",
     stream: false,
     input,
     tools: [
@@ -217,12 +261,20 @@ export function generateResponsesWorkload(
     ],
   };
 
-  if (activeWindowTargetTokens < 180_000 || activeWindowTargetTokens > 200_000)
+  if (activeWindowTargetTokens !== DEFAULT_ACTIVE_WINDOW_TARGET)
     throw new Error(
-      `active window target has ${activeWindowTargetTokens} tokens; expected 180000..200000`,
+      `active window target has ${activeWindowTargetTokens} tokens; expected ${DEFAULT_ACTIVE_WINDOW_TARGET}`,
     );
 
   assertResponsesWorkloadParity(body, currentTurnToolPairs);
+  const normalized = parseOpenAIResponsesRequest(body, {}).messages;
+  if (normalized.length !== options.messageCount)
+    throw new Error(
+      `workload normalized to ${normalized.length} messages; expected ${options.messageCount}`,
+    );
+  const sourceEstimatedTokens = estimateMessages(
+    gatewayMessagesToLore(normalized, `benchmark-source-${options.seed}`),
+  );
   return {
     body,
     parameters: {
@@ -230,12 +282,21 @@ export function generateResponsesWorkload(
       messageCount: options.messageCount,
       seed: options.seed,
       activeWindowTargetTokens,
-      activeWindowTokens: activeWindowTargetTokens,
+      sourceInputItems: input.length,
+      sourceNormalizedMessages: normalized.length,
+      sourceEstimatedTokens,
+      activeWindowLowerBoundTokens: Math.floor(
+        activeWindowTargetTokens * (18 / 19),
+      ),
+      activeWindowUpperBoundTokens: Math.ceil(
+        activeWindowTargetTokens * (21 / 19),
+      ),
       currentTurnToolPairs,
       largeToolOutputBytes,
       knowledgeEntries,
       vectorEntries,
       backlogEntries,
+      enforceActiveWindow: options.enforceActiveWindow ?? true,
     },
   };
 }
@@ -270,9 +331,11 @@ export function assertResponsesWorkloadParity(
   if (calls.size !== outputs.size || [...calls].some((id) => !outputs.has(id)))
     throw new Error("function call/output parity mismatch");
   const tail = body.input.slice(-currentTurnToolPairs * 2);
-  for (let index = 0; index < tail.length; index += 2) {
-    const call = tail[index];
-    const output = tail[index + 1];
+  const tailCalls = tail.slice(0, currentTurnToolPairs);
+  const tailOutputs = tail.slice(currentTurnToolPairs);
+  for (let index = 0; index < currentTurnToolPairs; index++) {
+    const call = tailCalls[index];
+    const output = tailOutputs[index];
     if (
       call?.type !== "function_call" ||
       output?.type !== "function_call_output" ||
@@ -282,12 +345,48 @@ export function assertResponsesWorkloadParity(
   }
 }
 
+/** Return a full-history body with one genuine, deterministic suffix. */
+export function appendResponsesContinuation(
+  source: ResponsesWorkloadBody,
+  seed: number,
+  ordinal: number,
+): ResponsesWorkloadBody {
+  requireNonNegativeInteger("continuation ordinal", ordinal);
+  const callId = `append-${seed}-${ordinal}`;
+  return {
+    ...source,
+    input: [
+      ...source.input,
+      {
+        type: "message",
+        role: "user",
+        content: `Inspect deterministic appended fixture ${ordinal}.`,
+      },
+      {
+        type: "reasoning",
+        id: `append-reason-${seed}-${ordinal}`,
+        encrypted_content: `deterministic-appended-provenance-${ordinal}`,
+        summary: [],
+      },
+      {
+        type: "function_call",
+        call_id: callId,
+        name: "read_file",
+        arguments: JSON.stringify({ path: `appended-${ordinal}.ts` }),
+      },
+      {
+        type: "function_call_output",
+        call_id: callId,
+        output: `deterministic appended output ${ordinal}`,
+      },
+    ],
+  };
+}
+
 export interface BenchmarkSample {
   decodeMs: number;
   postDecodeToUpstreamMs: number;
   healthMs: number;
-  processCpuMs: number;
-  retainedBytes: number;
 }
 
 export interface Percentiles {
@@ -318,7 +417,5 @@ export function summarizeBenchmarkSamples(samples: BenchmarkSample[]) {
     decodeMs: metric("decodeMs"),
     postDecodeToUpstreamMs: metric("postDecodeToUpstreamMs"),
     healthMs: metric("healthMs"),
-    processCpuMs: metric("processCpuMs"),
-    retainedBytes: metric("retainedBytes"),
   };
 }

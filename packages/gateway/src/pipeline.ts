@@ -20,6 +20,8 @@ import {
 import {
   clearBenchmarkTiming,
   observeBenchmarkFailure,
+  observeBenchmarkForegroundAcquire,
+  observeBenchmarkForegroundRelease,
   observeBenchmarkUpstreamStart,
 } from "./benchmark-timing";
 export { storeTurnTemporal } from "./turn-temporal";
@@ -1432,6 +1434,13 @@ async function awaitStreamingPostResponse(
     if (remaining > 0) streamingPostResponseWaiters.set(sessionID, remaining);
     else streamingPostResponseWaiters.delete(sessionID);
   }
+}
+
+/** Harness-only settlement barrier for deterministic benchmark snapshots. */
+export async function settleStreamingPostResponseForBenchmark(
+  sessionID: string,
+): Promise<void> {
+  await awaitStreamingPostResponse(sessionID);
 }
 
 /** Sessions that have already logged the cwd-fallback warning (dedup). */
@@ -18492,6 +18501,14 @@ async function handleConversationTurn(
   // prewarm can wait. The short budget ends before intentional throttling and
   // upstream generation; each nested read receives the same signal.
   const foregroundAbort = createForegroundAbortScope(req.signal);
+  observeBenchmarkForegroundAcquire(req);
+  let foregroundReleased = false;
+  const releaseForegroundScope = (): void => {
+    if (foregroundReleased) return;
+    foregroundReleased = true;
+    foregroundAbort.dispose();
+    observeBenchmarkForegroundRelease(req);
+  };
   const preparation = createMemoryPreparationScope(
     foregroundAbort.signal,
     memoryPreparationTimeoutMs(),
@@ -18516,7 +18533,7 @@ async function handleConversationTurn(
     responseReturned = true;
     return wrapBodyWithCleanup(
       response,
-      foregroundAbort.dispose,
+      releaseForegroundScope,
       foregroundAbort.signal,
     );
   } catch (error) {
@@ -18528,7 +18545,7 @@ async function handleConversationTurn(
   } finally {
     preparation.dispose();
     rollback.release?.();
-    if (!responseReturned) foregroundAbort.dispose();
+    if (!responseReturned) releaseForegroundScope();
   }
 }
 
@@ -20695,7 +20712,7 @@ async function handleConversationTurnPrepared(
 
   let upstreamResult: UpstreamResult;
   try {
-    observeBenchmarkUpstreamStart(req);
+    observeBenchmarkUpstreamStart(req, result.totalTokens, result.rawTokens);
     preparationTiming.upstreamStart();
     upstreamResult = await forwardToUpstream(
       modifiedReq,

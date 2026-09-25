@@ -4,7 +4,14 @@ export interface BenchmarkTimingSample {
   requestId: string;
   decodeMs: number;
   postDecodeToUpstreamMs: number;
+  activeWindowTokens: number | null;
+  rawWindowTokens: number | null;
   outcome: "upstream" | "failure";
+}
+
+export interface BenchmarkLifecycleSample {
+  requestId: string;
+  event: "foreground-acquired" | "foreground-released";
 }
 
 interface DecodeTiming {
@@ -25,6 +32,8 @@ let failureObserver:
       postDecodeToFailureMs: number;
     }) => void)
   | null = null;
+let lifecycleObserver: ((sample: BenchmarkLifecycleSample) => void) | null =
+  null;
 
 /** Harness-only data-free observer. Production leaves this unset. */
 export function setBenchmarkTimingObserver(
@@ -45,6 +54,12 @@ export function setBenchmarkFailureObserver(
   failureObserver = next;
 }
 
+export function setBenchmarkLifecycleObserver(
+  next: ((sample: BenchmarkLifecycleSample) => void) | null,
+): void {
+  lifecycleObserver = next;
+}
+
 export function beginBenchmarkDecode(req: Request): DecodeTiming | undefined {
   if (!observer) return undefined;
   const requestId = req.headers.get("x-lore-benchmark-id");
@@ -60,7 +75,11 @@ export function finishBenchmarkDecode(
   timings.set(timing.requestId, { ...timing, decodedAt: performance.now() });
 }
 
-export function observeBenchmarkUpstreamStart(request: GatewayRequest): void {
+export function observeBenchmarkUpstreamStart(
+  request: GatewayRequest,
+  activeWindowTokens: number,
+  rawWindowTokens: number,
+): void {
   const requestId = request.rawHeaders["x-lore-benchmark-id"];
   const timing = requestId ? timings.get(requestId) : undefined;
   if (!timing || !observer) return;
@@ -70,11 +89,38 @@ export function observeBenchmarkUpstreamStart(request: GatewayRequest): void {
       requestId: timing.requestId,
       decodeMs: timing.decodedAt - timing.startedAt,
       postDecodeToUpstreamMs: upstreamAt - timing.decodedAt,
+      activeWindowTokens,
+      rawWindowTokens,
       outcome: "upstream",
     });
   } catch {
     // Benchmark observation never changes request delivery.
   }
+}
+
+function observeLifecycle(
+  request: GatewayRequest,
+  event: BenchmarkLifecycleSample["event"],
+): void {
+  const requestId = request.rawHeaders["x-lore-benchmark-id"];
+  if (!requestId || !lifecycleObserver) return;
+  try {
+    lifecycleObserver({ requestId, event });
+  } catch {
+    // Benchmark observation never changes request delivery.
+  }
+}
+
+export function observeBenchmarkForegroundAcquire(
+  request: GatewayRequest,
+): void {
+  observeLifecycle(request, "foreground-acquired");
+}
+
+export function observeBenchmarkForegroundRelease(
+  request: GatewayRequest,
+): void {
+  observeLifecycle(request, "foreground-released");
 }
 
 export function clearBenchmarkTiming(request: GatewayRequest): void {
