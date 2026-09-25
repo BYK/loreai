@@ -17,10 +17,6 @@ is on the default branch. It downloads public weights on a GitHub-hosted CPU
 runner and uploads the synthetic vectors, dependency versions and scored report. The
 runner's timings are useful for comparing models in that runner only; they
 cannot establish whether Nano resolves #1898 on the four-core homelab.
-The workflow also probes a **third-party** ONNX INT8 conversion, pins its
-revision and checks its vectors against the official Nano BF16 result. The
-reported memory includes each full process, not just model weights. A smaller
-model file alone does not establish compatible vectors or acceptable CPU load.
 
 From the repository root on a machine that can download model weights:
 

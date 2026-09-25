@@ -52,17 +52,6 @@ jobs:
           python packages/core/eval/voyage-nano/embed-nano.py \
             packages/core/eval/voyage-nano/cases.json \
             "$RUNNER_TEMP/voyage-nano-results/nano-1024.json" --dimensions 1024
-      - name: Embed with third-party Nano ONNX INT8
-        run: |
-          node packages/core/eval/voyage-nano/embed-nano-q8.mjs \
-            packages/core/eval/voyage-nano/cases.json \
-            "$RUNNER_TEMP/voyage-nano-results/nano-q8-1024.json"
-      - name: Check INT8 fidelity against official Nano
-        run: |
-          python packages/core/eval/voyage-nano/fidelity.py \
-            "$RUNNER_TEMP/voyage-nano-results/nano-1024.json" \
-            "$RUNNER_TEMP/voyage-nano-results/nano-q8-1024.json" \
-            "$RUNNER_TEMP/voyage-nano-results/fidelity.json"
       - name: Score synthetic retrieval fixture
         run: |
           python packages/core/eval/voyage-nano/score.py \
@@ -70,7 +59,6 @@ jobs:
             "$RUNNER_TEMP/voyage-nano-results/nomic-768.json" \
             "$RUNNER_TEMP/voyage-nano-results/nano-512.json" \
             "$RUNNER_TEMP/voyage-nano-results/nano-1024.json" \
-            "$RUNNER_TEMP/voyage-nano-results/nano-q8-1024.json" \
             > "$RUNNER_TEMP/voyage-nano-results/report.json"
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
