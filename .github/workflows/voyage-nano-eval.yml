@@ -1,6 +1,11 @@
 name: Voyage Nano retrieval pilot
 
 on:
+  push:
+    branches: ['eval/voyage-4-nano-pilot']
+    paths:
+      - '.github/workflows/voyage-nano-eval.yml'
+      - 'packages/core/eval/voyage-nano/**'
   pull_request:
     paths:
       - '.github/workflows/voyage-nano-eval.yml'
