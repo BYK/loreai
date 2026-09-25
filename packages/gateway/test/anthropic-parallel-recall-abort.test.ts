@@ -99,13 +99,12 @@ function request(): GatewayRequest {
     tools: [{ name: "recall", description: "recall", inputSchema: {} }],
     stream: true,
     maxTokens: 32,
-    metadata: {},
     rawHeaders: {
       "x-api-key": "test-key",
       "x-lore-provider": "anthropic",
       "x-lore-upstream-url": "https://api.anthropic.com",
     },
-  };
+  } as unknown as GatewayRequest;
 }
 
 function sessionState(): SessionState {
