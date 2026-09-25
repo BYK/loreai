@@ -36,7 +36,7 @@ jobs:
       - name: Install CPU-only Nano runtime
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.4'
-          python -m pip install 'sentence-transformers>=5,<6'
+          python -m pip install 'sentence-transformers>=5,<6' 'transformers>=4.51,<5'
           python -m pip freeze > "$RUNNER_TEMP/voyage-nano-requirements.txt"
       - name: Embed with Nomic INT8
         run: |

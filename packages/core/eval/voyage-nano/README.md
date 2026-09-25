@@ -23,7 +23,7 @@ From the repository root on a machine that can download model weights:
 ```bash
 pnpm install --frozen-lockfile
 python -m venv /tmp/lore-voyage-eval
-/tmp/lore-voyage-eval/bin/pip install 'torch>=2.4' 'sentence-transformers>=5,<6'
+/tmp/lore-voyage-eval/bin/pip install 'torch>=2.4' 'sentence-transformers>=5,<6' 'transformers>=4.51,<5'
 node packages/core/eval/voyage-nano/embed-nomic.mjs \
   packages/core/eval/voyage-nano/cases.json /tmp/nomic-768.json
 LORE_EVAL_THREADS=2 /tmp/lore-voyage-eval/bin/python \
