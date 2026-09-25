@@ -13,8 +13,52 @@
  * module-level `stableLtmCache` and `stableLtmInFlight` maps are isolated.
  */
 import { describe, test, expect, vi } from "vitest";
+import { db, ltm, loadSessionTracking } from "@loreai/core";
 
 describe("singleFlightStableLtm", () => {
+  test("idle warming neither credits nor persists preferences before a foreground uses them", async () => {
+    vi.resetModules();
+    const { singleFlightStableLtm } = await import("../src/pipeline");
+    const sessionID = "idle-prefs-before-consumption";
+    const projectPath = "/test/idle-pref-consumption";
+    const id = ltm.create({
+      projectPath,
+      category: "preference",
+      title: "Only record if sent",
+      content: "Prefer short answers",
+      scope: "project",
+    });
+    db()
+      .query("DELETE FROM knowledge_session_injections WHERE session_id = ?")
+      .run(sessionID);
+    const compute = vi.fn(async () => ({
+      formatted: "warmed preference block",
+      tokenCount: 8,
+      preferenceEffects: { projectPath, entries: [ltm.get(id)!] },
+    }));
+    const injections = () =>
+      (
+        db()
+          .query(
+            "SELECT COUNT(*) AS n FROM knowledge_session_injections WHERE session_id = ?",
+          )
+          .get(sessionID) as { n: number }
+      ).n;
+    await singleFlightStableLtm(sessionID, compute);
+    expect(injections()).toBe(0);
+    expect(loadSessionTracking(sessionID)?.stableLtmText).toBeFalsy();
+
+    await singleFlightStableLtm(
+      sessionID,
+      compute,
+      new AbortController().signal,
+    );
+    expect(compute).toHaveBeenCalledOnce();
+    expect(injections()).toBe(1);
+    expect(loadSessionTracking(sessionID)?.stableLtmText).toBe(
+      "warmed preference block",
+    );
+  });
   test("concurrent callers share ONE compute; compute runs exactly once", async () => {
     vi.resetModules();
     const { singleFlightStableLtm } = await import("../src/pipeline");

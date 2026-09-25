@@ -3804,6 +3804,15 @@ function applyPendingPreferenceEffects(
     signal,
   );
   pendingPreferenceEffects.delete(key);
+  // An idle warm result remains volatile until an actual foreground uses it.
+  // Persisting it earlier would restore a frozen block after restart without
+  // the in-memory pending effects and credit an unsent selection.
+  const stable = stableLtmCache.get(sessionID);
+  if (stable)
+    saveSessionTracking(sessionID, {
+      stableLtmText: stable.formatted,
+      stableLtmTokens: stable.tokenCount,
+    });
 }
 
 /**
@@ -4009,10 +4018,11 @@ export async function singleFlightStableLtm(
         `${sessionID}\x1f${currentTenantId()}`,
         result.preferenceEffects,
       );
-    saveSessionTracking(sessionID, {
-      stableLtmText: result.formatted,
-      stableLtmTokens: result.tokenCount,
-    });
+    else if (callerSignal)
+      saveSessionTracking(sessionID, {
+        stableLtmText: result.formatted,
+        stableLtmTokens: result.tokenCount,
+      });
   }
   applyPendingPreferenceEffects(sessionID, callerSignal);
   return stableLtmCache.get(sessionID);
@@ -4033,9 +4043,8 @@ function stableLtmSelectionKey(
 
 /**
  * Compute the stable-LTM system[1] block (preferences + known entities +
- * project-knowledge catalog) for a session. Extracted from the turn pipeline so
- * it can be single-flighted across concurrent retries. Sets stableLtmCache +
- * persisted tracking before returning (matching the original inline behavior).
+ * project-knowledge catalog) for a session. Return a selection that a live
+ * caller can pin and persist after it is consumed.
  */
 async function computeStableLtm(
   sessionID: string,
@@ -4189,9 +4198,7 @@ async function precomputeStableLtmForIdleSession(
         cfg.knowledge.maxEntityInject,
       ),
     );
-    // Idle warming pins its stable block durably. Preserve the existing
-    // reinforcement semantics across a gateway restart after that write.
-    applyPendingPreferenceEffects(sessionID, stableLtmComputeSignal(sessionID));
+    // A warm block stays in memory until a foreground turn consumes it.
   } catch (err) {
     log.warn(
       `idle precompute: stable LTM warm failed for ${sessionID.slice(0, 16)}: ${
