@@ -53,6 +53,7 @@ import {
   createMemoryPreparationScope,
   detachedPipelineRequestCountForTest,
   evictLiveSessionForTest,
+  evictStableLtmSessionForTest,
   getActiveSessions,
   handleCompactEndpoint,
   handleRequest,
@@ -76,6 +77,7 @@ import {
   setStreamingPostResponseLimitsForTest,
   setStreamingPostResponseWaitObserverForTest,
   setUpstreamInterceptor,
+  singleFlightStableLtm,
   streamingPostResponsePendingForTest,
   validatedMetaStream,
 } from "../src/pipeline";
@@ -1200,6 +1202,93 @@ describe("Pipeline — streaming responses", () => {
       expect(bodies[1]).toContain("Overflow context choice");
     } finally {
       selection?.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("commits idle-warmed preferences on a real foreground cache hit and restores them after restart", async () => {
+    const projectPath = `/tmp/lore-idle-pref-${Date.now()}`;
+    const sessionHeaders = {
+      "x-lore-session-id": `idle-pref-${Date.now()}`,
+      "x-lore-project": projectPath,
+    };
+    const bodies: string[] = [];
+    const respond = async (body: unknown) => {
+      bodies.push(typeof body === "string" ? body : JSON.stringify(body));
+      return new Response(validResponsesSSE(`idle_pref_${bodies.length}`), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    setUpstreamInterceptor(respond);
+    try {
+      const request = (content: string) =>
+        makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: content }] },
+          ],
+        });
+      await (await handleRequest(request("begin"), loadLocalConfig())).text();
+      await new Promise((resolve) => setImmediate(resolve));
+      const sessionID = [...getActiveSessions().values()].find(
+        (state) =>
+          state.headerSessionId === sessionHeaders["x-lore-session-id"],
+      )?.sessionID;
+      expect(sessionID).toBeDefined();
+
+      const id = ltm.create({
+        projectPath,
+        category: "preference",
+        title: "Idle-warmed preference",
+        content: "Keep the same stable prefix",
+        scope: "project",
+      });
+      evictStableLtmSessionForTest(sessionID!);
+      saveSessionTracking(sessionID!, {
+        stableLtmText: null,
+        stableLtmTokens: null,
+      });
+      db()
+        .query("DELETE FROM knowledge_session_injections WHERE session_id = ?")
+        .run(sessionID!);
+      const warmed = "Idle-warmed preference: Keep the same stable prefix";
+      const compute = vi.fn(async () => ({
+        formatted: warmed,
+        tokenCount: 12,
+        preferenceEffects: { projectPath, entries: [ltm.get(id)!] },
+      }));
+      await singleFlightStableLtm(sessionID!, compute); // idle owner, no caller
+      const injections = () =>
+        (
+          db()
+            .query(
+              "SELECT COUNT(*) AS n FROM knowledge_session_injections WHERE session_id = ?",
+            )
+            .get(sessionID!) as { n: number }
+        ).n;
+      expect(injections()).toBe(0);
+      expect(loadSessionTracking(sessionID!)?.stableLtmText).toBeFalsy();
+
+      const resumed = await handleRequest(request("resume"), loadLocalConfig());
+      expect(resumed.status).toBe(200);
+      await resumed.text();
+      expect(compute).toHaveBeenCalledOnce();
+      expect(bodies.at(-1)).toContain(warmed);
+      expect(injections()).toBe(1);
+      expect(loadSessionTracking(sessionID!)?.stableLtmText).toBe(warmed);
+
+      await resetPipelineState();
+      setUpstreamInterceptor(respond);
+      const restored = await handleRequest(
+        request("after restart"),
+        loadLocalConfig(),
+      );
+      expect(restored.status).toBe(200);
+      await restored.text();
+      expect(bodies.at(-1)).toContain(warmed);
+      expect(injections()).toBe(1);
+    } finally {
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }

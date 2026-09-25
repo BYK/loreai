@@ -19377,9 +19377,9 @@ async function handleConversationTurnPrepared(
     pin: ltmPinnedText.get(sessionID),
   };
   let usedAcceptedWindowFallback = false;
+  let stable: { formatted: string; tokenCount: number } | undefined;
   if (cfg.knowledge.enabled) {
     const acceptedWindowFallback = Symbol("accepted source and knowledge pin");
-    let stable = stableLtmCache.get(sessionID);
     // Track whether LTM state changed for batched DB persistence
     let ltmDirty = false;
     let pinDirty = false;
@@ -19422,35 +19422,29 @@ async function handleConversationTurnPrepared(
       // Uses a dedicated budget independent of context-bound LTM. The known-
       // entities block is folded in here (not system[2]) so it is available on
       // turn 1.
-      if (!stable) {
-        // Single-flight: a client header-timeout retry burst can fire several
-        // concurrent identical turns at a cold session. Without dedup they ALL
-        // recompute the heavy stable block (ltm.forSession ×2 + entity fetch +
-        // catalog scan) independently, compounding the very latency that caused
-        // the retries. Share one in-flight compute; the settled value lands in
-        // stableLtmCache before the promise resolves, so re-reading is race-free.
-        stable = await singleFlightStableLtm(
-          sessionID,
-          (signal) =>
-            computeStableLtm(
-              sessionID,
-              projectPath,
-              cfg,
-              contextHint,
-              prefBudget,
-              signal,
-              requestGeneration,
-            ),
-          req.signal,
-          stableLtmSelectionKey(
+      // Always enter the cache-aware wrapper: an idle-warmed hit must commit
+      // preference effects and persist the block when this turn consumes it.
+      stable = await singleFlightStableLtm(
+        sessionID,
+        (signal) =>
+          computeStableLtm(
+            sessionID,
             projectPath,
+            cfg,
             contextHint,
             prefBudget,
-            cfg.knowledge.maxEntityInject,
+            signal,
+            requestGeneration,
           ),
-        );
-        assertCurrentPipelineGeneration(req.signal, requestGeneration);
-      }
+        req.signal,
+        stableLtmSelectionKey(
+          projectPath,
+          contextHint,
+          prefBudget,
+          cfg.knowledge.maxEntityInject,
+        ),
+      );
+      assertCurrentPipelineGeneration(req.signal, requestGeneration);
       stableLtmText = stable?.formatted;
 
       // Fallback for a genuinely-new but already-large session (no prior session
