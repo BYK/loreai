@@ -400,6 +400,7 @@ import {
 import { reportPrincipalTransportFailure } from "./principal-transport-failure";
 import {
   reportPrincipalProtocolFailure,
+  trackResponsesReadBoundary,
   type PrincipalProtocolFailureSample,
 } from "./principal-protocol-failure";
 import {
@@ -11983,12 +11984,18 @@ export function streamResponsesRecallAware(
 
           resetKeepalive();
           principalPhase = "read";
-          for await (const { event, data } of parseSSEStream(reader, {
-            maxFrames: maxSSEFrames,
-            inactivityMs: sseInactivityMs,
-            signal,
-            frameCounter,
-          })) {
+          for await (const { event, data } of trackResponsesReadBoundary(
+            parseSSEStream(reader, {
+              maxFrames: maxSSEFrames,
+              inactivityMs: sseInactivityMs,
+              signal,
+              frameCounter,
+            }),
+            () => {
+              principalPhase = "read";
+              principalEventKind = "none";
+            },
+          )) {
             resetKeepalive(); // upstream alive — reset inactivity timer
 
             if (!data || data === "[DONE]") continue;

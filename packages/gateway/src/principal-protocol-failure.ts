@@ -52,6 +52,19 @@ export type PrincipalProtocolFailureSample = {
   reason: (typeof PRINCIPAL_PROTOCOL_REASONS)[number];
 };
 
+/** Reset diagnostics when a completed frame is handed back to its parser. */
+export async function* trackResponsesReadBoundary<T>(
+  events: AsyncIterable<T>,
+  onRead: () => void,
+): AsyncGenerator<T> {
+  for await (const event of events) {
+    yield event;
+    // This runs before the next parser read, but not when processing this
+    // event throws. Thus failures still identify the current event.
+    onRead();
+  }
+}
+
 let failureHook: ((sample: PrincipalProtocolFailureSample) => void) | undefined;
 
 export function setPrincipalProtocolFailureHook(
