@@ -94,6 +94,34 @@ describe("configured upstream routing", () => {
     );
   });
 
+  test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
+    const [
+      { resolveProfile },
+      { loadConfig },
+      { resolveRequestUpstreamRouteForTest },
+    ] = await Promise.all([
+      import("../src/cache-warmer"),
+      import("../src/config"),
+      import("../src/pipeline"),
+    ]);
+    const proxy = "https://my-litellm-proxy.example.com";
+    const route = resolveRequestUpstreamRouteForTest(
+      { model: "claude-opus-5-5", protocol: "anthropic", rawHeaders: {} },
+      { ...loadConfig(), upstreamAnthropic: proxy },
+    );
+
+    expect(route.providerID).toBe("anthropic");
+    expect(
+      resolveProfile(
+        "claude-opus-5-5",
+        route.effectiveProtocol,
+        "5m",
+        route.effectiveUpstreamBase,
+        route.providerID,
+      )?.upstreamUrl,
+    ).toBe(`${proxy}/v1/messages`);
+  });
+
   test("does not apply the Anthropic destination to Responses ingress", async () => {
     harness = await createHarness({
       fixtures: [],

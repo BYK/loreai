@@ -7021,7 +7021,7 @@ function captureLegacyGlobalAuth(
  * retain the exact route intent used by forwardToUpstream.
  */
 function resolveRequestUpstreamRoute(
-  req: GatewayRequest,
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
   config: GatewayConfig,
 ): ResolvedRequestUpstreamRoute {
   const headerUpstream = extractUpstreamUrlHeader(req.rawHeaders);
@@ -7129,10 +7129,19 @@ function resolveRequestUpstreamRoute(
       : effectiveProtocol === "gemini"
         ? GEMINI_DEFAULT_UPSTREAM
         : config.upstreamOpenAI);
+  const usesConfiguredAnthropic =
+    providerID === undefined &&
+    headerUpstream === undefined &&
+    selfBuiltUpstreamUrl === null &&
+    providerRoute?.url === undefined &&
+    effectiveProtocol === "anthropic" &&
+    modelRoute?.protocol === "anthropic" &&
+    effectiveUpstreamBase === config.upstreamAnthropic;
 
   return {
     providerHeader,
-    providerID,
+    providerID:
+      providerID ?? (usesConfiguredAnthropic ? "anthropic" : undefined),
     headerUpstream,
     headerUpstreamPath,
     providerRoute,
@@ -7141,6 +7150,14 @@ function resolveRequestUpstreamRoute(
     effectiveUpstreamBase,
     bedrockMantle,
   };
+}
+
+/** Test-only access to the pure foreground route resolver. */
+export function resolveRequestUpstreamRouteForTest(
+  req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
+  config: GatewayConfig,
+): ResolvedRequestUpstreamRoute {
+  return resolveRequestUpstreamRoute(req, config);
 }
 
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
