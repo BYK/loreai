@@ -40,6 +40,7 @@ import {
   embedding,
   loadSessionCosts,
   db,
+  config,
   ensureProject,
   setCacheSizeSnapshot,
   evaluateCacheStrategy,
@@ -425,17 +426,24 @@ describe("buildIdleWorkHandler", () => {
     const clock = vi.spyOn(Date, "now");
     const start = Date.now();
     const fallback = vi.spyOn(temporal, "prune");
+    const probe = vi.spyOn(temporal, "pruneIdle");
     try {
       const handler = buildIdleWorkHandler(makeLLM());
       clock.mockReturnValue(start);
       await handler("idle-prune-fallback-1", makeSessionState({ projectPath }));
       clock.mockReturnValue(start + 61 * 60_000);
       await handler("idle-prune-fallback-2", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 62 * 60_000);
+      await handler("idle-prune-fallback-3", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 121 * 60_000);
+      await handler("idle-prune-fallback-4", makeSessionState({ projectPath }));
       expect(
         fallback.mock.calls.filter(([input]) => !input.skipSizeCap),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
+      expect(probe).toHaveBeenCalledTimes(4);
     } finally {
       fallback.mockRestore();
+      probe.mockRestore();
       clock.mockRestore();
       if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
       else process.env.LORE_DISABLE_VEC_WORKER = previous;
@@ -463,6 +471,34 @@ describe("buildIdleWorkHandler", () => {
     } finally {
       fallback.mockRestore();
       clock.mockRestore();
+      if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
+      else process.env.LORE_DISABLE_VEC_WORKER = previous;
+    }
+  });
+
+  test("rechecks a changed storage cap during a read-worker outage", async () => {
+    const projectPath = makeProjectDir();
+    const previous = process.env.LORE_DISABLE_VEC_WORKER;
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    const cfg = config();
+    const previousCap = cfg.pruning.maxStorage;
+    const clock = vi.spyOn(Date, "now");
+    const start = Date.now();
+    const fallback = vi.spyOn(temporal, "prune");
+    try {
+      const handler = buildIdleWorkHandler(makeLLM());
+      clock.mockReturnValue(start);
+      await handler("idle-cap-change-1", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 61 * 60_000);
+      await handler("idle-cap-change-2", makeSessionState({ projectPath }));
+      cfg.pruning.maxStorage = previousCap - 1;
+      clock.mockReturnValue(start + 62 * 60_000);
+      await handler("idle-cap-change-3", makeSessionState({ projectPath }));
+      expect(fallback).toHaveBeenCalledTimes(2);
+    } finally {
+      fallback.mockRestore();
+      clock.mockRestore();
+      cfg.pruning.maxStorage = previousCap;
       if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
       else process.env.LORE_DISABLE_VEC_WORKER = previous;
     }

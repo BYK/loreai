@@ -1059,7 +1059,7 @@ describe("bounded read-pool admission (#1739)", () => {
     _setTestVectorWorkerFactory(
       factoryReturningRead((worker, msg) => {
         posted.push(msg.spec);
-        worker.replyRead(msg.id, [{ b: 0 }]);
+        worker.replyRead(msg.id, [{ b: 0, has_distilled: null }]);
       }),
     );
     expect(
@@ -1067,7 +1067,7 @@ describe("bounded read-pool admission (#1739)", () => {
     ).toEqual({ ttlDeleted: 0, capDeleted: 0, sizeScanComplete: true });
     expect(posted).toEqual([
       {
-        sql: "SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?",
+        sql: "SELECT SUM(LENGTH(content)) as b, MAX(distilled) as has_distilled FROM temporal_messages WHERE project_id = ?",
         params: [pid],
         mode: "all",
         telemetryKind: "temporal-prune",

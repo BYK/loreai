@@ -1393,14 +1393,19 @@ export async function pruneIdle(input: {
     return { ...first, sizeScanComplete: false };
   }
   const rows = await offloadAllOrTimeout(
-    "SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?",
+    "SELECT SUM(LENGTH(content)) as b, MAX(distilled) as has_distilled FROM temporal_messages WHERE project_id = ?",
     [pid],
     { priority: "background", telemetryKind: "temporal-prune" },
   );
   if (isReadJobFailure(rows) || connection !== db())
     return { ...first, sizeScanComplete: false };
-  const totalBytes = (rows[0] as { b: number | null } | undefined)?.b ?? 0;
-  if (totalBytes <= input.maxStorageMB * 1024 * 1024)
+  const probe = rows[0] as
+    | { b: number | null; has_distilled: number | null }
+    | undefined;
+  const totalBytes = probe?.b ?? 0;
+  // No eligible rows means a writer-side scan could not evict anything.
+  // A newly distilled row will be picked up by the next idle pass.
+  if (totalBytes <= input.maxStorageMB * 1024 * 1024 || !probe?.has_distilled)
     return { ...first, sizeScanComplete: true };
   // Rare over-cap path: run the exact size check on the writer connection so
   // an intervening delete or project move cannot evict too much. The TTL and

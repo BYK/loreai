@@ -243,7 +243,7 @@ const temporalPruneGate = new WeakMap<
       at: number;
       retention: number;
       maxStorage: number;
-      sizeScanComplete: boolean;
+      workerProbeComplete: boolean;
       firstWorkerFailureAt: number;
       lastSyncFallbackAt?: number;
     }
@@ -1511,41 +1511,49 @@ export function buildIdleWorkHandler(
       }
       const prior = projects.get(projectId);
       const at = Date.now();
+      const settingsChanged =
+        prior !== undefined &&
+        (prior.retention !== cfg.pruning.retention ||
+          prior.maxStorage !== cfg.pruning.maxStorage);
       if (
         !prior ||
         at - prior.at >=
-          (prior.sizeScanComplete
+          (prior.workerProbeComplete
             ? TEMPORAL_PRUNE_INTERVAL_MS
             : TEMPORAL_PRUNE_RETRY_INTERVAL_MS) ||
-        prior.retention !== cfg.pruning.retention ||
-        prior.maxStorage !== cfg.pruning.maxStorage
+        settingsChanged
       ) {
         const attempt = {
           at,
           retention: cfg.pruning.retention,
           maxStorage: cfg.pruning.maxStorage,
-          sizeScanComplete: false,
-          firstWorkerFailureAt:
-            prior &&
-            !prior.sizeScanComplete &&
-            prior.retention === cfg.pruning.retention &&
-            prior.maxStorage === cfg.pruning.maxStorage
+          workerProbeComplete: false,
+          firstWorkerFailureAt: settingsChanged
+            ? at - TEMPORAL_PRUNE_SYNC_FALLBACK_MS
+            : prior && !prior.workerProbeComplete
               ? prior.firstWorkerFailureAt
               : at,
-          lastSyncFallbackAt: prior?.lastSyncFallbackAt,
+          lastSyncFallbackAt: settingsChanged
+            ? undefined
+            : prior?.lastSyncFallbackAt,
         };
         projects.set(projectId, attempt);
         try {
-          let { ttlDeleted, capDeleted, sizeScanComplete } =
-            await temporal.pruneIdle({
-              projectPath,
-              retentionDays: cfg.pruning.retention,
-              maxStorageMB: cfg.pruning.maxStorage,
-            });
+          const {
+            ttlDeleted: initialTtlDeleted,
+            capDeleted: initialCapDeleted,
+            sizeScanComplete: workerProbeComplete,
+          } = await temporal.pruneIdle({
+            projectPath,
+            retentionDays: cfg.pruning.retention,
+            maxStorageMB: cfg.pruning.maxStorage,
+          });
+          let ttlDeleted = initialTtlDeleted;
+          let capDeleted = initialCapDeleted;
           // Sustained worker failure must not leave the storage cap disabled.
           // One writer-side pass per hour can stall briefly in degraded mode.
           if (
-            !sizeScanComplete &&
+            !workerProbeComplete &&
             Date.now() - attempt.firstWorkerFailureAt >=
               TEMPORAL_PRUNE_SYNC_FALLBACK_MS &&
             (attempt.lastSyncFallbackAt === undefined ||
@@ -1553,22 +1561,17 @@ export function buildIdleWorkHandler(
                 TEMPORAL_PRUNE_SYNC_FALLBACK_MS)
           ) {
             attempt.lastSyncFallbackAt = Date.now();
-            let complete = true;
             const fallback = temporal.prune({
               projectPath,
               retentionDays: cfg.pruning.retention,
               maxStorageMB: cfg.pruning.maxStorage,
-              onMissingObject: () => {
-                complete = false;
-              },
             });
             ttlDeleted += fallback.ttlDeleted;
             capDeleted += fallback.capDeleted;
-            sizeScanComplete = complete;
           }
           if (projects.get(projectId) === attempt) {
-            attempt.sizeScanComplete = sizeScanComplete;
-            if (!sizeScanComplete) attempt.at = Date.now();
+            attempt.workerProbeComplete = workerProbeComplete;
+            if (!workerProbeComplete) attempt.at = Date.now();
           }
           if (ttlDeleted > 0 || capDeleted > 0) {
             log.info(
