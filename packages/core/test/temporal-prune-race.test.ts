@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { db, ensureProject } from "../src/db";
 import { registerSink, type LogSink } from "../src/log";
-import { prune } from "../src/temporal";
+import { prune, pruneIdle } from "../src/temporal";
 
 // #1001: the active db() connection is rebuilt by maintenance (overflow /
 // split / magnet) several times per run; an idle prune can race that window and
@@ -107,6 +107,64 @@ afterEach(() => {
 });
 
 describe("temporal.prune resilience to a db()-swap missing-table race (#1001)", () => {
+  test("an undistilled over-cap backlog never triggers a writer size scan", async () => {
+    const pid = ensureProject(PROJECT);
+    db()
+      .query(
+        `INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at, metadata)
+         VALUES (?, ?, 'sess', 'user', ?, 5, 0, ?, '{}')`,
+      )
+      .run(
+        "undistilled-over-cap",
+        pid,
+        "x".repeat(2 * 1024 * 1024),
+        Date.now(),
+      );
+    let sizeScans = 0;
+    registerSink({
+      ...passthroughSink,
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        if (sql.includes("SELECT SUM(LENGTH(content))")) sizeScans++;
+        return fn();
+      },
+    });
+
+    expect(
+      await pruneIdle({
+        projectPath: PROJECT,
+        retentionDays: 1,
+        maxStorageMB: 1,
+      }),
+    ).toEqual({ ttlDeleted: 0, capDeleted: 0, sizeScanComplete: true });
+    expect(sizeScans).toBe(1); // test-only in-process probe; no second writer scan
+    expect(temporalCount()).toBe(1);
+  });
+
+  test("idle pruning reports a skipped archived pass so the project is retried", async () => {
+    const arch = seedArchivedDistillation(10 * DAY);
+    registerSink(
+      throwingSink(
+        /SELECT id FROM distillations/,
+        new Error("no such table: distillations"),
+      ),
+    );
+    expect(
+      await pruneIdle({
+        projectPath: PROJECT,
+        retentionDays: 1,
+        maxStorageMB: 1,
+      }),
+    ).toMatchObject({ sizeScanComplete: false });
+    registerSink(passthroughSink);
+    expect(distillationExists(arch)).toBe(true);
+    await pruneIdle({
+      projectPath: PROJECT,
+      retentionDays: 1,
+      maxStorageMB: 1,
+    });
+    expect(distillationExists(arch)).toBe(false);
+  });
+
   test("a missing-object error in Pass 3 is swallowed; Passes 1-2 still commit", () => {
     seedDistilledMessage(10 * DAY); // older than retention → Pass 1 deletes
     const arch = seedArchivedDistillation(10 * DAY); // Pass 3 would delete it

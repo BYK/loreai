@@ -85,7 +85,7 @@ async function poolOrInProcess(
       return [];
     }
   } finally {
-    recordVecReadLatency(cohort, performance.now() - started);
+    recordVecReadLatency(cohort, performance.now() - started, spec.kind);
   }
 }
 

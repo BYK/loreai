@@ -115,7 +115,17 @@ export async function offloadAllOrTimeout(
   params: ReadParam[],
   options?: ReadPoolRequestOptions,
 ): Promise<unknown[] | ReadJobFailure> {
-  const res = await tryPoolRead({ sql, params, mode: "all" }, options);
+  const res = await tryPoolRead(
+    {
+      sql,
+      params,
+      mode: "all",
+      ...(options?.telemetryKind
+        ? { telemetryKind: options.telemetryKind }
+        : {}),
+    },
+    options,
+  );
   if (res === READ_JOB_TIMED_OUT || res === READ_JOB_PRESSURED) return res;
   if (res) return res.rows as unknown[];
   if (!inProcessReadFallbackForTest()) return READ_JOB_UNAVAILABLE;

@@ -21,6 +21,7 @@ import {
   ltm,
   DirectFsResolver,
   ensureProject,
+  db,
   latReader,
   log,
   config as loreConfig,
@@ -226,6 +227,28 @@ const consolidationCooldown = new Map<
  * cleared in a `finally`.
  */
 const consolidationInProgress = new Set<string>();
+
+/** Pruning is project-wide, but idle handlers run once per session. Key by the
+ * live connection so a database swap cannot inherit a prior project's gate.
+ * Arm before awaiting the background size probe to coalesce concurrent idles.
+ */
+export const TEMPORAL_PRUNE_INTERVAL_MS = 15 * 60_000;
+const TEMPORAL_PRUNE_RETRY_INTERVAL_MS = 60_000;
+const TEMPORAL_PRUNE_SYNC_FALLBACK_MS = 60 * 60_000;
+const temporalPruneGate = new WeakMap<
+  object,
+  Map<
+    string,
+    {
+      at: number;
+      retention: number;
+      maxStorage: number;
+      workerProbeComplete: boolean;
+      firstWorkerFailureAt: number;
+      lastSyncFallbackAt?: number;
+    }
+  >
+>();
 
 /** 1 hour cooldown before retrying consolidation with the same entry count. */
 export const CONSOLIDATION_COOLDOWN_MS = 60 * 60 * 1000;
@@ -1480,15 +1503,85 @@ export function buildIdleWorkHandler(
 
     // 5. Temporal pruning
     try {
-      const { ttlDeleted, capDeleted } = temporal.prune({
-        projectPath,
-        retentionDays: cfg.pruning.retention,
-        maxStorageMB: cfg.pruning.maxStorage,
-      });
-      if (ttlDeleted > 0 || capDeleted > 0) {
-        log.info(
-          `pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
-        );
+      const connection = db();
+      let projects = temporalPruneGate.get(connection);
+      if (!projects) {
+        projects = new Map();
+        temporalPruneGate.set(connection, projects);
+      }
+      const prior = projects.get(projectId);
+      const at = Date.now();
+      const settingsChanged =
+        prior !== undefined &&
+        (prior.retention !== cfg.pruning.retention ||
+          prior.maxStorage !== cfg.pruning.maxStorage);
+      if (
+        !prior ||
+        at - prior.at >=
+          (prior.workerProbeComplete
+            ? TEMPORAL_PRUNE_INTERVAL_MS
+            : TEMPORAL_PRUNE_RETRY_INTERVAL_MS) ||
+        settingsChanged
+      ) {
+        const attempt = {
+          at,
+          retention: cfg.pruning.retention,
+          maxStorage: cfg.pruning.maxStorage,
+          workerProbeComplete: false,
+          firstWorkerFailureAt: settingsChanged
+            ? at - TEMPORAL_PRUNE_SYNC_FALLBACK_MS
+            : prior && !prior.workerProbeComplete
+              ? prior.firstWorkerFailureAt
+              : at,
+          lastSyncFallbackAt: settingsChanged
+            ? undefined
+            : prior?.lastSyncFallbackAt,
+        };
+        projects.set(projectId, attempt);
+        try {
+          const {
+            ttlDeleted: initialTtlDeleted,
+            capDeleted: initialCapDeleted,
+            sizeScanComplete: workerProbeComplete,
+          } = await temporal.pruneIdle({
+            projectPath,
+            retentionDays: cfg.pruning.retention,
+            maxStorageMB: cfg.pruning.maxStorage,
+          });
+          let ttlDeleted = initialTtlDeleted;
+          let capDeleted = initialCapDeleted;
+          // Sustained worker failure must not leave the storage cap disabled.
+          // One writer-side pass per hour can stall briefly in degraded mode.
+          if (
+            !workerProbeComplete &&
+            Date.now() - attempt.firstWorkerFailureAt >=
+              TEMPORAL_PRUNE_SYNC_FALLBACK_MS &&
+            (attempt.lastSyncFallbackAt === undefined ||
+              Date.now() - attempt.lastSyncFallbackAt >=
+                TEMPORAL_PRUNE_SYNC_FALLBACK_MS)
+          ) {
+            attempt.lastSyncFallbackAt = Date.now();
+            const fallback = temporal.prune({
+              projectPath,
+              retentionDays: cfg.pruning.retention,
+              maxStorageMB: cfg.pruning.maxStorage,
+            });
+            ttlDeleted += fallback.ttlDeleted;
+            capDeleted += fallback.capDeleted;
+          }
+          if (projects.get(projectId) === attempt) {
+            attempt.workerProbeComplete = workerProbeComplete;
+            if (!workerProbeComplete) attempt.at = Date.now();
+          }
+          if (ttlDeleted > 0 || capDeleted > 0) {
+            log.info(
+              `pruned temporal messages: ${ttlDeleted} by TTL, ${capDeleted} by size cap`,
+            );
+          }
+        } catch (error) {
+          if (projects.get(projectId) === attempt) attempt.at = Date.now();
+          throw error;
+        }
       }
     } catch (e) {
       log.error("idle pruning error:", e);

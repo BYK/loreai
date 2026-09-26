@@ -87,10 +87,10 @@ describe("vec-latency rolling telemetry", () => {
     const seen: VecReadLatencySample[] = [];
     setVecReadLatencyHook((s) => seen.push(s));
     recordVecReadLatency("blob-js", 12);
-    recordVecReadLatency("vec0", 34);
+    recordVecReadLatency("vec0", 34, "temporal");
     expect(seen).toEqual([
       { readMode: "blob-js", elapsedMs: 12 },
-      { readMode: "vec0", elapsedMs: 34 },
+      { readMode: "vec0", elapsedMs: 34, kind: "temporal" },
     ]);
   });
 

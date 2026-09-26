@@ -19,11 +19,14 @@
 // SDK coupling (mirrors read-telemetry.ts).
 
 import type { VecReadMode } from "./db/vec-store";
+import type { VectorQuerySpec } from "./vector-query";
 
 /** One recorded vector KNN read. */
 export interface VecReadLatencySample {
   /** (storage layout × vec availability) cohort the read ran under. */
   readMode: VecReadMode;
+  /** Bounded logical table/query kind; never contains a project or user ID. */
+  kind?: VectorQuerySpec["kind"];
   /** Wall-clock latency of the whole read job (pool queue + IPC + KNN, or the
    *  in-process fallback scan), in milliseconds. */
   elapsedMs: number;
@@ -66,6 +69,7 @@ export function setVecReadLatencyHook(
 export function recordVecReadLatency(
   readMode: VecReadMode,
   elapsedMs: number,
+  kind?: VectorQuerySpec["kind"],
 ): void {
   if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return;
   let buf = windows.get(readMode);
@@ -80,7 +84,7 @@ export function recordVecReadLatency(
   const h = hook;
   if (h) {
     try {
-      h({ readMode, elapsedMs });
+      h({ readMode, elapsedMs, ...(kind ? { kind } : {}) });
     } catch {
       // Telemetry must never break the read path.
     }

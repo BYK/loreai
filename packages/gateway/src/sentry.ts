@@ -664,6 +664,7 @@ export function setupReadPoolTelemetryCapture(): void {
     try {
       const attributes = {
         family: sample.family,
+        kind: sample.kind,
         priority: sample.priority,
         outcome: sample.outcome,
       };
@@ -753,7 +754,7 @@ export function setupVecReadLatencyCapture(): void {
     try {
       Sentry.metrics.distribution("lore.vec.read_latency_ms", s.elapsedMs, {
         unit: "millisecond",
-        attributes: vecCohortTags(s.readMode),
+        attributes: { ...vecCohortTags(s.readMode), kind: s.kind ?? "unknown" },
       });
     } catch {
       // Telemetry must never break the read path.

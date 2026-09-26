@@ -1188,6 +1188,10 @@ export function prune(input: {
   projectPath: string;
   retentionDays: number;
   maxStorageMB: number;
+  /** Idle maintenance runs this pass only after its off-thread size probe. */
+  skipSizeCap?: boolean;
+  /** Idle maintenance uses this to retry a pass skipped during DB replacement. */
+  onMissingObject?: () => void;
 }): PruneResult {
   // Resolving the connection and project row can itself race the swap window
   // (e.g. `no such table: projects` from ensureProject's lookup); treat that the
@@ -1199,6 +1203,7 @@ export function prune(input: {
     pid = ensureProject(input.projectPath);
   } catch (e) {
     if (!isMissingObjectError(e)) throw e;
+    input.onMissingObject?.();
     log.info(
       "temporal.prune setup (db/ensureProject) skipped — object missing during db maintenance window (transient):",
       e,
@@ -1260,50 +1265,52 @@ export function prune(input: {
   // limit and if so, evict the oldest distilled messages until under the cap.
   let capDeleted = 0;
   try {
-    const maxBytes = input.maxStorageMB * 1024 * 1024;
-    const totalBytes =
-      (
-        database
-          .query(
-            "SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?",
-          )
-          .get(pid) as { b: number | null }
-      ).b ?? 0;
-
-    if (totalBytes > maxBytes) {
-      // Collect oldest distilled messages until we've accounted for enough bytes
-      // to drop below the cap. Delete them in a single batch.
-      const candidates = database
-        .query(
-          // Evict by LOCAL residency (COALESCE(restored_at, created_at)) so a freshly
-          // restored message isn't the first evicted for its old origin created_at (#826/D).
-          "SELECT id, LENGTH(content) as size FROM temporal_messages WHERE project_id = ? AND distilled = 1 ORDER BY COALESCE(restored_at, created_at) ASC",
-        )
-        .all(pid) as { id: string; size: number }[];
-
-      const toDelete: string[] = [];
-      let freed = 0;
-      const excess = totalBytes - maxBytes;
-      for (const row of candidates) {
-        if (freed >= excess) break;
-        toDelete.push(row.id);
-        freed += row.size;
-      }
-
-      if (toDelete.length) {
-        const placeholders = toDelete.map(() => "?").join(",");
-        withSyncApplying(() => {
+    if (!input.skipSizeCap) {
+      const maxBytes = input.maxStorageMB * 1024 * 1024;
+      const totalBytes =
+        (
           database
             .query(
-              `DELETE FROM temporal_messages WHERE id IN (${placeholders})`,
+              "SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?",
             )
-            .run(...toDelete);
-          clearPrunedSyncState(database, "temporal_messages", toDelete);
-        });
-        // Drop the evicted messages' vec0 chunks too (see Pass 1 rationale).
-        deleteEmbeddings(database, "temporal", toDelete);
-        // toDelete.length is the accurate count — result.changes is inflated by FTS triggers.
-        capDeleted = toDelete.length;
+            .get(pid) as { b: number | null }
+        ).b ?? 0;
+
+      if (totalBytes > maxBytes) {
+        // Collect oldest distilled messages until we've accounted for enough bytes
+        // to drop below the cap. Delete them in a single batch.
+        const candidates = database
+          .query(
+            // Evict by LOCAL residency (COALESCE(restored_at, created_at)) so a freshly
+            // restored message isn't the first evicted for its old origin created_at (#826/D).
+            "SELECT id, LENGTH(content) as size FROM temporal_messages WHERE project_id = ? AND distilled = 1 ORDER BY COALESCE(restored_at, created_at) ASC",
+          )
+          .all(pid) as { id: string; size: number }[];
+
+        const toDelete: string[] = [];
+        let freed = 0;
+        const excess = totalBytes - maxBytes;
+        for (const row of candidates) {
+          if (freed >= excess) break;
+          toDelete.push(row.id);
+          freed += row.size;
+        }
+
+        if (toDelete.length) {
+          const placeholders = toDelete.map(() => "?").join(",");
+          withSyncApplying(() => {
+            database
+              .query(
+                `DELETE FROM temporal_messages WHERE id IN (${placeholders})`,
+              )
+              .run(...toDelete);
+            clearPrunedSyncState(database, "temporal_messages", toDelete);
+          });
+          // Drop the evicted messages' vec0 chunks too (see Pass 1 rationale).
+          deleteEmbeddings(database, "temporal", toDelete);
+          // toDelete.length is the accurate count — result.changes is inflated by FTS triggers.
+          capDeleted = toDelete.length;
+        }
       }
     }
   } catch (e) {
@@ -1350,9 +1357,71 @@ export function prune(input: {
 
   // A clean tick (no missing-object skip) clears the consecutive-skip streak so
   // only a *sustained* run of skips escalates to warn.
-  if (sawMissingObject) noteMissingObjectTick();
-  else consecutiveMissingObjectSkipTicks = 0;
+  if (sawMissingObject) {
+    input.onMissingObject?.();
+    noteMissingObjectTick();
+  } else consecutiveMissingObjectSkipTicks = 0;
   return { ttlDeleted, capDeleted };
+}
+
+/** Idle pruning: keep the routine full-content size scan off the gateway
+ * thread. An over-cap result is rechecked by prune() on the writer connection
+ * before deleting anything, since messages may have changed while we waited.
+ * A failed or pressured worker defers only size-cap eviction to the next pass.
+ */
+export async function pruneIdle(input: {
+  projectPath: string;
+  retentionDays: number;
+  maxStorageMB: number;
+}): Promise<PruneResult & { sizeScanComplete: boolean }> {
+  const connection = db();
+  let firstComplete = true;
+  const first = prune({
+    ...input,
+    skipSizeCap: true,
+    onMissingObject: () => {
+      firstComplete = false;
+    },
+  });
+  if (!firstComplete) return { ...first, sizeScanComplete: false };
+  if (connection !== db()) return { ...first, sizeScanComplete: false };
+  let pid: string;
+  try {
+    pid = ensureProject(input.projectPath);
+  } catch (error) {
+    if (!isMissingObjectError(error)) throw error;
+    return { ...first, sizeScanComplete: false };
+  }
+  const rows = await offloadAllOrTimeout(
+    "SELECT SUM(LENGTH(content)) as b, MAX(distilled) as has_distilled FROM temporal_messages WHERE project_id = ?",
+    [pid],
+    { priority: "background", telemetryKind: "temporal-prune" },
+  );
+  if (isReadJobFailure(rows) || connection !== db())
+    return { ...first, sizeScanComplete: false };
+  const probe = rows[0] as
+    | { b: number | null; has_distilled: number | null }
+    | undefined;
+  const totalBytes = probe?.b ?? 0;
+  // No eligible rows means a writer-side scan could not evict anything.
+  // A newly distilled row will be picked up by the next idle pass.
+  if (totalBytes <= input.maxStorageMB * 1024 * 1024 || !probe?.has_distilled)
+    return { ...first, sizeScanComplete: true };
+  // Rare over-cap path: run the exact size check on the writer connection so
+  // an intervening delete or project move cannot evict too much. The TTL and
+  // archived passes are idempotent and should now find no work.
+  let finalComplete = true;
+  const final = prune({
+    ...input,
+    onMissingObject: () => {
+      finalComplete = false;
+    },
+  });
+  return {
+    ttlDeleted: first.ttlDeleted + final.ttlDeleted,
+    capDeleted: first.capDeleted + final.capDeleted,
+    sizeScanComplete: finalComplete,
+  };
 }
 
 /**

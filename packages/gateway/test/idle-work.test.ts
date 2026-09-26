@@ -36,9 +36,11 @@ import { resetPipelineState } from "../src/pipeline";
 import { compressBody } from "../src/cache-analytics";
 import {
   ltm,
+  temporal,
   embedding,
   loadSessionCosts,
   db,
+  config,
   ensureProject,
   setCacheSizeSnapshot,
   evaluateCacheStrategy,
@@ -381,6 +383,127 @@ describe("shouldDeferPrefixRewriteOnCoolBust (#946 mid-flight defer)", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildIdleWorkHandler", () => {
+  test("prunes a shared project once across separate idle sessions", async () => {
+    const projectPath = makeProjectDir();
+    const prune = vi.spyOn(temporal, "pruneIdle");
+    try {
+      const handler = buildIdleWorkHandler(makeLLM());
+      await handler("idle-prune-first", makeSessionState({ projectPath }));
+      await handler("idle-prune-second", makeSessionState({ projectPath }));
+      expect(prune).toHaveBeenCalledTimes(1);
+    } finally {
+      prune.mockRestore();
+    }
+  });
+
+  test("backs off when the size probe has no read worker", async () => {
+    const projectPath = makeProjectDir();
+    const previous = process.env.LORE_DISABLE_VEC_WORKER;
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    const prune = vi.spyOn(temporal, "pruneIdle");
+    try {
+      const handler = buildIdleWorkHandler(makeLLM());
+      await handler(
+        "idle-prune-unavailable-1",
+        makeSessionState({ projectPath }),
+      );
+      await handler(
+        "idle-prune-unavailable-2",
+        makeSessionState({ projectPath }),
+      );
+      expect(prune).toHaveBeenCalledTimes(1);
+    } finally {
+      prune.mockRestore();
+      if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
+      else process.env.LORE_DISABLE_VEC_WORKER = previous;
+    }
+  });
+
+  test("runs a writer prune after sustained read-worker failure", async () => {
+    const projectPath = makeProjectDir();
+    const previous = process.env.LORE_DISABLE_VEC_WORKER;
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    const clock = vi.spyOn(Date, "now");
+    const start = Date.now();
+    const fallback = vi.spyOn(temporal, "prune");
+    const probe = vi.spyOn(temporal, "pruneIdle");
+    try {
+      const handler = buildIdleWorkHandler(makeLLM());
+      clock.mockReturnValue(start);
+      await handler("idle-prune-fallback-1", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 61 * 60_000);
+      await handler("idle-prune-fallback-2", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 62 * 60_000);
+      await handler("idle-prune-fallback-3", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 121 * 60_000);
+      await handler("idle-prune-fallback-4", makeSessionState({ projectPath }));
+      expect(
+        fallback.mock.calls.filter(([input]) => !input.skipSizeCap),
+      ).toHaveLength(2);
+      expect(probe).toHaveBeenCalledTimes(4);
+    } finally {
+      fallback.mockRestore();
+      probe.mockRestore();
+      clock.mockRestore();
+      if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
+      else process.env.LORE_DISABLE_VEC_WORKER = previous;
+    }
+  });
+
+  test("does not repeat a failed writer fallback every minute", async () => {
+    const projectPath = makeProjectDir();
+    const previous = process.env.LORE_DISABLE_VEC_WORKER;
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    const clock = vi.spyOn(Date, "now");
+    const start = Date.now();
+    const fallback = vi.spyOn(temporal, "prune").mockImplementation(() => {
+      throw new Error("writer unavailable");
+    });
+    try {
+      const handler = buildIdleWorkHandler(makeLLM());
+      clock.mockReturnValue(start);
+      await handler("idle-prune-error-1", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 61 * 60_000);
+      await handler("idle-prune-error-2", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 62 * 60_000);
+      await handler("idle-prune-error-3", makeSessionState({ projectPath }));
+      expect(fallback).toHaveBeenCalledTimes(1);
+    } finally {
+      fallback.mockRestore();
+      clock.mockRestore();
+      if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
+      else process.env.LORE_DISABLE_VEC_WORKER = previous;
+    }
+  });
+
+  test("rechecks a changed storage cap during a read-worker outage", async () => {
+    const projectPath = makeProjectDir();
+    const previous = process.env.LORE_DISABLE_VEC_WORKER;
+    process.env.LORE_DISABLE_VEC_WORKER = "1";
+    const cfg = config();
+    const previousCap = cfg.pruning.maxStorage;
+    const clock = vi.spyOn(Date, "now");
+    const start = Date.now();
+    const fallback = vi.spyOn(temporal, "prune");
+    try {
+      const handler = buildIdleWorkHandler(makeLLM());
+      clock.mockReturnValue(start);
+      await handler("idle-cap-change-1", makeSessionState({ projectPath }));
+      clock.mockReturnValue(start + 61 * 60_000);
+      await handler("idle-cap-change-2", makeSessionState({ projectPath }));
+      cfg.pruning.maxStorage = previousCap - 1;
+      clock.mockReturnValue(start + 62 * 60_000);
+      await handler("idle-cap-change-3", makeSessionState({ projectPath }));
+      expect(fallback).toHaveBeenCalledTimes(2);
+    } finally {
+      fallback.mockRestore();
+      clock.mockRestore();
+      cfg.pruning.maxStorage = previousCap;
+      if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
+      else process.env.LORE_DISABLE_VEC_WORKER = previous;
+    }
+  });
+
   test("runs local idle steps on an empty project without calling the LLM", async () => {
     const llm = makeLLM();
     const handler = buildIdleWorkHandler(llm);
