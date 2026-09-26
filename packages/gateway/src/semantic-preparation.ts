@@ -22,6 +22,7 @@ import type { GatewayMessage, GatewayRequest } from "./translate/types";
 type Stage =
   | "awaiting"
   | "fallback_snapshot"
+  | "fallback_bound"
   | "idle_resume"
   | "source_validation"
   | "conversion"

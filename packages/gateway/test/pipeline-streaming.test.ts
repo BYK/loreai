@@ -1115,9 +1115,10 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it.each([false, true])(
-    "forwards a complete large history when preparation times out (mixed provenance: %s)",
-    async (mixedProvenance) => {
+  it.each(["recall", "provenance", "oversized"] as const)(
+    "bounds a large history when preparation times out (%s)",
+    async (scenario) => {
+      const mixedProvenance = scenario === "provenance";
       const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
       process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
       const upstreamBodies: string[] = [];
@@ -1148,12 +1149,9 @@ describe("Pipeline — streaming responses", () => {
         const sessionHeaders = {
           "x-lore-session-id": "large-preparation-timeout",
         };
-        await (
-          await handleRequest(
-            makeResponsesRequest({ sessionHeaders }),
-            loadLocalConfig(),
-          )
-        ).text();
+        const primingRequest = makeResponsesRequest({ sessionHeaders });
+        primingRequest.model = "gpt-5.4-mini";
+        await (await handleRequest(primingRequest, loadLocalConfig())).text();
         await new Promise((resolve) => setImmediate(resolve));
         const state = [...getActiveSessions().values()].find(
           (candidate) =>
@@ -1219,19 +1217,42 @@ describe("Pipeline — streaming responses", () => {
         const request = makeResponsesRequest({
           sessionHeaders,
           messages: [
-            { role: "user", content: [{ type: "text", text: "begin" }] },
+            ...Array.from({ length: 16_383 }, (_, index) => ({
+              role: "user" as const,
+              content: [{ type: "text" as const, text: `history-${index}` }],
+            })),
             {
               role: "assistant",
               content: [{ type: "text", text: buildRecallMarker("secret") }],
             },
             ...(mixedProvenance ? [mixedMessage] : []),
-            ...Array.from({ length: 16_383 }, (_, index) => ({
-              role: "user" as const,
-              content: [{ type: "text" as const, text: `history-${index}` }],
-            })),
+            {
+              role: "user",
+              content: [
+                ...(mixedProvenance
+                  ? [
+                      {
+                        type: "tool_result" as const,
+                        toolUseId: "call_real",
+                        content: [
+                          { type: "text" as const, text: "file contents" },
+                        ],
+                      },
+                    ]
+                  : []),
+                {
+                  type: "text",
+                  text:
+                    scenario === "oversized"
+                      ? "x ".repeat(300_000)
+                      : "continue after history-16382",
+                },
+              ],
+            },
           ],
         });
-        stallFallback = !mixedProvenance;
+        request.model = "gpt-5.4-mini";
+        stallFallback = scenario === "recall";
         const pendingResponse = handleRequest(request, loadLocalConfig());
         if (stallFallback) {
           await fallbackEntered;
@@ -1245,23 +1266,33 @@ describe("Pipeline — streaming responses", () => {
           unblockFallback();
         }
         const response = await pendingResponse;
+        if (scenario === "oversized") {
+          expect(response.status).toBe(503);
+          expect(upstreamBodies).toHaveLength(0);
+          return;
+        }
         expect(response.status).toBe(200);
         expect(await response.text()).toContain("still working");
         expect(upstreamBodies).toHaveLength(1);
-        expect(upstreamBodies[0]).toContain("history-16382");
+        expect(upstreamBodies[0].includes('"text":"history-16382"')).toBe(true);
+        expect(upstreamBodies[0].includes('"text":"history-0"')).toBe(false);
         // Real preparation expands the marker in-place, but the emergency
         // forward must use the original transcript without the stored result.
-        expect(request.messages[1].content[0]).toMatchObject({
+        expect(request.messages[16_383].content[0]).toMatchObject({
           type: "tool_use",
           name: "recall",
         });
-        expect(upstreamBodies[0]).not.toContain("PRIVATE_LORE_RECALL_RESULT");
+        expect(upstreamBodies[0].includes("PRIVATE_LORE_RECALL_RESULT")).toBe(
+          false,
+        );
         if (mixedProvenance) {
-          expect(upstreamBodies[0]).not.toContain("lore_syn_probe");
-          expect(upstreamBodies[0]).toContain("call_real");
-          expect(upstreamBodies[0]).toContain("KEEP_ENCRYPTED_REASONING");
+          expect(upstreamBodies[0].includes("lore_syn_probe")).toBe(false);
+          expect(upstreamBodies[0].includes("call_real")).toBe(true);
+          expect(upstreamBodies[0].includes("KEEP_ENCRYPTED_REASONING")).toBe(
+            true,
+          );
         } else {
-          expect(JSON.stringify(request.messages.slice(1, 3))).toContain(
+          expect(JSON.stringify(request.messages.slice(16_383))).toContain(
             "PRIVATE_LORE_RECALL_RESULT",
           );
         }

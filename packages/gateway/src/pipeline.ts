@@ -12,6 +12,7 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
+import { boundFallbackHistory } from "./fallback-history";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -342,6 +343,7 @@ import {
   ensureModelDataReady,
   getModelEntrySync,
   getModelEntrySyncForProvider,
+  knownModelContextLimit,
   isModelDataLoaded,
   lookupProviderRoute,
 } from "./worker-model";
@@ -18712,14 +18714,43 @@ async function handleConversationTurn(
           (error instanceof ReadPreparationUnavailableError &&
             error.reason === "timeout"))
       ) {
-        log.warn(
-          `memory preparation timed out for ${requestSourceMessageCount(completeRequest)} messages; forwarding complete request without Lore injection`,
-        );
         try {
           // Apply only the safe ingress cleanup to the pristine copy. The
           // preparation copy may contain expanded recall results and other
           // Lore-generated content that was absent from the client's request.
           sanitizeCompleteRequestForFallback(completeRequest);
+        } catch {
+          throw new ReadPreparationUnavailableError("context", "timeout");
+        }
+        const originalCount = completeRequest.messages.length;
+        const providerID =
+          rollback.route?.providerID ??
+          extractProviderHeader(completeRequest.rawHeaders);
+        const knownContext = knownModelContextLimit(
+          providerID,
+          completeRequest.model,
+        );
+        const bounded =
+          knownContext === undefined
+            ? null
+            : preparationTiming.measure("fallback_bound", () =>
+                boundFallbackHistory(
+                  completeRequest,
+                  knownContext,
+                  getModelSpec(completeRequest.model, providerID).output,
+                  providerID,
+                ),
+              );
+        if (!bounded) {
+          log.warn(
+            "memory preparation timed out; no safe bounded upstream request",
+          );
+          throw new ReadPreparationUnavailableError("context", "timeout");
+        }
+        log.warn(
+          `memory preparation timed out for ${originalCount} messages; forwarding ${completeRequest.messages.length} bounded messages without Lore injection`,
+        );
+        try {
           rollback.release?.();
           rollback.release = undefined;
           return await handlePassthrough(
