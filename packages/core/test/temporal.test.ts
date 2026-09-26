@@ -700,6 +700,64 @@ describe("temporal", () => {
       expect(result.ttlDeleted).toBe(1); // both-old caught by TTL
       expect(result.capDeleted).toBeGreaterThan(0); // at least one of the large ones evicted
     });
+
+    test("idle pruning probes off the read path and rechecks an over-cap project before eviction", async () => {
+      const now = Date.now();
+      insertMessage(
+        "idle-cap-old",
+        "sess-idle",
+        1,
+        now - 2 * DAY_MS,
+        700 * 1024,
+      );
+      insertMessage("idle-cap-new", "sess-idle", 1, now - DAY_MS, 700 * 1024);
+
+      const result = await temporal.pruneIdle({
+        projectPath: PRUNE_PROJECT,
+        retentionDays: 120,
+        maxStorageMB: 1,
+      });
+
+      expect(result).toEqual({
+        ttlDeleted: 0,
+        capDeleted: 1,
+        sizeScanComplete: true,
+      });
+      const ids = db()
+        .query("SELECT id FROM temporal_messages WHERE project_id = ?")
+        .all(ensureProject(PRUNE_PROJECT)) as { id: string }[];
+      expect(ids.map((row) => row.id)).toEqual(["idle-cap-new"]);
+    });
+
+    test("an unavailable read worker defers the size cap without rescanning on the main thread", async () => {
+      const now = Date.now();
+      insertMessage("idle-ttl", "sess-idle", 1, now - 130 * DAY_MS);
+      insertMessage(
+        "idle-large",
+        "sess-idle",
+        1,
+        now - DAY_MS,
+        2 * 1024 * 1024,
+      );
+      const previous = process.env.LORE_DISABLE_VEC_WORKER;
+      process.env.LORE_DISABLE_VEC_WORKER = "1";
+      try {
+        expect(
+          await temporal.pruneIdle({
+            projectPath: PRUNE_PROJECT,
+            retentionDays: 120,
+            maxStorageMB: 1,
+          }),
+        ).toEqual({ ttlDeleted: 1, capDeleted: 0, sizeScanComplete: false });
+      } finally {
+        if (previous === undefined) delete process.env.LORE_DISABLE_VEC_WORKER;
+        else process.env.LORE_DISABLE_VEC_WORKER = previous;
+      }
+      const ids = db()
+        .query("SELECT id FROM temporal_messages WHERE project_id = ?")
+        .all(ensureProject(PRUNE_PROJECT)) as { id: string }[];
+      expect(ids.map((row) => row.id)).toEqual(["idle-large"]);
+    });
   });
 
   describe("ftsQuery sanitization", () => {

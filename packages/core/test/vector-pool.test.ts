@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { close, db } from "../src/db";
+import { close, db, ensureProject } from "../src/db";
+import { pruneIdle } from "../src/temporal";
 import {
   _resetVectorPoolForTest,
   _setTestVectorWorkerFactory,
@@ -983,6 +984,7 @@ describe("bounded read-pool admission (#1739)", () => {
     vi.useFakeTimers();
     const samples: Array<{
       outcome: string;
+      kind: string;
       pendingCount: number;
       oldestPendingMs: number;
       queueMs?: number;
@@ -1012,6 +1014,7 @@ describe("bounded read-pool admission (#1739)", () => {
         sample.queueMs > 0,
     );
     expect(started?.queueMs).toBeGreaterThan(0);
+    expect(samples.every((sample) => sample.kind === "sql")).toBe(true);
     await vi.advanceTimersByTimeAsync(20);
     posted[2].worker.replyRead(posted[2].id, []);
     expect(
@@ -1022,6 +1025,55 @@ describe("bounded read-pool admission (#1739)", () => {
     await queued;
     shutdownVectorPool();
     await Promise.all(held);
+  });
+
+  it("labels the background pruning read without including SQL in telemetry", async () => {
+    const kinds: string[] = [];
+    setReadPoolTelemetryHook((sample) => kinds.push(sample.kind));
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) =>
+        worker.replyRead(msg.id, [{ b: 0 }]),
+      ),
+    );
+    expect(
+      await tryPoolRead(
+        { ...job("prune"), telemetryKind: "temporal-prune" },
+        { priority: "background" },
+      ),
+    ).toEqual({ rows: [{ b: 0 }] });
+    expect(kinds).toEqual([
+      "temporal-prune",
+      "temporal-prune",
+      "temporal-prune",
+    ]);
+  });
+
+  it("dispatches the idle size scan to the background read worker", async () => {
+    const projectPath = `/tmp/idle-prune-worker-${crypto.randomUUID()}`;
+    const pid = ensureProject(projectPath);
+    const posted: ReadJobSpec[] = [];
+    const priorities: string[] = [];
+    setReadPoolTelemetryHook((sample) => {
+      if (sample.kind === "temporal-prune") priorities.push(sample.priority);
+    });
+    _setTestVectorWorkerFactory(
+      factoryReturningRead((worker, msg) => {
+        posted.push(msg.spec);
+        worker.replyRead(msg.id, [{ b: 0 }]);
+      }),
+    );
+    expect(
+      await pruneIdle({ projectPath, retentionDays: 120, maxStorageMB: 1 }),
+    ).toEqual({ ttlDeleted: 0, capDeleted: 0, sizeScanComplete: true });
+    expect(posted).toEqual([
+      {
+        sql: "SELECT SUM(LENGTH(content)) as b FROM temporal_messages WHERE project_id = ?",
+        params: [pid],
+        mode: "all",
+        telemetryKind: "temporal-prune",
+      },
+    ]);
+    expect(priorities).toEqual(["background", "background", "background"]);
   });
 
   it("keeps a running aborted job charged until its reply, then serves the next job once", async () => {

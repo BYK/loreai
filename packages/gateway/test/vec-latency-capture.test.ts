@@ -65,7 +65,7 @@ describe("vector read-latency Sentry capture (#1065)", () => {
 
   it("forwards each sample as a cohort-tagged distribution", () => {
     const hook = installAndGetHook();
-    hook({ readMode: "vec0", elapsedMs: 12 });
+    hook({ readMode: "vec0", elapsedMs: 12, kind: "temporal" });
 
     const calls = vi.mocked(Sentry.metrics.distribution).mock.calls;
     const dist = calls.find((c) => c[0] === "lore.vec.read_latency_ms");
@@ -80,12 +80,13 @@ describe("vector read-latency Sentry capture (#1065)", () => {
       read_mode: "vec0",
       storage_mode: "vec0",
       vec_available: "true",
+      kind: "temporal",
     });
   });
 
   it("tags a degraded read distinctly from a healthy vec0 read", () => {
     const hook = installAndGetHook();
-    hook({ readMode: "degraded", elapsedMs: 9000 });
+    hook({ readMode: "degraded", elapsedMs: 9000, kind: "knowledge" });
     const dist = vi
       .mocked(Sentry.metrics.distribution)
       .mock.calls.find((c) => c[0] === "lore.vec.read_latency_ms");
@@ -95,6 +96,7 @@ describe("vector read-latency Sentry capture (#1065)", () => {
       read_mode: "degraded",
       storage_mode: "vec0",
       vec_available: "false",
+      kind: "knowledge",
     });
   });
 

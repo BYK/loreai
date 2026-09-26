@@ -110,6 +110,7 @@ const FOREGROUND_WEIGHT = 4;
 export type ReadPoolPriority = "foreground" | "background";
 export interface ReadPoolRequestOptions {
   priority?: ReadPoolPriority;
+  telemetryKind?: ReadJobSpec["telemetryKind"];
   /** Abort a queued request before dispatch. Running SQL keeps its worker slot
    * until it finishes or its deadline retires the worker. */
   signal?: AbortSignal;
@@ -125,6 +126,11 @@ export interface ReadPoolStats {
 
 export interface ReadPoolTelemetry extends ReadPoolStats {
   family: "read" | "search";
+  /** Bounded logical query kind, or "sql" for a generic read job. */
+  kind:
+    | VectorQuerySpec["kind"]
+    | "sql"
+    | NonNullable<ReadJobSpec["telemetryKind"]>;
   priority: ReadPoolPriority;
   outcome:
     | "admitted"
@@ -323,6 +329,13 @@ function emitPoolTelemetry(
     readPoolTelemetryHook({
       ...readPoolStats(),
       family: p.message.type === "search" ? "search" : "read",
+      kind:
+        p.message.type === "search"
+          ? p.message.spec.kind
+          : p.message.type === "read" &&
+              p.message.spec.telemetryKind === "temporal-prune"
+            ? "temporal-prune"
+            : "sql",
       priority: p.priority,
       outcome,
       queueMs:
@@ -447,6 +460,9 @@ function snapshotMessage(message: VectorWorkerInbound): VectorWorkerInbound {
       spec: {
         sql: message.spec.sql,
         mode: message.spec.mode,
+        ...(message.spec.telemetryKind === "temporal-prune"
+          ? { telemetryKind: "temporal-prune" as const }
+          : {}),
         params: message.spec.params.map((param) =>
           param instanceof Uint8Array ? new Uint8Array(param) : param,
         ),
