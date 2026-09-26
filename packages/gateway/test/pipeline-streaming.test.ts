@@ -1115,7 +1115,7 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
-  it.each(["recall", "provenance", "oversized"] as const)(
+  it.each(["recall", "provenance", "oversized", "headerless"] as const)(
     "bounds a large history when preparation times out (%s)",
     async (scenario) => {
       const mixedProvenance = scenario === "provenance";
@@ -1252,6 +1252,10 @@ describe("Pipeline — streaming responses", () => {
           ],
         });
         request.model = "gpt-5.4-mini";
+        if (scenario === "headerless") {
+          delete request.rawHeaders["x-lore-provider"];
+          delete request.rawHeaders["x-lore-upstream-url"];
+        }
         stallFallback = scenario === "recall";
         const pendingResponse = handleRequest(request, loadLocalConfig());
         if (stallFallback) {

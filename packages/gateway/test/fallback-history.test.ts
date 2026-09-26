@@ -57,9 +57,9 @@ it("drops older turns within a smaller model budget while retaining tool pairs a
   );
   const input = request(history);
   const result = boundFallbackHistory(input, 10_000, 1000);
-  expect(result).not.toBeNull();
-  expect(result?.removed).toBeGreaterThan(0);
-  expect(result?.estimatedTokens).toBeLessThanOrEqual(result?.budget);
+  if (!result) throw new Error("expected a safe bounded history");
+  expect(result.removed).toBeGreaterThan(0);
+  expect(result.estimatedTokens).toBeLessThanOrEqual(result.budget);
   expect(input.messages[0].role).toBe("user");
   expect(
     input.messages.some((m) => JSON.stringify(m).includes("older-0")),

@@ -6712,6 +6712,34 @@ type ResolvedRequestUpstreamRoute = {
   bedrockMantle: boolean;
 };
 
+/** A headerless model route identifies a provider only when its final URL
+ * matches that provider's built-in destination, without a caller override. */
+function canonicalModelRouteProviderID(
+  route: ResolvedRequestUpstreamRoute | undefined,
+): string | undefined {
+  if (
+    !route?.modelRoute ||
+    route.providerID ||
+    route.headerUpstream ||
+    route.providerRoute ||
+    route.effectiveUpstreamBase !== route.modelRoute.url
+  )
+    return undefined;
+  const canonicalProviders = [
+    "openai",
+    "anthropic",
+    "deepseek",
+    "xai",
+    "mistral",
+    "google",
+    "nvidia",
+  ] as const;
+  return canonicalProviders.find(
+    (providerID) =>
+      resolveProviderRoute(providerID)?.url === route.modelRoute?.url,
+  );
+}
+
 /** OpenCode Zen may append an empty choice frame after finish_reason. */
 function isOpenCodeZenOpenAIStream(
   route: ResolvedRequestUpstreamRoute,
@@ -18725,6 +18753,7 @@ async function handleConversationTurn(
         const originalCount = completeRequest.messages.length;
         const providerID =
           rollback.route?.providerID ??
+          canonicalModelRouteProviderID(rollback.route) ??
           extractProviderHeader(completeRequest.rawHeaders);
         const knownContext = knownModelContextLimit(
           providerID,
