@@ -37,6 +37,7 @@ import {
   setupReadPoolTelemetryCapture,
   setupRecallContinuationFailureCapture,
   setupPrincipalTransportFailureCapture,
+  setupPrincipalProtocolFailureCapture,
   setupVecReadLatencyCapture,
 } from "./sentry";
 import { cancelAndReleaseReader, readStreamChunk } from "./stream/anthropic";
@@ -140,6 +141,7 @@ export async function startServer(
   // Classify principal Responses body failures using fixed transport, stage,
   // and recovery outcomes only. No provider or request content is captured.
   setupPrincipalTransportFailureCapture();
+  setupPrincipalProtocolFailureCapture();
 
   // Shared fetch handler for all server instances. Access policy and routing
   // live in the Hono app (`app.ts`); the bridge only supplies socket metadata.

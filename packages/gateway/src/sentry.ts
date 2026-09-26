@@ -19,6 +19,10 @@ import {
   setPrincipalTransportFailureHook,
   type PrincipalTransportFailureSample,
 } from "./principal-transport-failure";
+import {
+  setPrincipalProtocolFailureHook,
+  type PrincipalProtocolFailureSample,
+} from "./principal-protocol-failure";
 
 // ---------------------------------------------------------------------------
 // Scope enrichment
@@ -812,6 +816,34 @@ export function setupPrincipalTransportFailureCapture(): void {
       }
     },
   );
+}
+
+/** Report parser failures using fixed fields, never a provider error or SSE body. */
+export function setupPrincipalProtocolFailureCapture(): void {
+  setPrincipalProtocolFailureHook((sample: PrincipalProtocolFailureSample) => {
+    if (!Sentry.isInitialized()) return;
+    try {
+      const currentScope = new Sentry.Scope();
+      const isolationScope = new Sentry.Scope();
+      currentScope.setClient(Sentry.getClient());
+      Sentry.captureEvent({
+        level: "warning",
+        message: "Responses principal protocol failed",
+        fingerprint: [
+          "responses-principal-protocol",
+          sample.phase,
+          sample.reason,
+        ],
+        contexts: { responses_principal_protocol: sample },
+        sdkProcessingMetadata: {
+          capturedSpanScope: currentScope,
+          capturedSpanIsolationScope: isolationScope,
+        },
+      });
+    } catch {
+      // Telemetry never affects the response path.
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

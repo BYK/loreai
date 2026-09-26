@@ -21,6 +21,11 @@ import {
   setPrincipalTransportFailureHook,
   type PrincipalTransportFailureSample,
 } from "../src/principal-transport-failure";
+import {
+  reportPrincipalProtocolFailure,
+  setPrincipalProtocolFailureHook,
+  type PrincipalProtocolFailureSample,
+} from "../src/principal-protocol-failure";
 import type { GatewayResponse } from "../src/translate/types";
 
 const silentLogSink = {
@@ -33,6 +38,7 @@ const silentLogSink = {
 afterEach(() => {
   setRecallContinuationFailureHook(undefined);
   setPrincipalTransportFailureHook(undefined);
+  setPrincipalProtocolFailureHook(undefined);
   log.registerSink(silentLogSink);
 });
 
@@ -893,8 +899,10 @@ describe("streamResponsesRecallAware", () => {
 
   test("rejects an SSE event name that disagrees with the payload type", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
+    const protocol: PrincipalProtocolFailureSample[] = [];
     const errors: string[] = [];
     setRecallContinuationFailureHook((category) => failures.push(category));
+    setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
     log.registerSink({
       info: () => {},
       warn: () => {},
@@ -923,8 +931,37 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_GATEWAY_ERROR);
     expect(out).not.toContain(PUBLIC_RECALL_ERROR);
     expect(failures).toEqual([]);
+    expect(protocol).toEqual([
+      { phase: "decode", event: "created", reason: "payload_type_mismatch" },
+    ]);
     expect(errors).toEqual([
-      "openai-responses recall-aware stream failed category=principal_protocol",
+      "openai-responses recall-aware stream failed category=principal_protocol phase=decode event=created reason=payload_type_mismatch",
+    ]);
+  });
+
+  test("does not report arbitrary protocol diagnostics", () => {
+    const samples: PrincipalProtocolFailureSample[] = [];
+    setPrincipalProtocolFailureHook((sample) => samples.push(sample));
+    reportPrincipalProtocolFailure({
+      phase: "private request text" as PrincipalProtocolFailureSample["phase"],
+      event: "created",
+      reason: "other",
+    });
+    reportPrincipalProtocolFailure({
+      phase: "decode",
+      event:
+        "private upstream event" as PrincipalProtocolFailureSample["event"],
+      reason: "other",
+    });
+    expect(samples).toEqual([]);
+    reportPrincipalProtocolFailure({
+      phase: "decode",
+      event: "created",
+      reason: "other",
+      private_message: "secret\nforged-log-line",
+    } as PrincipalProtocolFailureSample);
+    expect(samples).toEqual([
+      { phase: "decode", event: "created", reason: "other" },
     ]);
   });
 
@@ -1696,6 +1733,8 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("rejects terminal output changing streamed identity", async () => {
+    const protocol: PrincipalProtocolFailureSample[] = [];
+    setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_terminal_identity", "gpt-5.6-terra"),
@@ -1725,6 +1764,13 @@ describe("streamResponsesRecallAware", () => {
       },
     );
     expect(await drain(client)).toContain("response.failed");
+    expect(protocol).toEqual([
+      {
+        phase: "terminal",
+        event: "terminal",
+        reason: "terminal_output_changed",
+      },
+    ]);
   });
 
   test("rejects an unknown public incomplete reason", async () => {
@@ -2514,6 +2560,8 @@ describe("streamResponsesRecallAware", () => {
 
   test("rejects a terminal-only principal reasoning summary before recall execution", async () => {
     const privateSummary = "private terminal-only principal summary";
+    const protocol: PrincipalProtocolFailureSample[] = [];
+    setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
     const args = JSON.stringify({ query: "must not execute" });
     let recalls = 0;
     let followUps = 0;
@@ -2577,6 +2625,13 @@ describe("streamResponsesRecallAware", () => {
     expect(output).toContain("response.failed");
     expect(output).not.toContain(privateSummary);
     expect(output).not.toContain("must not execute");
+    expect(protocol).toEqual([
+      {
+        phase: "terminal",
+        event: "terminal",
+        reason: "reasoning_lifecycle",
+      },
+    ]);
   });
 
   test("rejects a terminal-only continuation reasoning summary before nested recall execution", async () => {
@@ -5599,6 +5654,8 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test("rejects content_part.done changing initial part content", async () => {
+    const protocol: PrincipalProtocolFailureSample[] = [];
+    setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_part_initial_changed", "gpt-5.6-terra"),
@@ -5615,12 +5672,6 @@ describe("streamResponsesRecallAware", () => {
           item_id: "msg_part_initial_changed",
           content_index: 0,
           part: { type: "output_text", text: "secret" },
-        }),
-        sseEvent("response.output_text.done", {
-          output_index: 0,
-          item_id: "msg_part_initial_changed",
-          content_index: 0,
-          text: "safe",
         }),
         sseEvent("response.content_part.done", {
           output_index: 0,
@@ -5649,6 +5700,9 @@ describe("streamResponsesRecallAware", () => {
     );
 
     expect(await drain(client)).toContain("response.failed");
+    expect(protocol).toContainEqual(
+      expect.objectContaining({ event: "content_part" }),
+    );
   });
 
   test("rejects finalized reasoning that contradicts summary deltas", async () => {
@@ -7467,7 +7521,9 @@ describe("streamResponsesRecallAware", () => {
         delta: "summary",
       }),
     },
-  ])("rejects $name", async ({ item, event }) => {
+  ])("rejects $name", async ({ name, item, event }) => {
+    const protocol: PrincipalProtocolFailureSample[] = [];
+    setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_wrong_item_type", "gpt-5.6-terra"),
@@ -7484,6 +7540,11 @@ describe("streamResponsesRecallAware", () => {
       },
     );
     expect(await drain(client)).toContain("response.failed");
+    expect(protocol).toContainEqual(
+      expect.objectContaining({
+        event: name === "refusal on a function call" ? "refusal" : "reasoning",
+      }),
+    );
   });
 
   test("rejects a recall item missing output_item.done", async () => {

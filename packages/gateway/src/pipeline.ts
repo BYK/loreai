@@ -399,6 +399,11 @@ import {
 } from "./recall-continuation-failure";
 import { reportPrincipalTransportFailure } from "./principal-transport-failure";
 import {
+  reportPrincipalProtocolFailure,
+  trackResponsesReadBoundary,
+  type PrincipalProtocolFailureSample,
+} from "./principal-protocol-failure";
+import {
   recordConversationCost,
   updateShadowContext,
   recordWarmupHit,
@@ -11717,6 +11722,109 @@ export function streamResponsesRecallAware(
           | "principal_unexpected";
         let principalFailureCategory: PrincipalFailureCategory =
           "principal_unexpected";
+        // Keep diagnostics independent of event payloads: function arguments,
+        // reasoning ciphertext and upstream error text can contain user data.
+        let principalPhase: PrincipalProtocolFailureSample["phase"] = "setup";
+        let principalEventKind: PrincipalProtocolFailureSample["event"] =
+          "none";
+        const principalEventKindFor = (
+          event: string,
+        ): PrincipalProtocolFailureSample["event"] => {
+          if (event === "response.created") return "created";
+          if (event === "response.in_progress") return "in_progress";
+          if (
+            event === "response.output_item.added" ||
+            event === "response.output_item.done"
+          )
+            return "output_item";
+          if (event.startsWith("response.function_call_arguments."))
+            return "arguments";
+          if (event.startsWith("response.reasoning_")) return "reasoning";
+          if (event.startsWith("response.output_text.")) return "output_text";
+          if (event.startsWith("response.content_part.")) return "content_part";
+          if (event.startsWith("response.refusal.")) return "refusal";
+          if (
+            event === "response.completed" ||
+            event === "response.done" ||
+            event === "response.failed" ||
+            event === "response.incomplete"
+          )
+            return "terminal";
+          if (event === "codex.rate_limits") return "quota";
+          return "other";
+        };
+        const principalProtocolReason = (
+          error: unknown,
+        ): PrincipalProtocolFailureSample["reason"] => {
+          let message: string;
+          try {
+            if (!(error instanceof Error) || typeof error.message !== "string")
+              return "other";
+            message = error.message;
+          } catch {
+            return "other";
+          }
+          if (message.startsWith("Responses payload type does not match "))
+            return "payload_type_mismatch";
+          if (message.startsWith("malformed JSON in Responses event "))
+            return "malformed_json";
+          if (message === "recall principal returned response.failed")
+            return "upstream_failed";
+          if (message === "incomplete recall principal cannot execute recall")
+            return "upstream_incomplete";
+          if (
+            message.startsWith("Responses output_item.done changed reasoning ")
+          )
+            return "reasoning_item_mismatch";
+          if (
+            message.startsWith(
+              "Responses stream ended with provisional reasoning ",
+            )
+          )
+            return "provisional_reasoning";
+          if (message === "Responses terminal output changed streamed item")
+            return "terminal_output_changed";
+          if (message.startsWith("Responses terminal changed "))
+            return "terminal_reasoning_changed";
+          if (message.startsWith("Responses terminal output "))
+            return "terminal_output";
+          if (message.startsWith("invalid recall function arguments:"))
+            return "invalid_recall_arguments";
+          if (
+            message.startsWith("recall function call did not complete") ||
+            message ===
+              "recall stream ended before function arguments completed"
+          )
+            return "recall_call_incomplete";
+          if (message.startsWith("duplicate Responses "))
+            return "identity_collision";
+          if (
+            message.startsWith("Responses reasoning ") ||
+            message.startsWith("invalid Responses reasoning ")
+          )
+            return "reasoning_lifecycle";
+          if (
+            message.startsWith("Responses output_item.done ") ||
+            message.startsWith(
+              "Responses stream ended before output_item.done",
+            ) ||
+            message.startsWith("missing Responses lifecycle for index ")
+          )
+            return "output_lifecycle";
+          if (
+            message.startsWith(
+              "Responses stream ended before item_reference completion",
+            )
+          )
+            return "reference_incomplete";
+          if (
+            message.startsWith("Responses terminal ") ||
+            message.startsWith("Responses event before response.created") ||
+            message.startsWith("Responses event after terminal")
+          )
+            return "response_lifecycle";
+          return "other";
+        };
         const classifyPrincipalFailure = (
           error: unknown,
         ): PrincipalFailureCategory => {
@@ -11833,6 +11941,8 @@ export function streamResponsesRecallAware(
         const hiddenRecallBaseline = hiddenRecallBytes;
         const runPrincipalAttempt = async (): Promise<void> => {
           principalReadFinished = false;
+          principalPhase = "setup";
+          principalEventKind = "none";
           if (!currentPrincipalResponse.body) {
             throw new Error("Upstream response has no body");
           }
@@ -11873,12 +11983,19 @@ export function streamResponsesRecallAware(
           };
 
           resetKeepalive();
-          for await (const { event, data } of parseSSEStream(reader, {
-            maxFrames: maxSSEFrames,
-            inactivityMs: sseInactivityMs,
-            signal,
-            frameCounter,
-          })) {
+          principalPhase = "read";
+          for await (const { event, data } of trackResponsesReadBoundary(
+            parseSSEStream(reader, {
+              maxFrames: maxSSEFrames,
+              inactivityMs: sseInactivityMs,
+              signal,
+              frameCounter,
+            }),
+            () => {
+              principalPhase = "read";
+              principalEventKind = "none";
+            },
+          )) {
             resetKeepalive(); // upstream alive — reset inactivity timer
 
             if (!data || data === "[DONE]") continue;
@@ -11892,6 +12009,8 @@ export function streamResponsesRecallAware(
             }
 
             principalFailureCategory = "principal_protocol";
+            principalPhase = "decode";
+            principalEventKind = principalEventKindFor(event);
             let parsed: Record<string, unknown>;
             try {
               parsed = JSON.parse(data) as Record<string, unknown>;
@@ -11931,18 +12050,23 @@ export function streamResponsesRecallAware(
             ) {
               recallDetected = true;
             }
+            principalPhase = "normalize";
             const normalizationState = normalizeCodexEvent(
               state,
               event,
               parsed,
             );
+            principalPhase = "validate_response";
             validateResponseLifecycle(state, event, parsed);
+            principalPhase = "seed_implicit";
             seedImplicitCodexItem(state, normalizationState, event, parsed);
 
+            principalPhase = "reference";
             if (consumeReferenceEvent(state, referenceIndices, event, parsed)) {
               continue;
             }
 
+            principalPhase = "validate_output";
             const outputIndex = outputIndexForEvent(
               event,
               parsed,
@@ -12006,6 +12130,7 @@ export function streamResponsesRecallAware(
             }
 
             // Always accumulate into the internal state for postResponse.
+            principalPhase = "accumulate";
             const acceptedCodexRateLimit = applyResponsesEvent(
               state,
               event,
@@ -12132,6 +12257,7 @@ export function streamResponsesRecallAware(
               event === "response.incomplete" ||
               event === "response.failed"
             ) {
+              principalPhase = "terminal";
               principalReadFinished = true;
               const terminalParsed = stripHiddenReferenceOutput(parsed);
               const terminalResponse = terminalParsed.response as
@@ -13468,8 +13594,19 @@ export function streamResponsesRecallAware(
                 : continuationAttempted
                   ? (continuationFailureCategory ?? "unexpected")
                   : classifyPrincipalFailure(err);
+            const protocolReason =
+              category === "principal_protocol"
+                ? principalProtocolReason(err)
+                : undefined;
+            if (protocolReason !== undefined) {
+              reportPrincipalProtocolFailure({
+                phase: principalPhase,
+                event: principalEventKind,
+                reason: protocolReason,
+              });
+            }
             reportRecallStreamFailure(
-              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}`,
+              `openai-responses recall-aware stream failed${category ? ` category=${category}` : ""}${protocolReason !== undefined ? ` phase=${principalPhase} event=${principalEventKind} reason=${protocolReason}` : ""}`,
             );
           }
           if (!signal.aborted) {
