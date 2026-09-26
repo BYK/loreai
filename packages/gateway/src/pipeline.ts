@@ -18578,8 +18578,9 @@ function assertCurrentPipelineGeneration(
 }
 
 /** Remove Lore-owned ingress blocks without replaying their native Responses
- * provenance. Preserve unrelated opaque items (including encrypted reasoning). */
-function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
+ * provenance. Preserve unrelated opaque items (including encrypted reasoning).
+ * @internal Exported for timeout fallback regression tests. */
+export function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
   const originals = new Map<
     GatewayMessage,
     {
@@ -18626,7 +18627,7 @@ function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
             message.content[position].text !== original.texts[index]),
       );
     if (!changed) continue;
-    if (!original.aligned || retained.some((index) => index === undefined)) {
+    if (!original.aligned || retained.includes(undefined)) {
       delete message.provenanceContent;
       delete message.provenancePositions;
       continue;
@@ -18657,10 +18658,18 @@ function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
       remapped.set(index, remapped.size);
       return [replacement];
     });
+    const positions: number[] = [];
+    for (const sourceIndex of retained) {
+      const position = remapped.get(original.positions[sourceIndex!]);
+      if (position === undefined) {
+        // A malformed/sparse position map can omit a retained native block.
+        // Never forward a partial map.
+        throw new Error("unable to remap fallback request provenance");
+      }
+      positions.push(position);
+    }
     message.provenanceContent = provenance;
-    message.provenancePositions = retained.map(
-      (index) => remapped.get(original.positions[index!])!,
-    );
+    message.provenancePositions = positions;
   }
 }
 
