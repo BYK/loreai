@@ -401,8 +401,10 @@ import {
 } from "./recall-continuation-failure";
 import { reportPrincipalTransportFailure } from "./principal-transport-failure";
 import {
+  reportInvalidRecallArguments,
   reportPrincipalProtocolFailure,
   trackResponsesReadBoundary,
+  type InvalidRecallArgumentsIssue,
   type PrincipalProtocolFailureSample,
 } from "./principal-protocol-failure";
 import {
@@ -9034,6 +9036,27 @@ export function streamResponsesRecallAware(
     detailOffset?: number;
     detailLimit?: number;
   };
+  class InvalidRecallArguments extends Error {
+    constructor(
+      readonly issue: InvalidRecallArgumentsIssue,
+      message: string,
+    ) {
+      super(`invalid recall function arguments: ${message}`);
+    }
+  }
+  const readRecallArguments = (
+    value: unknown,
+  ): RecallArguments | { invalidIssue: InvalidRecallArgumentsIssue } => {
+    try {
+      return parseRecallArguments(value);
+    } catch (error) {
+      if (error instanceof InvalidRecallArguments) {
+        return { invalidIssue: error.issue };
+      }
+      // Non-string or malformed JSON is a broken upstream frame.
+      throw error;
+    }
+  };
   const parseRecallArguments = (value: unknown): RecallArguments => {
     if (typeof value !== "string") {
       throw new Error(
@@ -9047,7 +9070,7 @@ export function streamResponsesRecallAware(
       throw new Error("invalid recall function arguments: malformed JSON");
     }
     if (!input || typeof input !== "object" || Array.isArray(input)) {
-      throw new Error("invalid recall function arguments: expected object");
+      throw new InvalidRecallArguments("expected_object", "expected object");
     }
     const record = input as Record<string, unknown>;
     const allowed = new Set([
@@ -9060,8 +9083,9 @@ export function streamResponsesRecallAware(
     ]);
     const unknown = Object.keys(record).find((key) => !allowed.has(key));
     if (unknown) {
-      throw new Error(
-        `invalid recall function arguments: unknown property "${unknown}"`,
+      throw new InvalidRecallArguments(
+        "unknown_property",
+        `unknown property "${unknown}"`,
       );
     }
     // The strict OpenAI tool projection sends every declared property and uses
@@ -9075,9 +9099,7 @@ export function streamResponsesRecallAware(
     const detailLimitValue =
       record.detailLimit === null ? undefined : record.detailLimit;
     if (queryValue !== undefined && typeof queryValue !== "string") {
-      throw new Error(
-        "invalid recall function arguments: query must be a string",
-      );
+      throw new InvalidRecallArguments("query_type", "query must be a string");
     }
     if (
       idValue !== undefined &&
@@ -9085,7 +9107,7 @@ export function streamResponsesRecallAware(
         !idValue ||
         idValue.length > MAX_RECALL_ID_CHARS)
     ) {
-      throw new Error("invalid recall function arguments: id must be a string");
+      throw new InvalidRecallArguments("id_type", "id must be a string");
     }
     if (
       idsValue !== undefined &&
@@ -9097,20 +9119,22 @@ export function streamResponsesRecallAware(
             typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
         ))
     ) {
-      throw new Error(
-        `invalid recall function arguments: ids must contain 1-${MAX_RECALL_BATCH_IDS} strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
+      throw new InvalidRecallArguments(
+        "ids_type",
+        `ids must contain 1-${MAX_RECALL_BATCH_IDS} strings no longer than ${MAX_RECALL_ID_CHARS} characters`,
       );
     }
     if (idValue !== undefined && idsValue !== undefined) {
-      throw new Error("invalid recall function arguments: id and ids conflict");
+      throw new InvalidRecallArguments("id_conflict", "id and ids conflict");
     }
     if (
       detailOffsetValue !== undefined &&
       (!Number.isSafeInteger(detailOffsetValue) ||
         (detailOffsetValue as number) < 0)
     ) {
-      throw new Error(
-        "invalid recall function arguments: detailOffset must be non-negative",
+      throw new InvalidRecallArguments(
+        "detail_offset",
+        "detailOffset must be non-negative",
       );
     }
     if (
@@ -9119,29 +9143,30 @@ export function streamResponsesRecallAware(
         (detailLimitValue as number) < 1 ||
         (detailLimitValue as number) > 16_000)
     ) {
-      throw new Error(
-        "invalid recall function arguments: detailLimit must be 1-16000",
+      throw new InvalidRecallArguments(
+        "detail_limit",
+        "detailLimit must be 1-16000",
       );
     }
     if (scopeValue !== undefined && typeof scopeValue !== "string") {
-      throw new Error(
-        "invalid recall function arguments: scope must be a string",
-      );
+      throw new InvalidRecallArguments("scope_type", "scope must be a string");
     }
     const query = queryValue ?? "";
     const id = idValue || undefined;
     const ids = Array.isArray(idsValue) ? [...idsValue] : undefined;
     if (!query.trim() && !id && !ids) {
-      throw new Error(
-        "invalid recall function arguments: query, id, or ids is required",
+      throw new InvalidRecallArguments(
+        "missing_selector",
+        "query, id, or ids is required",
       );
     }
     if (
       (detailOffsetValue !== undefined || detailLimitValue !== undefined) &&
       !id
     ) {
-      throw new Error(
-        "invalid recall function arguments: detail ranges require one id",
+      throw new InvalidRecallArguments(
+        "detail_without_id",
+        "detail ranges require one id",
       );
     }
     const scope = scopeValue || undefined;
@@ -9152,7 +9177,10 @@ export function streamResponsesRecallAware(
       scope !== "project" &&
       scope !== "knowledge"
     ) {
-      throw new Error("invalid recall function arguments: unsupported scope");
+      throw new InvalidRecallArguments(
+        "unsupported_scope",
+        "unsupported scope",
+      );
     }
     return {
       query,
@@ -9176,11 +9204,15 @@ export function streamResponsesRecallAware(
     detailOffset?: number;
     detailLimit?: number;
     toolUseId: string;
+    invalidIssue?: InvalidRecallArgumentsIssue;
   };
   const collectCompletedRecall = (
     acc: ResponsesAccState,
     outputIndex: number,
-    parsedInputs: Map<number, RecallArguments>,
+    parsedInputs: Map<
+      number,
+      RecallArguments | { invalidIssue: InvalidRecallArgumentsIssue }
+    >,
     pending: PendingResponsesRecall[],
     completedIndices: Set<number>,
   ): boolean => {
@@ -9195,7 +9227,7 @@ export function streamResponsesRecallAware(
       throw new Error(`duplicate recall completion for index ${outputIndex}`);
     }
     const input =
-      parsedInputs.get(outputIndex) ?? parseRecallArguments(rawItem.arguments);
+      parsedInputs.get(outputIndex) ?? readRecallArguments(rawItem.arguments);
     const recallItem = acc.items.get(outputIndex);
     const toolUseId =
       recallItem?.type === "tool_use" ? recallItem.callId || recallItem.id : "";
@@ -9207,12 +9239,16 @@ export function streamResponsesRecallAware(
     completedIndices.add(outputIndex);
     pending.push({
       outputIndex,
-      query: input.query,
-      scope: input.scope,
-      id: input.id,
-      ids: input.ids,
-      detailOffset: input.detailOffset,
-      detailLimit: input.detailLimit,
+      ...("invalidIssue" in input
+        ? { query: "", invalidIssue: input.invalidIssue }
+        : {
+            query: input.query,
+            scope: input.scope,
+            id: input.id,
+            ids: input.ids,
+            detailOffset: input.detailOffset,
+            detailLimit: input.detailLimit,
+          }),
       toolUseId,
     });
     parsedInputs.delete(outputIndex);
@@ -10822,10 +10858,31 @@ export function streamResponsesRecallAware(
     }
   };
   const settleRecall = async (
-    input: Parameters<typeof opts.onRecall>[0],
+    input: Parameters<typeof opts.onRecall>[0] & {
+      invalidIssue?: InvalidRecallArgumentsIssue;
+    },
   ): ReturnType<typeof opts.onRecall> => {
-    const admission = recallBudget.admit(recallItemReservation(input));
+    const admission = recallBudget.admit(
+      input.invalidIssue ? 1 : recallItemReservation(input),
+    );
     if (admission) throw new RecallContinuationFailure("depth_exhausted");
+    if (input.invalidIssue) {
+      const resultText =
+        `Invalid recall arguments (${input.invalidIssue}). ` +
+        "Call recall again with a non-empty query, one valid id, or a non-empty ids list. Set unused arguments to null.";
+      log.warn(
+        `openai-responses recall arguments rejected issue=${input.invalidIssue}`,
+      );
+      reportInvalidRecallArguments(input.invalidIssue);
+      recallBudget.record({
+        resultBytes: Buffer.byteLength(resultText),
+        coverage: [],
+      });
+      return {
+        anchorText: buildRecallAnchor(crypto.randomUUID()),
+        resultText,
+      };
+    }
     const operation = opts.onRecall(input);
     const onLateResult = async (): Promise<void> => {
       try {
@@ -11818,6 +11875,13 @@ export function streamResponsesRecallAware(
             return "terminal_reasoning_changed";
           if (message.startsWith("Responses terminal output "))
             return "terminal_output";
+          if (
+            message ===
+            "invalid recall function arguments: expected JSON string"
+          )
+            return "recall_arguments_not_string";
+          if (message === "invalid recall function arguments: malformed JSON")
+            return "malformed_recall_json";
           if (message.startsWith("invalid recall function arguments:"))
             return "invalid_recall_arguments";
           if (
@@ -11982,7 +12046,10 @@ export function streamResponsesRecallAware(
 
           // --- Recall interception state ---
           // `output_index` values whose item is a suppressed `recall` function_call.
-          const parsedRecallInputs = new Map<number, RecallArguments>();
+          const parsedRecallInputs = new Map<
+            number,
+            RecallArguments | { invalidIssue: InvalidRecallArgumentsIssue }
+          >();
           // Ordered list of parsed recall invocations: { outputIndex, block }.
           const pendingRecalls: PendingResponsesRecall[] = [];
           const completedRecallIndices = new Set<number>();
@@ -12256,7 +12323,7 @@ export function streamResponsesRecallAware(
               ) {
                 parsedRecallInputs.set(
                   outputIndex,
-                  parseRecallArguments(parsed.arguments),
+                  readRecallArguments(parsed.arguments),
                 );
               }
               if (isUnresolvedToolEvent && !isRecallEvent) {
@@ -12423,6 +12490,14 @@ export function streamResponsesRecallAware(
               if (pendingRecalls.length > 1) {
                 throw new RecallContinuationFailure("parallel_recall");
               }
+              // Mixed visible tools have no internal follow-up: returning an
+              // invisible marker here would silently drop the invalid call.
+              if (otherToolSeen && pendingRecalls[0]?.invalidIssue) {
+                throw new InvalidRecallArguments(
+                  pendingRecalls[0].invalidIssue,
+                  "invalid call alongside a visible tool",
+                );
+              }
               const anchorTexts: string[] = [];
               transactionBaseline = {
                 ...state,
@@ -12475,6 +12550,7 @@ export function streamResponsesRecallAware(
                     ids: recall.ids,
                     detailOffset: recall.detailOffset,
                     detailLimit: recall.detailLimit,
+                    invalidIssue: recall.invalidIssue,
                     outputIndex: recall.outputIndex,
                     toolUseId: recall.toolUseId,
                     contentPosition,
@@ -12590,7 +12666,8 @@ export function streamResponsesRecallAware(
                       >();
                       const contRecallInputs = new Map<
                         number,
-                        RecallArguments
+                        | RecallArguments
+                        | { invalidIssue: InvalidRecallArgumentsIssue }
                       >();
                       const contPending: PendingResponsesRecall[] = [];
                       const contCompletedRecallIndices = new Set<number>();
@@ -12919,7 +12996,7 @@ export function streamResponsesRecallAware(
                             ) {
                               contRecallInputs.set(
                                 ci,
-                                parseRecallArguments(cparsed.arguments),
+                                readRecallArguments(cparsed.arguments),
                               );
                             }
                             if (isContUnresolvedTool && !isContRecall) {
@@ -13239,6 +13316,13 @@ export function streamResponsesRecallAware(
                           if (contentPosition < 0) {
                             throw new RecallContinuationFailure(
                               "missing_recall_block",
+                            );
+                          }
+                          if (contOtherTool && pendingNextRecall.invalidIssue) {
+                            // A mixed continuation cannot feed the model a
+                            // repair result; fail instead of losing the call.
+                            throw new RecallContinuationFailure(
+                              "nested_recall_execution",
                             );
                           }
                           nextRecall = {

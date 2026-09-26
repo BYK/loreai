@@ -39,6 +39,8 @@ export const PRINCIPAL_PROTOCOL_REASONS = [
   "terminal_output_changed",
   "terminal_reasoning_changed",
   "invalid_recall_arguments",
+  "recall_arguments_not_string",
+  "malformed_recall_json",
   "recall_call_incomplete",
   "identity_collision",
   "reasoning_lifecycle",
@@ -51,6 +53,47 @@ export type PrincipalProtocolFailureSample = {
   event: (typeof PRINCIPAL_PROTOCOL_EVENT_KINDS)[number];
   reason: (typeof PRINCIPAL_PROTOCOL_REASONS)[number];
 };
+
+/** Fixed validation codes; no function-call arguments or property names. */
+export const INVALID_RECALL_ARGUMENT_ISSUES = [
+  "expected_object",
+  "unknown_property",
+  "query_type",
+  "id_type",
+  "ids_type",
+  "id_conflict",
+  "detail_offset",
+  "detail_limit",
+  "scope_type",
+  "missing_selector",
+  "detail_without_id",
+  "unsupported_scope",
+] as const;
+
+export type InvalidRecallArgumentsIssue =
+  (typeof INVALID_RECALL_ARGUMENT_ISSUES)[number];
+
+let invalidRecallHook:
+  | ((issue: InvalidRecallArgumentsIssue) => void)
+  | undefined;
+
+export function setInvalidRecallArgumentsHook(
+  hook: typeof invalidRecallHook,
+): void {
+  invalidRecallHook = hook;
+}
+
+export function reportInvalidRecallArguments(
+  issue: InvalidRecallArgumentsIssue,
+): void {
+  try {
+    if (INVALID_RECALL_ARGUMENT_ISSUES.includes(issue)) {
+      invalidRecallHook?.(issue);
+    }
+  } catch {
+    // Telemetry never affects the response path.
+  }
+}
 
 /** Reset diagnostics when a completed frame is handed back to its parser. */
 export async function* trackResponsesReadBoundary<T>(

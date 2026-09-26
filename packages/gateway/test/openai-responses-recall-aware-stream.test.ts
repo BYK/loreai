@@ -9745,6 +9745,8 @@ describe("streamResponsesRecallAware", () => {
   test("rejects malformed completed recall arguments before execution", async () => {
     let executed = false;
     let completedResponse: unknown;
+    const protocolFailures: PrincipalProtocolFailureSample[] = [];
+    setPrincipalProtocolFailureHook((sample) => protocolFailures.push(sample));
     const client = streamResponsesRecallAware(
       streamFrom([
         created("resp_malformed_args", "gpt-5.6-terra"),
@@ -9786,6 +9788,269 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("call_malformed");
     expect(JSON.stringify(completedResponse)).not.toContain("recall");
     expect(JSON.stringify(completedResponse)).not.toContain("call_malformed");
+    expect(protocolFailures).toContainEqual({
+      phase: "accumulate",
+      event: "arguments",
+      reason: "malformed_recall_json",
+    });
+  });
+
+  test("lets the model correct invalid strict recall arguments in the same turn", async () => {
+    const queries: string[] = [];
+    const followUpResults: string[] = [];
+    const invalid = {
+      query: null,
+      scope: null,
+      id: null,
+      ids: null,
+      detailOffset: null,
+      detailLimit: null,
+    };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_invalid_recall", "gpt-5.6-terra"),
+        recallCall(0, invalid),
+        completed("resp_invalid_recall"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async ({ query }) => {
+          queries.push(query);
+          return {
+            anchorText: buildAnchor(query),
+            resultText: "Found the requested context",
+          };
+        },
+        runFollowUp: async ({ resultText }) => {
+          followUpResults.push(resultText);
+          const response =
+            followUpResults.length === 1
+              ? streamFrom([
+                  created("resp_repaired_recall", "gpt-5.6-terra"),
+                  recallCall(
+                    0,
+                    { query: "architecture" },
+                    "fc_corrected",
+                    "call_corrected",
+                  ),
+                  completed("resp_repaired_recall"),
+                ])
+              : streamFrom([
+                  created("resp_repaired_answer", "gpt-5.6-terra"),
+                  textItem(0, "recovered answer"),
+                  completed("resp_repaired_answer"),
+                ]);
+          return { reader: response.body!.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(queries).toEqual(["architecture"]);
+    expect(followUpResults).toHaveLength(2);
+    expect(followUpResults[0]).toContain("Invalid recall arguments");
+    expect(output).toContain("recovered answer");
+    expect(output).not.toContain('"name":"recall"');
+    expect(output).not.toContain("response.failed");
+  });
+
+  test("bounds repeated invalid recalls without executing search", async () => {
+    let followUps = 0;
+    let searched = false;
+    const invalid = { query: null, id: null, ids: null };
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_invalid_loop_first", "gpt-5.6-terra"),
+        recallCall(0, invalid, "fc_first", "call_first"),
+        completed("resp_invalid_loop_first"),
+      ]),
+      {
+        maxRecallExecutions: 2,
+        onComplete: () => {},
+        onRecall: async () => {
+          searched = true;
+          throw new Error("invalid recall should not execute");
+        },
+        runFollowUp: async () => {
+          followUps++;
+          const response = streamFrom([
+            created(`resp_invalid_loop_${followUps}`, "gpt-5.6-terra"),
+            recallCall(
+              0,
+              invalid,
+              `fc_loop_${followUps}`,
+              `call_loop_${followUps}`,
+            ),
+            completed(`resp_invalid_loop_${followUps}`),
+          ]);
+          return { reader: response.body!.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(searched).toBe(false);
+    expect(followUps).toBe(2);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("call_loop_");
+  });
+
+  test("lets the model correct an invalid nested recall", async () => {
+    const queries: string[] = [];
+    const followUpResults: string[] = [];
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_valid_first", "gpt-5.6-terra"),
+        recallCall(0, { query: "first" }, "fc_first", "call_first"),
+        completed("resp_valid_first"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async ({ query }) => {
+          queries.push(query);
+          return { anchorText: buildAnchor(query), resultText: "results" };
+        },
+        runFollowUp: async ({ resultText }) => {
+          followUpResults.push(resultText);
+          const response =
+            followUpResults.length === 1
+              ? streamFrom([
+                  created("resp_invalid_nested", "gpt-5.6-terra"),
+                  recallCall(0, { query: "" }, "fc_invalid", "call_invalid"),
+                  completed("resp_invalid_nested"),
+                ])
+              : followUpResults.length === 2
+                ? streamFrom([
+                    created("resp_corrected_nested", "gpt-5.6-terra"),
+                    recallCall(0, { query: "fixed" }, "fc_fixed", "call_fixed"),
+                    completed("resp_corrected_nested"),
+                  ])
+                : streamFrom([
+                    created("resp_final_nested", "gpt-5.6-terra"),
+                    textItem(0, "nested answer"),
+                    completed("resp_final_nested"),
+                  ]);
+          return { reader: response.body!.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(queries).toEqual(["first", "fixed"]);
+    expect(followUpResults[1]).toContain("Invalid recall arguments");
+    expect(output).toContain("nested answer");
+    expect(output).not.toContain("response.failed");
+  });
+
+  test("does not hide an invalid recall beside a visible tool", async () => {
+    let recalled = false;
+    let followedUp = false;
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_mixed_invalid", "gpt-5.6-terra"),
+        sseEvent("response.output_item.added", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_visible_mixed",
+            call_id: "call_visible_mixed",
+            name: "read",
+          },
+        }),
+        sseEvent("response.function_call_arguments.done", {
+          output_index: 0,
+          item_id: "fc_visible_mixed",
+          arguments: "{}",
+        }),
+        sseEvent("response.output_item.done", {
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "fc_visible_mixed",
+            call_id: "call_visible_mixed",
+            name: "read",
+            arguments: "{}",
+          },
+        }),
+        recallCall(1, { query: "" }, "fc_invalid_mixed", "call_invalid_mixed"),
+        completed("resp_mixed_invalid"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          recalled = true;
+          throw new Error("invalid recall should not execute");
+        },
+        runFollowUp: async () => {
+          followedUp = true;
+          throw new Error("mixed tools should not run a follow-up");
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalled).toBe(false);
+    expect(followedUp).toBe(false);
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("call_invalid_mixed");
+    expect(output).not.toContain("fc_invalid_mixed");
+  });
+
+  test("does not lose an invalid nested recall beside a visible tool", async () => {
+    const failures: RecallContinuationFailureCategory[] = [];
+    setRecallContinuationFailureHook((category) => failures.push(category));
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_mixed_nested_first", "gpt-5.6-terra"),
+        recallCall(0, { query: "first" }, "fc_first", "call_first"),
+        completed("resp_mixed_nested_first"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: buildAnchor("first"),
+          resultText: "first result",
+        }),
+        runFollowUp: async () => {
+          const response = streamFrom([
+            created("resp_mixed_nested", "gpt-5.6-terra"),
+            sseEvent("response.output_item.added", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_read",
+                call_id: "call_read",
+                name: "read",
+              },
+            }),
+            sseEvent("response.function_call_arguments.done", {
+              output_index: 0,
+              item_id: "fc_read",
+              arguments: "{}",
+            }),
+            sseEvent("response.output_item.done", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_read",
+                call_id: "call_read",
+                name: "read",
+                arguments: "{}",
+              },
+            }),
+            recallCall(1, { query: "" }, "fc_invalid", "call_invalid"),
+            completed("resp_mixed_nested"),
+          ]);
+          return { reader: response.body!.getReader() };
+        },
+      },
+    );
+
+    const output = await drain(client);
+    expect(failures).toContain("nested_recall_execution");
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("fc_invalid");
+    expect(output).not.toContain("call_invalid");
   });
 
   test.each([
@@ -9974,49 +10239,72 @@ describe("streamResponsesRecallAware", () => {
   });
 
   test.each([
-    ['{"query":"x","scope":42}', "scope must be a string"],
-    ['{"query":"x","extra":true}', "unknown property"],
-    ['{"query":42}', "query must be a string"],
-    ['{"query":"x","id":42}', "id must be a string"],
-  ])("rejects strict recall arguments %s", async (argumentsJSON, message) => {
-    let executed = false;
-    const client = streamResponsesRecallAware(
-      streamFrom([
-        created("resp_strict_args", "gpt-5.6-terra"),
-        sseEvent("response.output_item.added", {
-          output_index: 0,
-          item: {
-            type: "function_call",
-            id: "fc_strict",
-            call_id: "call_strict",
-            name: "recall",
+    ['{"query":"x","scope":42}', "scope_type"],
+    ['{"query":"x","extra":true}', "unknown_property"],
+    ['{"query":42}', "query_type"],
+    ['{"query":"x","id":42}', "id_type"],
+  ])(
+    "returns a repair result for invalid recall arguments %s",
+    async (argumentsJSON, issue) => {
+      let executed = false;
+      let followUpResult = "";
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_strict_args", "gpt-5.6-terra"),
+          sseEvent("response.output_item.added", {
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_strict",
+              call_id: "call_strict",
+              name: "recall",
+            },
+          }),
+          sseEvent("response.function_call_arguments.done", {
+            output_index: 0,
+            item_id: "fc_strict",
+            arguments: argumentsJSON,
+          }),
+          sseEvent("response.output_item.done", {
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_strict",
+              call_id: "call_strict",
+              name: "recall",
+              arguments: argumentsJSON,
+              status: "completed",
+            },
+          }),
+          completed("resp_strict_args"),
+        ]),
+        {
+          onComplete: () => {},
+          onRecall: async () => {
+            executed = true;
+            return { anchorText: "", resultText: "" };
           },
-        }),
-        sseEvent("response.function_call_arguments.done", {
-          output_index: 0,
-          item_id: "fc_strict",
-          arguments: argumentsJSON,
-        }),
-        completed("resp_strict_args"),
-      ]),
-      {
-        onComplete: () => {},
-        onRecall: async () => {
-          executed = true;
-          return { anchorText: "", resultText: "" };
+          runFollowUp: async ({ resultText }) => {
+            followUpResult = resultText;
+            return {
+              reader: streamFrom([
+                created("resp_strict_repaired", "gpt-5.6-terra"),
+                textItem(0, "corrected answer"),
+                completed("resp_strict_repaired"),
+              ]).body!.getReader(),
+            };
+          },
         },
-        runFollowUp: async () => {
-          throw new Error("should not run");
-        },
-      },
-    );
+      );
 
-    const out = await drain(client);
-    expect(executed).toBe(false);
-    expect(out).not.toContain(message);
-    expect(out).toContain(PUBLIC_RECALL_ERROR);
-    expect(out).not.toContain('"name":"recall"');
-  });
+      const out = await drain(client);
+      expect(executed).toBe(false);
+      expect(followUpResult).toContain(`Invalid recall arguments (${issue})`);
+      expect(out).toContain("corrected answer");
+      expect(out).not.toContain(PUBLIC_RECALL_ERROR);
+      expect(out).not.toContain('"name":"recall"');
+    },
+  );
 
   test.each([
     {

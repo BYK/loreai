@@ -22,7 +22,9 @@ vi.mock("@sentry/bun", () => ({
 
 import * as Sentry from "@sentry/bun";
 import {
+  reportInvalidRecallArguments,
   reportPrincipalProtocolFailure,
+  setInvalidRecallArgumentsHook,
   setPrincipalProtocolFailureHook,
   type PrincipalProtocolFailureSample,
 } from "../src/principal-protocol-failure";
@@ -34,9 +36,32 @@ describe("setupPrincipalProtocolFailureCapture", () => {
     scopes.index = 0;
     vi.mocked(Sentry.isInitialized).mockReturnValue(true);
     setPrincipalProtocolFailureHook(undefined);
+    setInvalidRecallArgumentsHook(undefined);
   });
 
-  afterEach(() => setPrincipalProtocolFailureHook(undefined));
+  afterEach(() => {
+    setPrincipalProtocolFailureHook(undefined);
+    setInvalidRecallArgumentsHook(undefined);
+  });
+
+  it("captures a recovered invalid recall using only a fixed validation code", () => {
+    setupPrincipalProtocolFailureCapture();
+    reportInvalidRecallArguments("missing_selector");
+    reportInvalidRecallArguments(
+      "private argument content" as "missing_selector",
+    );
+    expect(Sentry.captureEvent).toHaveBeenCalledTimes(1);
+    expect(Sentry.captureEvent).toHaveBeenCalledWith({
+      level: "warning",
+      message: "Responses recall arguments rejected",
+      fingerprint: ["responses-recall-arguments", "missing_selector"],
+      contexts: { responses_recall_arguments: { issue: "missing_selector" } },
+      sdkProcessingMetadata: {
+        capturedSpanScope: scopes.current,
+        capturedSpanIsolationScope: scopes.isolation,
+      },
+    });
+  });
 
   it("captures only fixed fields in fresh scopes", () => {
     setupPrincipalProtocolFailureCapture();
