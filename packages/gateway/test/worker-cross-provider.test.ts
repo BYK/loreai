@@ -318,6 +318,71 @@ describe("worker cross-provider routing matrix (structural guard)", () => {
   });
 
   test.each([
+    [
+      "OpenCode Go DeepSeek V4 Pro",
+      "opencode-go",
+      "deepseek-v4-pro",
+      "https://opencode.ai/zen/go",
+      "max_tokens",
+    ],
+    [
+      "direct DeepSeek",
+      "deepseek",
+      "deepseek-chat",
+      "https://api.deepseek.com",
+      "max_tokens",
+    ],
+    [
+      "OpenCode Go GLM",
+      "opencode-go",
+      "glm-5.3",
+      "https://opencode.ai/zen/go",
+      "max_completion_tokens",
+    ],
+    [
+      "OpenRouter DeepSeek",
+      "openrouter",
+      "deepseek/deepseek-chat",
+      "https://openrouter.ai/api",
+      "max_completion_tokens",
+    ],
+  ] as const)(
+    "%s worker uses the provider-compatible token budget field",
+    async (_label, providerID, modelID, upstreamUrl, expectedField) => {
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({
+          scheme: providerID === "opencode-go" ? "bearer" : "api-key",
+          value: "worker-test-key",
+        }),
+        { providerID, modelID },
+      );
+
+      await client.prompt("system", "user", {
+        sessionID: `sess-token-budget-${providerID}-${modelID}`,
+        workerID: "lore-distill",
+        model: { providerID, modelID },
+        upstreamUrl,
+        upstreamProviderID: providerID,
+        protocol: "openai",
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      if (providerID === "opencode-go") {
+        expect(fetchArgUrl(mockFetch.mock.calls[0][0])).toBe(
+          "https://opencode.ai/zen/go/v1/chat/completions",
+        );
+      }
+      const options = mockFetch.mock.calls[0][1] as { body: string };
+      const body = JSON.parse(options.body) as Record<string, unknown>;
+      const rejectedField =
+        expectedField === "max_tokens" ? "max_completion_tokens" : "max_tokens";
+      expect(body[expectedField]).toEqual(expect.any(Number));
+      expect(body[rejectedField]).toBeUndefined();
+    },
+  );
+
+  test.each([
     ["DeepSeek", "deepseek", "deepseek-chat", "openai"],
     ["direct OpenAI", "openai", "gpt-5-mini", "openai"],
     [

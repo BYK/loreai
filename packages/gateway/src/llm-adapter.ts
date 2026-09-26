@@ -230,7 +230,10 @@ export function classifyWorker400(body: string): string {
     ["thinking", /\bthinking\b/i],
     ["temperature", /\btemperature\b/i],
     ["cache-control", /cache[_ -]?control|cache[_ -]?ttl|prompt cach/i],
-    ["max-tokens", /max[_ -]?tokens|output tokens/i],
+    [
+      "max-tokens",
+      /\bmax(?:[_ -]completion)?[_ -]?tokens\b|\boutput tokens\b/i,
+    ],
     ["model", /\bmodel\b/i],
     ["messages", /\bmessages?\b/i],
     ["system", /\bsystem\b/i],
@@ -1950,6 +1953,22 @@ function stripLongContextBetaForWorker(headers: Record<string, string>): void {
 }
 
 /**
+ * DeepSeek's Chat Completions API uses `max_tokens`. OpenCode Go exposes its
+ * DeepSeek models through that endpoint too; other OpenAI-compatible worker
+ * routes retain `max_completion_tokens`.
+ */
+function usesDeepSeekMaxTokensParameter(model: {
+  providerID: string;
+  modelID: string;
+}): boolean {
+  return (
+    model.providerID === "deepseek" ||
+    (model.providerID === "opencode-go" &&
+      /(?:^|\/)deepseek(?:[-/]|$)/i.test(model.modelID))
+  );
+}
+
+/**
  * Build OpenAI Chat Completions API request.
  * Returns the full URL, headers, and serialized body.
  */
@@ -2001,7 +2020,9 @@ function buildOpenAIWorkerRequest(
     },
     body: JSON.stringify({
       model: model.modelID,
-      max_completion_tokens: maxTokens,
+      ...(usesDeepSeekMaxTokensParameter(model)
+        ? { max_tokens: maxTokens }
+        : { max_completion_tokens: maxTokens }),
       stream: false,
       ...(temperature != null && { temperature }),
       ...(effort != null && { reasoning_effort: effort }),
