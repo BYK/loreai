@@ -252,13 +252,13 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
 
-  # Merge the shard blobs into a single coverage report and upload to Codecov.
+  # Merge the shard blobs into a single coverage report and publish the results.
   coverage:
     name: Coverage report
     needs: [changes, unit-test]
     if: needs.changes.outputs.code == 'true' && !cancelled()
     runs-on: ubuntu-24.04
-    # Codecov upload needs to post PR comments and commit statuses.
+    # Coverage Action posts PR comments and commit statuses.
     permissions:
       contents: read
       pull-requests: write
@@ -288,16 +288,17 @@ jobs:
           test "$(find .vitest-reports -maxdepth 1 -name 'blob-*.json' | wc -l)" -eq 4
           pnpm exec vitest run --merge-reports --coverage.enabled --coverage.reporter=text-summary --coverage.reporter=lcov
 
-      # Uses Sentry's fork with the standard GITHUB_TOKEN (no CODECOV_TOKEN
-      # secret needed). `informational-patch` is true on push events so the 80%
-      # patch gate only BLOCKS on pull requests; on main/release pushes it
-      # reports without failing. Patch target (80%) and project-informational
-      # status are configured in codecov.yml.
+      # codecov.yml keeps project status informational and PR comments enabled.
+      # The 80% patch target is enforced on pull requests, and informational on
+      # pushes where there is no PR patch to compare.
       - name: Coverage Report
-        uses: getsentry/codecov-action@main
+        uses: getsentry/coverage-action@0.4.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           files: ./coverage/lcov.info
+          coverage-format: lcov
+          enable-tests: "false"
+          target-patch: "80"
           informational-patch: ${{ github.event_name == 'push' }}
 
       # Rebuild the shard manifest from this run's real timings. Never fails
