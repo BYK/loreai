@@ -248,6 +248,10 @@ test.each([
     "cache-control",
   ],
   ['{"error":{"message":"max_tokens exceeds the model limit"}}', "max-tokens"],
+  [
+    '{"error":{"message":"unsupported field max_completion_tokens"}}',
+    "max-tokens",
+  ],
   ['{"error":{"message":"unknown model"}}', "model"],
   ['{"error":{"message":"credit balance is too low"}}', "billing"],
   ['{"error":{"message":"request rejected"}}', "invalid-request"],
