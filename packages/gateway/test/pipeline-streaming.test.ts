@@ -98,6 +98,7 @@ import {
 import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
 import { translateAnthropicStreamToResponses } from "../src/stream/openai-responses";
 import { translateAnthropicStreamToGemini } from "../src/stream/gemini";
+import { buildRecallMarker, recallStoreKey } from "../src/recall";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -1113,6 +1114,169 @@ describe("Pipeline — streaming responses", () => {
       await resetPipelineState();
     }
   });
+
+  it.each([false, true])(
+    "forwards a complete large history when preparation times out (mixed provenance: %s)",
+    async (mixedProvenance) => {
+      const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      const upstreamBodies: string[] = [];
+      let stallFallback = false;
+      let enteredFallback!: () => void;
+      const fallbackEntered = new Promise<void>((resolve) => {
+        enteredFallback = resolve;
+      });
+      let unblockFallback!: () => void;
+      const fallbackGate = new Promise<void>((resolve) => {
+        unblockFallback = resolve;
+      });
+      setUpstreamInterceptor(async (body) => {
+        upstreamBodies.push(JSON.stringify(body));
+        if (stallFallback) {
+          enteredFallback();
+          await fallbackGate;
+        }
+        return new Response(
+          validResponsesSSE("large_timeout", "still working"),
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      });
+      let selection: { mockRestore(): void } | undefined;
+      try {
+        const sessionHeaders = {
+          "x-lore-session-id": "large-preparation-timeout",
+        };
+        await (
+          await handleRequest(
+            makeResponsesRequest({ sessionHeaders }),
+            loadLocalConfig(),
+          )
+        ).text();
+        await new Promise((resolve) => setImmediate(resolve));
+        const state = [...getActiveSessions().values()].find(
+          (candidate) =>
+            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+        );
+        expect(state).toBeDefined();
+        state!.recallStore.set(recallStoreKey("secret", "all"), {
+          toolUseId: "toolu_private_recall",
+          input: { query: "secret", scope: "all" },
+          position: 0,
+          result: "PRIVATE_LORE_RECALL_RESULT",
+        });
+        upstreamBodies.length = 0;
+        selection = vi.spyOn(ltm, "forSession").mockImplementation(
+          (_project, _session, _budget, options) =>
+            new Promise((_, reject) => {
+              const signal = options?.signal;
+              const abort = () => reject(signal?.reason);
+              signal?.addEventListener("abort", abort, { once: true });
+              if (signal?.aborted) abort();
+            }),
+        );
+        const mixedMessage: GatewayRequest["messages"][number] = {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call_real",
+              name: "read",
+              input: { filePath: "example" },
+            },
+            {
+              type: "tool_use",
+              id: "lore_syn_probe",
+              name: "read",
+              input: { filePath: "private" },
+            },
+          ],
+          provenanceContent: [
+            {
+              type: "opaque",
+              responsesItem: true,
+              raw: {
+                type: "reasoning",
+                encrypted_content: "KEEP_ENCRYPTED_REASONING",
+              },
+            },
+            {
+              type: "tool_use",
+              id: "call_real",
+              name: "read",
+              input: { filePath: "example" },
+            },
+            {
+              type: "tool_use",
+              id: "lore_syn_probe",
+              name: "read",
+              input: { filePath: "private" },
+            },
+          ],
+          provenancePositions: [1, 2],
+        };
+        const request = makeResponsesRequest({
+          sessionHeaders,
+          messages: [
+            { role: "user", content: [{ type: "text", text: "begin" }] },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: buildRecallMarker("secret") }],
+            },
+            ...(mixedProvenance ? [mixedMessage] : []),
+            ...Array.from({ length: 16_383 }, (_, index) => ({
+              role: "user" as const,
+              content: [{ type: "text" as const, text: `history-${index}` }],
+            })),
+          ],
+        });
+        stallFallback = !mixedProvenance;
+        const pendingResponse = handleRequest(request, loadLocalConfig());
+        if (stallFallback) {
+          await fallbackEntered;
+          // The fallback must release the session's preparation slot while
+          // upstream response headers are still pending.
+          const release = await acquireMemoryPreparation(
+            state!.sessionID,
+            AbortSignal.timeout(1000),
+          );
+          release();
+          unblockFallback();
+        }
+        const response = await pendingResponse;
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain("still working");
+        expect(upstreamBodies).toHaveLength(1);
+        expect(upstreamBodies[0]).toContain("history-16382");
+        // Real preparation expands the marker in-place, but the emergency
+        // forward must use the original transcript without the stored result.
+        expect(request.messages[1].content[0]).toMatchObject({
+          type: "tool_use",
+          name: "recall",
+        });
+        expect(upstreamBodies[0]).not.toContain("PRIVATE_LORE_RECALL_RESULT");
+        if (mixedProvenance) {
+          expect(upstreamBodies[0]).not.toContain("lore_syn_probe");
+          expect(upstreamBodies[0]).toContain("call_real");
+          expect(upstreamBodies[0]).toContain("KEEP_ENCRYPTED_REASONING");
+        } else {
+          expect(JSON.stringify(request.messages.slice(1, 3))).toContain(
+            "PRIVATE_LORE_RECALL_RESULT",
+          );
+        }
+      } finally {
+        unblockFallback();
+        selection?.mockRestore();
+        setUpstreamInterceptor(undefined);
+        if (priorTimeout === undefined)
+          delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+        else process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = priorTimeout;
+        await resetPipelineState();
+      }
+    },
+    20_000,
+  );
 
   it("reattaches a context selection after a caller leaves without recording phantom injections", async () => {
     const projectPath = `/tmp/lore-context-queue-${Date.now()}`;
