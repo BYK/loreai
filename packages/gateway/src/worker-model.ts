@@ -553,6 +553,23 @@ export function getModelEntrySyncForProvider(
   return getModelEntrySync(modelID);
 }
 
+/** The emergency passthrough must not trust the generic 200K fallback for a
+ * model whose actual context window is unknown. */
+export function knownModelContextLimit(
+  providerID: string | undefined,
+  modelID: string,
+): number | undefined {
+  if (!providerID) return undefined;
+  // A flat entry may belong to a different provider with a larger context.
+  const entry = cachedModelDataByProvider?.get(`${providerID}/${modelID}`);
+  const context = entry?.limit?.context;
+  return typeof context === "number" &&
+    Number.isSafeInteger(context) &&
+    context > 0
+    ? context
+    : undefined;
+}
+
 /** True when models.dev data has been loaded into the in-memory cache. */
 export function isModelDataLoaded(): boolean {
   return cachedModelData !== null;

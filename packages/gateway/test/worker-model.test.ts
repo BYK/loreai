@@ -15,6 +15,7 @@ import {
   getModelEntry,
   getModelEntrySync,
   getModelEntrySyncForProvider,
+  knownModelContextLimit,
   getWorkerModel,
   parseWorkerModelEnv,
   resetWorkerModelState,
@@ -2764,6 +2765,22 @@ describe("provider-qualified pricing (getModelEntrySyncForProvider)", () => {
     expect(
       getModelEntrySync("deepseek/deepseek-v4-flash").cost?.cache_read,
     ).toBe(0.0028);
+  });
+
+  test("timeout fallback refuses a flat context limit from a different provider", () => {
+    const model = "shared-model";
+    _setModelDataForTest(
+      { [model]: { id: model, limit: { context: 1_000_000, output: 10_000 } } },
+      {
+        "small-provider/shared-model": {
+          id: model,
+          limit: { context: 16_000, output: 2_000 },
+        },
+      },
+    );
+    expect(knownModelContextLimit("small-provider", model)).toBe(16_000);
+    expect(knownModelContextLimit("unlisted-provider", model)).toBeUndefined();
+    expect(knownModelContextLimit(undefined, model)).toBeUndefined();
   });
 
   test("falls back to the bare lookup when provider is undefined or unknown", async () => {

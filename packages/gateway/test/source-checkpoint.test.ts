@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   db,
+  data,
   estimateMessages,
   temporal,
   ensureProject,
+  projectId,
   saveSessionTracking,
   loadSessionTracking,
   appendSessionPromptDelta,
@@ -95,6 +97,49 @@ it("jumps to the verified last-seen index after an unaccepted long preparation",
   expect(appended.timing.observations.source_speculative_jump).toBe(5580);
   expect(appended.timing.observations.source_converted_messages).toBe(1);
   expect(new SourceWindowStore(storage).load()).toBeUndefined();
+});
+
+it("reuses conversion and token estimates for a full history beyond the old cache limit", async () => {
+  const history: GatewayMessage[] = Array.from({ length: 17_000 }, (_, i) => ({
+    role: i % 2 ? "assistant" : "user",
+    content: [{ type: "text", text: `history ${i} context` }],
+  }));
+  const first = await prepare(history);
+  expect(first.timing.observations.source_converted_messages).toBe(17_000);
+  expect(first.timing.observations.source_estimated_messages).toBe(17_000);
+
+  const repeated = await prepare(structuredClone(history));
+  expect(repeated.timing.observations.source_speculative_jump).toBe(17_000);
+  expect(repeated.timing.observations.source_converted_messages).toBe(0);
+  expect(repeated.timing.observations.source_estimated_messages).toBe(0);
+  expect(repeated.prepared.temporalInput.latestUser).toEqual(
+    first.prepared.temporalInput.latestUser,
+  );
+});
+
+it("expires uncommitted source snapshots even without another request", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  const baselineTimers = vi.getTimerCount();
+  const history = messages.slice(0, 80);
+  await prepare(history);
+  expect(vi.getTimerCount()).toBe(baselineTimers + 1);
+  await vi.advanceTimersByTimeAsync(5 * 60_000);
+  expect(vi.getTimerCount()).toBe(baselineTimers);
+  expect(
+    (await prepare(history)).timing.observations.source_converted_messages,
+  ).toBe(80);
+});
+
+it("rejects a source snapshot after the project is deleted and recreated", async () => {
+  const history = messages.slice(0, 80);
+  await prepare(history);
+  const formerId = projectId(projectPath);
+  expect(formerId).toBeDefined();
+  data.deleteProject(formerId!);
+  expect(ensureProject(projectPath)).not.toBe(formerId);
+  const restarted = await prepare(history);
+  expect(restarted.timing.observations.source_speculative_jump).toBeUndefined();
+  expect(restarted.timing.observations.source_converted_messages).toBe(80);
 });
 
 it("rejects a speculative jump when history was edited despite the same last ID", async () => {

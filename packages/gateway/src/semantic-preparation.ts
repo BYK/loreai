@@ -20,13 +20,24 @@ import {
 import type { GatewayMessage, GatewayRequest } from "./translate/types";
 
 type Stage =
+  | "awaiting"
+  | "fallback_snapshot"
+  | "fallback_bound"
+  | "idle_resume"
   | "source_validation"
   | "conversion"
+  | "copy"
   | "provenance"
   | "temporal_input"
+  | "scan"
   | "stored_ids"
   | "resolve_tools"
+  | "checkpoint_capture"
+  | "speculative_cache"
+  | "cache_persist"
   | "semantic_total"
+  | "ltm_selection"
+  | "ltm_context"
   | "turn_to_upstream";
 export interface StageTiming {
   wallMs: number;
@@ -46,6 +57,10 @@ export class PreparationTiming {
   };
   private readonly started = performance.now();
   private readonly cpu = process.cpuUsage();
+  private activeStage?: Stage;
+  private lastStage?: Stage;
+  private lastFailure?: { stage: Stage; error: unknown };
+  private reportedDeadline = false;
   private readonly attributes: {
     protocol: string;
     codex: boolean;
@@ -61,6 +76,8 @@ export class PreparationTiming {
   measure<T>(stage: Stage, fn: () => T): T {
     const started = performance.now();
     const cpu = process.cpuUsage();
+    const previous = this.activeStage;
+    this.activeStage = stage;
     let span: Sentry.Span | undefined;
     try {
       span = Sentry.startInactiveSpan({
@@ -74,6 +91,8 @@ export class PreparationTiming {
     try {
       return fn();
     } finally {
+      this.activeStage = previous;
+      this.lastStage = stage;
       const delta = process.cpuUsage(cpu);
       this.record(stage, {
         wallMs: performance.now() - started,
@@ -85,6 +104,53 @@ export class PreparationTiming {
         /* telemetry is best effort */
       }
     }
+  }
+  async measureAsync<T>(stage: Stage, fn: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    const cpu = process.cpuUsage();
+    const previous = this.activeStage;
+    this.activeStage = stage;
+    try {
+      return await fn();
+    } catch (error) {
+      this.lastFailure = { stage, error };
+      throw error;
+    } finally {
+      this.activeStage = previous;
+      this.lastStage = stage;
+      const delta = process.cpuUsage(cpu);
+      this.record(stage, {
+        wallMs: performance.now() - started,
+        cpuMs: (delta.user + delta.system) / 1000,
+      });
+    }
+  }
+  /** Report numeric, fixed-label diagnostics even when no upstream call began. */
+  deadline(error?: unknown): void {
+    if (this.reportedDeadline) return;
+    this.reportedDeadline = true;
+    const delta = process.cpuUsage(this.cpu);
+    const wallMs = performance.now() - this.started;
+    const cpuMs = (delta.user + delta.system) / 1000;
+    const failure = this.lastFailure;
+    const stage =
+      this.activeStage ??
+      (failure && failure.error === error ? failure.stage : "awaiting");
+    this.metric("deadline_count", 1, stage);
+    this.metric("deadline_wall_ms", wallMs, stage);
+    this.metric("deadline_cpu_ms", cpuMs, stage);
+    log.warn(
+      "semantic-preparation deadline",
+      JSON.stringify({
+        wallMs,
+        cpuMs,
+        activeStage: stage,
+        lastCompletedStage: this.lastStage,
+        counts: this.counts,
+        stages: this.stages,
+        observations: this.observations,
+      }),
+    );
   }
   record(stage: Stage, timing: StageTiming): void {
     this.stages[stage] = timing;
@@ -255,7 +321,9 @@ export async function prepareSemanticMessages(input: {
     : checkpoint?.base
       ? [...checkpoint.base.raw, ...suffix]
       : suffix;
-  const loreMessages = checkpoint ? structuredClone(raw) : raw;
+  const loreMessages = checkpoint
+    ? timing.measure("copy", () => structuredClone(raw))
+    : raw;
   const temporalInput = timing.measure("temporal_input", () =>
     captureTurnTemporalInput(raw, sourceCount, checkpoint),
   );
@@ -279,31 +347,33 @@ export async function prepareSemanticMessages(input: {
     legacySourceIDs?: readonly string[];
   }> = [];
   timing.counts.messages = loreMessages.length;
-  for (const [index, message] of loreMessages.entries()) {
-    input.signal?.throwIfAborted();
-    timing.counts.parts += message.parts.length;
-    let results = 0;
-    for (const part of message.parts)
-      if (isToolPart(part)) {
-        if (part.tool === "result") {
-          results++;
-          timing.counts.toolResults++;
-        } else timing.counts.toolUses++;
+  timing.measure("scan", () => {
+    for (const [index, message] of loreMessages.entries()) {
+      input.signal?.throwIfAborted();
+      timing.counts.parts += message.parts.length;
+      let results = 0;
+      for (const part of message.parts)
+        if (isToolPart(part)) {
+          if (part.tool === "result") {
+            results++;
+            timing.counts.toolResults++;
+          } else timing.counts.toolUses++;
+        }
+      if (
+        message.info.role === "user" &&
+        results > 0 &&
+        results === message.parts.length
+      ) {
+        timing.counts.placeholders++;
+        if (index < convertedFrom - offset) continue;
+        candidates.push({
+          sourceID: message.info.id,
+          legacySourceID: message.legacySourceID,
+          legacySourceIDs: message.legacySourceIDs,
+        });
       }
-    if (
-      message.info.role === "user" &&
-      results > 0 &&
-      results === message.parts.length
-    ) {
-      timing.counts.placeholders++;
-      if (index < convertedFrom - offset) continue;
-      candidates.push({
-        sourceID: message.info.id,
-        legacySourceID: message.legacySourceID,
-        legacySourceIDs: message.legacySourceIDs,
-      });
     }
-  }
+  });
   const newIds = timing.measure("stored_ids", () =>
     temporal.storedMessageIds({
       projectPath: input.projectPath,
@@ -320,7 +390,21 @@ export async function prepareSemanticMessages(input: {
   timing.measure("resolve_tools", () =>
     resolveToolResults(loreMessages, (m) => ids.get(m.info.id) ?? m.info.id),
   );
-  checkpoint?.capture(raw, loreMessages, ids, provenanceByMessageId);
+  if (checkpoint)
+    timing.measure("checkpoint_capture", () =>
+      checkpoint.capture(
+        raw,
+        loreMessages,
+        ids,
+        provenanceByMessageId,
+        reuse
+          ? {
+              rawLength: reuse.raw.length,
+              resolvedTokens: reuse.resolvedTokens,
+            }
+          : undefined,
+      ),
+    );
   input.signal?.throwIfAborted();
   if (
     checkpoint &&
@@ -329,21 +413,24 @@ export async function prepareSemanticMessages(input: {
     raw.length >= 64 &&
     raw.length <= SPECULATIVE_SOURCE_MAX_MESSAGES
   ) {
-    rememberSpeculativeSource(input.sessionID, {
-      projectPath: input.projectPath,
-      protocol: input.checkpointProtocol ?? input.protocol!,
-      sourceCount,
-      sourceDigest: checkpoint.digest,
-      fallbackReason: checkpoint.reason,
-      lastMessageID: raw.at(-1)!.info.id,
-      offset: checkpoint.offset,
-      raw,
-      ids,
-      provenance: provenanceByMessageId,
-    });
+    timing.measure("speculative_cache", () =>
+      rememberSpeculativeSource(input.sessionID, {
+        projectPath: input.projectPath,
+        protocol: input.checkpointProtocol ?? input.protocol!,
+        sourceCount,
+        sourceDigest: checkpoint.digest,
+        fallbackReason: checkpoint.reason,
+        lastMessageID: raw.at(-1)!.info.id,
+        offset: checkpoint.offset,
+        raw,
+        resolvedTokens: checkpoint.capturedResolvedTokens,
+        ids,
+        provenance: provenanceByMessageId,
+      }),
+    );
   }
   // Publish before yielding; cache writes never wait for another writer.
-  tokenCache.persist();
+  timing.measure("cache_persist", () => tokenCache.persist());
   const delta = process.cpuUsage(cpu);
   timing.record("semantic_total", {
     wallMs: performance.now() - started,

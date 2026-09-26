@@ -12,6 +12,7 @@ import {
   CONTEXT_WARNING_MARKER,
   loreMessagesToGateway,
   removeOrphanedToolResults,
+  sanitizeCompleteRequestForFallback,
   shouldPreserveResponsesProvenance,
   stripContextWarnings,
 } from "../src/pipeline";
@@ -426,6 +427,35 @@ describe("Responses context-warning cleanup", () => {
     expect(message.provenanceContent).toBeUndefined();
     expect(message.provenancePositions).toBeUndefined();
   });
+});
+
+test("timeout fallback rejects a sparse position map instead of emitting an undefined position", () => {
+  const sparsePositions: number[] = [];
+  sparsePositions.length = 1;
+  const message: GatewayMessage = {
+    role: "user",
+    content: [{ type: "text", text: "[lore:session-id=probe]\ncontinue" }],
+    provenanceContent: [{ type: "text", text: "original" }],
+    // An internally constructed request can contain an array hole; the
+    // alignment check's Array.every skips it before the snapshot spreads it.
+    provenancePositions: sparsePositions,
+  };
+  const request: GatewayRequest = {
+    protocol: "openai-responses",
+    model: "gpt-5.4-mini",
+    system: "",
+    messages: [message],
+    tools: [],
+    stream: true,
+    maxTokens: 1024,
+    metadata: {},
+    rawHeaders: {},
+  };
+
+  expect(() => sanitizeCompleteRequestForFallback(request)).toThrow(
+    "unable to remap fallback request provenance",
+  );
+  expect(message.provenancePositions).toHaveLength(1);
 });
 
 // ---------------------------------------------------------------------------

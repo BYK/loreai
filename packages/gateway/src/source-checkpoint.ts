@@ -396,23 +396,31 @@ export class SourceCheckpoint {
     return this.next !== undefined;
   }
 
+  get capturedResolvedTokens(): number[] {
+    return this.resolvedTokens.slice();
+  }
+
   capture(
     raw: LoreMessageWithParts[],
     resolved: LoreMessageWithParts[],
     ids: Map<string, string>,
     provenance: ReadonlyMap<string, Provenance>,
+    speculative?: { rawLength: number; resolvedTokens: readonly number[] },
   ) {
     this.raw = raw;
     // Appended results may change an older pending call's resolved size.
     // Every other retained estimate is stable because the source prefix and
     // stored-ID revision were validated before taking this path.
     const appendedResults = new Set<string>();
-    for (const m of raw.slice(this.base?.raw.length ?? 0))
+    for (const m of raw.slice(
+      speculative?.rawLength ?? this.base?.raw.length ?? 0,
+    ))
       for (const p of m.parts)
         if (isToolPart(p) && p.tool === "result") appendedResults.add(p.callID);
     let estimated = 0;
     this.resolvedTokens = resolved.map((m, i) => {
-      const cached = this.base?.resolvedTokens[i];
+      const cached =
+        speculative?.resolvedTokens[i] ?? this.base?.resolvedTokens[i];
       if (
         cached !== undefined &&
         !raw[i].parts.some(

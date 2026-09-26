@@ -12,6 +12,7 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
+import { boundFallbackHistory } from "./fallback-history";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -342,6 +343,7 @@ import {
   ensureModelDataReady,
   getModelEntrySync,
   getModelEntrySyncForProvider,
+  knownModelContextLimit,
   isModelDataLoaded,
   lookupProviderRoute,
 } from "./worker-model";
@@ -6714,6 +6716,34 @@ type ResolvedRequestUpstreamRoute = {
   effectiveUpstreamBase: string;
   bedrockMantle: boolean;
 };
+
+/** A headerless model route identifies a provider only when its final URL
+ * matches that provider's built-in destination, without a caller override. */
+function canonicalModelRouteProviderID(
+  route: ResolvedRequestUpstreamRoute | undefined,
+): string | undefined {
+  if (
+    !route?.modelRoute ||
+    route.providerID ||
+    route.headerUpstream ||
+    route.providerRoute ||
+    route.effectiveUpstreamBase !== route.modelRoute.url
+  )
+    return undefined;
+  const canonicalProviders = [
+    "openai",
+    "anthropic",
+    "deepseek",
+    "xai",
+    "mistral",
+    "google",
+    "nvidia",
+  ] as const;
+  return canonicalProviders.find(
+    (providerID) =>
+      resolveProviderRoute(providerID)?.url === route.modelRoute?.url,
+  );
+}
 
 /** OpenCode Zen may append an empty choice frame after finish_reason. */
 function isOpenCodeZenOpenAIStream(
@@ -17958,6 +17988,7 @@ export function validatedMetaStream(
 async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
+  resolvedRoute?: ResolvedRequestUpstreamRoute,
 ): Promise<Response> {
   if (requestSourcePrefix(req)) {
     throw new SourceDeltaUnavailableError(
@@ -17975,6 +18006,7 @@ async function handlePassthrough(
       undefined,
       undefined,
       abortScope.signal,
+      resolvedRoute,
     );
   } catch (error) {
     abortScope.dispose();
@@ -18682,6 +18714,102 @@ function assertCurrentPipelineGeneration(
   }
 }
 
+/** Remove Lore-owned ingress blocks without replaying their native Responses
+ * provenance. Preserve unrelated opaque items (including encrypted reasoning).
+ * @internal Exported for timeout fallback regression tests. */
+export function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
+  const originals = new Map<
+    GatewayMessage,
+    {
+      content: GatewayMessage["content"];
+      texts: (string | undefined)[];
+      provenance: NonNullable<GatewayMessage["provenanceContent"]>;
+      positions: number[];
+      aligned: boolean;
+    }
+  >();
+  for (const message of req.messages) {
+    if (!message.provenanceContent) continue;
+    originals.set(message, {
+      content: [...message.content],
+      texts: message.content.map((block) =>
+        block.type === "text" ? block.text : undefined,
+      ),
+      provenance: [...message.provenanceContent],
+      positions: [...(message.provenancePositions ?? [])],
+      aligned: hasAlignedGatewayProvenance(message),
+    });
+  }
+  stripContextMarkers(req.messages);
+  stripSyntheticRoundTrips(req);
+  stripContextWarnings(req.messages);
+  for (const message of req.messages) {
+    const original = originals.get(message);
+    if (!original) continue;
+    const available = new Map<GatewayMessage["content"][number], number[]>();
+    original.content.forEach((block, index) => {
+      const indexes = available.get(block) ?? [];
+      indexes.push(index);
+      available.set(block, indexes);
+    });
+    const retained = message.content.map((block) =>
+      available.get(block)?.shift(),
+    );
+    const changed =
+      retained.length !== original.content.length ||
+      retained.some(
+        (index, position) =>
+          index !== position ||
+          (message.content[position]?.type === "text" &&
+            message.content[position].text !== original.texts[index]),
+      );
+    if (!changed) continue;
+    if (!original.aligned || retained.includes(undefined)) {
+      delete message.provenanceContent;
+      delete message.provenancePositions;
+      continue;
+    }
+    const mappedProvenance = new Set(original.positions);
+    const retainedByProvenance = new Map(
+      retained.map((sourceIndex, position) => [
+        original.positions[sourceIndex!],
+        position,
+      ]),
+    );
+    const remapped = new Map<number, number>();
+    const provenance = original.provenance.flatMap((block, index) => {
+      if (mappedProvenance.has(index) && !retainedByProvenance.has(index))
+        return [];
+      const position = retainedByProvenance.get(index);
+      if (position === undefined) {
+        remapped.set(index, remapped.size);
+        return [block];
+      }
+      const visible = message.content[position];
+      const sourceIndex = retained[position];
+      const replacement =
+        visible?.type === "text" &&
+        visible.text !== original.texts[sourceIndex!]
+          ? visible
+          : block;
+      remapped.set(index, remapped.size);
+      return [replacement];
+    });
+    const positions: number[] = [];
+    for (const sourceIndex of retained) {
+      const position = remapped.get(original.positions[sourceIndex!]);
+      if (position === undefined) {
+        // A malformed/sparse position map can omit a retained native block.
+        // Never forward a partial map.
+        throw new Error("unable to remap fallback request provenance");
+      }
+      positions.push(position);
+    }
+    message.provenanceContent = provenance;
+    message.provenancePositions = positions;
+  }
+}
+
 async function handleConversationTurn(
   req: GatewayRequest,
   config: GatewayConfig,
@@ -18701,7 +18829,32 @@ async function handleConversationTurn(
     foregroundAbort.signal,
     memoryPreparationTimeoutMs(),
   );
-  const rollback: { preparation?: () => void; release?: () => void } = {};
+  const preparationTiming = new PreparationTiming(req);
+  // Preparation can rewrite messages in place (notably recall expansion).
+  // Preserve a pristine full request before those changes for the emergency
+  // upstream path. Suffix-only requests must never use this path.
+  let completeRequest: GatewayRequest | undefined;
+  if (!requestSourcePrefix(req) && requestSourceMessageCount(req) > 16_384) {
+    try {
+      completeRequest = preparationTiming.measure("fallback_snapshot", () => ({
+        ...req,
+        messages: structuredClone(req.messages),
+        tools: structuredClone(req.tools),
+        metadata: structuredClone(req.metadata),
+        rawHeaders: { ...req.rawHeaders },
+        ...(req.extras ? { extras: structuredClone(req.extras) } : {}),
+        ...(req.sourceInput ? { sourceInput: { ...req.sourceInput } } : {}),
+      }));
+    } catch {
+      // The normal memory path still runs; a non-cloneable direct caller only
+      // loses the emergency fallback, never changes what reaches upstream.
+    }
+  }
+  const rollback: {
+    preparation?: () => void;
+    release?: () => void;
+    route?: ResolvedRequestUpstreamRoute;
+  } = {};
   let responseReturned = false;
   try {
     const response = await handleConversationTurnPrepared(
@@ -18715,6 +18868,7 @@ async function handleConversationTurn(
       claimSession,
       foregroundAbort,
       preparation,
+      preparationTiming,
       rollback,
       onSessionIdentified,
     );
@@ -18727,6 +18881,63 @@ async function handleConversationTurn(
   } catch (error) {
     rollback.preparation?.();
     if (preparation.expired() && !foregroundAbort.signal.aborted) {
+      preparationTiming.deadline(error);
+      if (
+        completeRequest &&
+        ((error instanceof DOMException && error.name === "TimeoutError") ||
+          (error instanceof ReadPreparationUnavailableError &&
+            error.reason === "timeout"))
+      ) {
+        try {
+          // Apply only the safe ingress cleanup to the pristine copy. The
+          // preparation copy may contain expanded recall results and other
+          // Lore-generated content that was absent from the client's request.
+          sanitizeCompleteRequestForFallback(completeRequest);
+        } catch {
+          throw new ReadPreparationUnavailableError("context", "timeout");
+        }
+        const originalCount = completeRequest.messages.length;
+        const providerID =
+          rollback.route?.providerID ??
+          canonicalModelRouteProviderID(rollback.route) ??
+          extractProviderHeader(completeRequest.rawHeaders);
+        const knownContext = knownModelContextLimit(
+          providerID,
+          completeRequest.model,
+        );
+        const bounded =
+          knownContext === undefined
+            ? null
+            : preparationTiming.measure("fallback_bound", () =>
+                boundFallbackHistory(
+                  completeRequest,
+                  knownContext,
+                  getModelSpec(completeRequest.model, providerID).output,
+                  providerID,
+                ),
+              );
+        if (!bounded) {
+          log.warn(
+            "memory preparation timed out; no safe bounded upstream request",
+          );
+          throw new ReadPreparationUnavailableError("context", "timeout");
+        }
+        log.warn(
+          `memory preparation timed out for ${originalCount} messages; forwarding ${completeRequest.messages.length} bounded messages without Lore injection`,
+        );
+        try {
+          rollback.release?.();
+          rollback.release = undefined;
+          return await handlePassthrough(
+            completeRequest,
+            config,
+            rollback.route,
+          );
+        } catch {
+          log.error("memory preparation fallback forwarding failed");
+          return errorResponse(502, "Gateway request failed");
+        }
+      }
       throw new ReadPreparationUnavailableError("context", "timeout");
     }
     throw error;
@@ -18748,7 +18959,12 @@ async function handleConversationTurnPrepared(
   claimSession: (sessionID: string) => Promise<void>,
   foregroundAbort: ReturnType<typeof createForegroundAbortScope>,
   preparation: ReturnType<typeof createMemoryPreparationScope>,
-  rollback: { preparation?: () => void; release?: () => void },
+  preparationTiming: PreparationTiming,
+  rollback: {
+    preparation?: () => void;
+    release?: () => void;
+    route?: ResolvedRequestUpstreamRoute;
+  },
   onSessionIdentified?: (sessionID: string) => void,
 ): Promise<Response> {
   if (
@@ -18878,6 +19094,7 @@ async function handleConversationTurnPrepared(
     config,
     requestOrder,
   );
+  rollback.route = requestUpstreamRoute;
 
   // --- Synthetic project-resolution: capture a returning tool_result ---
   // If we previously injected a synthetic tool_use for project detection,
@@ -19232,7 +19449,6 @@ async function handleConversationTurnPrepared(
   // session-identity and project-binding bugs (e.g. the Tier 1b rotation merge,
   // or a hosted gateway falling back to its own cwd) immediately visible in
   // `LORE_DEBUG=1` logs instead of requiring a DB autopsy.
-  const preparationTiming = new PreparationTiming(req);
   log.info(
     `turn: session=${sessionID.slice(0, 16)} messages=${currMsgCount} ` +
       `model=${req.model} stream=${req.stream} new=${isNew} tier=${tier} ` +
@@ -19426,11 +19642,8 @@ async function handleConversationTurnPrepared(
   // into the prefix by one cold cycle — never a worse cache bust than clearing
   // (both produce a full write on a genuine miss; the preserved body is ≤ the
   // re-rendered one).
-  const idleResult = onIdleResume(
-    sessionID,
-    thresholdMs,
-    Date.now(),
-    cacheWarm,
+  const idleResult = preparationTiming.measure("idle_resume", () =>
+    onIdleResume(sessionID, thresholdMs, Date.now(), cacheWarm),
   );
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
@@ -19572,24 +19785,26 @@ async function handleConversationTurnPrepared(
       // turn 1.
       // Always enter the cache-aware wrapper: an idle-warmed hit must commit
       // preference effects and persist the block when this turn consumes it.
-      stable = await singleFlightStableLtm(
-        sessionID,
-        (signal) =>
-          computeStableLtm(
-            sessionID,
+      stable = await preparationTiming.measureAsync("ltm_selection", () =>
+        singleFlightStableLtm(
+          sessionID,
+          (signal) =>
+            computeStableLtm(
+              sessionID,
+              projectPath,
+              cfg,
+              contextHint,
+              prefBudget,
+              signal,
+              requestGeneration,
+            ),
+          req.signal,
+          stableLtmSelectionKey(
             projectPath,
-            cfg,
             contextHint,
             prefBudget,
-            signal,
-            requestGeneration,
+            cfg.knowledge.maxEntityInject,
           ),
-        req.signal,
-        stableLtmSelectionKey(
-          projectPath,
-          contextHint,
-          prefBudget,
-          cfg.knowledge.maxEntityInject,
         ),
       );
       assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -19753,22 +19968,26 @@ async function handleConversationTurnPrepared(
               );
               return { entries, overflow };
             };
-            const selection = contextKey
-              ? await contextLtmPreparation.run(
-                  contextKey,
-                  (owner) =>
-                    select(
-                      AbortSignal.any([
-                        owner,
-                        stableLtmComputeSignal(sessionID),
-                      ]),
+            const selection = await preparationTiming.measureAsync(
+              "ltm_context",
+              () =>
+                contextKey
+                  ? contextLtmPreparation.run(
+                      contextKey,
+                      (owner) =>
+                        select(
+                          AbortSignal.any([
+                            owner,
+                            stableLtmComputeSignal(sessionID),
+                          ]),
+                        ),
+                      optionalSignal,
+                    )
+                  : promiseAgainstAbort(
+                      () => select(optionalSignal),
+                      optionalSignal,
                     ),
-                  optionalSignal,
-                )
-              : await promiseAgainstAbort(
-                  () => select(optionalSignal),
-                  optionalSignal,
-                );
+            );
             contextEntries = selection.entries;
             overflowSink = selection.overflow;
           } catch (error) {
