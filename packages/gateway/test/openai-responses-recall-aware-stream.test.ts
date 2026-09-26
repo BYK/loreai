@@ -13,6 +13,8 @@
 import { log } from "@loreai/core";
 import { afterEach, describe, test, expect, vi } from "vitest";
 import { streamResponsesRecallAware } from "../src/pipeline";
+import { expandRecallMarkers } from "../src/recall";
+import { parseOpenAIResponsesRequest } from "../src/translate/openai-responses";
 import {
   setRecallContinuationFailureHook,
   type RecallContinuationFailureCategory,
@@ -9852,6 +9854,70 @@ describe("streamResponsesRecallAware", () => {
     expect(output).toContain("recovered answer");
     expect(output).not.toContain('"name":"recall"');
     expect(output).not.toContain("response.failed");
+    expect(output).not.toContain('"call_id":"call_0"');
+    const terminal = /event: response\.completed\ndata: (.+)/.exec(output);
+    const terminalItems = (
+      JSON.parse(terminal![1]) as {
+        response: { output: Array<{ id: string }> };
+      }
+    ).response.output;
+    const additions = [
+      ...output.matchAll(/event: response\.output_item\.added\ndata: (.+)/g),
+    ].map(
+      (match) =>
+        JSON.parse(match[1]) as { output_index: number; item: { id: string } },
+    );
+    expect(additions).toHaveLength(terminalItems.length);
+    for (const addition of additions) {
+      expect(terminalItems[addition.output_index]?.id).toBe(addition.item.id);
+    }
+  });
+
+  test("leaves no orphaned anchor in the next turn after invalid recall", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_invalid_replay", "gpt-5.6-terra"),
+        recallCall(0, { query: null, id: null, ids: null }),
+        completed("resp_invalid_replay"),
+      ]),
+      {
+        onComplete: () => {},
+        onRecall: async () => {
+          throw new Error("invalid recall should not execute");
+        },
+        runFollowUp: async () => ({
+          reader: streamFrom([
+            created("resp_invalid_replay_answer", "gpt-5.6-terra"),
+            textItem(0, "answer after repair"),
+            completed("resp_invalid_replay_answer"),
+          ]).body!.getReader(),
+        }),
+      },
+    );
+
+    const streamed = await drain(client);
+    expect(streamed).not.toContain("lore-recall:");
+    const terminal = /event: response\.completed\ndata: (.+)/.exec(streamed);
+    expect(terminal).not.toBeNull();
+    const output = (
+      JSON.parse(terminal![1]) as {
+        response: { output: Record<string, unknown>[] };
+      }
+    ).response.output;
+    expect(output).toHaveLength(1);
+    expect(output).not.toContainEqual(
+      expect.objectContaining({ type: "function_call", name: "recall" }),
+    );
+    const nextRequest = parseOpenAIResponsesRequest(
+      {
+        model: "gpt-5.6-terra",
+        stream: true,
+        input: [...output, { role: "user", content: "continue" }],
+      },
+      {},
+    );
+    expect(expandRecallMarkers(nextRequest, new Map())).toBe(false);
+    expect(JSON.stringify(nextRequest.messages)).not.toContain("lore-recall:");
   });
 
   test("bounds repeated invalid recalls without executing search", async () => {
@@ -10051,6 +10117,78 @@ describe("streamResponsesRecallAware", () => {
     expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
     expect(output).not.toContain("fc_invalid");
     expect(output).not.toContain("call_invalid");
+  });
+
+  test("preserves output order for a nested recall beside an earlier visible tool", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_mixed_order_first", "gpt-5.6-terra"),
+        recallCall(0, { query: "first" }),
+        completed("resp_mixed_order_first"),
+      ]),
+      {
+        validation: "codex",
+        onComplete: () => {},
+        onRecall: async ({ query }) => ({
+          anchorText: buildAnchor(query),
+          resultText: "result",
+        }),
+        runFollowUp: async () => ({
+          reader: streamFrom([
+            created("resp_mixed_order_next", "gpt-5.6-terra"),
+            sseEvent("response.output_item.added", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_read_order",
+                call_id: "call_read_order",
+                name: "",
+              },
+            }),
+            sseEvent("response.function_call_arguments.done", {
+              output_index: 0,
+              item_id: "fc_read_order",
+              arguments: "{}",
+            }),
+            recallCall(1, { query: "second" }, "fc_second", "call_second"),
+            sseEvent("response.output_item.done", {
+              output_index: 0,
+              item: {
+                type: "function_call",
+                id: "fc_read_order",
+                call_id: "call_read_order",
+                name: "read",
+                arguments: "{}",
+              },
+            }),
+            completed("resp_mixed_order_next"),
+          ]).body!.getReader(),
+        }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(output).not.toContain("response.failed");
+    const terminal = /event: response\.completed\ndata: (.+)/.exec(output);
+    const terminalItems = (
+      JSON.parse(terminal![1]) as {
+        response: { output: Array<{ id: string }> };
+      }
+    ).response.output;
+    const additions = [
+      ...output.matchAll(/event: response\.output_item\.added\ndata: (.+)/g),
+    ].map(
+      (match) =>
+        JSON.parse(match[1]) as { output_index: number; item: { id: string } },
+    );
+    expect(additions.map(({ item }) => item.id)).toContain("fc_read_order");
+    expect(additions).toHaveLength(3);
+    expect(additions.map(({ output_index }) => output_index)).toEqual([
+      0, 1, 2,
+    ]);
+    for (const addition of additions) {
+      expect(terminalItems[addition.output_index]?.id).toBe(addition.item.id);
+    }
   });
 
   test.each([

@@ -10879,7 +10879,9 @@ export function streamResponsesRecallAware(
         coverage: [],
       });
       return {
-        anchorText: buildRecallAnchor(crypto.randomUUID()),
+        // This rejected call is never stored for replay. An anchor here would
+        // become an orphaned text comment in the client's next turn.
+        anchorText: "",
         resultText,
       };
     }
@@ -11950,6 +11952,7 @@ export function streamResponsesRecallAware(
         const referenceIndices = new Map<number, ReferenceLifecycle>();
         const publicRecallIndices = new Set<number>();
         const queuedAnchorIndices = new Set<number>();
+        const invalidRecallIndices = new Set<number>();
         const forwardedOutputIndices = new Map<number, number>();
         const forwardedSourceOrder: number[] = [];
         const publicOutputIndexFor = (sourceIndex: number): number => {
@@ -12532,7 +12535,7 @@ export function streamResponsesRecallAware(
               };
               for (const recall of pendingRecalls) {
                 const syntheticId = `msg_${state.id || "lore"}_${recall.outputIndex}`;
-                reserveSyntheticIdentity(syntheticId);
+                if (!recall.invalidIssue) reserveSyntheticIdentity(syntheticId);
                 const recallAcc = finalizeResponsesAcc(state);
                 const contentPosition = recallAcc.content.findIndex(
                   (block) =>
@@ -12593,8 +12596,12 @@ export function streamResponsesRecallAware(
                     id: `msg_${state.id || "lore"}_${recall.outputIndex}`,
                     text: executed.anchorText,
                   });
-                  queuedAnchorIndices.add(recall.outputIndex);
-                  queueTransactional(anchorChunk);
+                  if (recall.invalidIssue) {
+                    invalidRecallIndices.add(recall.outputIndex);
+                  } else {
+                    queuedAnchorIndices.add(recall.outputIndex);
+                    queueTransactional(anchorChunk);
+                  }
                   for (const deferred of deferredEvents) {
                     queueTransactional(
                       deferred.chunk,
@@ -12602,8 +12609,12 @@ export function streamResponsesRecallAware(
                     );
                   }
                 } else {
-                  queuedAnchorIndices.add(recall.outputIndex);
-                  queueTransactional(anchorChunk);
+                  if (recall.invalidIssue) {
+                    invalidRecallIndices.add(recall.outputIndex);
+                  } else {
+                    queuedAnchorIndices.add(recall.outputIndex);
+                    queueTransactional(anchorChunk);
+                  }
                   for (const deferred of deferredEvents) {
                     queueTransactional(
                       deferred.chunk,
@@ -13334,7 +13345,8 @@ export function streamResponsesRecallAware(
                             contIndex,
                           );
                           const nextSyntheticId = `msg_${state.id || "lore"}_${shiftedRecallIndex}`;
-                          reserveSyntheticIdentity(nextSyntheticId);
+                          if (!nextRecall.invalidIssue)
+                            reserveSyntheticIdentity(nextSyntheticId);
                           continuationFailureCategory =
                             "nested_recall_execution";
                           try {
@@ -13381,14 +13393,45 @@ export function streamResponsesRecallAware(
                             id: nextSyntheticId,
                             text: nextExecuted.anchorText,
                           });
-                          queueTransactional(
-                            encoder.encode(
+                          if (nextRecall.invalidIssue) {
+                            invalidRecallIndices.add(shiftedRecallIndex);
+                          } else {
+                            queuedAnchorIndices.add(shiftedRecallIndex);
+                            const anchorChunk = encoder.encode(
                               emitTextItem(
                                 shiftedRecallIndex,
                                 nextExecuted.anchorText,
                               ),
-                            ),
-                          );
+                            );
+                            if (heldContinuationEvents.length > 0) {
+                              // An unnamed visible tool may still be held at
+                              // a lower index; forward it before this anchor.
+                              holdContinuation(
+                                anchorChunk,
+                                undefined,
+                                shiftedRecallIndex,
+                              );
+                              const anchorEvent = heldContinuationEvents.pop()!;
+                              const firstLaterItem =
+                                heldContinuationEvents.findIndex(
+                                  (held) =>
+                                    held.sourceIndex !== undefined &&
+                                    held.sourceIndex > shiftedRecallIndex,
+                                );
+                              heldContinuationEvents.splice(
+                                firstLaterItem < 0
+                                  ? heldContinuationEvents.length
+                                  : firstLaterItem,
+                                0,
+                                anchorEvent,
+                              );
+                            } else {
+                              queueTransactional(
+                                anchorChunk,
+                                shiftedRecallIndex,
+                              );
+                            }
+                          }
                         }
                       }
                       flushHeldContinuation();
@@ -13467,7 +13510,7 @@ export function streamResponsesRecallAware(
                     text: anchorTexts[anchorIndex++] ?? "",
                   };
                 }),
-                rawOutputItems: buildOutputItems(),
+                rawOutputItems: buildOutputItems(invalidRecallIndices),
               };
               if (continuationAttempted) {
                 continuationFailureCategory = "delivery";
@@ -13492,7 +13535,9 @@ export function streamResponsesRecallAware(
               }
               if (
                 !(await safeEnqueue(
-                  encoder.encode(buildTerminal(visibleResp)),
+                  encoder.encode(
+                    buildTerminal(visibleResp, invalidRecallIndices),
+                  ),
                   () => {
                     terminalDelivered = true;
                     const successful =
