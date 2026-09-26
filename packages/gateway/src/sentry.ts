@@ -653,6 +653,12 @@ export function setupReadPathTimingCapture(): void {
         t.candidateCount,
         { attributes },
       );
+      if (t.embeddingInputChars > 0)
+        Sentry.metrics.distribution(
+          "lore.readpath.embedding_input_chars",
+          t.embeddingInputChars,
+          { attributes },
+        );
     } catch {
       // Telemetry must never break the read path.
     }

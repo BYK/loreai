@@ -4764,7 +4764,15 @@ async function initIfNeeded(
   // session whose lastRequestTime exceeds the idle timeout.
   if (config && !stopIdleScheduler) {
     const llm = getLLMClient(config);
-    const baseIdleHandler = buildIdleWorkHandler(llm);
+    const baseIdleHandler = buildIdleWorkHandler(llm, (sessionID) => {
+      // Keep the accepted context selection across idle resumes. Only a real
+      // curation change warrants re-running the expensive relevance search.
+      ltmSessionCache.delete(sessionID);
+      saveSessionTracking(sessionID, {
+        ltmCacheText: null,
+        ltmCacheTokens: null,
+      });
+    });
     // Wrap the idle handler to ALSO precompute the stable-LTM cache for idle
     // sessions. When a session idles long enough that the next turn is a cold
     // post-idle resume, the gateway's LTM injection would otherwise recompute
@@ -19647,11 +19655,6 @@ async function handleConversationTurnPrepared(
   );
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
-    ltmSessionCache.delete(sessionID);
-    saveSessionTracking(sessionID, {
-      ltmCacheText: null,
-      ltmCacheTokens: null,
-    });
     // NOTE: the stable LTM block (system[1]: preferences + entities) is
     // deliberately NOT refreshed here (v45). It is frozen for the session's life
     // and replayed byte-identically — recomputing it from the live knowledge
@@ -19660,7 +19663,7 @@ async function handleConversationTurnPrepared(
     // Re-warming after the 1h breakpoint expires re-sends the same frozen bytes;
     // newly-curated preferences are picked up by the NEXT session, not mid-session.
     log.info(
-      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — preserving context LTM selection` +
         (cacheWarm ? " (cache warm — skipping compact)" : "") +
         (econ?.result.confident
           ? ` (strategy=${econ.result.strategy})`

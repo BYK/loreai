@@ -1320,18 +1320,16 @@ describe("cache stability (e2e)", () => {
 
     const { ltm } = await import("@loreai/core");
 
-    // Per-project config: a near-zero idle-resume threshold so that the small
-    // real delay between turns counts as an "idle resume". Idle resume busts the
-    // in-memory LTM session cache (gradient.onIdleResume → ltmSessionCache delete)
-    // and forces a forSession recompute on the next turn — the path that turns a
-    // pinned-system[2] knowledge change into a durable message delta (where B's
-    // overflow ToC rides) instead of a direct system[2] rewrite.
+    // A near-zero threshold exercises idle resume on each later turn. A real
+    // knowledge mutation explicitly invalidates the selection below.
     mkdirSync(projectPath, { recursive: true });
     writeFileSync(
       `${projectPath}/.lore.json`,
       JSON.stringify({ idleResumeMinutes: 0.0005 }),
     );
 
+    const { evictContextSelectionCacheForTest } =
+      await import("../src/pipeline");
     // Seed 30 project entries BEFORE the first request so they exist when
     // system[1] is first built (and frozen) on turn 0. ~310 tokens each ×30 ≈
     // 9.3K tokens > the 8000-token budget floor → guaranteed overflow tail when
@@ -1387,14 +1385,14 @@ describe("cache stability (e2e)", () => {
       }
 
       if (i === 1) {
-        // Material change to a pinned entry. The next turn's idle-resume recompute
-        // detects the change and carries it (plus the #917 overflow tail) as a
-        // durable message delta instead of rewriting the cached system[2] block.
+        // Material change to a pinned entry; emulate the cache invalidation
+        // triggered by the production curator's knowledge-change callback.
         ltm.update(seededIds[0], {
           content:
             "Changed body that must arrive as a durable delta. " +
             "More filler to keep it material. ".repeat(20),
         });
+        evictContextSelectionCacheForTest(sessionID);
       }
     }
 
@@ -1473,8 +1471,7 @@ describe("cache stability (e2e)", () => {
       "x-lore-project": projectPath,
       "x-lore-session-id": clientSessionID,
     };
-    // Near-zero idle-resume threshold → each turn (after a tiny delay) clears it
-    // → forSession recompute on the next turn (the path that can emit a delta).
+    // Near-zero idle-resume threshold exercises cache preservation on each turn.
     mkdirSync(projectPath, { recursive: true });
     writeFileSync(
       `${projectPath}/.lore.json`,
@@ -1482,6 +1479,7 @@ describe("cache stability (e2e)", () => {
     );
 
     const { ltm } = await import("@loreai/core");
+    const forSessionSpy = vi.spyOn(ltm, "forSession");
     // Seed many entries spread across the topics, enough to overflow the
     // context-bound render budget so the SELECTED subset is a moving target as
     // the query topic changes — reproducing the ranking churn without any DB
@@ -1506,6 +1504,7 @@ describe("cache stability (e2e)", () => {
 
     const history: unknown[] = [];
     let sessionID = "";
+    let callsAfterInitialSelection = 0;
     for (let i = 0; i < turns.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 80));
       const resp = await harness.chat(
@@ -1527,8 +1526,14 @@ describe("cache stability (e2e)", () => {
         sessionID = rows[0]?.session_id ?? "";
         expect(sessionID).not.toBe("");
       }
+      if (i === 1) callsAfterInitialSelection = forSessionSpy.mock.calls.length;
       // NB: intentionally NO ltm.update / ltm.remove anywhere — the DB is frozen.
     }
+
+    // Once the first context selection is saved, idle resumes reuse it instead
+    // of embedding and re-ranking the entire session on every later turn.
+    expect(callsAfterInitialSelection).toBeGreaterThan(0);
+    expect(forSessionSpy.mock.calls.length).toBe(callsAfterInitialSelection);
 
     // The core guarantee: the FIRST injection appends exactly ONE block (seq 0);
     // pure ranking churn (no genuine knowledge mutation) appends NOTHING further,

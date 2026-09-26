@@ -30,6 +30,8 @@ export interface ReadPathTiming {
    *  #999: split out so the next telemetry pass attributes the pathological
    *  awaited latency to embed vs vector-search rather than one opaque bucket. */
   vectorSearchMs: number;
+  /** Characters sent to query embedding after caller-side compaction. */
+  embeddingInputChars: number;
   /** totalMs - awaitedMs — approximate main-thread blocking time. */
   syncBlockingMs: number;
   /** Number of candidate rows the call scored (context for the blocking cost). */
@@ -63,6 +65,7 @@ export class ReadPathTimer {
    *  counted in `awaited` only. */
   embed = 0;
   vectorSearch = 0;
+  embeddingInputChars = 0;
 
   /**
    * Time the suspension across one awaited promise. When `bucket` is given, the
@@ -99,6 +102,7 @@ export class ReadPathTimer {
         awaitedMs: this.awaited,
         embedMs: this.embed,
         vectorSearchMs: this.vectorSearch,
+        embeddingInputChars: this.embeddingInputChars,
         syncBlockingMs: Math.max(0, totalMs - this.awaited),
         candidateCount,
       });

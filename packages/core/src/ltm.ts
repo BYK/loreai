@@ -2822,6 +2822,7 @@ export async function forSession(
         : queryDeadline.signal;
       try {
         querySignal.throwIfAborted();
+        timer.embeddingInputChars = sessionContext.length;
         [contextVec] = await timer.await(
           awaitEmbeddingOperation(
             embedding.embed([sessionContext], "query", querySignal),
