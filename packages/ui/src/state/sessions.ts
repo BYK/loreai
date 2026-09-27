@@ -267,6 +267,7 @@ export function createSessionsState({
     source: Accessor<{
       projectId: string;
       cursor: string | null;
+      q?: string | null;
     } | null>,
   ): {
     loader: Loader<CursorPage<SessionSummary>>;
@@ -279,6 +280,7 @@ export function createSessionsState({
           ? new URLSearchParams({
               projectId: value.projectId,
               cursor: value.cursor ?? "",
+              q: value.q ?? "",
             }).toString()
           : null;
       },
@@ -288,7 +290,11 @@ export function createSessionsState({
         return tracked(async () => {
           return client.listProjectSessionsPage(
             value.projectId,
-            { cursor: value.cursor, limit: 50 },
+            {
+              cursor: value.cursor,
+              limit: 50,
+              q: value.q ?? undefined,
+            },
             signal,
           );
         });

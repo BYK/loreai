@@ -6,10 +6,13 @@ import { formatWhen } from "~/lib/format";
 import { sessionHref, sessionsHref } from "~/routes/Browse";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
+import { SessionIdChip } from "./SessionIdChip";
+import { SessionSearchBox } from "./SessionSearchBox";
 
 export const SessionList: Component<{
   projectId: string;
   cursor: string | null;
+  q?: string | null;
   page: {
     loader: {
       data: () =>
@@ -24,9 +27,13 @@ export const SessionList: Component<{
 }> = (props) => {
   const navigate = useNavigate();
   const data = () => props.page.loader.data();
+  const q = () => props.q ?? null;
   return (
     <div class="p-4 sm:p-6">
-      <h1 class="mb-4 text-lg font-semibold">Sessions</h1>
+      <h1 class="mb-4 text-lg font-semibold">
+        {q() ? `Sessions matching “${q()}”` : "Sessions"}
+      </h1>
+      <SessionSearchBox projectId={props.projectId} q={q() ?? ""} />
       <Switch>
         <Match when={props.page.loader.loading() && !data()}>
           <StateCard kind="loading" title="Loading sessions" />
@@ -37,6 +44,16 @@ export const SessionList: Component<{
             "Sessions",
             props.page.loader.reload,
           )}
+        </Match>
+        <Match when={q() && data()?.items.length === 0}>
+          <StateCard kind="empty" title={`No sessions match “${q()}”`}>
+            <A
+              class="text-xs text-accent underline"
+              href={sessionsHref(props.projectId)}
+            >
+              Clear search
+            </A>
+          </StateCard>
         </Match>
         <Match when={data()?.items.length === 0}>
           <StateCard kind="empty" title="No captured sessions">
@@ -50,7 +67,23 @@ export const SessionList: Component<{
                 class="block py-3 hover:bg-soft"
                 href={sessionHref(props.projectId, session.session_id)}
               >
-                <div class="font-mono text-xs">{session.session_id}</div>
+                <Show
+                  when={session.title_source !== "id"}
+                  fallback={<SessionIdChip id={session.session_id} />}
+                >
+                  <div
+                    class="truncate font-medium text-sm"
+                    title={session.title}
+                  >
+                    {session.title}
+                  </div>
+                  <div class="mt-1 flex items-center gap-2">
+                    <SessionIdChip id={session.session_id} />
+                    <Show when={session.title_source === "distillation"}>
+                      <span class="text-[11px] text-muted">from summary</span>
+                    </Show>
+                  </div>
+                </Show>
                 <div class="mt-1 text-xs text-muted">
                   {session.message_count} messages · {session.distilled_count}{" "}
                   distilled · {session.undistilled_count} undistilled ·{" "}
@@ -63,7 +96,7 @@ export const SessionList: Component<{
         </Match>
       </Switch>
       <div class="mt-4 flex justify-between text-xs">
-        <Show when={props.cursor}>
+        <Show when={props.cursor || q()}>
           <button
             class="text-accent underline"
             onClick={() => navigate(sessionsHref(props.projectId))}
@@ -76,7 +109,7 @@ export const SessionList: Component<{
           class="text-accent underline disabled:opacity-40"
           onClick={() => {
             const next = data()?.next_cursor;
-            if (next) navigate(sessionsHref(props.projectId, next));
+            if (next) navigate(sessionsHref(props.projectId, next, q()));
           }}
         >
           Next page

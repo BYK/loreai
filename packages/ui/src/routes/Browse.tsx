@@ -34,8 +34,17 @@ export const knowledgeHref = (
   query?: KnowledgeQuery,
 ) =>
   `${projectHref(projectId)}/knowledge/${encodeURIComponent(knowledgeId)}${query ? knowledgeQueryToSearch(query) : ""}`;
-export const sessionsHref = (projectId: string, cursor?: string | null) =>
-  `${projectHref(projectId)}/sessions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`;
+export const sessionsHref = (
+  projectId: string,
+  cursor?: string | null,
+  q?: string | null,
+) => {
+  const params = new URLSearchParams();
+  if (cursor) params.set("cursor", cursor);
+  if (q) params.set("q", q);
+  const search = params.toString();
+  return `${projectHref(projectId)}/sessions${search ? `?${search}` : ""}`;
+};
 export const sessionHref = (projectId: string, sessionId: string) =>
   `${projectHref(projectId)}/sessions/${encodeURIComponent(sessionId)}`;
 export const searchHref = (
@@ -144,7 +153,11 @@ export const Browse: Component<{
     typeof searchParams.scope === "string" ? searchParams.scope : "all";
   const sessionsPage = ws.state.sessions.page(() =>
     props.view === "sessions" && activeProjectId()
-      ? { projectId: activeProjectId()!, cursor: cursor() }
+      ? {
+          projectId: activeProjectId()!,
+          cursor: cursor(),
+          q: searchQ() ?? null,
+        }
       : null,
   );
   const projectForEntry = createMemo(
@@ -319,7 +332,12 @@ export const Browse: Component<{
       case "sessions":
         if (!id) return projectFallback();
         return (
-          <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
+          <SessionList
+            projectId={id}
+            cursor={cursor()}
+            q={searchQ() ?? null}
+            page={sessionsPage}
+          />
         );
       case "search":
         if (!id) return projectFallback();
