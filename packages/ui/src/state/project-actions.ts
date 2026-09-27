@@ -23,6 +23,17 @@ import type { ApiClient } from "~/lib/api";
 import type { MessageBlock, Repository } from "~/db";
 import type { ProjectSummary } from "~/contracts";
 
+async function bestEffort(
+  label: string,
+  work: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await work();
+  } catch (reason) {
+    console.warn(`${label} failed`, reason);
+  }
+}
+
 export interface ProjectActionsDeps {
   client: ApiClient;
   tracked: <T>(read: () => Promise<T>) => Promise<T>;
@@ -90,9 +101,13 @@ export function createProjectActionsState({
         include_children: body.include_children,
       }),
     );
-    await purgeProjectCache(body.from_project_id);
+    await bestEffort("project cache purge", () =>
+      purgeProjectCache(body.from_project_id),
+    );
     if (body.to_project_id !== body.from_project_id) {
-      await purgeProjectCache(body.to_project_id);
+      await bestEffort("project cache purge", () =>
+        purgeProjectCache(body.to_project_id),
+      );
     }
     projects.reload();
     return result;
@@ -100,14 +115,14 @@ export function createProjectActionsState({
 
   async function clear(projectId: string): Promise<ProjectClearResult> {
     const result = await tracked(() => client.clearProject(projectId));
-    await purgeProjectCache(projectId);
+    await bestEffort("project cache purge", () => purgeProjectCache(projectId));
     projects.reload();
     return result;
   }
 
   async function remove(projectId: string): Promise<ProjectDeleteResult> {
     const result = await tracked(() => client.deleteProject(projectId));
-    await purgeProjectCache(projectId);
+    await bestEffort("project cache purge", () => purgeProjectCache(projectId));
     await projects.remove(projectId);
     projects.reload();
     return result;
@@ -116,16 +131,18 @@ export function createProjectActionsState({
   async function merge(): Promise<ProjectsMergeResult> {
     const result = await tracked(() => client.mergeProjects());
     // Ownership changed globally — every per-project projection is suspect.
-    await Promise.all([
-      repos.projects.clear(),
-      repos.knowledge.clear(),
-      repos.sessions.clear(),
-      repos.messageBlocks.clear(),
-      repos.projects.clearCollections(),
-      repos.knowledge.clearCollections(),
-      repos.sessions.clearCollections(),
-      repos.messageBlocks.clearCollections(),
-    ]);
+    await bestEffort("merge cache purge", () =>
+      Promise.all([
+        repos.projects.clear(),
+        repos.knowledge.clear(),
+        repos.sessions.clear(),
+        repos.messageBlocks.clear(),
+        repos.projects.clearCollections(),
+        repos.knowledge.clearCollections(),
+        repos.sessions.clearCollections(),
+        repos.messageBlocks.clearCollections(),
+      ]),
+    );
     projects.reload();
     return result;
   }

@@ -294,6 +294,47 @@ describe("MergeProjectsAction", () => {
     await closeLoreDb();
   });
 
+  it("keeps merge successful when cache purge fails", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    expect(db).not.toBeNull();
+    const repos = {
+      projects: createProjectsRepo(db),
+      knowledge: createKnowledgeRepo(db),
+      sessions: createSessionsRepo(db),
+      messageBlocks: createMessageBlocksRepo(db),
+    };
+    vi.spyOn(repos.projects, "clear").mockRejectedValue(
+      new Error("cache closed"),
+    );
+    vi.spyOn(repos.projects, "clearCollections").mockRejectedValue(
+      new Error("cache closed"),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = {
+      updated: 1,
+      merged: 1,
+      namesBackfilled: 0,
+      mergeDetails: [],
+    };
+    const actions = createProjectActionsState({
+      client: clientWith({ mergeProjects: async () => result }),
+      tracked: (read) => read(),
+      repos,
+      projects: { remove: vi.fn(), reload: vi.fn() },
+    });
+
+    try {
+      await expect(actions.merge()).resolves.toEqual(result);
+      expect(warn).toHaveBeenCalledWith(
+        "merge cache purge failed",
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+      await closeLoreDb();
+    }
+  });
+
   it("reports No duplicates found when merged is 0", async () => {
     const mergeProjects = vi.fn(async () => ({
       updated: 0,
@@ -362,5 +403,47 @@ describe("MergeProjectsAction", () => {
       screen.getByRole("button", { name: "Merge duplicate projects" }),
     );
     expect(screen.queryByText("Error: merge failed")).not.toBeInTheDocument();
+  });
+});
+
+describe("project action cache failures", () => {
+  it("keeps clear successful when cache purge fails", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    expect(db).not.toBeNull();
+    const repos = {
+      projects: createProjectsRepo(db),
+      knowledge: createKnowledgeRepo(db),
+      sessions: createSessionsRepo(db),
+      messageBlocks: createMessageBlocksRepo(db),
+    };
+    vi.spyOn(repos.sessions, "putMany").mockRejectedValue(
+      new Error("cache quota exceeded"),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = {
+      knowledge_deleted: 3,
+      temporal_deleted: 10,
+      distillations_deleted: 1,
+      sessions_cleared: 2,
+    };
+    const reload = vi.fn();
+    const actions = createProjectActionsState({
+      client: clientWith({ clearProject: async () => result }),
+      tracked: (read) => read(),
+      repos,
+      projects: { remove: vi.fn(), reload },
+    });
+
+    try {
+      await expect(actions.clear("p-1")).resolves.toEqual(result);
+      expect(warn).toHaveBeenCalledWith(
+        "project cache purge failed",
+        expect.any(Error),
+      );
+      expect(reload).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      await closeLoreDb();
+    }
   });
 });
