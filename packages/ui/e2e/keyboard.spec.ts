@@ -7,8 +7,10 @@ function focusName(page: import("@playwright/test").Page) {
     if (active.closest('[data-testid="logo"]')) return "logo";
     if (active.matches('a[aria-label="Lore.AI — home"]')) return "logo";
     if (active.matches('[aria-label="Search"]')) return "search";
-    const testId = active.closest("[data-testid]")?.getAttribute("data-testid");
-    if (testId?.startsWith("theme-")) return testId;
+    const closestTestId = active
+      .closest("[data-testid]")
+      ?.getAttribute("data-testid");
+    if (closestTestId?.startsWith("theme-")) return closestTestId;
     if (active.matches('[data-testid="nav-projects"]')) return "nav-projects";
     if (active.matches('[data-testid="nav-project"]')) return "nav-project";
     return active.getAttribute("aria-label") ?? active.tagName.toLowerCase();
@@ -76,6 +78,46 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
       title ?? "",
     );
   });
+
+  for (const [path, navId, marker] of [
+    ["/ui/entities", "nav-entities", "entities-page"],
+    ["/ui/contradictions", "nav-contradictions", "contradictions-page"],
+  ] as const) {
+    test(`shell keyboard navigation reaches ${navId} content`, async ({
+      page,
+    }, testInfo) => {
+      test.skip(
+        testInfo.project.name.includes("mobile"),
+        "desktop shell has persistent navigation",
+      );
+      await page.goto(path);
+      await expect(page.getByTestId(marker)).toBeVisible();
+      await page.getByTestId("theme-dark").click();
+      const nav = page.getByTestId(navId);
+      await nav.focus();
+      await expect(nav).toBeFocused();
+      let reachedMain = false;
+      for (let i = 0; i < 32; i++) {
+        await page.keyboard.press("Tab");
+        reachedMain = await page.evaluate(
+          () => document.activeElement?.closest("main") !== null,
+        );
+        if (reachedMain) break;
+      }
+      expect(reachedMain).toBe(true);
+      const focus = await page.evaluate(() => {
+        const active = document.activeElement as HTMLElement | null;
+        if (!active) return { visible: false, ring: "none/none" };
+        const style = getComputedStyle(active);
+        return {
+          visible: active.matches(":focus-visible"),
+          ring: `${style.outlineStyle}/${style.boxShadow}`,
+        };
+      });
+      expect(focus.visible).toBe(true);
+      expect(focus.ring).not.toBe("none/none");
+    });
+  }
 
   for (const choice of ["light", "dark"] as const) {
     test(`reader rows and theme toggle expose focus rings in ${choice} mode`, async ({

@@ -22,6 +22,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
 | `/ui/entities` (`?type=`, `?cursor=`) | Entity list with type filter, keyset paging and the rebuild card |
 | `/ui/entities/:entityId` | Entity detail: aliases, role/description/notes editing, relations, referencing knowledge, delete |
+| `/ui/contradictions` | Open contradiction pairs and keep/resolve decisions |
 | `/ui/warming` | Global cache-warming status, circuit-breaker reset, live-session controls and project histograms |
 | `/ui/costs` | Live and historical costs, worker breakdown, daily trend and budget controls |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
@@ -1096,10 +1097,11 @@ Latency summaries use 200 warmed requests per endpoint; each value is the median
 
 Screens reviewed on 2026-09-21 against the three v2.2 design specimens
 (contextual, focused, mobile discussion): `/ui/fixture?view=focus`,
-`/ui/fixture?view=blocks`, project page, knowledge table, knowledge detail
-and session reader, each at desktop (1280×800) and mobile (393×852), light
-and dark — 24 full-page captures taken with a throw-away Playwright script
-against the seeded e2e gateway and the Vite dev server (fixture routes).
+`/ui/fixture?view=blocks`, project page, knowledge table, knowledge detail,
+session reader, entities, entity detail, contradictions, warming and costs,
+each at desktop (1280×800) and mobile (393×852), light and dark — 24
+full-page captures taken with a throw-away Playwright script against the
+seeded e2e gateway and the Vite dev server (fixture routes).
 
 | # | Deviation from the specimens | Decision |
 |---|---|---|
@@ -1130,7 +1132,7 @@ The owner signs this gate off; the implementation agent does not. Each row names
 | Inert content | `packages/ui/test/safe-html.test.ts` (unit) and `e2e/hostile-content.spec.ts` (every production screen, desktop + mobile, `window.__pwned` stays 0, no `script`/`iframe`/handler attributes/`javascript:` links). |
 | IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v2 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
 | Keyboard / focus | `e2e/keyboard.spec.ts`, `e2e/reader.spec.ts` ("keyboard: rows are focusable"). |
-| Deep links + themes | `e2e/routes.spec.ts` (every README route survives reload; light/dark on every screen), `scripts/ui-deep-link-smoke.mjs` (always-on CI). |
+| Deep links + themes | `e2e/routes.spec.ts` (every README route, including `/ui/entities`, `/ui/entities/:entityId`, `/ui/contradictions`, `/ui/warming` and `/ui/costs`, survives reload; light/dark on every screen), `scripts/ui-deep-link-smoke.mjs` (always-on CI). |
 | Playwright green in CI | `ui-e2e` workflow run on the release PR (desktop + mobile projects) — link the run here when signing off. |
 | Owner sign-off | ☐ date / commit |
 

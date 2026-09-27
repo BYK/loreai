@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const PAYLOAD = "<script>window.__pwned=1</script>";
+const ALIAS_PAYLOAD = '<img src=x onerror="window.__pwned=1">';
+const ROLE_PAYLOAD = '<a href="javascript:window.__pwned=1">link</a>';
+const DESCRIPTION_PAYLOAD =
+  '<iframe srcdoc="<script>window.__pwned=1</script>"></iframe>';
+const NOTES_PAYLOAD = "[x](javascript:window.__pwned=1)";
 
 async function hostileFixtures(page: Page) {
   const projects = await (await page.request.get("/api/v1/projects")).json();
@@ -137,6 +142,69 @@ test.describe("hostile content stays inert", () => {
         .first(),
     ).toBeVisible();
     await assertSafe(page, true, dialog);
+    expect(dialogs).toEqual([]);
+  });
+
+  test("UI-08 routes render hostile entity and contradiction data inertly", async ({
+    page,
+  }) => {
+    const dialogs: string[] = [];
+    page.on("dialog", (dialog) => {
+      dialogs.push(dialog.message());
+      void dialog.dismiss();
+    });
+    const entities = await (await page.request.get("/api/v1/entities")).json();
+    const hostileEntity = entities.entities.find(
+      (item: { canonical_name: string }) =>
+        item.canonical_name.includes(PAYLOAD),
+    );
+    expect(hostileEntity).toBeTruthy();
+
+    await page.goto("/ui/entities");
+    await expect(page.getByTestId("entities-page")).toBeVisible();
+    await expect(
+      page.getByTestId("entity-row").filter({ hasText: PAYLOAD }),
+    ).toBeVisible();
+    await assertSafe(page);
+
+    await page.goto(`/ui/entities/${hostileEntity.id}`);
+    const entityPage = page.getByTestId("entity-page");
+    await expect(entityPage).toBeVisible();
+    await expect(entityPage.getByTestId("entity-name")).toContainText(PAYLOAD);
+    await expect(entityPage.getByTestId("entity-aliases")).toContainText(
+      ALIAS_PAYLOAD,
+    );
+    await expect(entityPage.getByTestId("entity-role")).toHaveValue(
+      ROLE_PAYLOAD,
+    );
+    await expect(entityPage.getByTestId("entity-description")).toHaveValue(
+      DESCRIPTION_PAYLOAD,
+    );
+    await expect(entityPage.getByTestId("entity-notes")).toHaveValue(
+      NOTES_PAYLOAD,
+    );
+    await assertSafe(page);
+
+    await page.goto("/ui/contradictions");
+    await expect(page.getByTestId("contradictions-page")).toBeVisible();
+    const hostilePair = page
+      .getByTestId("contradiction-row")
+      .filter({ hasText: PAYLOAD })
+      .first();
+    await expect(hostilePair).toBeVisible();
+    await assertSafe(page);
+
+    await page.goto("/ui/warming");
+    await expect(page.getByTestId("warming-page")).toContainText(
+      "Cache warming",
+    );
+    await assertSafe(page, false);
+
+    await page.goto("/ui/costs");
+    await expect(page.getByTestId("costs-page")).toContainText(
+      "Cost intelligence",
+    );
+    await assertSafe(page, false);
     expect(dialogs).toEqual([]);
   });
 });

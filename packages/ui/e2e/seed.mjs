@@ -180,7 +180,7 @@ core.ltm.create({
 // not change.
 const hostile = join(root, "hostile");
 mkdirSync(hostile, { recursive: true });
-core.ensureProject(hostile, "hostile", null);
+const hostileProjectId = core.ensureProject(hostile, "hostile", null);
 const hostilePayloads = [
   "<script>window.__pwned=1</script>",
   '<img src=x onerror="window.__pwned=1">',
@@ -313,6 +313,23 @@ core.entities.addRelation(ada.id, analyticalEngines.id, "colleague");
 core.entities.linkKnowledge(firstKnowledgeId, ada.id);
 void loreRepo;
 
+core.entities.create({
+  id: "e2e-hostile-entity",
+  projectPath: hostile,
+  crossProject: false,
+  entityType: "person",
+  canonicalName: `Hostile entity ${hostilePayloads[0]}`,
+  aliases: [
+    { type: "nickname", value: hostilePayloads[1] },
+    { type: "email", value: "hostile@example.invalid" },
+  ],
+  metadata: {
+    role: hostilePayloads[2],
+    description: hostilePayloads[3],
+    notes: hostilePayloads[4],
+  },
+});
+
 let contradictionFixtureId = 0;
 const nextContradictionFixtureId = () =>
   `01996200-1823-7000-8000-${(++contradictionFixtureId).toString(16).padStart(12, "0")}`;
@@ -349,6 +366,30 @@ for (const viewport of ["Desktop", "Mobile"]) {
     });
   }
 }
+
+const hostileConflictA = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: hostile,
+  scope: "project",
+  category: "decision",
+  title: `Hostile contradiction ${hostilePayloads[0]}`,
+  content: hostileText,
+});
+const hostileConflictB = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: hostile,
+  scope: "project",
+  category: "decision",
+  title: `Hostile opposite ${hostilePayloads[1]}`,
+  content: hostileText,
+});
+core.ltm.recordContradiction({
+  logicalIdA: hostileConflictA,
+  logicalIdB: hostileConflictB,
+  projectId: hostileProjectId,
+  similarity: 0.96,
+  rationale: hostileText,
+});
 
 core.close();
 
