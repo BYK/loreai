@@ -48,6 +48,11 @@ import {
   getProviderCostSummary,
 } from "./cost-tracker";
 import { getActiveSessions } from "./pipeline";
+import {
+  evaluateProviderBudgets,
+  parseProviderBudgets,
+  setProviderBudgets,
+} from "./provider-budgets";
 
 const MAX_OPERATIONS_BODY_BYTES = 8 * 1024;
 
@@ -554,6 +559,7 @@ export function handleGetCosts(configuredHostedMode = false): Response {
       observed_at: row.observedAt,
       stale: isProviderQuotaStale(row, Date.now()),
     })),
+    provider_budgets: evaluateProviderBudgets(),
   });
 }
 
@@ -567,23 +573,29 @@ export async function handleSetDailyBudget(
     configuredHostedMode,
   );
   if (blocked) return blocked;
-  if (getDailyBudgetEnvOverride() !== null) {
-    return errorResponse(
-      409,
-      "conflict",
-      "The daily budget is controlled by LORE_DAILY_BUDGET.",
-    );
-  }
   const parsed = await readJsonBody(req);
   if (parsed instanceof Response) return parsed;
   const body = jsonObject(parsed);
+  const keys = body ? Object.keys(body) : [];
+  const hasAmount = body !== null && "amount" in body;
+  const hasProviderBudgets = body !== null && "provider_budgets" in body;
   if (
     !body ||
-    Object.keys(body).length !== 1 ||
-    typeof body.amount !== "number" ||
-    !Number.isFinite(body.amount) ||
-    body.amount < 0 ||
-    body.amount > 1_000_000
+    (!hasAmount && !hasProviderBudgets) ||
+    keys.length !== (hasAmount ? 1 : 0) + (hasProviderBudgets ? 1 : 0)
+  ) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Body must be { amount } and/or { provider_budgets }.",
+    );
+  }
+  if (
+    hasAmount &&
+    (typeof body.amount !== "number" ||
+      !Number.isFinite(body.amount) ||
+      body.amount < 0 ||
+      body.amount > 1_000_000)
   ) {
     return errorResponse(
       400,
@@ -591,7 +603,30 @@ export async function handleSetDailyBudget(
       "Body must be { amount: a finite number between 0 and 1000000 }.",
     );
   }
-  setDailyBudget(body.amount);
+  // LORE_DAILY_BUDGET governs only the global amount — provider budgets are
+  // unaffected by it.
+  if (hasAmount && getDailyBudgetEnvOverride() !== null) {
+    return errorResponse(
+      409,
+      "conflict",
+      "The daily budget is controlled by LORE_DAILY_BUDGET.",
+    );
+  }
+  if (hasProviderBudgets) {
+    const budgets = parseProviderBudgets(body.provider_budgets);
+    if (typeof budgets === "string") {
+      return errorResponse(400, "invalid_request", budgets);
+    }
+    setProviderBudgets(budgets);
+  }
+  if (hasAmount) setDailyBudget(body.amount as number);
+  if (hasProviderBudgets) {
+    return jsonResponse({
+      amount: getDailyBudget(),
+      disabled: hasAmount ? body.amount === 0 : getDailyBudget() === 0,
+      provider_budgets: evaluateProviderBudgets(),
+    });
+  }
   return jsonResponse({
     amount: getDailyBudget(),
     disabled: body.amount === 0,

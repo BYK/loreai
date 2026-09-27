@@ -187,6 +187,7 @@ export {
   getProviderCostTotals,
   isProviderQuotaStale,
   QUOTA_STALE_FALLBACK_MS,
+  getProviderDayUsage,
   upsertProviderQuota,
   listProviderQuotas,
   type ProviderAuthKind,

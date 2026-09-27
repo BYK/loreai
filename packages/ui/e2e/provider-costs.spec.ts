@@ -16,6 +16,8 @@ test.describe("provider cost cards", () => {
     await expect(bars.nth(0)).toHaveAttribute("aria-valuenow", "23");
     await expect(bars.nth(1)).toHaveAttribute("aria-valuenow", "41");
     await expect(anthropic.getByText(/resets in/)).toHaveCount(2);
+    await expect(anthropic.getByText("Quota · 7d")).toBeVisible();
+    await expect(anthropic.getByText("41% / 80%")).toBeVisible();
 
     const openai = cards.filter({ hasText: "OpenAI" });
     await expect(openai.getByText("API key")).toBeVisible();

@@ -14,6 +14,11 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { detectHarness } from "./harness";
 import { resolveCostAttribution } from "./cost-attribution";
+import {
+  computeProviderBudgetPressure,
+  evaluateProviderBudgets,
+  getProviderBudgets,
+} from "./provider-budgets";
 import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
@@ -21249,7 +21254,35 @@ async function handleConversationTurnPrepared(
   // Gated to Anthropic-OAuth accounts; 0 for everything else.
   const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
   const quotaPressure = computeQuotaPressure(quotaSnapshot);
-  if (dailyBudget > 0 || quotaPressure > 0) {
+  // Per-provider budgets (#1927): evaluated only when any are configured,
+  // using whatever attribution is known pre-upstream. A DB failure must
+  // never break the request.
+  let providerPressure = 0;
+  try {
+    if (getProviderBudgets().length > 0) {
+      const attribution = resolveCostAttribution({
+        sessionID,
+        providerID: sessionState.lastUpstream?.providerID,
+        upstreamURL: sessionState.lastUpstream?.url,
+        credential: resolveAuth(
+          sessionID,
+          sessionState.lastUpstream?.providerID,
+        ),
+      });
+      providerPressure =
+        attribution.provider === "unknown"
+          ? 0
+          : computeProviderBudgetPressure(evaluateProviderBudgets(), {
+              provider: attribution.provider,
+              auth_kind: attribution.authKind,
+              account: attribution.account,
+            });
+    }
+  } catch (err) {
+    log.info(`provider-budget: evaluation failed: ${String(err)}`);
+  }
+  const combinedQuotaPressure = Math.max(quotaPressure, providerPressure);
+  if (dailyBudget > 0 || combinedQuotaPressure > 0) {
     const inputTokens =
       getLastTransformEstimate(sessionID) ||
       coreEstimateTokens(JSON.stringify(modifiedReq.messages));
@@ -21257,7 +21290,7 @@ async function handleConversationTurnPrepared(
     const delay = getDailyThrottleDelay(
       dailyBudget,
       estimatedCost,
-      quotaPressure,
+      combinedQuotaPressure,
     );
 
     if (delay > 0) {
@@ -21277,7 +21310,10 @@ async function handleConversationTurnPrepared(
           `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
             `session=${sessionID.slice(0, 16)} ` +
             `spend=$${getDailySpend().spend.toFixed(2)} ` +
-            `rate=$${getCostRate().toFixed(2)}/hr`,
+            `rate=$${getCostRate().toFixed(2)}/hr` +
+            (providerPressure >= quotaPressure && providerPressure > 0
+              ? " (provider-budget)"
+              : ""),
         );
         try {
           await completeBudgetThrottleDelay(

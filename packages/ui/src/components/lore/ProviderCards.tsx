@@ -5,6 +5,7 @@ import { createSignal, For, onCleanup, Show } from "solid-js";
 import type { CostsSnapshot } from "~/contracts";
 import { formatWhen } from "~/lib/format";
 import {
+  budgetsForCard,
   displayProvider,
   formatDuration,
   formatResetCountdown,
@@ -12,6 +13,7 @@ import {
   quotaPercent,
   quotaStale,
   quotaWindowLabel,
+  type BudgetRow,
   type ProviderCardModel,
   type QuotaRow,
 } from "~/lib/provider-quota";
@@ -19,6 +21,7 @@ import { StateCard } from "./StateCard";
 
 type Providers = CostsSnapshot["providers"];
 type Quotas = CostsSnapshot["quotas"];
+type Budgets = CostsSnapshot["provider_budgets"];
 
 function count(value: number): string {
   return new Intl.NumberFormat().format(value);
@@ -107,10 +110,47 @@ const QuotaLine: Component<{ quota: QuotaRow; now: () => number }> = (
   );
 };
 
+function budgetUnitLabel(unit: BudgetRow["unit"]): string {
+  return unit === "usd" ? "USD" : unit === "tokens" ? "Tokens" : "Quota";
+}
+
+function budgetValue(
+  budget: BudgetRow,
+  money: (usd: number) => string,
+): string {
+  if (budget.used === null) return "—";
+  if (budget.unit === "usd") {
+    return `${money(budget.used)} / ${money(budget.amount)}`;
+  }
+  if (budget.unit === "tokens") {
+    return `${count(budget.used)} / ${count(budget.amount)}`;
+  }
+  return `${budget.used.toFixed(0)}% / ${budget.amount.toFixed(0)}%`;
+}
+
+const BudgetLine: Component<{
+  budget: BudgetRow;
+  money: (usd: number) => string;
+}> = (props) => (
+  <div class="flex items-baseline justify-between gap-3 text-xs">
+    <span class="text-muted">
+      {budgetUnitLabel(props.budget.unit)} ·{" "}
+      {props.budget.window === "daily" ? "daily" : props.budget.window}
+    </span>
+    <span
+      class={`tabular-nums ${(props.budget.fraction ?? 0) >= 1 ? "text-danger" : ""}`}
+    >
+      {budgetValue(props.budget, props.money)}
+      {props.budget.stale ? " (stale)" : ""}
+    </span>
+  </div>
+);
+
 const ProviderCard: Component<{
   card: ProviderCardModel;
   money: (usd: number) => string;
   now: () => number;
+  budgets: BudgetRow[];
 }> = (props) => (
   <section
     class="rounded-lg border border-line bg-bg p-4"
@@ -171,12 +211,24 @@ const ProviderCard: Component<{
         </For>
       </div>
     </Show>
+
+    <Show when={props.budgets.length > 0}>
+      <div class="mt-3 space-y-2 border-t border-line pt-3">
+        <div class="text-[11px] font-medium uppercase tracking-wide text-muted">
+          Budgets
+        </div>
+        <For each={props.budgets}>
+          {(budget) => <BudgetLine budget={budget} money={props.money} />}
+        </For>
+      </div>
+    </Show>
   </section>
 );
 
 export const ProviderCards: Component<{
   providers: Providers;
   quotas: Quotas;
+  budgets?: Budgets;
   money: (usd: number) => string;
   now?: () => number;
 }> = (props) => {
@@ -206,7 +258,12 @@ export const ProviderCards: Component<{
         <div class="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           <For each={cards()}>
             {(card) => (
-              <ProviderCard card={card} money={props.money} now={now} />
+              <ProviderCard
+                card={card}
+                money={props.money}
+                now={now}
+                budgets={budgetsForCard(props.budgets ?? [], card)}
+              />
             )}
           </For>
         </div>
