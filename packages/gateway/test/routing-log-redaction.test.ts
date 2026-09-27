@@ -369,6 +369,9 @@ describe("routing log credential redaction", () => {
     expect(diagnostic).toContain("host=api.githubcopilot.com");
     expect(diagnostic).toContain("category=INVALID_ARGUMENT");
     expect(diagnostic).toContain("requestId=GHREQ-1234567890");
+    expect(diagnostic).toMatch(
+      /bodyBytes=\d+ instructionsBytes=\d+ inputItems=\d+ tools=\d+/,
+    );
     expect(diagnostic).not.toContain("/chat/completions");
     expect(messages.join("\n")).not.toContain(privateBodyMarker);
     expect(messages.join("\n")).not.toContain(credential);

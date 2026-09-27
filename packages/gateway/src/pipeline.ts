@@ -14,6 +14,7 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { detectHarness } from "./harness";
 import { boundFallbackHistory } from "./fallback-history";
+import { upstreamRequestShape } from "./upstream-request-shape";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -7012,6 +7013,7 @@ function logUpstreamResponseFailure(
   req: GatewayRequest,
   route: ResolvedRequestUpstreamRoute,
   sessionID: string,
+  requestShape?: string,
 ): void {
   const details = [
     `provider=${safeDiagnosticToken(route.providerID) ?? "none"}`,
@@ -7024,6 +7026,7 @@ function logUpstreamResponseFailure(
   if (category) details.push(`category=${category}`);
   const requestId = safeUpstreamRequestId(headers);
   if (requestId) details.push(`requestId=${requestId}`);
+  if (requestShape) details.push(requestShape);
   log.error(`upstream error: ${status} (${details.join(" ")})`);
 }
 
@@ -7219,6 +7222,8 @@ type UpstreamResult = {
   retry: (signal?: AbortSignal) => Promise<Response>;
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
+  /** Content-free request dimensions, computed only for rejected requests. */
+  requestShape?: string;
   /** The wire protocol used for the upstream request (may differ from ingress). */
   effectiveProtocol:
     | "anthropic"
@@ -7573,7 +7578,15 @@ async function forwardToUpstream(
   };
 
   const response = await dispatch(signal);
-  return { response, retry: dispatch, serializedBody, effectiveProtocol };
+  return {
+    response,
+    retry: dispatch,
+    serializedBody,
+    effectiveProtocol,
+    ...(response.status === 400
+      ? { requestShape: upstreamRequestShape(body, serializedBody) }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -21397,6 +21410,7 @@ async function handleConversationTurnPrepared(
       req,
       requestUpstreamRoute,
       sessionID,
+      upstreamResult.requestShape,
     );
 
     // When the API rejects with a context-length error, escalate the compression
