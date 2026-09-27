@@ -10,6 +10,7 @@ import {
   STANDARD_TOOLS,
 } from "./helpers/fixtures";
 import { setUpstreamInterceptor } from "../src/pipeline";
+import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
 import { db, listProviderQuotas } from "@loreai/core";
 
 const quotaHeaders = {
@@ -140,6 +141,87 @@ it("attributes quota headers to the session credential on the provisional path",
   expect(response.status).toBe(200);
 
   const quotas = listProviderQuotas().filter((q) => q.provider === "anthropic");
+  expect(quotas.length).toBeGreaterThan(0);
+  for (const q of quotas) {
+    expect(q.authKind).toBe("subscription");
+  }
+});
+
+it("attributes quota headers to the Codex session account on the provisional path", async () => {
+  db().exec("DELETE FROM provider_quotas");
+  harness = await createHarness({ fixtures: [] });
+  setUpstreamInterceptor(async () => {
+    const response = buildOpenAIResponsesResponse(
+      {
+        id: "resp_quota",
+        model: "gpt-5",
+        content: [{ type: "text", text: "Hello quota" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 12, outputTokens: 3 },
+      },
+      true,
+    );
+    const text = await response.text();
+    return new Response(text, {
+      headers: {
+        "content-type": "text/event-stream",
+        // openai-ratelimit headers persist quota rows but do NOT classify the
+        // credential as a subscription (unlike x-codex-* headers).
+        "x-ratelimit-limit-requests": "200",
+        "x-ratelimit-remaining-requests": "150",
+        "x-ratelimit-reset-requests": "30m",
+      },
+    });
+  });
+  const projectPath = dirname(harness.dbPath);
+  const request = {
+    model: "gpt-5",
+    stream: true,
+    instructions: DEFAULT_SYSTEM + "\nWorking directory: " + projectPath,
+    input: [{ role: "user", content: "Hello" }],
+    tools: ["read", "write", "shell"].map((name) => ({
+      type: "function",
+      name,
+      description: name,
+      parameters: { type: "object", properties: {} },
+    })),
+  };
+  const headers = {
+    "content-type": "application/json",
+    authorization: "Bearer chatgpt-oauth-token",
+    // api.openai.com resolves provider "openai" without self-identifying as
+    // the ChatGPT subscription backend — the session's stored
+    // chatgpt-account-id (captured on the first turn) is the only
+    // subscription discriminator on the provisional forward.
+    "x-lore-upstream-url": "https://api.openai.com",
+    "chatgpt-account-id": "acct-xyz",
+    "x-lore-project": projectPath,
+    "x-session-id": "codex-before-plugin",
+  };
+  const initial = await harness.request("/v1/codex/responses", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(request),
+  });
+  expect(initial.status).toBe(200);
+  await initial.text();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  db().exec("DELETE FROM provider_quotas");
+
+  // A new canonical session id routes the turn through the provisional
+  // verification path — quota capture must resolve the ChatGPT account from
+  // the session snapshot via the forwarded sessionID.
+  const migrated = await harness.request("/v1/codex/responses", {
+    method: "POST",
+    headers: { ...headers, "x-lore-session-id": "codex-after-plugin" },
+    body: JSON.stringify(request),
+  });
+  await migrated.text();
+  expect(migrated.status).toBe(200);
+
+  const quotas = listProviderQuotas().filter((q) => q.provider === "openai");
   expect(quotas.length).toBeGreaterThan(0);
   for (const q of quotas) {
     expect(q.authKind).toBe("subscription");
