@@ -14,6 +14,11 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { detectHarness } from "./harness";
 import { boundFallbackHistory } from "./fallback-history";
+import {
+  formatUpstreamRequestShape,
+  upstreamRequestShape,
+  type UpstreamRequestShape,
+} from "./upstream-request-shape";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -386,6 +391,7 @@ import {
   spanStartupBackfill,
   captureClientAbortUnderPressure,
   captureEmptyCompletion,
+  captureUpstream400,
   type AnthropicUsage,
 } from "./sentry";
 import { createRecallDiagnostics } from "./recall-diagnostics";
@@ -7011,19 +7017,25 @@ function logUpstreamResponseFailure(
   headers: Headers,
   req: GatewayRequest,
   route: ResolvedRequestUpstreamRoute,
-  sessionID: string,
+  sessionID: string | undefined,
+  requestShape?: UpstreamRequestShape,
 ): void {
   const details = [
     `provider=${safeDiagnosticToken(route.providerID) ?? "none"}`,
     `model=${safeDiagnosticToken(req.model) ?? "redacted"}`,
     `protocol=${route.effectiveProtocol}`,
     `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)}`,
-    `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
   ];
+  if (sessionID) {
+    details.push(
+      `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
+    );
+  }
   const category = safeUpstreamErrorCategory(errorBody);
   if (category) details.push(`category=${category}`);
   const requestId = safeUpstreamRequestId(headers);
   if (requestId) details.push(`requestId=${requestId}`);
+  if (requestShape) details.push(formatUpstreamRequestShape(requestShape));
   log.error(`upstream error: ${status} (${details.join(" ")})`);
 }
 
@@ -7215,10 +7227,14 @@ export function resolveRequestUpstreamRouteForTest(
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
 type UpstreamResult = {
   response: Response;
+  /** Validated route used for dispatch, for content-free error diagnostics. */
+  route: ResolvedRequestUpstreamRoute;
   /** Repeat the exact prepared request bytes, headers, route, and interceptor. */
   retry: (signal?: AbortSignal) => Promise<Response>;
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
+  /** Content-free request dimensions, computed only for rejected requests. */
+  requestShape?: UpstreamRequestShape;
   /** The wire protocol used for the upstream request (may differ from ingress). */
   effectiveProtocol:
     | "anthropic"
@@ -7573,7 +7589,22 @@ async function forwardToUpstream(
   };
 
   const response = await dispatch(signal);
-  return { response, retry: dispatch, serializedBody, effectiveProtocol };
+  return {
+    response,
+    route,
+    retry: dispatch,
+    serializedBody,
+    effectiveProtocol,
+    ...(response.status === 400
+      ? {
+          requestShape: upstreamRequestShape(
+            body,
+            serializedBody,
+            effectiveProtocol,
+          ),
+        }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -18168,6 +18199,18 @@ async function handlePassthrough(
   // responses. Running a 4xx/429 body through an SSE validator would launder
   // it into status 200 or a synthetic stream failure.
   if (!upstreamResponse.ok) {
+    if (upstreamResponse.status === 400) {
+      logUpstreamResponseFailure(
+        400,
+        "",
+        upstreamResponse.headers,
+        req,
+        forwarded.route,
+        undefined,
+        forwarded.requestShape,
+      );
+      captureUpstream400(effectiveProtocol, forwarded.requestShape);
+    }
     return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
   }
 
@@ -21397,7 +21440,11 @@ async function handleConversationTurnPrepared(
       req,
       requestUpstreamRoute,
       sessionID,
+      upstreamResult.requestShape,
     );
+    if (upstreamResponse.status === 400) {
+      captureUpstream400(effectiveProtocol, upstreamResult.requestShape);
+    }
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.
