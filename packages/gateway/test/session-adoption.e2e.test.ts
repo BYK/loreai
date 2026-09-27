@@ -520,6 +520,62 @@ describe("issue #796: restart-proof session adoption (Tier 3b)", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("threads the detected harness onto the provisional-turn user row (#1915)", async () => {
+    harness = await createHarness({
+      fixtures: fixtures(),
+      projectPath: "/test/provisional-harness",
+    });
+    let r = await harness.chat(body([{ role: "user", content: U0 }]), "key-A", {
+      "x-lore-session-id": "V1",
+    });
+    await r.text();
+    r = await harness.chat(
+      body([
+        { role: "user", content: U0 },
+        { role: "assistant", content: "A0 done." },
+        { role: "user", content: U1 },
+      ]),
+      "key-A",
+      { "x-lore-session-id": "V1" },
+    );
+    await r.text();
+    const original = loreSessionRows(harness)[0];
+    await harness.restartPipeline();
+
+    // Resume under a Claude Code identity: the transcript fingerprint adopts
+    // the prior session and the turn commits through the provisional path —
+    // its user row must still carry the detected harness, never a
+    // placeholder model.
+    r = await harness.chat(
+      {
+        ...body([
+          { role: "user", content: U0 },
+          { role: "assistant", content: "A0 done." },
+          { role: "user", content: U1 },
+          { role: "assistant", content: "A1 done." },
+          { role: "user", content: U2 },
+        ]),
+        // The coding-prompt marker keeps this out of the side-channel
+        // passthrough, like a real Claude Code turn.
+        system: `${DEFAULT_SYSTEM}\nWorking directory: /test/provisional-harness`,
+      },
+      "key-A",
+      { "x-claude-code-session-id": "cc-resumed" },
+    );
+    expect(r.status).toBe(200);
+    await r.text();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const [row] = harness.queryDB<{ metadata: string }>(
+      "SELECT metadata FROM temporal_messages WHERE session_id = ? AND content LIKE ?",
+      [original.session_id, `%${U2}%`],
+    );
+    const meta = JSON.parse(row.metadata) as Record<string, unknown>;
+    expect(meta.agent).toBe("claude-code");
+    expect(meta).not.toHaveProperty("model");
+  });
+
   it("adopts a resumed conversation from a new clone path matched by git remote", async () => {
     enableHostedMode();
     const originalPath = "/client/checkouts/adoption-original";

@@ -635,3 +635,40 @@ describe("resolveToolResults", () => {
     });
   });
 });
+
+describe("user row metadata", () => {
+  const messages: GatewayMessage[] = [
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    { role: "assistant", content: [{ type: "text", text: "hello" }] },
+  ];
+
+  test("omits agent and model when no harness is detected", () => {
+    const [user] = gatewayMessagesToLore(messages, "sess-meta");
+    expect(user.info.role).toBe("user");
+    expect(user.info).not.toHaveProperty("agent");
+    expect(user.info).not.toHaveProperty("model");
+  });
+
+  test("records the detected harness as agent and still omits model", () => {
+    const [user] = gatewayMessagesToLore(
+      messages,
+      "sess-meta",
+      0,
+      0,
+      undefined,
+      "claude-code",
+    );
+    expect(user.info).toMatchObject({ agent: "claude-code" });
+    expect(user.info).not.toHaveProperty("model");
+  });
+
+  test("assistant rows keep their gateway placeholders", () => {
+    const [, assistant] = gatewayMessagesToLore(messages, "sess-meta");
+    expect(assistant.info).toMatchObject({
+      role: "assistant",
+      mode: "gateway",
+      modelID: "unknown",
+      providerID: "anthropic",
+    });
+  });
+});

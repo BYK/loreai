@@ -22,10 +22,16 @@ export type LoreUserMessage = {
   sessionID: string;
   role: "user";
   time: { created: number };
-  /** Agent name (e.g. "build", "plan"). Host-specific; stored as metadata. */
-  agent: string;
-  /** Model used for this turn. Stored as metadata. */
-  model: { providerID: string; modelID: string };
+  /**
+   * Harness / host agent that produced this turn (e.g. `claude-code`,
+   * `codex`, `build`). Omitted when unknown.
+   */
+  agent?: string;
+  /**
+   * Model the host recorded for this turn, when it exposes one. Omitted by
+   * the gateway (the model belongs to the assistant turn).
+   */
+  model?: { providerID: string; modelID: string };
 };
 
 export type LoreAssistantMessage = {
