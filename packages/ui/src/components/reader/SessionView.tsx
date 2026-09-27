@@ -74,10 +74,7 @@ import {
   messageBlockId,
   originLabel,
 } from "~/reader/blocks";
-import {
-  NATIVE_TRANSCRIPT_LABEL,
-  coverageDeclaration,
-} from "~/reader/coverage";
+import { CAPTURE_HELP, coverageDeclaration } from "~/reader/coverage";
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows } from "~/reader/rows";
 import { type SearchHit, queryMatcher, searchRows } from "~/reader/search";
@@ -1104,22 +1101,21 @@ export const SessionView: Component<SessionViewProps> = (props) => {
               data-coverage={coverage().kind}
               data-coverage-reason={coverage().reason ?? ""}
             >
-              <Badge
-                variant={coverage().kind === "captured" ? "teal" : "outline"}
-                title="What this view contains, as reported by Lore"
+              <Show when={coverage().kind === "partial"}>
+                <Badge
+                  variant="outline"
+                  title="What this view contains, as reported by Lore"
+                >
+                  {coverage().label}
+                </Badge>
+              </Show>
+              <span
+                data-testid="reader-coverage-line"
+                class="cursor-help"
+                title={CAPTURE_HELP}
               >
-                {coverage().label}
-              </Badge>
-              <span data-testid="reader-coverage-line">
                 {coverage().detail}
               </span>
-              <Badge
-                variant="outline"
-                title="No harness exposes its own transcript to Lore yet; only Lore's capture is shown"
-                data-testid="native-transcript"
-              >
-                {NATIVE_TRANSCRIPT_LABEL}
-              </Badge>
               <Show when={props.status}>
                 {(status) => <StaleBadge status={status()} />}
               </Show>

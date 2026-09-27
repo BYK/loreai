@@ -686,10 +686,11 @@ header's declaration (`data-testid="reader-coverage"`,
 | everything the server counted is loaded | **captured** | `N messages, complete as captured` | `null` |
 
 Unknown is never promoted to complete: the cache alone (`hasOlder === null`)
-and a missing `message_count` are both partial. Every declaration also
-states `Native transcript not yet available` (`NATIVE_TRANSCRIPT_LABEL`):
-the harness's own transcript is a distinct source no adapter exposes, so it
-is declared absent rather than left implied by "captured". The search
+and a missing `message_count` are both partial. The header always shows the
+detail line — with `CAPTURE_HELP` as its tooltip explaining what
+Lore-captured history is — and the "Partial history" badge only while the
+view is partial; there is no native-transcript banner (#1920; native
+availability will come from adapters later). The search
 summary repeats the detail (`Searched the loaded history only · …`) when
 the view is partial.
 
@@ -1120,7 +1121,7 @@ seeded e2e gateway and the Vite dev server (fixture routes).
 | 8 | Session reader: the compressed-context card renders at the top of a partial window although its source messages (0–9) are not loaded yet. | **Accepted** — the card is labelled "compressed context", placed after its sources once they are loaded (`reader.spec.ts` asserts the placement); showing it first in a partial window is the honest coverage state. |
 | 9 | Knowledge table: a disabled "Next page" control is rendered (faint) when there is no further page. | **Accepted** — keeps the paging control's position stable; disabled state is announced. |
 | 10 | Theme switch: a colour transition makes toggle labels briefly low-contrast right after switching (visible in captures taken immediately after the click). | **Accepted** — settled state has full contrast (verified); no change. |
-| 11 | Mobile reader header wraps coverage badges and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
+| 11 | Mobile reader header wraps the coverage badge and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
 | 12 | The specimens' discussion/thread panes, reply composer and "Ask agent" are P3/P4; the real screens show them only as disabled placeholders. | **Deferred** — by design (plan §0/§6); tracked by the roadmap epic #1824. |
 | 13 | Knowledge detail (mobile): a long unbroken title overflowed the viewport. | **Fixed** here (`break-words` on the heading). |
 
