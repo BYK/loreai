@@ -620,7 +620,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const el = scrollEl;
     const items = virtualizer.getVirtualItems();
     const last = items.at(-1);
-    const pinNow = () => {
+    const pinNow = (items: ReturnType<typeof virtualizer.getVirtualItems>) => {
       const foldIdx = items.findIndex((item) => item.end > el.scrollTop);
       const pinItem =
         foldIdx >= 0
@@ -644,7 +644,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       top: el.scrollTop,
       total: virtualizer.getTotalSize(),
       anchor: last ? { key: String(last.key), index: last.index } : null,
-      pin: enablePin ? pinNow() : null,
+      pin: enablePin ? pinNow(items) : null,
       wantPin: enablePin,
       serialAtStart: userSerial() ?? -1,
       forLink: scrollTarget,
@@ -667,7 +667,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         const nearTop = el.scrollTop - listOffset() < el.clientHeight;
         const staleMount = nearTop && (mounted[0]?.index ?? 0) > mounted.length;
         if (!staleMount) {
-          const pin = pinNow();
+          const pin = pinNow(mounted);
           if (pin && prepend) prepend.pin = pin;
         }
         requestAnimationFrame(capturePin);
@@ -931,7 +931,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    * live watcher instead of silently running ungated. */
   let userScroll: { serial(): number; dispose(): void } | null = null;
   function userSerial() {
-    if (!userScroll && scrollEl) userScroll = watchUserScroll(scrollEl);
+    // A pending rAF can outlive the component; a detached scroller gets
+    // no watcher — listeners on it would just leak.
+    if (!userScroll && scrollEl?.isConnected) {
+      userScroll = watchUserScroll(scrollEl);
+    }
     return userScroll?.serial();
   }
 
