@@ -22,6 +22,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
 | `/ui/entities` (`?type=`, `?cursor=`) | Entity list with type filter, keyset paging and the rebuild card |
 | `/ui/entities/:entityId` | Entity detail: aliases, role/description/notes editing, relations, referencing knowledge, delete |
+| `/ui/contradictions` | Open contradiction pairs and keep/resolve decisions |
 | `/ui/warming` | Global cache-warming status, circuit-breaker reset, live-session controls and project histograms |
 | `/ui/costs` | Live and historical costs, worker breakdown, daily trend and budget controls |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
@@ -347,10 +348,19 @@ pnpm --filter @loreai/ui test           # Vitest, jsdom
 pnpm --filter @loreai/ui build          # -> packages/ui/dist (hashed assets)
 pnpm --filter @loreai/ui preview        # serve dist locally
 pnpm --filter @loreai/ui test:e2e       # Playwright against the BUILT gateway (see below)
+pnpm --filter @loreai/ui measure:p1     # reproducible UI-07 startup, latency, bundle and scroll measurements
 node scripts/ui-deep-link-smoke.mjs     # browser-free deep-link smoke against the built gateway
 
 pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm test && pnpm run build   # root flows include this package
 ```
+
+### Measurements
+
+`packages/ui/scripts/measure-p1.mjs` runs the reproducible UI-07 P1 probes
+against throw-away gateway data. Use `--runs` and `--requests` to control
+sample counts, `--baseline <commit>` for an isolated worktree comparison,
+`--json` or `--markdown` for artifacts, and `--write-readme` to replace the
+generated measurements block below.
 
 ### Development workflow
 
@@ -448,7 +458,7 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -1030,6 +1040,125 @@ the first `/ui` request; the proxy path is unchanged. (The bundle size above
 predates the move from an embedded module to staged files, which took
 `dist/index.cjs` back to ≈17.45 MB.)
 
+<!-- p1-measurements:start -->
+### UI-07 P1 measurements
+
+Command: `/opt/hostedtoolcache/node/22.23.2/x64/bin/node /home/ubuntu/repos/loreai/packages/ui/scripts/measure-p1.mjs --runs 5 --requests 200 --baseline a4e6af5b --json /home/ubuntu/measure-p1.json --write-readme`
+
+Machine: INTEL(R) XEON(R) PLATINUM 8559C × 8; 31.3 GiB; Node v22.23.2; linux 6.8.0-1061-aws x64; baseline worktree SHA a4e6af5b.
+
+Git SHA (code at measurement time): `ead90dc0`; measured 2026-09-27T08:27:49.846Z.
+
+Baseline SHA: `a4e6af5b` (worktree `a4e6af5b`).
+
+Baseline note: commit `a4e6af5b` predates the current `/ui` surface, so UI-specific baseline rows are `—`.
+
+| Metric | Current | Baseline | vs baseline (%) |
+|---|---:|---:|---:|
+| Startup → first 200 `/health` (median of 5 runs) | p50 1200.1 ms | p50 1139.6 ms | +5.3% |
+| RSS after start | p50 363.7 MB | p50 346.9 MB | +4.8% |
+| RSS after serving UI | p50 366.4 MB | — | — |
+
+Harness/child processes spawned by the gateway while serving the UI: 0 (max across 5 runs).
+
+Latency summaries use 200 warmed requests per endpoint; each value is the median of per-run percentiles.
+
+| Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 | vs baseline p50 (%) | vs baseline p95 (%) |
+|---|---:|---:|---:|---:|
+| `POST /v1/messages` | 34.9 / 183.7 / 201 ms | 31.1 / 135 / 200 ms | +12.2% | +36.1% |
+| `GET /health` | 1 / 1.9 / 14.2 ms | 0.6 / 24.2 / 74.7 ms | +66.7% | -92.1% |
+| `GET /api/v1/projects` | 1 / 13.2 / 26.2 ms | 0.5 / 14.2 / 79.3 ms | +100% | -7% |
+| `GET /ui/` | 1.3 / 5.6 / 18.3 ms | — | — | — |
+| `GET /ui/assets/index-sIkuw9jR.js` | 2.5 / 4.1 / 5.1 ms | — | — | — |
+
+| Bundle asset | Raw | gzip-9 | Brotli-11 |
+|---|---:|---:|---:|
+| `assets/confirm-dialog-B9j6cbk2.js` | 767 B | 378 B | 325 B |
+| `assets/Contradictions-CECjvMf0.js` | 6,243 B | 2,383 B | 2,051 B |
+| `assets/dm-sans-latin-ext-wght-italic-DUE6_iCb.woff2` | 20,808 B | 20,836 B* | 20,807 B* |
+| `assets/dm-sans-latin-ext-wght-normal-BOFOeGcA.woff2` | 18,228 B | 18,256 B* | 18,227 B* |
+| `assets/dm-sans-latin-wght-italic-Cz4n9dED.woff2` | 39,712 B | 39,644 B* | 39,716 B* |
+| `assets/dm-sans-latin-wght-normal-Xz1IZZA0.woff2` | 36,932 B | 36,852 B* | 36,936 B* |
+| `assets/Entities-CvHpa-Il.js` | 15,473 B | 4,865 B | 4,312 B |
+| `assets/index-BG9YjK25.css` | 48,070 B | 9,685 B | 8,432 B |
+| `assets/index-sIkuw9jR.js` | 464,214 B | 143,155 B | 123,330 B |
+| `assets/loreai-BYyO8ZaX.svg` | 11,885 B | 4,931 B | 4,352 B |
+| `assets/loreai-dark-BoECdKok.svg` | 11,902 B | 4,934 B | 4,340 B |
+| `assets/marked.esm-DFH_7NNB.js` | 43,074 B | 12,727 B | 11,627 B |
+| `assets/Operations-s9Ymx2MJ.js` | 25,086 B | 7,096 B | 6,239 B |
+| `assets/playfair-display-latin-400-italic-LeeEXsx5.woff2` | 21,884 B | 21,912 B* | 21,884 B* |
+| `assets/playfair-display-latin-400-normal-CFtfchNt.woff2` | 21,856 B | 21,829 B* | 21,791 B* |
+| `assets/playfair-display-latin-ext-400-italic-zVOgzDMq.woff2` | 13,668 B | 13,691 B* | 13,672 B* |
+| `assets/playfair-display-latin-ext-400-normal-BxlSGspa.woff2` | 12,336 B | 12,359 B* | 12,337 B* |
+| `assets/recall-text-B0O2pagn.js` | 1,747 B | 779 B | 699 B |
+| `assets/Session-Bo5clKqk.js` | 165,408 B | 55,528 B | 48,941 B |
+| `favicon.svg` | 11,922 B | 4,987 B | 4,383 B |
+| `index.html` | 515 B | 309 B | 191 B |
+| `ui-manifest.json` | 3,296 B | 765 B* | 661 B* |
+| **Total staged UI** | **995,026 B** | **437,901 B** | **405,253 B** |
+| `dist/index.cjs` | 18,103,290 B | — | — |
+
+* no precompressed sibling; compressed by the script
+
+| First render (5 fresh contexts) | Median |
+|---|---:|
+| domContentLoadedEventEnd | 117.7 ms |
+| loadEventEnd | 142.5 ms |
+| firstPaint | 20 ms |
+| firstContentfulPaint | 144 ms |
+| firstUsefulContentMs | 175.9 ms |
+
+| Long-history scroll | Frame p50 / p95 / max | Frames >50 ms | Long tasks (count / total / max) | Fixture frame p95 / max |
+|---|---:|---:|---:|---:|
+| desktop (1280×800) | 16.7 / 16.7 / 16.8 ms | 0 | 2 / 258 / 179 ms | 16.7 / 16.8 ms |
+| mobile (393×852, DPR 3) | 16.7 / 16.7 / 33.4 ms | 0 | 2 / 257 / 180 ms | 16.7 / 33.4 ms |
+<!-- p1-measurements:end -->
+
+### UI-07 fixture review
+
+Screens reviewed on 2026-09-21 against the three v2.2 design specimens
+(contextual, focused, mobile discussion): `/ui/fixture?view=focus`,
+`/ui/fixture?view=blocks`, project page, knowledge table, knowledge detail,
+session reader (the UI-08 entities, contradictions, warming and costs
+screens landed after this review and are covered by the Playwright gate only),
+each at desktop (1280×800) and mobile (393×852), light and dark — 24
+full-page captures taken with a throw-away Playwright script against the
+seeded e2e gateway and the Vite dev server (fixture routes).
+
+| # | Deviation from the specimens | Decision |
+|---|---|---|
+| 1 | Colour palette: the app renders the website's cream/green brand tokens, not the specimen's cool pale-blue chrome and teal accent. | **Accepted** — deliberate token decision, see "Design tokens: website → UI mapping". Structure, radii, borders and focus treatment follow the specimen. |
+| 2 | App bar shows the Lore.AI logo instead of the "Lore" wordmark; "Local workspace" / avatar match. | **Accepted** — brand. |
+| 3 | Knowledge table (mobile): five columns squeezed the title to ~6 characters. | **Fixed** here — scope/confidence/updated columns are hidden below `sm`; title + category remain. |
+| 4 | Knowledge table (desktop): title and preview cells were clipped mid-word without an ellipsis. | **Fixed** here (`truncate` on the cell children). |
+| 5 | Session reader: app-bar search said "Pick a project to search" while inside a project. | **Fixed** here (`searchProjectId` passed from the session route). |
+| 6 | Fixture `?view=focus`: "Proposed approach" list lost its numbering (specimen shows 1–4). | **Fixed** here (`list-decimal`). |
+| 7 | Mobile navigation drawer did not return focus to its opener on close (specimen/plan §0: logical focus order). | **Fixed** here (`Shell.tsx`), asserted by `e2e/keyboard.spec.ts`. |
+| 8 | Session reader: the compressed-context card renders at the top of a partial window although its source messages (0–9) are not loaded yet. | **Accepted** — the card is labelled "compressed context", placed after its sources once they are loaded (`reader.spec.ts` asserts the placement); showing it first in a partial window is the honest coverage state. |
+| 9 | Knowledge table: a disabled "Next page" control is rendered (faint) when there is no further page. | **Accepted** — keeps the paging control's position stable; disabled state is announced. |
+| 10 | Theme switch: a colour transition makes toggle labels briefly low-contrast right after switching (visible in captures taken immediately after the click). | **Accepted** — settled state has full contrast (verified); no change. |
+| 11 | Mobile reader header wraps coverage badges and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
+| 12 | The specimens' discussion/thread panes, reply composer and "Ask agent" are P3/P4; the real screens show them only as disabled placeholders. | **Deferred** — by design (plan §0/§6); tracked by the roadmap epic #1824. |
+| 13 | Knowledge detail (mobile): a long unbroken title overflowed the viewport. | **Fixed** here (`break-words` on the heading). |
+
+### P1 read-only UI release checklist
+
+The owner signs this gate off; the implementation agent does not. Each row names the command or artifact that proves it.
+
+| Gate | Evidence |
+|---|---|
+| Headless gateway non-regression | `pnpm test` (gateway suite incl. `start-gateway-quiet.test.ts`, `cli-bundle-smoke.test.ts`, `bundle-exports.test.ts`); `node packages/ui/scripts/measure-p1.mjs --baseline a4e6af5b` startup/RSS/proxy deltas in "UI-07 P1 measurements". |
+| No harness spawn while browsing | `measure-p1.mjs` reports 0 child processes of the gateway after serving every UI asset; `grep -rn "child_process" packages/ui/src` → none. The UI source has no process-spawn imports. |
+| No new mandatory cloud dependency | `packages/ui/package.json` dependencies are bundled browser libraries only; the SPA talks to same-origin `/api/v1` (`src/lib/api.ts`), `ui-static.test.ts` serves from staged assets. |
+| Management security boundary | `packages/gateway/test/management-access.test.ts`, `hono-routing.test.ts`, `gateway-auth-config.test.ts` (socket-peer + Origin/Host checks, `LORE_ALLOW_REMOTE_MANAGEMENT`, `LORE_GATEWAY_AUTH_TOKEN`, hosted-mode write refusals); `e2e/browse.spec.ts` (dev-only routes absent in production). |
+| CSP | `packages/gateway/test/ui-static.test.ts` asserts the `Content-Security-Policy` header on `/ui` responses (see "How the gateway serves the SPA"). |
+| Inert content | `packages/ui/test/safe-html.test.ts` (unit) and `e2e/hostile-content.spec.ts` (every production screen, desktop + mobile, `window.__pwned` stays 0, no `script`/`iframe`/handler attributes/`javascript:` links). |
+| IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v3 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
+| Keyboard / focus | `e2e/keyboard.spec.ts`, `e2e/reader.spec.ts` ("keyboard: rows are focusable"). |
+| Deep links + themes | `e2e/routes.spec.ts` (every README route, including `/ui/entities`, `/ui/entities/:entityId`, `/ui/contradictions`, `/ui/warming` and `/ui/costs`, survives reload; light/dark on every screen), `scripts/ui-deep-link-smoke.mjs` (always-on CI). |
+| Playwright green in CI | `ui-e2e` workflow run on the release PR (desktop + mobile projects) — link the run here when signing off. |
+| Owner sign-off | ☐ date / commit |
+
 ## Data authority
 
 - The gateway (`packages/core` SQLite via `packages/gateway/src/api.ts`) is
@@ -1176,6 +1305,7 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Cache warming controls + histograms | `WarmingPage` | global toggle, breaker reset, per-session modes | UI-08 |
 | Cost intelligence + daily budget | `CostsPage` | live/historical totals, workers, budget | UI-08 |
 | Destructive / expensive action confirmation | `ConfirmDialog` (`components/ui`) | Kobalte `Dialog`, `role="alertdialog"` | UI-08 |
+| Project actions (rename / move sessions / clear / delete / merge) | `ProjectActions`, `MergeProjectsAction` | `ConfirmDialog`, `Dialog`, `Select`, `TextField`, inline notices | UI-08 |
 
 ## Legacy dashboard parity (UI-08, #1823)
 
@@ -1188,8 +1318,10 @@ top of `/api/v1`. Status:
   rebuild card (preview / rebuild all / cancel) with the honest cost copy
   and a per-project result table. — **PR1 (this change)**
 - [ ] Dashboard — live sessions table with warming + cost columns
-- [ ] Project actions — rename, move sessions, delete session, delete
-  distillation, clear, delete project
+- [x] Project actions — rename (`PATCH /api/v1/projects/:id`), move
+  sessions, clear, delete project, merge duplicate projects. Delete
+  session / delete distillation stay out of scope (excluded above). —
+  **PR4 (this change)**
 - [ ] User knowledge — dedup merge/dismiss suggestions, contradiction
   keep-A / keep-B / keep-both
 - [ ] Knowledge detail actions — move knowledge, delete

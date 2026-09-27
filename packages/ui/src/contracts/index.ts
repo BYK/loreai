@@ -9,6 +9,7 @@ export * from "./page";
 export * from "./folk";
 export * from "./parse";
 export * from "./entities";
+export * from "./project-actions";
 export * from "./operations";
 export * from "./contradictions";
 export * from "./recall";

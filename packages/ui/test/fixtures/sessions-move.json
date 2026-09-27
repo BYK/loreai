@@ -1,0 +1,10 @@
+{
+  "sessions_moved": 1,
+  "messages_moved": 1,
+  "distillations_moved": 0,
+  "tool_calls_moved": 0,
+  "knowledge_moved": 0,
+  "movedSessionIds": [
+    "ui-contracts-move-session"
+  ]
+}

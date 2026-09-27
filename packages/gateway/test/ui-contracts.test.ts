@@ -42,6 +42,10 @@ import {
   syncStatus,
   teamList,
   costsSnapshot,
+  projectClearResult,
+  projectRenameResult,
+  projectsMergeResult,
+  sessionsMoveResult,
   warmingSnapshot,
 } from "../../ui/src/contracts";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
@@ -245,8 +249,14 @@ const FIXTURES = fileURLToPath(
 
 async function contractRoute<
   Schema extends Parameters<typeof safeParseContract>[1],
->(fixture: string, route: string, path: string, schema: Schema): Promise<void> {
-  const res = await api(path);
+>(
+  fixture: string,
+  route: string,
+  path: string,
+  schema: Schema,
+  init?: LoopbackRequestInit,
+): Promise<void> {
+  const res = await api(path, init);
   const body: unknown = await res.json();
   const parsed = safeParseContract(route, schema, body);
   if (!parsed.ok) {
@@ -498,6 +508,86 @@ describe("ui contracts against the real gateway", () => {
       "/entities/rebuild",
       "/api/v1/entities/rebuild",
       entityRebuildStatus,
+    );
+  });
+
+  const JSON_BODY = (body: unknown): LoopbackRequestInit => ({
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  it("PATCH /projects/:id (rename)", async () => {
+    await contractRoute(
+      "project-rename.json",
+      `/projects/${SEEDED.projectId}`,
+      v1(["projects", SEEDED.projectId]),
+      projectRenameResult,
+      {
+        method: "PATCH",
+        ...JSON_BODY({ name: "ui-contracts-renamed" }),
+      },
+    );
+  });
+
+  it("POST /sessions/move", async () => {
+    const { ensureProject, temporal } = await import("@loreai/core");
+    const sourcePath = "/test/ui-contracts/move-source";
+    const sourceId = ensureProject(sourcePath, "move-source");
+    temporal.store({
+      projectPath: sourcePath,
+      info: {
+        sessionID: "ui-contracts-move-session",
+        id: "move-msg-0",
+        role: "user",
+        agent: "test",
+        model: { providerID: "anthropic", modelID: "claude-test" },
+        time: { created: 1_700_000_010_000 },
+      },
+      parts: [{ type: "text", text: "a session to move" }],
+    });
+    await contractRoute(
+      "sessions-move.json",
+      "/sessions/move",
+      "/api/v1/sessions/move",
+      sessionsMoveResult,
+      {
+        method: "POST",
+        ...JSON_BODY({
+          session_ids: ["ui-contracts-move-session"],
+          from_project_id: sourceId,
+          to_project: { id: SEEDED.projectId },
+        }),
+      },
+    );
+  });
+
+  it("POST /projects/:id/clear", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const path = "/test/ui-contracts/clear";
+    const id = ensureProject(path, "clear-me");
+    ltm.create({
+      projectPath: path,
+      category: "decision",
+      title: "Disposable entry",
+      content: "Cleared by the contract test.",
+      scope: "project",
+    });
+    await contractRoute(
+      "project-clear.json",
+      `/projects/${id}/clear`,
+      v1(["projects", id, "clear"]),
+      projectClearResult,
+      { method: "POST", ...JSON_BODY({}) },
+    );
+  });
+
+  it("POST /projects/merge", async () => {
+    await contractRoute(
+      "projects-merge.json",
+      "/projects/merge",
+      "/api/v1/projects/merge",
+      projectsMergeResult,
+      { method: "POST" },
     );
   });
 

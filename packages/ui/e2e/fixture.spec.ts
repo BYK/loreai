@@ -55,4 +55,11 @@ test.describe("/ui/fixture design specimen", () => {
     await expect(page).toHaveURL(/\/ui\/fixture$/);
     await expect(page.getByTestId("inline-discussion")).toBeVisible();
   });
+
+  test("blocks reader deep link survives reload", async ({ page }) => {
+    await page.goto("/ui/fixture?view=blocks");
+    await expect(page.getByTestId("reader-blocks")).toBeVisible();
+    await page.reload();
+    await expect(page.getByTestId("reader-blocks")).toBeVisible();
+  });
 });

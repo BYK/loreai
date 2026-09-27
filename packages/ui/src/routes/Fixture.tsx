@@ -368,7 +368,7 @@ const Doc: Component<{ focus: boolean }> = (props) => (
           {"grep: pattern found in 0 files"}
         </ToolBlock>
         <b>Proposed approach</b>
-        <ol class="my-2 pl-6 [&_li]:py-1">
+        <ol class="my-2 list-decimal pl-6 [&_li]:py-1">
           <li>Refactor the parser around stable block IDs.</li>
           <li>
             <Passage id="source-step" selected marker="2 replies">

@@ -25,8 +25,12 @@ import {
   knowledgeList,
   knowledgeVersionHistory,
   parseContract,
+  projectClearResult,
   projectList,
+  projectRenameResult,
+  projectsMergeResult,
   recallResponse,
+  sessionsMoveResult,
   safeParseContract,
   sessionDetail,
   sessionList,
@@ -88,6 +92,19 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "contradictions-list.json": {
     route: "/contradictions",
     schema: contradictionListResponse,
+  },
+  "project-rename.json": {
+    route: "/projects/p",
+    schema: projectRenameResult,
+  },
+  "project-clear.json": {
+    route: "/projects/p/clear",
+    schema: projectClearResult,
+  },
+  "sessions-move.json": { route: "/sessions/move", schema: sessionsMoveResult },
+  "projects-merge.json": {
+    route: "/projects/merge",
+    schema: projectsMergeResult,
   },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {

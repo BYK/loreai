@@ -303,6 +303,60 @@ describe("POST /api/v1/projects/:id/clear", () => {
   });
 });
 
+describe("configured hosted mode on project writes", () => {
+  it("refuses move/clear/delete with 403 before pipeline init", async () => {
+    // `isHostedMode()` only reflects the lazy pipeline init — a server
+    // started with `hostedMode: true` must refuse these writes on the
+    // configured flag alone.
+    const { isHostedMode } = await import("@loreai/core");
+    expect(isHostedMode()).toBe(false);
+    const { startServer } = await import("../src/server");
+    const { loadConfig } = await import("../src/config");
+    const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = true;
+    config.gatewayAuthToken = "t".repeat(32);
+    const hosted = await startServer(config);
+    const hostedApi = (path: string, init?: LoopbackRequestInit) =>
+      loopbackRequest(`http://127.0.0.1:${hosted.port}${path}`, init);
+
+    try {
+      const { ensureProject } = await import("@loreai/core");
+      const projectId = ensureProject(
+        `/test/configured-hosted/${Date.now()}`,
+        "guarded",
+      );
+      const move = await hostedApi("/api/v1/sessions/move", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session_ids: ["cfg-hosted-session"],
+          from_project_id: projectId,
+          to_project: { path: "/test/other" },
+        }),
+      });
+      const clear = await hostedApi(`/api/v1/projects/${projectId}/clear`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const del = await hostedApi(`/api/v1/projects/${projectId}`, {
+        method: "DELETE",
+      });
+      for (const res of [move, clear, del]) {
+        expect(res.status).toBe(403);
+        expect(
+          ((await res.json()) as { error: { type: string } }).error.type,
+        ).toBe("forbidden");
+      }
+      const { data } = await import("@loreai/core");
+      expect(data.listProjects().some((p) => p.id === projectId)).toBe(true);
+    } finally {
+      await hosted.stop();
+    }
+  });
+});
+
 describe("POST /api/v1/projects/merge", () => {
   it("succeeds (may be a no-op)", async () => {
     const res = await api("/api/v1/projects/merge", { method: "POST" });

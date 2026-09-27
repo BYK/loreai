@@ -29,8 +29,10 @@ export function createProjectsState({ client, repo, tracked }: ProjectsDeps) {
         // No recorded collection means "never fetched" — let the server
         // answer first. A row count below the recorded count means rows
         // were lost to TTL/LRU eviction: render them, marked partial.
+        // NB: no store.reconcileOne here — a late cache read resolving after
+        // the server answer would overwrite fresh records with stale rows
+        // (cache reads are raced, not ordered); only onServer writes records.
         if (!collection) return undefined;
-        for (const p of rows) store.reconcileOne(p);
         return { value: rows, partial: rows.length !== collection.count };
       },
       async onServer(_, values) {
@@ -56,6 +58,16 @@ export function createProjectsState({ client, repo, tracked }: ProjectsDeps) {
     },
     all(): ProjectSummary[] | undefined {
       return list.data() ?? store.selectList(SCOPE);
+    },
+    /** Evict a deleted/merged project from memory + the cache projection. */
+    async remove(id: string): Promise<void> {
+      store.remove(id);
+      await repo.delete(id);
+      await repo.deleteCollection(SCOPE);
+    },
+    /** Refetch the list (post-write invalidation). */
+    reload(): void {
+      list.reload();
     },
     status: statusOf(list),
   };

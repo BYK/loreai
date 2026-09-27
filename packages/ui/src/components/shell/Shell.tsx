@@ -35,6 +35,39 @@ const PANE_SCROLL = "min-w-0 lg:h-[calc(100dvh-62px)] lg:overflow-y-auto";
  */
 export const Shell: Component<ShellProps> = (props) => {
   const [navOpen, setNavOpen] = createSignal(false);
+  let navOpener: HTMLElement | null = null;
+  const setNavigationOpen = (open: boolean) => {
+    if (open) {
+      setNavOpen(true);
+      return;
+    }
+    setNavOpen(false);
+    const opener = navOpener;
+    navOpener = null;
+    let attempts = 0;
+    const focusNewOpener = () => {
+      const target = document.querySelector<HTMLElement>(
+        '[data-testid="open-nav"]',
+      );
+      if (target?.isConnected) {
+        target.focus();
+        return;
+      }
+      if (attempts < 10) {
+        attempts += 1;
+        requestAnimationFrame(focusNewOpener);
+      }
+    };
+    if (opener?.isConnected) {
+      opener.focus();
+      requestAnimationFrame(() => {
+        if (!opener.isConnected || document.activeElement !== opener)
+          focusNewOpener();
+      });
+      return;
+    }
+    requestAnimationFrame(focusNewOpener);
+  };
   // Resolve once: reading a JSX prop re-evaluates the caller's expression.
   const list = children(() => props.list);
   const detail = children(() => props.detail);
@@ -61,7 +94,10 @@ export const Shell: Component<ShellProps> = (props) => {
             )}
           </Show>
         }
-        onOpenNav={() => setNavOpen(true)}
+        onOpenNav={() => {
+          navOpener = document.activeElement as HTMLElement | null;
+          setNavOpen(true);
+        }}
         searchProjectId={props.searchProjectId}
       />
 
@@ -111,7 +147,7 @@ export const Shell: Component<ShellProps> = (props) => {
         </main>
       </div>
 
-      <DialogPrimitive.Root open={navOpen()} onOpenChange={setNavOpen}>
+      <DialogPrimitive.Root open={navOpen()} onOpenChange={setNavigationOpen}>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay class="fixed inset-0 z-40 bg-black/40 lg:hidden" />
           <DialogPrimitive.Content
@@ -120,7 +156,8 @@ export const Shell: Component<ShellProps> = (props) => {
             data-testid="nav-drawer"
             onClick={(event: MouseEvent) => {
               // Any navigation from the drawer closes it.
-              if ((event.target as HTMLElement).closest("a")) setNavOpen(false);
+              if ((event.target as HTMLElement).closest("a"))
+                setNavigationOpen(false);
             }}
           >
             <DialogPrimitive.CloseButton class="absolute right-3 top-3 rounded-md px-2 py-1 text-sm text-muted hover:bg-soft">
