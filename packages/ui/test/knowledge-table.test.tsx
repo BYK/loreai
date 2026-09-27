@@ -3,7 +3,11 @@ import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
-import type { KnowledgeEntry, KnowledgeQuery } from "~/contracts";
+import type {
+  AllKnowledgeQuery,
+  KnowledgeEntry,
+  KnowledgeQuery,
+} from "~/contracts";
 
 const entry: KnowledgeEntry = {
   id: "k-1",
@@ -202,5 +206,105 @@ describe("KnowledgeTable", () => {
     ));
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(reload).toHaveBeenCalled();
+  });
+
+  it("supports route-mode entry links and a non-sortable project column", () => {
+    const query: AllKnowledgeQuery = {
+      ...defaultQuery,
+      project: "p-1",
+    };
+    const global = {
+      ...entry,
+      id: "k-global",
+      project_id: null,
+      project_name: null,
+    };
+    const rows = [{ ...entry, project_name: "Lore" }, global];
+    const entryRoute = vi.fn(() => "/knowledge/k-1");
+    const routes = {
+      list: vi.fn(() => "/knowledge"),
+      entry: entryRoute,
+      defaultQuery: { ...defaultQuery, project: null },
+    };
+    const page = {
+      loader: {
+        data: () => ({ items: rows, next_cursor: null }),
+        loading: () => false,
+        error: () => undefined,
+        reload: vi.fn(),
+        stale: () => false,
+      },
+      status: () => ({ stale: false, partial: false }),
+    };
+    render(() => (
+      <MemoryRouter>
+        <Route
+          path="*"
+          component={() => (
+            <KnowledgeTable
+              routes={routes}
+              query={query}
+              page={page}
+              showProject
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+
+    expect(
+      screen.getByRole("columnheader", { name: "project" }),
+    ).not.toHaveAttribute("aria-sort");
+    expect(screen.getByText("Lore")).toBeInTheDocument();
+    expect(screen.getByText("Global")).toBeInTheDocument();
+    const firstRow = screen.getAllByTestId("knowledge-row")[0];
+    if (!firstRow) throw new Error("Expected a knowledge table row");
+    fireEvent.click(firstRow);
+    expect(entryRoute).toHaveBeenCalledWith("k-1", query);
+  });
+
+  it("counts extra filters in the empty state and clears to the route default", () => {
+    const defaultAllQuery: AllKnowledgeQuery = {
+      ...defaultQuery,
+      project: null,
+    };
+    const listRoute = vi.fn(() => "/knowledge");
+    const page = {
+      loader: {
+        data: () => ({ items: [], next_cursor: null }),
+        loading: () => false,
+        error: () => undefined,
+        reload: vi.fn(),
+        stale: () => false,
+      },
+      status: () => ({ stale: false, partial: false }),
+    };
+    render(() => (
+      <MemoryRouter>
+        <Route
+          path="*"
+          component={() => (
+            <KnowledgeTable
+              routes={{
+                list: listRoute,
+                entry: () => "/knowledge/k-1",
+                defaultQuery: defaultAllQuery,
+              }}
+              query={{ ...defaultAllQuery, project: "missing-project" }}
+              page={page}
+              extraFilters={<span>Project filter</span>}
+              extraFiltersActive
+            />
+          )}
+        />
+      </MemoryRouter>
+    ));
+
+    expect(
+      screen.getByText("No knowledge matches these filters"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Project filter")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(listRoute).toHaveBeenCalledWith(defaultAllQuery);
   });
 });

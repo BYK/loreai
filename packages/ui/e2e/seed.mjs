@@ -140,6 +140,13 @@ for (const entry of entries) {
   const id = core.ltm.create({ ...entry, projectPath: lore, scope: "project" });
   if (!firstKnowledgeId) firstKnowledgeId = id;
 }
+core.ltm.create({
+  scope: "global",
+  category: "decision",
+  title: "Global: prefer inert rendering",
+  content: "Knowledge titles and content are untrusted text in every project.",
+  confidence: 0.91,
+});
 core.ltm.appendVersion(firstKnowledgeId, {
   content:
     "SQLite remains the authoritative local store, with WAL mode and FTS5 for deterministic recall.",

@@ -23,9 +23,11 @@ const NavItem: Component<{
   children: JSX.Element;
   testId?: string;
   section?: string;
+  end?: boolean;
 }> = (props) => (
   <A
     href={props.href}
+    end={props.end}
     data-testid={props.testId}
     data-section={props.section}
     aria-current={props.active ? "page" : undefined}
@@ -160,9 +162,10 @@ export const Nav: Component<NavProps> = (props) => {
       <div class="eyebrow px-3">Workspace</div>
       <NavItem
         href="/"
-        active={props.activeProjectId === null}
+        active={props.activeProjectId === null && location.pathname === "/"}
         count={props.projects?.length}
         testId="nav-projects"
+        end
       >
         Projects
       </NavItem>
@@ -175,8 +178,13 @@ export const Nav: Component<NavProps> = (props) => {
           </Show>
         )}
       </Show>
-      <NavItem href="/" count={props.totalKnowledge ?? undefined}>
-        Knowledge
+      <NavItem
+        href="/knowledge"
+        active={location.pathname === "/knowledge"}
+        testId="nav-all-knowledge"
+        end
+      >
+        All knowledge
       </NavItem>
 
       <Show when={!props.projects?.length}>

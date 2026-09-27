@@ -21,6 +21,7 @@ import { createKnowledgeState } from "./knowledge";
 import { createProjectsState } from "./projects";
 import { createSessionsState } from "./sessions";
 import { createRecallState } from "./recall";
+import { createKnowledgeSearchState } from "./knowledge-search";
 
 export interface AppStateDeps {
   client: ApiClient;
@@ -129,6 +130,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     },
     projects,
   });
+  const knowledgeSearch = createKnowledgeSearchState({ client, tracked });
 
   return {
     projects,
@@ -137,6 +139,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     sessions,
     recall,
     projectActions,
+    knowledgeSearch,
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {

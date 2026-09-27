@@ -12,10 +12,12 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 
 | Route | What |
 |---|---|
-| `/ui` | Workspace: project navigation + "choose a project" document |
+| `/ui` | Workspace: project navigation, all-knowledge link + "choose a project" document |
 | `/ui/projects/:projectId` | Project identity, health, recent sessions and knowledge list |
 | `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
+| `/ui/knowledge` (`?q=&category=&scope=&project=&sort=&cursor=`) | Cross-project, server-filtered and sorted knowledge table with a project column |
+| `/ui/search` (`?q=`) | Ranked cross-project knowledge search, top 50 of an exact total |
 | `/ui/projects/:projectId/sessions` | Cursor-paged sessions for a project |
 | `/ui/projects/:projectId/sessions/:sessionId` | #1801 session reader |
 | `/ui/projects/:projectId/imports` (`?cursor=`) | Conversation-import history for the project (agent, source, created/updated counts, imported time), keyset paged |
@@ -463,7 +465,7 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -1285,7 +1287,7 @@ and the smoke page; the fixture and shell rows land in #1797.
 |---|---|---|---|
 | Pane chrome (nav / list / detail), responsive collapse | `Shell` (`components/shell`), `PaneHead` | CSS grid + Tailwind `md`/`lg` breakpoints; one pane below `md`, nav drawer (`Dialog`) below `lg` | #1797 |
 | Project rows, knowledge rows | `Nav` items, `ListRow` | `<A>` (router, `aria-current`), `Badge` | #1797 |
-| Global search entry (placeholder) | `SearchEntry` | button + `Dialog` (Kobalte) explaining #1799; icon-only below `md` | #1797 (real in #1799) |
+| Workspace search entry | `SearchEntry` | workspace searches navigate to `/ui/search?q=`; project searches remain scoped | #1917 |
 | Connection status (checking / reachable / unreachable / unauthorized) | `ConnectionStatus` | `lib/connection.ts` store fed by the API client | #1797 |
 | Dark / light | `ThemeToggle` | `lib/theme.ts`: `.dark` on `<html>`, `color-scheme`, `localStorage` `lore.ui.theme`, follows the OS until toggled | #1797 |
 | Document-first detail, eyebrow labels | `KnowledgeDocument`, `DocHeader`, `Crumb`, `Tabs` | `.eyebrow`, `Badge` | #1797 |

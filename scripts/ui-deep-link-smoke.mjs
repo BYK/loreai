@@ -174,6 +174,40 @@ async function main() {
       "deep link → X-Frame-Options DENY",
       deep.headers["x-frame-options"] === "DENY",
     );
+    for (const path of ["/ui/knowledge", "/ui/search?q=x"]) {
+      const route = await req(`${base}${path}`);
+      check(
+        `${path} deep link → 200`,
+        route.status === 200,
+        String(route.status),
+      );
+      check(
+        `${path} deep link → text/html`,
+        (route.headers["content-type"] ?? "").startsWith("text/html"),
+        route.headers["content-type"],
+      );
+      check(
+        `${path} deep link → index.html body`,
+        route.body.includes('<div id="root">'),
+      );
+      check(
+        `${path} deep link → no-cache`,
+        route.headers["cache-control"] === "no-cache",
+        route.headers["cache-control"],
+      );
+      const routeCsp = route.headers["content-security-policy"] ?? "";
+      check(
+        `${path} deep link → strict CSP`,
+        routeCsp.includes("default-src 'none'") &&
+          routeCsp.includes("script-src 'self'") &&
+          routeCsp.includes("frame-ancestors 'none'"),
+        routeCsp,
+      );
+      check(
+        `${path} deep link → X-Frame-Options DENY`,
+        route.headers["x-frame-options"] === "DENY",
+      );
+    }
 
     const script = /<script[^>]+src="(\/ui\/assets\/[^"]+\.js)"/.exec(
       deep.body,
