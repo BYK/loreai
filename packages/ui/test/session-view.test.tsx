@@ -1296,11 +1296,18 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     fireScroll(scroll, 0);
     await tick();
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
-    // The user scrolls while the page is in flight…
+    // The user scrolls while the page is in flight — the pin keeps
+    // refreshing through the gesture, so it lands on the post-scroll
+    // fold rather than the request-time one.
     scroll.dispatchEvent(new Event("wheel"));
     fireScroll(scroll, 200);
-    // …then it lands: the prepended rows' estimate delta still applies on
-    // top of where the user left the view, but nothing drags it back.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    // …then it lands: the prepended rows' estimate delta applies on top of
+    // where the user left the view, and the repin adds nothing on top.
     apply!();
     await tick();
     settle!();

@@ -591,16 +591,15 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     top: number;
     total: number;
     anchor: { key: string; index: number } | null;
-    /** A row a few items under the fold and its screen top, refreshed
-     * every frame until the page lands — the mount window and the first
+    /** The first row at the fold and its screen top, refreshed every
+     * frame until the page lands — the mount window and the first
      * measures of the rows at the top keep shifting the fold for a few
      * frames, so only the freshest capture reflects the settled view. */
     pin: { key: string; top: number } | null;
-    /** The load started near the top — a whole fresh page of unmeasured
-     * rows lands between the fold and the top, so the re-pin loop is armed
-     * when the page lands. Mid-scroll loads have their neighbours measured
-     * already and the estimate delta alone holds the view. */
-    wantPin: boolean;
+    /** The fold row itself — the row actually under the eye. It sits at
+     * the viewport edge and slips in and out of the overscan range, so
+     * the repin prefers it when mounted and falls back to `pin`. */
+    foldPin: { key: string; top: number } | null;
     /** The user-scroll serial when the page was requested — a gesture
      * between request and landing re-anchors the estimate-delta
      * compensation to where the user left the view. */
@@ -622,6 +621,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const last = items.at(-1);
     const pinNow = (items: ReturnType<typeof virtualizer.getVirtualItems>) => {
       const foldIdx = items.findIndex((item) => item.end > el.scrollTop);
+      // A few rows under the fold: the fold row itself sits at the
+      // viewport edge and keeps dropping out of the overscan range — an
+      // unmounted row cannot witness the prepend.
       const pinItem =
         foldIdx >= 0
           ? items[Math.min(foldIdx + 3, items.length - 1)]
@@ -631,9 +633,28 @@ export const SessionView: Component<SessionViewProps> = (props) => {
             `[data-row-key="${CSS.escape(String(pinItem.key))}"]`,
           )
         : null;
-      return pinItem && rowEl
-        ? { key: String(pinItem.key), top: rowEl.getBoundingClientRect().top }
+      const foldItem = foldIdx >= 0 ? items[foldIdx] : undefined;
+      const foldEl = foldItem
+        ? el.querySelector<HTMLElement>(
+            `[data-row-key="${CSS.escape(String(foldItem.key))}"]`,
+          )
         : null;
+      return {
+        pin:
+          pinItem && rowEl
+            ? {
+                key: String(pinItem.key),
+                top: rowEl.getBoundingClientRect().top,
+              }
+            : null,
+        foldPin:
+          foldItem && foldEl
+            ? {
+                key: String(foldItem.key),
+                top: foldEl.getBoundingClientRect().top,
+              }
+            : null,
+      };
     };
     // The repin only guards loads that started near the top — the scroll-up
     // auto-load path, where a whole fresh page of unmeasured rows lands
@@ -644,31 +665,38 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       top: el.scrollTop,
       total: virtualizer.getTotalSize(),
       anchor: last ? { key: String(last.key), index: last.index } : null,
-      pin: enablePin ? pinNow(items) : null,
-      wantPin: enablePin,
+      pin: enablePin ? pinNow(items).pin : null,
+      foldPin: enablePin ? pinNow(items).foldPin : null,
       serialAtStart: userSerial() ?? -1,
       forLink: scrollTarget,
     };
     // Refresh the pin every frame until the page lands: `getVirtualItems`
     // can still return the pre-scroll mount window right now, an unmounted
-    // row cannot witness the prepend, and the first measures of the rows
-    // already at the top keep shifting the fold for a few frames — only
-    // the freshest capture reflects what the user sees when the prepend
-    // actually arrives.
+    // row cannot witness the prepend, the first measures of the rows
+    // already at the top keep shifting the fold for a few frames, and a
+    // user scroll mid-load moves the fold too — the refresh deliberately
+    // does not stop on gestures, so the pin that lands is at most a frame
+    // behind what the user is looking at.
     const countAtCall = rows().length;
     if (enablePin && typeof requestAnimationFrame === "function") {
       let frames = 0;
-      const serial0 = userSerial() ?? -1;
       const capturePin = () => {
-        if (serial0 >= 0 && userSerial() !== serial0) return;
         if (!prepend || rows().length !== countAtCall) return;
-        if (++frames > 60) return;
+        if (++frames > 300) return;
         const mounted = virtualizer.getVirtualItems();
         const nearTop = el.scrollTop - listOffset() < el.clientHeight;
-        const staleMount = nearTop && (mounted[0]?.index ?? 0) > mounted.length;
+        // The mount window lags the issued scroll for a frame or two after
+        // the request — a mid-load user scroll legitimately keeps the
+        // window away from the top, so the stale check only applies while
+        // the request-time scroll could still be settling.
+        const staleMount =
+          frames < 5 && nearTop && (mounted[0]?.index ?? 0) > mounted.length;
         if (!staleMount) {
-          const pin = pinNow(mounted);
-          if (pin && prepend) prepend.pin = pin;
+          const { pin, foldPin } = pinNow(mounted);
+          if (prepend) {
+            if (pin) prepend.pin = pin;
+            if (foldPin) prepend.foldPin = foldPin;
+          }
         }
         requestAnimationFrame(capturePin);
       };
@@ -684,33 +712,6 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       prepend = null;
       setOlderInFlight(false);
     }
-  }
-
-  /** The row to re-pin after a prepend: the first mounted row at or
-   * below the sticky toolbar — the row the user is actually looking at.
-   * The deeper buffer the request-time pin needs (its row can leave the
-   * overscan range before the page lands) is unnecessary here: this pin
-   * is captured inside the viewport and only has to survive its own
-   * ~24-frame repin window. */
-  function foldPin(): { key: string; top: number } | null {
-    const el = scrollEl;
-    if (!el) return null;
-    const foldTop = el.getBoundingClientRect().top + toolbarHeight();
-    const rowEls = Array.from(
-      el.querySelectorAll<HTMLElement>("[data-row-key]"),
-    );
-    const foldIdx = rowEls.findIndex(
-      (row) => row.getBoundingClientRect().top >= foldTop,
-    );
-    // Nothing below the fold: no pin, the estimate delta alone carries
-    // the view.
-    if (foldIdx < 0) return null;
-    const pinEl = rowEls[foldIdx];
-    if (!pinEl) return null;
-    return {
-      key: pinEl.dataset.rowKey ?? "",
-      top: pinEl.getBoundingClientRect().top,
-    };
   }
 
   createEffect(
@@ -730,8 +731,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         const delta = virtualizer.getTotalSize() - before.total;
         if (delta <= 0) return;
         // A user gesture during the load owns the position: re-anchor to
-        // where they left it (prepended height still compensates on top)
-        // and drop the pin — repinning would drag the view back.
+        // where they left it (prepended height still compensates on top).
         const userTook =
           before.serialAtStart >= 0 && userSerial() !== before.serialAtStart;
         const target = (userTook ? scrollEl.scrollTop : before.top) + delta;
@@ -745,42 +745,39 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // their real heights over the next frames, and each first-measure
         // adjustment drags the viewport. Keep correcting for a couple dozen
         // frames — a correction that finds no drift costs nothing, and late
-        // measures must not get the last word. Without a captured pin (the
-        // user scrolled mid-load, or no pin was taken at request time) the
-        // loop starts empty and captures one on its first frame — by then
-        // the scroll and the virtualizer's own effect have landed, the
-        // rows carry their post-prepend layout, and first-measures have
-        // not run yet, so the frame-1 screen top is the reference to hold.
-        const deferred =
-          (before.wantPin || userTook) && (userTook || !before.pin);
-        let pin =
-          before.wantPin || userTook ? (deferred ? null : before.pin) : null;
-        if ((pin || deferred) && typeof requestAnimationFrame === "function") {
+        // measures must not get the last word. The pin was refreshed every
+        // frame while the page was in flight, gestures included, so it is
+        // at most a frame behind the screen the user last saw — capturing
+        // one here would read the pre-relayout DOM instead.
+        const pin = before.pin;
+        const foldPin = before.foldPin;
+        if ((pin || foldPin) && typeof requestAnimationFrame === "function") {
           let frames = 0;
           const serial0 = userSerial() ?? -1;
           const repin = () => {
             const el = scrollEl;
             if (!el || ++frames > 24) return;
             if (serial0 >= 0 && userSerial() !== serial0) return;
-            if (pin === null) {
-              pin = foldPin();
-              if (pin === null && frames > 1) return;
-              requestAnimationFrame(repin);
-              return;
-            }
-            const rowEl = el.querySelector<HTMLElement>(
-              `[data-row-key="${CSS.escape(pin.key)}"]`,
-            );
-            if (rowEl) {
-              const drift = rowEl.getBoundingClientRect().top - pin.top;
-              if (drift !== 0) {
-                const next = el.scrollTop + drift;
-                if (drift < 0) repinIssued = next;
-                // Go through the virtualizer's own scroll so a reconcile
-                // cannot drag the offset back to a stale target.
-                virtualizer.scrollToOffset(next);
-                virtualizer.scrollOffset = next;
-              }
+            // The fold row is the row under the eye; the deeper pin only
+            // stands in while the fold row is out of the mount window.
+            const primary = foldPin ?? pin;
+            const backup = foldPin !== null ? pin : null;
+            const readDrift = (p: { key: string; top: number }) => {
+              const rowEl = el.querySelector<HTMLElement>(
+                `[data-row-key="${CSS.escape(p.key)}"]`,
+              );
+              return rowEl ? rowEl.getBoundingClientRect().top - p.top : null;
+            };
+            const drift =
+              (primary ? readDrift(primary) : null) ??
+              (backup ? readDrift(backup) : null);
+            if (drift !== null && drift !== 0) {
+              const next = el.scrollTop + drift;
+              if (drift < 0) repinIssued = next;
+              // Go through the virtualizer's own scroll so a reconcile
+              // cannot drag the offset back to a stale target.
+              virtualizer.scrollToOffset(next);
+              virtualizer.scrollOffset = next;
             }
             // An unmounted pin row retries next frame — it can slip out of
             // the mounted window while the measures settle.
