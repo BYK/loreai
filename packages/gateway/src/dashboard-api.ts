@@ -6,7 +6,13 @@
  * mode (same trust rule as the mutation handlers in api.ts). Every response
  * is JSON through the management-access helpers; no handler calls an LLM.
  */
-import { entities, isHostedMode, ltm } from "@loreai/core";
+import {
+  data,
+  entities,
+  isHostedMode,
+  ltm,
+  projectPath as projectPathById,
+} from "@loreai/core";
 
 import { dismissContradiction, resolveContradiction } from "./review-actions";
 import { decodeRequestBody, HttpRequestBodyTooLargeError } from "./http-body";
@@ -15,6 +21,15 @@ import { errorResponse, jsonResponse } from "./management-access";
 type EntityWithAliases = NonNullable<
   ReturnType<typeof entities.getWithAliases>
 >;
+
+/**
+ * `isHostedMode()` only reflects the lazy pipeline init, so a configured
+ * hosted deployment is invisible until the first proxied request — the
+ * configured flag is authoritative for request-time guards.
+ */
+function requestIsHosted(configuredHostedMode = false): boolean {
+  return configuredHostedMode || isHostedMode();
+}
 
 // ---------------------------------------------------------------------------
 // List item shaping
@@ -249,6 +264,7 @@ function decodeContradictionId(segment: string): string | null {
 export async function handleContradictionRequest(
   req: Request,
   url: URL,
+  configuredHostedMode = false,
 ): Promise<Response> {
   if (req.method !== "PATCH") {
     return errorResponse(
@@ -257,7 +273,7 @@ export async function handleContradictionRequest(
       `No API route for ${req.method} ${url.pathname}`,
     );
   }
-  if (isHostedMode()) {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -425,8 +441,9 @@ function parseMetadataPatch(body: unknown): MetadataPatch | Response {
 export async function handlePatchEntity(
   req: Request,
   id: string,
+  configuredHostedMode = false,
 ): Promise<Response> {
-  if (isHostedMode()) {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -473,9 +490,92 @@ export async function handlePatchEntity(
   return jsonResponse(detailBody(updated));
 }
 
+// ---------------------------------------------------------------------------
+// Project rename
+// ---------------------------------------------------------------------------
+
+const MAX_PROJECT_NAME_CHARS = 200;
+const MAX_PROJECT_PATCH_BODY_BYTES = 8 * 1024;
+
+/**
+ * `PATCH /api/v1/projects/:id` — rename a project. Body `{name: string}`;
+ * the name is trimmed and must be 1–200 chars. Unknown id → 404; hosted
+ * mode → 403. `renameProject` returns false both for unknown ids and for a
+ * no-change update, so the project row is checked first and an unchanged
+ * name still reports 200 with the stored name.
+ */
+export async function handleRenameProject(
+  req: Request,
+  id: string,
+  configuredHostedMode = false,
+): Promise<Response> {
+  if (requestIsHosted(configuredHostedMode)) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Project renaming is not available in hosted mode.",
+    );
+  }
+  if (!projectPathById(id)) {
+    return errorResponse(404, "not_found", `Project not found: ${id}`);
+  }
+
+  let body: unknown;
+  try {
+    body = JSON.parse(
+      await decodeRequestBody(req, req.signal, {
+        compressedBytes: MAX_PROJECT_PATCH_BODY_BYTES,
+        decompressedBytes: MAX_PROJECT_PATCH_BODY_BYTES,
+      }),
+    );
+  } catch (error) {
+    if (error instanceof HttpRequestBodyTooLargeError) {
+      return errorResponse(
+        413,
+        "invalid_request",
+        `Rename body exceeds ${MAX_PROJECT_PATCH_BODY_BYTES} bytes`,
+      );
+    }
+    return errorResponse(400, "invalid_request", "Invalid JSON body");
+  }
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    !("name" in body) ||
+    typeof body.name !== "string" ||
+    Object.keys(body).length !== 1
+  ) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      "Body must be { name: string }",
+    );
+  }
+  const name = body.name.trim();
+  if (name === "" || name.length > MAX_PROJECT_NAME_CHARS) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      `Project name must be 1–${MAX_PROJECT_NAME_CHARS} characters`,
+    );
+  }
+
+  // `renameProject` reports false for an unchanged name as well as for a
+  // vanished project — re-check the row so a delete between the pre-check
+  // and the update surfaces as 404, not a swallowed 200.
+  if (!data.renameProject(id, name) && !projectPathById(id)) {
+    return errorResponse(404, "not_found", `Project not found: ${id}`);
+  }
+  return jsonResponse({ id, name });
+}
+
 /** `DELETE /api/v1/entities/:id`. Hosted mode → 403. */
-export function handleDeleteEntity(id: string): Response {
-  if (isHostedMode()) {
+export function handleDeleteEntity(
+  id: string,
+  configuredHostedMode = false,
+): Response {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -502,6 +602,7 @@ export async function handleEntityRebuildStatus(): Promise<Response> {
 export async function handleEntityRequest(
   req: Request,
   url: URL,
+  configuredHostedMode = false,
 ): Promise<Response> {
   const { pathname } = url;
   const match = /^\/api\/v1\/entities\/([^/]+)$/.exec(pathname);
@@ -524,9 +625,9 @@ export async function handleEntityRequest(
     case "GET":
       return handleGetEntity(id);
     case "PATCH":
-      return handlePatchEntity(req, id);
+      return handlePatchEntity(req, id, configuredHostedMode);
     case "DELETE":
-      return handleDeleteEntity(id);
+      return handleDeleteEntity(id, configuredHostedMode);
     default:
       return errorResponse(
         404,

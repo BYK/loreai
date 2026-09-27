@@ -420,6 +420,46 @@ core.ltm.recordContradiction({
     "Epoch milliseconds and ISO strings cannot both be the storage format.",
 });
 
+// Project-actions fixtures (UI-08): disposable projects and scratch
+// sessions per browser project and retry so a delete/clear/move can never
+// race another spec — each test owns `pa-<viewport>-<run>-<letter>` and the
+// session `e2e-session-scratch-<viewport>-<run>`.
+for (const viewport of ["Desktop", "Mobile"]) {
+  const tag = viewport.toLowerCase();
+  for (const run of [1, 2]) {
+    for (const letter of ["a", "b", "c"]) {
+      const path = join(root, `pa-${tag}-${run}-${letter}`);
+      mkdirSync(path, { recursive: true });
+      core.ensureProject(path, `pa-${tag}-${run}-${letter}`, null);
+      core.ltm.create({
+        projectPath: path,
+        scope: "project",
+        category: "gotcha",
+        title: `Disposable entry ${viewport} ${run} ${letter}`,
+        content: "Seeded for the project-actions e2e spec.",
+        confidence: 0.5,
+      });
+    }
+    core.temporal.store({
+      projectPath: scratch,
+      info: {
+        id: `e2e-scratch-${tag}-${run}-message`,
+        sessionID: `e2e-session-scratch-${tag}-${run}`,
+        role: "user",
+        time: { created: 1_700_000_200_000 + run },
+        agent: "e2e",
+        model: { providerID: "e2e", modelID: "seed" },
+      },
+      parts: [
+        {
+          type: "text",
+          text: `Scratch session ${run} for ${viewport}, moved to lore by the project-actions spec.`,
+        },
+      ],
+    });
+  }
+}
+
 core.close();
 
 // One gen-0 distillation over the first ten messages, written the way
