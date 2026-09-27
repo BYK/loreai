@@ -1,5 +1,5 @@
 import type { Component, JSX } from "solid-js";
-import { createSignal, For, Match, Show, Switch } from "solid-js";
+import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { A, useLocation } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
@@ -139,8 +139,9 @@ export const Nav: Component<NavProps> = (props) => {
   const location = useLocation();
   const [filter, setFilter] = createSignal("");
   const [showAll, setShowAll] = createSignal(false);
-  const sections = () =>
-    sectionProjects(props.projects ?? [], pins().pinned(), filter());
+  const sections = createMemo(() =>
+    sectionProjects(props.projects ?? [], pins().pinned(), filter()),
+  );
   return (
     <nav
       aria-label="Workspace"
@@ -171,6 +172,9 @@ export const Nav: Component<NavProps> = (props) => {
         Knowledge
       </NavItem>
 
+      <Show when={!props.projects?.length}>
+        <NavHeading>Projects</NavHeading>
+      </Show>
       <Switch>
         <Match when={props.loading && !props.projects}>
           <div class="px-3 py-2 text-xs text-muted" role="status">
