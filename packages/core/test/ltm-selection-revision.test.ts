@@ -10,12 +10,23 @@ import { clearAllEmbeddings, storeEmbedding } from "../src/db/vec-store";
 import { withTenant } from "../src/tenant";
 
 describe("context LTM selection revision", () => {
+  test("configured source sets remain distinct even with empty indexes", () => {
+    const path = `/tmp/ltm-source-switch-${crypto.randomUUID()}`;
+    const disabled = ltm.selectionRevision(path, []);
+    const defaultSource = ltm.selectionRevision(path, ["distillation"]);
+    const temporal = ltm.selectionRevision(path, ["temporal"]);
+    const both = ltm.selectionRevision(path, ["temporal", "distillation"]);
+    expect(new Set([disabled, defaultSource, temporal, both]).size).toBe(4);
+    expect(ltm.selectionRevision(path, ["distillation", "temporal"])).toBe(
+      both,
+    );
+  });
   test("keeps v91 cache stamp layout until a vector index changes", () => {
     const path = `/tmp/ltm-v91-stamp-${crypto.randomUUID()}`;
     const pid = ensureProject(path);
     expect(ltm.selectionRevision(path).split(":")).toHaveLength(4);
     expect(
-      ltm.selectionRevision(path, ["distillation", "temporal"]).split(":"),
+      ltm.selectionRevision(path, ["distillation"]).split(":"),
     ).toHaveLength(8);
     const id = crypto.randomUUID();
     db()

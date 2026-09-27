@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { db, ensureProject } from "../src/db";
 import * as latReader from "../src/lat-reader";
 import * as ltm from "../src/ltm";
+import { _restoreProvider, _saveAndClearProvider } from "../src/embedding";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
 import {
   _resetVectorPoolForTest,
@@ -101,6 +102,44 @@ describe("lat-reader", () => {
     } finally {
       rmSync(canonical, { recursive: true, force: true });
       rmSync(alias, { recursive: true, force: true });
+    }
+  });
+
+  test("selects lat.md rules with no knowledge or passive context sources", async () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-lat-only-"));
+    const previousProvider = _saveAndClearProvider();
+    let queryEmbeds = 0;
+    try {
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(_texts: string[]) {
+            queryEmbeds++;
+            return [new Float32Array([1, 0, 0])];
+          },
+        },
+      });
+      mkdirSync(join(project, "lat.md"));
+      writeFileSync(
+        join(project, "lat.md", "rules.md"),
+        "# Build rule\n\nAlways use the stable build command.\n",
+      );
+      latReader.refresh(project);
+      const selected = await ltm.forSession(
+        project,
+        `lat-only-${crypto.randomUUID()}`,
+        500,
+        {
+          contextHint: "Which stable build command should I use?",
+          excludeCategories: ["preference"],
+          includeContextSources: [],
+        },
+      );
+      expect(selected.some((entry) => entry.category === "lat.md")).toBe(true);
+      expect(queryEmbeds).toBe(0);
+    } finally {
+      _restoreProvider(previousProvider);
+      rmSync(project, { recursive: true, force: true });
     }
   });
 

@@ -148,10 +148,17 @@ export function selectionRevision(
     ? (mutations?.temporal_embeddings ?? 0)
     : 0;
   const contentStamp = `${knowledgeStamp}:${distillationRow?.revision ?? 0}:${contextSources.includes("distillation") ? (mutations?.distillations ?? 0) : 0}:${temporalRow?.revision ?? 0}:${contextSources.includes("temporal") ? (mutations?.temporal ?? 0) : 0}`;
+  // Preserve the legacy default stamp. Other configured source sets need a
+  // stable identity even when every source counter is zero.
+  const sourceSet = [...new Set(contextSources)].sort().join(",");
+  const sourceStamp =
+    sourceSet === "distillation"
+      ? contentStamp
+      : `${contentStamp}:sources=${sourceSet}`;
   // Existing v91 pins stay warm on a v92 upgrade until an index really changes.
   return localIndex || sharedIndex || distillationIndex || temporalIndex
-    ? `${contentStamp}:${localIndex}:${sharedIndex}:${distillationIndex}:${temporalIndex}`
-    : contentStamp;
+    ? `${sourceStamp}:${localIndex}:${sharedIndex}:${distillationIndex}:${temporalIndex}`
+    : sourceStamp;
 }
 
 /** Sensitivity classification — product hint guiding auto-promotion decisions. */
@@ -2777,7 +2784,8 @@ export async function forSession(
   if (
     !crossEntries.length &&
     !projectEntries.length &&
-    !wantsContextSourceFold
+    !wantsContextSourceFold &&
+    !latReader.hasLatDir(projectPath)
   ) {
     timer.emit("forSession", 0);
     return [];
@@ -2895,7 +2903,16 @@ export async function forSession(
   // cosine scale as knowledge (no separate embed, no scale mismatch).
   let contextVec: Float32Array | undefined;
 
-  if (sessionContext.trim().length > 20 && embedding.isAvailable()) {
+  if (
+    !projectEntries.length &&
+    !crossEntries.length &&
+    !wantsContextSourceFold
+  ) {
+    // A lat-only project needs the section-scoring step below, but there is
+    // no knowledge to query-embed, vector-search, or FTS-rank.
+    scoredProject = [];
+    scoredCross = [];
+  } else if (sessionContext.trim().length > 20 && embedding.isAvailable()) {
     // Vector scoring: embed session context, score entries by cosine similarity.
     // Captures semantic matches (e.g., "OpenAI Batch API" ↔ "batch queue worker")
     // that keyword-based FTS5 misses.
