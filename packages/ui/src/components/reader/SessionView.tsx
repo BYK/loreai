@@ -75,8 +75,9 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { CAPTURE_HELP, coverageDeclaration } from "~/reader/coverage";
+import { buildMarkers } from "~/reader/markers";
 import { displayedText } from "~/reader/render";
-import { buildRows, indexRows } from "~/reader/rows";
+import { buildRows, indexRows, type ReaderRow } from "~/reader/rows";
 import { type SearchHit, queryMatcher, searchRows } from "~/reader/search";
 import {
   type ReachState,
@@ -96,6 +97,7 @@ import {
   sourceReferenceText,
 } from "~/reader/selection";
 import type { KeyStatus } from "~/state/status";
+import type { SessionContext } from "~/contracts";
 
 import {
   DistillationBlockView,
@@ -104,6 +106,7 @@ import {
   type PassageHighlight,
   samePassage,
 } from "./SessionBlock";
+import { MarkerRowView } from "./MarkerRow";
 
 /** Older pages searched automatically for a deep-linked block. */
 export const DEEP_LINK_SEARCH_PAGES = 10;
@@ -145,6 +148,13 @@ export interface SessionViewProps {
   /** Absolute URL of this reader (without `?a=`), for copied deep links. */
   linkBase: () => string;
   loadDistillation?: (id: string) => Promise<DistillationDetail>;
+  /**
+   * `GET /sessions/:id/context` answer (#1924); when present, injection /
+   * prompt-delta / compaction markers interleave into the transcript.
+   */
+  context?: SessionContext | null;
+  /** Knowledge-entry link builder for marker items; absent → inert text. */
+  knowledgeHref?: (logicalId: string) => string;
   header?: JSX.Element;
   class?: string;
 }
@@ -210,15 +220,21 @@ function writeClipboard(text: string): Promise<void> {
 }
 
 const RowContent: Component<{
-  block: ReaderBlock;
+  row: ReaderRow;
   distillation: (id: string) => DistillationState | undefined;
   onOpenDistillation: (id: string) => void;
+  knowledgeHref?: (logicalId: string) => string;
 }> = (props) => (
   <Switch>
-    <Match when={props.block.kind === "message" && props.block}>
+    <Match when={props.row.marker}>
+      {(marker) => (
+        <MarkerRowView marker={marker()} knowledgeHref={props.knowledgeHref} />
+      )}
+    </Match>
+    <Match when={props.row.block?.kind === "message" && props.row.block}>
       {(block) => <MessageBlockView block={block()} />}
     </Match>
-    <Match when={props.block.kind === "distillation" && props.block}>
+    <Match when={props.row.block?.kind === "distillation" && props.row.block}>
       {(block) => (
         <DistillationBlockView
           block={block()}
@@ -242,7 +258,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       distillations: [...props.distillations],
     }),
   );
-  const rows = createMemo(() => buildRows(blocks()));
+  const markers = createMemo(() =>
+    props.context ? buildMarkers(props.context) : [],
+  );
+  const rows = createMemo(() => buildRows(blocks(), markers()));
   const rowIndex = createMemo(() => indexRows(rows()));
   const rowIndexOf = (blockId: string) => rowIndex().get(blockId) ?? -1;
   const [listOffset, setListOffset] = createSignal(0);
@@ -695,7 +714,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       case " ": {
         event.preventDefault();
         const row = rows()[index];
-        if (row) selectBlock(row.block);
+        if (row?.block) selectBlock(row.block);
         break;
       }
     }
@@ -1366,9 +1385,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                         }}
                       >
                         <RowContent
-                          block={row().block}
+                          row={row()}
                           distillation={distillationState}
                           onOpenDistillation={(id) => void openDistillation(id)}
+                          knowledgeHref={props.knowledgeHref}
                         />
                       </div>
                     )}
