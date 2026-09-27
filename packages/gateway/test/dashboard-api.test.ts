@@ -479,6 +479,10 @@ describe("GET/PATCH /api/v1/contradictions", () => {
         similarity: number;
         rationale: string | null;
         detected_at: number;
+        project_id_a: string | null;
+        project_name_a: string | null;
+        project_id_b: string | null;
+        project_name_b: string | null;
       }>;
       total: number;
     }>("/api/v1/contradictions");
@@ -497,6 +501,15 @@ describe("GET/PATCH /api/v1/contradictions", () => {
       similarity: 0.94,
       rationale: "The two recorded directives cannot both be followed.",
     });
+    // #1919 for grouping on /ui/contradictions: both sides report the
+    // seeding project's id and name.
+    const newestPair = pairs.at(-1);
+    expect(row).toMatchObject({
+      project_id_a: newestPair?.projectId,
+      project_id_b: newestPair?.projectId,
+    });
+    expect(typeof row?.project_name_a).toBe("string");
+    expect(row?.project_name_a).toBe(row?.project_name_b);
     expect(body.total).toBe(26);
     expect(body.contradictions).toHaveLength(25);
     expect(responseKeys).toEqual(newestFirst.slice(0, 25));

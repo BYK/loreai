@@ -1,5 +1,13 @@
 import type { Component } from "solid-js";
-import { createSignal, For, Match, onMount, Show, Switch } from "solid-js";
+import {
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 import { A } from "@solidjs/router";
 
 import type {
@@ -12,6 +20,10 @@ import { useWorkspace } from "~/routes/workspace";
 
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
+import {
+  groupContradictions,
+  type ContradictionGroup,
+} from "./contradiction-groups";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
 
@@ -21,6 +33,83 @@ interface DecisionRequest {
 }
 
 const pairKey = (pair: ContradictionListItem) => pair.id_a + ":" + pair.id_b;
+
+const ContradictionRow: Component<{
+  pair: ContradictionListItem;
+  crossProject: boolean;
+  acting: boolean;
+  disabled: boolean;
+  onDecision: (decision: ContradictionDecision) => void;
+}> = (props) => (
+  <article
+    class="rounded-lg border border-line bg-surface p-4"
+    data-testid="contradiction-row"
+  >
+    <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold">
+      <A
+        class="text-accent underline decoration-accent/40 underline-offset-2"
+        href={`/knowledge/${encodeURIComponent(props.pair.id_a)}`}
+      >
+        {props.pair.title_a}
+      </A>
+      <span aria-hidden="true" class="text-gold">
+        ↔
+      </span>
+      <A
+        class="text-accent underline decoration-accent/40 underline-offset-2"
+        href={`/knowledge/${encodeURIComponent(props.pair.id_b)}`}
+      >
+        {props.pair.title_b}
+      </A>
+    </div>
+    <Show when={props.pair.rationale}>
+      {(rationale) => <p class="mt-2 text-[13px] text-muted">{rationale()}</p>}
+    </Show>
+    <div class="mt-2 text-[11px] text-muted">
+      Similarity {(props.pair.similarity * 100).toFixed(0)}% · detected{" "}
+      {formatWhen(props.pair.detected_at)}
+      <Show when={props.crossProject}>
+        {" · A: "}
+        {props.pair.project_name_a ?? "Global"}
+        {" · B: "}
+        {props.pair.project_name_b ?? "Global"}
+      </Show>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={props.disabled}
+        aria-label={"Keep " + props.pair.title_a}
+        onClick={() => props.onDecision("keep-a")}
+      >
+        Keep A
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={props.disabled}
+        aria-label={"Keep " + props.pair.title_b}
+        onClick={() => props.onDecision("keep-b")}
+      >
+        Keep B
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={props.disabled}
+        onClick={() => props.onDecision("keep-both")}
+      >
+        Keep both
+      </Button>
+      <Show when={props.acting}>
+        <span class="self-center text-xs text-muted" role="status">
+          Saving decision…
+        </span>
+      </Show>
+    </div>
+  </article>
+);
 
 /** Review recorded opposite instructions without changing them automatically. */
 export const ContradictionsPage: Component = () => {
@@ -33,6 +122,24 @@ export const ContradictionsPage: Component = () => {
   const [confirmation, setConfirmation] = createSignal<DecisionRequest | null>(
     null,
   );
+  /** Group keys the reviewer collapsed; survives list refreshes. */
+  const [collapsed, setCollapsed] = createSignal<ReadonlySet<string>>(
+    new Set(),
+  );
+  const groups = createMemo<ContradictionGroup[]>(() =>
+    groupContradictions(data()?.contradictions ?? []),
+  );
+  const toggleGroup = (key: string) => {
+    setCollapsed((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
 
   const load = async () => {
     setLoading(true);
@@ -187,85 +294,54 @@ export const ContradictionsPage: Component = () => {
                     " newest; resolve them to review older pairs."}
                 </Show>
               </div>
-              <div class="space-y-3">
-                <For each={value().contradictions}>
-                  {(pair) => (
-                    <article
-                      class="rounded-lg border border-line bg-surface p-4"
-                      data-testid="contradiction-row"
-                    >
-                      <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-semibold">
-                        <A
-                          class="text-accent underline decoration-accent/40 underline-offset-2"
-                          href={`/knowledge/${encodeURIComponent(pair.id_a)}`}
+              <div class="space-y-5">
+                <For each={groups()}>
+                  {(group) => {
+                    const open = () => !collapsed().has(group.key);
+                    const bodyId = `contradiction-group-${group.key}`;
+                    return (
+                      <section
+                        data-testid="contradiction-group"
+                        data-group={group.key}
+                      >
+                        <button
+                          type="button"
+                          aria-expanded={open()}
+                          aria-controls={bodyId}
+                          data-testid="contradiction-group-toggle"
+                          class="mb-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-semibold uppercase tracking-[0.08em] text-muted hover:bg-soft"
+                          onClick={() => toggleGroup(group.key)}
                         >
-                          {pair.title_a}
-                        </A>
-                        <span aria-hidden="true" class="text-gold">
-                          ↔
-                        </span>
-                        <A
-                          class="text-accent underline decoration-accent/40 underline-offset-2"
-                          href={`/knowledge/${encodeURIComponent(pair.id_b)}`}
-                        >
-                          {pair.title_b}
-                        </A>
-                      </div>
-                      <Show when={pair.rationale}>
-                        {(rationale) => (
-                          <p class="mt-2 text-[13px] text-muted">
-                            {rationale()}
+                          <span aria-hidden="true">{open() ? "▾" : "▸"}</span>
+                          {group.label} ({group.pairs.length})
+                        </button>
+                        <Show when={group.crossProject}>
+                          <p class="mb-2 px-2 text-[11px] text-muted">
+                            Entries from different projects (or global rules)
                           </p>
-                        )}
-                      </Show>
-                      <div class="mt-2 text-[11px] text-muted">
-                        Similarity {(pair.similarity * 100).toFixed(0)}% ·
-                        detected {formatWhen(pair.detected_at)}
-                      </div>
-                      <div class="mt-3 flex flex-wrap gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={
-                            acting() !== null || confirmation() !== null
-                          }
-                          aria-label={"Keep " + pair.title_a}
-                          onClick={() => requestDecision(pair, "keep-a")}
-                        >
-                          Keep A
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={
-                            acting() !== null || confirmation() !== null
-                          }
-                          aria-label={"Keep " + pair.title_b}
-                          onClick={() => requestDecision(pair, "keep-b")}
-                        >
-                          Keep B
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={
-                            acting() !== null || confirmation() !== null
-                          }
-                          onClick={() => requestDecision(pair, "keep-both")}
-                        >
-                          Keep both
-                        </Button>
-                        <Show when={acting() === pairKey(pair)}>
-                          <span
-                            class="self-center text-xs text-muted"
-                            role="status"
-                          >
-                            Saving decision…
-                          </span>
                         </Show>
-                      </div>
-                    </article>
-                  )}
+                        <Show when={open()}>
+                          <div id={bodyId} class="space-y-3">
+                            <For each={group.pairs}>
+                              {(pair) => (
+                                <ContradictionRow
+                                  pair={pair}
+                                  crossProject={group.crossProject}
+                                  acting={acting() === pairKey(pair)}
+                                  disabled={
+                                    acting() !== null || confirmation() !== null
+                                  }
+                                  onDecision={(decision) =>
+                                    requestDecision(pair, decision)
+                                  }
+                                />
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                      </section>
+                    );
+                  }}
                 </For>
               </div>
             </section>

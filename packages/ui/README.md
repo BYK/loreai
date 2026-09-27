@@ -42,7 +42,11 @@ pairs, matching the retired dashboard; resolving or dismissing a pair reveals
 the next older one. Keeping A or B asks for confirmation and removes the
 losing knowledge entry. Keeping both preserves both entries and marks the pair
 dismissed so the detector does not reopen it. The route stays behind the
-management boundary and writes are refused in hosted mode.
+management boundary and writes are refused in hosted mode. Pairs are grouped
+by project (#1919) — each project's pairs render under a collapsible header
+with a count, and pairs spanning two projects (or involving a global entry)
+fall into a trailing "Cross-project" group labelled with both sides' project
+names.
 
 Tests:
 - pnpm --filter @loreai/gateway exec vitest run test/dashboard-api.test.ts test/route-registry.test.ts

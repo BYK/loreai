@@ -228,6 +228,10 @@ export function handleListContradictions(): Response {
       similarity: pair.similarity,
       rationale: pair.rationale,
       detected_at: pair.detectedAt,
+      project_id_a: pair.projectIdA,
+      project_name_a: pair.projectNameA,
+      project_id_b: pair.projectIdB,
+      project_name_b: pair.projectNameB,
     })),
     total: all.length,
   });
