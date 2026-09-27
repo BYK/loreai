@@ -249,6 +249,23 @@ describe("evaluateProviderBudgets", () => {
     });
   });
 
+  test("snapshot older than its window reports unknown, not the stale value", () => {
+    upsertProviderQuota(
+      quotaRow({
+        usedPercent: 90,
+        resetsAt: null,
+        observedAt: NOW - 6 * 3600_000,
+      }),
+    );
+    setProviderBudgets([budget({ unit: "percent", window: "5h", amount: 80 })]);
+    expect(evaluateProviderBudgets(NOW)[0]).toMatchObject({
+      used: null,
+      fraction: null,
+      resets_at: null,
+      stale: true,
+    });
+  });
+
   test("missing snapshot yields null used/fraction and stale", () => {
     setProviderBudgets([budget({ unit: "percent", window: "7d", amount: 80 })]);
     expect(evaluateProviderBudgets(NOW)[0]).toMatchObject({

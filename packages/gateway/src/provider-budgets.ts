@@ -9,6 +9,7 @@ import {
   getKV,
   setKV,
   getProviderDayUsage,
+  isProviderQuotaStale,
   listProviderQuotas,
   type ProviderAuthKind,
 } from "@loreai/core";
@@ -259,13 +260,24 @@ function evaluateOne(
       stale: true,
     };
   }
-  if (latest.resetsAt !== null && now >= latest.resetsAt) {
-    // The window rolled over since the observation; we do not invent the
-    // next reset boundary.
+  if (isProviderQuotaStale(latest, now)) {
+    if (latest.resetsAt !== null && now >= latest.resetsAt) {
+      // The window rolled over since the observation; we do not invent the
+      // next reset boundary.
+      return {
+        ...budget,
+        used: 0,
+        fraction: 0,
+        resets_at: latest.resetsAt,
+        stale: true,
+      };
+    }
+    // The observation is older than its own window (or the fallback bound)
+    // — the value may have moved without us seeing a reset.
     return {
       ...budget,
-      used: 0,
-      fraction: 0,
+      used: null,
+      fraction: null,
       resets_at: latest.resetsAt,
       stale: true,
     };
