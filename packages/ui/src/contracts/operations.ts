@@ -210,6 +210,18 @@ export const costsSnapshot = type({
     observed_at: "number",
     stale: "boolean",
   }).array(),
+  provider_budgets: type({
+    provider: "string",
+    auth_kind: "'api_key' | 'subscription' | null",
+    account: "string | null",
+    unit: "'usd' | 'tokens' | 'percent'",
+    window: "'daily' | '5h' | '7d'",
+    amount: "number",
+    used: "number | null",
+    fraction: "number | null",
+    resets_at: "number | null",
+    stale: "boolean",
+  }).array(),
 });
 
 export type CostsSnapshot = typeof costsSnapshot.infer;

@@ -6,6 +6,7 @@ import type { CostsSnapshot } from "~/contracts";
 
 type Providers = CostsSnapshot["providers"];
 type Quotas = CostsSnapshot["quotas"];
+type Budgets = CostsSnapshot["provider_budgets"];
 
 const NOW = 1_800_000_000_000;
 const money = (usd: number) => `$${usd.toFixed(4)}`;
@@ -48,11 +49,32 @@ function quotaRow(overrides: Partial<Quotas[number]> = {}): Quotas[number] {
   };
 }
 
-function renderCards(providers: Providers, quotas: Quotas) {
+function budgetRow(overrides: Partial<Budgets[number]> = {}): Budgets[number] {
+  return {
+    provider: "anthropic",
+    auth_kind: "subscription",
+    account: "a1b2c3d4e5f6",
+    unit: "percent",
+    window: "7d",
+    amount: 80,
+    used: 41,
+    fraction: 41 / 80,
+    resets_at: NOW + 3 * 24 * 3600_000,
+    stale: false,
+    ...overrides,
+  };
+}
+
+function renderCards(
+  providers: Providers,
+  quotas: Quotas,
+  budgets: Budgets = [],
+) {
   return render(() => (
     <ProviderCards
       providers={providers}
       quotas={quotas}
+      budgets={budgets}
       money={money}
       now={() => NOW}
     />
@@ -186,5 +208,54 @@ describe("ProviderCards", () => {
     expect(container.textContent).not.toContain("empty-window");
     // remaining alone (no limit) is not enough for a non-5h/7d window
     expect(container.textContent).not.toContain("credits");
+  });
+
+  it("shows matching budgets with used/amount and stale suffix", () => {
+    renderCards(
+      [providerRow()],
+      [],
+      [
+        budgetRow(),
+        budgetRow({
+          unit: "usd",
+          window: "daily",
+          amount: 10,
+          used: 12.5,
+          fraction: 1.25,
+        }),
+        budgetRow({
+          unit: "tokens",
+          window: "daily",
+          amount: 100_000,
+          used: null,
+          fraction: null,
+          stale: true,
+        }),
+        // wrong auth_kind and wrong provider — filtered out
+        budgetRow({ auth_kind: "api_key" }),
+        budgetRow({ provider: "openai" }),
+      ],
+    );
+    const card = screen.getByTestId("provider-card");
+    expect(card.textContent).toContain("Budgets");
+    expect(card.textContent).toContain("Quota · 7d");
+    expect(card.textContent).toContain("41% / 80%");
+    expect(card.textContent).toContain("USD · daily");
+    expect(card.textContent).toContain("$12.5000 / $10.0000");
+    expect(card.textContent).toContain("Tokens · daily");
+    expect(card.textContent).toContain("—");
+    expect(card.textContent).toContain("(stale)");
+  });
+
+  it("marks over-budget rows with text-danger", () => {
+    renderCards(
+      [providerRow()],
+      [],
+      [budgetRow({ used: 90, fraction: 90 / 80 })],
+    );
+    const danger = screen
+      .getByTestId("provider-card")
+      .querySelector(".text-danger");
+    expect(danger?.textContent).toContain("90% / 80%");
   });
 });

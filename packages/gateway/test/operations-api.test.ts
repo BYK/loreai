@@ -1146,6 +1146,177 @@ describe("GET/PATCH /api/v1/costs", () => {
     }
   });
 
+  it("accepts provider budgets, echoes statuses, and validates malformed input", async () => {
+    const { db, getKV, setKV } = await import("@loreai/core");
+    const previous = getKV("provider_budgets");
+    const restore = () => {
+      if (previous === null)
+        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
+      else setKV("provider_budgets", previous);
+    };
+    const patch = (payload: unknown) =>
+      api("/api/v1/costs/budget", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    try {
+      const ok = await patch({
+        provider_budgets: [
+          {
+            provider: "anthropic",
+            auth_kind: "subscription",
+            account: null,
+            unit: "percent",
+            window: "7d",
+            amount: 80,
+          },
+          { provider: "openai", unit: "usd", window: "daily", amount: 5 },
+        ],
+      });
+      expect(ok.status).toBe(200);
+      const saved = (await ok.json()) as {
+        provider_budgets: Array<{
+          provider: string;
+          unit: string;
+          window: string;
+          used: number | null;
+          stale: boolean;
+        }>;
+      };
+      expect(saved.provider_budgets).toHaveLength(2);
+      expect(saved.provider_budgets[0]).toMatchObject({
+        provider: "anthropic",
+        unit: "percent",
+        window: "7d",
+      });
+      expect(getKV("provider_budgets")).toContain('"percent"');
+
+      const get = (await (await api("/api/v1/costs")).json()) as {
+        provider_budgets: unknown[];
+      };
+      expect(get.provider_budgets).toHaveLength(2);
+
+      for (const bad of [
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "usd",
+              window: "daily",
+              amount: 1,
+              extra: 1,
+            },
+          ],
+        },
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "widgets",
+              window: "daily",
+              amount: 1,
+            },
+          ],
+        },
+        {
+          provider_budgets: [
+            { provider: "anthropic", unit: "usd", window: "5h", amount: 1 },
+          ],
+        },
+        {
+          provider_budgets: Array.from({ length: 51 }, () => ({
+            provider: "anthropic",
+            unit: "usd",
+            window: "daily",
+            amount: 1,
+          })),
+        },
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "5h",
+              amount: 80,
+            },
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "5h",
+              amount: 90,
+            },
+          ],
+        },
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "daily",
+              amount: 101,
+            },
+          ],
+        },
+      ]) {
+        const res = await patch(bad);
+        expect(res.status).toBe(400);
+        expect(
+          ((await res.json()) as { error: { type: string } }).error.type,
+        ).toBe("invalid_request");
+      }
+
+      // Legacy body still returns exactly { amount, disabled }.
+      const legacy = (await (await patch({ amount: 3 })).json()) as Record<
+        string,
+        unknown
+      >;
+      expect(Object.keys(legacy).sort()).toEqual(["amount", "disabled"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("LORE_DAILY_BUDGET blocks amount but not provider budgets", async () => {
+    const { db, getKV, setKV } = await import("@loreai/core");
+    const previous = getKV("provider_budgets");
+    const envBefore = process.env.LORE_DAILY_BUDGET;
+    const patch = (payload: unknown) =>
+      api("/api/v1/costs/budget", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    try {
+      process.env.LORE_DAILY_BUDGET = "42";
+      expect((await patch({ amount: 5 })).status).toBe(409);
+      expect((await patch({ amount: 5, provider_budgets: [] })).status).toBe(
+        409,
+      );
+      expect(
+        (
+          await patch({
+            provider_budgets: [
+              {
+                provider: "anthropic",
+                unit: "usd",
+                window: "daily",
+                amount: 2,
+              },
+            ],
+          })
+        ).status,
+      ).toBe(200);
+      expect(getKV("provider_budgets")).toContain('"usd"');
+    } finally {
+      if (envBefore === undefined) delete process.env.LORE_DAILY_BUDGET;
+      else process.env.LORE_DAILY_BUDGET = envBefore;
+      if (previous === null)
+        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
+      else setKV("provider_budgets", previous);
+    }
+  });
+
   it("advertises PATCH for loopback-origin management preflights", async () => {
     const response = await api("/api/v1/warming/settings", {
       method: "OPTIONS",

@@ -5,6 +5,7 @@ import {
   getProviderCostTotals,
   isProviderQuotaStale,
   QUOTA_STALE_FALLBACK_MS,
+  getProviderDayUsage,
   upsertProviderQuota,
   listProviderQuotas,
   type ProviderCostRow,
@@ -203,6 +204,45 @@ describe("isProviderQuotaStale", () => {
         now,
       ),
     ).toBe(false);
+  });
+});
+
+describe("getProviderDayUsage", () => {
+  test("sums cost, tokens and requests for one provider day", () => {
+    addProviderCost(costRow({ cost: 1, outputTokens: 50 }));
+    addProviderCost(costRow({ cost: 0.5, requests: 2, cacheReadTokens: 90 }));
+    addProviderCost(costRow({ day: "2099-01-02", cost: 9 }));
+    const usage = getProviderDayUsage(
+      "2099-01-01",
+      "anthropic",
+      "subscription",
+      "acct1",
+    );
+    expect(usage).toEqual({ cost: 1.5, tokens: 410, requests: 3 });
+  });
+
+  test("null auth kind/account matches everything, set values filter", () => {
+    addProviderCost(costRow({ cost: 1 }));
+    addProviderCost(
+      costRow({ authKind: "api_key", account: "acct2", cost: 2 }),
+    );
+    expect(
+      getProviderDayUsage("2099-01-01", "anthropic", null, null).cost,
+    ).toBe(3);
+    expect(
+      getProviderDayUsage("2099-01-01", "anthropic", "subscription", null).cost,
+    ).toBe(1);
+    expect(
+      getProviderDayUsage("2099-01-01", "anthropic", null, "acct2").cost,
+    ).toBe(2);
+  });
+
+  test("no rows returns zeros", () => {
+    expect(getProviderDayUsage("2099-01-01", "gemini", null, null)).toEqual({
+      cost: 0,
+      tokens: 0,
+      requests: 0,
+    });
   });
 });
 

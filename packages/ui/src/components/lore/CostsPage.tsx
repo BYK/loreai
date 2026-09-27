@@ -154,6 +154,7 @@ export const CostsPage: Component = () => {
             <ProviderCards
               providers={data().providers}
               quotas={data().quotas}
+              budgets={data().provider_budgets}
               money={formatMoney}
             />
 

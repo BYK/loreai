@@ -6296,6 +6296,36 @@ export function getProviderCostTotals(today: string): ProviderCostTotals[] {
   }));
 }
 
+/** Usage sums for one provider day, optionally filtered by auth kind/account. */
+export function getProviderDayUsage(
+  day: string,
+  provider: string,
+  authKind: ProviderAuthKind | null,
+  account: string | null,
+): { cost: number; tokens: number; requests: number } {
+  const row = db()
+    .query(
+      `SELECT COALESCE(SUM(cost), 0) AS cost,
+              COALESCE(SUM(input_tokens + output_tokens +
+                          cache_read_tokens + cache_write_tokens), 0) AS tokens,
+              COALESCE(SUM(requests), 0) AS requests
+       FROM provider_costs
+       WHERE day = ? AND provider = ?
+         AND (? IS NULL OR auth_kind = ?)
+         AND (? IS NULL OR account = ?)`,
+    )
+    .get(day, provider, authKind, authKind, account, account) as {
+    cost: number;
+    tokens: number;
+    requests: number;
+  } | null;
+  return {
+    cost: row?.cost ?? 0,
+    tokens: row?.tokens ?? 0,
+    requests: row?.requests ?? 0,
+  };
+}
+
 /** One latest-observed quota window for a (provider, auth kind, account). */
 export type ProviderQuotaRow = {
   provider: string;

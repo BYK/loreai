@@ -529,6 +529,21 @@ for (const [window, minutes, used, resetMs] of [
   });
 }
 
+// Per-provider budget (#1927): an 80% cap on Anthropic's weekly quota window.
+core.setKV(
+  "provider_budgets",
+  JSON.stringify([
+    {
+      provider: "anthropic",
+      auth_kind: "subscription",
+      account: "e2e-anth",
+      unit: "percent",
+      window: "7d",
+      amount: 80,
+    },
+  ]),
+);
+
 core.close();
 
 // One gen-0 distillation over the first ten messages, written the way

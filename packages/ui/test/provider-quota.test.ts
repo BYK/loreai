@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  budgetsForCard,
   displayProvider,
   formatResetCountdown,
   groupProviderCards,
@@ -155,5 +156,41 @@ describe("groupProviderCards", () => {
       "requests",
       "credits",
     ]);
+  });
+});
+
+describe("budgetsForCard", () => {
+  const card = {
+    provider: "anthropic",
+    auth_kind: "subscription" as const,
+    account: "a1",
+  };
+  const budget = (
+    o: Partial<Parameters<typeof budgetsForCard>[0][number]> = {},
+  ) => ({
+    provider: "anthropic",
+    auth_kind: null,
+    account: null,
+    unit: "usd" as const,
+    window: "daily" as const,
+    amount: 10,
+    used: null,
+    fraction: null,
+    resets_at: null,
+    stale: false,
+    ...o,
+  });
+
+  it("matches wildcards and exact tuples, filters the rest", () => {
+    const budgets = [
+      budget(),
+      budget({ auth_kind: "subscription" }),
+      budget({ account: "a1" }),
+      budget({ auth_kind: "subscription", account: "a1" }),
+      budget({ auth_kind: "api_key" }),
+      budget({ account: "other" }),
+      budget({ provider: "openai" }),
+    ];
+    expect(budgetsForCard(budgets, card)).toHaveLength(4);
   });
 });
