@@ -13,6 +13,8 @@
  */
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { detectHarness } from "./harness";
+import { resolveCostAttribution } from "./cost-attribution";
+import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
@@ -7245,6 +7247,7 @@ async function forwardToUpstream(
   cache?: AnthropicCacheOptions,
   signal?: AbortSignal,
   resolvedRoute?: ResolvedRequestUpstreamRoute,
+  sessionID?: string,
 ): Promise<UpstreamResult> {
   let url: string;
   let headers: Record<string, string>;
@@ -7561,7 +7564,7 @@ async function forwardToUpstream(
     }, dispatchSignal);
 
   const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
-    return effectiveInterceptor
+    const response = await (effectiveInterceptor
       ? responseAgainstAbort(
           () =>
             effectiveInterceptor(body, req.model, req.stream, () =>
@@ -7569,7 +7572,24 @@ async function forwardToUpstream(
             ),
           dispatchSignal,
         )
-      : dispatchUpstream(dispatchSignal);
+      : dispatchUpstream(dispatchSignal));
+    // Capture provider quota headers for the cost ledger (#1926). Header
+    // reads only — the response object is returned untouched.
+    try {
+      observeProviderQuotaHeaders(
+        response.headers,
+        resolveCostAttribution({
+          sessionID,
+          providerID,
+          upstreamURL: effectiveUpstreamBase,
+          credential: routingAuth,
+          responseHeaders: response.headers,
+        }),
+      );
+    } catch {
+      // Quota capture must never affect the proxied response.
+    }
+    return response;
   };
 
   const response = await dispatch(signal);
@@ -8296,6 +8316,7 @@ export function buildStreamingResponse(
                     },
                     signal,
                     recallContext.upstreamRoute,
+                    recallContext.sessionState.sessionID,
                   ),
                 // JSON parsing is unused on the streaming path (assertSSEResponse
                 // guarantees an SSE body); provide a guard that throws if reached.
@@ -15560,11 +15581,19 @@ function accountConversationUsage(
     "conversation",
     resolvedConversationTTL,
   );
+  const state = sessions.get(sessionID);
+  const attribution = resolveCostAttribution({
+    sessionID,
+    providerID: state?.lastUpstream?.providerID,
+    upstreamURL: state?.lastUpstream?.url,
+    credential: resolveAuth(sessionID, state?.lastUpstream?.providerID),
+  });
   recordConversationCost(
     sessionID,
     model,
     usageForSentry,
     resolvedConversationTTL,
+    attribution,
   );
   return usageForSentry;
 }
@@ -16532,6 +16561,8 @@ async function handleCompactionInner(
     return await handlePassthrough(
       { ...req, rawHeaders: fallbackHeaders },
       config,
+      undefined,
+      sessionState.sessionID,
     );
   }
   const resp = buildCompactionResponse(sessionID, summary, req.model);
@@ -18129,6 +18160,7 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
   resolvedRoute?: ResolvedRequestUpstreamRoute,
+  sessionID?: string,
 ): Promise<Response> {
   if (requestSourcePrefix(req)) {
     throw new SourceDeltaUnavailableError(
@@ -18147,6 +18179,7 @@ async function handlePassthrough(
       undefined,
       abortScope.signal,
       resolvedRoute,
+      sessionID,
     );
   } catch (error) {
     abortScope.dispose();
@@ -18344,6 +18377,7 @@ async function handleProvisionalConversationTurn(
       undefined,
       abortScope.signal,
       requestUpstream.route,
+      identified.sessionID,
     );
   } catch (error) {
     abortScope.dispose();
@@ -21332,6 +21366,7 @@ async function handleConversationTurnPrepared(
       cacheOptions,
       foregroundAbort.signal,
       requestUpstreamRoute,
+      sessionID,
     );
   } catch (error) {
     releaseForeground();
@@ -21715,6 +21750,7 @@ async function handleConversationTurnPrepared(
             },
             signal,
             requestUpstreamRoute,
+            sessionState.sessionID,
           ),
         parseJSON: (response, protocol, signal) =>
           accumulateNonStreamResponse(
@@ -22296,6 +22332,7 @@ async function handleConversationTurnPrepared(
                       },
                       followUpSignal,
                       requestUpstreamRoute,
+                      sessionState.sessionID,
                     ),
                   parseJSON: () => {
                     throw new Error(
@@ -22354,6 +22391,7 @@ async function handleConversationTurnPrepared(
                       },
                       recoverySignal,
                       requestUpstreamRoute,
+                      sessionState.sessionID,
                     ),
                   parseJSON: () => {
                     throw new Error(

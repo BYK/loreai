@@ -28,7 +28,12 @@ import {
   addDailyCost,
   getDailyCostTotals,
   getDailyCostForDay,
+  addProviderCost,
+  getProviderCostTotals,
+  type ProviderAuthKind,
+  type DailyCostBucket,
 } from "@loreai/core";
+import type { CostAttribution } from "./cost-attribution";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -761,6 +766,7 @@ export function recordConversationCost(
   model: string,
   usage: Usage,
   ttl?: "5m" | "1h",
+  attribution?: CostAttribution,
 ): void {
   const costs = getOrCreate(sessionID);
   const call = computeCallCost(model, usage, "conversation", ttl);
@@ -776,6 +782,7 @@ export function recordConversationCost(
   dailySpend += call.total;
   addDailyCost(dailySpendDate, "conversation", call.total);
   updateCostRate(call.total);
+  recordProviderCost(attribution, "conversation", call.total, usage);
 }
 
 /** Worker ID → cost bucket mapping. */
@@ -798,6 +805,7 @@ export function recordWorkerCost(
   callType: "direct" | "batch",
   workerID?: string,
   ttl?: "5m" | "1h",
+  attribution?: CostAttribution,
 ): void {
   if (!sessionID) return;
   const costs = getOrCreate(sessionID);
@@ -817,6 +825,7 @@ export function recordWorkerCost(
   maybeResetDay();
   dailySpend += call.total;
   addDailyCost(dailySpendDate, "worker", call.total);
+  recordProviderCost(attribution, "worker", call.total, usage);
 }
 
 /**
@@ -831,6 +840,7 @@ export function recordWarmupCost(
   cacheReadTokens: number,
   cacheCreationTokens: number,
   ttl?: "5m" | "1h",
+  attribution?: CostAttribution,
 ): void {
   const costs = getOrCreate(sessionID);
   const pricing = getPricingSync(model);
@@ -847,6 +857,76 @@ export function recordWarmupCost(
   maybeResetDay();
   dailySpend += warmupTotal;
   addDailyCost(dailySpendDate, "warmup", warmupTotal);
+  recordProviderCost(attribution, "warmup", warmupTotal, {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_input_tokens: cacheReadTokens,
+    cache_creation_input_tokens: cacheCreationTokens,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Per-provider ledger (provider_costs table, #1926)
+// ---------------------------------------------------------------------------
+
+/** Write one provider-attributed cost row alongside the daily ledger write. */
+function recordProviderCost(
+  attribution: CostAttribution | undefined,
+  bucket: DailyCostBucket,
+  cost: number,
+  usage: Usage,
+): void {
+  if (!attribution) return;
+  try {
+    addProviderCost({
+      day: dailySpendDate,
+      provider: attribution.provider,
+      authKind: attribution.authKind,
+      account: attribution.account,
+      bucket,
+      cost,
+      inputTokens: usage.input_tokens ?? 0,
+      outputTokens: usage.output_tokens ?? 0,
+      cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+      requests: 1,
+    });
+  } catch (error) {
+    log.info("provider cost capture failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/** API-shaped per-provider cost totals for GET /api/v1/costs. */
+export type ProviderCostSummary = {
+  provider: string;
+  auth_kind: ProviderAuthKind;
+  account: string;
+  spend: number;
+  today_spend: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  requests: number;
+  last_day: string | null;
+};
+
+export function getProviderCostSummary(): ProviderCostSummary[] {
+  return getProviderCostTotals(dailySpendDate).map((row) => ({
+    provider: row.provider,
+    auth_kind: row.authKind,
+    account: row.account,
+    spend: row.cost,
+    today_spend: row.todayCost,
+    input_tokens: row.inputTokens,
+    output_tokens: row.outputTokens,
+    cache_read_tokens: row.cacheReadTokens,
+    cache_write_tokens: row.cacheWriteTokens,
+    requests: row.requests,
+    last_day: row.lastDay,
+  }));
 }
 
 // ---------------------------------------------------------------------------

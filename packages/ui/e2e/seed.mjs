@@ -479,6 +479,56 @@ for (const viewport of ["Desktop", "Mobile"]) {
   }
 }
 
+// Provider cost + quota snapshot fixtures (#1926): one subscription and one
+// API-key account so /ui/costs renders both card shapes.
+const todayUTC = new Date().toISOString().slice(0, 10);
+core.addProviderCost({
+  day: todayUTC,
+  provider: "anthropic",
+  authKind: "subscription",
+  account: "e2e-anth",
+  bucket: "conversation",
+  cost: 2.5,
+  inputTokens: 12_000,
+  outputTokens: 3_000,
+  cacheReadTokens: 8_000,
+  cacheWriteTokens: 400,
+  requests: 7,
+});
+core.addProviderCost({
+  day: todayUTC,
+  provider: "openai",
+  authKind: "api_key",
+  account: "e2e-oai",
+  bucket: "conversation",
+  cost: 0.5,
+  inputTokens: 4_000,
+  outputTokens: 1_500,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  requests: 3,
+});
+const nowMs = Date.now();
+for (const [window, minutes, used, resetMs] of [
+  ["5h", 300, 23, nowMs + 2 * 3600_000],
+  ["7d", 10080, 41, nowMs + 3 * 24 * 3600_000],
+]) {
+  core.upsertProviderQuota({
+    provider: "anthropic",
+    authKind: "subscription",
+    account: "e2e-anth",
+    window,
+    label: "allowed",
+    windowMinutes: minutes,
+    usedPercent: used,
+    remaining: null,
+    limit: null,
+    resetsAt: resetMs,
+    source: "anthropic-unified",
+    observedAt: nowMs,
+  });
+}
+
 core.close();
 
 // One gen-0 distillation over the first ten messages, written the way

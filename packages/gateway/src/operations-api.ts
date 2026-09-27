@@ -11,6 +11,8 @@ import {
   canonicalProjectId,
   data,
   isHostedMode,
+  isProviderQuotaStale,
+  listProviderQuotas,
   loadParentChildMap,
   projectId,
 } from "@loreai/core";
@@ -43,6 +45,7 @@ import {
   totalActualCost,
   totalSavings,
   totalWorkerCost,
+  getProviderCostSummary,
 } from "./cost-tracker";
 import { getActiveSessions } from "./pipeline";
 
@@ -535,6 +538,22 @@ export function handleGetCosts(configuredHostedMode = false): Response {
       },
     },
     sessions: liveRows,
+    providers: getProviderCostSummary(),
+    quotas: listProviderQuotas().map((row) => ({
+      provider: row.provider,
+      auth_kind: row.authKind,
+      account: row.account,
+      window: row.window,
+      label: row.label,
+      window_minutes: row.windowMinutes,
+      used_percent: row.usedPercent,
+      remaining: row.remaining,
+      limit: row.limit,
+      resets_at: row.resetsAt,
+      source: row.source,
+      observed_at: row.observedAt,
+      stale: isProviderQuotaStale(row, Date.now()),
+    })),
   });
 }
 
