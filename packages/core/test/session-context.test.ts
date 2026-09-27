@@ -367,6 +367,16 @@ describe("sessionContext", () => {
     expect(ctx!.turns).toEqual([]);
   });
 
+  test("a session known only by a live distillation is non-null", () => {
+    const project = freshProject("distill-only");
+    const pid = ensureProject(project);
+    insertDistillation(pid, "s-distill-only", "d-only", 0, 40, 500);
+    const ctx = sessionContext(project, "s-distill-only");
+    expect(ctx).not.toBeNull();
+    expect(ctx!.distilled_prefix.token_count).toBe(40);
+    expect(ctx!.history.message_count).toBe(0);
+  });
+
   test("a session known only by prompt deltas or injections is non-null", () => {
     const project = freshProject("deltas-only");
     const pid = ensureProject(project);

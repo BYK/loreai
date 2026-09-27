@@ -244,7 +244,8 @@ export function sessionContext(
     history.message_count === 0 &&
     !tracking &&
     promptDeltas.length === 0 &&
-    injections.length === 0
+    injections.length === 0 &&
+    distillations.length === 0
   ) {
     return null;
   }
