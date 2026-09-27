@@ -222,7 +222,14 @@ function handleShowSession(url: URL, sessionId: string): Response {
   const paged = handleShowSessionCursor(url, project, sessionId, distillations);
   if (paged) return paged;
   const messages = temporal.bySession(project.path, sessionId);
-  return jsonResponse({ messages, distillations });
+  // Derived session title (#1921) — additive; same value cursor mode returns.
+  const title = data.sessionTitle(project.path, sessionId);
+  return jsonResponse({
+    messages,
+    distillations,
+    title: title.title,
+    title_source: title.title_source,
+  });
 }
 
 function handleShowDistillation(id: string): Response {
