@@ -43,7 +43,14 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
   test("mobile navigation traps focus and Escape returns it to the opener", async ({
     page,
   }) => {
-    await page.goto("/ui");
+    const projects = await (await page.request.get("/api/v1/projects")).json();
+    const lore = projects.find(
+      (item: { name: string }) => item.name === "lore",
+    );
+    const scratch = projects.find(
+      (item: { name: string }) => item.name === "scratch",
+    );
+    await page.goto(`/ui/projects/${lore.id}/knowledge`);
     test.skip(
       !(await page.getByTestId("open-nav").isVisible()),
       "mobile navigation is only rendered in the mobile project",
@@ -57,6 +64,15 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
     await expect(opener).toBeFocused();
+
+    await opener.press("Enter");
+    await expect(drawer).toBeVisible();
+    await drawer
+      .getByTestId("nav-project")
+      .filter({ hasText: "scratch" })
+      .click();
+    await expect(page).toHaveURL(`/ui/projects/${scratch.id}`);
+    await expect(page.getByTestId("open-nav")).toBeFocused();
   });
 
   test("knowledge rows support arrow navigation and Enter", async ({

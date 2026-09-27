@@ -44,7 +44,29 @@ export const Shell: Component<ShellProps> = (props) => {
     setNavOpen(false);
     const opener = navOpener;
     navOpener = null;
-    queueMicrotask(() => opener?.focus());
+    let attempts = 0;
+    const focusNewOpener = () => {
+      const target = document.querySelector<HTMLElement>(
+        '[data-testid="open-nav"]',
+      );
+      if (target?.isConnected) {
+        target.focus();
+        return;
+      }
+      if (attempts < 10) {
+        attempts += 1;
+        requestAnimationFrame(focusNewOpener);
+      }
+    };
+    if (opener?.isConnected) {
+      opener.focus();
+      requestAnimationFrame(() => {
+        if (!opener.isConnected || document.activeElement !== opener)
+          focusNewOpener();
+      });
+      return;
+    }
+    requestAnimationFrame(focusNewOpener);
   };
   // Resolve once: reading a JSX prop re-evaluates the caller's expression.
   const list = children(() => props.list);

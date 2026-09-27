@@ -290,6 +290,28 @@ describe("shell: project navigation and real-data path", () => {
     await waitFor(() => expect(opener).toHaveFocus());
   });
 
+  it("focuses a replacement opener after the original is removed", async () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      setTimeout(() => callback(0), 0);
+      return 1;
+    });
+    const client = fakeClient();
+    mount("/", client);
+    const opener = await screen.findByTestId("open-nav");
+    opener.focus();
+    fireEvent.click(opener);
+    await screen.findByTestId("nav-drawer");
+
+    opener.remove();
+    fireEvent.keyDown(document, { key: "Escape" });
+    const replacement = document.createElement("button");
+    replacement.dataset.testid = "open-nav";
+    replacement.tabIndex = 0;
+    document.body.append(replacement);
+
+    await waitFor(() => expect(replacement).toHaveFocus());
+  });
+
   it("navigates project → knowledge list → entry document with stable ids in the URL", async () => {
     const client = fakeClient();
     const { history } = mount("/", client);
