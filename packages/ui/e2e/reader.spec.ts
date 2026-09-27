@@ -77,8 +77,10 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "100 of 230 captured messages loaded",
     );
-    await expect(page.getByTestId("native-transcript")).toContainText(
-      "Native transcript not yet available",
+    await expect(page.getByTestId("native-transcript")).toHaveCount(0);
+    await expect(page.getByTestId("reader-coverage-line")).toHaveAttribute(
+      "title",
+      /Lore-captured history/,
     );
     // The first page is the newest 100 messages; message 5 is older history.
     await expect(rowWith(page, "needle-5)")).toHaveCount(0);
@@ -92,6 +94,11 @@ test.describe("session reader", () => {
       "data-coverage",
       "captured",
     );
+    await expect(
+      page
+        .getByTestId("reader-coverage")
+        .getByText("Captured history", { exact: true }),
+    ).toHaveCount(0);
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "230 messages, complete as captured",
     );

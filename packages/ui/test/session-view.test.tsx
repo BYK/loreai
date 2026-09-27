@@ -21,7 +21,7 @@ import { anchorFor, blockAnchor, encodeAnchor } from "~/reader/anchors";
 import { buildBlocks, messageBlock } from "~/reader/blocks";
 import { buildRows } from "~/reader/rows";
 import { queryMatcher, searchRows } from "~/reader/search";
-import { NATIVE_TRANSCRIPT_LABEL } from "~/reader/coverage";
+import { CAPTURE_HELP } from "~/reader/coverage";
 import { HIGHLIGHT_ATTR } from "~/reader/selection";
 import { WHOLE_LOAD_PAGES } from "~/reader/whole-search";
 import {
@@ -599,15 +599,16 @@ async function settleSearch() {
 }
 
 describe("SessionView: coverage badges", () => {
-  it("declares captured history only for a complete, known total and always names the native transcript gap", async () => {
+  it("declares captured history without a badge or native-transcript banner", async () => {
     mount();
     await tick();
     const coverage = screen.getByTestId("reader-coverage");
     expect(coverage.dataset.coverage).toBe("captured");
-    expect(coverage).toHaveTextContent("Captured history");
-    expect(screen.getByTestId("native-transcript")).toHaveTextContent(
-      NATIVE_TRANSCRIPT_LABEL,
-    );
+    expect(screen.queryByTestId("native-transcript")).toBeNull();
+    expect(screen.queryByText("Captured history")).toBeNull();
+    const line = screen.getByTestId("reader-coverage-line");
+    expect(line).toHaveTextContent("complete as captured");
+    expect(line).toHaveAttribute("title", CAPTURE_HELP);
   });
 
   it("stays partial for a cached window even when the count matches", async () => {
@@ -625,6 +626,7 @@ describe("SessionView: coverage badges", () => {
     expect(coverage.dataset.coverage).toBe("partial");
     expect(coverage.dataset.coverageReason).toBe("cached-window");
     expect(coverage).toHaveTextContent("Partial history");
+    expect(screen.queryByTestId("native-transcript")).toBeNull();
     expect(screen.getByTestId("reader-coverage-line")).toHaveTextContent(
       "from the cached window",
     );
