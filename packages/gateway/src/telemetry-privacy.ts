@@ -62,6 +62,7 @@ const SAFE_ERROR_TELEMETRY_MESSAGES = [
   /^Worker health degraded$/,
   /^Worker upstream auth error: HTTP \d+$/,
   /^Worker upstream exhausted \d+ retries: HTTP \d+(?: embedded \d+)?$/,
+  /^Upstream request rejected \(HTTP 400\)$/,
   /^cch: multiple billing-header sentinels in request body/,
   /^tool-pairing 400 \(tool_use\/tool_result concurrency\)$/,
 ];

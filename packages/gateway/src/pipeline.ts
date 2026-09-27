@@ -14,7 +14,11 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { detectHarness } from "./harness";
 import { boundFallbackHistory } from "./fallback-history";
-import { upstreamRequestShape } from "./upstream-request-shape";
+import {
+  formatUpstreamRequestShape,
+  upstreamRequestShape,
+  type UpstreamRequestShape,
+} from "./upstream-request-shape";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -387,6 +391,7 @@ import {
   spanStartupBackfill,
   captureClientAbortUnderPressure,
   captureEmptyCompletion,
+  captureUpstream400,
   type AnthropicUsage,
 } from "./sentry";
 import { createRecallDiagnostics } from "./recall-diagnostics";
@@ -7013,7 +7018,7 @@ function logUpstreamResponseFailure(
   req: GatewayRequest,
   route: ResolvedRequestUpstreamRoute,
   sessionID: string,
-  requestShape?: string,
+  requestShape?: UpstreamRequestShape,
 ): void {
   const details = [
     `provider=${safeDiagnosticToken(route.providerID) ?? "none"}`,
@@ -7026,7 +7031,7 @@ function logUpstreamResponseFailure(
   if (category) details.push(`category=${category}`);
   const requestId = safeUpstreamRequestId(headers);
   if (requestId) details.push(`requestId=${requestId}`);
-  if (requestShape) details.push(requestShape);
+  if (requestShape) details.push(formatUpstreamRequestShape(requestShape));
   log.error(`upstream error: ${status} (${details.join(" ")})`);
 }
 
@@ -7223,7 +7228,7 @@ type UpstreamResult = {
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
   /** Content-free request dimensions, computed only for rejected requests. */
-  requestShape?: string;
+  requestShape?: UpstreamRequestShape;
   /** The wire protocol used for the upstream request (may differ from ingress). */
   effectiveProtocol:
     | "anthropic"
@@ -7584,7 +7589,13 @@ async function forwardToUpstream(
     serializedBody,
     effectiveProtocol,
     ...(response.status === 400
-      ? { requestShape: upstreamRequestShape(body, serializedBody) }
+      ? {
+          requestShape: upstreamRequestShape(
+            body,
+            serializedBody,
+            effectiveProtocol,
+          ),
+        }
       : {}),
   };
 }
@@ -21412,6 +21423,9 @@ async function handleConversationTurnPrepared(
       sessionID,
       upstreamResult.requestShape,
     );
+    if (upstreamResponse.status === 400) {
+      captureUpstream400(effectiveProtocol, upstreamResult.requestShape);
+    }
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.

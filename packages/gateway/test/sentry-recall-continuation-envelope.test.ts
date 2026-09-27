@@ -5,7 +5,10 @@ import {
   reportRecallContinuationFailure,
   setRecallContinuationFailureHook,
 } from "../src/recall-continuation-failure";
-import { setupRecallContinuationFailureCapture } from "../src/sentry";
+import {
+  captureUpstream400,
+  setupRecallContinuationFailureCapture,
+} from "../src/sentry";
 
 describe("recall-continuation Sentry envelope", () => {
   afterEach(() => {
@@ -68,6 +71,62 @@ describe("recall-continuation Sentry envelope", () => {
       expect(serialized).not.toContain("private");
       expect(serialized).not.toContain('"trace"');
       expect(serialized).not.toContain('"request"');
+    } finally {
+      await client.close(5_000);
+      if (previousBun === undefined) Reflect.deleteProperty(globalThis, "Bun");
+      else Reflect.set(globalThis, "Bun", previousBun);
+    }
+  });
+
+  it("exports an upstream 400 issue without inherited prompt or request context", async () => {
+    const previousBun = Reflect.get(globalThis, "Bun");
+    Reflect.set(globalThis, "Bun", { version: "1.3.0", revision: "test" });
+    const sent: unknown[] = [];
+    const options = buildSentryOptions(() => ({
+      send(envelope) {
+        sent.push(envelope);
+        return Promise.resolve({ statusCode: 200 });
+      },
+      flush: () => Promise.resolve(true),
+    }));
+    if (!options.transport) throw new Error("test transport is required");
+    const client = new Sentry.BunClient({
+      ...options,
+      integrations: [],
+      transport: options.transport,
+      stackParser: Sentry.defaultStackParser,
+    });
+    client.init();
+    const current = new Sentry.Scope();
+    const isolation = new Sentry.Scope();
+    current.setClient(client);
+    current.setContext("prompt", { text: "PRIVATE_PROMPT_MARKER" });
+    isolation.setContext("request", {
+      url: "https://private.invalid/PRIVATE_PATH_MARKER",
+    });
+
+    try {
+      await Sentry.withIsolationScope(isolation, () =>
+        Sentry.withScope(current, async () => {
+          captureUpstream400("openai-responses", {
+            bodyBytes: 8100,
+            inputItems: 769,
+            tools: 3,
+          });
+          await client.flush(5_000);
+        }),
+      );
+      const serialized = JSON.stringify(
+        sent.find((envelope) =>
+          JSON.stringify(envelope).includes(
+            "Upstream request rejected (HTTP 400)",
+          ),
+        ),
+      );
+      expect(serialized).toContain("Upstream request rejected (HTTP 400)");
+      expect(serialized).toContain("upstream_request_shape");
+      expect(serialized).toContain("8100");
+      expect(serialized).not.toContain("PRIVATE_");
     } finally {
       await client.close(5_000);
       if (previousBun === undefined) Reflect.deleteProperty(globalThis, "Bun");

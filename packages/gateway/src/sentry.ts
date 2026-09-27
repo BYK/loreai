@@ -24,6 +24,50 @@ import {
   setPrincipalProtocolFailureHook,
   type PrincipalProtocolFailureSample,
 } from "./principal-protocol-failure";
+import type { UpstreamRequestShape } from "./upstream-request-shape";
+
+/** Emit an alertable issue for a rejected request without capturing provider data. */
+export function captureUpstream400(
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+  shape?: UpstreamRequestShape,
+): void {
+  try {
+    if (!Sentry.isInitialized()) return;
+    const currentScope = new Sentry.Scope();
+    const isolationScope = new Sentry.Scope();
+    currentScope.setClient(Sentry.getClient());
+    Sentry.captureEvent({
+      level: "warning",
+      message: "Upstream request rejected (HTTP 400)",
+      fingerprint: ["upstream-400", protocol],
+      tags: { protocol },
+      contexts: shape
+        ? {
+            upstream_request_shape: {
+              request_bytes: shape.bodyBytes,
+              input_items: shape.inputItems,
+              tool_count: shape.tools,
+              ...(shape.instructionsBytes !== undefined
+                ? { instructions_bytes: shape.instructionsBytes }
+                : {}),
+              ...(shape.largestItemBytes !== undefined
+                ? { largest_item_bytes: shape.largestItemBytes }
+                : {}),
+              ...(shape.largestItemType !== undefined
+                ? { largest_item_type: shape.largestItemType }
+                : {}),
+            },
+          }
+        : undefined,
+      sdkProcessingMetadata: {
+        capturedSpanScope: currentScope,
+        capturedSpanIsolationScope: isolationScope,
+      },
+    });
+  } catch {
+    // Telemetry never affects the response path.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Scope enrichment
