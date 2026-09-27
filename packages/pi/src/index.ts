@@ -115,6 +115,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
 
   let projectPath = process.cwd();
   let currentSessionID = sessionIDFor(undefined);
+  // The harness's own session name (user-set via /name) — forwarded as
+  // x-lore-session-title so the gateway can persist it (#1921).
+  let currentSessionTitle = "";
   let compactAuthHeaders: Record<string, string> = {};
   const gatewayAccessHeaders = gatewayAccessHeadersForRemote(gatewayBase);
 
@@ -138,6 +141,9 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
           "x-lore-project": projectPath,
         };
         if (cachedGitRemote) headers["x-lore-git-remote"] = cachedGitRemote;
+        if (currentSessionTitle)
+          headers["x-lore-session-title"] =
+            encodeURIComponent(currentSessionTitle);
         return headers;
       },
       onRequestHeaders: (headers) => {
@@ -185,6 +191,7 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
   registerProviders();
 
   pi.on("session_start", async (_event: SessionStartEvent, ctx) => {
+    currentSessionTitle = ctx.sessionManager.getSessionName?.()?.trim() ?? "";
     const nextProjectPath = ctx.cwd;
     const newID = sessionIDFor(ctx.sessionManager.getSessionFile());
     if (newID !== currentSessionID || nextProjectPath !== projectPath) {
@@ -196,6 +203,12 @@ export default async function lorePiExtension(pi: ExtensionAPI): Promise<void> {
       // requests carry the correct x-lore-session-id header.
       registerProviders();
     }
+  });
+
+  // Refresh the session title per turn so a /name issued mid-session is
+  // picked up without waiting for the next session_start.
+  pi.on("before_agent_start", async (_event, ctx) => {
+    currentSessionTitle = ctx.sessionManager.getSessionName?.()?.trim() ?? "";
   });
 
   // ---------------------------------------------------------------------------
