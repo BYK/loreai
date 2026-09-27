@@ -191,6 +191,7 @@ const hostilePayloads = [
   '<style>body{background:red}</style><div style="position:fixed;inset:0">clickjack</div>',
 ];
 const hostileText = hostilePayloads.join("\n\n");
+const hostileLongTitle = `Hostile ${"x".repeat(180)}`;
 const hostileIds = [];
 for (let i = 0; i < hostilePayloads.length; i++) {
   hostileIds.push(
@@ -198,7 +199,7 @@ for (let i = 0; i < hostilePayloads.length; i++) {
       projectPath: hostile,
       scope: "project",
       category: "gotcha",
-      title: `Hostile payload ${i + 1}: ${hostilePayloads[i]}`,
+      title: `${hostileLongTitle} ${i + 1}: ${hostilePayloads[i]}`,
       content: hostileText,
       confidence: 0.5,
     }),
@@ -372,7 +373,7 @@ const hostileConflictA = core.ltm.create({
   projectPath: hostile,
   scope: "project",
   category: "decision",
-  title: `Hostile contradiction ${hostilePayloads[0]}`,
+  title: `${hostileLongTitle} contradiction ${hostilePayloads[0]}`,
   content: hostileText,
 });
 const hostileConflictB = core.ltm.create({
@@ -380,7 +381,7 @@ const hostileConflictB = core.ltm.create({
   projectPath: hostile,
   scope: "project",
   category: "decision",
-  title: `Hostile opposite ${hostilePayloads[1]}`,
+  title: `${hostileLongTitle} opposite ${hostilePayloads[1]}`,
   content: hostileText,
 });
 core.ltm.recordContradiction({

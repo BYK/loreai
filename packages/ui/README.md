@@ -1122,6 +1122,7 @@ seeded e2e gateway and the Vite dev server (fixture routes).
 | 10 | Theme switch: a colour transition makes toggle labels briefly low-contrast right after switching (visible in captures taken immediately after the click). | **Accepted** — settled state has full contrast (verified); no change. |
 | 11 | Mobile reader header wraps coverage badges and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
 | 12 | The specimens' discussion/thread panes, reply composer and "Ask agent" are P3/P4; the real screens show them only as disabled placeholders. | **Deferred** — by design (plan §0/§6); tracked by the roadmap epic #1824. |
+| 13 | Knowledge detail (mobile): a long unbroken title overflowed the viewport. | **Fixed** here (`break-words` on the heading). |
 
 ### P1 read-only UI release checklist
 

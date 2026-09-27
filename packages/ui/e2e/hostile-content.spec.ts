@@ -77,10 +77,20 @@ test.describe("hostile content stays inert", () => {
 
     await page.goto(`/ui/projects/${project.id}/knowledge/${entry.id}`);
     await expect(page.getByTestId("knowledge-document")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
     await assertSafe(page);
 
     await page.goto(`/ui/knowledge/${entry.id}`);
     await expect(page.getByTestId("knowledge-document")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
     await assertSafe(page);
 
     await page.goto(`/ui/projects/${project.id}/sessions`);

@@ -32,7 +32,7 @@ export const DocHeader: Component<{
     <div class="mb-2 truncate text-xs text-muted">
       {props.crumb.join(" / ")}
     </div>
-    <h1 class="mb-3 text-[25px] leading-[1.2] font-semibold tracking-[-0.65px]">
+    <h1 class="mb-3 break-words text-[25px] leading-[1.2] font-semibold tracking-[-0.65px] [overflow-wrap:anywhere]">
       {props.title}
     </h1>
     <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
