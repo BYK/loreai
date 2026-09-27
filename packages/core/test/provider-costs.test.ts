@@ -130,6 +130,30 @@ describe("provider_costs ledger", () => {
   });
 });
 
+describe("provider_costs index", () => {
+  test("idx_provider_costs_group exists and serves the totals query", () => {
+    const index = db()
+      .query(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'index' AND name = 'idx_provider_costs_group'`,
+      )
+      .get();
+    expect(index).toBeTruthy();
+
+    const plan = db()
+      .query(
+        `EXPLAIN QUERY PLAN
+         SELECT provider, auth_kind, account, SUM(cost) AS cost
+         FROM provider_costs
+         GROUP BY provider, auth_kind, account`,
+      )
+      .all() as Array<{ detail: string }>;
+    expect(
+      plan.some((row) => row.detail.includes("idx_provider_costs_group")),
+    ).toBe(true);
+  });
+});
+
 describe("provider_quotas snapshots", () => {
   test("upsert replaces per (provider, authKind, account, window) key", () => {
     upsertProviderQuota(quotaRow({ usedPercent: 40 }));

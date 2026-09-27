@@ -8,6 +8,8 @@
  * Single shared implementation — previously duplicated in llm-adapter.ts
  * and worker-model.ts.
  */
+import { buildCodexWorkerHeaders } from "./cch";
+
 export function isChatGPTBackend(url: string | URL | undefined): boolean {
   if (!url) return false;
   try {
@@ -16,4 +18,16 @@ export function isChatGPTBackend(url: string | URL | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The Codex (ChatGPT) `chatgpt-account-id` captured for a session, if any.
+ * Its presence marks the session as ChatGPT-subscription-authenticated.
+ * Reads through `buildCodexWorkerHeaders` so the session snapshot stays an
+ * internal detail of cch.ts.
+ */
+export function sessionChatGPTAccountId(
+  sessionID: string | undefined,
+): string | null {
+  return buildCodexWorkerHeaders(sessionID)?.["chatgpt-account-id"] ?? null;
 }

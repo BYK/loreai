@@ -7,8 +7,9 @@
 import { createHash } from "node:crypto";
 import type { ProviderAuthKind } from "@loreai/core";
 import { authFingerprint, type AuthCredential } from "./auth";
-import { isChatGPTBackend } from "./chatgpt-backend";
-import { isClaudeCodeOAuthSession, sessionChatGPTAccountId } from "./cch";
+import { isChatGPTBackend, sessionChatGPTAccountId } from "./chatgpt-backend";
+import { isClaudeCodeOAuthSession } from "./cch";
+import { providerForUpstreamURL } from "./config";
 
 export type CostAttribution = {
   provider: string;
@@ -16,23 +17,19 @@ export type CostAttribution = {
   account: string;
 };
 
-/** Hostname → canonical provider id. */
-const PROVIDER_HOSTS: Readonly<Record<string, string>> = {
-  "api.anthropic.com": "anthropic",
-  "api.openai.com": "openai",
-  "chatgpt.com": "openai",
-  "generativelanguage.googleapis.com": "gemini",
-  "openrouter.ai": "openrouter",
-  "api.githubcopilot.com": "github-copilot",
-};
-
-function providerFromHost(hostname: string): string {
+function providerFromHost(hostname: string, upstreamURL: string): string {
   const host = hostname.toLowerCase();
-  const mapped = PROVIDER_HOSTS[host];
-  if (mapped) return mapped;
+  // Codex lives on ChatGPT's host but stays grouped under "openai" — the
+  // subscription auth kind is what distinguishes it from API-key traffic.
+  // Checked before the route table so "openai-codex" never surfaces here.
+  if (host === "chatgpt.com") return "openai";
+  const routed = providerForUpstreamURL(upstreamURL);
+  if (routed) return routed;
   // Vertex endpoints are <region>-aiplatform.googleapis.com.
   if (host.endsWith("aiplatform.googleapis.com")) return "vertex";
-  if (host.endsWith(".openrouter.ai")) return "openrouter";
+  if (host === "openrouter.ai" || host.endsWith(".openrouter.ai")) {
+    return "openrouter";
+  }
   if (/^bedrock(?:[.-]|$)/.test(host) && host.endsWith(".amazonaws.com")) {
     return "bedrock";
   }
@@ -47,7 +44,7 @@ function resolveProvider(
   if (trimmed) return trimmed;
   if (!upstreamURL) return "unknown";
   try {
-    return providerFromHost(new URL(upstreamURL).hostname);
+    return providerFromHost(new URL(upstreamURL).hostname, upstreamURL);
   } catch {
     return "unknown";
   }

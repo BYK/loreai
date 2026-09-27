@@ -18,6 +18,8 @@ describe("displayProvider", () => {
     ["openrouter", "OpenRouter"],
     ["github-copilot", "GitHub Copilot"],
     ["bedrock", "Amazon Bedrock"],
+    ["opencode", "OpenCode Zen"],
+    ["opencode-go", "OpenCode Go"],
     ["unknown", "Unknown provider"],
     ["minimax", "minimax"],
     ["<img>", "<img>"],

@@ -46,6 +46,8 @@ const PROVIDER_NAMES: Record<string, string> = {
   openrouter: "OpenRouter",
   "github-copilot": "GitHub Copilot",
   bedrock: "Amazon Bedrock",
+  opencode: "OpenCode Zen",
+  "opencode-go": "OpenCode Go",
   unknown: "Unknown provider",
 };
 

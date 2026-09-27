@@ -2279,6 +2279,7 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
     PRIMARY KEY (day, provider, auth_kind, account, bucket));
+  CREATE INDEX IF NOT EXISTS idx_provider_costs_group ON provider_costs(provider, auth_kind, account, day);
   CREATE TABLE IF NOT EXISTS provider_quotas (
     provider TEXT NOT NULL, auth_kind TEXT NOT NULL, account TEXT NOT NULL, window TEXT NOT NULL,
     label TEXT, window_minutes INTEGER, used_percent REAL, remaining REAL, "limit" REAL, resets_at INTEGER,
@@ -3946,6 +3947,8 @@ function recoverMissingObjects(database: Database) {
       cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
       requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
       PRIMARY KEY (day, provider, auth_kind, account, bucket));
+    CREATE INDEX IF NOT EXISTS idx_provider_costs_group
+      ON provider_costs (provider, auth_kind, account, day);
     CREATE TABLE IF NOT EXISTS provider_quotas (
       provider TEXT NOT NULL, auth_kind TEXT NOT NULL, account TEXT NOT NULL, window TEXT NOT NULL,
       label TEXT, window_minutes INTEGER, used_percent REAL, remaining REAL, "limit" REAL, resets_at INTEGER,

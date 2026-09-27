@@ -612,17 +612,6 @@ export function isClaudeCodeOAuthSession(sessionID: string): boolean {
   return sessionNeedsBilling.get(sessionID) === true;
 }
 
-/**
- * The Codex (ChatGPT) `chatgpt-account-id` captured for a session, if any.
- * Its presence marks the session as ChatGPT-subscription-authenticated.
- */
-export function sessionChatGPTAccountId(
-  sessionID: string | undefined,
-): string | null {
-  if (!sessionID) return null;
-  return sessionHeaderSnapshots.get(sessionID)?.chatgptAccountId ?? null;
-}
-
 // ---------------------------------------------------------------------------
 // Claude Code header sniffing & simulation for OAuth worker calls
 // ---------------------------------------------------------------------------
