@@ -293,6 +293,7 @@ test.describe("busy-session fixture", () => {
     // Lore-injected blocks are rare (one in 97) and the reader opens at the
     // newest end, so every hit starts out unmounted.
     await expect(page.locator("mark.passage-search")).toHaveCount(0);
+    await page.getByTestId("search-open").click();
     await page.getByTestId("search-input").fill("Project knowledge");
     await expect(page.getByTestId("search-summary")).toContainText(
       /\d+ matches in loaded history/,

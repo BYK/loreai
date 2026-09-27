@@ -49,8 +49,15 @@ async function setsize(page: Page) {
   return Number(value);
 }
 
+/** The quick-search bar is collapsed until Ctrl/Cmd+F or the Find button opens it. */
+async function openSearch(page: Page) {
+  await page.getByTestId("search-open").click();
+  await expect(page.getByTestId("search-input")).toBeFocused();
+}
+
 /** Bring the (possibly unmounted) row mentioning `marker` into view via search. */
 async function revealRow(page: Page, marker: string) {
+  await openSearch(page);
   await page.getByTestId("search-input").fill(marker);
   await expect(page.getByTestId("search-summary")).toContainText("1 match");
   await page.getByTestId("search-next").click();
@@ -241,6 +248,7 @@ test.describe("session reader", () => {
     await clickLoadOlder(page);
     await expect(page.getByTestId("history-start")).toBeVisible();
     // Its text mentions needle-0 … needle-9, yet only the message counts.
+    await openSearch(page);
     await page.getByTestId("search-input").fill("needle-9");
     await expect(page.getByTestId("search-summary")).toContainText("1 match");
     await page.getByTestId("search-next").click();
@@ -309,6 +317,71 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("history-start")).toBeVisible();
   });
 
+  test("quick search opens on Ctrl+F, counts n/m, highlights all matches and returns focus on Escape", async ({
+    page,
+  }, testInfo) => {
+    await openReader(page);
+    const input = page.getByTestId("search-input");
+    if (testInfo.project.name.includes("mobile")) {
+      // Touch devices have no Ctrl+F: the toolbar Find button is the entry.
+      await openSearch(page);
+    } else {
+      // Ctrl+F while a row has focus opens the bar and focuses the input.
+      const row = page.locator("[data-row-key]").last();
+      await row.focus();
+      await page.keyboard.press("Control+f");
+      await expect(input).toBeFocused();
+    }
+
+    await input.fill("needle-1");
+    await expect(page.getByTestId("search-summary")).toContainText(
+      /in loaded history/,
+    );
+    const count = page.getByTestId("search-count");
+    await expect(count).toHaveText(/^\d+\/\d+$/);
+    const total = Number(((await count.textContent()) ?? "0/0").split("/")[1]);
+    expect(total).toBeGreaterThan(1);
+
+    // Enter steps forward: the current-hit row changes and every mounted
+    // match carries a mark.
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("1/" + total);
+    const currentRow = page.locator("[data-search-current]");
+    await expect(currentRow).toHaveCount(1);
+    const firstKey = await currentRow.getAttribute("data-row-key");
+    await expect(page.locator("mark.passage-search")).toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("2/" + total);
+    const secondKey = await page
+      .locator("[data-search-current]")
+      .getAttribute("data-row-key");
+    expect(secondKey).not.toBe(firstKey);
+    await expect
+      .poll(() => page.locator("mark.passage-search-all").count())
+      .toBeGreaterThan(0);
+    await page.keyboard.press("Shift+Enter");
+    await expect(count).toHaveText("1/" + total);
+
+    // A second Ctrl+F inside the input falls through (no bar toggle).
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("quick-search")).toBeVisible();
+
+    // Escape closes and focus returns inside the reader (the row, or the
+    // scroller if stepping unmounted it).
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("quick-search")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const scroll = document.querySelector(
+            '[data-testid="session-scroll"]',
+          );
+          return scroll !== null && scroll.contains(document.activeElement);
+        }),
+      )
+      .toBe(true);
+  });
+
   test("in-session search covers unmounted rows and can select a hit as a source anchor", async ({
     page,
   }) => {
@@ -319,6 +392,7 @@ test.describe("session reader", () => {
     // needle-150 lives on the first page, far above the landed viewport.
     await expect(rowWith(page, "needle-150")).toHaveCount(0);
 
+    await openSearch(page);
     await page.getByTestId("search-input").fill("needle-150");
     await expect(page.getByTestId("search-summary")).toContainText(
       "1 match in loaded history",
@@ -365,6 +439,7 @@ test.describe("session reader", () => {
     // Message 8 is on the oldest page; "needle-8 and" is a literal nothing on
     // the loaded page contains (needle-18x carries a different digit run).
     const query = "needle-8 and";
+    await openSearch(page);
     await page.getByTestId("search-input").fill(query);
     await expect(page.getByTestId("search-summary")).toContainText(
       "No matches in loaded history",
