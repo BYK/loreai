@@ -1364,6 +1364,23 @@ export function prune(input: {
     );
   }
 
+  // session_meta holds the derived-title cache (#1921): a first_message row is
+  // treated as fresh forever, so after deletions it could keep serving a title
+  // whose source message is gone. The cache is disposable — drop the project's
+  // rows wholesale and let the next list re-derive.
+  if (ttlDeleted + capDeleted > 0) {
+    try {
+      database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
+    } catch (e) {
+      if (!isMissingObjectError(e)) throw e;
+      sawMissingObject = true;
+      log.info(
+        "temporal.prune session_meta cache drop skipped — object missing during db maintenance window (transient):",
+        e,
+      );
+    }
+  }
+
   // A clean tick (no missing-object skip) clears the consecutive-skip streak so
   // only a *sustained* run of skips escalates to warn.
   if (sawMissingObject) {
