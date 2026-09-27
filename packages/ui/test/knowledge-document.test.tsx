@@ -41,6 +41,7 @@ const project = {
   session_count: 1,
   message_count: 1,
   distillation_count: 0,
+  last_activity: null,
 };
 
 function loader<T>(

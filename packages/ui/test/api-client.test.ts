@@ -40,6 +40,7 @@ const PROJECT = {
   session_count: 2,
   message_count: 40,
   distillation_count: 1,
+  last_activity: Date.UTC(2026, 8, 1, 11),
 };
 
 const ENTRY = {
@@ -567,6 +568,10 @@ describe("contradiction API client", () => {
           similarity: 0.94,
           rationale: null,
           detected_at: Date.UTC(2026, 8, 1),
+          project_id_a: "p1",
+          project_name_a: "lore",
+          project_id_b: "p1",
+          project_name_b: "lore",
         },
       ],
       total: 1,

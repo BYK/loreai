@@ -41,6 +41,7 @@ const PROJECTS: ProjectSummary[] = [
     session_count: 5,
     message_count: 90,
     distillation_count: 3,
+    last_activity: Date.UTC(2026, 8, 2, 10),
   },
   {
     id: "p-empty",
@@ -52,6 +53,7 @@ const PROJECTS: ProjectSummary[] = [
     session_count: 1,
     message_count: 2,
     distillation_count: 0,
+    last_activity: Date.UTC(2026, 8, 1, 11),
   },
 ];
 

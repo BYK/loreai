@@ -32,6 +32,15 @@ mkdirSync(scratch, { recursive: true });
 const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
+// #1918: five extra empty projects so the sidebar has more entries than the
+// Recent limit and the filter / "All projects" surfaces render. They have no
+// messages or knowledge, so `last_activity` is null and they sort last.
+for (let i = 0; i < 5; i++) {
+  const dir = join(root, `archive-${i}`);
+  mkdirSync(dir, { recursive: true });
+  core.ensureProject(dir, `archive-${i}`, null);
+}
+
 const entries = [
   {
     category: "decision",
@@ -431,6 +440,34 @@ core.ltm.recordContradiction({
   rationale: hostileText,
 });
 
+// One cross-project pair (#1919): an entry in scratch vs an entry in lore, so
+// the contradictions page renders a "Cross-project" group after the per-project
+// groups.
+const crossConflictA = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Store timestamps as epoch ms",
+  content: "Persist all timestamps as integer epoch milliseconds.",
+});
+const crossConflictB = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: lore,
+  scope: "project",
+  category: "decision",
+  title: "Store timestamps as ISO strings",
+  content: "Persist all timestamps as ISO 8601 strings.",
+});
+core.ltm.recordContradiction({
+  logicalIdA: crossConflictA,
+  logicalIdB: crossConflictB,
+  projectId: scratchProjectId,
+  similarity: 0.95,
+  rationale:
+    "Epoch milliseconds and ISO strings cannot both be the storage format.",
+});
+
 // Project-actions fixtures (UI-08): disposable projects and scratch
 // sessions per browser project and retry so a delete/clear/move can never
 // race another spec — each test owns `pa-<viewport>-<run>-<letter>` and the
@@ -549,6 +586,16 @@ for (const { id, gradient } of [
     row.id,
   );
 }
+
+// The disposable pa-* fixtures are created late in the seed, so their fresh
+// knowledge rows would otherwise outrank lore/scratch/hostile in the sidebar's
+// recency ordering (last_activity desc) and push them out of Recent. Backdate
+// them so the named projects stay visible; the project-actions spec navigates
+// by URL and does not care about sidebar order.
+db.prepare(
+  `UPDATE knowledge SET updated_at = 1600000000000
+   WHERE project_id IN (SELECT id FROM projects WHERE name LIKE 'pa-%')`,
+).run();
 db.close();
 
 console.log(

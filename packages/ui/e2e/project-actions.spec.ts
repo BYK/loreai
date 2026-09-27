@@ -132,8 +132,14 @@ test.describe("project actions (UI-08)", () => {
     await expect(target).toBeEnabled();
     await target.click();
     // The Kobalte Select popup portals outside the dialog — which the modal
-    // dialog marks aria-hidden — so role queries can't see the options.
-    await page.locator("[role='option']").filter({ hasText: "lore" }).click();
+    // dialog marks aria-hidden — so role queries can't see the options, and
+    // with many seeded projects "lore" sits outside the listbox scrollport,
+    // so a normal click cannot scroll it into view. dispatchEvent still runs
+    // the item's real click handler.
+    await page
+      .locator("[role='option']")
+      .filter({ hasText: "lore" })
+      .dispatchEvent("click");
     await dialog.getByRole("button", { name: /Move \d+ session/ }).click();
     await expect(
       page.getByTestId("project-actions").getByTestId("action-notice-result"),

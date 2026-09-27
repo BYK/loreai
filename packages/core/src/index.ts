@@ -39,6 +39,7 @@ export * as listQuery from "./list-query";
 export type {
   KnowledgeKeyset,
   KnowledgeListOptions,
+  CrossProjectKnowledgeEntry,
   KnowledgeSort,
   KnowledgeScope,
   KnowledgeCategory,
