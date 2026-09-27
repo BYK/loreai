@@ -29,7 +29,7 @@ const scratch = join(root, "scratch");
 mkdirSync(lore, { recursive: true });
 mkdirSync(scratch, { recursive: true });
 
-core.ensureProject(lore, "lore", "github.com/BYK/loreai");
+const loreProjectId = core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
 // #1918: five extra empty projects so the sidebar has more entries than the
@@ -136,9 +136,11 @@ const entries = [
 ];
 
 let firstKnowledgeId;
+const knowledgeIds = [];
 for (const entry of entries) {
   const id = core.ltm.create({ ...entry, projectPath: lore, scope: "project" });
   if (!firstKnowledgeId) firstKnowledgeId = id;
+  knowledgeIds.push(id);
 }
 core.ltm.appendVersion(firstKnowledgeId, {
   content:
@@ -308,6 +310,33 @@ for (let k = 0; k < MESSAGES; k++) {
     ],
   });
 }
+
+// Context-window seeding (#1924): an injection batch, one durable prompt
+// delta, and per-turn gradient metadata so the pane and the transcript
+// markers have real rows to read. The prompt delta's debounceAt sits 60s
+// after a late message, so its applied_at lands inside the first page.
+core.ltm.recordSessionInjections(SESSION, lore, [
+  { logical_id: core.ltm.logicalIdOf(knowledgeIds[0]) },
+  { logical_id: core.ltm.logicalIdOf(knowledgeIds[2]) },
+]);
+core.appendSessionPromptDelta({
+  sessionID: SESSION,
+  projectID: loreProjectId,
+  selector: JSON.stringify({
+    insertAt: 3,
+    debounceAt: T0 + 228 * 60_000 + 60_000,
+    mut: {
+      changed: [{ id: core.ltm.logicalIdOf(knowledgeIds[0]) }],
+      removed: [],
+    },
+  }),
+  content: JSON.stringify([
+    {
+      role: "user",
+      content: [{ type: "text", text: "[memory refreshed] e2e delta text" }],
+    },
+  ]),
+});
 
 // Entities for the UI-08 screens: a person with aliases + metadata, an org
 // linked by a relation, and a repo. `entities.create` is the same API the
@@ -513,6 +542,51 @@ db.prepare(
   5.2,
   0.8,
 );
+
+// Per-turn gradient stats (#1924) the way pipeline.ts writes them via
+// messageMetadata(): a passthrough turn early in the loaded page and a
+// layer-1 turn near the end so one compaction marker lands in the mounted
+// window of the newest 100 messages (k = 130..229).
+for (const { id, gradient } of [
+  {
+    id: "e2e-m211",
+    gradient: {
+      layer: 0,
+      raw_tokens: 4_200,
+      total_tokens: 4_200,
+      distilled_tokens: 0,
+    },
+  },
+  {
+    id: "e2e-m225",
+    gradient: {
+      layer: 1,
+      raw_tokens: 18_400,
+      total_tokens: 6_100,
+      distilled_tokens: 812,
+    },
+  },
+]) {
+  const row = db
+    .prepare(
+      "SELECT id, metadata FROM temporal_messages WHERE source_id = ? AND session_id = ?",
+    )
+    .get(id, SESSION);
+  if (!row) throw new Error(`seeded message ${id} missing`);
+  const metadata = JSON.parse(row.metadata);
+  metadata.gradient = gradient;
+  metadata.usage = {
+    input: gradient.total_tokens,
+    output: 40,
+    cache_read: 0,
+    cache_write: 0,
+  };
+  db.prepare("UPDATE temporal_messages SET metadata = ? WHERE id = ?").run(
+    JSON.stringify(metadata),
+    row.id,
+  );
+}
+
 // The disposable pa-* fixtures are created late in the seed, so their fresh
 // knowledge rows would otherwise outrank lore/scratch/hostile in the sidebar's
 // recency ordering (last_activity desc) and push them out of Recent. Backdate

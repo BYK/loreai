@@ -63,6 +63,8 @@ const MANAGEMENT_PATHS = [
   "/api/v1/costs/budget",
   "/api/v1/contradictions",
   "/api/v1/contradictions/a/b",
+  "/api/v1/sessions/s1/search",
+  "/api/v1/sessions/s1/context",
   "/ui",
   "/ui/",
   "/ui/index.html",

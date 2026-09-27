@@ -93,3 +93,72 @@ export const sessionSearchPage = type({
 
 export type SessionSearchPage = typeof sessionSearchPage.infer;
 export type SessionSearchMode = SessionSearchPage["mode"];
+
+/**
+ * `GET /api/v1/sessions/:id/context?path=…` (#1924) — the session's real
+ * context window as Lore sees it: accepted gradient layer, history volume,
+ * the live distilled prefix, injected-knowledge state, reshaped prompt
+ * deltas, and per-turn transform stats stamped into assistant message
+ * metadata. Nullable fields stay null when the gateway could not derive
+ * them (unrecorded layer, absent session_state cache counters, injections
+ * whose entry was deleted, deltas with unparseable selectors, turns without
+ * usage).
+ */
+export const sessionContext = type({
+  session_id: nonEmptyString,
+  layer: "number | null",
+  history: { message_count: nonNegInt, token_estimate: "number" },
+  distilled_prefix: {
+    token_count: "number",
+    distillations: type({
+      id: nonEmptyString,
+      generation: "number.integer",
+      token_count: "number",
+      created_at: epochMs,
+      observations: "string",
+    }).array(),
+  },
+  knowledge: {
+    cache_text: "string | null",
+    cache_tokens: "number | null",
+    pin_tokens: "number | null",
+    stable_tokens: "number | null",
+    injections: type({
+      logical_id: "string",
+      title: "string | null",
+      category: "string | null",
+      confidence: "number | null",
+      created_at: epochMs,
+      credited: "boolean",
+      verdict: "string | null",
+    }).array(),
+  },
+  prompt_deltas: type({
+    seq: "number.integer",
+    insert_at: "number | null",
+    applied_at: "number | null",
+    changed: type({ id: "string", title: "string | null" }).array(),
+    removed: "string[]",
+    text: "string[]",
+  }).array(),
+  turns: type({
+    message_id: nonEmptyString,
+    created_at: epochMs,
+    layer: "number",
+    raw_tokens: "number",
+    total_tokens: "number",
+    distilled_tokens: "number",
+    usage: type({
+      input: "number",
+      output: "number",
+      cache_read: "number",
+      cache_write: "number",
+    }).or("null"),
+  }).array(),
+});
+
+export type SessionContext = typeof sessionContext.infer;
+export type SessionContextTurn = SessionContext["turns"][number];
+export type SessionContextInjection =
+  SessionContext["knowledge"]["injections"][number];
+export type SessionContextDelta = SessionContext["prompt_deltas"][number];

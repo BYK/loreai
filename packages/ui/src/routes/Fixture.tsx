@@ -11,7 +11,7 @@
  *                 through the real reader (`&blocks=` / `&seed=` override)
  */
 import type { Component, JSX } from "solid-js";
-import { For, Show } from "solid-js";
+import { For, Match, Show, Switch } from "solid-js";
 import { A, useSearchParams } from "@solidjs/router";
 
 import {
@@ -36,6 +36,8 @@ import {
   FutureActionRow,
 } from "~/components/lore/FutureAction";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
+import { ContextWindowPane } from "~/components/reader/ContextWindow";
+import { MarkerRowView } from "~/components/reader/MarkerRow";
 import {
   DistillationBlockView,
   MessageBlockView,
@@ -47,8 +49,11 @@ import { Badge } from "~/components/ui/badge";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import { cn } from "~/lib/utils";
 import { buildBlocks } from "~/reader/blocks";
+import { buildMarkers } from "~/reader/markers";
+import { buildRows } from "~/reader/rows";
 import {
   READER_SPECIMEN,
+  READER_SPECIMEN_CONTEXT,
   READER_SPECIMEN_DISTILLATION,
 } from "~/reader/specimen";
 
@@ -471,6 +476,8 @@ const Callouts: Component = () => (
  */
 const ReaderBlocks: Component = () => {
   const blocks = buildBlocks(READER_SPECIMEN);
+  const rows = buildRows(blocks, buildMarkers(READER_SPECIMEN_CONTEXT));
+  const href = (id: string) => `/ui/fixture#knowledge-${id}`;
   return (
     <section
       class="mx-auto max-w-[760px] px-4.5 py-6 sm:px-8"
@@ -481,22 +488,43 @@ const ReaderBlocks: Component = () => {
         title="Session blocks"
         trailing="Captured history · invented"
       />
-      <For each={blocks.messages}>
-        {(block) => <MessageBlockView block={block} />}
-      </For>
-      <For each={blocks.distillations}>
-        {(block) => (
-          <DistillationBlockView
-            block={block}
-            detail={{
-              ...block.summary,
-              project_id: "specimen",
-              observations: READER_SPECIMEN_DISTILLATION,
-              source_ids: "[]",
-            }}
-          />
+      <For each={rows}>
+        {(row) => (
+          <Switch>
+            <Match when={row.marker}>
+              {(marker) => (
+                <MarkerRowView marker={marker()} knowledgeHref={href} />
+              )}
+            </Match>
+            <Match when={row.block?.kind === "message" && row.block}>
+              {(block) => <MessageBlockView block={block()} />}
+            </Match>
+            <Match when={row.block?.kind === "distillation" && row.block}>
+              {(block) => (
+                <DistillationBlockView
+                  block={block()}
+                  detail={{
+                    ...block().summary,
+                    project_id: "specimen",
+                    observations: READER_SPECIMEN_DISTILLATION,
+                    source_ids: "[]",
+                  }}
+                />
+              )}
+            </Match>
+          </Switch>
         )}
       </For>
+      <div class="mt-8 border-t border-dashed border-line pt-6">
+        <div class="eyebrow mb-3">Context window</div>
+        <ContextWindowPane
+          context={READER_SPECIMEN_CONTEXT}
+          loading={false}
+          error={undefined}
+          onRetry={() => {}}
+          knowledgeHref={href}
+        />
+      </div>
     </section>
   );
 };

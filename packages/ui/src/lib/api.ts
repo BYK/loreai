@@ -50,6 +50,7 @@ import {
   sessionsMoveResult,
   recallResponse,
   safeParseContract,
+  sessionContext,
   sessionDetail,
   sessionList,
   sessionSummary,
@@ -85,6 +86,7 @@ import {
   type KnowledgeCategory,
   type KnowledgeScope,
   type KnowledgeSort,
+  type SessionContext,
   type SessionDetail,
   type SessionPage,
   type SessionSearchPage,
@@ -469,6 +471,23 @@ export function createApiClient(options: ApiClientOptions = {}) {
           cursor,
         }),
         sessionSearchPage,
+        signal,
+      );
+    },
+    /**
+     * `GET /sessions/:id/context?path=` — the session's real context window
+     * (#1924): gradient layer, distilled prefix, injected knowledge, prompt
+     * deltas and per-turn transform stats. Opt-in; the legacy session
+     * response is untouched.
+     */
+    getSessionContext(
+      projectPath: string,
+      sessionId: string,
+      signal?: AbortSignal,
+    ): Promise<SessionContext> {
+      return getJson(
+        apiPath(["sessions", sessionId, "context"], { path: projectPath }),
+        sessionContext,
         signal,
       );
     },
