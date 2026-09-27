@@ -62,13 +62,21 @@ export function sectionProjects(
   }
 
   const query = filter.trim().toLowerCase();
-  const matches = query
+  const activeProject = activeId ? byId.get(activeId) : undefined;
+  let matches = query
     ? sorted.filter(
         (p) =>
           p.name?.toLowerCase().includes(query) ||
           p.path.toLowerCase().includes(query),
       )
     : null;
+  if (
+    matches &&
+    activeProject &&
+    !matches.some((project) => project.id === activeProject.id)
+  ) {
+    matches = [activeProject, ...matches];
+  }
 
   return { pinned, recent, rest, matches };
 }

@@ -317,6 +317,19 @@ describe("sectionProjects / byRecency", () => {
       sectionProjects(list, [], "alpha").matches?.map((p) => p.id),
     ).toEqual(["alpha", "beta"]);
   });
+
+  it("keeps the active project in filtered matches without duplicating it", () => {
+    const list = [
+      project("active", { name: "Pinned project", last_activity: 3 }),
+      project("other", { name: "Other project", last_activity: 2 }),
+    ];
+
+    const unmatched = sectionProjects(list, ["active"], "no match", "active");
+    expect(unmatched.matches?.map((p) => p.id)).toEqual(["active"]);
+
+    const matched = sectionProjects(list, ["active"], "pinned", "active");
+    expect(matched.matches?.map((p) => p.id)).toEqual(["active"]);
+  });
 });
 
 describe("pins store", () => {
