@@ -770,6 +770,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
               const drift = rowEl.getBoundingClientRect().top - pin.top;
               if (drift !== 0) {
                 const next = el.scrollTop + drift;
+                if (drift < 0) repinIssued = next;
                 // Go through the virtualizer's own scroll so a reconcile
                 // cannot drag the offset back to a stale target.
                 virtualizer.scrollToOffset(next);
@@ -895,12 +896,21 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   // Upward moves near the top page older history in; downward moves (the
   // landing, prepend compensation, search scrolls) never do.
   let prevScrollTop = -1;
+  // The repin loop's own upward corrections are not user scrolls; an
+  // upward move that lands exactly on a repin-issued offset never
+  // triggers the next load. A user scroll only coincides if it reaches the
+  // same pixel, and the marker clears on the next event either way.
+  let repinIssued = -1;
   function onScroll() {
     const el = scrollEl;
     if (!el) return;
     const top = el.scrollTop;
     const prev = prevScrollTop;
     prevScrollTop = top;
+    if (top < prev && top === repinIssued) {
+      repinIssued = -1;
+      return;
+    }
     if (
       shouldLoadOlder({
         ...olderGate(),
