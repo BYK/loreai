@@ -44,6 +44,8 @@ import {
   readStorageMode,
   repartitionVec0Project,
 } from "./db/vec-store";
+import { refreshSessionMeta, type SessionTitleInfo } from "./session-meta";
+import type { SessionTitleSource } from "./session-title";
 
 /**
  * Reclaim the vec0 index rows orphaned by a bulk base-row delete. In vec0 mode a
@@ -93,6 +95,10 @@ export type SessionSummary = {
   distilled_count: number;
   undistilled_count: number;
   distillation_count: number;
+  /** Derived display title (#1921) — explicit, first user message,
+   *  distillation narrative, or the session id itself (`title_source`). */
+  title: string;
+  title_source: SessionTitleSource;
 };
 
 export type DistillationSummary = {
@@ -217,7 +223,7 @@ export function listSessions(
   limit = 50,
 ): SessionSummary[] {
   const pid = ensureProject(projectPath);
-  return db()
+  const rows = db()
     .query(
       `SELECT
         t.session_id,
@@ -240,6 +246,66 @@ export function listSessions(
        LIMIT ?`,
     )
     .all(pid, pid, limit) as SessionSummary[];
+  const meta = refreshSessionMeta(pid, rows);
+  for (const row of rows) {
+    const m = meta.get(row.session_id);
+    if (m) {
+      row.title = m.title;
+      row.title_source = m.title_source;
+    } else {
+      row.title = row.session_id;
+      row.title_source = "id";
+    }
+  }
+  return rows;
+}
+
+/**
+ * Set (or clear, `title === null`) the session's explicit title
+ * (`session_state.title`, #1921). Creates a minimal `session_state` row when
+ * none exists — same INSERT OR IGNORE shape `forceMinLayer` uses — and drops
+ * the session's cached `session_meta` rows so the next list re-derives. */
+export function setSessionTitle(sessionId: string, title: string | null): void {
+  const database = db();
+  database
+    .query(
+      "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
+    )
+    .run(sessionId, Date.now());
+  database
+    .query(
+      "UPDATE session_state SET title = ?, updated_at = ? WHERE session_id = ?",
+    )
+    .run(title, Date.now(), sessionId);
+  // session_id is globally unique (session_state PK), so this sweeps every
+  // project the session could have been listed under.
+  database
+    .query("DELETE FROM session_meta WHERE session_id = ?")
+    .run(sessionId);
+}
+
+/**
+ * The session's current `{title, title_source}` (#1921), computed through the
+ * same `session_meta` cache the list endpoints use — cheap on repeat reads,
+ * correct when the session has no messages at all (distillation/id source).
+ */
+export function sessionTitle(
+  projectPath: string,
+  sessionId: string,
+): SessionTitleInfo {
+  const pid = ensureProject(projectPath);
+  const agg = db()
+    .query(
+      `SELECT
+         (SELECT COUNT(*) FROM temporal_messages WHERE project_id = ? AND session_id = ?) AS message_count,
+         (SELECT COUNT(*) FROM distillations WHERE project_id = ? AND session_id = ?) AS distillation_count`,
+    )
+    .get(pid, sessionId, pid, sessionId) as {
+    message_count: number;
+    distillation_count: number;
+  };
+  const meta = refreshSessionMeta(pid, [{ session_id: sessionId, ...agg }]);
+  return meta.get(sessionId) ?? { title: sessionId, title_source: "id" };
 }
 
 /**
@@ -704,6 +770,8 @@ export function clearProject(projectPath: string): ClearResult {
     // project may have messages with the same globally keyed session ID, while
     // the owning project may have a state before its first temporal message.
     deleteOwnedProjectSessionStates(database, pid);
+    // session_meta is a derived cache — sweep the project's rows with the rest.
+    database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
     database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
@@ -862,6 +930,9 @@ export function deleteProject(projectId: string): ClearResult | null {
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(projectId);
     deleteOwnedProjectSessionStates(database, projectId);
+    database
+      .query("DELETE FROM session_meta WHERE project_id = ?")
+      .run(projectId);
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(projectId);
@@ -1233,6 +1304,10 @@ export function deleteSession(
            )`,
       )
       .run(sessionId, pid, currentTenantId());
+    // Derived-title cache: the session is gone, its rows are dead weight.
+    database
+      .query("DELETE FROM session_meta WHERE project_id = ? AND session_id = ?")
+      .run(pid, sessionId);
     // Outcome-reward injection rows have their own project binding and must
     // survive a different project's deletion of the same global session ID.
     database
@@ -1608,6 +1683,15 @@ export function moveSessions(
       movedSessionIds.push(
         ...allIds.filter((id) => ownedIds.has(id) && !foreignStates.has(id)),
       );
+      // session_meta rows are keyed (project_id, session_id): the moved
+      // sessions' cache rows stay under the source project and would be
+      // invisible-but-orphaned there. Drop them; the target's next list
+      // recomputes them.
+      database
+        .query(
+          `DELETE FROM session_meta WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(fromProjectId, ...allIds);
 
       database
         .query(

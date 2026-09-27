@@ -511,6 +511,15 @@ export function store(input: {
       if (existing.content !== content) {
         invalidateTemporalEmbedding(storageId);
         enqueueTemporalEmbedding(storageId, content);
+        // A user-message edit can change the session's derived title — drop
+        // its cached session_meta row so the next list re-derives (#1921).
+        if (input.info.role === "user") {
+          db()
+            .query(
+              "DELETE FROM session_meta WHERE project_id = ? AND session_id = ?",
+            )
+            .run(pid, input.info.sessionID);
+        }
       } else if (
         !hasTemporalEmbedding(storageId) ||
         hasPendingHistoricalTemporalEmbedding(storageId, pid)
