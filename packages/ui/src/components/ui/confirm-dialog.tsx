@@ -25,6 +25,8 @@ export const ConfirmDialog: Component<{
   destructive?: boolean;
   /** Disable both buttons while the action is in flight. */
   pending?: boolean;
+  /** Rendered between the description and the buttons (e.g. an inline error notice). */
+  children?: JSX.Element;
   onConfirm: () => void;
   onCancel: () => void;
 }> = (props) => (
@@ -39,6 +41,7 @@ export const ConfirmDialog: Component<{
         <DialogTitle>{props.title}</DialogTitle>
         <DialogDescription>{props.description}</DialogDescription>
       </DialogHeader>
+      {props.children}
       <DialogFooter>
         <Button
           variant="outline"

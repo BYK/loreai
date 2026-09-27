@@ -7,10 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { generateBusySession } from "~/fixture/busy-session";
 import { buildBlocks, messageBlock } from "~/reader/blocks";
-import {
-  NATIVE_TRANSCRIPT_LABEL,
-  coverageDeclaration,
-} from "~/reader/coverage";
+import { CAPTURE_HELP, coverageDeclaration } from "~/reader/coverage";
 import { displayedText } from "~/reader/render";
 import { buildRows } from "~/reader/rows";
 import {
@@ -38,7 +35,6 @@ describe("coverage declaration", () => {
       kind: "captured",
       label: "Captured history",
       reason: null,
-      native: "unavailable",
     });
     expect(c.detail).toBe("100 messages, complete as captured");
   });
@@ -124,13 +120,14 @@ describe("coverage declaration", () => {
     });
   });
 
-  it("always states that the native transcript is unavailable", () => {
-    expect(NATIVE_TRANSCRIPT_LABEL).toBe("Native transcript not yet available");
-    for (const total of [null, 5, 100]) {
-      expect(coverageDeclaration({ ...base, total }).native).toBe(
-        "unavailable",
-      );
+  it("carries no native-transcript field; the help tooltip explains capture", () => {
+    for (const decl of [
+      coverageDeclaration(base),
+      coverageDeclaration({ ...base, total: null }),
+    ]) {
+      expect("native" in decl).toBe(false);
     }
+    expect(CAPTURE_HELP).toContain("Lore-captured history");
   });
 });
 

@@ -155,6 +155,10 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v : null;
 }
 
+// Placeholders older gateway rows stored, not real values.
+const PLACEHOLDER_AGENTS = new Set(["gateway", "unknown"]);
+const PLACEHOLDER_MODELS = new Set(["unknown"]);
+
 /** Defensive read of the stored metadata JSON; malformed input → empty meta. */
 export function parseMeta(metadata: string | null | undefined): MessageMeta {
   const empty: MessageMeta = {
@@ -179,9 +183,11 @@ export function parseMeta(metadata: string | null | undefined): MessageMeta {
   const tools = Array.isArray(parsed.tools)
     ? parsed.tools.filter((t): t is string => typeof t === "string")
     : [];
+  const agent = str(parsed.agent);
+  const modelId = str(parsed.modelID) ?? str(model?.modelID);
   return {
-    agent: str(parsed.agent),
-    modelId: str(parsed.modelID) ?? str(model?.modelID),
+    agent: agent && PLACEHOLDER_AGENTS.has(agent.toLowerCase()) ? null : agent,
+    modelId: modelId && PLACEHOLDER_MODELS.has(modelId) ? null : modelId,
     providerId: str(parsed.providerID) ?? str(model?.providerID),
     mode: str(parsed.mode),
     tools,

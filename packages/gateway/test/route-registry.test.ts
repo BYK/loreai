@@ -51,6 +51,7 @@ const MANAGEMENT_PATHS = [
   "/api",
   "/api/",
   "/api/v1/projects",
+  "/api/v1/projects/019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
   "/api/v1/entities",
   "/api/v1/entities/rebuild",
   "/api/v1/entities/019e18ec-e328-76c4-9c3c-09dbe8d51c6c",

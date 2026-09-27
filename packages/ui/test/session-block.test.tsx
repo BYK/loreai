@@ -83,6 +83,43 @@ describe("MessageBlockView", () => {
     expect(screen.getByText("via opencode")).toBeInTheDocument();
   });
 
+  it("renders no noise badges on legacy gateway placeholder user rows", () => {
+    render(() => (
+      <MessageBlockView
+        block={messageBlock(
+          msg({
+            id: "g",
+            role: "user",
+            metadata: JSON.stringify({
+              agent: "gateway",
+              model: { providerID: "anthropic", modelID: "unknown" },
+            }),
+          }),
+        )}
+      />
+    ));
+    const article = document.getElementById("m.g");
+    expect(article).not.toBeNull();
+    expect(article?.textContent).not.toMatch(/\bvia \S+/);
+    expect(article?.textContent).not.toMatch(/\bunknown\b/);
+    expect(screen.getByText("User")).toBeInTheDocument();
+  });
+
+  it("renders a real harness badge on user rows", () => {
+    render(() => (
+      <MessageBlockView
+        block={messageBlock(
+          msg({
+            id: "cc",
+            role: "user",
+            metadata: '{"agent":"claude-code"}',
+          }),
+        )}
+      />
+    ));
+    expect(screen.getByText("via claude-code")).toBeInTheDocument();
+  });
+
   it("renders tool and reasoning parts collapsed and expandable", () => {
     const content = [
       "Let me look.",

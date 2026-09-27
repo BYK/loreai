@@ -5,18 +5,11 @@ import { A } from "@solidjs/router";
 
 import type { CostsSnapshot } from "~/contracts";
 import { isApiError } from "~/lib/api";
+import { formatMoney } from "~/lib/money";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
-
-function usd(value: number): string {
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 4,
-  }).format(value);
-}
 
 function tokens(value: number): string {
   return new Intl.NumberFormat().format(value);
@@ -129,24 +122,30 @@ export const CostsPage: Component = () => {
         {(data) => (
           <>
             <div class="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <Stat label="Current spend" value={usd(data().live.spend)} />
+              <Stat
+                label="Current spend"
+                value={formatMoney(data().live.spend)}
+              />
               <Stat
                 label={
                   data().live.net_savings >= 0
                     ? "Current net savings"
                     : "Current net overhead"
                 }
-                value={usd(Math.abs(data().live.net_savings))}
+                value={formatMoney(Math.abs(data().live.net_savings))}
                 valueClass={liveSavingsTone()}
               />
-              <Stat label="Combined spend" value={usd(data().totals.spend)} />
+              <Stat
+                label="Combined spend"
+                value={formatMoney(data().totals.spend)}
+              />
               <Stat
                 label={
                   data().totals.net_savings >= 0
                     ? "Combined net savings"
                     : "Combined net overhead"
                 }
-                value={usd(Math.abs(data().totals.net_savings))}
+                value={formatMoney(Math.abs(data().totals.net_savings))}
                 valueClass={combinedSavingsTone()}
               />
             </div>
@@ -157,8 +156,8 @@ export const CostsPage: Component = () => {
                   <h2 class="font-semibold">Daily budget</h2>
                   <p class="mt-1 text-xs text-muted">
                     {data().daily.budget.date} · today’s spend{" "}
-                    {usd(data().daily.budget.spend)} · rate{" "}
-                    {usd(data().daily.budget.rate)}/hr
+                    {formatMoney(data().daily.budget.spend)} · rate{" "}
+                    {formatMoney(data().daily.budget.rate)}/hr
                   </p>
                 </div>
                 <div class="text-right text-xs text-muted">
@@ -260,15 +259,15 @@ export const CostsPage: Component = () => {
                     {(day) => (
                       <div class="flex h-full min-w-7 flex-1 flex-col items-center justify-end">
                         <div class="mb-1 text-[9px] text-muted">
-                          {day.cost > 0 ? usd(day.cost) : ""}
+                          {day.cost > 0 ? formatMoney(day.cost) : ""}
                         </div>
                         <div
                           class="w-full max-w-8 rounded-t bg-accent"
                           style={{
                             height: `${Math.max(2, (day.cost / dailyMax()) * 78)}px`,
                           }}
-                          title={`${day.date}: ${usd(day.cost)}`}
-                          aria-label={`${day.date}: ${usd(day.cost)}`}
+                          title={`${day.date}: ${formatMoney(day.cost)}`}
+                          aria-label={`${day.date}: ${formatMoney(day.cost)}`}
                         />
                         <time
                           class="mt-1 text-[9px] text-muted"
@@ -289,30 +288,30 @@ export const CostsPage: Component = () => {
                 <MetricCard title="Spend composition">
                   <Metric
                     label={`Conversation · ${data().live.turns} turns`}
-                    value={usd(data().live.conversation_spend)}
+                    value={formatMoney(data().live.conversation_spend)}
                   />
                   <Metric
                     label="Worker overhead"
-                    value={usd(data().live.worker_cost)}
+                    value={formatMoney(data().live.worker_cost)}
                   />
                   <WorkerRows workers={data().live.workers} />
                 </MetricCard>
                 <MetricCard title="Savings estimate">
                   <Metric
                     label="Cache warming"
-                    value={`${usd(data().live.warmup_savings)} saved · ${usd(data().live.workers.warmup.cost)} cost`}
+                    value={`${formatMoney(data().live.warmup_savings)} saved · ${formatMoney(data().live.workers.warmup.cost)} cost`}
                   />
                   <Metric
                     label="1h cache TTL"
-                    value={usd(data().live.ttl_savings)}
+                    value={formatMoney(data().live.ttl_savings)}
                   />
                   <Metric
                     label="Batch API"
-                    value={usd(data().live.batch_savings)}
+                    value={formatMoney(data().live.batch_savings)}
                   />
                   <Metric
                     label={`Avoided compactions · ${data().live.avoided_compactions}`}
-                    value={usd(data().live.avoided_compaction_cost)}
+                    value={formatMoney(data().live.avoided_compaction_cost)}
                   />
                   <div class="mt-2 border-t border-line pt-2 text-xs text-muted">
                     Warmup cost is included in worker overhead and is subtracted
@@ -335,7 +334,7 @@ export const CostsPage: Component = () => {
                 />
                 <Stat
                   label="Spend without Lore · estimate"
-                  value={usd(data().live.cost_without_lore)}
+                  value={formatMoney(data().live.cost_without_lore)}
                 />
               </div>
             </section>
@@ -367,11 +366,21 @@ export const CostsPage: Component = () => {
                       <tr>
                         <th class="px-3 py-2 font-medium">Project</th>
                         <th class="px-3 py-2 font-medium">Session</th>
-                        <th class="px-3 py-2 font-medium">Turns</th>
-                        <th class="px-3 py-2 font-medium">Spend</th>
-                        <th class="px-3 py-2 font-medium">Worker cost</th>
-                        <th class="px-3 py-2 font-medium">Net</th>
-                        <th class="px-3 py-2 font-medium">Cache hit</th>
+                        <th class="px-3 py-2 text-right font-medium tabular-nums">
+                          Turns
+                        </th>
+                        <th class="px-3 py-2 text-right font-medium tabular-nums">
+                          Spend
+                        </th>
+                        <th class="px-3 py-2 text-right font-medium tabular-nums">
+                          Worker cost
+                        </th>
+                        <th class="px-3 py-2 text-right font-medium tabular-nums">
+                          Net
+                        </th>
+                        <th class="px-3 py-2 text-right font-medium tabular-nums">
+                          Cache hit
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -407,15 +416,21 @@ export const CostsPage: Component = () => {
                                 shortId(row.session_id)
                               )}
                             </td>
-                            <td class="px-3 py-2">{row.turns}</td>
-                            <td class="px-3 py-2">{usd(row.actual_cost)}</td>
-                            <td class="px-3 py-2">{usd(row.worker_cost)}</td>
-                            <td
-                              class={`px-3 py-2 ${row.net_savings >= 0 ? "text-accent" : "text-danger"}`}
-                            >
-                              {usd(row.net_savings)}
+                            <td class="px-3 py-2 text-right tabular-nums">
+                              {row.turns}
                             </td>
-                            <td class="px-3 py-2">
+                            <td class="px-3 py-2 text-right tabular-nums">
+                              {formatMoney(row.actual_cost)}
+                            </td>
+                            <td class="px-3 py-2 text-right tabular-nums">
+                              {formatMoney(row.worker_cost)}
+                            </td>
+                            <td
+                              class={`px-3 py-2 text-right tabular-nums ${row.net_savings >= 0 ? "text-accent" : "text-danger"}`}
+                            >
+                              {formatMoney(row.net_savings)}
+                            </td>
+                            <td class="px-3 py-2 text-right tabular-nums">
                               {row.cache_hit_pct === null
                                 ? "—"
                                 : `${row.cache_hit_pct.toFixed(0)}%`}
@@ -441,38 +456,42 @@ export const CostsPage: Component = () => {
                 <MetricCard title="Historical spend and overhead">
                   <Metric
                     label="Conversation spend"
-                    value={usd(data().historical.persisted_conversation_cost)}
+                    value={formatMoney(
+                      data().historical.persisted_conversation_cost,
+                    )}
                   />
                   <Metric
                     label="Total worker cost"
-                    value={usd(data().historical.total_worker_cost)}
+                    value={formatMoney(data().historical.total_worker_cost)}
                   />
                   <WorkerRows workers={data().historical.worker_breakdown} />
                   <Metric
                     label="Distillation estimate"
-                    value={`${usd(data().historical.distillation_cost)} · ${tokens(data().historical.distillation_calls)} calls`}
+                    value={`${formatMoney(data().historical.distillation_cost)} · ${tokens(data().historical.distillation_calls)} calls`}
                   />
                   <Metric
                     label="Cache warming cost · included above"
-                    value={usd(data().historical.warmup_cost)}
+                    value={formatMoney(data().historical.warmup_cost)}
                   />
                 </MetricCard>
                 <MetricCard title="Historical savings estimate">
                   <Metric
                     label="Cache warming"
-                    value={`${usd(data().historical.warmup_savings)} saved · ${tokens(data().historical.warmup_hits)} hits`}
+                    value={`${formatMoney(data().historical.warmup_savings)} saved · ${tokens(data().historical.warmup_hits)} hits`}
                   />
                   <Metric
                     label="1h cache TTL"
-                    value={`${usd(data().historical.ttl_savings)} · ${tokens(data().historical.ttl_hits)} hits`}
+                    value={`${formatMoney(data().historical.ttl_savings)} · ${tokens(data().historical.ttl_hits)} hits`}
                   />
                   <Metric
                     label="Batch API"
-                    value={usd(data().historical.batch_savings)}
+                    value={formatMoney(data().historical.batch_savings)}
                   />
                   <Metric
                     label={`Avoided compactions · ${data().historical.avoided_compactions}`}
-                    value={usd(data().historical.avoided_compaction_cost)}
+                    value={formatMoney(
+                      data().historical.avoided_compaction_cost,
+                    )}
                   />
                   <div
                     class={`mt-2 border-t border-line pt-2 text-sm font-semibold ${combinedSavingsTone()}`}
@@ -480,7 +499,7 @@ export const CostsPage: Component = () => {
                     {data().totals.net_savings >= 0
                       ? "Combined net savings"
                       : "Combined net overhead"}
-                    : {usd(Math.abs(data().totals.net_savings))}
+                    : {formatMoney(Math.abs(data().totals.net_savings))}
                   </div>
                 </MetricCard>
               </div>
@@ -544,7 +563,7 @@ const WorkerRows: Component<{ workers: WorkerCosts }> = (props) => (
         <div class="flex justify-between gap-3 py-0.5 text-[11px] text-muted">
           <span>{label}</span>
           <span class="tabular-nums">
-            {usd(item.cost)} · {tokens(item.calls)} calls
+            {formatMoney(item.cost)} · {tokens(item.calls)} calls
           </span>
         </div>
       )}
@@ -559,8 +578,12 @@ const BudgetBar: Component<{ amount: number; spend: number }> = (props) => {
   return (
     <div>
       <div class="flex justify-between text-xs">
-        <span class="font-medium">{usd(props.spend)} spent</span>
-        <span class="text-muted">{usd(props.amount)} daily limit</span>
+        <span class="font-medium tabular-nums">
+          {formatMoney(props.spend)} spent
+        </span>
+        <span class="text-muted tabular-nums">
+          {formatMoney(props.amount)} daily limit
+        </span>
       </div>
       <div
         class="mt-2 h-2 overflow-hidden rounded-full bg-soft"
