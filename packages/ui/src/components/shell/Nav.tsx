@@ -90,6 +90,8 @@ export interface NavProps {
   onRetry?: () => void;
   /** Stale-cache indicator shown next to the Projects header. */
   stale?: KeyStatus;
+  /** Optional workspace actions rendered above the connection status. */
+  footer?: JSX.Element;
   class?: string;
 }
 
@@ -100,7 +102,7 @@ export const Nav: Component<NavProps> = (props) => {
     <nav
       aria-label="Workspace"
       class={cn(
-        "flex h-full flex-col border-r border-line bg-nav px-3.5 py-6",
+        "flex min-h-full flex-col border-r border-line bg-nav px-3.5 py-6",
         props.class,
       )}
     >
@@ -217,6 +219,8 @@ export const Nav: Component<NavProps> = (props) => {
       >
         Cost intelligence
       </NavItem>
+
+      <Show when={props.footer}>{(footer) => footer()}</Show>
 
       <ConnectionStatus class="mt-auto border-t border-line px-3 pt-4" />
     </nav>

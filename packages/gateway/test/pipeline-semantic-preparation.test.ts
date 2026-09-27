@@ -164,3 +164,41 @@ it.each([false, true])(
     );
   },
 );
+
+it("stores the detected harness on user rows and no model (#1915)", async () => {
+  harness = await createHarness({
+    fixtures: makeConversationFixtures([
+      { userMessage: "harness check", assistantText: "harness reply" },
+    ]),
+  });
+  const response = await harness.chat(
+    {
+      model: DEFAULT_MODEL,
+      max_tokens: 1024,
+      stream: false,
+      // A real Claude Code turn carries the coding prompt's
+      // `Working directory:` marker — without it the request is a
+      // side-channel call and bypasses the pipeline entirely.
+      system: `${DEFAULT_SYSTEM}\nWorking directory: /test/harness-proj`,
+      messages: [{ role: "user", content: "harness check" }],
+      tools: STANDARD_TOOLS,
+    },
+    "test-key",
+    { "x-claude-code-session-id": "uuid-harness-test" },
+  );
+  expect(response.status).toBe(200);
+  expect(await response.text()).toContain("harness reply");
+  await vi.waitFor(() =>
+    expect(
+      harness!.queryDB<{ metadata: string }>(
+        "SELECT metadata FROM temporal_messages WHERE role = 'user'",
+      ),
+    ).toHaveLength(1),
+  );
+  const [{ metadata }] = harness.queryDB<{ metadata: string }>(
+    "SELECT metadata FROM temporal_messages WHERE role = 'user'",
+  );
+  const meta = JSON.parse(metadata) as Record<string, unknown>;
+  expect(meta.agent).toBe("claude-code");
+  expect(meta).not.toHaveProperty("model");
+});

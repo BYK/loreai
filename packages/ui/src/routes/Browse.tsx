@@ -12,6 +12,7 @@ import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
+import { MergeProjectsAction } from "~/components/lore/ProjectActions";
 import { SearchResults } from "~/components/lore/SearchResults";
 import { SessionList } from "~/components/lore/SessionList";
 import { errorStateFor } from "~/components/lore/ErrorState";
@@ -183,6 +184,13 @@ export const Browse: Component<{
       }
       onRetry={ws.projects.reload}
       stale={ws.state.projects.status()}
+      footer={
+        props.view === "welcome" ? (
+          <div class="border-t border-line px-3 pt-4">
+            <MergeProjectsAction />
+          </div>
+        ) : undefined
+      }
     />
   );
   const list = () => {

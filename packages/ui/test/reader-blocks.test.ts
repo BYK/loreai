@@ -131,6 +131,33 @@ describe("parseMeta / originOf", () => {
     ).toMatchObject({ modelId: "gpt", providerId: "openai", tools: ["read"] });
   });
 
+  it("suppresses placeholder agent/model stored by older gateway rows", () => {
+    expect(
+      parseMeta(
+        JSON.stringify({
+          agent: "gateway",
+          model: { providerID: "anthropic", modelID: "unknown" },
+        }),
+      ),
+    ).toMatchObject({
+      agent: null,
+      modelId: null,
+      providerId: "anthropic",
+    });
+    expect(parseMeta('{"agent":"unknown"}').agent).toBeNull();
+    expect(parseMeta('{"agent":"GATEWAY"}').agent).toBeNull();
+    expect(parseMeta('{"agent":"lore"}').agent).toBe("lore");
+    expect(originOf("assistant", parseMeta('{"agent":"lore"}'))).toBe("lore");
+    expect(parseMeta('{"agent":"claude-code"}').agent).toBe("claude-code");
+    expect(
+      parseMeta(JSON.stringify({ modelID: "unknown", providerID: "anthropic" }))
+        .modelId,
+    ).toBeNull();
+    expect(parseMeta('{"modelID":"claude-sonnet-4"}').modelId).toBe(
+      "claude-sonnet-4",
+    );
+  });
+
   it("survives malformed metadata", () => {
     for (const raw of ["", "not json", "[]", "null", "42", '"str"']) {
       expect(parseMeta(raw)).toEqual({

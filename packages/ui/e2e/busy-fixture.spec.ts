@@ -102,9 +102,7 @@ test.describe("busy-session fixture", () => {
       "data-coverage",
       "captured",
     );
-    await expect(page.getByTestId("native-transcript")).toContainText(
-      "Native transcript not yet available",
-    );
+    await expect(page.getByTestId("native-transcript")).toHaveCount(0);
     const mountedBefore = await mountedRows(page);
     expect(mountedBefore).toBeGreaterThan(0);
     expect(mountedBefore).toBeLessThan(MAX_MOUNTED_ROWS);

@@ -441,7 +441,7 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916); Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -477,7 +477,9 @@ part, so every block has at least one part.
 `synthetic: true`, `lore: true` or `agent: "lore"`), `system` (role
 `system`) or `unknown` (any other stored role, shown with an "unrecognised
 role" badge and the raw role). Lore-injected messages and the system prompt
-render with their own badge and tint (#1508). Metadata is parsed
+render with their own badge and tint (#1508). Placeholder metadata older
+gateway rows stored (`agent: "gateway"` / `"unknown"`, `modelID: "unknown"`)
+is suppressed rather than rendered as noise badges. Metadata is parsed
 defensively: malformed JSON yields an empty `MessageMeta`, never a crash.
 
 `createdAt` is `null` unless the server sent a finite positive epoch;
@@ -686,10 +688,11 @@ header's declaration (`data-testid="reader-coverage"`,
 | everything the server counted is loaded | **captured** | `N messages, complete as captured` | `null` |
 
 Unknown is never promoted to complete: the cache alone (`hasOlder === null`)
-and a missing `message_count` are both partial. Every declaration also
-states `Native transcript not yet available` (`NATIVE_TRANSCRIPT_LABEL`):
-the harness's own transcript is a distinct source no adapter exposes, so it
-is declared absent rather than left implied by "captured". The search
+and a missing `message_count` are both partial. The header always shows the
+detail line — with `CAPTURE_HELP` as its tooltip explaining what
+Lore-captured history is — and the "Partial history" badge only while the
+view is partial; there is no native-transcript banner (#1920; native
+availability will come from adapters later). The search
 summary repeats the detail (`Searched the loaded history only · …`) when
 the view is partial.
 
@@ -945,7 +948,8 @@ tie-break, page walk stops at the first unloaded hit / server end / page
 bound / empty page, next-hit choice, every summary and reach label).
 
 Playwright (`e2e/reader.spec.ts`, against the built gateway seeded by
-`e2e/seed.mjs` — 230 messages + one gen-0 distillation — desktop + mobile
+`e2e/seed.mjs` — 230 messages + one gen-0 distillation, plus 60 filler
+projects so the nav overflows — desktop + mobile
 projects): load older history twice keeps the row under the eye at the
 same distance from the toolbar; load older history twice → `history-start` + coverage
 `captured` / `complete as captured`; select → link → reload → same
@@ -1120,7 +1124,7 @@ seeded e2e gateway and the Vite dev server (fixture routes).
 | 8 | Session reader: the compressed-context card renders at the top of a partial window although its source messages (0–9) are not loaded yet. | **Accepted** — the card is labelled "compressed context", placed after its sources once they are loaded (`reader.spec.ts` asserts the placement); showing it first in a partial window is the honest coverage state. |
 | 9 | Knowledge table: a disabled "Next page" control is rendered (faint) when there is no further page. | **Accepted** — keeps the paging control's position stable; disabled state is announced. |
 | 10 | Theme switch: a colour transition makes toggle labels briefly low-contrast right after switching (visible in captures taken immediately after the click). | **Accepted** — settled state has full contrast (verified); no change. |
-| 11 | Mobile reader header wraps coverage badges and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
+| 11 | Mobile reader header wraps the coverage badge and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
 | 12 | The specimens' discussion/thread panes, reply composer and "Ask agent" are P3/P4; the real screens show them only as disabled placeholders. | **Deferred** — by design (plan §0/§6); tracked by the roadmap epic #1824. |
 | 13 | Knowledge detail (mobile): a long unbroken title overflowed the viewport. | **Fixed** here (`break-words` on the heading). |
 
@@ -1288,6 +1292,7 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Cache warming controls + histograms | `WarmingPage` | global toggle, breaker reset, per-session modes | UI-08 |
 | Cost intelligence + daily budget | `CostsPage` | live/historical totals, workers, budget | UI-08 |
 | Destructive / expensive action confirmation | `ConfirmDialog` (`components/ui`) | Kobalte `Dialog`, `role="alertdialog"` | UI-08 |
+| Project actions (rename / move sessions / clear / delete / merge) | `ProjectActions`, `MergeProjectsAction` | `ConfirmDialog`, `Dialog`, `Select`, `TextField`, inline notices | UI-08 |
 
 ## Legacy dashboard parity (UI-08, #1823)
 
@@ -1300,8 +1305,10 @@ top of `/api/v1`. Status:
   rebuild card (preview / rebuild all / cancel) with the honest cost copy
   and a per-project result table. — **PR1 (this change)**
 - [ ] Dashboard — live sessions table with warming + cost columns
-- [ ] Project actions — rename, move sessions, delete session, delete
-  distillation, clear, delete project
+- [x] Project actions — rename (`PATCH /api/v1/projects/:id`), move
+  sessions, clear, delete project, merge duplicate projects. Delete
+  session / delete distillation stay out of scope (excluded above). —
+  **PR4 (this change)**
 - [ ] User knowledge — dedup merge/dismiss suggestions, contradiction
   keep-A / keep-B / keep-both
 - [ ] Knowledge detail actions — move knowledge, delete
@@ -1399,7 +1406,7 @@ packages/ui/
   src/reader/             blocks.ts (block model), anchors.ts (source anchors), render.ts (per-part LRU), specimen.ts (dev fixture data)
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
-  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts, hash.ts, safe-html.ts (Markdown/code sanitising boundary)
+  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts, hash.ts, money.ts (formatMoney: $, cents < $100, whole dollars ≥ $100, <$0.01), safe-html.ts (Markdown/code sanitising boundary)
   src/contracts/          ArkType response contracts (relative imports only) + ContractError
   src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
   src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status

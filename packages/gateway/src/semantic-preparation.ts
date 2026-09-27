@@ -222,6 +222,8 @@ export async function prepareSemanticMessages(input: {
   timing: PreparationTiming;
   protocol?: string;
   checkpointProtocol?: string;
+  /** Client harness detected from request headers; stored on user rows. */
+  harness?: string;
   /** Whether the raw protocol item seam is safe for a future suffix. */
   checkpointBoundarySafe?: boolean;
   forceFull?: boolean;
@@ -313,6 +315,7 @@ export async function prepareSemanticMessages(input: {
       suffixStart,
       suffixStart,
       (visible, provenance) => tokenCache.count(visible, provenance),
+      input.harness,
     ),
   );
   input.signal?.throwIfAborted();

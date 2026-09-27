@@ -8,8 +8,8 @@
  *                a cached window, or a total the server has not confirmed.
  *
  * Both are *Lore's capture*; the harness's own transcript is a separate
- * source that no adapter exposes yet, so the declaration always states that
- * the native transcript is not available rather than leaving it implied.
+ * source that no adapter exposes yet — explained via `CAPTURE_HELP` on the
+ * coverage line, not as a permanent banner (#1920).
  */
 
 export type CoverageKind = "captured" | "partial";
@@ -33,11 +33,11 @@ export interface CoverageDeclaration {
   detail: string;
   /** Why the view is partial; null when it is complete. */
   reason: "older" | "unknown-total" | "cached-window" | "count" | null;
-  /** The harness transcript: not exposed by any adapter yet. */
-  native: "unavailable";
 }
 
-export const NATIVE_TRANSCRIPT_LABEL = "Native transcript not yet available";
+/** Tooltip text explaining what "Lore-captured history" is; shown once, on the coverage line. */
+export const CAPTURE_HELP =
+  "Lore-captured history: the messages Lore saw through the gateway for this session. Harnesses do not expose their own transcripts to Lore, so this is the only source shown.";
 
 function messages(n: number): string {
   return `${n.toLocaleString()} ${n === 1 ? "message" : "messages"}`;
@@ -53,7 +53,6 @@ export function coverageDeclaration(input: CoverageInput): CoverageDeclaration {
     label: "Partial history",
     detail,
     reason,
-    native: "unavailable",
   });
   if (cachedWindow) {
     return partial(
@@ -88,6 +87,5 @@ export function coverageDeclaration(input: CoverageInput): CoverageDeclaration {
     label: "Captured history",
     detail: `${messages(loaded)}, complete as captured`,
     reason: null,
-    native: "unavailable",
   };
 }

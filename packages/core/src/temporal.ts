@@ -76,8 +76,8 @@ export function partsToText(parts: LorePart[]): string {
 function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
   const meta: Record<string, unknown> = {};
   if (info.role === "user") {
-    meta.agent = info.agent;
-    meta.model = info.model;
+    if (info.agent) meta.agent = info.agent;
+    if (info.model) meta.model = info.model;
   } else {
     meta.modelID = info.modelID;
     meta.providerID = info.providerID;

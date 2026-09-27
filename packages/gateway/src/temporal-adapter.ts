@@ -284,8 +284,10 @@ function contentBlockToPart(
 /**
  * Convert an array of gateway messages to Lore's message-with-parts format.
  *
- * User messages get minimal metadata (we don't know the model at message
- * level). Assistant messages get zeroed-out token counts — call
+ * User messages record only the detected client harness, when the request
+ * identifies one (`harness`, from `detectHarness`), as `agent` metadata —
+ * the model belongs to the assistant turn and is never stored on user rows.
+ * Assistant messages get zeroed-out token counts — call
  * `updateAssistantMessageTokens` after accumulating the API response to
  * fill them in.
  */
@@ -295,6 +297,7 @@ export function gatewayMessagesToLore(
   startIndex = 0,
   legacyStartIndex = 0,
   hiddenTokenCount?: (visibleJson: string, provenanceJson: string) => number,
+  harness?: string,
 ): LoreMessageWithParts[] {
   const out: LoreMessageWithParts[] = [];
   const now = Date.now();
@@ -353,8 +356,7 @@ export function gatewayMessagesToLore(
         sessionID,
         role: "user",
         time: { created: now },
-        agent: "gateway",
-        model: { providerID: "anthropic", modelID: "unknown" },
+        ...(harness ? { agent: harness } : {}),
       };
       out.push({
         info,

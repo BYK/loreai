@@ -12,6 +12,7 @@ import type { CostsSnapshot, WarmingSnapshot } from "~/contracts";
 import { CostsPage } from "~/components/lore/CostsPage";
 import { WarmingPage } from "~/components/lore/WarmingPage";
 import type { ApiClient } from "~/lib/api";
+import { formatMoney } from "~/lib/money";
 import { WorkspaceProvider } from "~/routes/workspace";
 
 const workers = {
@@ -387,6 +388,20 @@ describe("CostsPage", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Disable budget" }));
     await waitFor(() => expect(setBudget).toHaveBeenCalledWith(0));
+  });
+
+  it("formats money with $, right-aligns numeric columns, never renders US$", async () => {
+    mountPage("costs", clientWith({ getCosts: async () => costsData }));
+    expect(await screen.findByText("Per-session costs")).toBeInTheDocument();
+    expect(
+      screen.getAllByText(formatMoney(costsData.live.spend)).length,
+    ).toBeGreaterThan(0);
+    expect(document.body.textContent).not.toContain("US$");
+    for (const name of ["Spend", "Net", "Worker cost", "Turns", "Cache hit"]) {
+      expect(screen.getByRole("columnheader", { name })).toHaveClass(
+        "text-right",
+      );
+    }
   });
 
   it("shows an empty per-session state without hiding daily/history data", async () => {
