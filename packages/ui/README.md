@@ -1178,6 +1178,8 @@ The owner signs this gate off; the implementation agent does not. Each row names
   be deleted without loss of Lore data; a reset never touches the server.
 - The SPA calls the **read** routes (`GET /api/v1/projects`,
   `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),
+  `GET /api/v1/knowledge` (cross-project cursor list) and
+  `GET /api/v1/knowledge/search?q=` (ranked cross-project search),
   `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations,
   entities and the folk status routes), and since UI-08 the entity
   **write** routes too (`PATCH`/`DELETE /api/v1/entities/:id`, `POST

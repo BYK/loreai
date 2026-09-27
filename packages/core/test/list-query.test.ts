@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { uuidv7 } from "uuidv7";
-import { db } from "../src/db";
+import { db, ensureProject } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as temporal from "../src/temporal";
 import { listSessions } from "../src/data";
@@ -8,8 +8,10 @@ import {
   KNOWLEDGE_SORTS,
   knowledgeSortKey,
   knowledgeVersionHistory,
+  listAllKnowledgePage,
   listKnowledgePage,
   listSessionsPage,
+  searchKnowledgeRanked,
   searchSessionMessagesPage,
   sessionSearchTerms,
   type KnowledgeKeyset,
@@ -17,6 +19,7 @@ import {
 } from "../src/list-query";
 import type { KnowledgeEntry, KnowledgeVersion } from "../src/ltm";
 import type { LoreMessage, LorePart } from "../src/types";
+import { withTenant } from "../src/tenant";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -266,6 +269,308 @@ describe("listKnowledgePage — deterministic keyset pagination", () => {
     pin(id, { confidence: 0.1 });
     expect(listKnowledgePage(project, { limit: 10 }).items).toHaveLength(0);
     expect(ltm.forProject(project, false)).toHaveLength(0);
+  });
+});
+
+describe("listAllKnowledgePage — cross-project keyset pagination", () => {
+  test("pages adversarially seeded tenant rows once in every sort order", () => {
+    const projectA = freshProject("cross-page-a");
+    const projectB = freshProject("cross-page-b");
+    const projectAId = ensureProject(projectA);
+    const projectBId = ensureProject(projectB);
+    db().query("UPDATE projects SET name = '' WHERE id = ?").run(projectAId);
+    db()
+      .query("UPDATE projects SET name = ? WHERE id = ?")
+      .run("Named project B", projectBId);
+    const marker = `crosspage${++seq}`;
+    const rows = [
+      {
+        projectPath: projectB,
+        title: "Shared title",
+        category: "pattern",
+        scope: "project" as const,
+        crossProject: true,
+      },
+      {
+        projectPath: projectA,
+        title: "Shared title",
+        category: "decision",
+        scope: "project" as const,
+      },
+      {
+        projectPath: projectB,
+        title: "Zulu title",
+        category: "gotcha",
+        scope: "project" as const,
+      },
+      {
+        projectPath: projectA,
+        title: "Alpha title",
+        category: "preference",
+        scope: "project" as const,
+      },
+      {
+        title: "Global title",
+        category: "architecture",
+        scope: "global" as const,
+      },
+    ];
+    const ids = rows.map((row) => {
+      const id = ltm.create({
+        id: uuidv7(),
+        ...row,
+        content: `content ${marker}`,
+      });
+      pin(id, { created: 4000, updated: 7000, confidence: 0.8 });
+      return id;
+    });
+    const lowConfidenceId = ltm.create({
+      id: uuidv7(),
+      projectPath: projectA,
+      scope: "project",
+      category: "decision",
+      title: "Low confidence",
+      content: `content ${marker}`,
+      confidence: 0.2,
+    });
+    const updatedId = ltm.create({
+      id: uuidv7(),
+      projectPath: projectA,
+      scope: "project",
+      category: "decision",
+      title: "Updated entry",
+      content: `old ${marker}`,
+    });
+    const oldVersionId = updatedId;
+    ltm.update(updatedId, { content: `current ${marker}` });
+    const currentVersionId = (
+      db()
+        .query("SELECT id FROM knowledge_current WHERE logical_id = ?")
+        .get(updatedId) as { id: string }
+    ).id;
+    pin(currentVersionId, { created: 4000, updated: 7000, confidence: 0.8 });
+    const removedId = ltm.create({
+      id: uuidv7(),
+      projectPath: projectB,
+      scope: "project",
+      category: "gotcha",
+      title: "Removed entry",
+      content: `removed ${marker}`,
+    });
+    ltm.remove(removedId);
+
+    const otherTenantId = withTenant("cross-page-other-tenant", () =>
+      ltm.create({
+        id: uuidv7(),
+        scope: "global",
+        category: "decision",
+        title: "Other tenant",
+        content: `content ${marker}`,
+      }),
+    );
+
+    for (const sort of KNOWLEDGE_SORTS) {
+      const all = listAllKnowledgePage({
+        q: marker,
+        sort,
+        limit: 100,
+      }).items;
+      const expected = expectedOrder(all, sort);
+      const paged: string[] = [];
+      let after: KnowledgeKeyset | undefined;
+      for (;;) {
+        const page = listAllKnowledgePage({
+          q: marker,
+          sort,
+          limit: 2,
+          after,
+        });
+        paged.push(...page.items.map((entry) => entry.id));
+        if (!page.next) break;
+        after = page.next;
+      }
+      expect(paged).toEqual(expected);
+      expect(new Set(paged).size).toBe(paged.length);
+      expect(paged).not.toContain(lowConfidenceId);
+      expect(paged).not.toContain(oldVersionId);
+      expect(paged).not.toContain(removedId);
+      expect(all.map((entry) => entry.logical_id)).not.toContain(removedId);
+      expect(
+        all.filter((entry) => entry.logical_id === updatedId),
+      ).toHaveLength(1);
+      expect(all.map((entry) => entry.logical_id)).not.toContain(otherTenantId);
+    }
+
+    const all = listAllKnowledgePage({ q: marker, limit: 100 }).items;
+    expect(
+      all.find((entry) => entry.project_id === projectAId)?.project_name,
+    ).toBe(projectA);
+    expect(
+      all.find((entry) => entry.project_id === projectBId)?.project_name,
+    ).toBe("Named project B");
+    expect(
+      all.find((entry) => entry.project_id === null)?.project_name,
+    ).toBeNull();
+    expect(all.map((entry) => entry.logical_id)).toEqual(
+      expect.arrayContaining([...ids, updatedId]),
+    );
+
+    const global = listAllKnowledgePage({
+      q: marker,
+      scope: "global",
+      limit: 100,
+    }).items;
+    expect(global.length).toBeGreaterThan(0);
+    expect(global.every((entry) => entry.project_id === null)).toBe(true);
+    const project = listAllKnowledgePage({
+      q: marker,
+      scope: "project",
+      limit: 100,
+    }).items;
+    expect(project.length).toBeGreaterThan(0);
+    expect(project.every((entry) => entry.project_id !== null)).toBe(true);
+    expect(all.length).toBeGreaterThan(project.length);
+
+    for (const scope of ["project", "global", "all"] as const) {
+      for (const sort of KNOWLEDGE_SORTS) {
+        const crossProjectIds = listAllKnowledgePage({
+          projectId: projectAId,
+          q: marker,
+          scope,
+          sort,
+          limit: 100,
+        }).items.map((entry) => entry.id);
+        const projectIds = listKnowledgePage(projectA, {
+          q: marker,
+          scope,
+          sort,
+          limit: 100,
+        }).items.map((entry) => entry.id);
+        expect(crossProjectIds).toEqual(projectIds);
+      }
+    }
+
+    expect(
+      listAllKnowledgePage({
+        q: marker,
+        category: "decision",
+        limit: 100,
+      }).items.every((entry) => entry.category === "decision"),
+    ).toBe(true);
+    expect(
+      listAllKnowledgePage({
+        q: marker,
+        category: "decision",
+        limit: 100,
+      }).items.map((entry) => entry.logical_id),
+    ).toContain(ids[1]);
+  });
+});
+
+describe("searchKnowledgeRanked — cross-project search", () => {
+  test("ranks title hits, counts beyond the top-N, and only returns current live rows", () => {
+    const projectA = freshProject("ranked-a");
+    const projectB = freshProject("ranked-b");
+    const marker = `rankterm${++seq}`;
+    const titleHit = ltm.create({
+      id: uuidv7(),
+      projectPath: projectA,
+      scope: "project",
+      category: "decision",
+      title: `${marker} in title`,
+      content: "A title match.",
+    });
+    const contentHit = ltm.create({
+      id: uuidv7(),
+      projectPath: projectB,
+      scope: "project",
+      category: "pattern",
+      title: "Plain note",
+      content: `Only the body contains ${marker}.`,
+    });
+    ltm.create({
+      id: uuidv7(),
+      scope: "global",
+      category: "preference",
+      title: "Another title match",
+      content: `${marker} also appears in this body.`,
+    });
+    const updatedId = ltm.create({
+      id: uuidv7(),
+      projectPath: projectA,
+      scope: "project",
+      category: "decision",
+      title: "Current searchable title",
+      content: `old ${marker}`,
+    });
+    ltm.update(updatedId, { content: `new ${marker}` });
+    const removedId = ltm.create({
+      id: uuidv7(),
+      projectPath: projectB,
+      scope: "project",
+      category: "gotcha",
+      title: "Removed searchable entry",
+      content: marker,
+    });
+    ltm.remove(removedId);
+
+    const page = searchKnowledgeRanked({ q: marker, limit: 1 });
+    expect(page.mode).toBe("fts");
+    expect(page.total).toBeGreaterThan(page.items.length);
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0].logical_id).toBe(titleHit);
+    const all = searchKnowledgeRanked({ q: marker, limit: 100 });
+    expect(
+      all.items.find((entry) => entry.logical_id === titleHit)?.rank,
+    ).toBeLessThan(
+      all.items.find((entry) => entry.logical_id === contentHit)!.rank!,
+    );
+    expect(
+      all.items.filter((entry) => entry.logical_id === updatedId),
+    ).toHaveLength(1);
+    expect(all.items.map((entry) => entry.logical_id)).not.toContain(removedId);
+    expect(all.total).toBe(all.items.length);
+
+    const projectFiltered = searchKnowledgeRanked({
+      q: marker,
+      limit: 100,
+      projectId: ensureProject(projectA),
+      scope: "project",
+    });
+    expect(projectFiltered.items.map((entry) => entry.logical_id)).toEqual(
+      expect.arrayContaining([titleHit, updatedId]),
+    );
+    expect(
+      projectFiltered.items.map((entry) => entry.logical_id),
+    ).not.toContain(contentHit);
+    const categoryFiltered = searchKnowledgeRanked({
+      q: marker,
+      limit: 100,
+      category: "pattern",
+    });
+    expect(categoryFiltered.items.map((entry) => entry.logical_id)).toEqual([
+      contentHit,
+    ]);
+  });
+
+  test("uses LIKE for stop-word-only input and none when there are no long terms", () => {
+    const likeId = ltm.create({
+      id: uuidv7(),
+      scope: "global",
+      category: "preference",
+      title: "Fallback note",
+      content: "the fallback contains the searchable stop word",
+    });
+    const like = searchKnowledgeRanked({ q: "the", limit: 1000 });
+    expect(like.mode).toBe("like");
+    expect(like.total).toBeGreaterThan(0);
+    expect(like.items.map((entry) => entry.logical_id)).toContain(likeId);
+    expect(like.items.every((entry) => entry.rank === null)).toBe(true);
+    expect(searchKnowledgeRanked({ q: "x y", limit: 10 })).toEqual({
+      items: [],
+      total: 0,
+      mode: "none",
+    });
   });
 });
 
