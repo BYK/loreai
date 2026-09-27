@@ -50,6 +50,34 @@ function api(path: string): Promise<Response> {
 
 type ApiError = { type: "error"; error: { type: string; message: string } };
 
+type ContextBody = {
+  session_id: string;
+  layer: number | null;
+  history: { message_count: number; token_estimate: number };
+  distilled_prefix: { token_count: number; distillations: unknown[] };
+  knowledge: {
+    cache_text: string | null;
+    cache_tokens: number | null;
+    pin_tokens: number | null;
+    stable_tokens: number | null;
+    injections: unknown[];
+  };
+  prompt_deltas: unknown[];
+  turns: Array<{
+    message_id: string;
+    layer: number;
+    raw_tokens: number;
+    total_tokens: number;
+    distilled_tokens: number;
+    usage: {
+      input: number;
+      output: number;
+      cache_read: number;
+      cache_write: number;
+    } | null;
+  }>;
+};
+
 function userMsg(sid: string, id: string, created: number): LoreMessage {
   return {
     id,
@@ -245,7 +273,7 @@ describe("GET /api/v1/sessions/:id/context", () => {
     const { base, sid, projectPath, logical } = await seed("full");
     const res = await api(base);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as Record<string, any>;
+    const body = (await res.json()) as ContextBody;
 
     expect(Object.keys(body).sort()).toEqual(
       [
@@ -355,7 +383,7 @@ describe("GET /api/v1/sessions/:id/context", () => {
     // session_state is keyed by session_id globally, so B's project still
     // resolves the session — but every project-scoped section is empty.
     expect(resB.status).toBe(200);
-    const scoped = (await resB.json()) as Record<string, any>;
+    const scoped = (await resB.json()) as ContextBody;
     expect(scoped.history).toEqual({ message_count: 0, token_estimate: 0 });
     expect(scoped.distilled_prefix).toEqual({
       token_count: 0,
