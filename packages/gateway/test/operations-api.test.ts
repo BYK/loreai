@@ -959,6 +959,8 @@ describe("GET/PATCH /api/v1/costs", () => {
         budget: { amount: number };
       };
       sessions: unknown[];
+      providers: unknown[];
+      quotas: unknown[];
     }>("/api/v1/costs");
     expect(data.live).toMatchObject({
       session_count: 0,
@@ -973,6 +975,77 @@ describe("GET/PATCH /api/v1/costs", () => {
     expect(data.daily.entries).toHaveLength(14);
     expect(data.daily.budget.amount).toBe(0);
     expect(data.sessions).toEqual([]);
+    expect(data.providers).toEqual([]);
+    expect(data.quotas).toEqual([]);
+  });
+
+  it("exposes provider cost and quota snapshots", async () => {
+    const { addProviderCost, upsertProviderQuota } =
+      await import("@loreai/core");
+    const today = new Date().toISOString().slice(0, 10);
+    addProviderCost({
+      day: today,
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct1",
+      bucket: "conversation",
+      cost: 1.5,
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 5,
+      requests: 2,
+    });
+    upsertProviderQuota({
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct1",
+      window: "5h",
+      label: "allowed",
+      windowMinutes: 300,
+      usedPercent: 23,
+      remaining: null,
+      limit: null,
+      resetsAt: 1_999_999_999_000,
+      source: "anthropic-unified",
+      observedAt: Date.now(),
+    });
+    const data = await body<{
+      providers: Array<{
+        provider: string;
+        auth_kind: string;
+        account: string;
+        spend: number;
+        today_spend: number;
+        requests: number;
+        last_day: string | null;
+      }>;
+      quotas: Array<{
+        provider: string;
+        window: string;
+        used_percent: number | null;
+        source: string;
+        observed_at: number;
+      }>;
+    }>("/api/v1/costs");
+    const provider = data.providers.find(
+      (p) => p.provider === "anthropic" && p.account === "acct1",
+    );
+    expect(provider).toMatchObject({
+      auth_kind: "subscription",
+      spend: 1.5,
+      today_spend: 1.5,
+      requests: 2,
+      last_day: today,
+    });
+    const quota = data.quotas.find(
+      (q) => q.provider === "anthropic" && q.window === "5h",
+    );
+    expect(quota).toMatchObject({
+      auth_kind: "subscription",
+      used_percent: 23,
+      source: "anthropic-unified",
+    });
   });
 
   it("sets and disables the daily budget, and rejects invalid values", async () => {

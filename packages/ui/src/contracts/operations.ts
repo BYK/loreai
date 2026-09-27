@@ -182,6 +182,33 @@ export const costsSnapshot = type({
     },
   },
   sessions: operationsSession.array(),
+  providers: type({
+    provider: "string",
+    auth_kind: "'api_key' | 'subscription'",
+    account: "string",
+    spend: "number",
+    today_spend: "number",
+    input_tokens: "number",
+    output_tokens: "number",
+    cache_read_tokens: "number",
+    cache_write_tokens: "number",
+    requests: "number",
+    last_day: "string | null",
+  }).array(),
+  quotas: type({
+    provider: "string",
+    auth_kind: "'api_key' | 'subscription'",
+    account: "string",
+    window: "string",
+    label: "string | null",
+    window_minutes: "number | null",
+    used_percent: "number | null",
+    remaining: "number | null",
+    limit: "number | null",
+    resets_at: "number | null",
+    source: "string",
+    observed_at: "number",
+  }).array(),
 });
 
 export type CostsSnapshot = typeof costsSnapshot.infer;

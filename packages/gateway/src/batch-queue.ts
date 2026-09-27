@@ -28,6 +28,7 @@ import type { LLMClient } from "@loreai/core";
 import { log, getKV, setKV } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import { authFingerprint, type AuthCredential, authHeaders } from "./auth";
+import { resolveCostAttribution } from "./cost-attribution";
 import {
   setGenAiUsageAttributes,
   emitCostMetric,
@@ -1050,6 +1051,12 @@ export function createBatchLLMClient(
                 "batch",
                 pending.workerID,
                 "1h",
+                resolveCostAttribution({
+                  sessionID: pending.sessionID,
+                  providerID: pending.providerID,
+                  upstreamURL: pending.upstreamUrl,
+                  credential: pending.auth,
+                }),
               );
             }
 
