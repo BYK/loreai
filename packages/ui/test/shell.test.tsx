@@ -266,11 +266,20 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
   return Object.assign(client, { calls, pageOpts, allPageOpts, searchOpts });
 }
 
-function mount(path: string, client: ApiClient, db?: Promise<LoreUiDb | null>) {
+function mount(
+  path: string,
+  client: ApiClient,
+  db?: Promise<LoreUiDb | null>,
+  base?: string,
+) {
   const history = createMemoryHistory();
   history.set({ value: path });
   const utils = render(() => (
-    <MemoryRouter history={history} root={createAppRoot(client, db)}>
+    <MemoryRouter
+      base={base}
+      history={history}
+      root={createAppRoot(client, db)}
+    >
       {routes}
     </MemoryRouter>
   ));
@@ -335,6 +344,28 @@ afterEach(() => {
 });
 
 describe("shell: project navigation and real-data path", () => {
+  it("highlights workspace links relative to the router base", async () => {
+    const { history } = mount("/ui", fakeClient(), undefined, "/ui");
+    await screen.findByTestId("nav-projects");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-accent-soft"),
+    );
+    expect(screen.getByTestId("nav-all-knowledge")).not.toHaveClass(
+      "bg-accent-soft",
+    );
+
+    history.set({ value: "/ui/knowledge" });
+    await waitFor(() => {
+      expect(screen.getByTestId("nav-all-knowledge")).toHaveClass(
+        "bg-accent-soft",
+      );
+      expect(screen.getByTestId("nav-projects")).not.toHaveClass(
+        "bg-accent-soft",
+      );
+    });
+  });
+
   it("loads projects into the nav and shows the welcome document", async () => {
     const client = fakeClient();
     mount("/", client);

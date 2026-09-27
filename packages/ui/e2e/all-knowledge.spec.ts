@@ -28,6 +28,22 @@ async function openAllKnowledgeFromHome(page: import("@playwright/test").Page) {
 }
 
 test.describe("cross-project knowledge", () => {
+  test("workspace nav active state resolves within the /ui base", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+
+    await page.goto("/ui/knowledge");
+    const allKnowledge = page.getByTestId("nav-all-knowledge");
+    const projects = page.getByTestId("nav-projects");
+    await expect(allKnowledge).toHaveClass(/bg-accent-soft/);
+    await expect(projects).not.toHaveClass(/bg-accent-soft/);
+
+    await page.goto("/ui");
+    await expect(projects).toHaveClass(/bg-accent-soft/);
+    await expect(allKnowledge).not.toHaveClass(/bg-accent-soft/);
+  });
+
   test("lists projects and Global, opens an entry, and filters category plus project", async ({
     page,
   }) => {
