@@ -148,6 +148,26 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     expect(t).not.toContain("tail ".repeat(3));
     expect(t).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
   });
+
+  test("includes recall IDs for every oversized change even beyond the optional index cap", () => {
+    const changes = Array.from({ length: 13 }, (_, index) =>
+      changed(`019e${String(index).padStart(4, "0")}`, `Changed ${index}`),
+    ).map((entry) => ({
+      ...entry,
+      content: "complete context ".repeat(1_000),
+    }));
+    const t = text(
+      buildKnowledgeDeltaMessage(changes, [], "7a3f9b2c", [
+        toc("019fffff", "Optional overflow"),
+      ]),
+    );
+    for (const entry of changes) {
+      expect(t).toContain(`[k:${entry.id}]`);
+    }
+    expect(t).not.toContain("Optional overflow");
+    expect(t).toContain("1 more");
+    expect(t).not.toContain("complete context");
+  });
 });
 
 describe("buildKnowledgeCatalogText — frozen system[1] catalog (#917 A)", () => {

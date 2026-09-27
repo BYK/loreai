@@ -2391,14 +2391,14 @@ const KNOWLEDGE_DELTA_TOKEN_BUDGET = 400;
  *  block count — and thus per-turn context tokens — without bound. When this
  *  many blocks have accumulated, the next append deletes them all and re-derives
  *  ONE cumulative block from the frozen pin baseline (paying one bust to reclaim
- *  budget). Each block is ≤ KNOWLEDGE_DELTA_TOKEN_BUDGET, so the worst-case
- *  durable-delta footprint is bounded at ~MAX_DELTA_BLOCKS × 400 tokens. */
+ *  budget). Full entry content in each block is packed to the delta token
+ *  budget; recall references for all changed entries sit outside that budget. */
 const MAX_DELTA_BLOCKS = 8;
 
-/** Max entries listed in the "Other relevant knowledge" overflow ToC (#917).
+/** Max optional entries listed in the "Other relevant knowledge" overflow ToC (#917).
  *  Each line is just `[id] title (category)` (~15-20 tokens), so 12 lines is a
- *  ~200-token index — small enough to ride the frozen delta without crowding
- *  out the rendered changed-entry content above it. */
+ *  ~200-token index; changed entries' IDs are always listed so durable
+ *  mutations cannot be marked surfaced without a recall reference. */
 const OVERFLOW_TOC_MAX = 12;
 
 /** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
@@ -3395,16 +3395,28 @@ export function buildKnowledgeDeltaMessage(
   // any removed id (a tombstoned entry must never be suggested for recall).
   const removedSet = new Set(removedIds);
   const tocSeen = new Set<string>(renderedIds);
-  const tocEntries: Array<{ id: string; title: string; category: string }> = [];
-  for (const e of [...entries, ...(overflow ?? [])]) {
-    if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
-    tocSeen.add(e.id);
-    tocEntries.push({ id: e.id, title: e.title, category: e.category });
+  const changedToc: Array<{ id: string; title: string; category: string }> = [];
+  const overflowToc: typeof changedToc = [];
+  for (const [group, source] of [
+    [changedToc, entries],
+    [overflowToc, overflow ?? []],
+  ] as const) {
+    for (const e of source) {
+      if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
+      tocSeen.add(e.id);
+      group.push({ id: e.id, title: e.title, category: e.category });
+    }
+    group.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
-  tocEntries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // Every changed entry is marked surfaced after this block is persisted, so
+  // its recall ID must be shown. Only optional overflow suggestions are capped.
+  const shownOverflow = overflowToc.slice(
+    0,
+    Math.max(0, OVERFLOW_TOC_MAX - changedToc.length),
+  );
+  const tocEntries = [...changedToc, ...shownOverflow];
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
-        .slice(0, OVERFLOW_TOC_MAX)
         .map((e) => {
           const recallId =
             e.category === "lat.md"
@@ -3415,8 +3427,8 @@ export function buildKnowledgeDeltaMessage(
           return `* [${recallId}] ${e.title} (${e.category})`;
         })
         .join("\n")}${
-        tocEntries.length > OVERFLOW_TOC_MAX
-          ? `\n* ${tocEntries.length - OVERFLOW_TOC_MAX} more — use recall with an id for detail.`
+        overflowToc.length > shownOverflow.length
+          ? `\n* ${overflowToc.length - shownOverflow.length} more — use recall with an id for detail.`
           : ""
       }`
     : "";
