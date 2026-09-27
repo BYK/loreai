@@ -130,9 +130,13 @@ describe("configured upstream routing", () => {
     await response.text();
 
     expect(response.status).toBe(200);
-    expect(
-      (capturedBody?.tools as Array<Record<string, unknown>>)[0]?.input_schema,
-    ).toEqual(schema);
+    if (!capturedBody || !Array.isArray(capturedBody.tools)) {
+      throw new Error("upstream request did not contain tools");
+    }
+    const firstTool = capturedBody.tools[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(firstTool?.input_schema).toEqual(schema);
   });
 
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
