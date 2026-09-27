@@ -66,3 +66,48 @@ export function shouldChainOlder(
   if (!gateOpen(gate)) return false;
   return nearTopOfList(gate);
 }
+
+/**
+ * "The user took the scroll": the reader's rAF loops (landing, prepend
+ * re-pin) keep issuing programmatic scrolls for a few hundred ms, and any
+ * real input during that window must cancel them instead of being folded
+ * into their drift correction. `serial()` changes exactly when the user
+ * gestures at the scroller — wheel, touch, pointer (which also covers
+ * scrollbar drags) and the scrolling keys.
+ */
+const USER_SCROLL_KEYS = new Set([
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End",
+  "ArrowUp",
+  "ArrowDown",
+  " ",
+  "Spacebar",
+]);
+
+export function watchUserScroll(el: HTMLElement): {
+  serial(): number;
+  dispose(): void;
+} {
+  let serial = 0;
+  const bump = () => {
+    serial += 1;
+  };
+  const onKey = (e: Event) => {
+    if (USER_SCROLL_KEYS.has((e as KeyboardEvent).key)) serial += 1;
+  };
+  el.addEventListener("wheel", bump, { passive: true });
+  el.addEventListener("touchstart", bump, { passive: true });
+  el.addEventListener("pointerdown", bump, { passive: true });
+  el.addEventListener("keydown", onKey);
+  return {
+    serial: () => serial,
+    dispose() {
+      el.removeEventListener("wheel", bump);
+      el.removeEventListener("touchstart", bump);
+      el.removeEventListener("pointerdown", bump);
+      el.removeEventListener("keydown", onKey);
+    },
+  };
+}

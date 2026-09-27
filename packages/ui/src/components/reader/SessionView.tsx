@@ -75,7 +75,11 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { CAPTURE_HELP, coverageDeclaration } from "~/reader/coverage";
-import { shouldChainOlder, shouldLoadOlder } from "~/reader/lazy-older";
+import {
+  shouldChainOlder,
+  shouldLoadOlder,
+  watchUserScroll,
+} from "~/reader/lazy-older";
 import { buildMarkers } from "~/reader/markers";
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows, type ReaderRow } from "~/reader/rows";
@@ -650,7 +654,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const countAtCall = rows().length;
     if (enablePin && typeof requestAnimationFrame === "function") {
       let frames = 0;
+      const serial0 = userSerial() ?? -1;
       const capturePin = () => {
+        if (serial0 >= 0 && userSerial() !== serial0) return;
         if (!prepend || rows().length !== countAtCall) return;
         if (++frames > 60) return;
         const mounted = virtualizer.getVirtualItems();
@@ -722,9 +728,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         const pin = before.pinFresh ? before.pin : null;
         if (pin && typeof requestAnimationFrame === "function") {
           let frames = 0;
+          const serial0 = userSerial() ?? -1;
           const repin = () => {
             const el = scrollEl;
             if (!el || ++frames > 24) return;
+            if (serial0 >= 0 && userSerial() !== serial0) return;
             const rowEl = el.querySelector<HTMLElement>(
               `[data-row-key="${CSS.escape(pin.key)}"]`,
             );
@@ -778,9 +786,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     if (typeof requestAnimationFrame === "function") {
       let frames = 0;
       let reachedEnd = false;
+      const serial0 = userSerial() ?? -1;
       const land = () => {
         const el = scrollEl;
         if (!el || ++frames > 24) return;
+        if (serial0 >= 0 && userSerial() !== serial0) return;
         const items = virtualizer.getVirtualItems();
         const lastItem = items.at(-1);
         if (lastItem && lastItem.index === last()) reachedEnd = true;
@@ -874,12 +884,28 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
   }
 
+  /** Serial that changes when the user gestures at the scroller — the rAF
+   * loops below snapshot it at start and stop (without scrolling) as soon
+   * as it moves, so user input is never folded into their corrections.
+   * Created lazily: a loop that starts before `onMount` runs still gets a
+   * live watcher instead of silently running ungated. */
+  let userScroll: { serial(): number; dispose(): void } | null = null;
+  function userSerial() {
+    if (!userScroll && scrollEl) userScroll = watchUserScroll(scrollEl);
+    return userScroll?.serial();
+  }
+
   onMount(() => {
     const scroll = scrollEl;
     if (!scroll) return;
     prevScrollTop = scroll.scrollTop;
     scroll.addEventListener("scroll", onScroll);
-    onCleanup(() => scroll.removeEventListener("scroll", onScroll));
+    userScroll ??= watchUserScroll(scroll);
+    onCleanup(() => {
+      scroll.removeEventListener("scroll", onScroll);
+      userScroll?.dispose();
+      userScroll = null;
+    });
   });
 
   // -- focus ---------------------------------------------------------------

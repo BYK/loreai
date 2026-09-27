@@ -24,6 +24,7 @@ import { queryMatcher, searchRows } from "~/reader/search";
 import { CAPTURE_HELP } from "~/reader/coverage";
 import { HIGHLIGHT_ATTR } from "~/reader/selection";
 import { WHOLE_LOAD_PAGES } from "~/reader/whole-search";
+import { watchUserScroll } from "~/reader/lazy-older";
 import {
   READER_SPECIMEN,
   READER_SPECIMEN_CONTEXT,
@@ -458,11 +459,14 @@ describe("SessionView: selection panel", () => {
 
   it("tells the reader when a selection spans two passages", async () => {
     mount();
-    // The reader lands at the newest row (with a frame-delayed re-issue);
-    // wait it out, then bring the first rows back into the mounted window
-    // (hasOlder is false, so no page is requested).
+    // The reader lands at the newest row and re-issues the scroll on every
+    // frame until it arrives or the frame cap hits — let the loop run out,
+    // then bring the first rows back into the mounted window (hasOlder is
+    // false, so no page is requested).
     if (typeof requestAnimationFrame === "function") {
-      await new Promise((r) => requestAnimationFrame(r));
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
     }
     await tick();
     const scroll = screen.getByTestId("session-scroll");
@@ -1222,6 +1226,44 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     const keys = mountedKeys();
     expect(keys).toContain("m.old-39");
     expect(keys).not.toContain("m.old-0");
+  });
+
+  it("lets the user take the scroll during the landing settle", async () => {
+    mount({
+      messages: older(40),
+      distillations: [],
+      messageCount: 40,
+      hasOlder: true,
+    });
+    await tick();
+    const scroll = scrollEl();
+    // The landing re-issues its scroll on every frame until it arrives; a
+    // user gesture must stop it instead of being folded into the drift.
+    scroll.dispatchEvent(new Event("wheel"));
+    fireScroll(scroll, 0);
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(scroll.scrollTop).toBe(0);
+  });
+
+  it("counts wheel, touch, pointer and navigation keys as user scroll input", () => {
+    const el = document.createElement("div");
+    const watch = watchUserScroll(el);
+    expect(watch.serial()).toBe(0);
+    el.dispatchEvent(new Event("wheel"));
+    el.dispatchEvent(new Event("touchstart"));
+    el.dispatchEvent(new Event("pointerdown"));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown" }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "x" }));
+    expect(watch.serial()).toBe(4);
+    watch.dispose();
+    el.dispatchEvent(new Event("wheel"));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+    expect(watch.serial()).toBe(4);
   });
 
   it("does not land at the end while a deep link is pending", async () => {
