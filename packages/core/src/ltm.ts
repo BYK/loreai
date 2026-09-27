@@ -108,7 +108,16 @@ export function selectionRevision(
     temporal_embeddings: number;
     lat: number;
   } | null;
-  const knowledgeStamp = `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}`;
+  // Preserve v91 stamps for unaffected projects. An absent lat.md directory
+  // changes the stamp only when that project indexed sections in the past;
+  // this also catches deletion before the startup refresh has cleared rows.
+  const missingLatDir =
+    ((mutations?.lat ?? 0) > 0 ||
+      db()
+        .query("SELECT 1 FROM lat_sections WHERE project_id = ? LIMIT 1")
+        .get(pid) !== null) &&
+    !latReader.hasLatDir(projectPath);
+  const knowledgeStamp = `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}${missingLatDir ? ":lat-dir-absent" : ""}`;
   if (!contextSources.length)
     return localIndex || sharedIndex
       ? `${knowledgeStamp}:${localIndex}:${sharedIndex}`

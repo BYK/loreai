@@ -64,6 +64,37 @@ describe("context LTM selection revision", () => {
     expect(revision()).not.toBe(revived);
   });
 
+  test("confidence ranking changes invalidate selection above the eligibility floor", () => {
+    const path = `/tmp/ltm-confidence-revision-${crypto.randomUUID()}`;
+    const pid = ensureProject(path);
+    const revision = () => ltm.selectionRevision(path);
+    const logicalId = crypto.randomUUID();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'gotcha', 'Ranked candidate', 'Confidence affects packing', ?, ?, ?)",
+      )
+      .run(logicalId, pid, Date.now(), Date.now(), logicalId);
+    const withoutMeta = revision();
+    db()
+      .query(
+        "INSERT INTO knowledge_meta (logical_id, confidence, base_confidence, updated_at) VALUES (?, 0.3, 0.3, ?)",
+      )
+      .run(logicalId, Date.now());
+    const createdMeta = revision();
+    expect(createdMeta).not.toBe(withoutMeta);
+    db()
+      .query("UPDATE knowledge_meta SET confidence = 0.9 WHERE logical_id = ?")
+      .run(logicalId);
+    const rankedHigher = revision();
+    expect(rankedHigher).not.toBe(createdMeta);
+    db()
+      .query(
+        "UPDATE knowledge_meta SET last_reinforced_at = ? WHERE logical_id = ?",
+      )
+      .run(Date.now(), logicalId);
+    expect(revision()).toBe(rankedHigher);
+  });
+
   test("separates project knowledge while sharing global entries and tracking promotion", () => {
     const projectA = `/tmp/ltm-revision-a-${crypto.randomUUID()}`;
     const projectB = `/tmp/ltm-revision-b-${crypto.randomUUID()}`;

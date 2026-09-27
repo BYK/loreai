@@ -2,8 +2,11 @@ import { describe, test, expect, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { db, ensureProject } from "../src/db";
 import * as latReader from "../src/lat-reader";
+import * as ltm from "../src/ltm";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
 import {
   _resetVectorPoolForTest,
@@ -35,6 +38,70 @@ describe("lat-reader", () => {
     test("returns false for project without lat.md/", () => {
       expect(latReader.hasLatDir("/nonexistent/project")).toBe(false);
     });
+  });
+
+  test("removing the directory invalidates selection without erasing shared indexed sections", () => {
+    const project = mkdtempSync(join(tmpdir(), "lore-lat-revision-"));
+    try {
+      mkdirSync(join(project, "lat.md"));
+      writeFileSync(
+        join(project, "lat.md", "rules.md"),
+        "# Build rule\n\nUse the stable build command.\n",
+      );
+      latReader.refresh(project);
+      const pid = ensureProject(project);
+      const beforeRemoval = ltm.selectionRevision(project);
+      expect(
+        db()
+          .query("SELECT 1 FROM lat_sections WHERE project_id = ? LIMIT 1")
+          .get(pid),
+      ).not.toBeNull();
+
+      rmSync(join(project, "lat.md"), { recursive: true });
+      expect(ltm.selectionRevision(project)).not.toBe(beforeRemoval);
+      latReader.refresh(project);
+      expect(
+        db()
+          .query("SELECT 1 FROM lat_sections WHERE project_id = ? LIMIT 1")
+          .get(pid),
+      ).not.toBeNull();
+      expect(ltm.selectionRevision(project)).not.toBe(beforeRemoval);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  test("refreshing a worktree alias without lat.md preserves its sibling's sections", () => {
+    const canonical = mkdtempSync(join(tmpdir(), "lore-lat-canonical-"));
+    const alias = mkdtempSync(join(tmpdir(), "lore-lat-alias-"));
+    try {
+      mkdirSync(join(canonical, "lat.md"));
+      writeFileSync(
+        join(canonical, "lat.md", "rules.md"),
+        "# Shared rule\n\nKeep this section.\n",
+      );
+      const pid = ensureProject(canonical);
+      db()
+        .query(
+          "INSERT INTO project_path_aliases (path, project_id) VALUES (?, ?)",
+        )
+        .run(alias, pid);
+      expect(ensureProject(alias)).toBe(pid);
+      latReader.refresh(canonical);
+      const canonicalRevision = ltm.selectionRevision(canonical);
+
+      expect(latReader.refresh(alias)).toBe(0);
+      expect(
+        db()
+          .query("SELECT 1 FROM lat_sections WHERE project_id = ? LIMIT 1")
+          .get(pid),
+      ).not.toBeNull();
+      expect(ltm.selectionRevision(canonical)).toBe(canonicalRevision);
+      expect(ltm.selectionRevision(alias)).not.toBe(canonicalRevision);
+    } finally {
+      rmSync(canonical, { recursive: true, force: true });
+      rmSync(alias, { recursive: true, force: true });
+    }
   });
 
   describe("parseSections", () => {

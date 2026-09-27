@@ -2234,6 +2234,42 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   ALTER TABLE context_ltm_source_mutations ADD COLUMN live_distillation_embeddings INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE context_ltm_source_mutations ADD COLUMN temporal_embeddings INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Version 93: confidence affects ranking even when an entry stays eligible.
+  -- Keep the original v91 migration immutable for already-upgraded databases.
+  DROP TRIGGER IF EXISTS knowledge_meta_context_revision_floor;
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_update
+  AFTER UPDATE OF confidence ON knowledge_meta
+  WHEN OLD.confidence IS NOT NEW.confidence BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = NEW.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_insert
+  AFTER INSERT ON knowledge_meta BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = NEW.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_delete
+  AFTER DELETE ON knowledge_meta BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = OLD.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS

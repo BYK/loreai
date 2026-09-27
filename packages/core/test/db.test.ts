@@ -147,9 +147,12 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
-  test("upgrades an existing v91 context selection schema to v92", () => {
+  test("upgrades an existing v91 context selection schema through v93", () => {
     const database = db();
     database.exec(`
+      DROP TRIGGER IF EXISTS knowledge_meta_context_revision_update;
+      DROP TRIGGER IF EXISTS knowledge_meta_context_revision_insert;
+      DROP TRIGGER IF EXISTS knowledge_meta_context_revision_delete;
       ALTER TABLE context_ltm_revision DROP COLUMN embedding_revision;
       ALTER TABLE context_ltm_revision DROP COLUMN live_embedding_revision;
       ALTER TABLE context_ltm_source_mutations DROP COLUMN distillation_embeddings;
@@ -182,6 +185,58 @@ describe("db", () => {
         "temporal_embeddings",
       ]),
     );
+    expect(
+      migrated
+        .query(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'knowledge_meta_context_revision_update'",
+        )
+        .get(),
+    ).toEqual({ name: "knowledge_meta_context_revision_update" });
+  });
+
+  test("v93 resumes after a partial confidence-trigger migration", () => {
+    db().exec(`
+      DROP TRIGGER knowledge_meta_context_revision_update;
+      DROP TRIGGER knowledge_meta_context_revision_delete;
+      UPDATE schema_version SET version = 92;
+    `);
+    close();
+    const migrated = db();
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    const triggers = migrated
+      .query(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'knowledge_meta_context_revision_%'",
+      )
+      .all() as Array<{ name: string }>;
+    expect(triggers.map((row) => row.name).sort()).toEqual([
+      "knowledge_meta_context_revision_delete",
+      "knowledge_meta_context_revision_insert",
+      "knowledge_meta_context_revision_update",
+    ]);
+    const pid = ensureProject(`/tmp/v93-retry-${crypto.randomUUID()}`);
+    const logicalId = crypto.randomUUID();
+    migrated
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'gotcha', 'Confidence', 'Rank', ?, ?, ?)",
+      )
+      .run(logicalId, pid, Date.now(), Date.now(), logicalId);
+    migrated
+      .query(
+        "INSERT INTO knowledge_meta (logical_id, confidence, base_confidence, updated_at) VALUES (?, 0.3, 0.3, ?)",
+      )
+      .run(logicalId, Date.now());
+    const before = migrated
+      .query("SELECT revision FROM context_ltm_revision WHERE scope_id = ?")
+      .get(pid) as { revision: number };
+    migrated
+      .query("UPDATE knowledge_meta SET confidence = 0.9 WHERE logical_id = ?")
+      .run(logicalId);
+    const after = migrated
+      .query("SELECT revision FROM context_ltm_revision WHERE scope_id = ?")
+      .get(pid) as { revision: number };
+    expect(after.revision).toBeGreaterThan(before.revision);
   });
 
   test("v90 adds nullable session cost shadow-context columns", () => {
