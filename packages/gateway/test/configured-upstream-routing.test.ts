@@ -117,6 +117,7 @@ describe("configured upstream routing", () => {
         "anthropic-version": "2023-06-01",
         "x-api-key": "test-key",
         "x-lore-provider": "minimax",
+        "x-lore-upstream-url": "https://api.minimax.io/anthropic",
         "x-lore-project": "/tmp/compatible-anthropic-provider",
       },
       body: JSON.stringify({

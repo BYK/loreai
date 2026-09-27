@@ -6744,7 +6744,6 @@ function supportsEffectiveRootToolSchemaCombinators(
   const providerRoute = route.providerRoute;
   if (
     providerRoute?.supportsRootToolSchemaCombinators !== true ||
-    route.headerUpstream !== undefined ||
     providerRoute.url === null
   ) {
     return false;
