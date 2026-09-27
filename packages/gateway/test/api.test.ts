@@ -1741,6 +1741,9 @@ describe("GET /api/v1/projects/:id/sessions — legacy + cursor mode", () => {
         "last_message_at",
         "message_count",
         "session_id",
+        // title/title_source are additive (#1921).
+        "title",
+        "title_source",
         "undistilled_count",
       ].sort(),
     );
