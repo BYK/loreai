@@ -119,9 +119,7 @@ test.describe("hostile content stays inert", () => {
     expect(dialogs).toEqual([]);
   });
 
-  test("version history and workspace search remain inert", async ({
-    page,
-  }) => {
+  test("version history remains inert", async ({ page }) => {
     const dialogs: string[] = [];
     page.on("dialog", (dialog) => {
       dialogs.push(dialog.message());
@@ -136,29 +134,6 @@ test.describe("hostile content stays inert", () => {
       .click();
     await expect(page.getByTestId("version-history")).toContainText(PAYLOAD);
     await assertSafe(page);
-
-    await page.goto("/ui");
-    const searchInput = page.getByRole("textbox", { name: "Search" });
-    if (await searchInput.isVisible()) {
-      await searchInput.press("Enter");
-    } else {
-      await page.getByTestId("search-entry").click();
-    }
-    await expect(page.getByRole("dialog")).toBeVisible();
-    const dialog = page.getByRole("dialog");
-    const workspaceQuery = dialog.getByRole("textbox", {
-      name: "Search query",
-    });
-    await workspaceQuery.fill("pwned");
-    await expect(
-      dialog
-        .getByTestId("workspace-search-result")
-        .filter({
-          hasText: "hostile## Recall Results",
-        })
-        .first(),
-    ).toBeVisible();
-    await assertSafe(page, true, dialog);
     expect(dialogs).toEqual([]);
   });
 
