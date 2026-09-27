@@ -708,7 +708,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     } catch {
       // the owner reports the failure through `olderError`
     } finally {
-      prepend = null;
+      // `prepend` is cleared by the rows effect once it has consumed it —
+      // clearing it here would race a rows update that lands after this
+      // promise resolves and skip the scroll compensation entirely.
       setOlderInFlight(false);
     }
   }
