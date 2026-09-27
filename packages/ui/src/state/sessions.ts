@@ -245,6 +245,10 @@ export function createSessionsState({
             value: {
               messages: hit.value.messages,
               distillations: [],
+              // Cached messages carry no stored title — report the id,
+              // which is exactly what the reader would show anyway.
+              title: splitKey(key).sid,
+              title_source: "id" as const,
             } satisfies SessionDetail,
             partial: hit.partial,
           };
@@ -387,6 +391,8 @@ export function createSessionsState({
               distillations: [],
               next_cursor: hit.value.nextCursor,
               message_count: hit.value.count,
+              title: splitKey(key).sid,
+              title_source: "id" as const,
             } satisfies SessionPage,
             partial: hit.partial,
           };

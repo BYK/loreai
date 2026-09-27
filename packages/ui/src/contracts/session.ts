@@ -4,6 +4,13 @@ import { type } from "arktype";
 import { distillationSummary } from "./distillation";
 import { epochMs, nonEmptyString, nonNegInt } from "./primitives";
 
+/** Where the gateway derived a session's display `title` from (#1921). */
+export const sessionTitleSource = type(
+  "'explicit' | 'first_message' | 'distillation' | 'id'",
+);
+
+export type SessionTitleSource = typeof sessionTitleSource.infer;
+
 /** `GET /api/v1/projects/:id/sessions` row — core `SessionSummary`. */
 export const sessionSummary = type({
   session_id: nonEmptyString,
@@ -13,6 +20,8 @@ export const sessionSummary = type({
   distilled_count: nonNegInt,
   undistilled_count: nonNegInt,
   distillation_count: nonNegInt,
+  title: nonEmptyString,
+  title_source: sessionTitleSource,
 });
 
 export type SessionSummary = typeof sessionSummary.infer;
@@ -42,6 +51,8 @@ export type TemporalMessage = typeof temporalMessage.infer;
 export const sessionDetail = type({
   messages: temporalMessage.array(),
   distillations: distillationSummary.array(),
+  title: nonEmptyString,
+  title_source: sessionTitleSource,
 });
 
 export type SessionDetail = typeof sessionDetail.infer;
@@ -57,6 +68,8 @@ export const sessionPage = type({
   distillations: distillationSummary.array(),
   next_cursor: "string | null",
   message_count: nonNegInt,
+  title: nonEmptyString,
+  title_source: sessionTitleSource,
 });
 
 export type SessionPage = typeof sessionPage.infer;

@@ -6,6 +6,8 @@
     "last_message_at": 1700000001000,
     "distilled_count": 0,
     "undistilled_count": 2,
-    "distillation_count": 1
+    "distillation_count": 1,
+    "title": "message 0 body",
+    "title_source": "first_message"
   }
 ]
