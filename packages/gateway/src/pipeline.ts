@@ -16561,6 +16561,8 @@ async function handleCompactionInner(
     return await handlePassthrough(
       { ...req, rawHeaders: fallbackHeaders },
       config,
+      undefined,
+      sessionState.sessionID,
     );
   }
   const resp = buildCompactionResponse(sessionID, summary, req.model);
@@ -18158,6 +18160,7 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
   resolvedRoute?: ResolvedRequestUpstreamRoute,
+  sessionID?: string,
 ): Promise<Response> {
   if (requestSourcePrefix(req)) {
     throw new SourceDeltaUnavailableError(
@@ -18176,6 +18179,7 @@ async function handlePassthrough(
       undefined,
       abortScope.signal,
       resolvedRoute,
+      sessionID,
     );
   } catch (error) {
     abortScope.dispose();
@@ -18373,6 +18377,7 @@ async function handleProvisionalConversationTurn(
       undefined,
       abortScope.signal,
       requestUpstream.route,
+      identified.sessionID,
     );
   } catch (error) {
     abortScope.dispose();
