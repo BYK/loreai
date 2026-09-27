@@ -97,6 +97,19 @@ export const dashboardRoutes: RouteModule = {
       );
     }
 
+    // PATCH only — GET/DELETE/POST on /api/v1/projects/:id stay in api.ts.
+    app.patch(
+      "/api/v1/projects/:id",
+      ctx.declaredMethodsOnly(["PATCH"], async (c: GatewayContext) => {
+        const dash = await import("../dashboard-api");
+        const res = await dash.handleRenameProject(
+          c.var.request,
+          c.req.param("id") ?? "",
+        );
+        return withManagementCors(res, c.var.allowedManagementOrigin);
+      }),
+    );
+
     app.get(
       "/api/v1/warming",
       ctx.declaredMethodsOnly(

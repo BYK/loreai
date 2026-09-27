@@ -41,8 +41,13 @@ import {
   knowledgeVersionHistory,
   sessionWarmingModeResult,
   parseContract,
+  projectClearResult,
+  projectDeleteResult,
   projectList,
+  projectRenameResult,
+  projectsMergeResult,
   query,
+  sessionsMoveResult,
   recallResponse,
   safeParseContract,
   sessionDetail,
@@ -69,8 +74,13 @@ import {
   type EntityRebuildStatus,
   type KnowledgeEntry,
   type KnowledgeVersionHistory,
+  type ProjectClearResult,
+  type ProjectDeleteResult,
+  type ProjectRenameResult,
   type ProjectSummary,
+  type ProjectsMergeResult,
   type RecallResponse,
+  type SessionsMoveResult,
   type RecallScope,
   type KnowledgeCategory,
   type KnowledgeScope,
@@ -645,6 +655,80 @@ export function createApiClient(options: ApiClientOptions = {}) {
       signal?: AbortSignal,
     ): Promise<ContradictionListResponse> {
       return getJson("/contradictions", contradictionListResponse, signal);
+    },
+    /** `PATCH /projects/:id` — rename; returns the stored trimmed name. */
+    renameProject(
+      id: string,
+      name: string,
+      signal?: AbortSignal,
+    ): Promise<ProjectRenameResult> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["projects", id]),
+        { name },
+        projectRenameResult,
+        signal,
+      );
+    },
+    /**
+     * `POST /sessions/move` — move sessions (children included unless
+     * `include_children: false`) between projects.
+     */
+    moveSessions(
+      body: {
+        session_ids: string[];
+        from_project_id: string;
+        to_project: { id?: string; git_remote?: string; path?: string };
+        include_children?: boolean;
+      },
+      signal?: AbortSignal,
+    ): Promise<SessionsMoveResult> {
+      return mutateJson(
+        "POST",
+        "/sessions/move",
+        body,
+        sessionsMoveResult,
+        signal,
+      );
+    },
+    /** `POST /projects/:id/clear` — deletes content, keeps the project row. */
+    clearProject(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<ProjectClearResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", id, "clear"]),
+        {},
+        projectClearResult,
+        signal,
+      );
+    },
+    /** `DELETE /projects/:id` — deletes the project and everything in it. */
+    deleteProject(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<ProjectDeleteResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["projects", id]),
+        undefined,
+        projectDeleteResult,
+        signal,
+      );
+    },
+    /**
+     * `POST /projects/merge` — merges projects that share a git remote.
+     * Hosted mode answers 400 `invalid_request` (not `forbidden`).
+     */
+    mergeProjects(signal?: AbortSignal): Promise<ProjectsMergeResult> {
+      return mutateJson(
+        "POST",
+        "/projects/merge",
+        undefined,
+        projectsMergeResult,
+        signal,
+      );
     },
     decideContradiction(
       idA: string,

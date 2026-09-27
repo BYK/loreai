@@ -16,6 +16,7 @@ import {
 } from "~/db";
 
 import { createEntitiesState } from "./entities";
+import { createProjectActionsState } from "./project-actions";
 import { createKnowledgeState } from "./knowledge";
 import { createProjectsState } from "./projects";
 import { createSessionsState } from "./sessions";
@@ -54,6 +55,8 @@ function lazyRepo<T>(
     collection: (scope) => call((r) => r.collection(scope), undefined),
     setCollection: (scope, state) =>
       call((r) => r.setCollection(scope, state), undefined),
+    deleteCollection: (scope) =>
+      call((r) => r.deleteCollection(scope), undefined),
   };
 }
 
@@ -114,6 +117,17 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     tracked,
   });
   const recall = createRecallState({ client, tracked });
+  const projectActions = createProjectActionsState({
+    client,
+    tracked,
+    repos: {
+      projects: projectsRepo,
+      knowledge: knowledgeRepo,
+      sessions: sessionsRepo,
+      messageBlocks: messageBlocksRepo,
+    },
+    projects,
+  });
 
   return {
     projects,
@@ -121,6 +135,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     entities,
     sessions,
     recall,
+    projectActions,
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {

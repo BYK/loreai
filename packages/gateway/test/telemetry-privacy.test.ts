@@ -77,6 +77,7 @@ describe("telemetry privacy boundary", () => {
       start_timestamp: 1,
       status: "ok",
       is_segment: false,
+      data: {},
       attributes: {
         "http.request.header.authorization": SECRETS[0],
         "url.full": `https://api.invalid/?api_key=${SECRETS[2]}`,

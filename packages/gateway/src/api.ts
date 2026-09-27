@@ -265,6 +265,13 @@ function handleDeleteDistillation(id: string): Response {
 }
 
 function handleDeleteProject(id: string): Response {
+  if (isHostedMode()) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Project deletion is not available in hosted mode.",
+    );
+  }
   const result = data.deleteProject(id);
   if (!result)
     return errorResponse(404, "not_found", `Project not found: ${id}`);
@@ -275,6 +282,13 @@ async function handleClearProject(
   req: Request,
   projectPath: string,
 ): Promise<Response> {
+  if (isHostedMode()) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Clearing a project is not available in hosted mode.",
+    );
+  }
   let body: {
     knowledge?: boolean;
     temporal?: boolean;
@@ -328,6 +342,13 @@ function resolveTargetProject(
 }
 
 async function handleMoveSessions(req: Request): Promise<Response> {
+  if (isHostedMode()) {
+    return errorResponse(
+      403,
+      "forbidden",
+      "Moving sessions is not available in hosted mode.",
+    );
+  }
   type MoveBody = {
     session_ids: string[];
     from_project_id: string;

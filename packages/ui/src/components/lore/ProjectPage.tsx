@@ -13,6 +13,7 @@ import {
   searchHref,
 } from "~/routes/Browse";
 import { DocHeader } from "./Document";
+import { ProjectActions } from "./ProjectActions";
 import { ListRow } from "./Panes";
 import { StateCard } from "./StateCard";
 import { createLoader } from "~/lib/loader";
@@ -107,6 +108,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           </Show>
         </Show>
       </section>
+      <ProjectActions project={props.project} />
       <section data-testid="health" class="border-b border-line py-5">
         <div class="eyebrow mb-2">Memory health</div>
         <div class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">

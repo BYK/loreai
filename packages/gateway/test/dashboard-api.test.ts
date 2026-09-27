@@ -627,6 +627,152 @@ describe("GET/PATCH /api/v1/contradictions", () => {
   });
 });
 
+describe("PATCH /api/v1/projects/:id (rename)", () => {
+  async function seedProject(name: string): Promise<string> {
+    const { ensureProject } = await import("@loreai/core");
+    return ensureProject(`/test/rename/${name}-${Date.now()}`, name);
+  }
+
+  it("renames a project and returns the stored trimmed name", async () => {
+    const id = await seedProject("old-name");
+    const res = await api(`/api/v1/projects/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "  new-name  " }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id, name: "new-name" });
+    const { data } = await import("@loreai/core");
+    expect(data.listProjects().find((p) => p.id === id)?.name).toBe("new-name");
+  });
+
+  it("reports 200 when the name is unchanged", async () => {
+    const id = await seedProject("same-name");
+    const res = await api(`/api/v1/projects/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "same-name" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id, name: "same-name" });
+  });
+
+  it("rejects empty, over-long, non-string and malformed bodies", async () => {
+    const id = await seedProject("validate-me");
+    for (const body of [
+      JSON.stringify({ name: "   " }),
+      JSON.stringify({ name: "x".repeat(201) }),
+      JSON.stringify({ name: 42 }),
+      JSON.stringify({ name: "ok", extra: true }),
+      JSON.stringify({ other: "x" }),
+      JSON.stringify("name"),
+      "{oops",
+    ]) {
+      const res = await api(`/api/v1/projects/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(res.status, body).toBe(400);
+      expect(
+        ((await res.json()) as { error: { type: string } }).error.type,
+      ).toBe("invalid_request");
+    }
+  });
+
+  it("404s for unknown and non-UUID ids", async () => {
+    for (const id of [randomUUID(), "not-a-uuid"]) {
+      const res = await api(`/api/v1/projects/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "x" }),
+      });
+      expect(res.status, id).toBe(404);
+      expect(
+        ((await res.json()) as { error: { type: string } }).error.type,
+      ).toBe("not_found");
+    }
+  });
+
+  it("is refused in hosted mode with 403 forbidden", async () => {
+    const { enableHostedMode, _resetHostedModeForTest, data } =
+      await import("@loreai/core");
+    const id = await seedProject("hosted-rename");
+    enableHostedMode();
+    try {
+      const res = await api(`/api/v1/projects/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "renamed" }),
+      });
+      expect(res.status).toBe(403);
+      expect(
+        ((await res.json()) as { error: { type: string } }).error.type,
+      ).toBe("forbidden");
+      expect(data.listProjects().find((p) => p.id === id)?.name).toBe(
+        "hosted-rename",
+      );
+    } finally {
+      _resetHostedModeForTest();
+    }
+  });
+
+  it("does not shadow the api.ts DELETE on the same path", async () => {
+    const id = await seedProject("delete-me");
+    const res = await api(`/api/v1/projects/${id}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const { data } = await import("@loreai/core");
+    expect(data.listProjects().some((p) => p.id === id)).toBe(false);
+  });
+});
+
+describe("hosted-mode guards on project writes", () => {
+  it("refuses move/clear/delete with 403 forbidden and leaves data intact", async () => {
+    const { enableHostedMode, _resetHostedModeForTest, ensureProject, ltm } =
+      await import("@loreai/core");
+    const path = `/test/hosted-guards/${Date.now()}`;
+    const projectId = ensureProject(path, "guarded");
+    ltm.create({
+      projectPath: path,
+      category: "decision",
+      title: "Guarded entry",
+      content: "Must survive hosted-mode refusals.",
+      scope: "project",
+    });
+    enableHostedMode();
+    try {
+      const move = await api("/api/v1/sessions/move", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session_ids: ["guard-session"],
+          from_project_id: projectId,
+          to_project: { path: "/test/other" },
+        }),
+      });
+      const clear = await api(`/api/v1/projects/${projectId}/clear`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const del = await api(`/api/v1/projects/${projectId}`, {
+        method: "DELETE",
+      });
+      for (const res of [move, clear, del]) {
+        expect(res.status).toBe(403);
+        expect(
+          ((await res.json()) as { error: { type: string } }).error.type,
+        ).toBe("forbidden");
+      }
+    } finally {
+      _resetHostedModeForTest();
+    }
+    const { data } = await import("@loreai/core");
+    expect(data.listProjects().some((p) => p.id === projectId)).toBe(true);
+    expect(ltm.forProject(path, false).length).toBe(1);
+  });
+});
+
 describe("management boundary", () => {
   it("hides the dashboard routes from non-loopback peers", async () => {
     const { startServer } = await import("../src/server");
@@ -661,6 +807,14 @@ describe("management boundary", () => {
           },
         },
         { path: "/api/v1/entities/x", init: { method: "DELETE" } },
+        {
+          path: "/api/v1/projects/x",
+          init: {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: "x" }),
+          },
+        },
       ] as Array<{ path: string; init: LoopbackRequestInit }>) {
         const res = await loopbackRequest(
           `${remoteBase}${init.path}`,
