@@ -68,7 +68,7 @@ const ProjectRow: Component<{
         aria-label={`${pinned() ? "Unpin" : "Pin"} ${label()}`}
         class={cn(
           "mr-2 flex-none rounded-sm text-muted focus-visible:opacity-100 group-hover:opacity-100",
-          pinned() ? "opacity-100" : "opacity-0",
+          pinned() ? "opacity-100" : "[@media(hover:hover)]:opacity-0",
         )}
         onClick={() => pins().toggle(props.project.id)}
       >

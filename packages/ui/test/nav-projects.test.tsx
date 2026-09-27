@@ -111,6 +111,9 @@ describe("Nav project sections", () => {
 
     const pin = screen.getByRole("button", { name: "Pin echo" });
     expect(pin).toHaveAttribute("aria-pressed", "false");
+    // Hidden only on hover-capable devices; touch users must see the control.
+    expect(pin.className).not.toMatch(/(^|\s)opacity-0(\s|$)/);
+    expect(pin.className).toContain("[@media(hover:hover)]:opacity-0");
     fireEvent.click(pin);
 
     expect(sectionLabels("pinned")).toEqual(["echo0"]);
