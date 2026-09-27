@@ -247,14 +247,92 @@ export function storeEmbedding(
   table: EmbeddingTable,
   id: string,
   vec: Float32Array,
+  options: { backfill?: boolean } = {},
 ): void {
-  if (readStorageMode(conn) === "vec0") {
-    storeEmbeddingVec0(conn, table, id, vec);
-    return;
-  }
+  // The vector and its revision must commit together. A process crash after
+  // the index write but before the stamp would otherwise make an old accepted
+  // selection look current forever, including after a restart.
+  withSavepointOn(conn, "store_embedding_revision", () => {
+    if (readStorageMode(conn) === "vec0") {
+      storeEmbeddingVec0(conn, table, id, vec);
+    } else {
+      conn
+        .query(`UPDATE ${BASE_TABLE[table]} SET embedding = ? WHERE id = ?`)
+        .run(toBlob(vec), id);
+    }
+    advanceContextEmbeddingRevision(conn, table, id, options.backfill === true);
+  });
+}
+
+/** One revision per affected scope when an entire vector index is reset. */
+function advanceAllContextEmbeddingRevisions(conn: EmbeddingWriteConn): void {
   conn
-    .query(`UPDATE ${BASE_TABLE[table]} SET embedding = ? WHERE id = ?`)
-    .run(toBlob(vec), id);
+    .query(
+      `INSERT INTO context_ltm_revision (tenant_id, scope_id, embedding_revision, live_embedding_revision)
+     SELECT tenant_id,
+            CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+            1, 1 FROM knowledge
+      WHERE is_current = 1 AND is_deleted = 0 AND category != 'preference'
+      GROUP BY tenant_id, CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END
+     ON CONFLICT(tenant_id, scope_id) DO UPDATE SET embedding_revision = embedding_revision + 1, live_embedding_revision = live_embedding_revision + 1`,
+    )
+    .run();
+  conn
+    .query(
+      `INSERT INTO context_ltm_source_mutations (project_id, distillation_embeddings, live_distillation_embeddings)
+     SELECT project_id, 1, 1 FROM distillations WHERE archived = 0 GROUP BY project_id
+     ON CONFLICT(project_id) DO UPDATE SET distillation_embeddings = distillation_embeddings + 1, live_distillation_embeddings = live_distillation_embeddings + 1`,
+    )
+    .run();
+  conn
+    .query(
+      `INSERT INTO context_ltm_source_mutations (project_id, temporal_embeddings)
+     SELECT project_id, 1 FROM temporal_messages GROUP BY project_id
+     ON CONFLICT(project_id) DO UPDATE SET temporal_embeddings = temporal_embeddings + 1`,
+    )
+    .run();
+}
+
+/** The vector index is a selection input in BOTH blob and vec0 storage modes.
+ * Advance the same scoped revision used for content writes after an embedding
+ * becomes searchable. Missing/superseded rows and preferences cannot affect
+ * the context selection; entity embeddings are a separate recall pool. */
+function advanceContextEmbeddingRevision(
+  conn: EmbeddingWriteConn,
+  table: EmbeddingTable,
+  id: string,
+  backfill = false,
+): void {
+  if (table === "knowledge") {
+    conn
+      .query(
+        `INSERT INTO context_ltm_revision (tenant_id, scope_id, embedding_revision, live_embedding_revision)
+       SELECT tenant_id,
+              CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+              1, ${backfill ? 0 : 1} FROM knowledge
+        WHERE id = ? AND is_current = 1 AND is_deleted = 0
+          AND category != 'preference'
+       ON CONFLICT(tenant_id, scope_id) DO UPDATE SET embedding_revision = embedding_revision + 1, live_embedding_revision = live_embedding_revision + ${backfill ? 0 : 1}`,
+      )
+      .run(id);
+  } else if (table === "distillations" || table === "temporal") {
+    const source =
+      table === "distillations" ? "distillations" : "temporal_messages";
+    const column =
+      table === "distillations"
+        ? "distillation_embeddings"
+        : "temporal_embeddings";
+    const liveColumn =
+      table === "distillations" ? "live_distillation_embeddings" : null;
+    conn
+      .query(
+        `INSERT INTO context_ltm_source_mutations (project_id, ${column}${liveColumn ? `, ${liveColumn}` : ""})
+       SELECT project_id, 1${liveColumn ? `, ${backfill ? 0 : 1}` : ""} FROM ${source}
+        WHERE id = ? ${table === "distillations" ? "AND archived = 0" : ""}
+       ON CONFLICT(project_id) DO UPDATE SET ${column} = ${column} + 1${liveColumn ? `, ${liveColumn} = ${liveColumn} + ${backfill ? 0 : 1}` : ""}`,
+      )
+      .run(id);
+  }
 }
 
 /**
@@ -383,6 +461,7 @@ export function storeTemporalChunks(
         toBlob(vecs[ord]),
       );
     }
+    advanceContextEmbeddingRevision(conn, "temporal", messageId);
   });
 }
 
@@ -449,14 +528,17 @@ export function deleteEmbeddings(
  * fixed-width vec0 tables — see {@link ensureVec0Store}.)
  */
 export function clearAllEmbeddings(conn: EmbeddingWriteConn): void {
-  if (readStorageMode(conn) === "vec0") {
-    for (const vt of VEC_TABLES) conn.query(`DELETE FROM ${vt}`).run();
-    return;
-  }
-  conn.query("UPDATE knowledge SET embedding = NULL").run();
-  conn.query("UPDATE distillations SET embedding = NULL").run();
-  conn.query("UPDATE temporal_messages SET embedding = NULL").run();
-  conn.query("UPDATE entities SET embedding = NULL").run();
+  withSavepointOn(conn, "clear_embedding_revision", () => {
+    if (readStorageMode(conn) === "vec0") {
+      for (const vt of VEC_TABLES) conn.query(`DELETE FROM ${vt}`).run();
+    } else {
+      conn.query("UPDATE knowledge SET embedding = NULL").run();
+      conn.query("UPDATE distillations SET embedding = NULL").run();
+      conn.query("UPDATE temporal_messages SET embedding = NULL").run();
+      conn.query("UPDATE entities SET embedding = NULL").run();
+    }
+    advanceAllContextEmbeddingRevisions(conn);
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ const sample = (
   awaitedMs: 80,
   embedMs: 30,
   vectorSearchMs: 45,
+  embeddingInputChars: 36_038,
   syncBlockingMs: 20,
   candidateCount: 7,
   ...over,
@@ -60,6 +61,9 @@ describe("read-path timing Sentry capture (#999)", () => {
     const calls = vi.mocked(Sentry.metrics.distribution).mock.calls;
     const embed = calls.find((c) => c[0] === "lore.readpath.embed_ms");
     const vector = calls.find((c) => c[0] === "lore.readpath.vector_search_ms");
+    const input = calls.find(
+      (c) => c[0] === "lore.readpath.embedding_input_chars",
+    );
 
     expect(embed).toBeDefined();
     expect(embed?.[1]).toBe(30);
@@ -71,6 +75,10 @@ describe("read-path timing Sentry capture (#999)", () => {
     expect(vector).toBeDefined();
     expect(vector?.[1]).toBe(45);
     expect((vector?.[2] as { unit?: string })?.unit).toBe("millisecond");
+    expect(input?.[1]).toBe(36_038);
+    expect(
+      (input?.[2] as { attributes?: Record<string, string> })?.attributes?.op,
+    ).toBe("forSession");
 
     // The pre-existing aggregate buckets are still emitted alongside.
     expect(distNames()).toEqual(

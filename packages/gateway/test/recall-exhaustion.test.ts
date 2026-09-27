@@ -1,4 +1,12 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { db } from "@loreai/core";
 import { loadConfig } from "../src/config";
 import {
@@ -12,6 +20,21 @@ import type { GatewayRequest } from "../src/translate/types";
 vi.mock("../src/recall", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/recall")>();
   return { ...actual, executeRecall: vi.fn() };
+});
+
+let previousPreparationTimeout: string | undefined;
+beforeAll(() => {
+  previousPreparationTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+  // The cold first request can exceed the production 8s budget under the
+  // parallel CI shard. This suite verifies recall once preparation finishes.
+  process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "30000";
+});
+
+afterAll(() => {
+  if (previousPreparationTimeout === undefined)
+    delete process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
+  else
+    process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = previousPreparationTimeout;
 });
 
 afterEach(async () => {

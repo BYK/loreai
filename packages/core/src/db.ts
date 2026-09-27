@@ -2090,6 +2090,186 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   ALTER TABLE session_state ADD COLUMN cost_shadow_last_actual_input INTEGER;
   ALTER TABLE session_state ADD COLUMN cost_shadow_last_output_tokens INTEGER;
   `,
+  `
+  -- Version 91: cheap, durable content revision for context-bound LTM selection.
+  -- Local and shared counters prevent unrelated projects or preference-only
+  -- changes from invalidating an expensive context selection.
+  ALTER TABLE session_state ADD COLUMN ltm_cache_revision TEXT;
+  CREATE TABLE IF NOT EXISTS context_ltm_revision (
+    tenant_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, scope_id)
+  );
+  -- Source inserts are already reflected by MAX(rowid) in selectionRevision.
+  -- Count only updates/deletes, so ordinary temporal ingestion does not pay
+  -- for an additional write on every message.
+  CREATE TABLE IF NOT EXISTS context_ltm_source_mutations (
+    project_id TEXT PRIMARY KEY,
+    distillations INTEGER NOT NULL DEFAULT 0,
+    temporal INTEGER NOT NULL DEFAULT 0,
+    lat INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TRIGGER IF NOT EXISTS knowledge_context_revision_insert
+  AFTER INSERT ON knowledge
+  WHEN NEW.is_current = 1 AND NEW.is_deleted = 0 AND NEW.category != 'preference' BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    VALUES (NEW.tenant_id, CASE WHEN NEW.project_id IS NULL OR NEW.cross_project = 1 THEN '' ELSE NEW.project_id END, 1)
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS knowledge_context_revision_update
+  AFTER UPDATE OF tenant_id, project_id, cross_project, title, content, category,
+                  is_current, is_deleted, approval_status, sensitivity ON knowledge
+  WHEN (OLD.is_current = 1 OR NEW.is_current = 1) AND (
+    OLD.tenant_id IS NOT NEW.tenant_id OR
+    OLD.project_id IS NOT NEW.project_id OR
+    OLD.cross_project IS NOT NEW.cross_project OR
+    OLD.title IS NOT NEW.title OR
+    OLD.content IS NOT NEW.content OR
+    OLD.category IS NOT NEW.category OR
+    OLD.is_current IS NOT NEW.is_current OR
+    OLD.is_deleted IS NOT NEW.is_deleted OR
+    OLD.approval_status IS NOT NEW.approval_status OR
+    OLD.sensitivity IS NOT NEW.sensitivity
+  ) BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT OLD.tenant_id, CASE WHEN OLD.project_id IS NULL OR OLD.cross_project = 1 THEN '' ELSE OLD.project_id END, 1
+     WHERE OLD.is_current = 1 AND OLD.is_deleted = 0 AND OLD.category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT NEW.tenant_id, CASE WHEN NEW.project_id IS NULL OR NEW.cross_project = 1 THEN '' ELSE NEW.project_id END, 1
+     WHERE NEW.is_current = 1 AND NEW.is_deleted = 0 AND NEW.category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS knowledge_context_revision_delete
+  AFTER DELETE ON knowledge
+  WHEN OLD.is_current = 1 AND OLD.is_deleted = 0 AND OLD.category != 'preference' BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    VALUES (OLD.tenant_id, CASE WHEN OLD.project_id IS NULL OR OLD.cross_project = 1 THEN '' ELSE OLD.project_id END, 1)
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  -- Decay/reinforcement only changes selection when an entry crosses the
+  -- confidence floor. Avoid invalidating on ordinary injection bookkeeping.
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_floor
+  AFTER UPDATE OF confidence ON knowledge_meta
+  WHEN (OLD.confidence > 0.2) <> (NEW.confidence > 0.2) BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = NEW.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS distillation_context_revision_update
+  AFTER UPDATE OF project_id, observations, archived, created_at ON distillations
+  WHEN OLD.project_id IS NOT NEW.project_id OR
+       OLD.observations IS NOT NEW.observations OR
+       OLD.archived IS NOT NEW.archived OR
+       OLD.created_at IS NOT NEW.created_at BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, distillations)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET distillations = distillations + 1;
+    INSERT INTO context_ltm_source_mutations (project_id, distillations)
+    SELECT NEW.project_id, 1 WHERE OLD.project_id IS NOT NEW.project_id
+    ON CONFLICT(project_id) DO UPDATE SET distillations = distillations + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS distillation_context_revision_delete
+  AFTER DELETE ON distillations BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, distillations)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET distillations = distillations + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS temporal_context_revision_update
+  AFTER UPDATE OF project_id, role, content, created_at ON temporal_messages
+  WHEN OLD.project_id IS NOT NEW.project_id OR
+       OLD.role IS NOT NEW.role OR
+       OLD.content IS NOT NEW.content OR
+       OLD.created_at IS NOT NEW.created_at BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, temporal)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET temporal = temporal + 1;
+    INSERT INTO context_ltm_source_mutations (project_id, temporal)
+    SELECT NEW.project_id, 1 WHERE OLD.project_id IS NOT NEW.project_id
+    ON CONFLICT(project_id) DO UPDATE SET temporal = temporal + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS temporal_context_revision_delete
+  AFTER DELETE ON temporal_messages BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, temporal)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET temporal = temporal + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS lat_context_revision_insert
+  AFTER INSERT ON lat_sections BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, lat)
+    VALUES (NEW.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET lat = lat + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS lat_context_revision_update
+  AFTER UPDATE OF project_id, file, heading, content, first_paragraph, updated_at ON lat_sections
+  WHEN OLD.project_id IS NOT NEW.project_id OR OLD.file IS NOT NEW.file OR
+       OLD.heading IS NOT NEW.heading OR OLD.content IS NOT NEW.content OR
+       OLD.first_paragraph IS NOT NEW.first_paragraph OR
+       OLD.updated_at IS NOT NEW.updated_at BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, lat)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET lat = lat + 1;
+    INSERT INTO context_ltm_source_mutations (project_id, lat)
+    SELECT NEW.project_id, 1 WHERE OLD.project_id IS NOT NEW.project_id
+    ON CONFLICT(project_id) DO UPDATE SET lat = lat + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS lat_context_revision_delete
+  AFTER DELETE ON lat_sections BEGIN
+    INSERT INTO context_ltm_source_mutations (project_id, lat)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET lat = lat + 1;
+  END;
+  `,
+  `
+  -- Version 92: vector-index changes become a separate durable selection
+  -- revision, so a startup backfill can coalesce its own index-only writes.
+  ALTER TABLE context_ltm_revision ADD COLUMN embedding_revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_revision ADD COLUMN live_embedding_revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_source_mutations ADD COLUMN distillation_embeddings INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_source_mutations ADD COLUMN live_distillation_embeddings INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_source_mutations ADD COLUMN temporal_embeddings INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Version 93: confidence affects ranking even when an entry stays eligible.
+  -- Keep the original v91 migration immutable for already-upgraded databases.
+  DROP TRIGGER IF EXISTS knowledge_meta_context_revision_floor;
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_update
+  AFTER UPDATE OF confidence ON knowledge_meta
+  WHEN OLD.confidence IS NOT NEW.confidence BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = NEW.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_insert
+  AFTER INSERT ON knowledge_meta BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = NEW.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  CREATE TRIGGER IF NOT EXISTS knowledge_meta_context_revision_delete
+  AFTER DELETE ON knowledge_meta BEGIN
+    INSERT INTO context_ltm_revision (tenant_id, scope_id, revision)
+    SELECT tenant_id,
+           CASE WHEN project_id IS NULL OR cross_project = 1 THEN '' ELSE project_id END,
+           1 FROM knowledge
+     WHERE logical_id = OLD.logical_id AND is_current = 1
+       AND is_deleted = 0 AND category != 'preference'
+    ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
+  END;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4276,6 +4456,7 @@ export function convergeProjectsByRemote(): void {
 /** Every durable table whose rows must follow a project merge. */
 export const PROJECT_MERGE_TABLES = Object.freeze([
   "cache_bust_stats",
+  "context_ltm_source_mutations",
   "dedup_feedback",
   "dedup_operations",
   "distillation_vec",
@@ -4487,6 +4668,24 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
       targetId,
       sourceId,
     );
+    // Preserve durable change stamps while converging project identities.
+    // Source-row project UPDATE triggers already advance the target's stamp.
+    d.query(
+      `INSERT INTO context_ltm_source_mutations
+         (project_id, distillations, distillation_embeddings, live_distillation_embeddings, temporal, temporal_embeddings, lat)
+       SELECT ?, distillations, distillation_embeddings, live_distillation_embeddings, temporal, temporal_embeddings, lat
+         FROM context_ltm_source_mutations WHERE project_id = ?
+       ON CONFLICT(project_id) DO UPDATE SET
+         distillations = MAX(distillations, excluded.distillations),
+         distillation_embeddings = MAX(distillation_embeddings, excluded.distillation_embeddings),
+         live_distillation_embeddings = MAX(live_distillation_embeddings, excluded.live_distillation_embeddings),
+         temporal = MAX(temporal, excluded.temporal),
+         temporal_embeddings = MAX(temporal_embeddings, excluded.temporal_embeddings),
+         lat = MAX(lat, excluded.lat)`,
+    ).run(targetId, sourceId);
+    d.query(
+      "DELETE FROM context_ltm_source_mutations WHERE project_id = ?",
+    ).run(sourceId);
     d.query("UPDATE entities SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
@@ -5938,6 +6137,7 @@ export type SessionTrackingState = {
   consecutiveTextOnlyTurns?: number;
   ltmCacheText?: string | null;
   ltmCacheTokens?: number | null;
+  ltmCacheRevision?: string | null;
   ltmPinText?: string | null;
   ltmPinTokens?: number | null;
   /** JSON array of sorted "id:hash(title+content)" keys for the pinned entry set (v39). */
@@ -6031,6 +6231,10 @@ export function saveSessionTracking(
   if (state.ltmCacheTokens !== undefined) {
     sets.push("ltm_cache_tokens = ?");
     vals.push(state.ltmCacheTokens);
+  }
+  if (state.ltmCacheRevision !== undefined) {
+    sets.push("ltm_cache_revision = ?");
+    vals.push(state.ltmCacheRevision);
   }
   if (state.ltmPinText !== undefined) {
     sets.push("ltm_pin_text = ?");
@@ -6169,6 +6373,7 @@ export type LoadedSessionTracking = {
   consecutiveTextOnlyTurns: number;
   ltmCacheText: string | null;
   ltmCacheTokens: number | null;
+  ltmCacheRevision: string | null;
   ltmPinText: string | null;
   ltmPinTokens: number | null;
   // v39: reorder-tolerant pin entry-set keys (JSON)
@@ -6526,7 +6731,8 @@ export function loadSessionTracking(
     .query(
       `SELECT last_curated_at, message_count, turns_since_curation,
               consecutive_text_only_turns,
-              ltm_cache_text, ltm_cache_tokens, ltm_pin_text, ltm_pin_tokens,
+              ltm_cache_text, ltm_cache_tokens, ltm_cache_revision,
+              ltm_pin_text, ltm_pin_tokens,
               ltm_pin_keys, stable_ltm_text, stable_ltm_tokens, recall_store,
               dedup_decisions,
                fingerprint, header_session_id, header_name, credential_fingerprint,
@@ -6547,6 +6753,7 @@ export function loadSessionTracking(
     consecutive_text_only_turns: number;
     ltm_cache_text: string | null;
     ltm_cache_tokens: number | null;
+    ltm_cache_revision: string | null;
     ltm_pin_text: string | null;
     ltm_pin_tokens: number | null;
     ltm_pin_keys: string | null;
@@ -6585,6 +6792,7 @@ export function loadSessionTracking(
     consecutiveTextOnlyTurns: row.consecutive_text_only_turns,
     ltmCacheText: row.ltm_cache_text,
     ltmCacheTokens: row.ltm_cache_tokens,
+    ltmCacheRevision: row.ltm_cache_revision,
     ltmPinText: row.ltm_pin_text,
     ltmPinTokens: row.ltm_pin_tokens,
     ltmPinKeys: row.ltm_pin_keys,

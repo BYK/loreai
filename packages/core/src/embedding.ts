@@ -94,6 +94,7 @@ export {
   backfillTemporalEmbeddings,
   checkConfigChange,
   formatTemporalRechunkProgress,
+  backfillIndexRevision,
   maybeCutoverToVec0,
   resetTemporalRechunkProgress,
   runStartupBackfill,

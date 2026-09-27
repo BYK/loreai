@@ -55,6 +55,112 @@ import * as log from "./log";
 import { estimateTokens } from "./tokenize";
 import { currentTenantId } from "./tenant";
 
+/**
+ * Cheap durable change stamp for a context-bound selection. Knowledge writes
+ * advance local or shared tenant counters (including sync/import/other sessions),
+ * while context sources advance for the whole project. Reading the stamp never
+ * embeds or scans a transcript. Capture it BEFORE async selection so a write
+ * racing the read causes another refresh next turn, not a permanently stale pin.
+ */
+export function selectionRevision(
+  projectPath: string,
+  contextSources: readonly string[] = [],
+): string {
+  const tenant = currentTenantId();
+  const pid = ensureProject(projectPath);
+  const knowledge = db()
+    .query(
+      "SELECT scope_id, revision, embedding_revision, live_embedding_revision FROM context_ltm_revision WHERE tenant_id = ? AND scope_id IN (?, '')",
+    )
+    .all(tenant, pid) as Array<{
+    scope_id: string;
+    revision: number;
+    embedding_revision: number;
+    live_embedding_revision: number;
+  }>;
+  // A backfill of missing vectors freezes only its affected scopes at the
+  // existing index revision; unrelated writes remain visible immediately.
+  const localRevision =
+    knowledge.find((row) => row.scope_id === pid)?.revision ?? 0;
+  const sharedRevision =
+    knowledge.find((row) => row.scope_id === "")?.revision ?? 0;
+  const localIndex = embedding.backfillIndexRevision(
+    "knowledge",
+    `${tenant}\0${pid}`,
+    knowledge.find((row) => row.scope_id === pid)?.embedding_revision ?? 0,
+    knowledge.find((row) => row.scope_id === pid)?.live_embedding_revision ?? 0,
+  );
+  const sharedIndex = embedding.backfillIndexRevision(
+    "knowledge",
+    `${tenant}\0`,
+    knowledge.find((row) => row.scope_id === "")?.embedding_revision ?? 0,
+    knowledge.find((row) => row.scope_id === "")?.live_embedding_revision ?? 0,
+  );
+  const mutations = db()
+    .query(
+      "SELECT distillations, distillation_embeddings, live_distillation_embeddings, temporal, temporal_embeddings, lat FROM context_ltm_source_mutations WHERE project_id = ?",
+    )
+    .get(pid) as {
+    distillations: number;
+    distillation_embeddings: number;
+    live_distillation_embeddings: number;
+    temporal: number;
+    temporal_embeddings: number;
+    lat: number;
+  } | null;
+  // Preserve v91 stamps for unaffected projects. An absent lat.md directory
+  // changes the stamp only when that project indexed sections in the past;
+  // this also catches deletion before the startup refresh has cleared rows.
+  const missingLatDir =
+    ((mutations?.lat ?? 0) > 0 ||
+      db()
+        .query("SELECT 1 FROM lat_sections WHERE project_id = ? LIMIT 1")
+        .get(pid) !== null) &&
+    !latReader.hasLatDir(projectPath);
+  const knowledgeStamp = `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}${missingLatDir ? ":lat-dir-absent" : ""}`;
+  if (!contextSources.length)
+    return localIndex || sharedIndex
+      ? `${knowledgeStamp}:${localIndex}:${sharedIndex}`
+      : knowledgeStamp;
+  const distillationRow = contextSources.includes("distillation")
+    ? (db()
+        .query(
+          "SELECT COALESCE(MAX(rowid), 0) AS revision FROM distillations WHERE project_id = ?",
+        )
+        .get(pid) as { revision: number })
+    : undefined;
+  const temporalRow = contextSources.includes("temporal")
+    ? (db()
+        .query(
+          "SELECT COALESCE(MAX(rowid), 0) AS revision FROM temporal_messages WHERE project_id = ?",
+        )
+        .get(pid) as { revision: number })
+    : undefined;
+  const distillationIndex = contextSources.includes("distillation")
+    ? embedding.backfillIndexRevision(
+        "distillations",
+        pid,
+        mutations?.distillation_embeddings ?? 0,
+        mutations?.live_distillation_embeddings ?? 0,
+      )
+    : 0;
+  const temporalIndex = contextSources.includes("temporal")
+    ? (mutations?.temporal_embeddings ?? 0)
+    : 0;
+  const contentStamp = `${knowledgeStamp}:${distillationRow?.revision ?? 0}:${contextSources.includes("distillation") ? (mutations?.distillations ?? 0) : 0}:${temporalRow?.revision ?? 0}:${contextSources.includes("temporal") ? (mutations?.temporal ?? 0) : 0}`;
+  // Preserve the legacy default stamp. Other configured source sets need a
+  // stable identity even when every source counter is zero.
+  const sourceSet = [...new Set(contextSources)].sort().join(",");
+  const sourceStamp =
+    sourceSet === "distillation"
+      ? contentStamp
+      : `${contentStamp}:sources=${sourceSet}`;
+  // Existing v91 pins stay warm on a v92 upgrade until an index really changes.
+  return localIndex || sharedIndex || distillationIndex || temporalIndex
+    ? `${sourceStamp}:${localIndex}:${sharedIndex}:${distillationIndex}:${temporalIndex}`
+    : sourceStamp;
+}
+
 /** Sensitivity classification — product hint guiding auto-promotion decisions. */
 export type Sensitivity = "normal" | "sensitive" | "restricted";
 /** Promotion intent — tracks the personal \u2192 team DB promotion flow. */
@@ -2678,7 +2784,8 @@ export async function forSession(
   if (
     !crossEntries.length &&
     !projectEntries.length &&
-    !wantsContextSourceFold
+    !wantsContextSourceFold &&
+    !latReader.hasLatDir(projectPath)
   ) {
     timer.emit("forSession", 0);
     return [];
@@ -2796,7 +2903,16 @@ export async function forSession(
   // cosine scale as knowledge (no separate embed, no scale mismatch).
   let contextVec: Float32Array | undefined;
 
-  if (sessionContext.trim().length > 20 && embedding.isAvailable()) {
+  if (
+    !projectEntries.length &&
+    !crossEntries.length &&
+    !wantsContextSourceFold
+  ) {
+    // A lat-only project needs the section-scoring step below, but there is
+    // no knowledge to query-embed, vector-search, or FTS-rank.
+    scoredProject = [];
+    scoredCross = [];
+  } else if (sessionContext.trim().length > 20 && embedding.isAvailable()) {
     // Vector scoring: embed session context, score entries by cosine similarity.
     // Captures semantic matches (e.g., "OpenAI Batch API" ↔ "batch queue worker")
     // that keyword-based FTS5 misses.
@@ -2822,6 +2938,7 @@ export async function forSession(
         : queryDeadline.signal;
       try {
         querySignal.throwIfAborted();
+        timer.embeddingInputChars = sessionContext.length;
         [contextVec] = await timer.await(
           awaitEmbeddingOperation(
             embedding.embed([sessionContext], "query", querySignal),

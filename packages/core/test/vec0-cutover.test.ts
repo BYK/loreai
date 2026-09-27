@@ -232,6 +232,48 @@ db();
 const describeVec = isVecAvailable() ? describe : describe.skip;
 
 describeVec("vec0 write + read round-trip", () => {
+  test("late vec0 embeddings advance the scoped LTM selection revision", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insKnowledge("late-knowledge", "Late vector", "Knowledge search entry");
+    insDistillation("late-distillation", "other-session");
+    insTemporal("late-temporal", "other-session", Date.now());
+    const revision = () =>
+      ltm.selectionRevision(PROJECT, ["distillation", "temporal"]);
+    const initial = revision();
+
+    storeEmbedding(db(), "knowledge", "late-knowledge", v(1, 0, 0, 0));
+    const indexedKnowledge = revision();
+    expect(indexedKnowledge).not.toBe(initial);
+    storeEmbedding(db(), "distillations", "late-distillation", v(1, 0, 0, 0));
+    const indexedDistillation = revision();
+    expect(indexedDistillation).not.toBe(indexedKnowledge);
+    storeTemporalChunks(db(), "late-temporal", [v(1, 0, 0, 0)]);
+    expect(revision()).not.toBe(indexedDistillation);
+  });
+
+  test("a revision failure rolls back a vec0 replacement", () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insKnowledge("atomic-vector", "Atomic", "Vector write");
+    db().exec(`CREATE TEMP TRIGGER fail_vec_revision
+      BEFORE UPDATE ON context_ltm_revision BEGIN
+        SELECT RAISE(ABORT, 'revision write failed');
+      END`);
+    try {
+      expect(() =>
+        storeEmbedding(db(), "knowledge", "atomic-vector", v(1, 0, 0, 0)),
+      ).toThrow("revision write failed");
+      expect(
+        db()
+          .query("SELECT id FROM knowledge_vec WHERE id = ?")
+          .get("atomic-vector"),
+      ).toBeNull();
+    } finally {
+      db().exec("DROP TRIGGER fail_vec_revision");
+    }
+  });
+
   test("converged startup leaves orphan discovery to idle maintenance (#1681)", async () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);

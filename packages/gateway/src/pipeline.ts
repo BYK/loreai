@@ -2147,7 +2147,7 @@ function activeSessionForKnownHeader(
  */
 const ltmSessionCache = new Map<
   string,
-  { formatted: string; tokenCount: number }
+  { formatted: string; tokenCount: number; revision?: string }
 >();
 
 /**
@@ -3285,8 +3285,8 @@ export function detectSurfacedMutations(
     const current = ltm.get(id) ?? ltm.getByLogical(logicalId);
     if (!current) {
       // Not a resolvable `knowledge` row. Before treating it as a non-knowledge
-      // synthetic, check the context-source snapshot map: distillation/temporal
-      // facts (`d:`/`t:`) are folded into the selection but live outside the
+      // synthetic, check the current selection snapshot: distillation/temporal
+      // facts (`d:`/`t:`) and lat.md sections live outside the knowledge
       // knowledge table, so their content must come from the current turn's
       // `entries`, not the DB. Surface on hash mismatch (the first-surface turn)
       // so they reach the wire via the durable delta — parity with the old
@@ -3308,11 +3308,10 @@ export function detectSurfacedMutations(
         continue;
       }
       // Null resolution means EITHER a genuinely deleted knowledge entry OR an
-      // id that was never a `knowledge` row at all (e.g. lat.md synthetics,
-      // which forSession injects as KnowledgeEntry-shaped rows with ids like
-      // `file#Heading` that live in lat_sections; or a context-source snapshot
-      // that has left the current selection and so is absent from the map on a
-      // later turn). Only a real knowledge deletion is a supersession — classify
+      // id that was never a `knowledge` row at all (e.g. a lat.md section or a
+      // context-source snapshot that has left the current selection and so is
+      // absent from the map on a later turn). Only a real knowledge deletion is
+      // a supersession — classify
       // as removed ONLY when the logical id is actually tombstoned. Otherwise the
       // model would be told to ignore still-valid pinned knowledge, and
       // (append-only) that false removal would be frozen into an immutable block
@@ -3595,22 +3594,34 @@ export function appendKnowledgePromptDelta(input: {
     blocks = [];
   }
   const surfacedKeys = advanceSurfacedKeys(input.previousKeys, blocks);
-  // Context-source snapshots (category `recalled`, ids `d:`/`t:`) don't live in
-  // the knowledge table, so detectSurfacedMutations can't resolve their content
-  // from the DB — supply it from this turn's selection. A synthetic's content
-  // is immutable per id, so it only needs resolving on its first-surface turn,
-  // which is exactly when it's present in `input.entries`.
+  // Synthetic selections (recalled context and lat.md) don't live in knowledge.
+  // Supply their current content so an edited section can be surfaced too.
   const syntheticEntries = new Map<
     string,
     { category: string; title: string; content: string }
   >();
   for (const e of input.entries ?? []) {
-    if (e.category === ltm.RECALLED_CONTEXT_CATEGORY) {
+    if (
+      e.category === ltm.RECALLED_CONTEXT_CATEGORY ||
+      e.category === "lat.md"
+    ) {
       syntheticEntries.set(e.id, {
         category: e.category,
         title: e.title,
         content: e.content,
       });
+    }
+  }
+  // A newly indexed synthetic has no key in the frozen pin. Ordinary knowledge
+  // retains the existing frozen-entry policy: a relevance reshuffle must not
+  // append previously unsurfaced, unchanged entries to the conversation.
+  const seen = entryKeyIds(surfacedKeys);
+  for (const key of input.nextKeys ?? []) {
+    const separator = key.lastIndexOf(":");
+    const id = separator === -1 ? key : key.slice(0, separator);
+    if (syntheticEntries.has(id) && !seen.has(id)) {
+      surfacedKeys.push(`${id}:`);
+      seen.add(id);
     }
   }
   const { changed, removedIds } = detectSurfacedMutations(
@@ -5893,6 +5904,9 @@ function getOrCreateSession(
       ltmSessionCache.set(sessionID, {
         formatted: persisted.ltmCacheText,
         tokenCount: persisted.ltmCacheTokens,
+        ...(persisted.ltmCacheRevision
+          ? { revision: persisted.ltmCacheRevision }
+          : {}),
       });
     }
     // Restore the frozen stable LTM block (system[1]) so it replays
@@ -16212,12 +16226,8 @@ function scheduleBackgroundWorkForTenant(
             result.deleted > 0 ||
             result.changedEntries?.length > 0
           ) {
-            // Invalidate LTM cache only when curation actually changed entries
-            ltmSessionCache.delete(sessionID);
-            saveSessionTracking(sessionID, {
-              ltmCacheText: null,
-              ltmCacheTokens: null,
-            });
+            // The SQLite content revision advances for every changed row.
+            // All sessions observe it on their next turn, including this one.
             log.info(
               `curation: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`,
             );
@@ -19776,11 +19786,6 @@ async function handleConversationTurnPrepared(
   );
   sessionState.lastTurnWasIdle = idleResult.triggered;
   if (idleResult.triggered) {
-    ltmSessionCache.delete(sessionID);
-    saveSessionTracking(sessionID, {
-      ltmCacheText: null,
-      ltmCacheTokens: null,
-    });
     // NOTE: the stable LTM block (system[1]: preferences + entities) is
     // deliberately NOT refreshed here (v45). It is frozen for the session's life
     // and replayed byte-identically — recomputing it from the live knowledge
@@ -19789,7 +19794,7 @@ async function handleConversationTurnPrepared(
     // Re-warming after the 1h breakpoint expires re-sends the same frozen bytes;
     // newly-curated preferences are picked up by the NEXT session, not mid-session.
     log.info(
-      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — refreshing caches` +
+      `session idle ${Math.round(idleResult.idleMs / 60_000)}min — preserving context LTM selection` +
         (cacheWarm ? " (cache warm — skipping compact)" : "") +
         (econ?.result.confident
           ? ` (strategy=${econ.result.strategy})`
@@ -19972,7 +19977,15 @@ async function handleConversationTurnPrepared(
       // still works: contextHint comes from the incoming request, not temporal
       // storage). (issue #796)
       if (!isFirstTurn || largeColdStart) {
+        const selectionRevision = ltm.selectionRevision(
+          projectPath,
+          cfg.knowledge.contextSources,
+        );
         let cached = ltmSessionCache.get(sessionID);
+        // Only content changes invalidate the selected context. This stamp is
+        // persisted with the selection, so idle resumes and restarts are cheap
+        // when knowledge and this session's context sources have not changed.
+        if (cached?.revision !== selectionRevision) cached = undefined;
         // Entry-set keys for the *freshly computed* selection. Only populated
         // on the recompute path (when ltmSessionCache was cold/invalidated) —
         // that's the only path where re-ranking can churn the text. On the
@@ -20066,6 +20079,7 @@ async function handleConversationTurnPrepared(
                       checkpoint.digest,
                       contextBudget,
                       contextHint,
+                      selectionRevision,
                       [...stickyIds].sort(),
                       cfg.knowledge.contextSources,
                     ]),
@@ -20163,7 +20177,7 @@ async function handleConversationTurnPrepared(
             );
             if (formatted) {
               const tokenCount = coreEstimateTokens(formatted);
-              cached = { formatted, tokenCount };
+              cached = { formatted, tokenCount, revision: selectionRevision };
               cachedKeys = ltmEntryKeys(contextEntries, renderedIds);
               ltmSessionCache.set(sessionID, cached);
               ltmDirty = true;
@@ -20186,6 +20200,7 @@ async function handleConversationTurnPrepared(
             cached = {
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
+              revision: selectionRevision,
             };
             cachedKeys = [];
             ltmSessionCache.set(sessionID, cached);
@@ -20246,6 +20261,7 @@ async function handleConversationTurnPrepared(
               ltmSessionCache.set(sessionID, {
                 formatted: pinned.formatted,
                 tokenCount: pinned.tokenCount,
+                revision: selectionRevision,
               });
               ltmDirty = true;
             }
@@ -20287,6 +20303,7 @@ async function handleConversationTurnPrepared(
             ltmSessionCache.set(sessionID, {
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
+              revision: selectionRevision,
             });
             ltmDirty = true;
             pinDirty = true;
@@ -20379,6 +20396,7 @@ async function handleConversationTurnPrepared(
           ? {
               ltmCacheText: cached.formatted,
               ltmCacheTokens: cached.tokenCount,
+              ltmCacheRevision: cached.revision ?? null,
             }
           : {}),
         ...(pinDirty && pinned
@@ -20421,6 +20439,7 @@ async function handleConversationTurnPrepared(
       saveSessionTracking(sessionID, {
         ltmCacheText: contextBeforeStep6.cache?.formatted ?? null,
         ltmCacheTokens: contextBeforeStep6.cache?.tokenCount ?? null,
+        ltmCacheRevision: contextBeforeStep6.cache?.revision ?? null,
         ltmPinText: contextBeforeStep6.pin?.formatted ?? null,
         ltmPinTokens: contextBeforeStep6.pin?.tokenCount ?? null,
         ltmPinKeys: contextBeforeStep6.pin?.entryKeys
@@ -20568,6 +20587,10 @@ async function handleConversationTurnPrepared(
       // Layer-4 turns don't churn the selection (see step-6).
       const stickyIds = entryKeyIds(ltmPinnedText.get(sessionID)?.entryKeys);
       const overflowSink: ltm.KnowledgeEntry[] = [];
+      const refreshRevision = ltm.selectionRevision(
+        projectPath,
+        cfg.knowledge.contextSources,
+      );
       const contextEntries = await ltm.forSession(
         projectPath,
         sessionID,
@@ -20609,7 +20632,11 @@ async function handleConversationTurnPrepared(
           const entryKeys = ltmEntryKeys(contextEntries, renderedIds);
           // Always update the cache with freshly ranked entries.
           ltmSessionCache.delete(sessionID);
-          ltmSessionCache.set(sessionID, { formatted, tokenCount });
+          ltmSessionCache.set(sessionID, {
+            formatted,
+            tokenCount,
+            revision: refreshRevision,
+          });
 
           // Reorder-tolerant diff-pinning: on consecutive Layer 4 turns,
           // system[2] stability matters because system[0]+[1] ARE still cache
@@ -20624,6 +20651,7 @@ async function handleConversationTurnPrepared(
             saveSessionTracking(sessionID, {
               ltmCacheText: formatted,
               ltmCacheTokens: tokenCount,
+              ltmCacheRevision: refreshRevision,
               // pin unchanged — don't write ltmPinText/ltmPinTokens/ltmPinKeys
             });
           } else if (
@@ -20659,11 +20687,13 @@ async function handleConversationTurnPrepared(
             ltmSessionCache.set(sessionID, {
               formatted: pinned.formatted,
               tokenCount: pinned.tokenCount,
+              revision: refreshRevision,
             });
             setLtmTokens(stableTokens, sessionID);
             saveSessionTracking(sessionID, {
               ltmCacheText: pinned.formatted,
               ltmCacheTokens: pinned.tokenCount,
+              ltmCacheRevision: refreshRevision,
               ltmPinText: pinned.formatted,
               ltmPinTokens: pinned.tokenCount,
               ltmPinKeys: JSON.stringify(frozenKeys),
@@ -20686,6 +20716,7 @@ async function handleConversationTurnPrepared(
             saveSessionTracking(sessionID, {
               ltmCacheText: formatted,
               ltmCacheTokens: tokenCount,
+              ltmCacheRevision: refreshRevision,
               ltmPinText: formatted,
               ltmPinTokens: tokenCount,
               ltmPinKeys: JSON.stringify(entryKeys),
@@ -20729,11 +20760,13 @@ async function handleConversationTurnPrepared(
           ltmSessionCache.set(sessionID, {
             formatted: pinned.formatted,
             tokenCount: pinned.tokenCount,
+            revision: refreshRevision,
           });
           setLtmTokens(stableTokens, sessionID);
           saveSessionTracking(sessionID, {
             ltmCacheText: pinned.formatted,
             ltmCacheTokens: pinned.tokenCount,
+            ltmCacheRevision: refreshRevision,
             ltmPinText: pinned.formatted,
             ltmPinTokens: pinned.tokenCount,
             ltmPinKeys: JSON.stringify(frozenKeys),
@@ -20753,6 +20786,7 @@ async function handleConversationTurnPrepared(
           saveSessionTracking(sessionID, {
             ltmCacheText: null,
             ltmCacheTokens: null,
+            ltmCacheRevision: null,
             ltmPinText: null,
             ltmPinTokens: null,
             ltmPinKeys: null,
@@ -20788,6 +20822,7 @@ async function handleConversationTurnPrepared(
           saveSessionTracking(sessionID, {
             ltmCacheText: contextBeforeStep6.cache?.formatted ?? null,
             ltmCacheTokens: contextBeforeStep6.cache?.tokenCount ?? null,
+            ltmCacheRevision: contextBeforeStep6.cache?.revision ?? null,
             ltmPinText: contextBeforeStep6.pin?.formatted ?? null,
             ltmPinTokens: contextBeforeStep6.pin?.tokenCount ?? null,
             ltmPinKeys: contextBeforeStep6.pin?.entryKeys

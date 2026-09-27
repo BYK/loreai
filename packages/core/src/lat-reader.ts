@@ -9,7 +9,7 @@
  * Change detection uses SHA-256 content hashes per file — unchanged files are skipped.
  */
 
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { remark } from "remark";
 import type { Heading, Paragraph, Text } from "mdast";
@@ -198,7 +198,16 @@ function contentHash(content: string): string {
 export function hasLatDir(projectPath: string): boolean {
   if (isHostedMode()) return false;
   const latDir = join(projectPath, "lat.md");
-  return existsSync(latDir) && statSync(latDir).isDirectory();
+  try {
+    return statSync(latDir).isDirectory();
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "ENOTDIR"
+    )
+      return false;
+    throw error;
+  }
 }
 
 /**
@@ -213,8 +222,7 @@ export function refresh(projectPath: string): number {
   if (isHostedMode()) return 0;
 
   const latDir = join(projectPath, "lat.md");
-  if (!existsSync(latDir) || !statSync(latDir).isDirectory()) return 0;
-
+  if (!hasLatDir(projectPath)) return 0;
   const pid = ensureProject(projectPath);
   const files = listMarkdownFiles(latDir);
   let upserted = 0;

@@ -438,6 +438,107 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     expect(text).toContain("WHOLESALE");
   });
 
+  it("WIRING: an edited lat.md section reaches the durable delta", () => {
+    const id = "lat.md/rules#Dashboard";
+    const title = "[lat.md/rules] Dashboard";
+    const sessionID = `wiring-lat-edit-${crypto.randomUUID()}`;
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [keyOf(id, title, "Old dashboard rule")],
+      nextKeys: [keyOf(id, title, "Revised dashboard rule")],
+      entries: [
+        { id, category: "lat.md", title, content: "Revised dashboard rule" },
+      ],
+    });
+    expect(wrote).toBe(true);
+    expect(deltaText(sessionID)).toContain("Revised dashboard rule");
+  });
+
+  it("WIRING: a newly indexed lat.md section reaches the durable delta", () => {
+    const id = "lat.md/rules#New section";
+    const title = "[lat.md/rules] New section";
+    const sessionID = `wiring-lat-new-${crypto.randomUUID()}`;
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [keyOf("another-id", "Other", "Existing rule")],
+      nextKeys: [keyOf(id, title, "Fresh dashboard rule")],
+      entries: [
+        { id, category: "lat.md", title, content: "Fresh dashboard rule" },
+      ],
+    });
+    expect(wrote).toBe(true);
+    expect(deltaText(sessionID)).toContain("Fresh dashboard rule");
+  });
+
+  it("WIRING: a plain synthetic key without a hash reaches the durable delta", () => {
+    const id = "lat.md/rules#Plain key";
+    const sessionID = `wiring-lat-plain-${crypto.randomUUID()}`;
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [],
+      nextKeys: [id],
+      entries: [
+        {
+          id,
+          category: "lat.md",
+          title: "Plain key",
+          content: "Plain key rule",
+        },
+      ],
+    });
+    expect(wrote).toBe(true);
+    expect(deltaText(sessionID)).toContain("Plain key rule");
+  });
+
+  it("WIRING: an old unpinned knowledge entry remains frozen after unrelated indexing", () => {
+    const sessionID = `wiring-frozen-knowledge-${crypto.randomUUID()}`;
+    const title = `Old candidate ${crypto.randomUUID()}`;
+    const id = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title,
+      content: "An unchanged entry that newly ranked into the selection.",
+    });
+    const content = "An unchanged entry that newly ranked into the selection.";
+    const pinnedTitle = `Build diagnostics ${crypto.randomUUID()}`;
+    const pinnedContent = "Already accepted into the original selection.";
+    const pinnedId = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: pinnedTitle,
+      content: pinnedContent,
+    });
+    const unrelatedId = ltm.create({
+      projectPath: PROJECT,
+      scope: "project",
+      category: "gotcha",
+      title: `Release packaging ${crypto.randomUUID()}`,
+      content: "Another project note before its edit.",
+    });
+    expect(new Set([id, pinnedId, unrelatedId]).size).toBe(3);
+    ltm.update(unrelatedId, {
+      content: "A material edit unrelated to the old candidate.",
+    });
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [keyOf(pinnedId, pinnedTitle, pinnedContent)],
+      nextKeys: [keyOf(id, title, content)],
+      entries: [{ id, category: "gotcha", title, content }],
+    });
+    expect(wrote).toBe(false);
+    expect(deltaText(sessionID)).not.toContain(content);
+  });
+
   it("key format matches ltmEntryKeys (the surfaced baseline producer)", () => {
     // The surfaced keys are produced by ltmEntryKeys elsewhere in the pipeline;
     // detectSurfacedMutations must parse that exact `id:fnv1a(title\x1f content)`
