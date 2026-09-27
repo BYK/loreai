@@ -70,24 +70,49 @@ export function selectionRevision(
   const pid = ensureProject(projectPath);
   const knowledge = db()
     .query(
-      "SELECT scope_id, revision FROM context_ltm_revision WHERE tenant_id = ? AND scope_id IN (?, '')",
+      "SELECT scope_id, revision, embedding_revision, live_embedding_revision FROM context_ltm_revision WHERE tenant_id = ? AND scope_id IN (?, '')",
     )
-    .all(tenant, pid) as Array<{ scope_id: string; revision: number }>;
+    .all(tenant, pid) as Array<{
+    scope_id: string;
+    revision: number;
+    embedding_revision: number;
+    live_embedding_revision: number;
+  }>;
+  // A backfill of missing vectors freezes only its affected scopes at the
+  // existing index revision; unrelated writes remain visible immediately.
   const localRevision =
     knowledge.find((row) => row.scope_id === pid)?.revision ?? 0;
   const sharedRevision =
     knowledge.find((row) => row.scope_id === "")?.revision ?? 0;
+  const localIndex = embedding.backfillIndexRevision(
+    "knowledge",
+    `${tenant}\0${pid}`,
+    knowledge.find((row) => row.scope_id === pid)?.embedding_revision ?? 0,
+    knowledge.find((row) => row.scope_id === pid)?.live_embedding_revision ?? 0,
+  );
+  const sharedIndex = embedding.backfillIndexRevision(
+    "knowledge",
+    `${tenant}\0`,
+    knowledge.find((row) => row.scope_id === "")?.embedding_revision ?? 0,
+    knowledge.find((row) => row.scope_id === "")?.live_embedding_revision ?? 0,
+  );
   const mutations = db()
     .query(
-      "SELECT distillations, temporal, lat FROM context_ltm_source_mutations WHERE project_id = ?",
+      "SELECT distillations, distillation_embeddings, live_distillation_embeddings, temporal, temporal_embeddings, lat FROM context_ltm_source_mutations WHERE project_id = ?",
     )
     .get(pid) as {
     distillations: number;
+    distillation_embeddings: number;
+    live_distillation_embeddings: number;
     temporal: number;
+    temporal_embeddings: number;
     lat: number;
   } | null;
+  const knowledgeStamp = `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}`;
   if (!contextSources.length)
-    return `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}`;
+    return localIndex || sharedIndex
+      ? `${knowledgeStamp}:${localIndex}:${sharedIndex}`
+      : knowledgeStamp;
   const distillationRow = contextSources.includes("distillation")
     ? (db()
         .query(
@@ -102,7 +127,22 @@ export function selectionRevision(
         )
         .get(pid) as { revision: number })
     : undefined;
-  return `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}:${distillationRow?.revision ?? 0}:${contextSources.includes("distillation") ? (mutations?.distillations ?? 0) : 0}:${temporalRow?.revision ?? 0}:${contextSources.includes("temporal") ? (mutations?.temporal ?? 0) : 0}`;
+  const distillationIndex = contextSources.includes("distillation")
+    ? embedding.backfillIndexRevision(
+        "distillations",
+        pid,
+        mutations?.distillation_embeddings ?? 0,
+        mutations?.live_distillation_embeddings ?? 0,
+      )
+    : 0;
+  const temporalIndex = contextSources.includes("temporal")
+    ? (mutations?.temporal_embeddings ?? 0)
+    : 0;
+  const contentStamp = `${knowledgeStamp}:${distillationRow?.revision ?? 0}:${contextSources.includes("distillation") ? (mutations?.distillations ?? 0) : 0}:${temporalRow?.revision ?? 0}:${contextSources.includes("temporal") ? (mutations?.temporal ?? 0) : 0}`;
+  // Existing v91 pins stay warm on a v92 upgrade until an index really changes.
+  return localIndex || sharedIndex || distillationIndex || temporalIndex
+    ? `${contentStamp}:${localIndex}:${sharedIndex}:${distillationIndex}:${temporalIndex}`
+    : contentStamp;
 }
 
 /** Sensitivity classification — product hint guiding auto-promotion decisions. */

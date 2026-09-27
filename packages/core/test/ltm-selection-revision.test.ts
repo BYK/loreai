@@ -6,9 +6,27 @@ import {
   saveSessionTracking,
 } from "../src/db";
 import * as ltm from "../src/ltm";
+import { clearAllEmbeddings, storeEmbedding } from "../src/db/vec-store";
 import { withTenant } from "../src/tenant";
 
 describe("context LTM selection revision", () => {
+  test("keeps v91 cache stamp layout until a vector index changes", () => {
+    const path = `/tmp/ltm-v91-stamp-${crypto.randomUUID()}`;
+    const pid = ensureProject(path);
+    expect(ltm.selectionRevision(path).split(":")).toHaveLength(4);
+    expect(
+      ltm.selectionRevision(path, ["distillation", "temporal"]).split(":"),
+    ).toHaveLength(8);
+    const id = crypto.randomUUID();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'gotcha', 'Still valid after the migration', 'Accepted selection', ?, ?, ?)",
+      )
+      .run(id, pid, Date.now(), Date.now(), id);
+    expect(ltm.selectionRevision(path).split(":")).toHaveLength(4);
+    storeEmbedding(db(), "knowledge", id, new Float32Array([1, 0, 0, 0]));
+    expect(ltm.selectionRevision(path).split(":")).toHaveLength(6);
+  });
   test("tracks other sessions' knowledge writes, imports, confidence changes, and removals", () => {
     const projectPath = `/tmp/ltm-revision-${crypto.randomUUID()}`;
     const revision = () => ltm.selectionRevision(projectPath);
@@ -173,5 +191,80 @@ describe("context LTM selection revision", () => {
     expect(revised).not.toBe(inserted);
     db().query("DELETE FROM lat_sections WHERE id = ?").run(id);
     expect(revision()).not.toBe(revised);
+  });
+
+  test("late blob embeddings advance relevant selection revisions", () => {
+    const path = `/tmp/ltm-blob-revision-${crypto.randomUUID()}`;
+    const pid = ensureProject(path);
+    const revKnowledge = () => ltm.selectionRevision(path);
+    const revSources = () =>
+      ltm.selectionRevision(path, ["distillation", "temporal"]);
+    const id = ltm.create({
+      projectPath: path,
+      scope: "project",
+      category: "gotcha",
+      title: "Late vector",
+      content: "Newly indexed after the selection",
+    });
+    const beforeKnowledge = revKnowledge();
+    storeEmbedding(db(), "knowledge", id, new Float32Array([1, 0, 0, 0]));
+    expect(revKnowledge()).not.toBe(beforeKnowledge);
+
+    const distillId = crypto.randomUUID();
+    db()
+      .query(`INSERT INTO distillations (id, project_id, session_id, narrative, facts, source_ids, created_at)
+      VALUES (?, ?, 'other', '', '[]', '[]', ?)`)
+      .run(distillId, pid, Date.now());
+    const beforeDistill = revSources();
+    storeEmbedding(
+      db(),
+      "distillations",
+      distillId,
+      new Float32Array([1, 0, 0, 0]),
+    );
+    expect(revSources()).not.toBe(beforeDistill);
+
+    const temporalId = crypto.randomUUID();
+    db()
+      .query(`INSERT INTO temporal_messages (id, project_id, session_id, role, content, created_at)
+      VALUES (?, ?, 'other', 'user', 'Delayed vector', ?)`)
+      .run(temporalId, pid, Date.now());
+    const beforeTemporal = revSources();
+    storeEmbedding(
+      db(),
+      "temporal",
+      temporalId,
+      new Float32Array([1, 0, 0, 0]),
+    );
+    expect(revSources()).not.toBe(beforeTemporal);
+    const beforeClear = revSources();
+    clearAllEmbeddings(db());
+    expect(revSources()).not.toBe(beforeClear);
+  });
+
+  test("a failed revision write rolls back the blob vector", () => {
+    const path = `/tmp/ltm-embedding-atomic-${crypto.randomUUID()}`;
+    const id = ltm.create({
+      projectPath: path,
+      scope: "project",
+      category: "gotcha",
+      title: "Atomic indexing",
+      content: "No searchable vector without a revision",
+    });
+    db().exec(`CREATE TEMP TRIGGER fail_context_revision
+      BEFORE UPDATE ON context_ltm_revision BEGIN
+        SELECT RAISE(ABORT, 'revision write failed');
+      END`);
+    try {
+      expect(() =>
+        storeEmbedding(db(), "knowledge", id, new Float32Array([1, 0, 0, 0])),
+      ).toThrow("revision write failed");
+      const row = db()
+        .query("SELECT embedding FROM knowledge WHERE id = ?")
+        .get(id) as { embedding: Uint8Array | null };
+      expect(row.embedding).toBeNull();
+    } finally {
+      db().exec("DROP TRIGGER fail_context_revision");
+    }
   });
 });

@@ -5,6 +5,7 @@ import {
   _saveAndClearProvider,
   backfillDistillationEmbeddings,
   backfillEmbeddings,
+  checkConfigChange,
   backfillEntityEmbeddings,
   embedDistillation,
   embedEntity,
@@ -12,8 +13,12 @@ import {
   EmbeddingAbortError,
   EmbeddingQueueCapacityError,
   fromBlob,
+  backfillIndexRevision,
   settleDocumentEmbeds,
 } from "../src/embedding";
+import * as ltm from "../src/ltm";
+import { storeEmbedding } from "../src/db/vec-store";
+import { currentTenantId } from "../src/tenant";
 import * as log from "../src/log";
 
 const PROJECT = "/test/embedding-backfill";
@@ -85,6 +90,62 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
     expect(Array.from(fromBlob(blob as Buffer))).toEqual(Array.from(VEC));
   });
 
+  test("coalesces index-only selection refreshes during a document backfill", async () => {
+    checkConfigChange();
+    const now = Date.now();
+    for (let i = 0; i < 9; i++) {
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'test', ?, 'content', ?, ?, ?)",
+        )
+        .run(`coalesce-${i}`, pid, `title-${i}`, now, now, `coalesce-${i}`);
+    }
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES ('indexed', ?, 'test', 'indexed', 'content', ?, ?, 'indexed')",
+      )
+      .run(pid, now, now);
+    storeEmbedding(db(), "knowledge", "indexed", VEC);
+    const accepted = ltm.selectionRevision(PROJECT);
+    const unrelated = `/test/unrelated-backfill-${crypto.randomUUID()}`;
+    const unrelatedId = crypto.randomUUID();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'gotcha', 'Unrelated late vector', 'An independent project remains fresh', ?, ?, ?)",
+      )
+      .run(unrelatedId, ensureProject(unrelated), now, now, unrelatedId);
+    storeEmbedding(db(), "knowledge", unrelatedId, VEC);
+    const unrelatedBefore = ltm.selectionRevision(unrelated);
+    let duringFirstBatch = "";
+    let batches = 0;
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          const current = ltm.selectionRevision(PROJECT);
+          expect(current).toBe(accepted);
+          if (batches++ === 0) {
+            duringFirstBatch = current;
+            storeEmbedding(db(), "knowledge", unrelatedId, VEC);
+            expect(ltm.selectionRevision(unrelated)).not.toBe(unrelatedBefore);
+          } else {
+            expect(current).toBe(duringFirstBatch);
+            storeEmbedding(db(), "knowledge", "indexed", VEC);
+            expect(ltm.selectionRevision(PROJECT)).not.toBe(duringFirstBatch);
+          }
+          return texts.map(() => VEC);
+        },
+      },
+    });
+
+    expect(await backfillEmbeddings()).toBe(9);
+    expect(batches).toBe(2);
+    expect(
+      backfillIndexRevision("knowledge", `${currentTenantId()}\0${pid}`, -1, 0),
+    ).toBe(-1);
+    expect(ltm.selectionRevision(PROJECT)).not.toBe(duringFirstBatch);
+  });
+
   test("backfillEmbeddings stops scheduling batches and throws a typed abort", async () => {
     const now = Date.now();
     for (let i = 0; i < 9; i++) {
@@ -135,6 +196,36 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
     const blob = embeddingOf("distillations", "bd");
     expect(blob).not.toBeNull();
     expect(Array.from(fromBlob(blob as Buffer))).toEqual(Array.from(VEC));
+  });
+
+  test("distillation backfill coalesces its own writes but exposes live vectors", async () => {
+    checkConfigChange();
+    const now = Date.now();
+    const insert = db().query(
+      "INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived) VALUES (?, ?, 's', '', '', 'observation', '', 0, 0, ?, 0)",
+    );
+    for (let i = 0; i < 9; i++) insert.run(`distill-${i}`, pid, now);
+    insert.run("distill-indexed", pid, now);
+    storeEmbedding(db(), "distillations", "distill-indexed", VEC);
+    const revision = () => ltm.selectionRevision(PROJECT, ["distillation"]);
+    const accepted = revision();
+    let batches = 0;
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          expect(revision()).toBe(accepted);
+          if (++batches === 2) {
+            storeEmbedding(db(), "distillations", "distill-indexed", VEC);
+            expect(revision()).not.toBe(accepted);
+          }
+          return texts.map(() => VEC);
+        },
+      },
+    });
+    expect(await backfillDistillationEmbeddings()).toBe(9);
+    expect(batches).toBe(2);
+    expect(revision()).not.toBe(accepted);
   });
 
   test("backfillEntityEmbeddings populates entities.embedding", async () => {

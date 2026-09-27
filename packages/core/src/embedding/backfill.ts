@@ -438,6 +438,108 @@ export async function runStartupBackfill(
 interface BackfillItem {
   id: string;
   text: string;
+  scopeKey?: string;
+}
+
+type ContextIndexSource = "knowledge" | "distillations";
+const contextIndexBackfills = new Map<
+  ContextIndexSource,
+  Map<
+    string,
+    {
+      revision: number;
+      liveRevision: number;
+      depth: number;
+      connection: ReturnType<typeof db>;
+    }
+  >
+>();
+
+/** Freeze only the scopes whose missing vectors this backfill is rebuilding. */
+export function backfillIndexRevision(
+  table: ContextIndexSource,
+  scopeKey: string,
+  current: number,
+  live: number,
+): number {
+  const snapshot = contextIndexBackfills.get(table)?.get(scopeKey);
+  return snapshot && isCurrentDatabase(snapshot.connection)
+    ? snapshot.revision + live - snapshot.liveRevision
+    : current;
+}
+
+function beginContextIndexBackfill(
+  items: BackfillItem[],
+  table: EmbeddingTable,
+): () => void {
+  if (table !== "knowledge" && table !== "distillations") return () => {};
+  const connection = db();
+  const scopes = new Set(items.flatMap((item) => item.scopeKey ?? []));
+  if (!scopes.size) return () => {};
+  const snapshots = contextIndexBackfills.get(table) ?? new Map();
+  contextIndexBackfills.set(table, snapshots);
+  const revisions = new Map<
+    string,
+    { revision: number; liveRevision: number }
+  >();
+  // Only read the affected scopes; hosted databases may contain many tenants.
+  const keys = [...scopes];
+  for (let i = 0; i < keys.length; i += 200) {
+    const batch = keys.slice(i, i + 200);
+    if (table === "knowledge") {
+      const pairs = batch.map((key) => {
+        const separator = key.indexOf("\0");
+        return [key.slice(0, separator), key.slice(separator + 1)];
+      });
+      const rows = connection
+        .query(`SELECT tenant_id, scope_id, embedding_revision, live_embedding_revision
+          FROM context_ltm_revision
+          WHERE (tenant_id, scope_id) IN (${pairs.map(() => "(?, ?)").join(", ")})`)
+        .all(...pairs.flat()) as Array<{
+        tenant_id: string;
+        scope_id: string;
+        embedding_revision: number;
+        live_embedding_revision: number;
+      }>;
+      for (const row of rows)
+        revisions.set(`${row.tenant_id}\0${row.scope_id}`, {
+          revision: row.embedding_revision,
+          liveRevision: row.live_embedding_revision,
+        });
+    } else {
+      const rows = connection
+        .query(`SELECT project_id, distillation_embeddings, live_distillation_embeddings
+          FROM context_ltm_source_mutations
+          WHERE project_id IN (${batch.map(() => "?").join(", ")})`)
+        .all(...batch) as Array<{
+        project_id: string;
+        distillation_embeddings: number;
+        live_distillation_embeddings: number;
+      }>;
+      for (const row of rows)
+        revisions.set(row.project_id, {
+          revision: row.distillation_embeddings,
+          liveRevision: row.live_distillation_embeddings,
+        });
+    }
+  }
+  for (const key of scopes) {
+    const previous = snapshots.get(key);
+    if (previous && previous.connection === connection) previous.depth++;
+    else
+      snapshots.set(key, {
+        ...(revisions.get(key) ?? { revision: 0, liveRevision: 0 }),
+        depth: 1,
+        connection,
+      });
+  }
+  return () => {
+    for (const key of scopes) {
+      const snapshot = snapshots.get(key);
+      if (snapshot?.connection !== connection) continue;
+      if (--snapshot.depth === 0) snapshots.delete(key);
+    }
+  };
 }
 
 async function embedBackfill(
@@ -448,55 +550,62 @@ async function embedBackfill(
   guard?: ReturnType<typeof createEmbeddingAbortGuard>,
   progressEvery?: number,
 ): Promise<number> {
-  let embedded = 0;
-  let nextProgress = progressEvery ?? Infinity;
+  const endIndexBackfill = beginContextIndexBackfill(items, table);
+  try {
+    let embedded = 0;
+    let nextProgress = progressEvery ?? Infinity;
 
-  for (let i = 0; i < items.length;) {
-    if (guard) throwIfEmbeddingAborted(guard);
-    const batch = nextEmbeddingBatch(items, i);
-    i += batch.length;
-
-    try {
-      const work = embed(
-        batch.map(({ text }) => text),
-        "document",
-      );
-      const vectors = guard
-        ? await awaitEmbeddingOperation(work, guard)
-        : await work;
+    for (let i = 0; i < items.length;) {
       if (guard) throwIfEmbeddingAborted(guard);
+      const batch = nextEmbeddingBatch(items, i);
+      i += batch.length;
 
-      for (let j = 0; j < batch.length; j++) {
-        storeEmbedding(db(), table, batch[j].id, vectors[j]);
-        embedded++;
+      try {
+        const work = embed(
+          batch.map(({ text }) => text),
+          "document",
+        );
+        const vectors = guard
+          ? await awaitEmbeddingOperation(work, guard)
+          : await work;
+        if (guard) throwIfEmbeddingAborted(guard);
+
+        for (let j = 0; j < batch.length; j++) {
+          storeEmbedding(db(), table, batch[j].id, vectors[j], {
+            backfill: true,
+          });
+          embedded++;
+        }
+      } catch (error) {
+        if (error instanceof EmbeddingAbortError) throw error;
+        if (
+          error instanceof EmbeddingQueueCapacityError ||
+          error instanceof LocalProviderUnavailableError
+        ) {
+          const reason =
+            error instanceof EmbeddingQueueCapacityError
+              ? "queue saturated"
+              : "provider unavailable";
+          log.info(`${label} backfill stopped: ${reason}`);
+          break;
+        }
+        log.error(
+          `${label} backfill batch failed (${batch.length} items):`,
+          error,
+        );
       }
-    } catch (error) {
-      if (error instanceof EmbeddingAbortError) throw error;
-      if (
-        error instanceof EmbeddingQueueCapacityError ||
-        error instanceof LocalProviderUnavailableError
-      ) {
-        const reason =
-          error instanceof EmbeddingQueueCapacityError
-            ? "queue saturated"
-            : "provider unavailable";
-        log.info(`${label} backfill stopped: ${reason}`);
-        break;
+
+      if (embedded >= nextProgress) {
+        log.info(`embedding ${completeLabel}: ${embedded}/${items.length}…`);
+        nextProgress = embedded + (progressEvery ?? Infinity);
       }
-      log.error(
-        `${label} backfill batch failed (${batch.length} items):`,
-        error,
-      );
     }
 
-    if (embedded >= nextProgress) {
-      log.info(`embedding ${completeLabel}: ${embedded}/${items.length}…`);
-      nextProgress = embedded + (progressEvery ?? Infinity);
-    }
+    if (embedded > 0) log.info(`embedded ${embedded} ${completeLabel}`);
+    return embedded;
+  } finally {
+    endIndexBackfill();
   }
-
-  if (embedded > 0) log.info(`embedded ${embedded} ${completeLabel}`);
-  return embedded;
 }
 
 export async function backfillEmbeddings(
@@ -511,16 +620,26 @@ export async function backfillEmbeddings(
   const mode = readStorageMode(db());
   const rows = db()
     .query(
-      `SELECT id, title, content FROM knowledge_current WHERE ${missingEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
+      `SELECT id, title, content, tenant_id, project_id, cross_project FROM knowledge_current WHERE ${missingEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
     )
-    .all() as Array<{ id: string; title: string; content: string }>;
+    .all() as Array<{
+    id: string;
+    title: string;
+    content: string;
+    tenant_id: string;
+    project_id: string | null;
+    cross_project: number;
+  }>;
 
   throwIfEmbeddingAborted(guard);
   return embedBackfill(
-    rows.map(({ id, title, content }) => ({
-      id,
-      text: `${title}\n${content}`,
-    })),
+    rows.map(
+      ({ id, title, content, tenant_id, project_id, cross_project }) => ({
+        id,
+        text: `${title}\n${content}`,
+        scopeKey: `${tenant_id}\0${project_id === null || cross_project ? "" : project_id}`,
+      }),
+    ),
     "knowledge",
     "embedding",
     "knowledge entries",
@@ -533,12 +652,16 @@ export async function backfillDistillationEmbeddings(): Promise<number> {
   const mode = readStorageMode(db());
   const rows = db()
     .query(
-      `SELECT id, observations FROM distillations WHERE ${missingEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
+      `SELECT id, observations, project_id FROM distillations WHERE ${missingEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
     )
-    .all() as Array<{ id: string; observations: string }>;
+    .all() as Array<{ id: string; observations: string; project_id: string }>;
 
   return embedBackfill(
-    rows.map(({ id, observations }) => ({ id, text: observations })),
+    rows.map(({ id, observations, project_id }) => ({
+      id,
+      text: observations,
+      scopeKey: project_id,
+    })),
     "distillations",
     "distillation embedding",
     "distillations",

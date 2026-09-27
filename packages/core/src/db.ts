@@ -2225,6 +2225,15 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     ON CONFLICT(project_id) DO UPDATE SET lat = lat + 1;
   END;
   `,
+  `
+  -- Version 92: vector-index changes become a separate durable selection
+  -- revision, so a startup backfill can coalesce its own index-only writes.
+  ALTER TABLE context_ltm_revision ADD COLUMN embedding_revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_revision ADD COLUMN live_embedding_revision INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_source_mutations ADD COLUMN distillation_embeddings INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_source_mutations ADD COLUMN live_distillation_embeddings INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE context_ltm_source_mutations ADD COLUMN temporal_embeddings INTEGER NOT NULL DEFAULT 0;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4626,12 +4635,16 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     // Preserve durable change stamps while converging project identities.
     // Source-row project UPDATE triggers already advance the target's stamp.
     d.query(
-      `INSERT INTO context_ltm_source_mutations (project_id, distillations, temporal, lat)
-       SELECT ?, distillations, temporal, lat
+      `INSERT INTO context_ltm_source_mutations
+         (project_id, distillations, distillation_embeddings, live_distillation_embeddings, temporal, temporal_embeddings, lat)
+       SELECT ?, distillations, distillation_embeddings, live_distillation_embeddings, temporal, temporal_embeddings, lat
          FROM context_ltm_source_mutations WHERE project_id = ?
        ON CONFLICT(project_id) DO UPDATE SET
          distillations = MAX(distillations, excluded.distillations),
+         distillation_embeddings = MAX(distillation_embeddings, excluded.distillation_embeddings),
+         live_distillation_embeddings = MAX(live_distillation_embeddings, excluded.live_distillation_embeddings),
          temporal = MAX(temporal, excluded.temporal),
+         temporal_embeddings = MAX(temporal_embeddings, excluded.temporal_embeddings),
          lat = MAX(lat, excluded.lat)`,
     ).run(targetId, sourceId);
     d.query(

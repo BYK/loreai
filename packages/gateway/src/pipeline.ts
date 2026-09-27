@@ -3610,9 +3610,9 @@ export function appendKnowledgePromptDelta(input: {
       });
     }
   }
-  // A newly indexed section or fresh cross-session distillation has no key in
-  // the frozen pin. Add a first-surface sentinel for selected synthetics only;
-  // ranking churn without a content revision never reaches this recompute path.
+  // A newly indexed synthetic has no key in the frozen pin. Ordinary knowledge
+  // retains the existing frozen-entry policy: a relevance reshuffle must not
+  // append previously unsurfaced, unchanged entries to the conversation.
   const seen = entryKeyIds(surfacedKeys);
   for (const key of input.nextKeys ?? []) {
     const id = key.slice(0, key.lastIndexOf(":"));

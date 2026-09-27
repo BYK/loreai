@@ -147,6 +147,43 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
+  test("upgrades an existing v91 context selection schema to v92", () => {
+    const database = db();
+    database.exec(`
+      ALTER TABLE context_ltm_revision DROP COLUMN embedding_revision;
+      ALTER TABLE context_ltm_revision DROP COLUMN live_embedding_revision;
+      ALTER TABLE context_ltm_source_mutations DROP COLUMN distillation_embeddings;
+      ALTER TABLE context_ltm_source_mutations DROP COLUMN live_distillation_embeddings;
+      ALTER TABLE context_ltm_source_mutations DROP COLUMN temporal_embeddings;
+      UPDATE schema_version SET version = 91;
+    `);
+    close();
+
+    const migrated = db();
+    expect(migrated.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    const revisionColumns = migrated
+      .query("PRAGMA table_info(context_ltm_revision)")
+      .all() as Array<{ name: string }>;
+    const sourceColumns = migrated
+      .query("PRAGMA table_info(context_ltm_source_mutations)")
+      .all() as Array<{ name: string }>;
+    expect(revisionColumns.map((column) => column.name)).toContain(
+      "embedding_revision",
+    );
+    expect(revisionColumns.map((column) => column.name)).toContain(
+      "live_embedding_revision",
+    );
+    expect(sourceColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "distillation_embeddings",
+        "live_distillation_embeddings",
+        "temporal_embeddings",
+      ]),
+    );
+  });
+
   test("v90 adds nullable session cost shadow-context columns", () => {
     const columns = db()
       .query("PRAGMA table_info(session_state)")
