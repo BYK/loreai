@@ -11,6 +11,7 @@ import { describe, test, expect } from "vitest";
 import {
   buildAnthropicRequest,
   type AnthropicCacheOptions,
+  type AnthropicRequestOptions,
 } from "../src/translate/anthropic";
 import type { GatewayRequest } from "../src/translate/types";
 
@@ -41,8 +42,15 @@ function makeRequest(overrides: Partial<GatewayRequest> = {}): GatewayRequest {
   };
 }
 
-function getBody(req: GatewayRequest, cache?: AnthropicCacheOptions) {
-  return buildAnthropicRequest(req, cache).body as Record<string, unknown>;
+function getBody(
+  req: GatewayRequest,
+  cache?: AnthropicCacheOptions,
+  options?: AnthropicRequestOptions,
+) {
+  return buildAnthropicRequest(req, cache, options).body as Record<
+    string,
+    unknown
+  >;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +111,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
       allOf: [{ additionalProperties: false }],
       anyOf: [{ required: ["value"] }],
     };
+    const originalSchema = structuredClone(schema);
     const req = makeRequest({
       tools: [{ name: "union", description: "union", inputSchema: schema }],
     });
@@ -113,14 +122,50 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
 
     expect(inputSchema).toEqual({
       type: "object",
-      properties: schema.properties,
+      properties: originalSchema.properties,
     });
     expect(inputSchema.oneOf).toBeUndefined();
     expect(inputSchema.allOf).toBeUndefined();
     expect(inputSchema.anyOf).toBeUndefined();
-    expect(schema.oneOf).toEqual([{ required: ["value"] }]);
-    expect(schema.allOf).toEqual([{ additionalProperties: false }]);
-    expect(schema.anyOf).toEqual([{ required: ["value"] }]);
+    expect(schema).toEqual(originalSchema);
+  });
+
+  test.each(["oneOf", "allOf", "anyOf"] as const)(
+    "rejects a root-only %s schema instead of weakening it to an unconstrained schema",
+    (keyword) => {
+      const req = makeRequest({
+        tools: [
+          {
+            name: "union",
+            description: "union",
+            inputSchema: { [keyword]: [{ type: "object" }] },
+          },
+        ],
+      });
+
+      expect(() => getBody(req)).toThrow(
+        "Anthropic tool schema must retain a non-combinator root shape",
+      );
+    },
+  );
+
+  test("preserves root combinators when the upstream capability allows them", () => {
+    const schema: Record<string, unknown> = {
+      oneOf: [{ type: "object" }, { type: "string" }],
+    };
+    const originalSchema = structuredClone(schema);
+    const body = getBody(
+      makeRequest({
+        tools: [{ name: "union", description: "union", inputSchema: schema }],
+      }),
+      undefined,
+      { sanitizeRootToolSchemas: false },
+    );
+
+    expect(
+      (body.tools as Array<Record<string, unknown>>)[0]?.input_schema,
+    ).toEqual(schema);
+    expect(schema).toEqual(originalSchema);
   });
 });
 

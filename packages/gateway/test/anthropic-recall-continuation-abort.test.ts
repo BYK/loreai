@@ -24,6 +24,7 @@ function installProductiveRecallMock(): void {
     return {
       result: "recall results",
       input: { query: "architecture" },
+      valid: true,
       coverage: [
         {
           identity: `t:source-${calls}`,

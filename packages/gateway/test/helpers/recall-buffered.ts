@@ -58,14 +58,17 @@ export function providerResponse(
   round: number,
   outcome: Outcome,
   stream = false,
+  recallInputOverride?: unknown,
 ): Response {
   const recalling = outcome === "recall" || outcome === "mixed";
   const invalid = outcome === "invalid" || outcome === "bad-usage";
   const input = outcome === "bad-usage" ? -1000 : invalid ? 1000 : 3;
   const output = invalid ? 100 : 2;
-  const recallInput = productiveRecallIds?.[round - 2]
-    ? { id: `k:${productiveRecallIds[round - 2]}` }
-    : { query };
+  const recallInput =
+    recallInputOverride ??
+    (productiveRecallIds?.[round - 2]
+      ? { id: `k:${productiveRecallIds[round - 2]}` }
+      : { query });
   const tool = {
     type: "tool_use",
     id: `call_${round}`,

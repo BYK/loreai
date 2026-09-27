@@ -177,6 +177,7 @@ describe("resolveProviderRoute", () => {
       expect(resolveProviderRoute("anthropic")).toEqual({
         url: "https://api.anthropic.com",
         protocol: "anthropic",
+        supportsRootToolSchemaCombinators: false,
       });
     });
 
@@ -184,6 +185,7 @@ describe("resolveProviderRoute", () => {
       expect(resolveProviderRoute("minimax")).toEqual({
         url: "https://api.minimax.io/anthropic",
         protocol: "anthropic",
+        supportsRootToolSchemaCombinators: true,
       });
     });
 
@@ -191,6 +193,7 @@ describe("resolveProviderRoute", () => {
       expect(resolveProviderRoute("minimax-cn")).toEqual({
         url: "https://api.minimaxi.com/anthropic",
         protocol: "anthropic",
+        supportsRootToolSchemaCombinators: true,
       });
     });
 
@@ -198,6 +201,7 @@ describe("resolveProviderRoute", () => {
       expect(resolveProviderRoute("fireworks")).toEqual({
         url: "https://api.fireworks.ai/inference",
         protocol: "anthropic",
+        supportsRootToolSchemaCombinators: true,
       });
     });
 
@@ -205,6 +209,7 @@ describe("resolveProviderRoute", () => {
       expect(resolveProviderRoute("kimi-coding")).toEqual({
         url: "https://api.kimi.com/coding",
         protocol: "anthropic",
+        supportsRootToolSchemaCombinators: true,
       });
     });
 

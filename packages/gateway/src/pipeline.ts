@@ -7373,7 +7373,9 @@ async function forwardToUpstream(
           conversationTTL: "5m" as const,
         }
       : cache;
-    const result = buildAnthropicRequest(req, effectiveCache);
+    const result = buildAnthropicRequest(req, effectiveCache, {
+      sanitizeRootToolSchemas: true,
+    });
 
     const project = await resolveVertexProject(config.vertexProject, signal);
     if (!project) {
@@ -7437,7 +7439,10 @@ async function forwardToUpstream(
             conversationTTL: "5m" as const,
           }
         : cache;
-    const result = buildAnthropicRequest(req, effectiveCache);
+    const result = buildAnthropicRequest(req, effectiveCache, {
+      sanitizeRootToolSchemas:
+        providerRoute?.supportsRootToolSchemaCombinators !== true,
+    });
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;
@@ -8057,7 +8062,7 @@ export function buildStreamingResponse(
                 throw new RecallContinuationFailure("depth_exhausted");
               }
               recallDepth++;
-              const { result, input, coverage } = await promiseAgainstAbort(
+              const recallExecution = await promiseAgainstAbort(
                 () =>
                   withTenant(
                     recallContext.sessionState.storageTenantId ?? "",
@@ -8074,6 +8079,10 @@ export function buildStreamingResponse(
                   ),
                 streamSignal,
               );
+              if (!recallExecution.valid) {
+                throw new RecallContinuationFailure("recall_execution");
+              }
+              const { result, input, coverage } = recallExecution;
 
               recallDiagnostics.record(input, result, coverage);
               const stopReason = recallBudget.record({
@@ -21586,7 +21595,7 @@ async function handleConversationTurnPrepared(
       }
       recallDepth++;
       recallPersistenceTransaction ??= bufferedRecallTransaction;
-      const { result, input, coverage } = await promiseAgainstAbort(
+      const recallExecution = await promiseAgainstAbort(
         () =>
           executeRecall(
             recallBlock,
@@ -21599,6 +21608,8 @@ async function handleConversationTurnPrepared(
           ),
         foregroundAbort.signal,
       );
+      if (!recallExecution.valid) return failRecall("recall_execution");
+      const { result, input, coverage } = recallExecution;
 
       bufferedRecallDiagnostics.record(input, result, coverage);
       const stopReason = recallBudget.record({
@@ -22149,7 +22160,7 @@ async function handleConversationTurnPrepared(
                   pendingKnowledgeDelta,
                 );
                 const deferredTransferRecordings: Array<() => void> = [];
-                const { result, input, coverage } = await withTenant(
+                const recallExecution = await withTenant(
                   sessionState.storageTenantId ?? "",
                   () =>
                     executeRecall(
@@ -22174,6 +22185,10 @@ async function handleConversationTurnPrepared(
                       (record) => deferredTransferRecordings.push(record),
                     ),
                 );
+                if (!recallExecution.valid) {
+                  throw new RecallContinuationFailure("recall_execution");
+                }
+                const { result, input, coverage } = recallExecution;
                 const recallBlock = acc.content[contentPosition];
                 if (
                   recallBlock?.type !== "tool_use" ||

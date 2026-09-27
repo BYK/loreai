@@ -435,6 +435,11 @@ export type AnthropicCacheOptions = {
   distilledPrefixLength?: number;
 };
 
+export type AnthropicRequestOptions = {
+  /** Remove root combinators rejected by Anthropic-compatible native APIs. */
+  sanitizeRootToolSchemas?: boolean;
+};
+
 /**
  * Anthropic Messages rejects combinators at the input schema root. Keep the
  * full schema internally for validation and remove only the rejected root
@@ -444,9 +449,24 @@ function sanitizeAnthropicToolInputSchema(
   inputSchema: Record<string, unknown>,
 ): Record<string, unknown> {
   const schema = { ...inputSchema };
+  const hadRootCombinator =
+    Object.hasOwn(schema, "oneOf") ||
+    Object.hasOwn(schema, "allOf") ||
+    Object.hasOwn(schema, "anyOf");
   delete schema.oneOf;
   delete schema.allOf;
   delete schema.anyOf;
+  if (
+    hadRootCombinator &&
+    typeof schema.type !== "string" &&
+    !Object.hasOwn(schema, "properties") &&
+    !Object.hasOwn(schema, "additionalProperties") &&
+    !Object.hasOwn(schema, "required")
+  ) {
+    throw new Error(
+      "Anthropic tool schema must retain a non-combinator root shape",
+    );
+  }
   return schema;
 }
 
@@ -468,6 +488,7 @@ function sanitizeAnthropicToolInputSchema(
 export function buildAnthropicRequest(
   req: GatewayRequest,
   cache?: AnthropicCacheOptions,
+  options: AnthropicRequestOptions = {},
 ): {
   url: string;
   headers: Record<string, string>;
@@ -609,7 +630,10 @@ export function buildAnthropicRequest(
     const tools = req.tools.map((t) => ({
       name: t.name,
       description: t.description,
-      input_schema: sanitizeAnthropicToolInputSchema(t.inputSchema),
+      input_schema:
+        options.sanitizeRootToolSchemas === false
+          ? { ...t.inputSchema }
+          : sanitizeAnthropicToolInputSchema(t.inputSchema),
     }));
 
     // Tool caching: place a breakpoint on the last tool definition.

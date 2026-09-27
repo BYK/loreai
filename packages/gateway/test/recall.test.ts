@@ -241,6 +241,7 @@ describe("executeRecall malformed input", () => {
     expect(result.result).toBe(
       "Recall search failed. The memory system encountered an error.",
     );
+    expect(result.valid).toBe(false);
     expect(result.input).toEqual({ query: "", scope: "all", id: undefined });
   });
 
@@ -271,6 +272,7 @@ describe("executeRecall malformed input", () => {
     expect(result.result).toBe(
       "Recall search failed. The memory system encountered an error.",
     );
+    expect(result.valid).toBe(false);
   });
 
   test("logs malformed recall input through a fixed error envelope", async () => {

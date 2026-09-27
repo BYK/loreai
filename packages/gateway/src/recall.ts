@@ -1100,6 +1100,7 @@ export async function executeRecall(
     detailOffset?: number;
     detailLimit?: number;
   };
+  valid: boolean;
   coverage?: RecallCoverage[];
 }> {
   let query = "";
@@ -1112,6 +1113,20 @@ export async function executeRecall(
   try {
     ({ query, scope, id, ids, detailOffset, detailLimit } =
       parseRecallInput(block));
+  } catch {
+    if (signal?.aborted) throw signal.reason;
+    const diagnostic = new Error("gateway recall execution failed");
+    diagnostic.name = "RecallExecutionError";
+    log.error(diagnostic);
+    return {
+      result: "Recall search failed. The memory system encountered an error.",
+      input: { query, scope, id, ids, detailOffset, detailLimit },
+      valid: false,
+      coverage: [],
+    };
+  }
+
+  try {
     const cfg = loreConfig();
     signal?.throwIfAborted();
     const recall = await runRecallWithMetadata({
@@ -1137,6 +1152,7 @@ export async function executeRecall(
     return {
       result: recall.result,
       input: { query, scope, id, ids, detailOffset, detailLimit },
+      valid: true,
       coverage: recall.coverage,
     };
   } catch {
@@ -1147,6 +1163,7 @@ export async function executeRecall(
     return {
       result: "Recall search failed. The memory system encountered an error.",
       input: { query, scope, id, ids, detailOffset, detailLimit },
+      valid: true,
       coverage: [],
     };
   }

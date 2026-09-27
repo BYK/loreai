@@ -94,6 +94,47 @@ describe("configured upstream routing", () => {
     );
   });
 
+  test("preserves root tool combinators for compatible Anthropic providers", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    let capturedBody: Record<string, unknown> | undefined;
+    setUpstreamInterceptor(async (body, _model, _stream, makeReal) => {
+      capturedBody = body as Record<string, unknown>;
+      return makeReal();
+    });
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(anthropicResponse());
+
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+      oneOf: [{ required: ["value"] }, { additionalProperties: false }],
+    };
+    const response = await harness.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "test-key",
+        "x-lore-provider": "minimax",
+        "x-lore-project": "/tmp/compatible-anthropic-provider",
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M2.7",
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "union", description: "union", input_schema: schema }],
+      }),
+    });
+    await response.text();
+
+    expect(response.status).toBe(200);
+    expect(
+      (capturedBody?.tools as Array<Record<string, unknown>>)[0]?.input_schema,
+    ).toEqual(schema);
+  });
+
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
     const [
       { resolveProfile },
