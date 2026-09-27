@@ -23,6 +23,7 @@ const renderList = (
     | { items: SessionSummary[]; next_cursor: string | null }
     | undefined,
   q: string | null = null,
+  cursor: string | null = null,
 ) => {
   const history = createMemoryHistory();
   history.set({ value: "/projects/p-1/sessions" });
@@ -33,7 +34,7 @@ const renderList = (
         component={() => (
           <SessionList
             projectId="p-1"
-            cursor={null}
+            cursor={cursor}
             q={q}
             page={{
               loader: {
@@ -290,6 +291,22 @@ describe("SessionList", () => {
     expect(screen.getByRole("link", { name: "Clear search" })).toHaveAttribute(
       "href",
       "/projects/p-1/sessions",
+    );
+  });
+
+  it("First page and Next page preserve the active query", async () => {
+    const history = renderList(
+      () => ({ items: [summary()], next_cursor: "c2" }),
+      "outbox",
+      "c1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() =>
+      expect(history.get()).toBe("/projects/p-1/sessions?cursor=c2&q=outbox"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "First page" }));
+    await waitFor(() =>
+      expect(history.get()).toBe("/projects/p-1/sessions?q=outbox"),
     );
   });
 });
