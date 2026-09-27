@@ -686,12 +686,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
   }
 
-  /** The row to re-pin after a prepend: the first mounted row that will
-   * sit at or below the sticky toolbar once the view moves by `delta`
-   * (its rect already carries the prepended estimate heights), then a few
-   * rows deeper — the fold row itself can slip out of the overscan range
-   * while the measures settle. */
-  function foldPin(delta: number): { key: string; top: number } | null {
+  /** The row to re-pin after a prepend: the first mounted row at or
+   * below the sticky toolbar — the row the user is actually looking at.
+   * The deeper buffer the request-time pin needs (its row can leave the
+   * overscan range before the page lands) is unnecessary here: this pin
+   * is captured inside the viewport and only has to survive its own
+   * ~24-frame repin window. */
+  function foldPin(): { key: string; top: number } | null {
     const el = scrollEl;
     if (!el) return null;
     const foldTop = el.getBoundingClientRect().top + toolbarHeight();
@@ -699,16 +700,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       el.querySelectorAll<HTMLElement>("[data-row-key]"),
     );
     const foldIdx = rowEls.findIndex(
-      (row) => row.getBoundingClientRect().top - delta >= foldTop,
+      (row) => row.getBoundingClientRect().top >= foldTop,
     );
-    // Nothing lands below the fold (or the DOM cannot tell us where rows
-    // sit): no pin, the estimate delta alone carries the view.
+    // Nothing below the fold: no pin, the estimate delta alone carries
+    // the view.
     if (foldIdx < 0) return null;
-    const pinEl = rowEls[Math.min(foldIdx + 3, rowEls.length - 1)];
+    const pinEl = rowEls[foldIdx];
     if (!pinEl) return null;
     return {
       key: pinEl.dataset.rowKey ?? "",
-      top: pinEl.getBoundingClientRect().top - delta,
+      top: pinEl.getBoundingClientRect().top,
     };
   }
 
@@ -744,25 +745,29 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // their real heights over the next frames, and each first-measure
         // adjustment drags the viewport. Keep correcting for a couple dozen
         // frames — a correction that finds no drift costs nothing, and late
-        // measures must not get the last word. The pin is captured fresh
-        // here, not at request time: it also serves the user-scroll case
-        // (a pin from before the gesture would point at a screen they
-        // already left), and its `top` is the post-compensation position —
-        // the rows' translateYs already carry the prepended estimates while
-        // scrollTop has not moved yet.
-        const pin =
-          before.wantPin || userTook
-            ? userTook || !before.pin
-              ? foldPin(delta)
-              : before.pin
-            : null;
-        if (pin && typeof requestAnimationFrame === "function") {
+        // measures must not get the last word. Without a captured pin (the
+        // user scrolled mid-load, or no pin was taken at request time) the
+        // loop starts empty and captures one on its first frame — by then
+        // the scroll and the virtualizer's own effect have landed, the
+        // rows carry their post-prepend layout, and first-measures have
+        // not run yet, so the frame-1 screen top is the reference to hold.
+        const deferred =
+          (before.wantPin || userTook) && (userTook || !before.pin);
+        let pin =
+          before.wantPin || userTook ? (deferred ? null : before.pin) : null;
+        if ((pin || deferred) && typeof requestAnimationFrame === "function") {
           let frames = 0;
           const serial0 = userSerial() ?? -1;
           const repin = () => {
             const el = scrollEl;
             if (!el || ++frames > 24) return;
             if (serial0 >= 0 && userSerial() !== serial0) return;
+            if (pin === null) {
+              pin = foldPin();
+              if (pin === null && frames > 1) return;
+              requestAnimationFrame(repin);
+              return;
+            }
             const rowEl = el.querySelector<HTMLElement>(
               `[data-row-key="${CSS.escape(pin.key)}"]`,
             );
