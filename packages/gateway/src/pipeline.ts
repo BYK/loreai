@@ -18540,6 +18540,8 @@ async function handleProvisionalConversationTurn(
               identified.sessionID,
               absoluteUserIndex,
               absoluteUserIndex,
+              undefined,
+              detectHarness(req.rawHeaders),
             )[0],
           }
         : {}),
