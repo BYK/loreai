@@ -94,6 +94,8 @@ describe("SessionList", () => {
       undistilled_count: 0,
       first_message_at: 1,
       last_message_at: 2,
+      title: "Session one",
+      title_source: "first_message" as const,
     };
     render(() => (
       <MemoryRouter>
