@@ -128,7 +128,9 @@ test.describe("project actions (UI-08)", () => {
       .click();
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("checkbox", { name: new RegExp(sessionId) }).check();
-    await dialog.getByRole("button", { name: "Target project" }).click();
+    const target = dialog.getByRole("button", { name: "Target project" });
+    await expect(target).toBeEnabled();
+    await target.click();
     await page
       .getByRole("option")
       .filter({ hasText: /^lore$/ })
