@@ -32,6 +32,15 @@ mkdirSync(scratch, { recursive: true });
 core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
+// #1918: five extra empty projects so the sidebar has more entries than the
+// Recent limit and the filter / "All projects" surfaces render. They have no
+// messages or knowledge, so `last_activity` is null and they sort last.
+for (let i = 0; i < 5; i++) {
+  const dir = join(root, `archive-${i}`);
+  mkdirSync(dir, { recursive: true });
+  core.ensureProject(dir, `archive-${i}`, null);
+}
+
 const entries = [
   {
     category: "decision",
@@ -504,6 +513,15 @@ db.prepare(
   5.2,
   0.8,
 );
+// The disposable pa-* fixtures are created late in the seed, so their fresh
+// knowledge rows would otherwise outrank lore/scratch/hostile in the sidebar's
+// recency ordering (last_activity desc) and push them out of Recent. Backdate
+// them so the named projects stay visible; the project-actions spec navigates
+// by URL and does not care about sidebar order.
+db.prepare(
+  `UPDATE knowledge SET updated_at = 1600000000000
+   WHERE project_id IN (SELECT id FROM projects WHERE name LIKE 'pa-%')`,
+).run();
 db.close();
 
 console.log(
