@@ -6733,6 +6733,27 @@ type ResolvedRequestUpstreamRoute = {
   bedrockMantle: boolean;
 };
 
+/**
+ * Provider capability is trusted only when the effective destination is the
+ * provider's canonical destination. An explicit upstream URL can override a
+ * compatible provider route with a destination that rejects root combinators.
+ */
+function supportsEffectiveRootToolSchemaCombinators(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  const providerRoute = route.providerRoute;
+  if (
+    providerRoute?.supportsRootToolSchemaCombinators !== true ||
+    route.headerUpstream !== undefined ||
+    providerRoute.url === null
+  ) {
+    return false;
+  }
+  const effectiveBase = normalizeUpstreamBase(route.effectiveUpstreamBase);
+  const canonicalBase = normalizeUpstreamBase(providerRoute.url);
+  return effectiveBase !== undefined && effectiveBase === canonicalBase;
+}
+
 /** A headerless model route identifies a provider only when its final URL
  * matches that provider's built-in destination, without a caller override. */
 function canonicalModelRouteProviderID(
@@ -7441,7 +7462,7 @@ async function forwardToUpstream(
         : cache;
     const result = buildAnthropicRequest(req, effectiveCache, {
       sanitizeRootToolSchemas:
-        providerRoute?.supportsRootToolSchemaCombinators !== true,
+        !supportsEffectiveRootToolSchemaCombinators(route),
     });
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;

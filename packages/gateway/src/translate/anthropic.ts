@@ -440,32 +440,43 @@ export type AnthropicRequestOptions = {
   sanitizeRootToolSchemas?: boolean;
 };
 
+const ROOT_TOOL_SCHEMA_COMBINATORS = [
+  "oneOf",
+  "allOf",
+  "anyOf",
+  "not",
+  "if",
+  "then",
+  "else",
+] as const;
+
 /**
  * Anthropic Messages rejects combinators at the input schema root. Keep the
- * full schema internally for validation and remove only the rejected root
- * keywords on the wire; nested combinators remain valid JSON Schema.
+ * full schema internally for validation. Only the intercepted recall tool may
+ * remove rejected root keywords from its wire schema; ordinary tools fail
+ * closed because removing those keywords changes validation. Nested
+ * combinators remain valid JSON Schema.
  */
 function sanitizeAnthropicToolInputSchema(
   inputSchema: Record<string, unknown>,
+  allowLossyRootCombinatorRemoval = false,
 ): Record<string, unknown> {
   const schema = { ...inputSchema };
-  const hadRootCombinator =
-    Object.hasOwn(schema, "oneOf") ||
-    Object.hasOwn(schema, "allOf") ||
-    Object.hasOwn(schema, "anyOf");
-  delete schema.oneOf;
-  delete schema.allOf;
-  delete schema.anyOf;
-  if (
-    hadRootCombinator &&
-    typeof schema.type !== "string" &&
-    !Object.hasOwn(schema, "properties") &&
-    !Object.hasOwn(schema, "additionalProperties") &&
-    !Object.hasOwn(schema, "required")
-  ) {
+  const hasRootCombinator = ROOT_TOOL_SCHEMA_COMBINATORS.some((keyword) =>
+    Object.hasOwn(schema, keyword),
+  );
+  if (hasRootCombinator && !allowLossyRootCombinatorRemoval) {
     throw new Error(
-      "Anthropic tool schema must retain a non-combinator root shape",
+      "Anthropic tool schema root combinators cannot be removed without changing validation",
     );
+  }
+  for (const keyword of ROOT_TOOL_SCHEMA_COMBINATORS) delete schema[keyword];
+  if (
+    hasRootCombinator &&
+    allowLossyRootCombinatorRemoval &&
+    schema.type !== "object"
+  ) {
+    throw new Error("Anthropic tool schema must retain an object root");
   }
   return schema;
 }
@@ -633,7 +644,10 @@ export function buildAnthropicRequest(
       input_schema:
         options.sanitizeRootToolSchemas === false
           ? { ...t.inputSchema }
-          : sanitizeAnthropicToolInputSchema(t.inputSchema),
+          : sanitizeAnthropicToolInputSchema(
+              t.inputSchema,
+              t.name === "recall",
+            ),
     }));
 
     // Tool caching: place a breakpoint on the last tool definition.

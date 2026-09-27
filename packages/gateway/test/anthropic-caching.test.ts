@@ -99,7 +99,7 @@ describe("buildAnthropicRequest — no caching", () => {
 });
 
 describe("buildAnthropicRequest — tool schema compatibility", () => {
-  test("omits unsupported root combinators without mutating nested schemas", () => {
+  test("omits recall root combinators without mutating nested schemas", () => {
     const schema: Record<string, unknown> = {
       type: "object",
       properties: {
@@ -113,7 +113,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     };
     const originalSchema = structuredClone(schema);
     const req = makeRequest({
-      tools: [{ name: "union", description: "union", inputSchema: schema }],
+      tools: [{ name: "recall", description: "recall", inputSchema: schema }],
     });
 
     const body = getBody(req);
@@ -130,24 +130,51 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     expect(schema).toEqual(originalSchema);
   });
 
-  test.each(["oneOf", "allOf", "anyOf"] as const)(
-    "rejects a root-only %s schema instead of weakening it to an unconstrained schema",
+  test.each(["oneOf", "allOf", "anyOf", "not", "if", "then", "else"] as const)(
+    "rejects a root %s schema instead of weakening tool validation",
     (keyword) => {
       const req = makeRequest({
         tools: [
           {
             name: "union",
             description: "union",
-            inputSchema: { [keyword]: [{ type: "object" }] },
+            inputSchema: {
+              type: "object",
+              properties: { value: { type: "string" } },
+              [keyword]:
+                keyword === "not"
+                  ? { type: "null" }
+                  : keyword === "if"
+                    ? { required: ["value"] }
+                    : keyword === "then" || keyword === "else"
+                      ? { required: ["value"] }
+                      : [{ required: ["value"] }],
+            },
           },
         ],
       });
 
       expect(() => getBody(req)).toThrow(
-        "Anthropic tool schema must retain a non-combinator root shape",
+        "Anthropic tool schema root combinators cannot be removed without changing validation",
       );
     },
   );
+
+  test("rejects a combinator without an explicit object root for recall", () => {
+    const req = makeRequest({
+      tools: [
+        {
+          name: "recall",
+          description: "recall",
+          inputSchema: { anyOf: [{ type: "object" }] },
+        },
+      ],
+    });
+
+    expect(() => getBody(req)).toThrow(
+      "Anthropic tool schema must retain an object root",
+    );
+  });
 
   test("preserves root combinators when the upstream capability allows them", () => {
     const schema: Record<string, unknown> = {

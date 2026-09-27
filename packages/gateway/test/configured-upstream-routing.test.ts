@@ -139,6 +139,57 @@ describe("configured upstream routing", () => {
     expect(firstTool?.input_schema).toEqual(schema);
   });
 
+  test("sanitizes root tool combinators when an explicit URL overrides the provider", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    let capturedBody: Record<string, unknown> | undefined;
+    setUpstreamInterceptor(async (body, _model, _stream, makeReal) => {
+      capturedBody = body as Record<string, unknown>;
+      return makeReal();
+    });
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(anthropicResponse());
+
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+      oneOf: [{ required: ["value"] }],
+    };
+    const response = await harness.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "test-key",
+        "x-lore-provider": "minimax",
+        "x-lore-upstream-url": "https://api.anthropic.com",
+        "x-lore-project": "/tmp/overridden-anthropic-provider",
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M2.7",
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          { name: "recall", description: "recall", input_schema: schema },
+        ],
+      }),
+    });
+    await response.text();
+
+    expect(response.status).toBe(200);
+    if (!capturedBody || !Array.isArray(capturedBody.tools)) {
+      throw new Error("upstream request did not contain tools");
+    }
+    const firstTool = capturedBody.tools[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(firstTool?.input_schema).toEqual({
+      type: "object",
+      properties: schema.properties,
+    });
+  });
+
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
     const [
       { resolveProfile },
