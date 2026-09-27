@@ -14,15 +14,15 @@ describe("buildHref", () => {
     expect(buildHref(["x"])).toBe("/x");
   });
 
-  it("encodes query values with %20 for spaces, not +", () => {
-    expect(buildHref(["x"], { q: "a b&c" })).toBe("/x?q=a%20b%26c");
+  it("encodes query values the same way apiPath does", () => {
+    expect(buildHref(["x"], { q: "a b&c" })).toBe("/x?q=a+b%26c");
   });
 });
 
 describe("route hrefs", () => {
   it("searchHref orders q then scope", () => {
     expect(searchHref("p1", "hello world", "session")).toBe(
-      "/projects/p1/search?q=hello%20world&scope=session",
+      "/projects/p1/search?q=hello+world&scope=session",
     );
     expect(searchHref("p1", "q")).toBe("/projects/p1/search?q=q&scope=all");
     expect(searchHref("p1", "", "knowledge")).toBe(

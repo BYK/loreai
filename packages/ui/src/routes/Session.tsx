@@ -14,7 +14,7 @@ import { Nav } from "~/components/shell/Nav";
 import { Shell } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 
-import { projectHref, sessionHref } from "~/lib/href";
+import { projectHref } from "~/lib/href";
 import { useWorkspace } from "./workspace";
 
 function decodeParam(segment: string | undefined): string | undefined {

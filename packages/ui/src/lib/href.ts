@@ -1,24 +1,27 @@
 import type { KnowledgeQuery, RecallScope } from "~/contracts";
-import { DEFAULT_KNOWLEDGE_QUERY, knowledgeQueryToSearch } from "~/contracts";
+import {
+  apiPath,
+  DEFAULT_KNOWLEDGE_QUERY,
+  knowledgeQueryToSearch,
+} from "~/contracts";
 
 type HrefQuery = Record<string, string | null | undefined>;
 
-/** `/seg/seg?k=v` with every segment and value `encodeURIComponent`-encoded;
- *  null/undefined/"" values are omitted. */
+/** `/seg/seg?k=v` via the shared `apiPath` encoder; null/undefined/"" values
+ *  are omitted. */
 export function buildHref(
   segments: readonly string[],
   query?: HrefQuery,
 ): string {
-  const path = `/${segments.map(encodeURIComponent).join("/")}`;
-  if (!query) return path;
-  const params = Object.entries(query)
-    .filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== null && entry[1] !== undefined && entry[1] !== "",
-    )
-    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
-    .join("&");
-  return params ? `${path}?${params}` : path;
+  const params: HrefQuery = {};
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== null && value !== undefined && value !== "") {
+        params[key] = value;
+      }
+    }
+  }
+  return apiPath(segments, params);
 }
 
 export const projectHref = (projectId: string) =>

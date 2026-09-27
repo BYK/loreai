@@ -117,42 +117,6 @@ export function toResponse(err: unknown): Response {
 // Cursor codec
 // ---------------------------------------------------------------------------
 
-type KnowledgeCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "knowledge";
-  project: string;
-  sort: KnowledgeSort;
-  key: number | string;
-  id: string;
-};
-
-type SessionCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "sessions";
-  project: string;
-  last_message_at: number;
-  session_id: string;
-};
-
-type MessageCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "messages";
-  project: string;
-  session: string;
-  created_at: number;
-  id: string;
-};
-
-type SearchCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "search";
-  project: string;
-  session: string;
-  mode: SessionSearchMode;
-  created_at: number;
-  id: string;
-};
-
 function decodeKnowledgeCursor(
   token: string,
   projectId: string,

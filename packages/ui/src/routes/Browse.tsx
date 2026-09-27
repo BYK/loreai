@@ -2,7 +2,7 @@ import type { Component } from "solid-js";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
-import type { KnowledgeQuery, ProjectSummary, RecallScope } from "~/contracts";
+import type { ProjectSummary, RecallScope } from "~/contracts";
 import { DEFAULT_KNOWLEDGE_QUERY, parseKnowledgeQuery } from "~/contracts";
 import { knowledgeHref, knowledgeListHref, projectHref } from "~/lib/href";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
