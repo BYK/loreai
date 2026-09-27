@@ -102,6 +102,13 @@ Env vars override `.lore.json` for the same setting. To override a `.lore.json` 
 | `LORE_WORKER_REQUEST_TIMEOUT_MS` | Whole-request worker ceiling. Default: 900000ms; raised as needed to preserve 60000ms of headroom. Also set as `timeouts.workerRequestTimeoutMs` in `.lore.json`; this environment variable takes priority. |
 | `LORE_WORKER_RESPONSE_INACTIVITY_MS` | How long a worker tolerates upstream silence. Default: 600000ms. Also set as `timeouts.workerResponseInactivityMs` in `.lore.json`; this environment variable takes priority. |
 
+## upstream-400-capture
+
+| Variable | Description |
+|---|---|
+| `LORE_UPSTREAM_400_CAPTURE_PATH` | Absolute path for a one-shot local JSON capture. The file contains private conversation data and is created with mode 0600. |
+| `LORE_UPSTREAM_400_CAPTURE_SESSION` | Exact local session ID required for capture on HTTP 400. Set both variables, then unset them after capture. |
+
 ## Memory engine (`@loreai/core`)
 
 | Variable | Description |

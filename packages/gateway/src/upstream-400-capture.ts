@@ -17,7 +17,15 @@ export function captureRejectedUpstreamRequest(
   localMode: boolean,
 ): void {
   if (!localMode) return;
+  /**
+   * Absolute path for a one-shot local JSON capture. The file contains private
+   * conversation data and is created with mode 0600.
+   */
   const path = process.env.LORE_UPSTREAM_400_CAPTURE_PATH;
+  /**
+   * Exact local session ID required for capture on HTTP 400. Set both variables,
+   * then unset them after capture.
+   */
   const targetSession = process.env.LORE_UPSTREAM_400_CAPTURE_SESSION;
   if (!path || !targetSession || targetSession !== sessionID) return;
   if (attemptedPaths.has(path)) return;
