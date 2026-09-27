@@ -348,7 +348,7 @@ const MoveSessionsDialog: Component<{
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [target, setTarget] = createSignal<string | null>(null);
   const [includeChildren, setIncludeChildren] = createSignal(true);
-  let contentEl!: HTMLElement;
+  let contentEl: HTMLElement | undefined;
 
   const page = ws.state.sessions.page(() =>
     props.open ? { projectId: props.project.id, cursor: cursor() } : null,
@@ -393,7 +393,7 @@ const MoveSessionsDialog: Component<{
 
   return (
     <Dialog open={props.open} onOpenChange={(open) => !open && props.onClose()}>
-      <DialogContent ref={contentEl} tabIndex={-1}>
+      <DialogContent ref={(el) => (contentEl = el)} tabIndex={-1}>
         <DialogHeader>
           <DialogTitle>Move sessions</DialogTitle>
           <DialogDescription>
