@@ -223,7 +223,7 @@ export const Nav: Component<NavProps> = (props) => {
                   )}
                 </For>
               </Show>
-              <Show when={sections().rest.length > 0}>
+              <Show when={sections().rest.length > 0 || filter() !== ""}>
                 <input
                   type="search"
                   aria-label="Filter projects"

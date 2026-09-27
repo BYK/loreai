@@ -194,6 +194,21 @@ describe("Nav project sections", () => {
     expect(screen.queryByRole("heading", { name: "Recent" })).toBeNull();
   });
 
+  it("keeps the filter available while all projects become pinned", async () => {
+    renderNav(SEVEN);
+    const input = await screen.findByTestId("nav-project-filter");
+
+    fireEvent.input(input, { target: { value: "a" } });
+    for (const item of SEVEN) pins().toggle(item.id);
+
+    expect(screen.getByTestId("nav-project-filter")).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(screen.queryByRole("heading", { name: "Matches" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Pinned" })).toBeInTheDocument();
+    expect(screen.queryByTestId("nav-project-filter")).toBeNull();
+  });
+
   it("no filter box and no All button with ≤5 projects and no pins", async () => {
     renderNav(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");
