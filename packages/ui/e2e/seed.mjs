@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /**
- * Seeds the e2e gateway's database (LORE_DB_PATH) with two projects and a
- * handful of knowledge entries through @loreai/core's public API — the same
- * write path the curator uses — so the specs browse real rows via /api/v1.
+ * Seeds the e2e gateway's database (LORE_DB_PATH) with two content projects,
+ * a hostile-payload project, and 60 filler projects (so the desktop nav
+ * overflows and must scroll), plus a handful of knowledge entries through
+ * @loreai/core's public API — the same write path the curator uses — so the
+ * specs browse real rows via /api/v1.
  *
  * Usage: node e2e/seed.mjs <projects-root>
  */
@@ -181,6 +183,14 @@ core.ltm.create({
 const hostile = join(root, "hostile");
 mkdirSync(hostile, { recursive: true });
 const hostileProjectId = core.ensureProject(hostile, "hostile", null);
+
+// Filler projects make the desktop nav overflow its scroll container
+// (#1916) — bare projects only, no entries.
+for (let i = 1; i <= 60; i++) {
+  const dir = join(root, "filler", String(i).padStart(2, "0"));
+  mkdirSync(dir, { recursive: true });
+  core.ensureProject(dir, `filler-${String(i).padStart(2, "0")}`, null);
+}
 const hostilePayloads = [
   "<script>window.__pwned=1</script>",
   '<img src=x onerror="window.__pwned=1">',
