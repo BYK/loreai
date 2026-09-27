@@ -1,6 +1,6 @@
 import type { Component, JSX } from "solid-js";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
-import { A, useLocation } from "@solidjs/router";
+import { A, useLocation, useMatch, useResolvedPath } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
 import { pins } from "~/state/pins";
@@ -23,9 +23,11 @@ const NavItem: Component<{
   children: JSX.Element;
   testId?: string;
   section?: string;
+  end?: boolean;
 }> = (props) => (
   <A
     href={props.href}
+    end={props.end}
     data-testid={props.testId}
     data-section={props.section}
     aria-current={props.active ? "page" : undefined}
@@ -149,6 +151,10 @@ export const Nav: Component<NavProps> = (props) => {
       props.activeProjectId,
     ),
   );
+  const homePath = useResolvedPath(() => "/");
+  const allKnowledgePath = useResolvedPath(() => "/knowledge");
+  const atHome = useMatch(() => homePath() ?? "");
+  const atAllKnowledge = useMatch(() => allKnowledgePath() ?? "");
   return (
     <nav
       aria-label="Workspace"
@@ -160,9 +166,10 @@ export const Nav: Component<NavProps> = (props) => {
       <div class="eyebrow px-3">Workspace</div>
       <NavItem
         href="/"
-        active={props.activeProjectId === null}
+        active={props.activeProjectId === null && !!atHome()}
         count={props.projects?.length}
         testId="nav-projects"
+        end
       >
         Projects
       </NavItem>
@@ -175,8 +182,13 @@ export const Nav: Component<NavProps> = (props) => {
           </Show>
         )}
       </Show>
-      <NavItem href="/" count={props.totalKnowledge ?? undefined}>
-        Knowledge
+      <NavItem
+        href="/knowledge"
+        active={!!atAllKnowledge()}
+        testId="nav-all-knowledge"
+        end
+      >
+        All knowledge
       </NavItem>
 
       <Show when={!props.projects?.length}>

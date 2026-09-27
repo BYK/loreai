@@ -20,6 +20,7 @@ import {
   apiErrorBody,
   apiPath,
   cursorPage,
+  crossProjectKnowledgeEntry,
   distillationDetail,
   distillationList,
   entityDetail,
@@ -27,6 +28,7 @@ import {
   entityRebuildStatus,
   knowledgeEntry,
   knowledgeList,
+  knowledgeSearchResponse,
   knowledgeVersionHistory,
   projectList,
   recallResponse,
@@ -110,7 +112,6 @@ beforeAll(async () => {
     session: SEEDED.sessionId,
     scope: "project",
   });
-
   for (const i of [0, 1]) {
     temporal.store({
       projectPath: SEEDED.projectPath,
@@ -316,6 +317,33 @@ describe("ui contracts against the real gateway", () => {
       `/projects/${SEEDED.projectId}/knowledge`,
       v1(["projects", SEEDED.projectId, "knowledge"]),
       knowledgeList,
+    );
+  });
+
+  it("GET /knowledge first cross-project page", async () => {
+    await contractRoute(
+      "knowledge-all-page.json",
+      "/knowledge",
+      v1(["knowledge"], { limit: 1 }),
+      cursorPage(crossProjectKnowledgeEntry),
+    );
+  });
+
+  it("GET /knowledge with a project filter", async () => {
+    await contractRoute(
+      "knowledge-all-project.json",
+      "/knowledge",
+      v1(["knowledge"], { project: SEEDED.projectId, limit: 1 }),
+      cursorPage(crossProjectKnowledgeEntry),
+    );
+  });
+
+  it("GET /knowledge/search?q=SQLite", async () => {
+    await contractRoute(
+      "knowledge-search.json",
+      "/knowledge/search",
+      v1(["knowledge", "search"], { q: "SQLite", limit: 20 }),
+      knowledgeSearchResponse,
     );
   });
 
