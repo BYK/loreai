@@ -20,11 +20,18 @@ async function navColor(page: Page): Promise<string> {
 }
 
 /**
- * Assert `scroller` overflows, that the inner Workspace nav reaches the
+ * Expand the collapsed "All projects" section so the list overflows, then
+ * assert `scroller` overflows, that the inner Workspace nav reaches the
  * bottom of the scroll content, and that the pixel at the bottom of the
  * scrolled container belongs to the nav (not the page background).
  */
 async function assertNavCoversScroll(page: Page, scroller: Locator) {
+  const all = scroller.getByTestId("nav-all-projects");
+  await expect(all).toBeVisible();
+  if ((await all.getAttribute("aria-expanded")) !== "true") {
+    await all.click();
+  }
+  await expect(all).toHaveAttribute("aria-expanded", "true");
   await expect
     .poll(() => scroller.getByTestId("nav-project").count())
     .toBeGreaterThanOrEqual(60);
