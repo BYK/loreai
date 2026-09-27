@@ -83,6 +83,18 @@ describe("resolveCostAttribution", () => {
     ).toBe("api_key");
   });
 
+  test.each(["openai-codex", "OpenAI-Codex "])(
+    "explicit providerID %p maps to openai subscription",
+    (providerID) => {
+      expect(
+        resolveCostAttribution({
+          providerID,
+          upstreamURL: "https://api.openai.com/v1",
+        }),
+      ).toMatchObject({ provider: "openai", authKind: "subscription" });
+    },
+  );
+
   test("openai subscription via /backend-api URL", () => {
     expect(
       resolveCostAttribution({

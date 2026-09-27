@@ -41,6 +41,9 @@ function resolveProvider(
   upstreamURL: string | undefined,
 ): string {
   const trimmed = providerID?.trim().toLowerCase();
+  // The Codex route id still groups under OpenAI — subscription auth kind is
+  // what distinguishes it from API-key traffic.
+  if (trimmed === "openai-codex") return "openai";
   if (trimmed) return trimmed;
   if (!upstreamURL) return "unknown";
   try {
@@ -82,6 +85,8 @@ export function resolveCostAttribution(input: {
   const { sessionID, providerID, upstreamURL, credential, responseHeaders } =
     input;
   const provider = resolveProvider(providerID, upstreamURL);
+  // The Codex route only exists for ChatGPT subscriptions.
+  const codexRoute = providerID?.trim().toLowerCase() === "openai-codex";
   const chatgptAccountId = sessionChatGPTAccountId(sessionID);
 
   let authKind: ProviderAuthKind = "api_key";
@@ -96,6 +101,7 @@ export function resolveCostAttribution(input: {
     }
   } else if (provider === "openai") {
     if (
+      codexRoute ||
       isChatGPTBackend(upstreamURL) ||
       chatgptAccountId !== null ||
       (responseHeaders && hasHeaderPrefix(responseHeaders, "x-codex-"))
