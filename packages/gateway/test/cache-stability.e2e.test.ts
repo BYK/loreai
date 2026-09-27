@@ -13,7 +13,9 @@
  * token injected into a cached block, etc.), the divergence offset jumps out of
  * the tail and these tests fail — turning whack-a-mole into a guardrail.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { log } from "@loreai/core";
 import * as embedding from "../../core/src/embedding";
@@ -647,7 +649,9 @@ describe("cache stability (e2e)", () => {
       evictContextSelectionCacheForTest(sessionID);
       if (forcedLayer === 4) setForceMinLayer(4, sessionID);
       const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
-      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      // Leave enough headroom for the real source-window setup under CI
+      // coverage; the mocked context read still waits for the optional deadline.
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "5000";
       const selection = vi
         .spyOn(ltm, "forSession")
         .mockImplementation((_project, _session, _budget, options) =>
@@ -1328,8 +1332,6 @@ describe("cache stability (e2e)", () => {
       JSON.stringify({ idleResumeMinutes: 0.0005 }),
     );
 
-    const { evictContextSelectionCacheForTest } =
-      await import("../src/pipeline");
     // Seed 30 project entries BEFORE the first request so they exist when
     // system[1] is first built (and frozen) on turn 0. ~310 tokens each ×30 ≈
     // 9.3K tokens > the 8000-token budget floor → guaranteed overflow tail when
@@ -1385,14 +1387,13 @@ describe("cache stability (e2e)", () => {
       }
 
       if (i === 1) {
-        // Material change to a pinned entry; emulate the cache invalidation
-        // triggered by the production curator's knowledge-change callback.
+        // Material change to a pinned entry must advance the durable content
+        // revision so the real pipeline refreshes the selection on turn 3.
         ltm.update(seededIds[0], {
           content:
             "Changed body that must arrive as a durable delta. " +
             "More filler to keep it material. ".repeat(20),
         });
-        evictContextSelectionCacheForTest(sessionID);
       }
     }
 
@@ -1441,9 +1442,8 @@ describe("cache stability (e2e)", () => {
     // fired on per-turn relevance-ranking churn (the forSession selection picks a
     // different subset each turn) even though NO knowledge changed in the DB,
     // rewriting a deep-prefix message every turn → ~250k tokens rewritten per
-    // turn. We force the recompute path (overflow set + near-zero idle-resume so
-    // forSession re-scores every turn) and VARY the query topic each turn so the
-    // selected subset churns — but never mutate the DB.
+    // turn. The cached selection should remain stable across near-zero idle
+    // resumes even when the query topic changes and the DB has no mutations.
     //
     // New contract (delta-primary): the FIRST injection of context-bound LTM
     // appends exactly ONE durable block (seq 0). After that, pure ranking churn
@@ -1560,6 +1560,118 @@ describe("cache stability (e2e)", () => {
     const steady = systemBlocks(bodies[1]);
     for (let i = 2; i < bodies.length; i++) {
       expect(systemBlocks(bodies[i])).toEqual(steady);
+    }
+  });
+
+  it("refreshes an accepted selection after another session writes knowledge, including across restart", async () => {
+    const turns = Array.from({ length: 4 }, (_, i) => ({
+      userMessage: `Turn ${i}: review the dashboard rules.`,
+      assistantText: `Dashboard rules turn ${i}.`,
+    }));
+    harness = await createHarness({
+      fixtures: makeConversationFixtures(turns),
+    });
+    const projectPath = `/tmp/lore-revision-${Date.now()}`;
+    const headers = {
+      "x-lore-project": projectPath,
+      "x-lore-session-id": `revision-${Date.now()}`,
+    };
+    const { ltm } = await import("@loreai/core");
+    const entryId = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "gotcha",
+      title: "Dashboard baseline",
+      content: "The dashboard baseline rule is already known.",
+    });
+
+    const history: unknown[] = [];
+    const chatTurn = async (i: number) => {
+      const response = await harness.chat(
+        makeBody(turns[i].userMessage, history),
+        "test-key",
+        headers,
+      );
+      expect(response.status).toBe(200);
+      await response.json();
+      history.push({ role: "user", content: turns[i].userMessage });
+      history.push({
+        role: "assistant",
+        content: [{ type: "text", text: turns[i].assistantText }],
+      });
+    };
+
+    await chatTurn(0);
+    await chatTurn(1);
+    ltm.update(entryId, {
+      content: "Dashboard baseline rule updated by another session.",
+    });
+    await chatTurn(2);
+    expect(harness.upstreamBodies()[2]).toContain(
+      "Dashboard baseline rule updated by another session.",
+    );
+
+    ltm.update(entryId, {
+      content:
+        "Dashboard baseline rule updated while this session was offline.",
+    });
+    await harness.restartPipeline();
+    await chatTurn(3);
+    expect(harness.upstreamBodies()[3]).toContain(
+      "Dashboard baseline rule updated while this session was offline.",
+    );
+  });
+
+  it("surfaces edited lat.md content in the next turn's durable delta", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "lore-lat-revision-"));
+    const latDir = join(projectPath, "lat.md");
+    mkdirSync(latDir);
+    const file = join(latDir, "dashboard.md");
+    writeFileSync(
+      file,
+      "# Dashboard guide\n\nOld dashboard rules apply here.\n",
+    );
+    const turns = Array.from({ length: 3 }, (_, i) => ({
+      userMessage: `Turn ${i}: explain the dashboard guide.`,
+      assistantText: `Dashboard guide turn ${i}.`,
+    }));
+    try {
+      harness = await createHarness({
+        fixtures: makeConversationFixtures(turns),
+      });
+      const { latReader } = await import("@loreai/core");
+      latReader.refresh(projectPath);
+      const headers = {
+        "x-lore-project": projectPath,
+        "x-lore-session-id": `lat-revision-${crypto.randomUUID()}`,
+      };
+      const history: unknown[] = [];
+      for (let i = 0; i < turns.length; i++) {
+        if (i === 2) {
+          writeFileSync(
+            file,
+            "# Dashboard guide\n\nRevised dashboard rules apply here.\n",
+          );
+          latReader.refresh(projectPath);
+        }
+        const response = await harness.chat(
+          makeBody(turns[i].userMessage, history),
+          "test-key",
+          headers,
+        );
+        expect(response.status).toBe(200);
+        await response.json();
+        history.push({ role: "user", content: turns[i].userMessage });
+        history.push({
+          role: "assistant",
+          content: [{ type: "text", text: turns[i].assistantText }],
+        });
+      }
+      expect(harness.upstreamBodies()[2]).toContain(
+        "Revised dashboard rules apply here.",
+      );
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
     }
   });
 

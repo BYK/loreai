@@ -438,6 +438,42 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     expect(text).toContain("WHOLESALE");
   });
 
+  it("WIRING: an edited lat.md section reaches the durable delta", () => {
+    const id = "lat.md/rules#Dashboard";
+    const title = "[lat.md/rules] Dashboard";
+    const sessionID = `wiring-lat-edit-${crypto.randomUUID()}`;
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [keyOf(id, title, "Old dashboard rule")],
+      nextKeys: [keyOf(id, title, "Revised dashboard rule")],
+      entries: [
+        { id, category: "lat.md", title, content: "Revised dashboard rule" },
+      ],
+    });
+    expect(wrote).toBe(true);
+    expect(deltaText(sessionID)).toContain("Revised dashboard rule");
+  });
+
+  it("WIRING: a newly indexed lat.md section reaches the durable delta", () => {
+    const id = "lat.md/rules#New section";
+    const title = "[lat.md/rules] New section";
+    const sessionID = `wiring-lat-new-${crypto.randomUUID()}`;
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [keyOf("another-id", "Other", "Existing rule")],
+      nextKeys: [keyOf(id, title, "Fresh dashboard rule")],
+      entries: [
+        { id, category: "lat.md", title, content: "Fresh dashboard rule" },
+      ],
+    });
+    expect(wrote).toBe(true);
+    expect(deltaText(sessionID)).toContain("Fresh dashboard rule");
+  });
+
   it("key format matches ltmEntryKeys (the surfaced baseline producer)", () => {
     // The surfaced keys are produced by ltmEntryKeys elsewhere in the pipeline;
     // detectSurfacedMutations must parse that exact `id:fnv1a(title\x1f content)`

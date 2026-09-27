@@ -55,6 +55,56 @@ import * as log from "./log";
 import { estimateTokens } from "./tokenize";
 import { currentTenantId } from "./tenant";
 
+/**
+ * Cheap durable change stamp for a context-bound selection. Knowledge writes
+ * advance local or shared tenant counters (including sync/import/other sessions),
+ * while context sources advance for the whole project. Reading the stamp never
+ * embeds or scans a transcript. Capture it BEFORE async selection so a write
+ * racing the read causes another refresh next turn, not a permanently stale pin.
+ */
+export function selectionRevision(
+  projectPath: string,
+  contextSources: readonly string[] = [],
+): string {
+  const tenant = currentTenantId();
+  const pid = ensureProject(projectPath);
+  const knowledge = db()
+    .query(
+      "SELECT scope_id, revision FROM context_ltm_revision WHERE tenant_id = ? AND scope_id IN (?, '')",
+    )
+    .all(tenant, pid) as Array<{ scope_id: string; revision: number }>;
+  const localRevision =
+    knowledge.find((row) => row.scope_id === pid)?.revision ?? 0;
+  const sharedRevision =
+    knowledge.find((row) => row.scope_id === "")?.revision ?? 0;
+  const mutations = db()
+    .query(
+      "SELECT distillations, temporal, lat FROM context_ltm_source_mutations WHERE project_id = ?",
+    )
+    .get(pid) as {
+    distillations: number;
+    temporal: number;
+    lat: number;
+  } | null;
+  if (!contextSources.length)
+    return `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}`;
+  const distillationRow = contextSources.includes("distillation")
+    ? (db()
+        .query(
+          "SELECT COALESCE(MAX(rowid), 0) AS revision FROM distillations WHERE project_id = ?",
+        )
+        .get(pid) as { revision: number })
+    : undefined;
+  const temporalRow = contextSources.includes("temporal")
+    ? (db()
+        .query(
+          "SELECT COALESCE(MAX(rowid), 0) AS revision FROM temporal_messages WHERE project_id = ?",
+        )
+        .get(pid) as { revision: number })
+    : undefined;
+  return `${pid}:${localRevision}:${sharedRevision}:${mutations?.lat ?? 0}:${distillationRow?.revision ?? 0}:${contextSources.includes("distillation") ? (mutations?.distillations ?? 0) : 0}:${temporalRow?.revision ?? 0}:${contextSources.includes("temporal") ? (mutations?.temporal ?? 0) : 0}`;
+}
+
 /** Sensitivity classification — product hint guiding auto-promotion decisions. */
 export type Sensitivity = "normal" | "sensitive" | "restricted";
 /** Promotion intent — tracks the personal \u2192 team DB promotion flow. */
