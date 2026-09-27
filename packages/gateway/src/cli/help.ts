@@ -216,6 +216,8 @@ Environment variables:
                                 Local mode is for loopback or fully trusted isolated networks.
                                 auto-enabled for non-loopback binds (e.g. Tailscale, LAN, 0.0.0.0)
   LORE_DEBUG                    Enable debug logging (1 or true)
+  LORE_UPSTREAM_400_CAPTURE_PATH     Absolute path for a one-shot 0600 request file (sensitive)
+  LORE_UPSTREAM_400_CAPTURE_SESSION  Exact local session ID to capture on upstream HTTP 400
   LORE_NO_UPDATE_CHECK          Disable background update checks (set to 1)
   SUPABASE_URL                  Override the Folk Lore Supabase project URL
   SUPABASE_ANON_KEY             Override the Supabase publishable key

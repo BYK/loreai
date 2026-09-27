@@ -328,6 +328,7 @@ import {
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
+import { captureRejectedUpstreamRequest } from "./upstream-400-capture";
 import {
   startIdleScheduler,
   buildIdleWorkHandler,
@@ -21414,6 +21415,15 @@ async function handleConversationTurnPrepared(
     rollback.preparation?.();
     rollback.preparation = undefined;
     rollback.release?.();
+    if (upstreamResponse.status === 400) {
+      // Capture while the exact outgoing JSON is still available, even if the
+      // upstream error body stalls or the downstream caller disconnects.
+      captureRejectedUpstreamRequest(
+        sessionID,
+        requestBody,
+        !config.hostedMode && !config.remoteGateway,
+      );
+    }
     const errorBodySignal = AbortSignal.any([
       foregroundAbort.signal,
       AbortSignal.timeout(foregroundErrorBodyTimeoutMs),

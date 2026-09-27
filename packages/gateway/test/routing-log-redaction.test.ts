@@ -1,7 +1,11 @@
 import { log } from "@loreai/core";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config";
 import {
+  getActiveSessions,
   handleRequest,
   resetPipelineState,
   setUpstreamInterceptor,
@@ -424,6 +428,81 @@ describe("routing log credential redaction", () => {
     expect(messages.join("\n")).not.toContain(privateMarker);
     expect(messages.join("\n")).not.toContain("PRIVATE_META_PROMPT");
     expect(await response.text()).toContain(privateMarker);
+  });
+
+  it("captures the exact rejected conversation request only after an explicit session match", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "lore-400-turn-"));
+    const path = join(directory, "rejected.json");
+    const previousPath = process.env.LORE_UPSTREAM_400_CAPTURE_PATH;
+    const previousSession = process.env.LORE_UPSTREAM_400_CAPTURE_SESSION;
+    const marker = "PRIVATE_REJECTED_REQUEST_MARKER";
+    const logged: string[] = [];
+    let upstreamBody: unknown;
+    try {
+      process.env.LORE_UPSTREAM_400_CAPTURE_PATH = path;
+      log.registerSink({
+        info: (message) => logged.push(message),
+        warn: (message) => logged.push(message),
+        error: (message) => logged.push(message),
+        captureException: vi.fn(),
+      });
+      let reject = false;
+      setUpstreamInterceptor(async (body) => {
+        upstreamBody = body;
+        return reject
+          ? new Response('{"detail":"Bad Request"}', { status: 400 })
+          : new Response(
+              JSON.stringify({
+                id: "resp_capture_setup",
+                object: "response",
+                status: "completed",
+                model: "gpt-5.6-luna",
+                output: [],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+      });
+      const request: GatewayRequest = {
+        protocol: "openai-responses",
+        model: "gpt-5.6-luna",
+        system: "You are a coding assistant.",
+        messages: [{ role: "user", content: [{ type: "text", text: marker }] }],
+        tools: [],
+        stream: false,
+        maxTokens: 64,
+        metadata: {},
+        rawHeaders: {
+          "x-lore-agent": "coder",
+          "x-lore-project": process.cwd(),
+          "x-session-affinity": "capture-test-session",
+          authorization: "Bearer placeholder",
+        },
+      };
+      const config = loadConfig();
+      const setup = await handleRequest(request, config);
+      expect(setup.status).toBe(200);
+      await setup.text();
+      const sessionID = [...getActiveSessions().values()][0]?.sessionID;
+      expect(sessionID).toBeTruthy();
+      process.env.LORE_UPSTREAM_400_CAPTURE_SESSION = sessionID;
+      reject = true;
+      const response = await handleRequest(request, config);
+
+      expect(response.status).toBe(400);
+      expect(upstreamBody).toBeDefined();
+      expect(readFileSync(path, "utf8")).toBe(JSON.stringify(upstreamBody));
+      expect(logged.join("\n")).not.toContain(marker);
+      expect(logged.join("\n")).toContain("captured locally");
+    } finally {
+      if (previousPath === undefined)
+        delete process.env.LORE_UPSTREAM_400_CAPTURE_PATH;
+      else process.env.LORE_UPSTREAM_400_CAPTURE_PATH = previousPath;
+      if (previousSession === undefined)
+        delete process.env.LORE_UPSTREAM_400_CAPTURE_SESSION;
+      else process.env.LORE_UPSTREAM_400_CAPTURE_SESSION = previousSession;
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("sanitizes the configured worker initialization URL", async () => {
