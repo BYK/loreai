@@ -4911,6 +4911,12 @@ export interface OpenContradiction {
   similarity: number;
   rationale: string | null;
   detectedAt: number;
+  /** Project each side belongs to; null when the entry is global (no
+   * project_id). Names fall back to the project path. */
+  projectIdA: string | null;
+  projectNameA: string | null;
+  projectIdB: string | null;
+  projectNameB: string | null;
 }
 
 /** Canonical (a <= b) ordering so a pair maps to exactly one PK row. */
@@ -5007,10 +5013,15 @@ export function listOpenContradictions(
   const rows = db()
     .query(
       `SELECT c.logical_id_a, c.logical_id_b, c.similarity, c.rationale, c.detected_at,
-              ka.title AS title_a, kb.title AS title_b
+              ka.title AS title_a, kb.title AS title_b,
+              ka.project_id AS project_id_a, kb.project_id AS project_id_b,
+              COALESCE(pa.name, pa.path) AS project_name_a,
+              COALESCE(pb.name, pb.path) AS project_name_b
          FROM knowledge_contradictions c
          JOIN knowledge_current ka ON ka.logical_id = c.logical_id_a
          JOIN knowledge_current kb ON kb.logical_id = c.logical_id_b
+         LEFT JOIN projects pa ON pa.id = ka.project_id
+         LEFT JOIN projects pb ON pb.id = kb.project_id
         WHERE c.tenant_id = ? AND ka.tenant_id = ? AND kb.tenant_id = ? AND c.status = 'open'
         ${pid ? "AND (c.project_id = ? OR c.project_id IS NULL)" : ""}
         ORDER BY c.detected_at DESC`,
@@ -5028,6 +5039,10 @@ export function listOpenContradictions(
     detected_at: number;
     title_a: string;
     title_b: string;
+    project_id_a: string | null;
+    project_id_b: string | null;
+    project_name_a: string | null;
+    project_name_b: string | null;
   }>;
   return rows.map((r) => ({
     logicalIdA: r.logical_id_a,
@@ -5037,6 +5052,10 @@ export function listOpenContradictions(
     similarity: r.similarity,
     rationale: r.rationale,
     detectedAt: r.detected_at,
+    projectIdA: r.project_id_a,
+    projectNameA: r.project_name_a,
+    projectIdB: r.project_id_b,
+    projectNameB: r.project_name_b,
   }));
 }
 

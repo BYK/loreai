@@ -402,6 +402,34 @@ core.ltm.recordContradiction({
   rationale: hostileText,
 });
 
+// One cross-project pair (#1919): an entry in scratch vs an entry in lore, so
+// the contradictions page renders a "Cross-project" group after the per-project
+// groups.
+const crossConflictA = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Store timestamps as epoch ms",
+  content: "Persist all timestamps as integer epoch milliseconds.",
+});
+const crossConflictB = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: lore,
+  scope: "project",
+  category: "decision",
+  title: "Store timestamps as ISO strings",
+  content: "Persist all timestamps as ISO 8601 strings.",
+});
+core.ltm.recordContradiction({
+  logicalIdA: crossConflictA,
+  logicalIdB: crossConflictB,
+  projectId: scratchProjectId,
+  similarity: 0.95,
+  rationale:
+    "Epoch milliseconds and ISO strings cannot both be the storage format.",
+});
+
 // Project-actions fixtures (UI-08): disposable projects and scratch
 // sessions per browser project and retry so a delete/clear/move can never
 // race another spec — each test owns `pa-<viewport>-<run>-<letter>` and the

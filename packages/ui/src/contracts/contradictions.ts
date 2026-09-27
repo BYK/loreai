@@ -11,6 +11,10 @@ export const contradictionListItem = type({
   similarity: "number",
   rationale: "string | null",
   detected_at: epochMs,
+  project_id_a: "string | null",
+  project_name_a: "string | null",
+  project_id_b: "string | null",
+  project_name_b: "string | null",
 });
 
 export type ContradictionListItem = typeof contradictionListItem.infer;

@@ -167,6 +167,92 @@ describe("contradiction store", () => {
     expect(ltm.listOpenContradictions(P)).toHaveLength(0);
   });
 
+  it("reports the shared project id and name for a same-project pair", async () => {
+    const P = "/test/contra/project-fields-same";
+    const a = await seed(P, "Rule alpha", "alpha", v(1, 0, 0));
+    const b = await seed(P, "Rule beta", "beta", v(1, 0, 0));
+    const projectId = ensureProject(P);
+    ltm.recordContradiction({
+      logicalIdA: a,
+      logicalIdB: b,
+      projectId,
+      similarity: 0.95,
+      rationale: "conflict",
+    });
+    const [pair] = ltm.listOpenContradictions(P);
+    expect(pair?.projectIdA).toBe(projectId);
+    expect(pair?.projectIdB).toBe(projectId);
+    // No explicit name → falls back to the path basename.
+    expect(pair?.projectNameA).toBe("project-fields-same");
+    expect(pair?.projectNameB).toBe("project-fields-same");
+    ltm.remove(a);
+    ltm.remove(b);
+  });
+
+  it("reports differing projects for a cross-project pair", async () => {
+    const PA = "/test/contra/project-fields-a";
+    const PB = "/test/contra/project-fields-b";
+    const a = await seed(PA, "Rule from A", "a", v(1, 0, 0));
+    const b = await seed(PB, "Rule from B", "b", v(1, 0, 0));
+    const idA = ensureProject(PA);
+    const idB = ensureProject(PB);
+    ltm.recordContradiction({
+      logicalIdA: a,
+      logicalIdB: b,
+      projectId: idA,
+      similarity: 0.95,
+      rationale: "conflict",
+    });
+    const pair = ltm
+      .listOpenContradictions()
+      .find((c) => c.logicalIdA === a || c.logicalIdB === a);
+    expect(pair?.projectIdA === idA || pair?.projectIdB === idA).toBe(true);
+    expect(
+      [pair?.projectIdA, pair?.projectIdB].sort((x, y) => x!.localeCompare(y!)),
+    ).toEqual([idA, idB].sort((x, y) => x.localeCompare(y)));
+    expect(
+      [pair?.projectNameA, pair?.projectNameB].sort((x, y) =>
+        x!.localeCompare(y!),
+      ),
+    ).toEqual(
+      ["project-fields-a", "project-fields-b"].sort((x, y) =>
+        x.localeCompare(y),
+      ),
+    );
+    ltm.remove(a);
+    ltm.remove(b);
+  });
+
+  it("reports null project fields for a global entry", async () => {
+    const P = "/test/contra/project-fields-global";
+    const a = await seed(P, "Project rule", "p", v(1, 0, 0));
+    const g = ltm.create({
+      category: "preference",
+      title: "Global rule",
+      content: "g",
+      scope: "global",
+      confidence: 0.9,
+    });
+    await embedding.settleDocumentEmbeds();
+    storeEmbedding(db(), "knowledge", g, v(1, 0, 0));
+    ltm.recordContradiction({
+      logicalIdA: a,
+      logicalIdB: g,
+      projectId: null,
+      similarity: 0.95,
+      rationale: "conflict",
+    });
+    const pair = ltm
+      .listOpenContradictions()
+      .find((c) => c.logicalIdA === a || c.logicalIdB === a);
+    expect(pair?.projectIdA === null || pair?.projectIdB === null).toBe(true);
+    expect(
+      pair?.projectIdA === null ? pair.projectNameA : pair?.projectNameB,
+    ).toBeNull();
+    ltm.remove(a);
+    ltm.remove(g);
+  });
+
   it("changes a contradiction only when its expected current status matches", async () => {
     const P = "/test/contra/status-transition";
     const a = await seed(P, "Use the stable id", "stable id", v(1, 0, 0));
