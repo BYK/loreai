@@ -895,6 +895,44 @@ describe("paged sessions and recall state", () => {
     expect(page.loader.data()?.items).toEqual([]);
   });
 
+  it("sessions.page keys on q and forwards it to the client", async () => {
+    const seen: unknown[] = [];
+    const client = {
+      listProjectSessionsPage: async (
+        projectId: string,
+        opts: { cursor: string | null; limit: number; q?: string },
+      ) => {
+        seen.push([projectId, opts]);
+        return { items: [], next_cursor: null };
+      },
+    } as unknown as ApiClient;
+    const state = createSessionsState({
+      client,
+      repos: {
+        sessions: createSessionsRepo(null),
+        messageBlocks: createMessageBlocksRepo(null),
+      },
+      tracked,
+    });
+    const [q, setQ] = createSignal<string | null>("outbox");
+    const page = state.page(() => ({ projectId: "p1", cursor: null, q: q() }));
+    await flush();
+    expect(seen).toEqual([["p1", { cursor: null, limit: 50, q: "outbox" }]]);
+    // A different q is a different loader key: refetches with the new query.
+    setQ("diacritics");
+    await flush();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toEqual([
+      "p1",
+      { cursor: null, limit: 50, q: "diacritics" },
+    ]);
+    // The same key does not refetch.
+    setQ("diacritics");
+    await flush();
+    expect(seen).toHaveLength(2);
+    expect(page.loader.data()?.items).toEqual([]);
+  });
+
   it("recall.search forwards the project query and scope", async () => {
     const seen: unknown[] = [];
     const client = {
