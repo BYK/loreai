@@ -1,7 +1,12 @@
 import { createMemo, type Accessor } from "solid-js";
 import { createSignal } from "solid-js";
 
-import type { KnowledgeEntry, KnowledgeVersionHistory } from "~/contracts";
+import type {
+  AllKnowledgeQuery,
+  CrossProjectKnowledgeEntry,
+  KnowledgeEntry,
+  KnowledgeVersionHistory,
+} from "~/contracts";
 import type { ApiClient } from "~/lib/api";
 import type { Repository } from "~/db";
 import { createLoader, type Loader } from "~/lib/loader";
@@ -10,6 +15,7 @@ import { createEntityStore } from "./entity-store";
 import type { CursorPage, KnowledgeQuery } from "~/contracts";
 import { mergeCursorPage, type MergedPage } from "./pages";
 import {
+  allKnowledgeQueryKey,
   isDefaultKnowledgeQuery,
   KNOWLEDGE_PAGE_SIZE,
   knowledgeQueryKey,
@@ -143,6 +149,50 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
     return { loader, status: statusOf(loader) };
   }
 
+  function allPage(source: Accessor<AllKnowledgeQuery | null>): {
+    loader: Loader<CursorPage<CrossProjectKnowledgeEntry>>;
+    status: Accessor<KeyStatus>;
+  } {
+    const keyed = createMemo(() => {
+      const value = source();
+      return value ? { value, key: allKnowledgeQueryKey(value) } : null;
+    });
+    const loader = createLoader(
+      () => keyed()?.key ?? null,
+      (key, signal) => {
+        const current = keyed();
+        if (!current || current.key !== key)
+          throw new Error("All-knowledge query changed");
+        const query = current.value;
+        return tracked(() =>
+          client.listKnowledgePage(
+            {
+              limit: KNOWLEDGE_PAGE_SIZE,
+              q: query.q || undefined,
+              category: query.category ?? undefined,
+              scope: query.scope ?? undefined,
+              sort: query.sort,
+              cursor: query.cursor,
+              project: query.project ?? undefined,
+            },
+            signal,
+          ),
+        );
+      },
+      {
+        async onServer(_, value) {
+          for (const item of value.items) {
+            store.reconcileOne(item);
+            await repo.put(item, item.project_id ?? "global", {
+              keepScope: true,
+            });
+          }
+        },
+      },
+    );
+    return { loader, status: statusOf(loader) };
+  }
+
   function listPaged(projectId: string): {
     page: Accessor<MergedPage<KnowledgeEntry> | undefined>;
     status: Accessor<KeyStatus>;
@@ -219,6 +269,7 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
   return {
     list,
     page,
+    allPage,
     listPaged,
     entry,
     versions,

@@ -1,4 +1,4 @@
-import type { Component } from "solid-js";
+import type { JSX } from "solid-js";
 import { For, Match, Show, Switch, createEffect, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import {
@@ -30,9 +30,13 @@ import {
 } from "../ui/select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 
+type KnowledgeTableRow = KnowledgeEntry & {
+  project_name?: string | null;
+};
+
 export const prevCursorOf = new Map<string, string | null>();
 const features = tableFeatures({});
-const helper = createColumnHelper<typeof features, KnowledgeEntry>();
+const helper = createColumnHelper<typeof features, KnowledgeTableRow>();
 const SORT_LABELS: Record<KnowledgeQuery["sort"], string> = {
   updated_desc: "Updated",
   created_desc: "Created",
@@ -40,14 +44,22 @@ const SORT_LABELS: Record<KnowledgeQuery["sort"], string> = {
   title_asc: "Title A–Z",
 };
 
-export const KnowledgeTable: Component<{
-  projectId: string;
-  query: KnowledgeQuery;
+export type KnowledgeTableRoutes<Q extends KnowledgeQuery> = {
+  list(query: Q): string;
+  entry(knowledgeId: string, query: Q): string;
+  defaultQuery: Q;
+};
+
+export type KnowledgeTableProps<Q extends KnowledgeQuery> = (
+  | { projectId: string; routes?: never }
+  | { routes: KnowledgeTableRoutes<Q>; projectId?: never }
+) & {
+  query: Q;
   selectedId?: string;
   page: {
     loader: {
       data: () =>
-        | { items: KnowledgeEntry[]; next_cursor: string | null }
+        | { items: KnowledgeTableRow[]; next_cursor: string | null }
         | undefined;
       loading: () => boolean;
       error: () => unknown;
@@ -56,7 +68,14 @@ export const KnowledgeTable: Component<{
     };
     status: () => { stale: boolean; partial: boolean };
   };
-}> = (props) => {
+  showProject?: boolean;
+  extraFilters?: JSX.Element;
+  extraFiltersActive?: boolean;
+};
+
+export function KnowledgeTable<Q extends KnowledgeQuery>(
+  props: KnowledgeTableProps<Q>,
+) {
   const navigate = useNavigate();
   const [active, setActive] = createSignal(0);
   let tableRef: HTMLTableElement | undefined;
@@ -72,13 +91,34 @@ export const KnowledgeTable: Component<{
     if (!table || !table.contains(document.activeElement)) return;
     table.querySelector<HTMLTableRowElement>("tr[data-active]")?.focus();
   });
-  const go = (query: KnowledgeQuery) =>
-    navigate(knowledgeListHref(props.projectId, query));
-  const clear = () => go({ ...DEFAULT_KNOWLEDGE_QUERY });
+  const go = (query: Q) =>
+    navigate(
+      props.routes
+        ? props.routes.list(query)
+        : knowledgeListHref(props.projectId, query),
+    );
+  const entryHref = (id: string) =>
+    props.routes
+      ? props.routes.entry(id, props.query)
+      : knowledgeHref(props.projectId, id, props.query);
+  const clear = () =>
+    go(
+      props.routes ? props.routes.defaultQuery : (DEFAULT_KNOWLEDGE_QUERY as Q),
+    );
+  const filtersActive = () =>
+    !!(
+      props.query.q ||
+      props.query.category ||
+      props.query.scope ||
+      props.extraFiltersActive
+    );
   const columns = helper.columns([
     helper.accessor("title", { header: "title" }),
     helper.accessor("category", { header: "category" }),
     helper.display({ id: "scope", header: "scope" }),
+    ...(props.showProject
+      ? [helper.display({ id: "project", header: "project" })]
+      : []),
     helper.accessor("confidence", { header: "confidence" }),
     helper.display({ id: "updated", header: "updated" }),
   ]);
@@ -154,6 +194,7 @@ export const KnowledgeTable: Component<{
         </form>
         {filter("category", KNOWLEDGE_CATEGORIES, "All categories")}
         {filter("scope", KNOWLEDGE_SCOPES, "Any scope")}
+        {props.extraFilters}
         <Select
           value={props.query.sort}
           onChange={(value) =>
@@ -213,12 +254,12 @@ export const KnowledgeTable: Component<{
           <StateCard
             kind="empty"
             title={
-              props.query.q || props.query.category || props.query.scope
+              filtersActive()
                 ? "No knowledge matches these filters"
                 : "No knowledge extracted yet"
             }
             action={
-              props.query.q || props.query.category || props.query.scope ? (
+              filtersActive() ? (
                 <Button variant="link" size="sm" onClick={clear}>
                   Clear filters
                 </Button>
@@ -252,6 +293,7 @@ export const KnowledgeTable: Component<{
                           <th
                             class={`px-2 py-2 font-semibold ${
                               id === "scope" ||
+                              id === "project" ||
                               id === "confidence" ||
                               id === "updated"
                                 ? "hidden sm:table-cell"
@@ -301,25 +343,11 @@ export const KnowledgeTable: Component<{
                       row.original.id === props.selectedId ? "true" : undefined
                     }
                     class="h-11 cursor-pointer border-b border-line hover:bg-soft"
-                    onClick={() =>
-                      navigate(
-                        knowledgeHref(
-                          props.projectId,
-                          row.original.id,
-                          props.query,
-                        ),
-                      )
-                    }
+                    onClick={() => navigate(entryHref(row.original.id))}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        navigate(
-                          knowledgeHref(
-                            props.projectId,
-                            row.original.id,
-                            props.query,
-                          ),
-                        );
+                        navigate(entryHref(row.original.id));
                       } else if (event.key === "ArrowDown") {
                         event.preventDefault();
                         setActive(Math.min(rows().length - 1, index() + 1));
@@ -336,6 +364,7 @@ export const KnowledgeTable: Component<{
                             cell.column.id === "title" ? "max-w-0" : ""
                           } ${
                             cell.column.id === "scope" ||
+                            cell.column.id === "project" ||
                             cell.column.id === "confidence" ||
                             cell.column.id === "updated"
                               ? "hidden sm:table-cell"
@@ -359,6 +388,11 @@ export const KnowledgeTable: Component<{
                             ) : (
                               "project"
                             )
+                          ) : cell.column.id === "project" ? (
+                            (row.original.project_name ??
+                            (row.original.project_id
+                              ? "Unknown project"
+                              : "Global"))
                           ) : cell.column.id === "confidence" ? (
                             <>
                               {formatConfidence(row.original.confidence)}{" "}
@@ -419,4 +453,4 @@ export const KnowledgeTable: Component<{
       {/* Virtualization is intentionally absent because each page contains at most 50 rows. */}
     </div>
   );
-};
+}

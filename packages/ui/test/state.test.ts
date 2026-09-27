@@ -20,6 +20,7 @@ import {
 import { createRepository } from "~/db/repository";
 import type { MessageBlock } from "~/db";
 import type {
+  AllKnowledgeQuery,
   KnowledgeEntry,
   ProjectSummary,
   SessionDetail,
@@ -403,6 +404,50 @@ describe("knowledge state", () => {
 
     expect(paged.status().error).toBeUndefined();
     expect(paged.page()?.items).toEqual([ENTRIES[0]]);
+  });
+
+  it("does not serve cached rows from the cross-project page", async () => {
+    const entry = ENTRIES[0];
+    if (!entry) throw new Error("Missing test knowledge entry");
+    const result = deferred<{
+      items: Array<KnowledgeEntry & { project_name: string | null }>;
+      next_cursor: string | null;
+    }>();
+    const getScope = vi.fn(async () => [entry]);
+    const collection = vi.fn(async () => undefined);
+    const repo = {
+      ...createKnowledgeRepo(null),
+      getScope,
+      collection,
+    };
+    const listKnowledgePage = vi.fn(() => result.promise);
+    const state = createKnowledgeState({
+      client: { listKnowledgePage } as unknown as ApiClient,
+      repo,
+      tracked,
+    });
+    const query: AllKnowledgeQuery = {
+      q: "",
+      category: null,
+      scope: null,
+      sort: "updated_desc",
+      cursor: null,
+      project: null,
+    };
+    const page = state.allPage(() => query);
+
+    await flush();
+    expect(page.loader.data()).toBeUndefined();
+    expect(page.loader.loading()).toBe(true);
+    expect(getScope).not.toHaveBeenCalled();
+    expect(collection).not.toHaveBeenCalled();
+
+    result.resolve({
+      items: [{ ...entry, project_name: "lore" }],
+      next_cursor: null,
+    });
+    await flush();
+    expect(page.loader.data()?.items[0]?.project_name).toBe("lore");
   });
 });
 
