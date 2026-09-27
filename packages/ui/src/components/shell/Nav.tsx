@@ -211,7 +211,7 @@ export const Nav: Component<NavProps> = (props) => {
         <Match when={props.projects}>
           {(_projects) => (
             <>
-              <Show when={sections().pinned.length > 0}>
+              <Show when={!sections().matches && sections().pinned.length > 0}>
                 <NavHeading>Pinned</NavHeading>
                 <For each={sections().pinned}>
                   {(project) => (
@@ -241,16 +241,18 @@ export const Nav: Component<NavProps> = (props) => {
                 when={sections().matches}
                 fallback={
                   <>
-                    <NavHeading>Recent</NavHeading>
-                    <For each={sections().recent}>
-                      {(project) => (
-                        <ProjectRow
-                          project={project}
-                          activeProjectId={props.activeProjectId}
-                          section="recent"
-                        />
-                      )}
-                    </For>
+                    <Show when={sections().recent.length > 0}>
+                      <NavHeading>Recent</NavHeading>
+                      <For each={sections().recent}>
+                        {(project) => (
+                          <ProjectRow
+                            project={project}
+                            activeProjectId={props.activeProjectId}
+                            section="recent"
+                          />
+                        )}
+                      </For>
+                    </Show>
                     <Show when={sections().rest.length > 0}>
                       <button
                         type="button"

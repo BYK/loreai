@@ -168,6 +168,32 @@ describe("Nav project sections", () => {
     expect(sectionLabels("recent").length).toBe(5);
   });
 
+  it("does not duplicate pinned projects in filtered matches", async () => {
+    pins().toggle("delta");
+    renderNav(SEVEN);
+    const input = await screen.findByTestId("nav-project-filter");
+
+    fireEvent.input(input, { target: { value: "del" } });
+
+    expect(screen.queryByRole("heading", { name: "Pinned" })).toBeNull();
+    expect(sectionLabels("matches")).toEqual(["delta0"]);
+    expect(
+      screen
+        .getAllByTestId("nav-project")
+        .filter((row) => row.textContent?.startsWith("delta")),
+    ).toHaveLength(1);
+  });
+
+  it("does not render an empty Recent section", async () => {
+    const projects = SEVEN.slice(0, 3);
+    for (const item of projects) pins().toggle(item.id);
+
+    renderNav(projects);
+    await screen.findAllByTestId("nav-project");
+
+    expect(screen.queryByRole("heading", { name: "Recent" })).toBeNull();
+  });
+
   it("no filter box and no All button with ≤5 projects and no pins", async () => {
     renderNav(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");
