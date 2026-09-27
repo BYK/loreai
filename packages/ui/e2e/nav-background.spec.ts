@@ -25,6 +25,10 @@ async function navColor(page: Page): Promise<string> {
  * scrolled container belongs to the nav (not the page background).
  */
 async function assertNavCoversScroll(page: Page, scroller: Locator) {
+  const allProjects = scroller.getByTestId("nav-all-projects");
+  if ((await allProjects.getAttribute("aria-expanded")) === "false") {
+    await allProjects.click();
+  }
   await expect
     .poll(() => scroller.getByTestId("nav-project").count())
     .toBeGreaterThanOrEqual(60);
