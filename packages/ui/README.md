@@ -1404,7 +1404,7 @@ packages/ui/
   src/reader/             blocks.ts (block model), anchors.ts (source anchors), render.ts (per-part LRU), specimen.ts (dev fixture data)
   src/components/ui/      copied Solid UI primitives (owned source, see ATTRIBUTION.md)
   src/compat/             compatibility smoke page + probes
-  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts, hash.ts, safe-html.ts (Markdown/code sanitising boundary)
+  src/lib/                api.ts (typed client), loader.ts, connection.ts, theme.ts, format.ts, utils.ts, hash.ts, money.ts (formatMoney: $, cents < $100, whole dollars ≥ $100, <$0.01), safe-html.ts (Markdown/code sanitising boundary)
   src/contracts/          ArkType response contracts (relative imports only) + ContractError
   src/db/                 IndexedDB: schema/open/repository (+TTL/LRU)/local stores/limits
   src/state/              Solid state: entity store, cursor pages, projects/knowledge/sessions, cache status
