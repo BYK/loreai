@@ -12,6 +12,7 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
+import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { boundFallbackHistory } from "./fallback-history";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
@@ -3711,14 +3712,8 @@ export function appendKnowledgePromptDelta(input: {
   return true;
 }
 
-/**
- * Window (ms) during which a new mutation merges into the LATEST block instead
- * of appending a new one. Bounds rapid-fire curator batches (e.g. 3 entries
- * curated back-to-back) to a single `[memory refreshed]` cycle. 60s — long
- * enough to absorb a curator batch, short enough that an idle session's next
- * mutation (after the user resumes) gets its own block.
- */
-const KNOWLEDGE_DELTA_DEBOUNCE_MS = 60_000;
+// KNOWLEDGE_DELTA_DEBOUNCE_MS lives in prompt-delta-constants.ts (shared with
+// the session-context API, which must not import this module).
 
 /** True when the latest block's debounce window still covers `now`. */
 function withinDebounceWindow(rawSelector: string, now: number): boolean {
@@ -20513,6 +20508,17 @@ async function handleConversationTurnPrepared(
       budget: modelBudget,
     });
   }
+  // Record the accepted transform's stats so postResponse can persist them
+  // into the assistant turn's temporal metadata (session-context API, #1924).
+  temporalInput = Object.freeze({
+    ...temporalInput,
+    gradient: {
+      layer: result.layer,
+      rawTokens: result.rawTokens,
+      totalTokens: result.totalTokens,
+      distilledTokens: result.distilledTokens,
+    },
+  });
   preparation.assertActive();
   checkpoint?.finish(result.messages);
   // This header is deliberately optimistic: the candidate checkpoint is not

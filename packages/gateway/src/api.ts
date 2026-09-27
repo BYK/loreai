@@ -44,6 +44,7 @@ import {
   handleShowSessionCursor,
 } from "./api-lists";
 import { parseBooleanParam } from "./query-bool";
+import { handleSessionContext } from "./session-context-api";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -965,6 +966,20 @@ export async function handleAPIRequest(
         );
       }
       return handleSearchSession(url, project, params.id);
+    }
+
+    // GET /api/v1/sessions/:id/context
+    params = matchRoute(pathname, "/api/v1/sessions/:id/context");
+    if (params) {
+      const project = resolveProject(url);
+      if (!project) {
+        return errorResponse(
+          400,
+          "invalid_request",
+          "Session context requires ?git_remote or ?path to identify the project",
+        );
+      }
+      return handleSessionContext(url, project, params.id);
     }
 
     // GET /api/v1/distillations/:id
