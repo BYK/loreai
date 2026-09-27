@@ -663,6 +663,41 @@ Focus is logical (`focusKey`): arrow keys move it across rows
 that may not be mounted; the DOM focus lands when the virtualiser mounts
 the row.
 
+**Newest-first landing and lazy older history (#1923).** Once a session's
+rows first exist, the reader lands at the **newest** message
+(`scrollToIndex(last, {align: "end"})`, re-issued once on the next frame
+because rows enter at the 120 px estimate) unless a `?a=` deep link is
+pending — the link resolution owns the scroll then, and the reader only
+marks itself as landed. The rule lives in `src/reader/lazy-older.ts` as
+pure decision helpers the scroll handler applies. Scrolling **up** near
+the top pages older history in by itself: `shouldLoadOlder` requires the
+reader landed, no deep link pending, `hasOlder === true`, no page in
+flight, no reported `olderError` (an error is only retried by the
+explicit Retry control), an *upward* move (`scrollTop < prevScrollTop` —
+this excludes the landing and prepend-compensation scrolls, which only
+ever move down), and `scrollTop - listOffset < clientHeight` (one
+viewport of margin). A page that lands shorter than a viewport chains
+(`shouldChainOlder`, the same gates minus the moved-up rule) until the
+window fills or the server says the start was reached; the chain only
+continues pages that actually prepended rows, so a no-progress owner
+cannot loop the loader. Older history never loads on mount — the scroll
+must move up first.
+
+The older-history affordance is a fixed-height status slot
+(`data-testid="older-status"`) between the sticky toolbar and the row
+list, inside the scroll element — always present, so its content changing
+never shifts rows. It renders exactly what the server reported: a
+loading line (`older-loading`) while a page is in flight, an `role=alert`
+line plus Retry (`older-retry`) after a failed page, a "Scroll up to load
+older history" hint plus the explicit **Load older history** button
+(`load-older`) while older pages remain, `history-start` once the start
+of captured history is loaded, and nothing while `hasOlder` is unknown.
+Two jump controls sit at the toolbar's right edge: **Jump to latest**
+(`jump-to-latest`, shown while the last row is not mounted) and **Jump
+to start** (`jump-to-start`, shown only once `hasOlder === false` and the
+first row is not mounted — it is never offered while history is still
+incomplete).
+
 **Selection and deep links.** `src/reader/selection.ts` reads the DOM
 `Selection` into a `SelectionReading`: a `part` reading (block, part,
 start/end into the displayed text, quote) when the range lies inside one
@@ -717,7 +752,25 @@ availability will come from adapters later). The search
 summary repeats the detail (`Searched the loaded history only · …`) when
 the view is partial.
 
-### In-session search (#1849)
+### In-session search (#1849, quick-search bar #1922)
+
+The search UI is a collapsible bar inside the reader's sticky toolbar
+(`src/components/reader/QuickSearch.tsx`, opened by **Ctrl/Cmd+F** —
+`isFindShortcut` in `src/reader/quick-search.ts` — from anywhere the
+reader has focus, or the toolbar **Find** button, `search-open`, which is
+the mobile entry point). A second Ctrl/Cmd+F *inside* the search input is
+left untouched so it falls through to the browser's own find. Escape in
+the input, or the close button (`search-close`), shuts the bar and
+returns focus to the element that had it (the row, or the `session-scroll`
+element as a fallback). Enter / Shift+Enter step through hits and the
+`search-count` shows `n/m` (`0/m` before any cycling, `…/m` while the
+scan runs). Every hit in a mounted row is marked with
+`mark.passage-search-all` (subtle accent tint) via
+`HighlightController.searchHits`; the current hit keeps
+`mark.passage-search` (accent outline). When the view is partial and the
+scan finished, the coverage line also offers **Load older history**
+(`search-load-older`), which pages older history in and — since a rows
+change re-scans the active query — grows the match count.
 
 `src/reader/search.ts` scans the **logical** rows (`ReaderRow[]`), not the
 DOM, so hits in rows the virtualiser has not mounted are found. Matching is
@@ -901,6 +954,15 @@ IndexedDB write-through rejects; counted and logged, reader untouched),
 **Verify** (`verifyAgainst`: duplicates / missing / mismatched / extra /
 ordering against the engine's expected state) and **Metrics** (JSON
 report, `busy-report-json`).
+
+Query params: `?blocks=` (block count, capped at `BUSY_MAX_BLOCKS`),
+`?seed=`, `?a=` (a deep link), and `?paged=<n>` (#1923 paged mode: the
+reader starts with only the newest *n* generated messages, `hasOlder`
+pages in the rest n at a time with a ~150 ms delay, `?failOlder=1` makes
+the first page reject once so the error/retry path is exercisable; the
+distillation rows are left out in paged mode so `aria-setsize` equals the
+loaded message count). `e2e/paging-fixture.spec.ts` covers the paged
+mode on the Vite dev server.
 
 `src/fixture/busy-metrics.ts` records input→next-paint (`PerformanceObserver`
 `event`, 16 ms `durationThreshold`, `duration` is bucketed to 8 ms), frame
