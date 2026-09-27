@@ -102,7 +102,7 @@ export const Nav: Component<NavProps> = (props) => {
     <nav
       aria-label="Workspace"
       class={cn(
-        "flex h-full flex-col border-r border-line bg-nav px-3.5 py-6",
+        "flex min-h-full flex-col border-r border-line bg-nav px-3.5 py-6",
         props.class,
       )}
     >
