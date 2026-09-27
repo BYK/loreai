@@ -78,14 +78,14 @@ import {
 // Response helpers (mirrors api.ts; kept local so this module has no cycle)
 // ---------------------------------------------------------------------------
 
-function jsonResponse(body: unknown, status = 200): Response {
+export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function errorResponse(
+export function errorResponse(
   status: number,
   type: string,
   message: string,
@@ -102,7 +102,7 @@ export class BadRequest extends Error {
   }
 }
 
-function toResponse(err: unknown): Response {
+export function toResponse(err: unknown): Response {
   if (err instanceof BadRequest)
     return errorResponse(400, err.errorType, err.message);
   throw err;
@@ -112,7 +112,7 @@ function toResponse(err: unknown): Response {
 // Cursor codec
 // ---------------------------------------------------------------------------
 
-const CURSOR_VERSION = 1;
+export const CURSOR_VERSION = 1;
 
 type KnowledgeCursor = {
   v: typeof CURSOR_VERSION;
@@ -161,7 +161,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** Decode a token into a plain object, or throw `invalid_cursor`. */
-function decodeCursorObject(token: string): Record<string, unknown> {
+export function decodeCursorObject(token: string): Record<string, unknown> {
   // base64url alphabet only — anything else is rejected before decoding so a
   // sloppy token can't decode to something unexpected.
   if (!/^[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) {
@@ -308,7 +308,11 @@ export function wantsCursorMode(url: URL): boolean {
   );
 }
 
-function parseLimit(url: URL, defaultLimit: number, maxLimit: number): number {
+export function parseLimit(
+  url: URL,
+  defaultLimit: number,
+  maxLimit: number,
+): number {
   const raw = url.searchParams.get("limit");
   if (raw === null || raw === "") return defaultLimit;
   if (!/^\d+$/.test(raw))
@@ -364,7 +368,7 @@ export function parseKnowledgeListOptions(url: URL): KnowledgeListOptions {
 
 /** Present the stable logical_id as the external id (A2, #823), matching the
  *  legacy list and `GET /knowledge/:id`. */
-function externalize<T extends { logical_id: string }>(e: T): T {
+export function externalize<T extends { logical_id: string }>(e: T): T {
   return { ...e, id: e.logical_id };
 }
 

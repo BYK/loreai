@@ -124,14 +124,22 @@ describe("GET /api/v1/projects", () => {
 
   it("returns projects after seeding", async () => {
     const { projectId } = await seedProject();
-    const projects =
-      await apiJSON<Array<{ id: string; name: string | null }>>(
-        "/api/v1/projects",
-      );
+    const projects = await apiJSON<
+      Array<{
+        id: string;
+        name: string | null;
+        last_activity: number | null;
+      }>
+    >("/api/v1/projects");
     expect(projects.length).toBeGreaterThanOrEqual(1);
     const found = projects.find((p) => p.id === projectId);
     expect(found).toBeDefined();
     expect(found?.name).toBe("test-project");
+    for (const p of projects) {
+      expect(
+        p.last_activity === null || typeof p.last_activity === "number",
+      ).toBe(true);
+    }
   });
 });
 
@@ -1453,6 +1461,14 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
         kind: "knowledge",
         project: projectId,
         sort: "bogus",
+        key: 1,
+        id: "x",
+      }),
+      forged({
+        v: 1,
+        kind: "knowledge_all",
+        project: null,
+        sort: "updated_desc",
         key: 1,
         id: "x",
       }),

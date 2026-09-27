@@ -20,6 +20,10 @@ const makePair = (
   similarity: 0.94,
   rationale: "These rules conflict.",
   detected_at: Date.UTC(2026, 8, 1, 10),
+  project_id_a: "p-lore",
+  project_name_a: "lore",
+  project_id_b: "p-lore",
+  project_name_b: "lore",
   ...overrides,
 });
 
@@ -169,5 +173,84 @@ describe("ContradictionsPage", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.getByText("Rule A")).toBeInTheDocument());
+  });
+
+  it("groups pairs by project with the cross-project group last", async () => {
+    mount(
+      clientWith({
+        listContradictions: async () => ({
+          contradictions: [
+            makePair(),
+            makePair({
+              id_a: "pa2",
+              id_b: "pb2",
+              title_a: "Rule A2",
+              title_b: "Rule B2",
+            }),
+            makePair({
+              id_a: "other-a",
+              id_b: "other-b",
+              title_a: "Other A",
+              title_b: "Other B",
+              project_id_a: "p-other",
+              project_name_a: "other",
+              project_id_b: "p-other",
+              project_name_b: "other",
+            }),
+            makePair({
+              id_a: "cross-a",
+              id_b: "cross-b",
+              title_a: "Cross A",
+              title_b: "Cross B",
+              project_id_b: "p-other",
+              project_name_b: "other",
+            }),
+          ],
+          total: 4,
+        }),
+      }),
+    );
+
+    await screen.findByText("Rule A");
+    const groups = screen.getAllByTestId("contradiction-group");
+    expect(groups).toHaveLength(3);
+    expect(groups.map((g) => g.getAttribute("data-group"))).toEqual([
+      "p-lore",
+      "p-other",
+      "cross-project",
+    ]);
+    const toggles = screen.getAllByTestId("contradiction-group-toggle");
+    expect(toggles[0]).toHaveTextContent("lore (2)");
+    expect(toggles[1]).toHaveTextContent("other (1)");
+    expect(toggles[2]).toHaveTextContent("Cross-project (1)");
+    expect(groups[2]).toHaveTextContent(
+      "Entries from different projects (or global rules)",
+    );
+    expect(groups[2]).toHaveTextContent("A: lore · B: other");
+  });
+
+  it("collapses and expands a group via its header", async () => {
+    mount(clientWith({}));
+    const toggle = await screen.findByTestId("contradiction-group-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByTestId("contradiction-row")).toHaveLength(1);
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryAllByTestId("contradiction-row")).toHaveLength(0);
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getAllByTestId("contradiction-row")).toHaveLength(1);
+  });
+
+  it("keeps collapsed state across a list refresh", async () => {
+    const listContradictions = vi
+      .fn<ApiClient["listContradictions"]>()
+      .mockResolvedValue(openPairs);
+    mount(clientWith({ listContradictions }));
+    const toggle = await screen.findByTestId("contradiction-group-toggle");
+    fireEvent.click(toggle);
+    expect(screen.queryAllByTestId("contradiction-row")).toHaveLength(0);
   });
 });

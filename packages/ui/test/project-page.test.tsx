@@ -17,6 +17,7 @@ const project: ProjectSummary = {
   session_count: 0,
   message_count: 0,
   distillation_count: 0,
+  last_activity: null,
 };
 
 const client = {

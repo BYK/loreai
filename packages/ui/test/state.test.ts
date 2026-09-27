@@ -44,6 +44,7 @@ const PROJECTS: ProjectSummary[] = [
     session_count: 1,
     message_count: 3,
     distillation_count: 0,
+    last_activity: null,
   },
 ];
 

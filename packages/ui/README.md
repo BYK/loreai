@@ -42,11 +42,32 @@ pairs, matching the retired dashboard; resolving or dismissing a pair reveals
 the next older one. Keeping A or B asks for confirmation and removes the
 losing knowledge entry. Keeping both preserves both entries and marks the pair
 dismissed so the detector does not reopen it. The route stays behind the
-management boundary and writes are refused in hosted mode.
+management boundary and writes are refused in hosted mode. Pairs are grouped
+by project (#1919) — each project's pairs render under a collapsible header
+with a count, and pairs spanning two projects (or involving a global entry)
+fall into a trailing "Cross-project" group labelled with both sides' project
+names.
 
 Tests:
 - pnpm --filter @loreai/gateway exec vitest run test/dashboard-api.test.ts test/route-registry.test.ts
 - pnpm --filter @loreai/ui exec vitest run test/contradictions-page.test.tsx test/contracts.test.ts test/api-client.test.ts
+- pnpm --filter @loreai/ui test:e2e
+
+### Sidebar projects (#1918)
+
+`GET /api/v1/projects` now returns a `last_activity` timestamp (max of the
+project's last temporal message and last knowledge update; null when it has
+neither) and rows arrive recency-first. The nav renders three surfaces on
+top: a **Pinned** section, a **Recent** section (top 5 non-pinned projects by
+`last_activity`, nulls last), and everything else behind an **All projects**
+toggle plus a filter input that matches name or path. Pins are local working
+state kept in localStorage under `lore.ui.pinnedProjects` — deliberately
+outside the disposable IndexedDB API cache, so they survive cache resets —
+and are never pruned when a project disappears from the list.
+
+Tests:
+- pnpm --filter @loreai/ui exec vitest run test/nav-projects.test.tsx test/contracts.test.ts
+- pnpm exec vitest run packages/core/test/list-projects.test.ts
 - pnpm --filter @loreai/ui test:e2e
 
 Reference documents:
@@ -1157,6 +1178,8 @@ The owner signs this gate off; the implementation agent does not. Each row names
   be deleted without loss of Lore data; a reset never touches the server.
 - The SPA calls the **read** routes (`GET /api/v1/projects`,
   `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),
+  `GET /api/v1/knowledge` (cross-project cursor list) and
+  `GET /api/v1/knowledge/search?q=` (ranked cross-project search),
   `GET /api/v1/knowledge/:id` (+ `/versions`), sessions, distillations,
   entities and the folk status routes), and since UI-08 the entity
   **write** routes too (`PATCH`/`DELETE /api/v1/entities/:id`, `POST
