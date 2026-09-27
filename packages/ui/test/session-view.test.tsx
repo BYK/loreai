@@ -539,7 +539,13 @@ describe("SessionView: history and keyboard", () => {
     expect(screen.queryByTestId("load-older")).toBeNull();
     expect(screen.getByTestId("history-start")).toBeInTheDocument();
     // The reader landed at the newest row and the prepend kept the
-    // viewport there; scroll to the top to see the prepended rows.
+    // viewport there; wait out the landing's frame-by-frame re-issue,
+    // then scroll to the top to see the prepended rows.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
     const scroll = screen.getByTestId("session-scroll");
     scroll.scrollTop = 0;
     scroll.dispatchEvent(new Event("scroll"));
@@ -1248,6 +1254,63 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     }
     await tick();
     expect(scroll.scrollTop).toBe(0);
+  });
+
+  it("does not re-pin the view when the user scrolls during an in-flight older page", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    let apply: (() => void) | null = null;
+    let settle: (() => void) | null = null;
+    const onLoadOlder = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          apply = () =>
+            setMsgs((prev) => [
+              // Unique ids: `older()` reuses `old-i`, which would collide
+              // with the loaded rows and dedupe instead of prepending.
+              ...older(3).map((m, i) => ({ ...m, id: `page-${i}` })),
+              ...prev,
+            ]);
+          settle = resolve;
+        }),
+    );
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      hasOlder: true,
+      messageCount: 43,
+      onLoadOlder,
+    });
+    // Let the landing loop run out so it cannot race the assertions.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    // An upward move to the top starts the near-top auto-load — the path
+    // that pins the row under the eye.
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 0);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // The user scrolls while the page is in flight…
+    scroll.dispatchEvent(new Event("wheel"));
+    fireScroll(scroll, 200);
+    // …then it lands: the prepended rows' estimate delta still applies on
+    // top of where the user left the view, but nothing drags it back.
+    apply!();
+    await tick();
+    settle!();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(scroll.scrollTop).toBe(200 + 3 * 120);
   });
 
   it("counts wheel, touch, pointer and navigation keys as user scroll input", () => {

@@ -602,6 +602,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
      * lands within the first frame leaves the synchronous pin pointing at
      * pre-settle positions, and repinning to it would drag the view. */
     pinFresh: boolean;
+    /** The user-scroll serial when the page was requested — a gesture
+     * between request and landing drops the pin and re-anchors the
+     * estimate-delta compensation to where the user left the view. */
+    serialAtStart: number;
     forLink: string | null;
   } | null = null;
 
@@ -643,6 +647,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       anchor: last ? { key: String(last.key), index: last.index } : null,
       pin: enablePin ? pinNow() : null,
       pinFresh: false,
+      serialAtStart: userSerial() ?? -1,
       forLink: scrollTarget,
     };
     // Pin the row under the eye, refreshed every frame until the page
@@ -656,7 +661,15 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       let frames = 0;
       const serial0 = userSerial() ?? -1;
       const capturePin = () => {
-        if (serial0 >= 0 && userSerial() !== serial0) return;
+        if (serial0 >= 0 && userSerial() !== serial0) {
+          // The user took the scroll mid-load: the pin captured so far
+          // points at a screen they have already moved away from.
+          if (prepend) {
+            prepend.pin = null;
+            prepend.pinFresh = false;
+          }
+          return;
+        }
         if (!prepend || rows().length !== countAtCall) return;
         if (++frames > 60) return;
         const mounted = virtualizer.getVirtualItems();
@@ -713,7 +726,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // they are measured.
         const delta = virtualizer.getTotalSize() - before.total;
         if (delta <= 0) return;
-        const target = before.top + delta;
+        // A user gesture during the load owns the position: re-anchor to
+        // where they left it (prepended height still compensates on top)
+        // and drop the pin — repinning would drag the view back.
+        const userTook =
+          before.serialAtStart >= 0 && userSerial() !== before.serialAtStart;
+        const target = (userTook ? scrollEl.scrollTop : before.top) + delta;
         virtualizer.scrollToOffset(target);
         // The virtualizer learns the offset from the scroll event, a frame
         // away. Until then it keeps the rows that sat at the old offset
@@ -725,7 +743,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // adjustment drags the viewport. Keep correcting for a couple dozen
         // frames — a correction that finds no drift costs nothing, and late
         // measures must not get the last word.
-        const pin = before.pinFresh ? before.pin : null;
+        const pin = !userTook && before.pinFresh ? before.pin : null;
         if (pin && typeof requestAnimationFrame === "function") {
           let frames = 0;
           const serial0 = userSerial() ?? -1;
