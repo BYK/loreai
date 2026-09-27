@@ -731,7 +731,25 @@ availability will come from adapters later). The search
 summary repeats the detail (`Searched the loaded history only · …`) when
 the view is partial.
 
-### In-session search (#1849)
+### In-session search (#1849, quick-search bar #1922)
+
+The search UI is a collapsible bar inside the reader's sticky toolbar
+(`src/components/reader/QuickSearch.tsx`, opened by **Ctrl/Cmd+F** —
+`isFindShortcut` in `src/reader/quick-search.ts` — from anywhere the
+reader has focus, or the toolbar **Find** button, `search-open`, which is
+the mobile entry point). A second Ctrl/Cmd+F *inside* the search input is
+left untouched so it falls through to the browser's own find. Escape in
+the input, or the close button (`search-close`), shuts the bar and
+returns focus to the element that had it (the row, or the `session-scroll`
+element as a fallback). Enter / Shift+Enter step through hits and the
+`search-count` shows `n/m` (`0/m` before any cycling, `…/m` while the
+scan runs). Every hit in a mounted row is marked with
+`mark.passage-search-all` (subtle accent tint) via
+`HighlightController.searchHits`; the current hit keeps
+`mark.passage-search` (accent outline). When the view is partial and the
+scan finished, the coverage line also offers **Load older history**
+(`search-load-older`), which pages older history in and — since a rows
+change re-scans the active query — grows the match count.
 
 `src/reader/search.ts` scans the **logical** rows (`ReaderRow[]`), not the
 DOM, so hits in rows the virtualiser has not mounted are found. Matching is

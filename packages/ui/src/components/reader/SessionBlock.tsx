@@ -57,6 +57,11 @@ export interface HighlightController {
   highlight: Accessor<PassageHighlight | null>;
   /** The current in-session search hit; marked independently of the passage. */
   searchHit?: Accessor<PassageHighlight | null>;
+  /** Every in-session search hit for a block part (all-match highlight). */
+  searchHits?: (
+    blockId: string,
+    partIndex: number,
+  ) => readonly PassageHighlight[];
   /** Called with the first `<mark>` each time a highlight is (re)applied. */
   onApplied?: (mark: HTMLElement, highlight: PassageHighlight) => void;
 }
@@ -130,6 +135,20 @@ export const RichText: Component<{
         span: { start: hit.start, end: hit.end, className: "passage-search" },
         source: hit,
       });
+    // Every other hit in this part is marked too — quieter, and never a
+    // scroll target, so it gets no `source` for `onApplied`.
+    for (const other of controller.searchHits?.(props.block, props.part) ??
+      []) {
+      if (hit && samePassage(hit, other)) continue;
+      wanted.push({
+        span: {
+          start: other.start,
+          end: other.end,
+          className: "passage-search-all",
+        },
+        source: other,
+      });
+    }
     if (wanted.length === 0) {
       clearHighlight(el);
       return;

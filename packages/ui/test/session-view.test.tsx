@@ -539,8 +539,8 @@ describe("SessionView: history and keyboard", () => {
     expect(screen.queryByTestId("load-older")).toBeNull();
     expect(screen.getByTestId("history-start")).toBeInTheDocument();
     // The reader landed at the newest row and the prepend kept the
-    // viewport there; wait out the landing's frame-by-frame re-issue,
-    // then scroll to the top to see the prepended rows.
+    // viewport there; wait out the landing's frame-by-frame re-issue, then
+    // scroll to the top to see the prepended rows.
     if (typeof requestAnimationFrame === "function") {
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => requestAnimationFrame(r));
@@ -637,6 +637,12 @@ async function settleSearch() {
   await tick(6);
 }
 
+/** The quick-search bar is collapsed until opened (the toolbar Find
+ * button or Ctrl/Cmd+F); tests reach it through the button. */
+function openQuickSearch() {
+  fireEvent.click(screen.getByTestId("search-open"));
+}
+
 describe("SessionView: coverage badges", () => {
   it("declares captured history without a badge or native-transcript banner", async () => {
     mount();
@@ -707,6 +713,7 @@ describe("SessionView: in-session search", () => {
     expect(mounted()).not.toContain("m.old-47");
     expect(mounted().length).toBeLessThan(messages.length);
 
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     fireEvent.input(input, { target: { value: "needle" } });
     expect(screen.queryByTestId("search-summary")).toBeNull(); // debounced
@@ -760,6 +767,7 @@ describe("SessionView: in-session search", () => {
   it("ignores one-character queries and reports no matches honestly", async () => {
     mount();
     await tick();
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     fireEvent.input(input, { target: { value: "x" } });
     await settleSearch();
@@ -776,6 +784,7 @@ describe("SessionView: in-session search", () => {
   it("turns the current hit into a source anchor and keeps the selection independent of the search", async () => {
     const { changes, anchor } = mount();
     await tick();
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     fireEvent.input(input, { target: { value: "Portability" } });
     await settleSearch();
@@ -858,6 +867,7 @@ describe("SessionView: in-session search", () => {
       );
       scrolled.length = 0;
 
+      openQuickSearch();
       fireEvent.input(screen.getByTestId("search-input"), {
         target: { value: "SQLite" },
       });
@@ -917,6 +927,7 @@ describe("SessionView: in-session search", () => {
       },
     });
     await tick();
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     fireEvent.input(input, { target: { value: "Portability" } });
     await settleSearch();
@@ -942,6 +953,7 @@ describe("SessionView: in-session search", () => {
       document.querySelector('[data-row-key="d.spec-d0"]'),
     ).toHaveTextContent("Compressed context");
     // …but search reads the logical session speech, not the compressed row.
+    openQuickSearch();
     fireEvent.input(screen.getByTestId("search-input"), {
       target: { value: "Compressed context" },
     });
@@ -949,6 +961,148 @@ describe("SessionView: in-session search", () => {
     expect(screen.getByTestId("search-summary")).toHaveTextContent(
       "No matches in loaded history",
     );
+  });
+
+  it("opens on Ctrl+F and Cmd+F, focuses the input and prevents the default", async () => {
+    mount();
+    await tick();
+    expect(screen.queryByTestId("quick-search")).toBeNull();
+    const row = document.querySelector<HTMLElement>("[data-row-key]")!;
+    row.focus();
+    expect(fireEvent.keyDown(row, { key: "f", ctrlKey: true })).toBe(false);
+    await tick();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key: "Escape" });
+    await tick();
+    expect(fireEvent.keyDown(row, { key: "F", metaKey: true })).toBe(false);
+    await tick();
+    expect(document.activeElement).toBe(screen.getByTestId("search-input"));
+  });
+
+  it("lets a second Ctrl+F inside the input fall through to the browser", async () => {
+    mount();
+    await tick();
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    input.focus();
+    expect(fireEvent.keyDown(input, { key: "f", ctrlKey: true })).toBe(true);
+    expect(screen.getByTestId("quick-search")).toBeInTheDocument();
+  });
+
+  it("closes on Escape and returns focus to the row that had it", async () => {
+    mount();
+    await tick();
+    const row = document.querySelector<HTMLElement>("[data-row-key]")!;
+    row.focus();
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key: "Escape" });
+    await tick();
+    expect(screen.queryByTestId("quick-search")).toBeNull();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it("cycles matches on Enter and Shift+Enter with an n/m count", async () => {
+    const messages = longHistory();
+    mount({ messages, messageCount: messages.length });
+    await tick();
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "needle" } });
+    await settleSearch();
+    expect(screen.getByTestId("search-count")).toHaveTextContent("0/3");
+    fireEvent.submit(input.closest("form")!);
+    await tick();
+    expect(screen.getByTestId("search-count")).toHaveTextContent("1/3");
+    fireEvent.submit(input.closest("form")!);
+    await tick();
+    expect(screen.getByTestId("search-count")).toHaveTextContent("2/3");
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    await tick();
+    expect(screen.getByTestId("search-count")).toHaveTextContent("1/3");
+  });
+
+  it("closes via the search-close button", async () => {
+    mount();
+    await tick();
+    openQuickSearch();
+    fireEvent.click(screen.getByTestId("search-close"));
+    await tick();
+    expect(screen.queryByTestId("quick-search")).toBeNull();
+  });
+
+  it("marks every match in mounted rows, not only the current one", async () => {
+    const messages = older(40).map((m, i) => ({
+      ...m,
+      content:
+        i === 3 || i === 4 || i === 5
+          ? `row ${i} carries the needle`
+          : `row ${i} says nothing of interest`,
+    }));
+    mount({ messages, messageCount: messages.length });
+    await tick();
+    openQuickSearch();
+    fireEvent.input(screen.getByTestId("search-input"), {
+      target: { value: "needle" },
+    });
+    await settleSearch();
+    fireEvent.click(screen.getByTestId("search-next"));
+    await tick();
+    expect(document.querySelectorAll("mark.passage-search")).toHaveLength(1);
+    expect(document.querySelectorAll("mark.passage-search-all").length).toBe(2);
+    expect(
+      document
+        .querySelector("mark.passage-search-all")
+        ?.closest("[data-row-key]")
+        ?.getAttribute("data-row-key"),
+    ).not.toBe(
+      document
+        .querySelector("mark.passage-search")
+        ?.closest("[data-row-key]")
+        ?.getAttribute("data-row-key"),
+    );
+  });
+
+  it("offers Load older history only while older pages remain and grows the count after a page lands", async () => {
+    const [msgs, setMsgs] = createSignal(SPECIMEN);
+    const [hasOlder, setHasOlder] = createSignal<boolean | null>(true);
+    const onLoadOlder = vi.fn(async () => {
+      setMsgs((prev) => [
+        ...older(2).map((m) => ({
+          ...m,
+          content: `${m.content} Portability first`,
+        })),
+        ...prev,
+      ]);
+      setHasOlder(false);
+    });
+    mount({
+      get messages() {
+        return msgs();
+      },
+      get hasOlder() {
+        return hasOlder();
+      },
+      messageCount: SPECIMEN.length + 2,
+      onLoadOlder,
+    });
+    await tick();
+    openQuickSearch();
+    fireEvent.input(screen.getByTestId("search-input"), {
+      target: { value: "Portability" },
+    });
+    await settleSearch();
+    const before = screen.getByTestId("search-summary").textContent ?? "";
+    fireEvent.click(screen.getByTestId("search-load-older"));
+    await settleSearch();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // The new page is searched too: the count grew by its two hits.
+    const after = screen.getByTestId("search-summary").textContent ?? "";
+    expect(Number.parseInt(after, 10)).toBe(Number.parseInt(before, 10) + 2);
+    // History is complete now: the escalation is gone.
+    expect(screen.queryByTestId("search-load-older")).toBeNull();
   });
 });
 
@@ -1017,6 +1171,7 @@ describe("SessionView: whole-session search", () => {
   }
 
   async function typeAndSearchWhole(query: string) {
+    openQuickSearch();
     fireEvent.input(screen.getByTestId("search-input"), {
       target: { value: query },
     });
@@ -1191,6 +1346,7 @@ describe("SessionView: whole-session search", () => {
   it("offers no whole-session search when the loaded window is the whole captured history", async () => {
     mount({ hasOlder: false });
     await tick();
+    openQuickSearch();
     fireEvent.input(screen.getByTestId("search-input"), {
       target: { value: "zzz-not-here" },
     });

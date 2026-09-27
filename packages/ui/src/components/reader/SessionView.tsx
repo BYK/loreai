@@ -80,6 +80,8 @@ import {
   shouldLoadOlder,
   watchUserScroll,
 } from "~/reader/lazy-older";
+import { QuickSearchBar } from "~/components/reader/QuickSearch";
+import { isFindShortcut } from "~/reader/quick-search";
 import { buildMarkers } from "~/reader/markers";
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows, type ReaderRow } from "~/reader/rows";
@@ -989,6 +991,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
 
   function onKeyDown(event: KeyboardEvent) {
     const target = event.target as HTMLElement;
+    // Ctrl/Cmd+F opens the quick-search bar from anywhere in the reader —
+    // except the search input itself, where it falls through to the
+    // browser's own find on a second press.
+    if (isFindShortcut(event)) {
+      if (target !== searchInputEl) {
+        event.preventDefault();
+        openQuickSearch();
+      }
+      return;
+    }
     if (
       event.key === "Escape" &&
       (selection() || selectionHint() || linkState().kind !== "none")
@@ -1052,6 +1064,45 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   // -- in-session search ---------------------------------------------------
   const [query, setQuery] = createSignal("");
   const [search, setSearch] = createSignal<SearchState>(SEARCH_IDLE);
+  // The quick-search bar (#1922) collapses behind Ctrl/Cmd+F, Escape, the
+  // toolbar Find button or its own close control; `returnFocus` is the
+  // reader element that had focus when it opened.
+  const [quickSearchOpen, setQuickSearchOpen] = createSignal(false);
+  let searchInputEl: HTMLInputElement | undefined;
+  let returnFocus: HTMLElement | null = null;
+
+  function openQuickSearch() {
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== searchInputEl &&
+      scrollEl?.contains(active)
+    ) {
+      returnFocus = active;
+    }
+    setQuickSearchOpen(true);
+    // Solid renders the bar synchronously; the input is already mounted.
+    searchInputEl?.focus();
+    searchInputEl?.select();
+  }
+
+  function closeQuickSearch() {
+    clearSearch();
+    setQuickSearchOpen(false);
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+      returnFocus = null;
+      return;
+    }
+    const key = focusKey();
+    const row = key
+      ? scrollEl?.querySelector<HTMLElement>(
+          `[data-row-key="${CSS.escape(key)}"]`,
+        )
+      : undefined;
+    if (row) row.focus();
+    else scrollEl?.focus();
+  }
   const [hitIndex, setHitIndex] = createSignal(-1);
   const [searchHit, setSearchHit] = createSignal<PassageHighlight | null>(null);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1136,6 +1187,29 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       { defer: true },
     ),
   );
+
+  /** Every hit, grouped by `${blockId}\0${partIndex}` — mounted rows mark
+   * them all with `passage-search-all`; the current hit keeps
+   * `passage-search`. Capped per part to bound the wrap work. */
+  const allHits = createMemo(() => {
+    const map = new Map<string, PassageHighlight[]>();
+    for (const hit of search().hits) {
+      const key = `${hit.blockId} ${hit.partIndex}`;
+      const list = map.get(key);
+      if (list && list.length >= 200) continue;
+      const span = {
+        blockId: hit.blockId,
+        partIndex: hit.partIndex,
+        start: hit.start,
+        end: hit.end,
+      };
+      if (list) list.push(span);
+      else map.set(key, [span]);
+    }
+    return map;
+  });
+  const hitsFor = (blockId: string, partIndex: number) =>
+    allHits().get(`${blockId} ${partIndex}`) ?? [];
 
   /** Keep the current hit pointing at the same passage across re-scans. */
   createEffect(
@@ -1395,6 +1469,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       value={{
         highlight,
         searchHit,
+        searchHits: hitsFor,
         onApplied: (mark, h) => {
           // A deep link or search hit scrolls to its passage once its own mark
           // exists; a selection mark on the same block must not consume it.
@@ -1414,6 +1489,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           ref={(el) => (scrollEl = el)}
           class="relative min-h-0 flex-1 overflow-y-auto"
           data-testid="session-scroll"
+          tabIndex={-1}
           onPointerUp={() => queueMicrotask(selectFromDom)}
           onKeyUp={(e) => {
             if (e.shiftKey || e.key === "Shift") queueMicrotask(selectFromDom);
@@ -1458,6 +1534,15 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 </span>
               </Show>
               <span class="ml-auto flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="search-open"
+                  aria-label="Find in session"
+                  onClick={openQuickSearch}
+                >
+                  Find
+                </Button>
                 <Show
                   when={
                     (virtualizer.getVirtualItems().at(-1)?.index ?? -1) <
@@ -1496,155 +1581,97 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 </Show>
               </span>
             </div>
-            <form
-              role="search"
-              aria-label="Search this session"
-              class="flex flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-xs sm:px-7.5"
-              onSubmit={(e) => {
-                e.preventDefault();
-                stepHit(1);
-              }}
-            >
-              <input
-                type="search"
-                data-testid="search-input"
-                aria-label="Find in session"
-                placeholder="Find in session…"
-                autocomplete="off"
-                class="h-8 min-w-0 flex-1 rounded-md border border-line bg-bg px-2.5 text-[13px] text-text outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-xs"
-                value={query()}
-                onInput={(e) => setQuery(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.stopPropagation();
-                    if (query()) clearSearch();
-                    else e.currentTarget.blur();
-                  } else if (e.key === "Enter" && e.shiftKey) {
-                    e.preventDefault();
-                    stepHit(-1);
-                  }
-                }}
-              />
-              <Show when={searchSummary()}>
-                {(summary) => (
-                  <>
-                    <span
-                      data-testid="search-summary"
-                      role="status"
-                      aria-live="polite"
-                      class="text-muted"
-                    >
-                      {summary()}
+            <Show when={quickSearchOpen()}>
+              <QuickSearchBar
+                query={query()}
+                onQuery={setQuery}
+                count={
+                  queryMatcher(query()) !== null
+                    ? { index: hitIndex(), total: search().hits.length }
+                    : null
+                }
+                scanning={!search().done}
+                summary={searchSummary()}
+                canStep={search().hits.length > 0}
+                canSelect={hitIndex() >= 0}
+                onStep={stepHit}
+                onSelect={selectHit}
+                onClear={clearSearch}
+                onClose={closeQuickSearch}
+                inputRef={(el) => (searchInputEl = el)}
+              >
+                <Show when={search().done && coverage().kind === "partial"}>
+                  <span
+                    class="flex basis-full flex-wrap items-center gap-2 text-muted"
+                    data-testid="search-coverage"
+                  >
+                    <span>
+                      Searched the loaded history only · {coverage().detail}
                     </span>
-                    <span class="flex items-center gap-1">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        data-testid="search-prev"
-                        aria-label="Previous match"
-                        disabled={search().hits.length === 0}
-                        onClick={() => stepHit(-1)}
-                      >
-                        ↑
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        data-testid="search-next"
-                        aria-label="Next match"
-                        disabled={search().hits.length === 0}
-                        onClick={() => stepHit(1)}
-                      >
-                        ↓
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        data-testid="search-select"
-                        disabled={hitIndex() < 0}
-                        onClick={selectHit}
-                      >
-                        Select match
-                      </Button>
+                    <Show when={props.hasOlder === true && !props.loadingOlder}>
                       <button
                         type="button"
                         class="text-xs text-accent underline"
-                        data-testid="search-clear"
-                        onClick={clearSearch}
+                        data-testid="search-load-older"
+                        onClick={() => void loadOlder()}
                       >
-                        Clear
+                        Load older history
                       </button>
-                    </span>
-                    <Show when={search().done && coverage().kind === "partial"}>
-                      <span
-                        class="flex basis-full flex-wrap items-center gap-2 text-muted"
-                        data-testid="search-coverage"
+                    </Show>
+                    <Show
+                      when={
+                        wholeAvailable() &&
+                        (whole().kind === "idle" || whole().kind === "error")
+                      }
+                    >
+                      <button
+                        type="button"
+                        class="text-xs text-accent underline"
+                        data-testid="search-whole"
+                        onClick={() => void searchWhole()}
                       >
-                        <span>
-                          Searched the loaded history only · {coverage().detail}
-                        </span>
-                        <Show
-                          when={
-                            wholeAvailable() &&
-                            (whole().kind === "idle" ||
-                              whole().kind === "error")
-                          }
-                        >
-                          <button
-                            type="button"
-                            class="text-xs text-accent underline"
-                            data-testid="search-whole"
-                            onClick={() => void searchWhole()}
-                          >
-                            {whole().kind === "error"
-                              ? "Retry whole-session search"
-                              : "Search the whole session"}
-                          </button>
-                        </Show>
-                      </span>
+                        {whole().kind === "error"
+                          ? "Retry whole-session search"
+                          : "Search the whole session"}
+                      </button>
                     </Show>
-                    <Show when={wholeLine()}>
-                      {(line) => (
-                        <span
-                          class="flex basis-full flex-wrap items-center gap-2 text-muted"
-                          data-testid="search-whole-summary"
-                          data-whole-state={whole().kind}
-                          role="status"
-                          aria-live="polite"
+                  </span>
+                </Show>
+                <Show when={wholeLine()}>
+                  {(line) => (
+                    <span
+                      class="flex basis-full flex-wrap items-center gap-2 text-muted"
+                      data-testid="search-whole-summary"
+                      data-whole-state={whole().kind}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <span>{line()}</span>
+                      <Show when={olderHit() && reach()?.kind !== "loading"}>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          data-testid="search-whole-next"
+                          onClick={reachOlderHit}
                         >
-                          <span>{line()}</span>
-                          <Show
-                            when={olderHit() && reach()?.kind !== "loading"}
-                          >
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              data-testid="search-whole-next"
-                              onClick={reachOlderHit}
-                            >
-                              {reach()?.kind === "exhausted"
-                                ? "Keep loading"
-                                : "Go to the newest older match"}
-                            </Button>
-                          </Show>
-                          <Show when={reach()}>
-                            {(state) => (
-                              <span data-testid="search-reach">
-                                {reachLabel(state())}
-                              </span>
-                            )}
-                          </Show>
-                        </span>
-                      )}
-                    </Show>
-                  </>
-                )}
-              </Show>
-            </form>
+                          {reach()?.kind === "exhausted"
+                            ? "Keep loading"
+                            : "Go to the newest older match"}
+                        </Button>
+                      </Show>
+                      <Show when={reach()}>
+                        {(state) => (
+                          <span data-testid="search-reach">
+                            {reachLabel(state())}
+                          </span>
+                        )}
+                      </Show>
+                    </span>
+                  )}
+                </Show>
+              </QuickSearchBar>
+            </Show>
             <Show when={linkBanner()}>
               {(banner) => (
                 <div
