@@ -82,6 +82,9 @@ describe("buildMarkers", () => {
     const batch = injections[0]!;
     expect(batch.id).toBe(`k.injection.${T0}`);
     expect(batch.title).toBe("Lore injected 3 knowledge entries");
+    // The items carry the titles; the detail line stays empty rather than
+    // repeating them.
+    expect(batch.detail).toBe("");
     expect(batch.items).toEqual([
       { id: "k-1", label: "One" },
       { id: "k-2", label: "Two" },

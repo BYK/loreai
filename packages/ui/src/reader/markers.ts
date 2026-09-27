@@ -62,10 +62,7 @@ export function buildMarkers(ctx: SessionContext): MarkerBlock[] {
         group.length === 1
           ? "Lore injected 1 knowledge entry"
           : `Lore injected ${group.length} knowledge entries`,
-      detail: group
-        .map((i) => i.title ?? i.logical_id)
-        .join(" · ")
-        .slice(0, 120),
+      detail: "",
       items: group.map((i) => ({
         id: i.title === null ? null : i.logical_id,
         label: i.title === null ? `${i.logical_id} (entry removed)` : i.title,

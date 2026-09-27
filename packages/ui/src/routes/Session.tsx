@@ -74,6 +74,7 @@ export const Session: Component = () => {
 
   const reader = ws.state.sessions.reader(projectId, sessionId);
   const context = ws.state.sessions.context(projectId, sessionId);
+  const hrefForKnowledge = (id: string) => knowledgeHref(projectId() ?? "", id);
   const projectsSettled = () =>
     ws.projects.data() !== undefined || ws.projects.error() !== undefined;
   const projectMissing = () =>
@@ -177,11 +178,7 @@ export const Session: Component = () => {
                 ws.tracked(() => ws.client.getDistillation(id))
               }
               context={context.loader.data() ?? null}
-              knowledgeHref={(id) =>
-                projectId()
-                  ? knowledgeHref(projectId()!, id)
-                  : `/ui/knowledge/${encodeURIComponent(id)}`
-              }
+              knowledgeHref={hrefForKnowledge}
               header={header()}
             />
           }
@@ -191,11 +188,7 @@ export const Session: Component = () => {
               loading={context.loader.loading()}
               error={context.loader.error()}
               onRetry={context.loader.reload}
-              knowledgeHref={(id) =>
-                projectId()
-                  ? knowledgeHref(projectId()!, id)
-                  : `/ui/knowledge/${encodeURIComponent(id)}`
-              }
+              knowledgeHref={hrefForKnowledge}
             />
           }
         />

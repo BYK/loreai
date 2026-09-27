@@ -7,7 +7,7 @@
  * switching follows the roving-tabindex / arrow-key pattern.
  */
 import type { Component, JSX } from "solid-js";
-import { createSignal, onCleanup, Show } from "solid-js";
+import { children, createSignal, onCleanup, Show } from "solid-js";
 
 import { PaneHead } from "~/components/lore/Panes";
 import { cn } from "~/lib/utils";
@@ -29,6 +29,11 @@ export const SessionWorkspace: Component<{
 }> = (props) => {
   const [desktop, setDesktop] = createSignal(desktopQuery());
   const [tab, setTab] = createSignal<Tab>("transcript");
+  // Resolve each child once: a breakpoint flip switches branches of the Show
+  // below, and re-evaluating the caller's JSX there would remount SessionView
+  // and drop its selection and scroll state.
+  const transcript = children(() => props.transcript);
+  const contextPane = children(() => props.context);
 
   const media = globalThis.matchMedia?.("(min-width: 1024px)");
   const onChange = (event: MediaQueryListEvent) => setDesktop(event.matches);
@@ -74,7 +79,7 @@ export const SessionWorkspace: Component<{
       class="border-l border-line bg-surface lg:h-[calc(100dvh-62px)] lg:overflow-y-auto"
     >
       <PaneHead title="Context window" />
-      {props.context}
+      {contextPane()}
     </aside>
   );
 
@@ -82,7 +87,7 @@ export const SessionWorkspace: Component<{
     <Show
       when={desktop()}
       fallback={
-        <div class="flex h-[calc(100dvh-62px)] min-h-0 flex-col">
+        <div class="flex h-[calc(100dvh-62px)] min-h-0 flex-col overflow-hidden">
           <div
             role="tablist"
             aria-label="Session panes"
@@ -113,10 +118,10 @@ export const SessionWorkspace: Component<{
             role="tabpanel"
             id="session-panel-transcript"
             aria-labelledby="session-tab-transcript"
-            class="min-h-0 flex-1"
+            class="min-h-0 flex-1 overflow-hidden [&>*]:h-full"
             hidden={tab() !== "transcript"}
           >
-            {props.transcript}
+            {transcript()}
           </div>
           <div
             role="tabpanel"
@@ -131,7 +136,7 @@ export const SessionWorkspace: Component<{
       }
     >
       <div class="grid lg:grid-cols-[minmax(0,1fr)_340px]">
-        <div class="min-w-0">{props.transcript}</div>
+        <div class="min-w-0">{transcript()}</div>
         {contextPanel}
       </div>
     </Show>

@@ -39,9 +39,9 @@ export function buildRows(
 ): ReaderRow[] {
   const { timed, untimed } = partitionDistillations(blocks.distillations);
   const rows: ReaderRow[] = untimed.map((d) => ({ key: d.id, block: d }));
-  const timedMarkers = markers
-    .filter((m) => m.createdAt !== null)
-    .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+  const timedMarkers = [...markers].sort(
+    (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1),
+  );
   let next = 0;
   let markerNext = 0;
   for (const message of blocks.messages) {

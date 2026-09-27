@@ -62,6 +62,34 @@ describe("SessionWorkspace", () => {
     expect(screen.getByTestId("transcript-content")).toBeInTheDocument();
   });
 
+  it("keeps the same transcript DOM node across a breakpoint flip", () => {
+    let matches = false;
+    const listeners = new Set<(e: MediaQueryListEvent) => void>();
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      media: query,
+      get matches() {
+        return matches;
+      },
+      addEventListener: (_type: string, l: (e: MediaQueryListEvent) => void) =>
+        listeners.add(l),
+      removeEventListener: (
+        _type: string,
+        l: (e: MediaQueryListEvent) => void,
+      ) => listeners.delete(l),
+      addListener: () => {},
+      removeListener: () => {},
+      onchange: null,
+      dispatchEvent: () => false,
+    }));
+    mount();
+    const before = screen.getByTestId("transcript-content");
+    expect(before).toBeInTheDocument();
+    matches = true;
+    for (const l of listeners) l({ matches } as MediaQueryListEvent);
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.getByTestId("transcript-content")).toBe(before);
+  });
+
   it("roves tabs with arrow keys and activates on Enter/Space", () => {
     mockDesktop(false);
     mount();
