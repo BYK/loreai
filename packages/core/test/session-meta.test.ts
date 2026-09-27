@@ -383,3 +383,54 @@ describe("refreshSessionMeta", () => {
     expect(writes).toBe(1);
   });
 });
+
+describe("temporal.prune — session_meta cache drop", () => {
+  test("a prune that deletes messages drops the cached title", () => {
+    const project = freshProject("prune");
+    const day = 24 * 60 * 60 * 1000;
+    // First message is old enough to age out; second is recent — after the
+    // prune, the title must be re-derived from the second message, not served
+    // from the cached first_message row.
+    store(project, "s-prune", "m1", Date.now() - 10 * day, "old first message");
+    store(project, "s-prune", "m2", Date.now(), "recent second message");
+    // TTL pass only deletes distilled messages.
+    db()
+      .query(
+        "UPDATE temporal_messages SET distilled = 1 WHERE source_id = 'm1'",
+      )
+      .run();
+
+    expect(
+      listSessions(project).find((s) => s.session_id === "s-prune")?.title,
+    ).toBe("old first message");
+    expect(metaRow(project, "s-prune")?.title_source).toBe("first_message");
+
+    const result = temporal.prune({
+      projectPath: project,
+      retentionDays: 5,
+      maxStorageMB: 1024,
+      skipSizeCap: true,
+    });
+    expect(result.ttlDeleted).toBe(1);
+
+    const after = listSessions(project).find((s) => s.session_id === "s-prune");
+    expect(after?.title).toBe("recent second message");
+    expect(after?.title_source).toBe("first_message");
+  });
+
+  test("a prune with nothing to delete leaves session_meta in place", () => {
+    const project = freshProject("prune-noop");
+    store(project, "s-keep", "m1", Date.now(), "keep me");
+    listSessions(project);
+    expect(metaRow(project, "s-keep")).toBeTruthy();
+
+    const result = temporal.prune({
+      projectPath: project,
+      retentionDays: 5,
+      maxStorageMB: 1024,
+      skipSizeCap: true,
+    });
+    expect(result).toEqual({ ttlDeleted: 0, capDeleted: 0 });
+    expect(metaRow(project, "s-keep")?.title).toBe("keep me");
+  });
+});
