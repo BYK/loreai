@@ -873,6 +873,59 @@ describe("listSessionsPage", () => {
     expect(p2.items.map((s) => s.session_id)).toEqual(["x2", "x1"]);
     expect(p2.next).toBeNull();
   });
+
+  test("every item carries a derived title and title_source (#1921)", () => {
+    const project = freshProject("sessions-titles");
+    temporal.store({
+      projectPath: project,
+      info: msg("s-t", "s-t-m", 1000),
+      parts: [
+        {
+          id: "part-s-t-m",
+          sessionID: "s-t",
+          messageID: "s-t-m",
+          type: "text",
+          text: "Title-worthy first message",
+          time: { start: 0, end: 0 },
+        },
+      ],
+    });
+    const page = listSessionsPage(project, { limit: 10 });
+    expect(page.items[0]).toMatchObject({
+      title: "Title-worthy first message",
+      title_source: "first_message",
+    });
+  });
+
+  test("q filters by title/id and keeps the keyset order", () => {
+    const project = freshProject("sessions-q");
+    const plan: Array<[string, number, string]> = [
+      ["s-n2", 2000, "needle two"],
+      ["s-n1", 1000, "needle one"],
+      ["s-x", 3000, "haystack"],
+    ];
+    for (const [sid, t, text] of plan) {
+      temporal.store({
+        projectPath: project,
+        info: msg(sid, `${sid}-m`, t),
+        parts: [
+          {
+            id: `part-${sid}`,
+            sessionID: sid,
+            messageID: `${sid}-m`,
+            type: "text",
+            text,
+            time: { start: 0, end: 0 },
+          },
+        ],
+      });
+    }
+    const page = listSessionsPage(project, { limit: 10, q: "needle" });
+    expect(page.items.map((s) => s.session_id)).toEqual(["s-n2", "s-n1"]);
+    expect(page.next).toBeNull();
+    const byPrefix = listSessionsPage(project, { limit: 10, q: "s-x" });
+    expect(byPrefix.items.map((s) => s.session_id)).toEqual(["s-x"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

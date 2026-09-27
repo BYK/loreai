@@ -19,6 +19,12 @@ import { ftsQuery, EMPTY_QUERY } from "./search";
 import { config } from "./config";
 import { sql, type SqlFragment } from "./sql";
 import { currentTenantId } from "./tenant";
+import {
+  escapeLike,
+  pruneOrphanSessionMeta,
+  refreshSessionMeta,
+} from "./session-meta";
+import { normalizeTitle } from "./session-title";
 import type { SessionSummary } from "./data";
 import type { TemporalMessage } from "./temporal";
 
@@ -408,13 +414,85 @@ export type SessionPage = {
  */
 export function listSessionsPage(
   projectPath: string,
-  options: { limit: number; after?: SessionKeyset },
+  options: { limit: number; after?: SessionKeyset; q?: string },
 ): SessionPage {
   const pid = ensureProject(projectPath);
   const limit = Math.max(1, Math.floor(options.limit));
   const having = options.after
-    ? sql`HAVING (MAX(t.created_at) < ${options.after.last_message_at} OR (MAX(t.created_at) = ${options.after.last_message_at} AND t.session_id < ${options.after.session_id}))`
+    ? sql`(MAX(t.created_at) < ${options.after.last_message_at} OR (MAX(t.created_at) = ${options.after.last_message_at} AND t.session_id < ${options.after.session_id}))`
     : sql.empty;
+
+  const q = options.q?.trim() ?? "";
+  if (q) {
+    // Title search (#1921): titles live in the session_meta cache, so first
+    // refresh it for EVERY session of the project (a match may sit beyond
+    // this page) and sweep orphans left by out-of-band deletes.
+    const all = sql.all<{
+      session_id: string;
+      message_count: number;
+      distillation_count: number;
+    }>(
+      db(),
+      sql`SELECT t.session_id, COUNT(*) as message_count, COALESCE(d.cnt, 0) as distillation_count
+         FROM temporal_messages t
+         LEFT JOIN (
+           SELECT session_id, COUNT(*) AS cnt
+           FROM distillations
+           WHERE project_id = ${pid}
+           GROUP BY session_id
+         ) d ON d.session_id = t.session_id
+         WHERE t.project_id = ${pid}
+         GROUP BY t.session_id`,
+    );
+    refreshSessionMeta(pid, all);
+    pruneOrphanSessionMeta(pid);
+
+    // m.title / m.title_source are not aggregates, but the join keys on the
+    // grouping key (t.session_id) so SQLite bare-column semantics return the
+    // one matching meta row per group.
+    const match = sql`(instr(m.title_norm, ${normalizeTitle(q)}) > 0 OR t.session_id LIKE ${`${escapeLike(q)}%`} ESCAPE '\\')`;
+    const rows = sql.all<SessionSummary>(
+      db(),
+      sql`SELECT
+          t.session_id,
+          COUNT(*) as message_count,
+          MIN(t.created_at) as first_message_at,
+          MAX(t.created_at) as last_message_at,
+          SUM(CASE WHEN t.distilled = 1 THEN 1 ELSE 0 END) as distilled_count,
+          SUM(CASE WHEN t.distilled = 0 THEN 1 ELSE 0 END) as undistilled_count,
+          COALESCE(d.cnt, 0) as distillation_count,
+          m.title,
+          m.title_source
+         FROM temporal_messages t
+         JOIN session_meta m
+           ON m.project_id = ${pid} AND m.session_id = t.session_id
+         LEFT JOIN (
+           SELECT session_id, COUNT(*) AS cnt
+           FROM distillations
+           WHERE project_id = ${pid}
+           GROUP BY session_id
+         ) d ON d.session_id = t.session_id
+         WHERE t.project_id = ${pid}
+         GROUP BY t.session_id
+         HAVING ${match} ${options.after ? sql`AND ${having}` : sql.empty}
+         ORDER BY MAX(t.created_at) DESC, t.session_id DESC
+         LIMIT ${limit + 1}`,
+    );
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const last = items[items.length - 1];
+    return {
+      items,
+      next:
+        hasMore && last
+          ? {
+              last_message_at: last.last_message_at,
+              session_id: last.session_id,
+            }
+          : null,
+    };
+  }
+
   const rows = sql.all<SessionSummary>(
     db(),
     sql`SELECT
@@ -434,10 +512,19 @@ export function listSessionsPage(
        ) d ON d.session_id = t.session_id
        WHERE t.project_id = ${pid}
        GROUP BY t.session_id
-       ${having}
+       ${options.after ? sql`HAVING ${having}` : sql.empty}
        ORDER BY MAX(t.created_at) DESC, t.session_id DESC
        LIMIT ${limit + 1}`,
   );
+
+  // Attach derived titles (#1921): refreshSessionMeta recomputes only stale
+  // rows, so a warm list is the aggregate query + one IN() lookup.
+  const meta = refreshSessionMeta(pid, rows);
+  for (const row of rows) {
+    const m = meta.get(row.session_id);
+    row.title = m?.title ?? row.session_id;
+    row.title_source = m?.title_source ?? "id";
+  }
 
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
