@@ -557,7 +557,12 @@ export async function handleRenameProject(
     );
   }
 
-  data.renameProject(id, name);
+  // `renameProject` reports false for an unchanged name as well as for a
+  // vanished project — re-check the row so a delete between the pre-check
+  // and the update surfaces as 404, not a swallowed 200.
+  if (!data.renameProject(id, name) && !projectPathById(id)) {
+    return errorResponse(404, "not_found", `Project not found: ${id}`);
+  }
   return jsonResponse({ id, name });
 }
 

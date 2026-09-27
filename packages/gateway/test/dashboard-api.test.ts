@@ -694,6 +694,31 @@ describe("PATCH /api/v1/projects/:id (rename)", () => {
     }
   });
 
+  it("404s when the project vanishes between validation and update", async () => {
+    const id = await seedProject("race-delete");
+    const core = await import("@loreai/core");
+    // Simulate a concurrent delete landing after the handler's existence
+    // check: `renameProject` reports no change and the row is gone on the
+    // re-check — the request must not read as a 200.
+    const spy = vi.spyOn(core.data, "renameProject").mockImplementation(() => {
+      core.data.deleteProject(id);
+      return false;
+    });
+    try {
+      const res = await api(`/api/v1/projects/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "gone" }),
+      });
+      expect(res.status).toBe(404);
+      expect(
+        ((await res.json()) as { error: { type: string } }).error.type,
+      ).toBe("not_found");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("is refused in hosted mode with 403 forbidden", async () => {
     const { enableHostedMode, _resetHostedModeForTest, data } =
       await import("@loreai/core");

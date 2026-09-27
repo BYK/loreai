@@ -117,6 +117,42 @@ describe("ProjectActions", () => {
     expect(
       await screen.findByText(/Not available in hosted mode/),
     ).toBeInTheDocument();
+    // A hosted refusal can't be retried — the dialog closes on its own and
+    // the notice stays on the section.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(
+      screen
+        .getByTestId("project-actions")
+        .querySelector("[data-testid='action-notice-forbidden']"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a retriable error inside the open dialog", async () => {
+    mount(
+      clientWith({
+        renameProject: async () => {
+          throw new ApiError(
+            "invalid",
+            "/projects/p-1",
+            "Project name must be 1-200 characters",
+            400,
+          );
+        },
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Rename…" }));
+    fireEvent.input(await screen.findByLabelText("Project name"), {
+      target: { value: "x" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(
+        dialog.querySelector("[data-testid='action-notice-error']"),
+      ).toHaveTextContent("Project name must be 1-200 characters"),
+    );
   });
 
   it("moves selected sessions and reports counts", async () => {

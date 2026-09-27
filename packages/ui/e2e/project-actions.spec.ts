@@ -143,6 +143,29 @@ test.describe("project actions (UI-08)", () => {
     await expect(page.getByRole("link", { name: sessionId })).toBeVisible();
   });
 
+  test("move dialog keeps focus trapped after the target select closes", async ({
+    page,
+  }) => {
+    const scratchId = await projectIdByName(page, "scratch");
+    await page.goto(`/ui/projects/${scratchId}`);
+    const actions = page.getByTestId("project-actions");
+    await actions.getByRole("button", { name: "Delete project…" }).click();
+    await page.keyboard.press("Escape");
+    await actions.getByRole("button", { name: "Move sessions…" }).click();
+    const dialog = page.getByRole("dialog");
+    const target = dialog.getByRole("button", { name: "Target project" });
+    await expect(target).toBeEnabled();
+    await target.click();
+    await page.keyboard.press("Escape");
+    for (let i = 0; i < 15; i++) {
+      await page.keyboard.press("Tab");
+      const inside = await page.evaluate(
+        () => document.activeElement?.closest("[role='dialog']") !== null,
+      );
+      expect(inside, `Tab ${i} left the dialog`).toBe(true);
+    }
+  });
+
   test("merge duplicates reports none on the seeded data", async ({ page }) => {
     await page.goto("/ui/");
     await expect(page.getByTestId("merge-projects")).toBeVisible();

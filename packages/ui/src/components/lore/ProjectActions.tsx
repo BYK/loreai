@@ -15,6 +15,7 @@ import {
   createSignal,
   For,
   Match,
+  on,
   Show,
   Switch,
 } from "solid-js";
@@ -107,6 +108,15 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
 
   const busy = () => pending() !== null;
 
+  // Hosted-mode refusals can't be retried — close the dialog and leave the
+  // notice on the section. Other errors keep the dialog open so the inline
+  // notice stays in view and the user can retry.
+  const closeOnForbidden = (result: unknown, close: () => void): boolean => {
+    if (result) return false;
+    if (notice()?.kind === "forbidden") close();
+    return true;
+  };
+
   return (
     <section data-testid="project-actions" class="border-b border-line py-5">
       <div class="eyebrow mb-2">Actions</div>
@@ -115,7 +125,10 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
           variant="outline"
           size="sm"
           disabled={busy()}
-          onClick={() => setRenameOpen(true)}
+          onClick={() => {
+            setNotice(null);
+            setRenameOpen(true);
+          }}
         >
           Rename…
         </Button>
@@ -123,7 +136,10 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
           variant="outline"
           size="sm"
           disabled={busy() || props.project.session_count === 0}
-          onClick={() => setMoveOpen(true)}
+          onClick={() => {
+            setNotice(null);
+            setMoveOpen(true);
+          }}
         >
           Move sessions…
         </Button>
@@ -131,7 +147,10 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
           variant="outline"
           size="sm"
           disabled={busy()}
-          onClick={() => setConfirmClear(true)}
+          onClick={() => {
+            setNotice(null);
+            setConfirmClear(true);
+          }}
         >
           Clear…
         </Button>
@@ -139,7 +158,10 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
           variant="destructive"
           size="sm"
           disabled={busy()}
-          onClick={() => setConfirmDelete(true)}
+          onClick={() => {
+            setNotice(null);
+            setConfirmDelete(true);
+          }}
         >
           Delete project…
         </Button>
@@ -150,6 +172,7 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
         project={props.project}
         open={renameOpen()}
         pending={pending() === "rename"}
+        notice={notice()}
         onClose={() => setRenameOpen(false)}
         onSubmit={(name) => {
           void run("rename", () => actions.rename(props.project.id, name)).then(
@@ -160,6 +183,8 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
                   kind: "result",
                   text: `Renamed to ${result.name}`,
                 });
+              } else {
+                closeOnForbidden(result, () => setRenameOpen(false));
               }
             },
           );
@@ -170,6 +195,7 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
         project={props.project}
         open={moveOpen()}
         pending={pending() === "move"}
+        notice={notice()}
         onClose={() => setMoveOpen(false)}
         onSubmit={(sessionIds, targetId, includeChildren) => {
           void run("move", () =>
@@ -186,6 +212,8 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
                 kind: "result",
                 text: `Moved ${pluralize(result.sessions_moved, "session")}, ${pluralize(result.knowledge_moved, "knowledge entry", "knowledge entries")}`,
               });
+            } else {
+              closeOnForbidden(result, () => setMoveOpen(false));
             }
           });
         }}
@@ -208,11 +236,15 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
                   kind: "result",
                   text: `Cleared ${pluralize(result.knowledge_deleted ?? 0, "knowledge entry", "knowledge entries")}, ${pluralize(result.sessions_cleared ?? 0, "session")}`,
                 });
+              } else {
+                closeOnForbidden(result, () => setConfirmClear(false));
               }
             },
           );
         }}
-      />
+      >
+        <Show when={notice()}>{(n) => <NoticeLine notice={n()} />}</Show>
+      </ConfirmDialog>
 
       <ConfirmDialog
         open={confirmDelete()}
@@ -226,10 +258,13 @@ export const ProjectActions: Component<{ project: ProjectSummary }> = (
           void run("delete", () => actions.remove(props.project.id)).then(
             (result) => {
               if (result) navigate("/");
+              else closeOnForbidden(result, () => setConfirmDelete(false));
             },
           );
         }}
-      />
+      >
+        <Show when={notice()}>{(n) => <NoticeLine notice={n()} />}</Show>
+      </ConfirmDialog>
     </section>
   );
 };
@@ -238,6 +273,7 @@ const RenameDialog: Component<{
   project: ProjectSummary;
   open: boolean;
   pending: boolean;
+  notice: Notice | null;
   onClose: () => void;
   onSubmit: (name: string) => void;
 }> = (props) => {
@@ -271,6 +307,7 @@ const RenameDialog: Component<{
               disabled={props.pending}
             />
           </TextField>
+          <Show when={props.notice}>{(n) => <NoticeLine notice={n()} />}</Show>
           <DialogFooter class="mt-4">
             <Button
               type="button"
@@ -294,6 +331,7 @@ const MoveSessionsDialog: Component<{
   project: ProjectSummary;
   open: boolean;
   pending: boolean;
+  notice: Notice | null;
   onClose: () => void;
   onSubmit: (
     sessionIds: string[],
@@ -310,21 +348,41 @@ const MoveSessionsDialog: Component<{
   const [selected, setSelected] = createSignal<Set<string>>(new Set());
   const [target, setTarget] = createSignal<string | null>(null);
   const [includeChildren, setIncludeChildren] = createSignal(true);
+  let contentEl!: HTMLElement;
 
   const page = ws.state.sessions.page(() =>
     props.open ? { projectId: props.project.id, cursor: cursor() } : null,
   );
 
+  // Reset all dialog state each time it opens.
+  createEffect(
+    on(
+      () => props.open,
+      (open) => {
+        if (!open) return;
+        setCursor(null);
+        setLoaded({ items: new Map(), next: null });
+        setSelected(new Set<string>());
+        setTarget(null);
+        setIncludeChildren(true);
+      },
+    ),
+  );
+
   // Fold each fetched page into the accumulated checkbox list.
-  createMemo(() => {
-    const data = page.loader.data();
-    if (!data) return;
-    setLoaded((prev) => {
-      const items = new Map(prev.items);
-      for (const s of data.items) items.set(s.session_id, s);
-      return { items, next: data.next_cursor };
-    });
-  });
+  createEffect(
+    on(
+      () => page.loader.data(),
+      (data) => {
+        if (!data) return;
+        setLoaded((prev) => {
+          const items = new Map(prev.items);
+          for (const s of data.items) items.set(s.session_id, s);
+          return { items, next: data.next_cursor };
+        });
+      },
+    ),
+  );
 
   const targets = createMemo(() =>
     (ws.projects.data() ?? []).filter((p) => p.id !== props.project.id),
@@ -335,7 +393,7 @@ const MoveSessionsDialog: Component<{
 
   return (
     <Dialog open={props.open} onOpenChange={(open) => !open && props.onClose()}>
-      <DialogContent>
+      <DialogContent ref={contentEl} tabIndex={-1}>
         <DialogHeader>
           <DialogTitle>Move sessions</DialogTitle>
           <DialogDescription>
@@ -394,6 +452,16 @@ const MoveSessionsDialog: Component<{
         </div>
         <div class="mt-3">
           <Select
+            // modal={false}: a modal Select inside the modal dialog locks
+            // focus/hides outside content and its Escape focus-restore lands
+            // on <body>, breaking the dialog's focus trap.
+            modal={false}
+            onOpenChange={(open) => {
+              // Kobalte restores focus to the trigger a frame late; during
+              // that gap the unmounted listbox leaves focus on <body> and Tab
+              // escapes the dialog's focus scope — snap it back now.
+              if (!open) contentEl?.focus();
+            }}
             value={target()}
             onChange={setTarget}
             options={targets().map((p) => p.id)}
@@ -438,6 +506,7 @@ const MoveSessionsDialog: Component<{
           />
           Include child (sub-agent) sessions
         </label>
+        <Show when={props.notice}>{(n) => <NoticeLine notice={n()} />}</Show>
         <DialogFooter class="mt-4">
           <Button
             type="button"
@@ -514,10 +583,16 @@ export const MergeProjectsAction: Component = () => {
                 });
               }
             })
-            .catch((error) => setNotice(noticeFor(error)))
+            .catch((error) => {
+              const n = noticeFor(error);
+              setNotice(n);
+              if (n.kind === "forbidden") setConfirm(false);
+            })
             .finally(() => setPending(false));
         }}
-      />
+      >
+        <Show when={notice()}>{(n) => <NoticeLine notice={n()} />}</Show>
+      </ConfirmDialog>
     </div>
   );
 };
