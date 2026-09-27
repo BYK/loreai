@@ -1102,7 +1102,8 @@ Latency summaries use 200 warmed requests per endpoint; each value is the median
 Screens reviewed on 2026-09-21 against the three v2.2 design specimens
 (contextual, focused, mobile discussion): `/ui/fixture?view=focus`,
 `/ui/fixture?view=blocks`, project page, knowledge table, knowledge detail,
-session reader, entities, entity detail, contradictions, warming and costs,
+session reader (the UI-08 entities, contradictions, warming and costs
+screens landed after this review and are covered by the Playwright gate only),
 each at desktop (1280×800) and mobile (393×852), light and dark — 24
 full-page captures taken with a throw-away Playwright script against the
 seeded e2e gateway and the Vite dev server (fixture routes).
@@ -1134,7 +1135,7 @@ The owner signs this gate off; the implementation agent does not. Each row names
 | Management security boundary | `packages/gateway/test/management-access.test.ts`, `hono-routing.test.ts`, `gateway-auth-config.test.ts` (socket-peer + Origin/Host checks, `LORE_ALLOW_REMOTE_MANAGEMENT`, `LORE_GATEWAY_AUTH_TOKEN`, hosted-mode write refusals); `e2e/browse.spec.ts` (dev-only routes absent in production). |
 | CSP | `packages/gateway/test/ui-static.test.ts` asserts the `Content-Security-Policy` header on `/ui` responses (see "How the gateway serves the SPA"). |
 | Inert content | `packages/ui/test/safe-html.test.ts` (unit) and `e2e/hostile-content.spec.ts` (every production screen, desktop + mobile, `window.__pwned` stays 0, no `script`/`iframe`/handler attributes/`javascript:` links). |
-| IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v2 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
+| IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v3 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
 | Keyboard / focus | `e2e/keyboard.spec.ts`, `e2e/reader.spec.ts` ("keyboard: rows are focusable"). |
 | Deep links + themes | `e2e/routes.spec.ts` (every README route, including `/ui/entities`, `/ui/entities/:entityId`, `/ui/contradictions`, `/ui/warming` and `/ui/costs`, survives reload; light/dark on every screen), `scripts/ui-deep-link-smoke.mjs` (always-on CI). |
 | Playwright green in CI | `ui-e2e` workflow run on the release PR (desktop + mobile projects) — link the run here when signing off. |
