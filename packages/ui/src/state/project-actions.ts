@@ -123,7 +123,9 @@ export function createProjectActionsState({
   async function remove(projectId: string): Promise<ProjectDeleteResult> {
     const result = await tracked(() => client.deleteProject(projectId));
     await bestEffort("project cache purge", () => purgeProjectCache(projectId));
-    await projects.remove(projectId);
+    await bestEffort("project cache eviction", () =>
+      projects.remove(projectId),
+    );
     projects.reload();
     return result;
   }

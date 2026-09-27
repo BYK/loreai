@@ -446,4 +446,45 @@ describe("project action cache failures", () => {
       await closeLoreDb();
     }
   });
+
+  it("keeps remove successful when cache eviction fails", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    expect(db).not.toBeNull();
+    const repos = {
+      projects: createProjectsRepo(db),
+      knowledge: createKnowledgeRepo(db),
+      sessions: createSessionsRepo(db),
+      messageBlocks: createMessageBlocksRepo(db),
+    };
+    const remove = vi.fn(async () => {
+      throw new Error("cache closed");
+    });
+    const reload = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = {
+      knowledge_deleted: 3,
+      temporal_deleted: 10,
+      distillations_deleted: 1,
+      sessions_cleared: 2,
+    };
+    const actions = createProjectActionsState({
+      client: clientWith({ deleteProject: async () => result }),
+      tracked: (read) => read(),
+      repos,
+      projects: { remove, reload },
+    });
+
+    try {
+      await expect(actions.remove("p-1")).resolves.toEqual(result);
+      expect(remove).toHaveBeenCalledWith("p-1");
+      expect(warn).toHaveBeenCalledWith(
+        "project cache eviction failed",
+        expect.any(Error),
+      );
+      expect(reload).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      await closeLoreDb();
+    }
+  });
 });
