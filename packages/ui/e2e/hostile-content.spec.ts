@@ -18,7 +18,14 @@ async function hostileFixtures(page: Page) {
   const sessions = await (
     await page.request.get(`/api/v1/projects/${project.id}/sessions`)
   ).json();
-  return { project, entry: entries[0], session: sessions[0] };
+  return {
+    project,
+    entry:
+      entries.find((item: { title: string }) =>
+        item.title.startsWith("Hostile x"),
+      ) ?? entries[0],
+    session: sessions[0],
+  };
 }
 
 async function assertSafe(

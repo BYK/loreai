@@ -373,7 +373,7 @@ const hostileConflictA = core.ltm.create({
   projectPath: hostile,
   scope: "project",
   category: "decision",
-  title: `${hostileLongTitle} contradiction ${hostilePayloads[0]}`,
+  title: `Hostile contradiction ${hostilePayloads[0]}`,
   content: hostileText,
 });
 const hostileConflictB = core.ltm.create({
@@ -381,7 +381,7 @@ const hostileConflictB = core.ltm.create({
   projectPath: hostile,
   scope: "project",
   category: "decision",
-  title: `${hostileLongTitle} opposite ${hostilePayloads[1]}`,
+  title: `Hostile opposite ${hostilePayloads[1]}`,
   content: hostileText,
 });
 core.ltm.recordContradiction({
