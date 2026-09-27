@@ -1402,6 +1402,14 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
         key: 1,
         id: "x",
       }),
+      forged({
+        v: 1,
+        kind: "knowledge_all",
+        project: null,
+        sort: "updated_desc",
+        key: 1,
+        id: "x",
+      }),
       "a".repeat(5000),
     ];
     for (const token of bad) {
