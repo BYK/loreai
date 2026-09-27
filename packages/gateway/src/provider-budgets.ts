@@ -98,6 +98,12 @@ export function parseProviderBudgets(
       return 'window must be "daily", "5h", or "7d".';
     }
     const window = rec.window as ProviderBudgetWindow;
+    if (window === "daily" && unit === "percent") {
+      return (
+        "percent budgets apply to quota windows (5h/7d); daily budgets " +
+        'must be "usd" or "tokens".'
+      );
+    }
     if (window !== "daily" && unit !== "percent") {
       return (
         '5h/7d windows require unit "percent" — usd/token usage is only ' +
@@ -213,6 +219,16 @@ function evaluateOne(
       budget.auth_kind,
       budget.account,
     );
+    if (budget.unit === "percent") {
+      // Corrupt KV entry (validation rejects this combination).
+      return {
+        ...budget,
+        used: null,
+        fraction: null,
+        resets_at: nextUtcMidnight(now),
+        stale: true,
+      };
+    }
     const used = budget.unit === "usd" ? usage.cost : usage.tokens;
     return {
       ...budget,

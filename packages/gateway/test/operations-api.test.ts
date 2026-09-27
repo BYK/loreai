@@ -1258,6 +1258,17 @@ describe("GET/PATCH /api/v1/costs", () => {
             },
           ],
         },
+        // daily + percent is rejected even when the amount is in range
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "daily",
+              amount: 50,
+            },
+          ],
+        },
       ]) {
         const res = await patch(bad);
         expect(res.status).toBe(400);

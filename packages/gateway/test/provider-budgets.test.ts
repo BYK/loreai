@@ -150,6 +150,16 @@ describe("parseProviderBudgets", () => {
     expect(typeof parseProviderBudgets(input)).toBe("string");
   });
 
+  test("daily + percent is rejected with a specific message", () => {
+    expect(
+      parseProviderBudgets([
+        { provider: "anthropic", unit: "percent", window: "daily", amount: 50 },
+      ]),
+    ).toBe(
+      'percent budgets apply to quota windows (5h/7d); daily budgets must be "usd" or "tokens".',
+    );
+  });
+
   test("different auth kinds on the same tuple are not duplicates", () => {
     const parsed = parseProviderBudgets([
       {
@@ -259,6 +269,25 @@ describe("evaluateProviderBudgets", () => {
     const status = evaluateProviderBudgets(NOW)[0];
     expect(status?.used).toBe(75);
     expect(status?.fraction).toBeCloseTo(0.75);
+  });
+
+  test("daily percent entries in KV are dropped before evaluation", () => {
+    setKV(
+      "provider_budgets",
+      JSON.stringify([
+        {
+          provider: "anthropic",
+          auth_kind: null,
+          account: null,
+          unit: "percent",
+          window: "daily",
+          amount: 50,
+        },
+      ]),
+    );
+    // First line of defense: the loader re-validates and drops the entry.
+    expect(getProviderBudgets()).toEqual([]);
+    expect(evaluateProviderBudgets(NOW)).toEqual([]);
   });
 
   test("quota rows for other auth kinds/accounts do not match", () => {
