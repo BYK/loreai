@@ -3712,9 +3712,6 @@ export function appendKnowledgePromptDelta(input: {
   return true;
 }
 
-// KNOWLEDGE_DELTA_DEBOUNCE_MS lives in prompt-delta-constants.ts (shared with
-// the session-context API, which must not import this module).
-
 /** True when the latest block's debounce window still covers `now`. */
 function withinDebounceWindow(rawSelector: string, now: number): boolean {
   try {
@@ -20508,8 +20505,8 @@ async function handleConversationTurnPrepared(
       budget: modelBudget,
     });
   }
-  // Record the accepted transform's stats so postResponse can persist them
-  // into the assistant turn's temporal metadata (session-context API, #1924).
+  // Transform stats ride along so postResponse can stamp them into the
+  // assistant turn's temporal metadata.
   temporalInput = Object.freeze({
     ...temporalInput,
     gradient: {
