@@ -9,7 +9,15 @@
  * 400 and is shown verbatim.
  */
 import type { Component } from "solid-js";
-import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  Match,
+  Show,
+  Switch,
+} from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
 import type { ProjectSummary } from "~/contracts";
@@ -234,6 +242,9 @@ const RenameDialog: Component<{
   onSubmit: (name: string) => void;
 }> = (props) => {
   const [name, setName] = createSignal(props.project.name ?? "");
+  createEffect(() => {
+    if (props.open) setName(props.project.name ?? "");
+  });
   const current = () => (props.project.name ?? "").trim();
   const dirty = () => name().trim() !== current() && name().trim() !== "";
   return (
