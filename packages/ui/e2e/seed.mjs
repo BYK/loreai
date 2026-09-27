@@ -175,6 +175,62 @@ core.ltm.create({
   confidence: 0.6,
 });
 
+// Hostile strings exercise every browser-rendered text surface.  Keep this
+// project separate so the stable lore counts used by the browsing specs do
+// not change.
+const hostile = join(root, "hostile");
+mkdirSync(hostile, { recursive: true });
+const hostileProjectId = core.ensureProject(hostile, "hostile", null);
+const hostilePayloads = [
+  "<script>window.__pwned=1</script>",
+  '<img src=x onerror="window.__pwned=1">',
+  '<a href="javascript:window.__pwned=1">link</a>',
+  '<iframe srcdoc="<script>window.__pwned=1</script>"></iframe>',
+  "[x](javascript:window.__pwned=1)",
+  '<svg onload="window.__pwned=1"></svg>',
+  '<style>body{background:red}</style><div style="position:fixed;inset:0">clickjack</div>',
+];
+const hostileText = hostilePayloads.join("\n\n");
+const hostileLongTitle = `Hostile ${"x".repeat(180)}`;
+const hostileIds = [];
+for (let i = 0; i < hostilePayloads.length; i++) {
+  hostileIds.push(
+    core.ltm.create({
+      projectPath: hostile,
+      scope: "project",
+      category: "gotcha",
+      title: `${hostileLongTitle} ${i + 1}: ${hostilePayloads[i]}`,
+      content: hostileText,
+      confidence: 0.5,
+    }),
+  );
+}
+core.ltm.appendVersion(hostileIds[0], { content: hostileText });
+for (const role of ["user", "assistant"]) {
+  const id = `e2e-hostile-${role}`;
+  core.temporal.store({
+    projectPath: hostile,
+    info: {
+      id,
+      sessionID: "e2e-hostile-session",
+      role,
+      time: { created: Date.UTC(2026, 4, 3, 9, role === "user" ? 0 : 1) },
+      agent: "e2e",
+      model: { providerID: "e2e", modelID: "seed" },
+      ...(role === "assistant" ? { parentID: "e2e-hostile-user" } : {}),
+    },
+    parts: [
+      {
+        id: `${id}-part`,
+        sessionID: "e2e-hostile-session",
+        messageID: id,
+        type: "text",
+        text: hostileText,
+      },
+    ],
+  });
+}
+
 // A session with more messages than one reader page (READER_PAGE_SIZE = 100)
 // so the specs can page older history, search unmounted blocks and follow
 // deep links through the real /api/v1 paging route. Message `k` mentions
@@ -258,6 +314,23 @@ core.entities.addRelation(ada.id, analyticalEngines.id, "colleague");
 core.entities.linkKnowledge(firstKnowledgeId, ada.id);
 void loreRepo;
 
+core.entities.create({
+  id: "e2e-hostile-entity",
+  projectPath: hostile,
+  crossProject: false,
+  entityType: "person",
+  canonicalName: `Hostile entity ${hostilePayloads[0]}`,
+  aliases: [
+    { type: "nickname", value: hostilePayloads[1] },
+    { type: "email", value: "hostile@example.invalid" },
+  ],
+  metadata: {
+    role: hostilePayloads[2],
+    description: hostilePayloads[3],
+    notes: hostilePayloads[4],
+  },
+});
+
 let contradictionFixtureId = 0;
 const nextContradictionFixtureId = () =>
   `01996200-1823-7000-8000-${(++contradictionFixtureId).toString(16).padStart(12, "0")}`;
@@ -294,6 +367,30 @@ for (const viewport of ["Desktop", "Mobile"]) {
     });
   }
 }
+
+const hostileConflictA = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: hostile,
+  scope: "project",
+  category: "decision",
+  title: `Hostile contradiction ${hostilePayloads[0]}`,
+  content: hostileText,
+});
+const hostileConflictB = core.ltm.create({
+  id: nextContradictionFixtureId(),
+  projectPath: hostile,
+  scope: "project",
+  category: "decision",
+  title: `Hostile opposite ${hostilePayloads[1]}`,
+  content: hostileText,
+});
+core.ltm.recordContradiction({
+  logicalIdA: hostileConflictA,
+  logicalIdB: hostileConflictB,
+  projectId: hostileProjectId,
+  similarity: 0.96,
+  rationale: hostileText,
+});
 
 core.close();
 

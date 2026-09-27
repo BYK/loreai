@@ -10,7 +10,7 @@ test.describe("entities (UI-08)", () => {
     );
 
     const rows = page.getByTestId("entity-row");
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(4);
     await rows.filter({ hasText: "Ada Lovelace" }).click();
 
     await expect(page).toHaveURL(/\/ui\/entities\/[^/]+$/);

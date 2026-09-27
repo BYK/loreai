@@ -14,9 +14,17 @@ on:
       - 'packages/gateway/src/ui-manifest.ts'
       - 'packages/gateway/src/server.ts'
       - 'packages/gateway/src/api.ts'
+      - 'packages/gateway/src/app.ts'
+      - 'packages/gateway/src/routes/**'
+      - 'packages/gateway/src/management-access.ts'
+      - 'packages/gateway/src/api-lists.ts'
+      - 'packages/gateway/src/ui-bootstrap.ts'
+      - 'packages/gateway/src/dashboard-api.ts'
+      - 'packages/gateway/src/operations-api.ts'
       - 'packages/gateway/script/ui-assets.ts'
       - 'packages/gateway/script/build.ts'
       - 'packages/gateway/script/bundle.ts'
+      - 'packages/ui/e2e/**'
       - 'scripts/ui-deep-link-smoke.mjs'
       - 'pnpm-lock.yaml'
       - '.github/workflows/ui-e2e.yml'
@@ -39,6 +47,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6

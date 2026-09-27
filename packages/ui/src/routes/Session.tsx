@@ -182,6 +182,7 @@ export const Session: Component = () => {
       nav={nav}
       detail={detail()}
       mobilePane="detail"
+      searchProjectId={projectId() ?? undefined}
       back={
         projectId()
           ? { href: projectHref(projectId()!), label: projectLabel() }
