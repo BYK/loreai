@@ -42,6 +42,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   gemini: "Gemini",
+  google: "Gemini",
   vertex: "Vertex AI",
   openrouter: "OpenRouter",
   "github-copilot": "GitHub Copilot",

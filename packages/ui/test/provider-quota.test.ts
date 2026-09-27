@@ -20,6 +20,7 @@ describe("displayProvider", () => {
     ["bedrock", "Amazon Bedrock"],
     ["opencode", "OpenCode Zen"],
     ["opencode-go", "OpenCode Go"],
+    ["google", "Gemini"],
     ["unknown", "Unknown provider"],
     ["minimax", "minimax"],
     ["<img>", "<img>"],
