@@ -5,6 +5,7 @@ import * as embedding from "../src/embedding";
 import {
   _resetPatternEchoCooldownForTest,
   detectPatternEchoes,
+  parsePatternResponse,
   PATTERN_COOLDOWN_MS,
 } from "../src/pattern-echo";
 import * as log from "../src/log";
@@ -27,6 +28,13 @@ import type { VectorWorkerInbound } from "../src/vector-worker-types";
 // armed it and the full search + cluster ran on every single distillation.
 
 const PROJECT = "/test/pattern-echo";
+
+it("keeps the complete pattern content across the former 1200-character cut", () => {
+  const content = `${"x".repeat(1_199)}😀${"tail ".repeat(200)}`;
+  expect(
+    parsePatternResponse(JSON.stringify({ title: "Long pattern", content })),
+  ).toMatchObject({ content });
+});
 
 function insertDistill(id: string, pid: string, session: string): void {
   db()

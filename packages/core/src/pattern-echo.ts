@@ -438,7 +438,8 @@ function clusterBySimilarity(
 
 type PatternResponse = { title: string; content: string };
 
-function parsePatternResponse(text: string): PatternResponse | null {
+/** @internal Exported for the full-content regression test. */
+export function parsePatternResponse(text: string): PatternResponse | null {
   const cleaned = text
     .trim()
     .replace(/^```json?\s*/i, "")
@@ -459,7 +460,7 @@ function parsePatternResponse(text: string): PatternResponse | null {
     ) {
       return {
         title: parsed.title.slice(0, 200),
-        content: parsed.content.slice(0, 1200),
+        content: parsed.content,
       };
     }
   } catch {

@@ -118,7 +118,7 @@ export function parseEngramExport(raw: unknown): LoreImportDoc {
     const entry: LoreImportEntry = {
       // Clamp to the schema ceiling so a single oversized observation is
       // truncated here rather than failing validation and aborting the entire
-      // import. The importer truncates further (to 1200) downstream.
+      // import. The importer preserves the content after this safety bound.
       content:
         obs.content.length > MAX_IMPORT_CONTENT_LENGTH
           ? obs.content.slice(0, MAX_IMPORT_CONTENT_LENGTH)

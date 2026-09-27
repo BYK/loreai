@@ -16,6 +16,7 @@ import { detectHarness } from "./harness";
 import { boundFallbackHistory } from "./fallback-history";
 import {
   formatUpstreamRequestShape,
+  sanitizeUpstreamJson,
   upstreamRequestShape,
   type UpstreamRequestShape,
 } from "./upstream-request-shape";
@@ -2390,14 +2391,14 @@ const KNOWLEDGE_DELTA_TOKEN_BUDGET = 400;
  *  block count — and thus per-turn context tokens — without bound. When this
  *  many blocks have accumulated, the next append deletes them all and re-derives
  *  ONE cumulative block from the frozen pin baseline (paying one bust to reclaim
- *  budget). Each block is ≤ KNOWLEDGE_DELTA_TOKEN_BUDGET, so the worst-case
- *  durable-delta footprint is bounded at ~MAX_DELTA_BLOCKS × 400 tokens. */
+ *  budget). Full entry content in each block is packed to the delta token
+ *  budget; recall references for all changed entries sit outside that budget. */
 const MAX_DELTA_BLOCKS = 8;
 
-/** Max entries listed in the "Other relevant knowledge" overflow ToC (#917).
+/** Max optional entries listed in the "Other relevant knowledge" overflow ToC (#917).
  *  Each line is just `[id] title (category)` (~15-20 tokens), so 12 lines is a
- *  ~200-token index — small enough to ride the frozen delta without crowding
- *  out the rendered changed-entry content above it. */
+ *  ~200-token index; changed entries' IDs are always listed so durable
+ *  mutations cannot be marked surfaced without a recall reference. */
 const OVERFLOW_TOC_MAX = 12;
 
 /** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
@@ -3368,7 +3369,7 @@ export function buildKnowledgeDeltaMessage(
   // the stale pin is simply left for the next session start to refresh.
   if (!entries.length) return [];
   const renderedIds: string[] = [];
-  let rendered = formatKnowledge(
+  const rendered = formatKnowledge(
     entries.map((entry) => ({
       id: entry.id,
       category: entry.category,
@@ -3378,21 +3379,13 @@ export function buildKnowledgeDeltaMessage(
     KNOWLEDGE_DELTA_TOKEN_BUDGET,
     renderedIds,
   );
-  if (!rendered && entries.length) {
-    const entry = entries[0];
-    const truncated =
-      entry.content.length > 900
-        ? `${entry.content.slice(0, 900)}…`
-        : entry.content;
-    rendered =
-      `## Long-term Knowledge\n\n### ${entry.category.charAt(0).toUpperCase()}${entry.category.slice(1)}\n\n` +
-      `* **${entry.title}**: ${truncated}`;
-    renderedIds.push(entry.id);
-  }
-  rendered ??= "";
+  // If even the first entry exceeds the delta budget, surface its recall ID
+  // below rather than injecting an arbitrary prefix of its content. The old
+  // 900-code-unit fallback could split an emoji and persist invalid UTF-16 in
+  // every future request for the session.
   // Fold two groups into ONE compact, ACTIONABLE recall-by-id index:
   //  (1) changed entries that overflowed the full-render budget above —
-  //      surfaced as `[k:id]` hints instead of the old "Additional Changed
+  //      surfaced as recall-by-id hints instead of the old "Additional Changed
   //      Knowledge (truncated)" dump (3 cut-off entries + "N more omitted",
   //      which the model couldn't act on);
   //  (2) #917 relevance-scored overflow that didn't fit system[2].
@@ -3402,20 +3395,40 @@ export function buildKnowledgeDeltaMessage(
   // any removed id (a tombstoned entry must never be suggested for recall).
   const removedSet = new Set(removedIds);
   const tocSeen = new Set<string>(renderedIds);
-  const tocEntries: Array<{ id: string; title: string; category: string }> = [];
-  for (const e of [...entries, ...(overflow ?? [])]) {
-    if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
-    tocSeen.add(e.id);
-    tocEntries.push({ id: e.id, title: e.title, category: e.category });
+  const changedToc: Array<{ id: string; title: string; category: string }> = [];
+  const overflowToc: typeof changedToc = [];
+  for (const [group, source] of [
+    [changedToc, entries],
+    [overflowToc, overflow ?? []],
+  ] as const) {
+    for (const e of source) {
+      if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
+      tocSeen.add(e.id);
+      group.push({ id: e.id, title: e.title, category: e.category });
+    }
+    group.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
-  tocEntries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // Every changed entry is marked surfaced after this block is persisted, so
+  // its recall ID must be shown. Only optional overflow suggestions are capped.
+  const shownOverflow = overflowToc.slice(
+    0,
+    Math.max(0, OVERFLOW_TOC_MAX - changedToc.length),
+  );
+  const tocEntries = [...changedToc, ...shownOverflow];
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
-        .slice(0, OVERFLOW_TOC_MAX)
-        .map((e) => `* [k:${e.id}] ${e.title} (${e.category})`)
+        .map((e) => {
+          const recallId =
+            e.category === "lat.md"
+              ? `lat:${e.id}`
+              : e.id.startsWith("d:") || e.id.startsWith("t:")
+                ? e.id
+                : `k:${e.id}`;
+          return `* [${recallId}] ${e.title} (${e.category})`;
+        })
         .join("\n")}${
-        tocEntries.length > OVERFLOW_TOC_MAX
-          ? `\n* ${tocEntries.length - OVERFLOW_TOC_MAX} more — use recall with an id for detail.`
+        overflowToc.length > shownOverflow.length
+          ? `\n* ${overflowToc.length - shownOverflow.length} more — use recall with an id for detail.`
           : ""
       }`
     : "";
@@ -4703,14 +4716,6 @@ async function initIfNeeded(
           log.error(`workspace knowledge import error (${subDir}):`, e);
         }
       }
-    }
-
-    // Prune corrupted/oversized knowledge entries (safety net for past bugs).
-    const pruned = ltm.pruneOversized(1200);
-    if (pruned > 0) {
-      log.info(
-        `pruned ${pruned} oversized knowledge entries (confidence set to 0)`,
-      );
     }
 
     // Watch knowledge files for live changes (git pull, manual edits, etc.)
@@ -7493,7 +7498,10 @@ async function forwardToUpstream(
   // the gateway-reconstructed `x-api-key` / `Authorization`.
   applyUpstreamExtraHeaders(headers, extraHeadersForUpstream(config, url));
 
-  let serializedBody = JSON.stringify(body);
+  // JSON.stringify escapes lone UTF-16 surrogates as e.g. "\\ud83d", which
+  // upstream JSON parsers reject. Sanitize values and property names on the
+  // wire so persisted messages can resume without rewriting their history.
+  let serializedBody = JSON.stringify(body, sanitizeUpstreamJson);
 
   // Re-sign the billing header cch after body reconstruction.
   // buildAnthropicRequest completely rebuilds the body (different JSON key
