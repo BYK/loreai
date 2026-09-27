@@ -328,6 +328,7 @@ import {
   type AuthCredential,
 } from "./auth";
 import type { UpstreamInterceptor } from "./recorder";
+import { dumpUpstream400 } from "./upstream-400-dump";
 import {
   startIdleScheduler,
   buildIdleWorkHandler,
@@ -7589,6 +7590,7 @@ async function forwardToUpstream(
   };
 
   const response = await dispatch(signal);
+  await dumpUpstream400(url, headers, serializedBody, response);
   return {
     response,
     route,
