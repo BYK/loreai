@@ -37,7 +37,10 @@ function project(
   };
 }
 
-function renderNav(projects: ProjectSummary[]) {
+function renderNav(
+  projects: ProjectSummary[],
+  activeProjectId: string | null = null,
+) {
   return render(() => (
     <MemoryRouter>
       <Route
@@ -48,7 +51,7 @@ function renderNav(projects: ProjectSummary[]) {
               projects={projects}
               loading={false}
               error={undefined}
-              activeProjectId={null}
+              activeProjectId={activeProjectId}
               totalKnowledge={null}
             />
           </ConnectionContext.Provider>
@@ -209,6 +212,18 @@ describe("Nav project sections", () => {
     expect(screen.queryByTestId("nav-project-filter")).toBeNull();
   });
 
+  it("keeps the active project visible while All projects is collapsed", async () => {
+    renderNav(SEVEN, "delta");
+
+    const active = screen.getByRole("link", { name: /delta/ });
+    expect(active).toHaveAttribute("aria-current", "page");
+    expect(active.closest('[data-section="recent"]')).not.toBeNull();
+    expect(screen.getByTestId("nav-all-projects")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
   it("no filter box and no All button with ≤5 projects and no pins", async () => {
     renderNav(SEVEN.slice(0, 3));
     await screen.findAllByTestId("nav-project");
@@ -238,6 +253,44 @@ describe("sectionProjects / byRecency", () => {
     const list = [project("a"), project("b")];
     const sections = sectionProjects(list, ["b", "ghost", "a"], "");
     expect(sections.pinned.map((p) => p.id)).toEqual(["b", "a"]);
+  });
+
+  it("surfaces an active unpinned project without dropping recent entries", () => {
+    const list = Array.from({ length: 7 }, (_, index) =>
+      project(`p${index}`, { last_activity: 7 - index }),
+    );
+
+    const active = sectionProjects(list, [], "", "p6");
+    expect(active.recent.map((p) => p.id)).toEqual([
+      "p6",
+      "p0",
+      "p1",
+      "p2",
+      "p3",
+      "p4",
+    ]);
+    expect(active.rest.map((p) => p.id)).toEqual(["p5"]);
+
+    const pinned = sectionProjects(list, ["p6"], "", "p6");
+    expect(pinned.pinned.map((p) => p.id)).toEqual(["p6"]);
+    expect(pinned.recent.map((p) => p.id)).toEqual([
+      "p0",
+      "p1",
+      "p2",
+      "p3",
+      "p4",
+    ]);
+    expect(pinned.rest.map((p) => p.id)).toEqual(["p5"]);
+
+    const withoutActive = sectionProjects(list, [], "", null);
+    expect(withoutActive.recent.map((p) => p.id)).toEqual([
+      "p0",
+      "p1",
+      "p2",
+      "p3",
+      "p4",
+    ]);
+    expect(withoutActive.rest.map((p) => p.id)).toEqual(["p5", "p6"]);
   });
 
   it("byRecency breaks activity ties by created_at desc", () => {

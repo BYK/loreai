@@ -140,7 +140,12 @@ export const Nav: Component<NavProps> = (props) => {
   const [filter, setFilter] = createSignal("");
   const [showAll, setShowAll] = createSignal(false);
   const sections = createMemo(() =>
-    sectionProjects(props.projects ?? [], pins().pinned(), filter()),
+    sectionProjects(
+      props.projects ?? [],
+      pins().pinned(),
+      filter(),
+      props.activeProjectId,
+    ),
   );
   return (
     <nav

@@ -38,6 +38,7 @@ export function sectionProjects(
   projects: readonly ProjectSummary[],
   pinnedIds: readonly string[],
   filter: string,
+  activeId: string | null = null,
 ): ProjectSections {
   const sorted = [...projects].sort(byRecency);
   const byId = new Map(projects.map((p) => [p.id, p]));
@@ -50,8 +51,15 @@ export function sectionProjects(
   const pinnedSet = new Set(pinned.map((p) => p.id));
   const unpinned = sorted.filter((p) => !pinnedSet.has(p.id));
 
-  const recent = unpinned.slice(0, RECENT_LIMIT);
-  const rest = unpinned.slice(RECENT_LIMIT);
+  let recent = unpinned.slice(0, RECENT_LIMIT);
+  let rest = unpinned.slice(RECENT_LIMIT);
+  const active = activeId
+    ? rest.find((project) => project.id === activeId)
+    : undefined;
+  if (active) {
+    recent = [active, ...recent];
+    rest = rest.filter((project) => project.id !== active.id);
+  }
 
   const query = filter.trim().toLowerCase();
   const matches = query
