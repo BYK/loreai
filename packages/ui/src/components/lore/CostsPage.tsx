@@ -9,6 +9,7 @@ import { formatMoney } from "~/lib/money";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
 import { errorStateFor } from "./ErrorState";
+import { ProviderCards } from "./ProviderCards";
 import { StateCard } from "./StateCard";
 
 function tokens(value: number): string {
@@ -149,6 +150,12 @@ export const CostsPage: Component = () => {
                 valueClass={combinedSavingsTone()}
               />
             </div>
+
+            <ProviderCards
+              providers={data().providers}
+              quotas={data().quotas}
+              money={formatMoney}
+            />
 
             <section class="mb-6 rounded-lg border border-line bg-bg p-4">
               <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
