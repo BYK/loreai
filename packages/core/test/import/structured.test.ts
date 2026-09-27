@@ -8,7 +8,6 @@ import {
   LORE_IMPORT_VERSION,
   type LoreImportDoc,
 } from "../../src/import/schema";
-import { MAX_ENTRY_CONTENT_LENGTH } from "../../src/curator";
 
 const PROJECT = join(
   fileURLToPath(new URL(".", import.meta.url)),
@@ -82,8 +81,8 @@ describe("importStructuredEntries", () => {
     expect(entry?.content).toBe("new content v2");
   });
 
-  test("truncates content over the 1200-char cap", () => {
-    const long = "x".repeat(MAX_ENTRY_CONTENT_LENGTH + 500);
+  test("preserves complete imported content, even when it exceeds a prompt budget", () => {
+    const long = `${"x".repeat(1_199)}😀${"y".repeat(500)}`;
     importStructuredEntries(
       doc([{ title: "Long entry title", content: long }]),
       { defaultProjectPath: PROJECT },
@@ -91,8 +90,7 @@ describe("importStructuredEntries", () => {
     const rows = entriesForProject(PROJECT);
     const entry = rows.find((r) => r.title === "Long entry title");
     expect(entry).toBeDefined();
-    expect(entry!.content.length).toBeLessThanOrEqual(MAX_ENTRY_CONTENT_LENGTH);
-    expect(entry!.content).toContain("[truncated");
+    expect(entry?.content).toBe(long);
   });
 
   test("synthesizes a title from content when absent", () => {
@@ -238,10 +236,10 @@ describe("importStructuredEntries", () => {
     expect(row?.confidence).toBeCloseTo(0.9, 5);
   });
 
-  test("re-import of a >cap entry is idempotent (compares truncated content)", () => {
+  test("re-import of a large entry is idempotent (compares complete content)", () => {
     const P = PROJECT + "_trunc_reimport";
     ensureProject(P);
-    const long = "z".repeat(MAX_ENTRY_CONTENT_LENGTH + 800);
+    const long = "z".repeat(2_000);
     const d = doc([{ title: "Big one", content: long }]);
     const first = importStructuredEntries(d, { defaultProjectPath: P });
     expect(first.created).toBe(1);

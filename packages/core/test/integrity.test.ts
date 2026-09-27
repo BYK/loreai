@@ -12,19 +12,17 @@ describe("knowledge integrity checking", () => {
   });
 
   describe("check", () => {
-    test("detects oversized entries", () => {
+    test("accepts long entries without flagging them as corrupted", () => {
       ltm.create({
         projectPath: PROJECT,
         category: "architecture",
         title: "Oversized Entry",
-        content: "x".repeat(1500), // Exceeds 1200 char limit
+        content: "x".repeat(1500),
         scope: "project",
       });
 
       const issues = ltm.check(PROJECT);
-      const oversized = issues.filter((i) => i.type === "oversized");
-      expect(oversized.length).toBe(1);
-      expect(oversized[0].description).toContain("1500");
+      expect(issues).toEqual([]);
     });
 
     test("detects empty entries", () => {

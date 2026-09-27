@@ -1,7 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { upstreamRequestShape } from "../src/upstream-request-shape";
+import {
+  sanitizeUpstreamJson,
+  upstreamRequestShape,
+} from "../src/upstream-request-shape";
 
 describe("upstream request shape", () => {
+  it("measures the sanitized item bytes actually sent upstream", () => {
+    const body = {
+      input: [{ type: "message", content: { ["\ud83d"]: "broken \ud83d" } }],
+    };
+    const wire = JSON.stringify(body, sanitizeUpstreamJson);
+    const shape = upstreamRequestShape(body, wire, "openai-responses");
+    expect(shape.bodyBytes).toBe(Buffer.byteLength(wire));
+    expect(shape.largestItemBytes).toBe(
+      Buffer.byteLength(JSON.stringify(body.input[0], sanitizeUpstreamJson)),
+    );
+    expect(wire).not.toContain("\\ud83d");
+  });
+
+  it("rejects normalization collisions instead of dropping a schema property", () => {
+    expect(() =>
+      JSON.stringify({ ["\ud83d"]: 1, ["�"]: 2 }, sanitizeUpstreamJson),
+    ).toThrow("Cannot serialize colliding Unicode property names");
+  });
+
   it("reports only numeric dimensions and allowlisted item types", () => {
     const privateText = "PRIVATE_PROMPT_ä";
     const body = {

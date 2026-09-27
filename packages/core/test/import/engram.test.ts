@@ -1,6 +1,5 @@
 import { describe, test, expect } from "vitest";
 import { parseEngramExport } from "../../src/import/sources/engram";
-import { MAX_ENTRY_CONTENT_LENGTH } from "../../src/curator";
 
 function engramExport(observations: unknown[], sessions: unknown[] = []) {
   return {
@@ -84,7 +83,7 @@ describe("parseEngramExport", () => {
   });
 
   test("carries sync_id as external_id and preserves long content", () => {
-    const long = "y".repeat(MAX_ENTRY_CONTENT_LENGTH + 300);
+    const long = "y".repeat(1_500);
     const doc = parseEngramExport(
       engramExport([
         {
@@ -96,7 +95,7 @@ describe("parseEngramExport", () => {
       ]),
     );
     expect(doc.entries[0].external_id).toBe("obs-abc123");
-    // The adapter preserves content; the importer truncates.
+    // The adapter preserves content for the importer to store intact.
     expect(doc.entries[0].content.length).toBe(long.length);
   });
 

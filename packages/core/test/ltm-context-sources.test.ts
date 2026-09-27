@@ -186,6 +186,21 @@ describe("ltm.forSession — context sources (distillation + temporal)", () => {
     expect(byId.has(knowledgeId)).toBe(true);
   });
 
+  test("skips an oversized temporal message rather than injecting a cut-off excerpt", async () => {
+    db()
+      .query("UPDATE temporal_messages SET content = ? WHERE id = ?")
+      .run(`an earlier conversation ${"detail ".repeat(2_000)}`, tempId);
+
+    const result = await ltm.forSession(PROJ, undefined, 800, {
+      excludeCategories: ["preference"],
+      contextHint: HINT,
+      includeContextSources: ["temporal"],
+    });
+
+    expect(result.map((entry) => entry.id)).not.toContain(`t:${tempId}`);
+    expect(result.map((entry) => entry.id)).toContain(knowledgeId);
+  });
+
   test("VACUITY: without includeContextSources, the facts are NOT injected", async () => {
     const result = await ltm.forSession(PROJ, undefined, 4000, {
       excludeCategories: ["preference"],

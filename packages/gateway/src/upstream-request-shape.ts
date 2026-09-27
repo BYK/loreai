@@ -1,3 +1,25 @@
+import { sanitizeSurrogates } from "@loreai/core";
+
+/** Sanitize JSON string values and property names before sending upstream. */
+export function sanitizeUpstreamJson(_key: string, value: unknown): unknown {
+  if (typeof value === "string") return sanitizeSurrogates(value);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const keys = Object.keys(value);
+  if (keys.every((key) => sanitizeSurrogates(key) === key)) return value;
+  const sanitized = keys.map((key) => sanitizeSurrogates(key));
+  if (new Set(sanitized).size !== keys.length) {
+    throw new Error("Cannot serialize colliding Unicode property names");
+  }
+  return Object.fromEntries(
+    keys.map((key, index) => [
+      sanitized[index],
+      (value as Record<string, unknown>)[key],
+    ]),
+  );
+}
+
 /** Content-free request dimensions for otherwise opaque upstream 400s. */
 export type UpstreamRequestShape = {
   bodyBytes: number;
@@ -68,7 +90,7 @@ export function upstreamRequestShape(
     let largestItemType: UpstreamRequestShape["largestItemType"] = "other";
     for (const item of input) {
       const itemBytes = Buffer.byteLength(
-        JSON.stringify(item) ?? "null",
+        JSON.stringify(item, sanitizeUpstreamJson) ?? "null",
         "utf8",
       );
       if (itemBytes <= largestItemBytes) continue;
