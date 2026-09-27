@@ -114,6 +114,52 @@ async function seedContradictionPair(prefix: string): Promise<{
   return { a, b, projectId };
 }
 
+interface ImportsBody {
+  imports: Array<{
+    id: string;
+    project_id: string;
+    agent_name: string;
+    source_id: string;
+    source_hash: string;
+    entries_created: number;
+    entries_updated: number;
+    imported_at: number;
+  }>;
+  next_cursor: string | null;
+  total: number;
+}
+
+async function seedImport(
+  projectPath: string,
+  row: {
+    id: string;
+    agent_name: string;
+    source_id: string;
+    imported_at: number;
+    created?: number;
+    updated?: number;
+  },
+): Promise<void> {
+  const { db, ensureProject } = await import("@loreai/core");
+  const projectId = ensureProject(projectPath);
+  db()
+    .query(
+      `INSERT INTO import_history
+       (id, project_id, agent_name, source_id, source_hash, entries_created, entries_updated, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      row.id,
+      projectId,
+      row.agent_name,
+      row.source_id,
+      "hash",
+      row.created ?? 0,
+      row.updated ?? 0,
+      row.imported_at,
+    );
+}
+
 interface ListBody {
   entities: Array<{
     id: string;
@@ -901,6 +947,95 @@ describe("configured hosted mode", () => {
   });
 });
 
+describe("GET /api/v1/projects/:id/imports", () => {
+  const IMPORTS_PATH = "/test/dashboard/imports";
+
+  async function importsProject(): Promise<{ id: string; path: string }> {
+    const { db, ensureProject } = await import("@loreai/core");
+    ensureProject(IMPORTS_PATH, "imports-project");
+    const row = db()
+      .query("SELECT id FROM projects WHERE path = ?")
+      .get(IMPORTS_PATH) as { id: string };
+    return { id: row.id, path: IMPORTS_PATH };
+  }
+
+  it("pages through imports in (imported_at DESC, id DESC) order", async () => {
+    const project = await importsProject();
+    // Equal timestamps exercise the id tiebreak; a fresh record proves the
+    // "newest first" order too.
+    await seedImport(IMPORTS_PATH, {
+      id: "imp-b",
+      agent_name: "claude",
+      source_id: "conv-b",
+      imported_at: 1_700_000_000_000,
+      created: 2,
+    });
+    await seedImport(IMPORTS_PATH, {
+      id: "imp-a",
+      agent_name: "claude",
+      source_id: "conv-a",
+      imported_at: 1_700_000_000_000,
+      created: 1,
+    });
+    await seedImport(IMPORTS_PATH, {
+      id: "imp-c",
+      agent_name: "codex",
+      source_id: "conv-c",
+      imported_at: 1_700_000_500_000,
+      created: 3,
+      updated: 1,
+    });
+
+    const page1 = await apiJSON<ImportsBody>(
+      `/api/v1/projects/${project.id}/imports?limit=1`,
+    );
+    expect(page1.total).toBe(3);
+    expect(page1.imports.map((r) => r.id)).toEqual(["imp-c"]);
+    expect(page1.imports[0].entries_created).toBe(3);
+    expect(page1.imports[0].entries_updated).toBe(1);
+    expect(page1.next_cursor).not.toBeNull();
+
+    const page2 = await apiJSON<ImportsBody>(
+      `/api/v1/projects/${project.id}/imports?limit=1&page=${encodeURIComponent(page1.next_cursor!)}`,
+    );
+    expect(page2.imports.map((r) => r.id)).toEqual(["imp-b"]);
+    expect(page2.next_cursor).not.toBeNull();
+
+    const page3 = await apiJSON<ImportsBody>(
+      `/api/v1/projects/${project.id}/imports?limit=1&page=${encodeURIComponent(page2.next_cursor!)}`,
+    );
+    expect(page3.imports.map((r) => r.id)).toEqual(["imp-a"]);
+    expect(page3.next_cursor).toBeNull();
+  });
+
+  it("rejects malformed cursor and limit", async () => {
+    const project = await importsProject();
+    for (const suffix of ["page=%%%", "page=aGk!", "limit=abc", "limit=0"]) {
+      const res = await api(`/api/v1/projects/${project.id}/imports?${suffix}`);
+      expect(res.status, suffix).toBe(400);
+    }
+  });
+
+  it("404s for unknown and non-UUID project ids", async () => {
+    for (const id of [randomUUID(), "not-a-uuid"]) {
+      const res = await api(`/api/v1/projects/${id}/imports`);
+      expect(res.status, id).toBe(404);
+    }
+  });
+
+  it("returns an empty page for a project without imports", async () => {
+    const { db, ensureProject } = await import("@loreai/core");
+    ensureProject("/test/dashboard/no-imports", "empty-project");
+    const row = db()
+      .query("SELECT id FROM projects WHERE path = ?")
+      .get("/test/dashboard/no-imports") as { id: string };
+    const body = await apiJSON<ImportsBody>(
+      `/api/v1/projects/${row.id}/imports`,
+    );
+    expect(body).toEqual({ imports: [], next_cursor: null, total: 0 });
+  });
+});
+
 describe("management boundary", () => {
   it("hides the dashboard routes from non-loopback peers", async () => {
     const { startServer } = await import("../src/server");
@@ -943,6 +1078,7 @@ describe("management boundary", () => {
             body: JSON.stringify({ name: "x" }),
           },
         },
+        { path: `/api/v1/projects/${randomUUID()}/imports`, init: {} },
       ] as Array<{ path: string; init: LoopbackRequestInit }>) {
         const res = await loopbackRequest(
           `${remoteBase}${init.path}`,

@@ -7,6 +7,7 @@
  * is JSON through the management-access helpers; no handler calls an LLM.
  */
 import {
+  conversationImport,
   data,
   entities,
   isHostedMode,
@@ -114,6 +115,54 @@ function detailBody(e: EntityWithAliases) {
 // Cursor paging (keyset over (entity_type, canonical_name, id))
 // ---------------------------------------------------------------------------
 
+function encodeCursorPayload(payload: object): string {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+}
+
+function decodeCursorPayload(token: string): Record<string, unknown> | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** `limit` query param: absent → `defaultLimit`, else 1..`max`. */
+function parseLimit(
+  url: URL,
+  defaultLimit = 50,
+  max = 200,
+): { limit: number } | { error: Response } {
+  const rawLimit = url.searchParams.get("limit");
+  if (rawLimit === null || rawLimit === "") return { limit: defaultLimit };
+  if (!/^\d+$/.test(rawLimit)) {
+    return {
+      error: errorResponse(
+        400,
+        "invalid_request",
+        `Invalid limit: ${rawLimit}`,
+      ),
+    };
+  }
+  const n = parseInt(rawLimit, 10);
+  if (n < 1) {
+    return {
+      error: errorResponse(
+        400,
+        "invalid_request",
+        `Invalid limit: ${rawLimit}`,
+      ),
+    };
+  }
+  return { limit: Math.min(n, max) };
+}
+
 const ENTITY_CURSOR_VERSION = 1;
 
 type EntityCursor = { v: number; t: string; n: string; i: string };
@@ -125,29 +174,46 @@ function encodeEntityCursor(item: EntityListItem): string {
     n: item.canonical_name,
     i: item.id,
   };
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return encodeCursorPayload(payload);
 }
 
 function decodeEntityCursor(token: string): EntityCursor | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
+  const parsed = decodeCursorPayload(token);
   if (
-    typeof parsed !== "object" ||
     parsed === null ||
-    Array.isArray(parsed) ||
-    (parsed as EntityCursor).v !== ENTITY_CURSOR_VERSION ||
-    typeof (parsed as EntityCursor).t !== "string" ||
-    typeof (parsed as EntityCursor).n !== "string" ||
-    typeof (parsed as EntityCursor).i !== "string"
+    parsed.v !== ENTITY_CURSOR_VERSION ||
+    typeof parsed.t !== "string" ||
+    typeof parsed.n !== "string" ||
+    typeof parsed.i !== "string"
   ) {
     return null;
   }
-  return parsed as EntityCursor;
+  return parsed as unknown as EntityCursor;
+}
+
+const IMPORT_CURSOR_VERSION = 1;
+
+type ImportCursor = { v: number; t: number; i: string };
+
+function encodeImportCursor(item: { imported_at: number; id: string }): string {
+  return encodeCursorPayload({
+    v: IMPORT_CURSOR_VERSION,
+    t: item.imported_at,
+    i: item.id,
+  });
+}
+
+function decodeImportCursor(token: string): ImportCursor | null {
+  const parsed = decodeCursorPayload(token);
+  if (
+    parsed === null ||
+    parsed.v !== IMPORT_CURSOR_VERSION ||
+    typeof parsed.t !== "number" ||
+    typeof parsed.i !== "string"
+  ) {
+    return null;
+  }
+  return parsed as unknown as ImportCursor;
 }
 
 /** Strict `(type, name, id)` tuple comparison — the sort keyset order. */
@@ -170,26 +236,9 @@ function afterCursor(a: EntityListItem, c: EntityCursor): boolean {
  * max 200. Malformed cursor or limit → 400 `invalid_request`.
  */
 export function handleListEntities(url: URL): Response {
-  const rawLimit = url.searchParams.get("limit");
-  let limit = 50;
-  if (rawLimit !== null && rawLimit !== "") {
-    if (!/^\d+$/.test(rawLimit)) {
-      return errorResponse(
-        400,
-        "invalid_request",
-        `Invalid limit: ${rawLimit}`,
-      );
-    }
-    const n = parseInt(rawLimit, 10);
-    if (n < 1) {
-      return errorResponse(
-        400,
-        "invalid_request",
-        `Invalid limit: ${rawLimit}`,
-      );
-    }
-    limit = Math.min(n, 200);
-  }
+  const parsedLimit = parseLimit(url);
+  if ("error" in parsedLimit) return parsedLimit.error;
+  const limit = parsedLimit.limit;
 
   const token = url.searchParams.get("page");
   let cursor: EntityCursor | null = null;
@@ -225,6 +274,57 @@ export function handleListEntities(url: URL): Response {
       : null;
 
   return jsonResponse({ entities: items, next_cursor, total: all.length });
+}
+
+/**
+ * `GET /api/v1/projects/:id/imports?page=<cursor>&limit=<n>` — the
+ * conversation-import history for one project, newest first with an `id`
+ * tiebreak (same order `imported_at DESC` produces, made stable). Cursor is
+ * the versioned base64url keyset `{v:1, t: imported_at, i: id}`; `limit`
+ * defaults to 50, max 200; malformed cursor/limit → 400. Unknown or non-UUID
+ * project id → 404 (the lookup happens before `listImports`, which would
+ * otherwise `ensureProject` a phantom row). Read-only: no hosted guard.
+ */
+export function handleListProjectImports(url: URL, id: string): Response {
+  const path = projectPathById(id);
+  if (path === null) {
+    return errorResponse(404, "not_found", `Project not found: ${id}`);
+  }
+
+  const parsedLimit = parseLimit(url);
+  if ("error" in parsedLimit) return parsedLimit.error;
+  const limit = parsedLimit.limit;
+
+  const token = url.searchParams.get("page");
+  let cursor: ImportCursor | null = null;
+  if (token !== null && token !== "") {
+    cursor = decodeImportCursor(token);
+    if (!cursor) {
+      return errorResponse(400, "invalid_request", "Malformed page cursor");
+    }
+  }
+
+  // JS re-sort adds the id tiebreak listImports' SQL ORDER BY lacks.
+  const all = conversationImport.listImports(path).sort((a, b) => {
+    if (a.imported_at !== b.imported_at) return b.imported_at - a.imported_at;
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+
+  const paged = cursor
+    ? all.filter(
+        (r) =>
+          r.imported_at < cursor.t ||
+          (r.imported_at === cursor.t && r.id < cursor.i),
+      )
+    : all;
+  const items = paged.slice(0, limit);
+  const last = items[items.length - 1];
+  const next_cursor =
+    last !== undefined && paged.length > limit
+      ? encodeImportCursor(last)
+      : null;
+
+  return jsonResponse({ imports: items, next_cursor, total: all.length });
 }
 
 /**

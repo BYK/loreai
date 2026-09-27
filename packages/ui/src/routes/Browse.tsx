@@ -15,6 +15,7 @@ import { ProjectPage } from "~/components/lore/ProjectPage";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
 import { SearchResults } from "~/components/lore/SearchResults";
 import { SessionList } from "~/components/lore/SessionList";
+import { ImportHistoryPage } from "~/components/lore/ImportHistoryPage";
 import { errorStateFor } from "~/components/lore/ErrorState";
 import { ListRow, PaneHead } from "~/components/lore/Panes";
 import { StateCard } from "~/components/lore/StateCard";
@@ -36,6 +37,8 @@ export const knowledgeHref = (
   `${projectHref(projectId)}/knowledge/${encodeURIComponent(knowledgeId)}${query ? knowledgeQueryToSearch(query) : ""}`;
 export const sessionsHref = (projectId: string, cursor?: string | null) =>
   `${projectHref(projectId)}/sessions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`;
+export const importsHref = (projectId: string, cursor?: string | null) =>
+  `${projectHref(projectId)}/imports${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`;
 export const sessionHref = (projectId: string, sessionId: string) =>
   `${projectHref(projectId)}/sessions/${encodeURIComponent(sessionId)}`;
 export const searchHref = (
@@ -110,6 +113,7 @@ export const Browse: Component<{
     | "knowledge-table"
     | "entry"
     | "sessions"
+    | "imports"
     | "search";
 }> = (props) => {
   const raw = useParams<{
@@ -321,6 +325,9 @@ export const Browse: Component<{
         return (
           <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
         );
+      case "imports":
+        if (!id) return projectFallback();
+        return <ImportHistoryPage projectId={id} cursor={cursor()} />;
       case "search":
         if (!id) return projectFallback();
         return (
@@ -347,6 +354,7 @@ export const Browse: Component<{
       case "search":
       case "sessions":
       case "knowledge-table":
+      case "imports":
         return { href: projectHref(id), label: label() };
       case "project":
         return { href: "/", label: "Projects" };
