@@ -106,10 +106,18 @@ describe("upstream request shape", () => {
   );
 
   it("counts Gemini contents", () => {
-    const body = { contents: [{ role: "user", parts: [{ text: "private" }] }] };
+    const body = {
+      contents: [{ role: "user", parts: [{ text: "private" }] }],
+      tools: [
+        { functionDeclarations: [{ name: "a" }, { name: "b" }, { name: "c" }] },
+      ],
+    };
     expect(
-      upstreamRequestShape(body, JSON.stringify(body), "gemini").inputItems,
-    ).toBe(1);
+      upstreamRequestShape(body, JSON.stringify(body), "gemini"),
+    ).toMatchObject({
+      inputItems: 1,
+      tools: 3,
+    });
   });
 
   it("uses UTF-8 byte length to bound re-serialization for multibyte content", () => {

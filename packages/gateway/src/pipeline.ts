@@ -7017,7 +7017,7 @@ function logUpstreamResponseFailure(
   headers: Headers,
   req: GatewayRequest,
   route: ResolvedRequestUpstreamRoute,
-  sessionID: string,
+  sessionID: string | undefined,
   requestShape?: UpstreamRequestShape,
 ): void {
   const details = [
@@ -7025,8 +7025,12 @@ function logUpstreamResponseFailure(
     `model=${safeDiagnosticToken(req.model) ?? "redacted"}`,
     `protocol=${route.effectiveProtocol}`,
     `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)}`,
-    `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
   ];
+  if (sessionID) {
+    details.push(
+      `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
+    );
+  }
   const category = safeUpstreamErrorCategory(errorBody);
   if (category) details.push(`category=${category}`);
   const requestId = safeUpstreamRequestId(headers);
@@ -7223,6 +7227,8 @@ export function resolveRequestUpstreamRouteForTest(
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
 type UpstreamResult = {
   response: Response;
+  /** Validated route used for dispatch, for content-free error diagnostics. */
+  route: ResolvedRequestUpstreamRoute;
   /** Repeat the exact prepared request bytes, headers, route, and interceptor. */
   retry: (signal?: AbortSignal) => Promise<Response>;
   /** The serialized JSON body sent to the upstream provider. */
@@ -7585,6 +7591,7 @@ async function forwardToUpstream(
   const response = await dispatch(signal);
   return {
     response,
+    route,
     retry: dispatch,
     serializedBody,
     effectiveProtocol,
@@ -18192,6 +18199,18 @@ async function handlePassthrough(
   // responses. Running a 4xx/429 body through an SSE validator would launder
   // it into status 200 or a synthetic stream failure.
   if (!upstreamResponse.ok) {
+    if (upstreamResponse.status === 400) {
+      logUpstreamResponseFailure(
+        400,
+        "",
+        upstreamResponse.headers,
+        req,
+        forwarded.route,
+        undefined,
+        forwarded.requestShape,
+      );
+      captureUpstream400(effectiveProtocol, forwarded.requestShape);
+    }
     return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
   }
 

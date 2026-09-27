@@ -39,7 +39,19 @@ export function upstreamRequestShape(
     const rawTools = payload.tools;
     const tools = Array.isArray(rawTools) ? rawTools : [];
     shape.inputItems = input.length;
-    shape.tools = tools.length;
+    // Gemini groups all functions in one top-level tools entry.
+    shape.tools =
+      protocol === "gemini"
+        ? tools.reduce((count, tool) => {
+            const declarations =
+              tool && typeof tool === "object"
+                ? (tool as Record<string, unknown>).functionDeclarations
+                : undefined;
+            return (
+              count + (Array.isArray(declarations) ? declarations.length : 1)
+            );
+          }, 0)
+        : tools.length;
     if (protocol === "openai-responses") {
       const instructions = payload.instructions;
       shape.instructionsBytes =
