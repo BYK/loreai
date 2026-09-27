@@ -30,6 +30,15 @@ mkdirSync(scratch, { recursive: true });
 core.ensureProject(lore, "lore", "github.com/BYK/loreai");
 const scratchProjectId = core.ensureProject(scratch, "scratch", null);
 
+// #1918: five extra empty projects so the sidebar has more entries than the
+// Recent limit and the filter / "All projects" surfaces render. They have no
+// messages or knowledge, so `last_activity` is null and they sort last.
+for (let i = 0; i < 5; i++) {
+  const dir = join(root, `archive-${i}`);
+  mkdirSync(dir, { recursive: true });
+  core.ensureProject(dir, `archive-${i}`, null);
+}
+
 const entries = [
   {
     category: "decision",

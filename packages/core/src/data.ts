@@ -77,6 +77,9 @@ export type ProjectSummary = {
   session_count: number;
   message_count: number;
   distillation_count: number;
+  /** Max(last temporal message created_at, last knowledge_current updated_at);
+   * null when the project has neither. */
+  last_activity: number | null;
 };
 
 export type SessionSummary = {
@@ -168,17 +171,25 @@ export function listProjects(): ProjectSummary[] {
         COALESCE(k.cnt, 0) AS knowledge_count,
         COALESCE(t.session_count, 0) AS session_count,
         COALESCE(t.message_count, 0) AS message_count,
-        COALESCE(d.cnt, 0) AS distillation_count
+        COALESCE(d.cnt, 0) AS distillation_count,
+        CASE
+          WHEN t.last_message_at IS NULL THEN k.last_knowledge_at
+          WHEN k.last_knowledge_at IS NULL THEN t.last_message_at
+          ELSE MAX(t.last_message_at, k.last_knowledge_at)
+        END AS last_activity
        FROM projects p
        LEFT JOIN (
-         SELECT project_id, COUNT(*) AS cnt
-         FROM knowledge_current WHERE confidence > 0.2
+         SELECT project_id,
+                COUNT(*) FILTER (WHERE confidence > 0.2) AS cnt,
+                MAX(updated_at) AS last_knowledge_at
+         FROM knowledge_current
          GROUP BY project_id
        ) k ON k.project_id = p.id
        LEFT JOIN (
          SELECT project_id,
                 COUNT(DISTINCT session_id) AS session_count,
-                COUNT(*) AS message_count
+                COUNT(*) AS message_count,
+                MAX(created_at) AS last_message_at
          FROM temporal_messages
          GROUP BY project_id
        ) t ON t.project_id = p.id
@@ -187,7 +198,7 @@ export function listProjects(): ProjectSummary[] {
          FROM distillations
          GROUP BY project_id
        ) d ON d.project_id = p.id
-       ORDER BY p.created_at DESC`,
+       ORDER BY last_activity IS NULL, last_activity DESC, p.created_at DESC`,
     )
     .all() as ProjectSummary[];
   if (cacheable) {

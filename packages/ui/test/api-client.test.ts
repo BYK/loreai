@@ -40,6 +40,7 @@ const PROJECT = {
   session_count: 2,
   message_count: 40,
   distillation_count: 1,
+  last_activity: Date.UTC(2026, 8, 1, 11),
 };
 
 const ENTRY = {

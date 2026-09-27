@@ -48,6 +48,23 @@ Tests:
 - pnpm --filter @loreai/ui exec vitest run test/contradictions-page.test.tsx test/contracts.test.ts test/api-client.test.ts
 - pnpm --filter @loreai/ui test:e2e
 
+### Sidebar projects (#1918)
+
+`GET /api/v1/projects` now returns a `last_activity` timestamp (max of the
+project's last temporal message and last knowledge update; null when it has
+neither) and rows arrive recency-first. The nav renders three surfaces on
+top: a **Pinned** section, a **Recent** section (top 5 non-pinned projects by
+`last_activity`, nulls last), and everything else behind an **All projects**
+toggle plus a filter input that matches name or path. Pins are local working
+state kept in localStorage under `lore.ui.pinnedProjects` — deliberately
+outside the disposable IndexedDB API cache, so they survive cache resets —
+and are never pruned when a project disappears from the list.
+
+Tests:
+- pnpm --filter @loreai/ui exec vitest run test/nav-projects.test.tsx test/contracts.test.ts
+- pnpm exec vitest run packages/core/test/list-projects.test.ts
+- pnpm --filter @loreai/ui test:e2e
+
 Reference documents:
 
 - [API inventory and gateway baseline](https://github.com/BYK/loreai/issues/1796#issuecomment-5736848368)
