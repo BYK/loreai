@@ -315,30 +315,36 @@ export const ContradictionsPage: Component = () => {
                           <span aria-hidden="true">{open() ? "▾" : "▸"}</span>
                           {group.label} ({group.pairs.length})
                         </button>
-                        <Show when={group.crossProject}>
-                          <p class="mb-2 px-2 text-[11px] text-muted">
-                            Entries from different projects (or global rules)
-                          </p>
-                        </Show>
-                        <Show when={open()}>
-                          <div id={bodyId} class="space-y-3">
-                            <For each={group.pairs}>
-                              {(pair) => (
-                                <ContradictionRow
-                                  pair={pair}
-                                  crossProject={group.crossProject}
-                                  acting={acting() === pairKey(pair)}
-                                  disabled={
-                                    acting() !== null || confirmation() !== null
-                                  }
-                                  onDecision={(decision) =>
-                                    requestDecision(pair, decision)
-                                  }
-                                />
-                              )}
-                            </For>
-                          </div>
-                        </Show>
+                        {/* The aria-controls target stays mounted; only the
+                            content inside is collapsed. */}
+                        <div id={bodyId}>
+                          <Show when={open()}>
+                            <Show when={group.crossProject}>
+                              <p class="mb-2 px-2 text-[11px] text-muted">
+                                Entries from different projects (or global
+                                rules)
+                              </p>
+                            </Show>
+                            <div class="space-y-3">
+                              <For each={group.pairs}>
+                                {(pair) => (
+                                  <ContradictionRow
+                                    pair={pair}
+                                    crossProject={group.crossProject}
+                                    acting={acting() === pairKey(pair)}
+                                    disabled={
+                                      acting() !== null ||
+                                      confirmation() !== null
+                                    }
+                                    onDecision={(decision) =>
+                                      requestDecision(pair, decision)
+                                    }
+                                  />
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                        </div>
                       </section>
                     );
                   }}
