@@ -26,7 +26,7 @@ describe("route hrefs", () => {
     );
     expect(searchHref("p1", "q")).toBe("/projects/p1/search?q=q&scope=all");
     expect(searchHref("p1", "", "knowledge")).toBe(
-      "/projects/p1/search?q=&scope=knowledge",
+      "/projects/p1/search?scope=knowledge",
     );
   });
 

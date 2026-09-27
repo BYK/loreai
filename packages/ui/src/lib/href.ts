@@ -27,31 +27,32 @@ export const projectHref = (projectId: string) =>
 export const knowledgeListHref = (
   projectId: string,
   query: KnowledgeQuery = DEFAULT_KNOWLEDGE_QUERY,
-) => `${projectHref(projectId)}/knowledge${knowledgeQueryToSearch(query)}`;
+) =>
+  buildHref(["projects", projectId, "knowledge"]) +
+  knowledgeQueryToSearch(query);
 
 export const knowledgeHref = (
   projectId: string,
   knowledgeId: string,
   query?: KnowledgeQuery,
 ) =>
-  `${projectHref(projectId)}/knowledge/${encodeURIComponent(knowledgeId)}${query ? knowledgeQueryToSearch(query) : ""}`;
+  buildHref(["projects", projectId, "knowledge", knowledgeId]) +
+  (query ? knowledgeQueryToSearch(query) : "");
 
 export const sessionsHref = (projectId: string, cursor?: string | null) =>
-  `${projectHref(projectId)}${buildHref(["sessions"], { cursor })}`;
+  buildHref(["projects", projectId, "sessions"], { cursor });
 
 export const importsHref = (projectId: string, cursor?: string | null) =>
-  `${projectHref(projectId)}${buildHref(["imports"], { cursor })}`;
+  buildHref(["projects", projectId, "imports"], { cursor });
 
 export const sessionHref = (projectId: string, sessionId: string) =>
-  `${projectHref(projectId)}${buildHref(["sessions", sessionId])}`;
+  buildHref(["projects", projectId, "sessions", sessionId]);
 
 export const searchHref = (
   projectId: string,
   q: string,
   scope: RecallScope = "all",
-) =>
-  // `q` is emitted even when empty — byte-identical to the old template.
-  `${projectHref(projectId)}/search?q=${encodeURIComponent(q)}&scope=${encodeURIComponent(scope)}`;
+) => buildHref(["projects", projectId, "search"], { q, scope });
 
 export const entityHref = (id: string) => buildHref(["entities", id]);
 
