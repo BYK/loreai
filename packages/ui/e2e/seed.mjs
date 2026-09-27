@@ -350,6 +350,29 @@ core.entities.create({
   },
 });
 
+// Import history (UI-08): three imports for `lore`, one of them an update.
+core.conversationImport.recordImport(
+  lore,
+  "claude",
+  "claude-session-alpha",
+  "hash-alpha",
+  { created: 12, updated: 0 },
+);
+core.conversationImport.recordImport(
+  lore,
+  "claude",
+  "claude-session-beta",
+  "hash-beta",
+  { created: 5, updated: 2 },
+);
+core.conversationImport.recordImport(
+  lore,
+  "codex",
+  "codex-thread-9",
+  "hash-9",
+  { created: 3, updated: 1 },
+);
+
 let contradictionFixtureId = 0;
 const nextContradictionFixtureId = () =>
   `01996200-1823-7000-8000-${(++contradictionFixtureId).toString(16).padStart(12, "0")}`;

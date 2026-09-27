@@ -757,20 +757,6 @@ function handleEntityRebuildCancel(): Response {
   return jsonResponse({ cancelled });
 }
 
-function handleImportHistory(url: URL): Response {
-  const project = resolveProject(url);
-  if (!project) {
-    return errorResponse(
-      400,
-      "invalid_request",
-      "Import history requires ?git_remote or ?path to identify the project",
-    );
-  }
-
-  const records = conversationImport.listImports(project.path);
-  return jsonResponse(records);
-}
-
 async function handleImportRecord(req: Request): Promise<Response> {
   const body = await parseBody<{
     git_remote?: string;
@@ -1009,11 +995,6 @@ export async function handleAPIRequest(
         }
         throw error;
       }
-    }
-
-    // GET /api/v1/import/history
-    if (pathname === "/api/v1/import/history") {
-      return handleImportHistory(url);
     }
   }
 

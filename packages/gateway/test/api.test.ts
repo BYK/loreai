@@ -540,21 +540,6 @@ describe("GET /api/v1/recall", () => {
 // Tests: Import endpoints
 // ---------------------------------------------------------------------------
 
-describe("GET /api/v1/import/history", () => {
-  it("returns 400 when project is not identified", async () => {
-    const res = await api("/api/v1/import/history");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns empty array for project with no imports", async () => {
-    const { projectPath } = await seedProject();
-    const pq = `path=${encodeURIComponent(projectPath)}`;
-    const records = await apiJSON<unknown[]>(`/api/v1/import/history?${pq}`);
-    expect(Array.isArray(records)).toBe(true);
-    expect(records.length).toBe(0);
-  });
-});
-
 describe("POST /api/v1/import/record", () => {
   it("records an import", async () => {
     const { projectPath } = await seedProject();
@@ -573,14 +558,14 @@ describe("POST /api/v1/import/record", () => {
     const body = (await res.json()) as { recorded: boolean };
     expect(body.recorded).toBe(true);
 
-    // Verify via history endpoint
-    const pq = `path=${encodeURIComponent(projectPath)}`;
-    const records = await apiJSON<
-      Array<{ agent_name: string; source_id: string }>
-    >(`/api/v1/import/history?${pq}`);
-    expect(records.length).toBe(1);
-    expect(records[0].agent_name).toBe("test-agent");
-    expect(records[0].source_id).toBe("session-123");
+    // Verify via the paged project imports route
+    const { projectId } = await seedProject();
+    const page = await apiJSON<{
+      imports: Array<{ agent_name: string; source_id: string }>;
+    }>(`/api/v1/projects/${projectId}/imports`);
+    expect(page.imports.length).toBe(1);
+    expect(page.imports[0].agent_name).toBe("test-agent");
+    expect(page.imports[0].source_id).toBe("session-123");
   });
 
   it("returns 400 for missing fields", async () => {

@@ -21,7 +21,7 @@ import {
 } from "../ui/select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 import { useWorkspace } from "~/routes/workspace";
-import { searchHref } from "~/routes/Browse";
+import { searchHref } from "~/lib/href";
 
 export const SearchResults: Component<{
   project: ProjectSummary;

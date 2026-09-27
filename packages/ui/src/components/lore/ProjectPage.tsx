@@ -8,10 +8,11 @@ import { useWorkspace } from "~/routes/workspace";
 import {
   projectHref,
   knowledgeListHref,
+  importsHref,
   sessionsHref,
   sessionHref,
   searchHref,
-} from "~/routes/Browse";
+} from "~/lib/href";
 import { DocHeader } from "./Document";
 import { ProjectActions } from "./ProjectActions";
 import { ListRow } from "./Panes";
@@ -151,12 +152,20 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
       <section class="border-b border-line py-5">
         <div class="mb-3 flex items-center justify-between">
           <div class="eyebrow">Recent sessions</div>
-          <A
-            class="text-xs text-accent underline"
-            href={sessionsHref(props.project.id)}
-          >
-            All sessions →
-          </A>
+          <div class="flex items-center gap-3">
+            <A
+              class="text-xs text-accent underline"
+              href={importsHref(props.project.id)}
+            >
+              Import history →
+            </A>
+            <A
+              class="text-xs text-accent underline"
+              href={sessionsHref(props.project.id)}
+            >
+              All sessions →
+            </A>
+          </div>
         </div>
         <Switch>
           <Match when={sessions.loader.loading() && !sessions.loader.data()}>
