@@ -141,6 +141,18 @@ function rssKb(pid) {
   }
   return Number(execFileSync("ps", ["-o", "rss=", "-p", String(pid)]));
 }
+function childProcessCount(pid) {
+  try {
+    return execFileSync("pgrep", ["-P", String(pid)], {
+      encoding: "utf8",
+    })
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean).length;
+  } catch {
+    return 0;
+  }
+}
 async function waitForHealth(base, child, spawnError) {
   const deadline = Date.now() + 30_000;
   let exited = false;
@@ -650,6 +662,9 @@ async function measureGateway(
       const rssAfterUiMb = serveUiAssets
         ? round(rssKb(gateway.child.pid) / 1024)
         : null;
+      const childProcesses = serveUiAssets
+        ? childProcessCount(gateway.child.pid)
+        : null;
       const latency = await collectLatency(
         gateway.base,
         requests,
@@ -661,6 +676,7 @@ async function measureGateway(
         startupMs: round(gateway.startupMs),
         rssAfterStartMb,
         rssAfterUiMb,
+        childProcesses,
         latency,
       };
       if (render && index === runs - 1) {
@@ -695,6 +711,7 @@ async function measureGateway(
     startupMs: medianOfRunSummaries(runResults, "startupMs"),
     rssAfterStartMb: medianOfRunSummaries(runResults, "rssAfterStartMb"),
     rssAfterUiMb: medianOfRunSummaries(runResults, "rssAfterUiMb"),
+    childProcesses: medianOfRunSummaries(runResults, "childProcesses"),
     latency,
     firstRender: firstRenderSamples.length
       ? {
@@ -826,6 +843,8 @@ function markdown(result) {
     `| RSS after start | p50 ${current.rssAfterStartMb.p50} MB | ${baseline ? `p50 ${baseline.rssAfterStartMb.p50} MB` : "—"} | ${formatDelta(current.rssAfterStartMb.p50, baseline?.rssAfterStartMb.p50)} |`,
     `| RSS after serving UI | p50 ${current.rssAfterUiMb.p50} MB | ${baseline?.rssAfterUiMb ? `p50 ${baseline.rssAfterUiMb.p50} MB` : "—"} | ${formatDelta(current.rssAfterUiMb.p50, baseline?.rssAfterUiMb?.p50)} |`,
     "",
+    `Harness/child processes spawned by the gateway while serving the UI: ${Math.max(...current.runs.map((run) => run.childProcesses ?? 0))} (max across ${current.runs.length} runs).`,
+    "",
     `Latency summaries use ${result.requests} warmed requests per endpoint; each value is the median of per-run percentiles.`,
     "",
     "| Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 | vs baseline p50 (%) | vs baseline p95 (%) |",
@@ -906,7 +925,17 @@ async function main() {
   const baselineSha = flag("baseline");
   const jsonPath = flag("json");
   const markdownPath = flag("markdown");
+  const renderFromPath = flag("render-from");
   const writeReadmeFlag = argv.includes("--write-readme");
+  if (renderFromPath) {
+    const result = JSON.parse(readFileSync(renderFromPath, "utf8"));
+    const block = markdown(result);
+    if (markdownPath) writeFileSync(markdownPath, `${block}\n`);
+    if (writeReadmeFlag) writeReadme(block);
+    console.log(block);
+    if (markdownPath) process.stderr.write(`wrote ${markdownPath}\n`);
+    return;
+  }
   const gatewayBin = join(
     currentGatewayRoot,
     "packages",

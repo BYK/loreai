@@ -1029,7 +1029,7 @@ Command: `/opt/hostedtoolcache/node/22.23.2/x64/bin/node /home/ubuntu/repos/lore
 
 Machine: INTEL(R) XEON(R) PLATINUM 8559C × 8; 31.3 GiB; Node v22.23.2; linux 6.8.0-1061-aws x64; baseline worktree SHA a4e6af5b.
 
-Git SHA: `2fe9d0da`; measured 2026-09-21T09:22:38.162Z.
+Git SHA: `9bc96c91`; measured 2026-09-21T09:32:53.956Z.
 
 Baseline SHA: `a4e6af5b` (worktree `a4e6af5b`).
 
@@ -1037,19 +1037,21 @@ Baseline note: commit `a4e6af5b` predates the current `/ui` surface, so UI-speci
 
 | Metric | Current | Baseline | vs baseline (%) |
 |---|---:|---:|---:|
-| Startup → first 200 `/health` (median of 5 runs) | p50 1412.2 ms | p50 1150.3 ms | +22.8% |
-| RSS after start | p50 347 MB | p50 346.7 MB | +0.1% |
-| RSS after serving UI | p50 353.5 MB | — | — |
+| Startup → first 200 `/health` (median of 5 runs) | p50 1290.4 ms | p50 1210.9 ms | +6.6% |
+| RSS after start | p50 346.9 MB | p50 347 MB | 0% |
+| RSS after serving UI | p50 352.9 MB | — | — |
+
+Harness/child processes spawned by the gateway while serving the UI: 0 (max across 5 runs).
 
 Latency summaries use 200 warmed requests per endpoint; each value is the median of per-run percentiles.
 
 | Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 | vs baseline p50 (%) | vs baseline p95 (%) |
 |---|---:|---:|---:|---:|
-| `POST /v1/messages` | 32.5 / 152.7 / 274.4 ms | 30.4 / 161.1 / 223.4 ms | +6.9% | -5.2% |
-| `GET /health` | 0.5 / 21.6 / 78.3 ms | 0.5 / 19 / 82.6 ms | +0% | +13.7% |
-| `GET /api/v1/projects` | 0.6 / 21 / 99.2 ms | 0.5 / 15.6 / 71.7 ms | +20% | +34.6% |
-| `GET /ui/` | 0.6 / 8.9 / 97.4 ms | — | — | — |
-| `GET /ui/assets/index-CurzdKYW.js` | 2.3 / 2.9 / 3.9 ms | — | — | — |
+| `POST /v1/messages` | 32.3 / 127.1 / 213.6 ms | 32.1 / 135.2 / 202.4 ms | +0.6% | -6% |
+| `GET /health` | 0.5 / 15.5 / 88.9 ms | 0.5 / 18.6 / 87.7 ms | +0% | -16.7% |
+| `GET /api/v1/projects` | 0.5 / 16.4 / 88.4 ms | 0.5 / 12.3 / 135.1 ms | +0% | +33.3% |
+| `GET /ui/` | 0.6 / 26.8 / 70.3 ms | — | — | — |
+| `GET /ui/assets/index-CurzdKYW.js` | 2.4 / 5 / 6.8 ms | — | — | — |
 
 | Bundle asset | Raw | gzip-9 | Brotli-11 |
 |---|---:|---:|---:|
@@ -1078,17 +1080,59 @@ Latency summaries use 200 warmed requests per endpoint; each value is the median
 
 | First render (5 fresh contexts) | Median |
 |---|---:|
-| domContentLoadedEventEnd | 109.4 ms |
-| loadEventEnd | 132.7 ms |
-| firstPaint | 20 ms |
-| firstContentfulPaint | 140 ms |
-| firstUsefulContentMs | 164.1 ms |
+| domContentLoadedEventEnd | 114.1 ms |
+| loadEventEnd | 145.3 ms |
+| firstPaint | 16 ms |
+| firstContentfulPaint | 148 ms |
+| firstUsefulContentMs | 185.2 ms |
 
 | Long-history scroll | Frame p50 / p95 / max | Frames >50 ms | Long tasks (count / total / max) | Fixture frame p95 / max |
 |---|---:|---:|---:|---:|
-| desktop (1280×800) | 16.7 / 16.7 / 16.8 ms | 0 | 2 / 238 / 173 ms | 16.7 / 16.8 ms |
-| mobile (393×852, DPR 3) | 16.7 / 16.8 / 33.4 ms | 0 | 2 / 235 / 170 ms | 16.8 / 33.4 ms |
+| desktop (1280×800) | 16.7 / 16.8 / 16.8 ms | 0 | 2 / 287 / 214 ms | 16.8 / 16.8 ms |
+| mobile (393×852, DPR 3) | 16.7 / 16.7 / 33.3 ms | 0 | 2 / 277 / 192 ms | 16.7 / 33.3 ms |
 <!-- p1-measurements:end -->
+
+### UI-07 fixture review
+
+Screens reviewed on 2026-09-21 against the three v2.2 design specimens
+(contextual, focused, mobile discussion): `/ui/fixture?view=focus`,
+`/ui/fixture?view=blocks`, project page, knowledge table, knowledge detail
+and session reader, each at desktop (1280×800) and mobile (393×852), light
+and dark — 24 full-page captures taken with a throw-away Playwright script
+against the seeded e2e gateway and the Vite dev server (fixture routes).
+
+| # | Deviation from the specimens | Decision |
+|---|---|---|
+| 1 | Colour palette: the app renders the website's cream/green brand tokens, not the specimen's cool pale-blue chrome and teal accent. | **Accepted** — deliberate token decision, see "Design tokens: website → UI mapping". Structure, radii, borders and focus treatment follow the specimen. |
+| 2 | App bar shows the Lore.AI logo instead of the "Lore" wordmark; "Local workspace" / avatar match. | **Accepted** — brand. |
+| 3 | Knowledge table (mobile): five columns squeezed the title to ~6 characters. | **Fixed** here — scope/confidence/updated columns are hidden below `sm`; title + category remain. |
+| 4 | Knowledge table (desktop): title and preview cells were clipped mid-word without an ellipsis. | **Fixed** here (`truncate` on the cell children). |
+| 5 | Session reader: app-bar search said "Pick a project to search" while inside a project. | **Fixed** here (`searchProjectId` passed from the session route). |
+| 6 | Fixture `?view=focus`: "Proposed approach" list lost its numbering (specimen shows 1–4). | **Fixed** here (`list-decimal`). |
+| 7 | Mobile navigation drawer did not return focus to its opener on close (specimen/plan §0: logical focus order). | **Fixed** here (`Shell.tsx`), asserted by `e2e/keyboard.spec.ts`. |
+| 8 | Session reader: the compressed-context card renders at the top of a partial window although its source messages (0–9) are not loaded yet. | **Accepted** — the card is labelled "compressed context", placed after its sources once they are loaded (`reader.spec.ts` asserts the placement); showing it first in a partial window is the honest coverage state. |
+| 9 | Knowledge table: a disabled "Next page" control is rendered (faint) when there is no further page. | **Accepted** — keeps the paging control's position stable; disabled state is announced. |
+| 10 | Theme switch: a colour transition makes toggle labels briefly low-contrast right after switching (visible in captures taken immediately after the click). | **Accepted** — settled state has full contrast (verified); no change. |
+| 11 | Mobile reader header wraps coverage badges and "Load older history" onto two rows. | **Accepted** — the 44 px target is preserved; single-row layout would need truncation. |
+| 12 | The specimens' discussion/thread panes, reply composer and "Ask agent" are P3/P4; the real screens show them only as disabled placeholders. | **Deferred** — by design (plan §0/§6); tracked by the roadmap epic #1824. |
+
+### P1 read-only UI release checklist
+
+The owner signs this gate off; the implementation agent does not. Each row names the command or artifact that proves it.
+
+| Gate | Evidence |
+|---|---|
+| Headless gateway non-regression | `pnpm test` (gateway suite incl. `start-gateway-quiet.test.ts`, `cli-bundle-smoke.test.ts`, `bundle-exports.test.ts`); `node packages/ui/scripts/measure-p1.mjs --baseline a4e6af5b` startup/RSS/proxy deltas in "UI-07 P1 measurements". |
+| No harness spawn while browsing | `measure-p1.mjs` reports 0 child processes of the gateway after serving every UI asset; `grep -rn "child_process" packages/ui/src` → none. The UI source has no process-spawn imports. |
+| No new mandatory cloud dependency | `packages/ui/package.json` dependencies are bundled browser libraries only; the SPA talks to same-origin `/api/v1` (`src/lib/api.ts`), `ui-static.test.ts` serves from staged assets. |
+| Management security boundary | `packages/gateway/test/management-access.test.ts`, `hono-routing.test.ts`, `gateway-auth-config.test.ts` (socket-peer + Origin/Host checks, `LORE_ALLOW_REMOTE_MANAGEMENT`, `LORE_GATEWAY_AUTH_TOKEN`, hosted-mode write refusals); `e2e/browse.spec.ts` (dev-only routes absent in production). |
+| CSP | `packages/gateway/test/ui-static.test.ts` asserts the `Content-Security-Policy` header on `/ui` responses (see "How the gateway serves the SPA"). |
+| Inert content | `packages/ui/test/safe-html.test.ts` (unit) and `e2e/hostile-content.spec.ts` (every production screen, desktop + mobile, `window.__pwned` stays 0, no `script`/`iframe`/handler attributes/`javascript:` links). |
+| IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v2 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
+| Keyboard / focus | `e2e/keyboard.spec.ts`, `e2e/reader.spec.ts` ("keyboard: rows are focusable"). |
+| Deep links + themes | `e2e/routes.spec.ts` (every README route survives reload; light/dark on every screen), `scripts/ui-deep-link-smoke.mjs` (always-on CI). |
+| Playwright green in CI | `ui-e2e` workflow run on the release PR (desktop + mobile projects) — link the run here when signing off. |
+| Owner sign-off | ☐ date / commit |
 
 ## Data authority
 
