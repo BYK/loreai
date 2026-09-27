@@ -17,6 +17,12 @@ import {
 import { dismissContradiction, resolveContradiction } from "./review-actions";
 import { decodeRequestBody, HttpRequestBodyTooLargeError } from "./http-body";
 import { errorResponse, jsonResponse } from "./management-access";
+import {
+  CURSOR_VERSION,
+  decodeCursor,
+  encodeCursor,
+  InvalidCursor,
+} from "./cursor";
 
 type EntityWithAliases = NonNullable<
   ReturnType<typeof entities.getWithAliases>
@@ -114,40 +120,43 @@ function detailBody(e: EntityWithAliases) {
 // Cursor paging (keyset over (entity_type, canonical_name, id))
 // ---------------------------------------------------------------------------
 
-const ENTITY_CURSOR_VERSION = 1;
-
-type EntityCursor = { v: number; t: string; n: string; i: string };
+type EntityCursor = {
+  v: typeof CURSOR_VERSION;
+  t: string;
+  n: string;
+  i: string;
+};
 
 function encodeEntityCursor(item: EntityListItem): string {
-  const payload: EntityCursor = {
-    v: ENTITY_CURSOR_VERSION,
+  return encodeCursor({
+    v: CURSOR_VERSION,
     t: item.entity_type,
     n: item.canonical_name,
     i: item.id,
-  };
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  });
 }
 
 function decodeEntityCursor(token: string): EntityCursor | null {
-  if (!/^[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) return null;
-  let parsed: unknown;
+  let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
-  } catch {
-    return null;
+    parsed = decodeCursor(token);
+  } catch (err) {
+    if (err instanceof InvalidCursor) return null;
+    throw err;
   }
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    (parsed as EntityCursor).v !== ENTITY_CURSOR_VERSION ||
-    typeof (parsed as EntityCursor).t !== "string" ||
-    typeof (parsed as EntityCursor).n !== "string" ||
-    typeof (parsed as EntityCursor).i !== "string"
+    typeof parsed.t !== "string" ||
+    typeof parsed.n !== "string" ||
+    typeof parsed.i !== "string"
   ) {
     return null;
   }
-  return parsed as EntityCursor;
+  return {
+    v: CURSOR_VERSION,
+    t: parsed.t,
+    n: parsed.n,
+    i: parsed.i,
+  };
 }
 
 /** Strict `(type, name, id)` tuple comparison — the sort keyset order. */

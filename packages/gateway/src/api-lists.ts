@@ -17,13 +17,10 @@
  *
  * Cursor tokens
  * -------------
- * A cursor is opaque to clients: base64url(JSON) of the keyset of the last row
- * of the page (sort key + id tiebreaker), the list kind, the sort, and the
- * project id it was minted for. It is NOT an offset. Decoding validates every
- * field; a token that fails to decode, was minted for another list/sort, or
- * for another project is rejected with 400 (`invalid_cursor`). Filters (`q`,
- * `category`, `scope`) are not embedded — the caller re-sends them with each
- * page, so a cursor never leaks the query it was minted under.
+ * Opaque base64url(JSON) cursor encoding and validation live in `cursor.ts`.
+ * Tokens contain the keyset, list kind, sort, and project/session bindings.
+ * Filters (`q`, `category`, `scope`) are not embedded — the caller re-sends
+ * them with each page, so a cursor never leaks the query it was minted under.
  *
  * Session messages
  * ----------------
@@ -68,11 +65,19 @@ import {
   listQuery,
   type KnowledgeKeyset,
   type KnowledgeListOptions,
-  type KnowledgeSort,
   type MessageKeyset,
   type SessionKeyset,
   type SessionSearchMode,
 } from "@loreai/core";
+import {
+  assertCursorBinding,
+  CURSOR_VERSION,
+  decodeCursor,
+  decodeKnowledgeCursor,
+  encodeCursor,
+  encodeKnowledgeCursor,
+  InvalidCursor,
+} from "./cursor";
 
 // ---------------------------------------------------------------------------
 // Response helpers (mirrors api.ts; kept local so this module has no cycle)
@@ -103,118 +108,19 @@ export class BadRequest extends Error {
 }
 
 export function toResponse(err: unknown): Response {
+  if (err instanceof InvalidCursor)
+    return errorResponse(400, "invalid_cursor", err.message);
   if (err instanceof BadRequest)
     return errorResponse(400, err.errorType, err.message);
   throw err;
 }
 
 // ---------------------------------------------------------------------------
-// Cursor codec
+// Cursor decoders
 // ---------------------------------------------------------------------------
 
-export const CURSOR_VERSION = 1;
-
-type KnowledgeCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "knowledge";
-  project: string;
-  sort: KnowledgeSort;
-  key: number | string;
-  id: string;
-};
-
-type SessionCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "sessions";
-  project: string;
-  last_message_at: number;
-  session_id: string;
-};
-
-type MessageCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "messages";
-  project: string;
-  session: string;
-  created_at: number;
-  id: string;
-};
-
-type SearchCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "search";
-  project: string;
-  session: string;
-  mode: SessionSearchMode;
-  created_at: number;
-  id: string;
-};
-
-function encodeCursor(
-  payload: KnowledgeCursor | SessionCursor | MessageCursor | SearchCursor,
-): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** Decode a token into a plain object, or throw `invalid_cursor`. */
-export function decodeCursorObject(token: string): Record<string, unknown> {
-  // base64url alphabet only — anything else is rejected before decoding so a
-  // sloppy token can't decode to something unexpected.
-  if (!/^[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
-  } catch {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  if (!isRecord(parsed) || parsed.v !== CURSOR_VERSION) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  return parsed;
-}
-
-function decodeKnowledgeCursor(
-  token: string,
-  projectId: string,
-  sort: KnowledgeSort,
-): KnowledgeKeyset {
-  const c = decodeCursorObject(token);
-  if (
-    c.kind !== "knowledge" ||
-    typeof c.project !== "string" ||
-    typeof c.sort !== "string" ||
-    typeof c.id !== "string" ||
-    !(typeof c.key === "number" || typeof c.key === "string")
-  ) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.sort !== sort) {
-    throw new BadRequest(
-      "invalid_cursor",
-      `Cursor was issued for sort=${c.sort}; request uses sort=${sort}`,
-    );
-  }
-  const keyset: KnowledgeKeyset = { key: c.key, id: c.id };
-  if (!listQuery.knowledgeKeysetMatchesSort(keyset, sort)) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  return keyset;
-}
-
 function decodeSessionCursor(token: string, projectId: string): SessionKeyset {
-  const c = decodeCursorObject(token);
+  const c = decodeCursor(token);
   if (
     c.kind !== "sessions" ||
     typeof c.project !== "string" ||
@@ -222,14 +128,9 @@ function decodeSessionCursor(token: string, projectId: string): SessionKeyset {
     typeof c.last_message_at !== "number" ||
     !Number.isFinite(c.last_message_at)
   ) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
+    throw new InvalidCursor("Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
   return { last_message_at: c.last_message_at, session_id: c.session_id };
 }
 
@@ -238,7 +139,7 @@ function decodeMessageCursor(
   projectId: string,
   sessionId: string,
 ): MessageKeyset {
-  const c = decodeCursorObject(token);
+  const c = decodeCursor(token);
   if (
     c.kind !== "messages" ||
     typeof c.project !== "string" ||
@@ -247,20 +148,10 @@ function decodeMessageCursor(
     typeof c.created_at !== "number" ||
     !Number.isFinite(c.created_at)
   ) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
+    throw new InvalidCursor("Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.session !== sessionId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different session",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
+  assertCursorBinding(c.session, sessionId, "session");
   return { created_at: c.created_at, id: c.id };
 }
 
@@ -269,7 +160,7 @@ function decodeSearchCursor(
   projectId: string,
   sessionId: string,
 ): { before: MessageKeyset; mode: SessionSearchMode } {
-  const c = decodeCursorObject(token);
+  const c = decodeCursor(token);
   if (
     c.kind !== "search" ||
     typeof c.project !== "string" ||
@@ -279,20 +170,10 @@ function decodeSearchCursor(
     !Number.isFinite(c.created_at) ||
     (c.mode !== "phrase" && c.mode !== "terms")
   ) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
+    throw new InvalidCursor("Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.session !== sessionId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different session",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
+  assertCursorBinding(c.session, sessionId, "session");
   return { before: { created_at: c.created_at, id: c.id }, mode: c.mode };
 }
 
@@ -390,7 +271,7 @@ export function handleListKnowledgeCursor(
     const token = url.searchParams.get("cursor");
     const after =
       token !== null && token !== ""
-        ? decodeKnowledgeCursor(token, project.id, sort)
+        ? decodeKnowledgeCursor(token, "knowledge", project.id, sort)
         : undefined;
     const page = listQuery.listKnowledgePage(project.path, {
       ...options,
@@ -400,14 +281,7 @@ export function handleListKnowledgeCursor(
     return jsonResponse({
       items: page.items.map(externalize),
       next_cursor: page.next
-        ? encodeCursor({
-            v: CURSOR_VERSION,
-            kind: "knowledge",
-            project: project.id,
-            sort,
-            key: page.next.key,
-            id: page.next.id,
-          })
+        ? encodeKnowledgeCursor("knowledge", project.id, sort, page.next)
         : null,
     });
   } catch (err) {
