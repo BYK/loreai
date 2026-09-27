@@ -1196,15 +1196,15 @@ export async function commandImport(
         const all: RemoteImportRecord[] = [];
         let cursor: string | null = null;
         do {
-          const page = await remoteGet<{
+          const importsPage: {
             imports: RemoteImportRecord[];
             next_cursor: string | null;
-          }>(
+          } = await remoteGet(
             remote,
             `/api/v1/projects/${encodeURIComponent(match.id)}/imports?limit=200${cursor ? `&page=${encodeURIComponent(cursor)}` : ""}`,
           );
-          all.push(...page.imports);
-          cursor = page.next_cursor;
+          all.push(...importsPage.imports);
+          cursor = importsPage.next_cursor;
         } while (cursor);
         remoteImports = all;
       }

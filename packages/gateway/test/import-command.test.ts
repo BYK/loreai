@@ -110,7 +110,8 @@ describe("commandImport (remote mode)", () => {
 
   test("remote import history is paged via next_cursor", async () => {
     copyFileSync(AIDER_FIXTURE, join(project, ".aider.chat.history.md"));
-    remoteGetMock.mockImplementation(async (_base: string, path: string) => {
+    remoteGetMock.mockImplementation(async (...args: unknown[]) => {
+      const path = args[1] as string;
       if (path === "/api/v1/projects") {
         return [{ id: "p1", path: project, git_remote: null }];
       }
