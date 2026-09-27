@@ -26,6 +26,7 @@ import { HIGHLIGHT_ATTR } from "~/reader/selection";
 import { WHOLE_LOAD_PAGES } from "~/reader/whole-search";
 import {
   READER_SPECIMEN,
+  READER_SPECIMEN_CONTEXT,
   READER_SPECIMEN_DISTILLATION,
 } from "~/reader/specimen";
 
@@ -457,6 +458,16 @@ describe("SessionView: selection panel", () => {
 
   it("tells the reader when a selection spans two passages", async () => {
     mount();
+    // The reader lands at the newest row (with a frame-delayed re-issue);
+    // wait it out, then bring the first rows back into the mounted window
+    // (hasOlder is false, so no page is requested).
+    if (typeof requestAnimationFrame === "function") {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    await tick();
+    const scroll = screen.getByTestId("session-scroll");
+    scroll.scrollTop = 0;
+    scroll.dispatchEvent(new Event("scroll"));
     await tick();
     const a = document.querySelector<HTMLElement>(
       '[data-block="m.spec-u1"][data-part="0"]',
@@ -523,6 +534,12 @@ describe("SessionView: history and keyboard", () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("load-older")).toBeNull();
     expect(screen.getByTestId("history-start")).toBeInTheDocument();
+    // The reader landed at the newest row and the prepend kept the
+    // viewport there; scroll to the top to see the prepended rows.
+    const scroll = screen.getByTestId("session-scroll");
+    scroll.scrollTop = 0;
+    scroll.dispatchEvent(new Event("scroll"));
+    await tick();
     const rows = Array.from(
       document.querySelectorAll<HTMLElement>("[data-row-key]"),
       (r) => r.dataset.rowKey,
@@ -547,6 +564,18 @@ describe("SessionView: history and keyboard", () => {
 
   it("moves focus between rows with the arrow keys and selects a block with Enter", async () => {
     const { changes } = mount();
+    // Landed at the newest row — the landing re-issues scrollToIndex every
+    // frame until it arrives (or its frame cap is reached), so let it run
+    // out before scrolling back to the first rows.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = screen.getByTestId("session-scroll");
+    scroll.scrollTop = 0;
+    scroll.dispatchEvent(new Event("scroll"));
     await tick();
     const first = document.querySelector<HTMLElement>(
       '[data-row-key="m.spec-sys"]',
@@ -1158,5 +1187,247 @@ describe("SessionView: whole-session search", () => {
     await settleSearch();
     expect(screen.queryByTestId("search-coverage")).toBeNull();
     expect(screen.queryByTestId("search-whole")).toBeNull();
+  });
+});
+
+describe("SessionView: newest-first landing and lazy older history", () => {
+  const scrollEl = () => screen.getByTestId("session-scroll");
+  const fireScroll = (el: HTMLElement, top: number) => {
+    el.scrollTop = top;
+    el.dispatchEvent(new Event("scroll"));
+  };
+  const mountedKeys = () =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>("[data-row-key]"),
+      (r) => r.dataset.rowKey ?? "",
+    );
+  /** Wait past the landing scroll's rAF re-issue before driving scroll. */
+  const settleLanding = async () => {
+    if (typeof requestAnimationFrame === "function") {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    await tick();
+  };
+
+  it("lands at the newest message once rows first exist", async () => {
+    mount({
+      messages: older(40),
+      distillations: [],
+      messageCount: 40,
+      hasOlder: true,
+    });
+    await tick();
+    const scroll = scrollEl();
+    expect(scroll.scrollTop).toBeGreaterThan(0);
+    const keys = mountedKeys();
+    expect(keys).toContain("m.old-39");
+    expect(keys).not.toContain("m.old-0");
+  });
+
+  it("does not land at the end while a deep link is pending", async () => {
+    const messages = older(40);
+    const block = messageBlock(messages[5]!);
+    mount({
+      messages,
+      distillations: [],
+      messageCount: 40,
+      hasOlder: false,
+      anchorParam: encodeAnchor(blockAnchor(block)),
+    });
+    await tick();
+    const scroll = scrollEl();
+    // The link resolution scrolled to its block, not to the end.
+    expect(mountedKeys()).toContain("m.old-5");
+    expect(scroll.scrollTop).toBeLessThan(40 * 120 - 800);
+    expect(screen.getByTestId("selection-panel")).toBeInTheDocument();
+  });
+
+  it("pages older history on an upward scroll near the top, never on mount or downward moves", async () => {
+    const [loading, setLoading] = createSignal(false);
+    const [err, setErr] = createSignal<unknown>(null);
+    const onLoadOlder = vi.fn(async () => {});
+    mount({
+      messages: older(40),
+      distillations: [],
+      hasOlder: true,
+      messageCount: 60,
+      get loadingOlder() {
+        return loading();
+      },
+      get olderError() {
+        return err();
+      },
+      onLoadOlder,
+    });
+    await settleLanding();
+    const scroll = scrollEl();
+    // The landing scroll is a downward move: nothing was requested.
+    expect(onLoadOlder).not.toHaveBeenCalled();
+
+    // Upward move far from the top: nothing.
+    fireScroll(scroll, 3_000);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    // Downward move: nothing.
+    fireScroll(scroll, 2_500);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+
+    // Upward move into the top viewport margin: one page.
+    fireScroll(scroll, 500);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // Downward while still near the top: nothing more.
+    fireScroll(scroll, 600);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // While a page is in flight an upward scroll does not queue another.
+    setLoading(true);
+    fireScroll(scroll, 100);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    setLoading(false);
+    // A reported failure is only retried by the explicit control.
+    setErr(new Error("page failed"));
+    fireScroll(scroll, 50);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await tick();
+    fireEvent.click(screen.getByTestId("older-retry"));
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders the older-history status slot honestly in every state", async () => {
+    const [hasOlder, setHasOlder] = createSignal<boolean | null>(true);
+    const [loading, setLoading] = createSignal(false);
+    const [err, setErr] = createSignal<unknown>(null);
+    mount({
+      messageCount: SPECIMEN.length + 5,
+      get hasOlder() {
+        return hasOlder();
+      },
+      get loadingOlder() {
+        return loading();
+      },
+      get olderError() {
+        return err();
+      },
+      onLoadOlder: vi.fn(async () => {}),
+    });
+    await tick();
+    const slot = screen.getByTestId("older-status");
+    expect(slot).toHaveTextContent("Scroll up to load older history");
+    expect(screen.getByTestId("load-older")).toBeInTheDocument();
+
+    setLoading(true);
+    expect(screen.getByTestId("older-loading")).toHaveTextContent(
+      "Loading older history…",
+    );
+    expect(screen.queryByTestId("load-older")).toBeNull();
+
+    setLoading(false);
+    setErr(new Error("page failed"));
+    expect(slot).toHaveTextContent("Older history unavailable: page failed");
+    expect(slot.querySelector('[role="alert"]')).not.toBeNull();
+    expect(screen.getByTestId("older-retry")).toBeInTheDocument();
+
+    setErr(null);
+    setHasOlder(false);
+    expect(screen.getByTestId("history-start")).toHaveTextContent(
+      "Start of captured history",
+    );
+
+    // hasOlder unknown: the slot claims nothing at all.
+    setHasOlder(null);
+    expect(slot).toBeEmptyDOMElement();
+  });
+
+  it("offers jump-to-latest away from the tail and jump-to-start only for complete history", async () => {
+    mount({
+      messages: older(40),
+      distillations: [],
+      messageCount: 40,
+      hasOlder: false,
+    });
+    await settleLanding();
+    // Landed at the newest row: no jump-to-latest; history is complete and
+    // the first row is unmounted, so jump-to-start is offered.
+    expect(screen.queryByTestId("jump-to-latest")).toBeNull();
+    fireEvent.click(screen.getByTestId("jump-to-start"));
+    await tick();
+    expect(mountedKeys()[0]).toBe("m.old-0");
+    expect(screen.queryByTestId("jump-to-start")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("jump-to-latest"));
+    await tick();
+    expect(mountedKeys().at(-1)).toBe("m.old-39");
+    expect(screen.queryByTestId("jump-to-latest")).toBeNull();
+    expect(screen.getByTestId("jump-to-start")).toBeInTheDocument();
+  });
+
+  it("hides jump-to-start while older history remains", async () => {
+    const onLoadOlder = vi.fn(async () => {});
+    mount({
+      messages: older(40),
+      distillations: [],
+      messageCount: 60,
+      hasOlder: true,
+      onLoadOlder,
+    });
+    await settleLanding();
+    expect(screen.queryByTestId("jump-to-start")).toBeNull();
+    const scroll = scrollEl();
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 100); // lands the auto-load at the top
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("jump-to-start")).toBeNull();
+  });
+
+  it("keeps a deep-linked selection and context marker rows stable across an older prepend", async () => {
+    const [msgs, setMsgs] = createSignal(SPECIMEN);
+    const [hasOlder, setHasOlder] = createSignal<boolean | null>(true);
+    const onLoadOlder = vi.fn(async () => {
+      setMsgs((prev) => [...older(3), ...prev]);
+      setHasOlder(false);
+    });
+    const block = messageBlock(SPECIMEN[3]!); // spec-a1
+    mount({
+      anchorParam: encodeAnchor(blockAnchor(block)),
+      context: READER_SPECIMEN_CONTEXT,
+      get messages() {
+        return msgs();
+      },
+      get hasOlder() {
+        return hasOlder();
+      },
+      messageCount: SPECIMEN.length + 3,
+      onLoadOlder,
+    });
+    await tick(5);
+    expect(screen.getByTestId("selection-panel")).toHaveTextContent(
+      /whole message/,
+    );
+    const markerKeys = () =>
+      mountedKeys().filter((key) => key.startsWith("k."));
+    const beforeMarkers = markerKeys();
+    expect(beforeMarkers.length).toBeGreaterThan(0);
+    const row = () =>
+      document.querySelector<HTMLElement>(`[data-row-key="${block.id}"]`)!;
+    const posBefore = Number(row().getAttribute("aria-posinset"));
+
+    fireEvent.click(screen.getByTestId("load-older"));
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // The selection is logical: same block, same panel.
+    expect(screen.getByTestId("selection-panel")).toHaveTextContent(
+      /whole message/,
+    );
+    expect(screen.getByTestId("selection-quote")).toHaveTextContent(
+      /Keep SQLite/,
+    );
+    // Marker rows keep their keys and the linked row shifted by exactly the
+    // three prepended messages.
+    expect(markerKeys()).toEqual(beforeMarkers);
+    expect(Number(row().getAttribute("aria-posinset"))).toBe(posBefore + 3);
+    expect(
+      document
+        .querySelector('[aria-posinset="1"]')
+        ?.getAttribute("data-row-key"),
+    ).toBe("m.old-0");
   });
 });

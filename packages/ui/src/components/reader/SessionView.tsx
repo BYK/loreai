@@ -75,6 +75,7 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { CAPTURE_HELP, coverageDeclaration } from "~/reader/coverage";
+import { shouldChainOlder, shouldLoadOlder } from "~/reader/lazy-older";
 import { buildMarkers } from "~/reader/markers";
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows, type ReaderRow } from "~/reader/rows";
@@ -586,6 +587,17 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     top: number;
     total: number;
     anchor: { key: string; index: number } | null;
+    /** A row a few items under the fold and its screen top, captured a frame
+     * after the scroll — the mount window needs a frame to reach the top.
+     * The scroll re-pins to it after the prepend so first-measure deltas of
+     * prepended rows cannot drift the rows under the eye; the pin sits a few
+     * rows deep because the fold row itself can slip out of the overscan
+     * range. */
+    pin: { key: string; top: number } | null;
+    /** True once the pin survived at least one refresh frame — a page that
+     * lands within the first frame leaves the synchronous pin pointing at
+     * pre-settle positions, and repinning to it would drag the view. */
+    pinFresh: boolean;
     forLink: string | null;
   } | null = null;
 
@@ -598,13 +610,76 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     ) {
       return;
     }
-    const last = virtualizer.getVirtualItems().at(-1);
+    const el = scrollEl;
+    const items = virtualizer.getVirtualItems();
+    const last = items.at(-1);
+    const pinNow = () => {
+      const foldIdx = items.findIndex((item) => item.end > el.scrollTop);
+      const pinItem =
+        foldIdx >= 0
+          ? items[Math.min(foldIdx + 3, items.length - 1)]
+          : undefined;
+      const rowEl = pinItem
+        ? el.querySelector<HTMLElement>(
+            `[data-row-key="${CSS.escape(String(pinItem.key))}"]`,
+          )
+        : null;
+      return pinItem && rowEl
+        ? { key: String(pinItem.key), top: rowEl.getBoundingClientRect().top }
+        : null;
+    };
+    // The repin only guards loads that started near the top — the scroll-up
+    // auto-load path, where a whole fresh page of unmeasured rows lands
+    // between the fold and the top. Mid-scroll loads have their neighbours
+    // measured already and the estimate delta alone holds the view.
+    const enablePin = el.scrollTop - listOffset() < el.clientHeight;
     prepend = {
-      top: scrollEl.scrollTop,
+      top: el.scrollTop,
       total: virtualizer.getTotalSize(),
       anchor: last ? { key: String(last.key), index: last.index } : null,
+      pin: enablePin ? pinNow() : null,
+      pinFresh: false,
       forLink: scrollTarget,
     };
+    // Pin the row under the eye, refreshed every frame until the page
+    // lands: `getVirtualItems` can still return the pre-scroll mount window
+    // right now, an unmounted row cannot witness the prepend, and the first
+    // measures of the rows already at the top keep shifting the fold for a
+    // few frames — only the freshest capture reflects what the user sees
+    // when the prepend actually arrives.
+    const countAtCall = rows().length;
+    if (enablePin && typeof requestAnimationFrame === "function") {
+      let frames = 0;
+      const capturePin = () => {
+        if (!prepend || rows().length !== countAtCall) return;
+        if (++frames > 60) return;
+        const mounted = virtualizer.getVirtualItems();
+        const nearTop = el.scrollTop - listOffset() < el.clientHeight;
+        const staleMount = nearTop && (mounted[0]?.index ?? 0) > mounted.length;
+        if (!staleMount) {
+          const foldIdx = mounted.findIndex((item) => item.end > el.scrollTop);
+          const pinItem =
+            foldIdx >= 0
+              ? mounted[Math.min(foldIdx + 3, mounted.length - 1)]
+              : undefined;
+          const rowEl = pinItem
+            ? el.querySelector<HTMLElement>(
+                `[data-row-key="${CSS.escape(String(pinItem.key))}"]`,
+              )
+            : null;
+          if (pinItem && rowEl && prepend) {
+            prepend.pin = {
+              key: String(pinItem.key),
+              top: rowEl.getBoundingClientRect().top,
+            };
+            prepend.pinFresh = true;
+          }
+        }
+        requestAnimationFrame(capturePin);
+      };
+      requestAnimationFrame(capturePin);
+    }
+    prependLanded = false;
     setOlderInFlight(true);
     try {
       await props.onLoadOlder();
@@ -639,10 +714,173 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // mounted, and their first measures would compensate against that
         // offset and drag the viewport back; hand it the new one now.
         virtualizer.scrollOffset = target;
+        // Re-pin the row under the eye: prepended overscan rows measure at
+        // their real heights over the next frames, and each first-measure
+        // adjustment drags the viewport. Keep correcting for a couple dozen
+        // frames — a correction that finds no drift costs nothing, and late
+        // measures must not get the last word.
+        const pin = before.pinFresh ? before.pin : null;
+        if (pin && typeof requestAnimationFrame === "function") {
+          let frames = 0;
+          const repin = () => {
+            const el = scrollEl;
+            if (!el || ++frames > 24) return;
+            const rowEl = el.querySelector<HTMLElement>(
+              `[data-row-key="${CSS.escape(pin.key)}"]`,
+            );
+            if (rowEl) {
+              const drift = rowEl.getBoundingClientRect().top - pin.top;
+              if (drift !== 0) {
+                const next = el.scrollTop + drift;
+                // Go through the virtualizer's own scroll so a reconcile
+                // cannot drag the offset back to a stale target.
+                virtualizer.scrollToOffset(next);
+                virtualizer.scrollOffset = next;
+              }
+            }
+            // An unmounted pin row retries next frame — it can slip out of
+            // the mounted window while the measures settle.
+            requestAnimationFrame(repin);
+          };
+          requestAnimationFrame(repin);
+        }
+        // A page shorter than a viewport leaves the reader at the top; the
+        // chain rule keeps loading until older history fills it.
+        prependLanded = true;
+        maybeChainOlder();
       },
       { defer: true },
     ),
   );
+
+  // -- landing & lazy older history -----------------------------------------
+  // The reader lands at the newest message once the session's rows first
+  // exist (#1923); a pending deep link owns the scroll instead and only
+  // marks the reader as landed. Scrolling back up near the top pages older
+  // history in (see `reader/lazy-older` for the rules).
+  const [landed, setLanded] = createSignal(false);
+  createEffect(
+    on(
+      () => props.sessionId,
+      () => setLanded(false),
+    ),
+  );
+
+  createEffect(() => {
+    if (landed() || rows().length === 0 || !scrollEl) return;
+    setLanded(true);
+    if (scrollTarget !== null || props.anchorParam !== null) return;
+    const last = () => untrack(rows).length - 1;
+    virtualizer.scrollToIndex(last(), { align: "end" });
+    // Rows enter at ROW_ESTIMATE; as they measure, the landed position can
+    // drift off the end. Re-issue the landing each frame until the last row
+    // is actually in view, the user scrolls away, or the cap hits.
+    if (typeof requestAnimationFrame === "function") {
+      let frames = 0;
+      let reachedEnd = false;
+      const land = () => {
+        const el = scrollEl;
+        if (!el || ++frames > 24) return;
+        const items = virtualizer.getVirtualItems();
+        const lastItem = items.at(-1);
+        if (lastItem && lastItem.index === last()) reachedEnd = true;
+        const arrived =
+          lastItem !== undefined &&
+          lastItem.index === last() &&
+          lastItem.end <= el.scrollTop + el.clientHeight + 1;
+        // Once the mount window has reached the end, it moving far above it
+        // again means the user took the scroll — measurement shrinkage also
+        // lowers scrollTop but the window stays at the bottom, so it never
+        // looks like this. Before reaching the end the window legitimately
+        // lags behind the issued scroll, so the check does not apply yet.
+        const userAway =
+          reachedEnd &&
+          !arrived &&
+          items.length > 0 &&
+          items.at(-1)!.index < last() - 10;
+        if (userAway) return;
+        // Keep watching past the first arrival: rows that measure shorter
+        // than the estimate pull the offset back up afterwards, and only a
+        // re-issue puts the end back under the eye.
+        if (!arrived) {
+          virtualizer.scrollToIndex(last(), { align: "end" });
+        }
+        requestAnimationFrame(land);
+      };
+      requestAnimationFrame(land);
+    }
+  });
+
+  /** Set when the in-flight (or last-settled) older page actually prepended
+   * rows — the busy→idle chain check only continues real deliveries, so a
+   * no-progress owner cannot loop the loader at the top. */
+  let prependLanded = false;
+
+  const olderGate = () => ({
+    hasOlder: props.hasOlder,
+    busy: props.loadingOlder === true || olderInFlight(),
+    error: props.olderError,
+    landed: landed(),
+    linkPending: scrollTarget !== null,
+  });
+
+  function maybeChainOlder() {
+    const el = scrollEl;
+    if (!el) return;
+    if (
+      shouldChainOlder({
+        ...olderGate(),
+        scrollTop: el.scrollTop,
+        listOffset: listOffset(),
+        clientHeight: el.clientHeight,
+      })
+    ) {
+      void loadOlder();
+    }
+  }
+
+  // The busy→idle transition runs the chain check too: the store may apply
+  // the page before its promise settles, so the rows effect alone cannot
+  // rely on `olderInFlight` still being true when it runs.
+  createEffect(
+    on(
+      () => props.loadingOlder === true || olderInFlight(),
+      (busy) => {
+        if (!busy && prependLanded) maybeChainOlder();
+      },
+      { defer: true },
+    ),
+  );
+
+  // Upward moves near the top page older history in; downward moves (the
+  // landing, prepend compensation, search scrolls) never do.
+  let prevScrollTop = -1;
+  function onScroll() {
+    const el = scrollEl;
+    if (!el) return;
+    const top = el.scrollTop;
+    const prev = prevScrollTop;
+    prevScrollTop = top;
+    if (
+      shouldLoadOlder({
+        ...olderGate(),
+        scrollTop: top,
+        prevScrollTop: prev,
+        listOffset: listOffset(),
+        clientHeight: el.clientHeight,
+      })
+    ) {
+      void loadOlder();
+    }
+  }
+
+  onMount(() => {
+    const scroll = scrollEl;
+    if (!scroll) return;
+    prevScrollTop = scroll.scrollTop;
+    scroll.addEventListener("scroll", onScroll);
+    onCleanup(() => scroll.removeEventListener("scroll", onScroll));
+  });
 
   // -- focus ---------------------------------------------------------------
   const [focusKey, setFocusKey] = createSignal<string | null>(null);
@@ -1147,30 +1385,43 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 </span>
               </Show>
               <span class="ml-auto flex items-center gap-2">
-                <Show when={props.hasOlder === true}>
+                <Show
+                  when={
+                    (virtualizer.getVirtualItems().at(-1)?.index ?? -1) <
+                    rows().length - 1
+                  }
+                >
                   <Button
                     variant="outline"
                     size="sm"
-                    data-testid="load-older"
-                    disabled={props.loadingOlder}
-                    onClick={() => void loadOlder()}
+                    data-testid="jump-to-latest"
+                    onClick={() =>
+                      virtualizer.scrollToIndex(rows().length - 1, {
+                        align: "end",
+                      })
+                    }
                   >
-                    {props.loadingOlder ? "Loading…" : "Load older history"}
+                    Jump to latest
                   </Button>
                 </Show>
-                <Show when={props.hasOlder === false && loaded() > 0}>
-                  <span data-testid="history-start">
-                    Start of captured history
-                  </span>
+                <Show
+                  when={
+                    props.hasOlder === false &&
+                    (virtualizer.getVirtualItems()[0]?.index ?? 0) > 0
+                  }
+                >
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="jump-to-start"
+                    onClick={() =>
+                      virtualizer.scrollToIndex(0, { align: "start" })
+                    }
+                  >
+                    Jump to start
+                  </Button>
                 </Show>
               </span>
-              <Show when={props.olderError}>
-                {(err) => (
-                  <span class="basis-full text-danger" role="alert">
-                    Older history unavailable: {errorMessage(err())}
-                  </span>
-                )}
-              </Show>
             </div>
             <form
               role="search"
@@ -1338,6 +1589,56 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 </div>
               )}
             </Show>
+          </div>
+          <div
+            class="flex h-9 items-center gap-2 border-b border-line px-5 text-xs text-muted sm:px-7.5"
+            data-testid="older-status"
+          >
+            <Switch>
+              <Match
+                when={
+                  props.hasOlder === true &&
+                  (props.loadingOlder || olderInFlight())
+                }
+              >
+                <span role="status" data-testid="older-loading">
+                  Loading older history…
+                </span>
+              </Match>
+              <Match when={props.hasOlder === true && props.olderError}>
+                {(err) => (
+                  <>
+                    <span role="alert" class="text-danger">
+                      Older history unavailable: {errorMessage(err())}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      data-testid="older-retry"
+                      onClick={() => void loadOlder()}
+                    >
+                      Retry
+                    </Button>
+                  </>
+                )}
+              </Match>
+              <Match when={props.hasOlder === true}>
+                <span>Scroll up to load older history</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="load-older"
+                  onClick={() => void loadOlder()}
+                >
+                  Load older history
+                </Button>
+              </Match>
+              <Match when={props.hasOlder === false && loaded() > 0}>
+                <span data-testid="history-start">
+                  Start of captured history
+                </span>
+              </Match>
+            </Switch>
           </div>
           <Show when={rows().length === 0}>
             <p class="px-5 py-8 text-sm text-muted sm:px-7.5" role="status">

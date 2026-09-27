@@ -127,6 +127,8 @@ export const BusyFixture: Component = () => {
     a?: string;
     blocks?: string;
     seed?: string;
+    paged?: string;
+    failOlder?: string;
   }>();
   const blockCount = intParam(
     search.blocks,
@@ -134,6 +136,12 @@ export const BusyFixture: Component = () => {
     BUSY_MAX_BLOCKS,
   );
   const seed = intParam(search.seed, BUSY_DEFAULT_SEED);
+  // `?paged=n` (#1923): the reader starts with only the newest n generated
+  // messages and `hasOlder` pages the rest in, like the real cursor route.
+  // `?failOlder=1` makes the first older page reject once, so the error /
+  // retry path is exercisable.
+  const pageSize = intParam(search.paged, 0);
+  const failOlder = search.failOlder === "1";
 
   const genStart = performance.now();
   const session = generateBusySession({ blocks: blockCount, seed });
@@ -143,9 +151,38 @@ export const BusyFixture: Component = () => {
 
   // The engine opens its streams on construction; start from that snapshot
   // so the first tick is a replacement, not a surprise append.
-  const [messages, setMessages] = createSignal<TemporalMessage[]>(
-    reconcile(session.messages, engine.snapshot()),
+  const allMessages = reconcile(session.messages, engine.snapshot());
+  // Paged mode pages the *generated* session — the engine's appended live
+  // messages belong to the streaming path, not the paged window.
+  const [loadedFrom, setLoadedFrom] = createSignal(
+    pageSize > 0 ? Math.max(0, session.messages.length - pageSize) : 0,
   );
+  const [messages, setMessages] = createSignal<TemporalMessage[]>(
+    pageSize > 0 ? session.messages.slice(loadedFrom()) : allMessages,
+  );
+  const [loadingOlder, setLoadingOlder] = createSignal(false);
+  const [olderError, setOlderError] = createSignal<unknown>(null);
+  let olderFailedOnce = false;
+  async function loadOlder() {
+    if (pageSize <= 0 || loadedFrom() <= 0) return;
+    setLoadingOlder(true);
+    setOlderError(null);
+    try {
+      await new Promise((r) => setTimeout(r, 150));
+      if (failOlder && !olderFailedOnce) {
+        olderFailedOnce = true;
+        throw new Error("fixture: older page failed");
+      }
+      const from = loadedFrom();
+      const next = Math.max(0, from - pageSize);
+      setMessages((prev) => [...session.messages.slice(next, from), ...prev]);
+      setLoadedFrom(next);
+    } catch (err) {
+      setOlderError(err);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
   const [streaming, setStreaming] = createSignal(false);
   const [connected, setConnected] = createSignal(true);
   const [hidden, setHidden] = createSignal(false);
@@ -567,9 +604,17 @@ export const BusyFixture: Component = () => {
       <SessionView
         sessionId={BUSY_SESSION_ID}
         messages={messages()}
-        distillations={session.distillations}
-        messageCount={messages().length}
-        hasOlder={false}
+        // Paged mode hides the distillations: the loaded window starts mid-
+        // session, so every summary would lead the document as an extra row
+        // and `aria-setsize` would not equal the loaded message count.
+        distillations={pageSize > 0 ? [] : session.distillations}
+        messageCount={
+          pageSize > 0 ? session.messages.length : messages().length
+        }
+        hasOlder={pageSize > 0 ? loadedFrom() > 0 : false}
+        loadingOlder={loadingOlder()}
+        olderError={olderError()}
+        onLoadOlder={pageSize > 0 ? loadOlder : undefined}
         status={status()}
         anchorParam={search.a ?? null}
         onAnchorChange={(encoded) =>
