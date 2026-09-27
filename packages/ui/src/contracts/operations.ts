@@ -208,6 +208,7 @@ export const costsSnapshot = type({
     resets_at: "number | null",
     source: "string",
     observed_at: "number",
+    stale: "boolean",
   }).array(),
 });
 

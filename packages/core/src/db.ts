@@ -6312,6 +6312,25 @@ export type ProviderQuotaRow = {
   observedAt: number;
 };
 
+/** Fallback staleness bound when the window length itself is unknown. */
+export const QUOTA_STALE_FALLBACK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a persisted quota snapshot may no longer reflect the live window:
+ * once its observed reset boundary has passed, or once it is older than the
+ * window it describes (24h when the window length is unknown).
+ */
+export function isProviderQuotaStale(
+  row: Pick<ProviderQuotaRow, "resetsAt" | "observedAt" | "windowMinutes">,
+  now: number,
+): boolean {
+  if (row.resetsAt !== null && now >= row.resetsAt) return true;
+  const age = now - row.observedAt;
+  return row.windowMinutes !== null
+    ? age > row.windowMinutes * 60_000
+    : age > QUOTA_STALE_FALLBACK_MS;
+}
+
 /**
  * Store the latest quota snapshot for a window. Out-of-order writes lose:
  * a snapshot only replaces the stored row when its observed_at is >= the

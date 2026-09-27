@@ -6,9 +6,11 @@ import type { CostsSnapshot } from "~/contracts";
 import { formatWhen } from "~/lib/format";
 import {
   displayProvider,
+  formatDuration,
   formatResetCountdown,
   groupProviderCards,
   quotaPercent,
+  quotaStale,
   quotaWindowLabel,
   type ProviderCardModel,
   type QuotaRow,
@@ -49,30 +51,41 @@ const QuotaLine: Component<{ quota: QuotaRow; now: () => number }> = (
 ) => {
   const percent = () => quotaPercent(props.quota);
   const label = () => quotaWindowLabel(props.quota);
+  const stale = () => quotaStale(props.quota, props.now());
   return (
     <div>
       <div class="flex justify-between gap-3 text-xs">
-        <span class="font-medium">{label()}</span>
+        <span class={stale() ? "text-muted" : "font-medium"}>{label()}</span>
         <Show
-          when={percent() !== null}
+          when={!stale()}
           fallback={
             <span class="text-muted">
-              {props.quota.remaining !== null &&
-                `remaining ${count(props.quota.remaining)}`}
-              {props.quota.remaining !== null &&
-                props.quota.limit !== null &&
-                " · "}
-              {props.quota.limit !== null &&
-                `limit ${count(props.quota.limit)}`}
+              last seen {formatDuration(props.now() - props.quota.observed_at)}{" "}
+              ago, may have reset
             </span>
           }
         >
-          <span class="text-muted">
-            {formatResetCountdown(props.quota.resets_at, props.now())}
-          </span>
+          <Show
+            when={percent() !== null}
+            fallback={
+              <span class="text-muted">
+                {props.quota.remaining !== null &&
+                  `remaining ${count(props.quota.remaining)}`}
+                {props.quota.remaining !== null &&
+                  props.quota.limit !== null &&
+                  " · "}
+                {props.quota.limit !== null &&
+                  `limit ${count(props.quota.limit)}`}
+              </span>
+            }
+          >
+            <span class="text-muted">
+              {formatResetCountdown(props.quota.resets_at, props.now())}
+            </span>
+          </Show>
         </Show>
       </div>
-      <Show when={percent() !== null}>
+      <Show when={percent() !== null && !stale()}>
         <div
           class="mt-1.5 h-2 overflow-hidden rounded-full bg-soft"
           role="progressbar"

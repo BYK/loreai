@@ -1010,6 +1010,21 @@ describe("GET/PATCH /api/v1/costs", () => {
       source: "anthropic-unified",
       observedAt: Date.now(),
     });
+    upsertProviderQuota({
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct1",
+      window: "7d",
+      label: "allowed",
+      windowMinutes: 10080,
+      usedPercent: 41,
+      remaining: null,
+      limit: null,
+      // Reset boundary already passed — must surface as stale, not live.
+      resetsAt: Date.now() - 60_000,
+      source: "anthropic-unified",
+      observedAt: Date.now() - 120_000,
+    });
     const data = await body<{
       providers: Array<{
         provider: string;
@@ -1026,6 +1041,7 @@ describe("GET/PATCH /api/v1/costs", () => {
         used_percent: number | null;
         source: string;
         observed_at: number;
+        stale: boolean;
       }>;
     }>("/api/v1/costs");
     const provider = data.providers.find(
@@ -1041,6 +1057,11 @@ describe("GET/PATCH /api/v1/costs", () => {
     const quota = data.quotas.find(
       (q) => q.provider === "anthropic" && q.window === "5h",
     );
+    expect(quota?.stale).toBe(false);
+    const staleQuota = data.quotas.find(
+      (q) => q.provider === "anthropic" && q.window === "7d",
+    );
+    expect(staleQuota?.stale).toBe(true);
     expect(quota).toMatchObject({
       auth_kind: "subscription",
       used_percent: 23,

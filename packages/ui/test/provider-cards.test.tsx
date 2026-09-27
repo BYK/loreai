@@ -43,6 +43,7 @@ function quotaRow(overrides: Partial<Quotas[number]> = {}): Quotas[number] {
     resets_at: NOW + 2 * 3600_000 + 14 * 60_000,
     source: "anthropic-unified",
     observed_at: NOW,
+    stale: false,
     ...overrides,
   };
 }
@@ -107,6 +108,31 @@ describe("ProviderCards", () => {
     expect(card.textContent).toContain("resets in 3d 4h");
     expect(card.textContent).toContain("5-hour window");
     expect(card.textContent).toContain("Weekly window");
+  });
+
+  it("stale snapshot (resets_at passed) renders no bar and a stale note", () => {
+    const { container } = renderCards(
+      [],
+      [quotaRow({ resets_at: NOW - 60_000, observed_at: NOW - 120_000 })],
+    );
+    expect(container.querySelector('[role="progressbar"]')).toBeNull();
+    expect(container.textContent).toMatch(/last seen .* ago, may have reset/);
+  });
+
+  it("snapshot older than its window degrades to stale", () => {
+    const { container } = renderCards(
+      [],
+      [
+        quotaRow({
+          window: "5h",
+          window_minutes: 300,
+          resets_at: null,
+          observed_at: NOW - 6 * 3600_000,
+        }),
+      ],
+    );
+    expect(container.querySelector('[role="progressbar"]')).toBeNull();
+    expect(container.textContent).toMatch(/last seen .* ago, may have reset/);
   });
 
   it("api-key card without quotas renders no progressbar", () => {

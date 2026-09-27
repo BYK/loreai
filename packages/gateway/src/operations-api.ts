@@ -11,6 +11,7 @@ import {
   canonicalProjectId,
   data,
   isHostedMode,
+  isProviderQuotaStale,
   listProviderQuotas,
   loadParentChildMap,
   projectId,
@@ -551,6 +552,7 @@ export function handleGetCosts(configuredHostedMode = false): Response {
       resets_at: row.resetsAt,
       source: row.source,
       observed_at: row.observedAt,
+      stale: isProviderQuotaStale(row, Date.now()),
     })),
   });
 }

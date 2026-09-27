@@ -185,6 +185,8 @@ export {
   type DailyCostBucket,
   addProviderCost,
   getProviderCostTotals,
+  isProviderQuotaStale,
+  QUOTA_STALE_FALLBACK_MS,
   upsertProviderQuota,
   listProviderQuotas,
   type ProviderAuthKind,

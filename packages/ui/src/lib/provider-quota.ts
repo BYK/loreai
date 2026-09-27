@@ -27,7 +27,25 @@ export type QuotaRow = {
   resets_at: number | null;
   source: string;
   observed_at: number;
+  stale: boolean;
 };
+
+/** Fallback staleness bound when the window length itself is unknown. */
+const QUOTA_STALE_FALLBACK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a quota snapshot may no longer reflect the live window — the
+ * gateway-computed flag OR the same rule re-evaluated against the current
+ * time (so snapshots kept open in the browser degrade too).
+ */
+export function quotaStale(row: QuotaRow, now: number): boolean {
+  if (row.stale) return true;
+  if (row.resets_at !== null && now >= row.resets_at) return true;
+  const age = now - row.observed_at;
+  return row.window_minutes !== null
+    ? age > row.window_minutes * 60_000
+    : age > QUOTA_STALE_FALLBACK_MS;
+}
 
 export type ProviderCardModel = {
   key: string;
@@ -87,22 +105,23 @@ export function formatResetCountdown(
   if (resetsAt === null) return "";
   const delta = resetsAt - now;
   if (delta <= 0) return "reset passed";
-  const seconds = Math.floor(delta / 1000);
-  if (seconds < 60) return `resets in ${seconds}s`;
+  return `resets in ${formatDuration(delta)}`;
+}
+
+/** Compact duration: "45s", "14m", "2h 14m", "3d 4h". */
+export function formatDuration(ms: number): string {
+  const seconds = Math.floor(Math.max(0, ms) / 1000);
+  if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `resets in ${minutes}m`;
+  if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) {
     const remMin = minutes % 60;
-    return remMin > 0
-      ? `resets in ${hours}h ${remMin}m`
-      : `resets in ${hours}h`;
+    return remMin > 0 ? `${hours}h ${remMin}m` : `${hours}h`;
   }
   const days = Math.floor(hours / 24);
   const remHours = hours % 24;
-  return remHours > 0
-    ? `resets in ${days}d ${remHours}h`
-    : `resets in ${days}d`;
+  return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
 }
 
 const WINDOW_ORDER = new Map([

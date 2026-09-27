@@ -3,6 +3,8 @@ import {
   db,
   addProviderCost,
   getProviderCostTotals,
+  isProviderQuotaStale,
+  QUOTA_STALE_FALLBACK_MS,
   upsertProviderQuota,
   listProviderQuotas,
   type ProviderCostRow,
@@ -151,6 +153,56 @@ describe("provider_costs index", () => {
     expect(
       plan.some((row) => row.detail.includes("idx_provider_costs_group")),
     ).toBe(true);
+  });
+});
+
+describe("isProviderQuotaStale", () => {
+  const now = 1_700_000_000_000;
+  test("resets_at in the past → stale", () => {
+    expect(
+      isProviderQuotaStale(
+        { resetsAt: now - 1, observedAt: now - 60_000, windowMinutes: 300 },
+        now,
+      ),
+    ).toBe(true);
+  });
+  test("age exceeds the window length → stale", () => {
+    expect(
+      isProviderQuotaStale(
+        { resetsAt: null, observedAt: now - 301 * 60_000, windowMinutes: 300 },
+        now,
+      ),
+    ).toBe(true);
+  });
+  test("null window older than 24h → stale", () => {
+    expect(
+      isProviderQuotaStale(
+        {
+          resetsAt: null,
+          observedAt: now - QUOTA_STALE_FALLBACK_MS - 1,
+          windowMinutes: null,
+        },
+        now,
+      ),
+    ).toBe(true);
+  });
+  test("fresh snapshot → not stale", () => {
+    expect(
+      isProviderQuotaStale(
+        {
+          resetsAt: now + 3600_000,
+          observedAt: now - 60_000,
+          windowMinutes: 300,
+        },
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isProviderQuotaStale(
+        { resetsAt: null, observedAt: now - 60_000, windowMinutes: null },
+        now,
+      ),
+    ).toBe(false);
   });
 });
 

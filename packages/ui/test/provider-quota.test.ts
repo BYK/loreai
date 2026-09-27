@@ -43,6 +43,7 @@ function quota(overrides: Partial<QuotaRow> = {}): QuotaRow {
     resets_at: null,
     source: "test",
     observed_at: 0,
+    stale: false,
     ...overrides,
   };
 }
