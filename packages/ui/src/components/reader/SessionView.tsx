@@ -665,8 +665,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       top: el.scrollTop,
       total: virtualizer.getTotalSize(),
       anchor: last ? { key: String(last.key), index: last.index } : null,
-      pin: enablePin ? pinNow(items).pin : null,
-      foldPin: enablePin ? pinNow(items).foldPin : null,
+      ...(enablePin ? pinNow(items) : { pin: null, foldPin: null }),
       serialAtStart: userSerial() ?? -1,
       forLink: scrollTarget,
     };
