@@ -21,6 +21,7 @@ const project: ProjectSummary = {
   session_count: 1,
   message_count: 1,
   distillation_count: 0,
+  last_activity: null,
 };
 
 const pageWith = (over: Partial<SessionPage>): SessionPage => ({
