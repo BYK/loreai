@@ -474,6 +474,28 @@ describe("detectSurfacedMutations — genuine DB mutation, not ranking churn", (
     expect(deltaText(sessionID)).toContain("Fresh dashboard rule");
   });
 
+  it("WIRING: a plain synthetic key without a hash reaches the durable delta", () => {
+    const id = "lat.md/rules#Plain key";
+    const sessionID = `wiring-lat-plain-${crypto.randomUUID()}`;
+    const wrote = appendKnowledgePromptDelta({
+      sessionID,
+      projectPath: PROJECT,
+      insertAt: 5,
+      previousKeys: [],
+      nextKeys: [id],
+      entries: [
+        {
+          id,
+          category: "lat.md",
+          title: "Plain key",
+          content: "Plain key rule",
+        },
+      ],
+    });
+    expect(wrote).toBe(true);
+    expect(deltaText(sessionID)).toContain("Plain key rule");
+  });
+
   it("WIRING: an old unpinned knowledge entry remains frozen after unrelated indexing", () => {
     const sessionID = `wiring-frozen-knowledge-${crypto.randomUUID()}`;
     const title = `Old candidate ${crypto.randomUUID()}`;

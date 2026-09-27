@@ -3615,7 +3615,8 @@ export function appendKnowledgePromptDelta(input: {
   // append previously unsurfaced, unchanged entries to the conversation.
   const seen = entryKeyIds(surfacedKeys);
   for (const key of input.nextKeys ?? []) {
-    const id = key.slice(0, key.lastIndexOf(":"));
+    const separator = key.lastIndexOf(":");
+    const id = separator === -1 ? key : key.slice(0, separator);
     if (syntheticEntries.has(id) && !seen.has(id)) {
       surfacedKeys.push(`${id}:`);
       seen.add(id);
