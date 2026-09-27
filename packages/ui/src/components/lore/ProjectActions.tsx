@@ -547,7 +547,10 @@ export const MergeProjectsAction: Component = () => {
         variant="outline"
         size="sm"
         disabled={pending()}
-        onClick={() => setConfirm(true)}
+        onClick={() => {
+          setNotice(null);
+          setConfirm(true);
+        }}
       >
         Merge duplicate projects
       </Button>

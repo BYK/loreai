@@ -37,6 +37,8 @@ export interface Repository<T> {
   ): Promise<void>;
   /** Drop the recorded collection progress for a scope (post-write purge). */
   deleteCollection(scope: string): Promise<void>;
+  /** Drop every recorded collection progress row for this store. */
+  clearCollections(): Promise<void>;
 }
 
 type AnyRecord = CachedRecord<unknown>;
@@ -183,6 +185,17 @@ export function createRepository<T>(
     async deleteCollection(scope) {
       if (!db) return;
       await db.delete("collections", `${store}:${scope}`);
+    },
+
+    async clearCollections() {
+      if (!db) return;
+      const keys = await db.getAllKeys(
+        "collections",
+        IDBKeyRange.bound(`${store}:`, `${store}:\uffff`),
+      );
+      for (const key of keys) {
+        await db.delete("collections", key);
+      }
     },
   };
 }

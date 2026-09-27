@@ -4,10 +4,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ProjectActions } from "~/components/lore/ProjectActions";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
+import {
+  closeLoreDb,
+  createKnowledgeRepo,
+  createMessageBlocksRepo,
+  createProjectsRepo,
+  createSessionsRepo,
+  openLoreDb,
+} from "~/db";
 import { WorkspaceProvider } from "~/routes/workspace";
 import type { ApiClient } from "~/lib/api";
 import { ApiError } from "~/lib/api";
 import type { ProjectSummary } from "~/contracts";
+import { createProjectActionsState } from "~/state/project-actions";
+import { IDBFactory } from "./idb-globals";
 
 const project = (over: Partial<ProjectSummary> = {}): ProjectSummary => ({
   id: "p-1",
@@ -239,6 +249,51 @@ describe("ProjectActions", () => {
 });
 
 describe("MergeProjectsAction", () => {
+  it("clears collection metadata for every store after merging", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    expect(db).not.toBeNull();
+    const repos = {
+      projects: createProjectsRepo(db),
+      knowledge: createKnowledgeRepo(db),
+      sessions: createSessionsRepo(db),
+      messageBlocks: createMessageBlocksRepo(db),
+    };
+    const collection = {
+      complete: false,
+      count: 1,
+      nextCursor: "next",
+      fetchedAt: 1,
+    };
+    await repos.projects.setCollection("all", collection);
+    await repos.projects.setCollection("p-1", collection);
+    await repos.knowledge.setCollection("p-1", collection);
+    await repos.sessions.setCollection("p-1", collection);
+    await repos.messageBlocks.setCollection("p-1/s-1", collection);
+
+    const actions = createProjectActionsState({
+      client: clientWith({
+        mergeProjects: async () => ({
+          updated: 1,
+          merged: 1,
+          namesBackfilled: 0,
+          mergeDetails: [],
+        }),
+      }),
+      tracked: (read) => read(),
+      repos,
+      projects: { remove: vi.fn(), reload: vi.fn() },
+    });
+
+    await actions.merge();
+
+    expect(await repos.projects.collection("all")).toBeUndefined();
+    expect(await repos.projects.collection("p-1")).toBeUndefined();
+    expect(await repos.knowledge.collection("p-1")).toBeUndefined();
+    expect(await repos.sessions.collection("p-1")).toBeUndefined();
+    expect(await repos.messageBlocks.collection("p-1/s-1")).toBeUndefined();
+    await closeLoreDb();
+  });
+
   it("reports No duplicates found when merged is 0", async () => {
     const mergeProjects = vi.fn(async () => ({
       updated: 0,
@@ -286,5 +341,26 @@ describe("MergeProjectsAction", () => {
       await screen.findByRole("button", { name: "Merge duplicates" }),
     );
     expect(await screen.findByText(/Merged 1 project/)).toBeInTheDocument();
+  });
+
+  it("clears a previous error when reopening the merge dialog", async () => {
+    const mergeProjects = vi.fn(async () => {
+      throw new Error("merge failed");
+    });
+    mount(clientWith({ mergeProjects }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Merge duplicate projects" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Merge duplicates" }),
+    );
+    expect(
+      (await screen.findAllByText("Error: merge failed")).length,
+    ).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Merge duplicate projects" }),
+    );
+    expect(screen.queryByText("Error: merge failed")).not.toBeInTheDocument();
   });
 });

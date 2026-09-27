@@ -121,8 +121,11 @@ export function createProjectActionsState({
       repos.knowledge.clear(),
       repos.sessions.clear(),
       repos.messageBlocks.clear(),
+      repos.projects.clearCollections(),
+      repos.knowledge.clearCollections(),
+      repos.sessions.clearCollections(),
+      repos.messageBlocks.clearCollections(),
     ]);
-    await repos.projects.deleteCollection("all");
     projects.reload();
     return result;
   }

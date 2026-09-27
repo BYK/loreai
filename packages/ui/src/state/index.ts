@@ -57,6 +57,7 @@ function lazyRepo<T>(
       call((r) => r.setCollection(scope, state), undefined),
     deleteCollection: (scope) =>
       call((r) => r.deleteCollection(scope), undefined),
+    clearCollections: () => call((r) => r.clearCollections(), undefined),
   };
 }
 
