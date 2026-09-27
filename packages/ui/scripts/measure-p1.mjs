@@ -817,7 +817,7 @@ function markdown(result) {
     "",
     `Machine: ${result.environment.cpuModel} × ${result.environment.cpuCount}; ${(result.environment.totalMemoryBytes / 1024 ** 3).toFixed(1)} GiB; Node ${result.environment.node}; ${result.environment.platform} ${result.environment.osRelease} ${result.environment.arch}${baselineWorktree}.`,
     "",
-    `Git SHA: \`${result.environment.gitSha}\`; measured ${result.environment.date}.`,
+    `Git SHA (code at measurement time): \`${result.environment.gitSha}\`; measured ${result.environment.date}.`,
     "",
     ...(result.baseline
       ? [

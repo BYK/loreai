@@ -1030,7 +1030,7 @@ Command: `/opt/hostedtoolcache/node/22.23.2/x64/bin/node /home/ubuntu/repos/lore
 
 Machine: INTEL(R) XEON(R) PLATINUM 8559C × 8; 31.3 GiB; Node v22.23.2; linux 6.8.0-1061-aws x64; baseline worktree SHA a4e6af5b.
 
-Git SHA: `9bc96c91`; measured 2026-09-21T09:32:53.956Z.
+Git SHA (code at measurement time): `ead90dc0`; measured 2026-09-27T08:27:49.846Z.
 
 Baseline SHA: `a4e6af5b` (worktree `a4e6af5b`).
 
@@ -1038,9 +1038,9 @@ Baseline note: commit `a4e6af5b` predates the current `/ui` surface, so UI-speci
 
 | Metric | Current | Baseline | vs baseline (%) |
 |---|---:|---:|---:|
-| Startup → first 200 `/health` (median of 5 runs) | p50 1290.4 ms | p50 1210.9 ms | +6.6% |
-| RSS after start | p50 346.9 MB | p50 347 MB | 0% |
-| RSS after serving UI | p50 352.9 MB | — | — |
+| Startup → first 200 `/health` (median of 5 runs) | p50 1200.1 ms | p50 1139.6 ms | +5.3% |
+| RSS after start | p50 363.7 MB | p50 346.9 MB | +4.8% |
+| RSS after serving UI | p50 366.4 MB | — | — |
 
 Harness/child processes spawned by the gateway while serving the UI: 0 (max across 5 runs).
 
@@ -1048,49 +1048,53 @@ Latency summaries use 200 warmed requests per endpoint; each value is the median
 
 | Endpoint | Current p50 / p95 / p99 | Baseline p50 / p95 / p99 | vs baseline p50 (%) | vs baseline p95 (%) |
 |---|---:|---:|---:|---:|
-| `POST /v1/messages` | 32.3 / 127.1 / 213.6 ms | 32.1 / 135.2 / 202.4 ms | +0.6% | -6% |
-| `GET /health` | 0.5 / 15.5 / 88.9 ms | 0.5 / 18.6 / 87.7 ms | +0% | -16.7% |
-| `GET /api/v1/projects` | 0.5 / 16.4 / 88.4 ms | 0.5 / 12.3 / 135.1 ms | +0% | +33.3% |
-| `GET /ui/` | 0.6 / 26.8 / 70.3 ms | — | — | — |
-| `GET /ui/assets/index-CurzdKYW.js` | 2.4 / 5 / 6.8 ms | — | — | — |
+| `POST /v1/messages` | 34.9 / 183.7 / 201 ms | 31.1 / 135 / 200 ms | +12.2% | +36.1% |
+| `GET /health` | 1 / 1.9 / 14.2 ms | 0.6 / 24.2 / 74.7 ms | +66.7% | -92.1% |
+| `GET /api/v1/projects` | 1 / 13.2 / 26.2 ms | 0.5 / 14.2 / 79.3 ms | +100% | -7% |
+| `GET /ui/` | 1.3 / 5.6 / 18.3 ms | — | — | — |
+| `GET /ui/assets/index-sIkuw9jR.js` | 2.5 / 4.1 / 5.1 ms | — | — | — |
 
 | Bundle asset | Raw | gzip-9 | Brotli-11 |
 |---|---:|---:|---:|
+| `assets/confirm-dialog-B9j6cbk2.js` | 767 B | 378 B | 325 B |
+| `assets/Contradictions-CECjvMf0.js` | 6,243 B | 2,383 B | 2,051 B |
 | `assets/dm-sans-latin-ext-wght-italic-DUE6_iCb.woff2` | 20,808 B | 20,836 B* | 20,807 B* |
 | `assets/dm-sans-latin-ext-wght-normal-BOFOeGcA.woff2` | 18,228 B | 18,256 B* | 18,227 B* |
 | `assets/dm-sans-latin-wght-italic-Cz4n9dED.woff2` | 39,712 B | 39,644 B* | 39,716 B* |
 | `assets/dm-sans-latin-wght-normal-Xz1IZZA0.woff2` | 36,932 B | 36,852 B* | 36,936 B* |
-| `assets/index-CGG3gk1z.css` | 44,504 B | 9,214 B | 8,037 B |
-| `assets/index-CurzdKYW.js` | 450,352 B | 139,102 B | 120,053 B |
+| `assets/Entities-CvHpa-Il.js` | 15,473 B | 4,865 B | 4,312 B |
+| `assets/index-BG9YjK25.css` | 48,070 B | 9,685 B | 8,432 B |
+| `assets/index-sIkuw9jR.js` | 464,214 B | 143,155 B | 123,330 B |
 | `assets/loreai-BYyO8ZaX.svg` | 11,885 B | 4,931 B | 4,352 B |
 | `assets/loreai-dark-BoECdKok.svg` | 11,902 B | 4,934 B | 4,340 B |
 | `assets/marked.esm-DFH_7NNB.js` | 43,074 B | 12,727 B | 11,627 B |
+| `assets/Operations-s9Ymx2MJ.js` | 25,086 B | 7,096 B | 6,239 B |
 | `assets/playfair-display-latin-400-italic-LeeEXsx5.woff2` | 21,884 B | 21,912 B* | 21,884 B* |
 | `assets/playfair-display-latin-400-normal-CFtfchNt.woff2` | 21,856 B | 21,829 B* | 21,791 B* |
 | `assets/playfair-display-latin-ext-400-italic-zVOgzDMq.woff2` | 13,668 B | 13,691 B* | 13,672 B* |
 | `assets/playfair-display-latin-ext-400-normal-BxlSGspa.woff2` | 12,336 B | 12,359 B* | 12,337 B* |
 | `assets/recall-text-B0O2pagn.js` | 1,747 B | 779 B | 699 B |
-| `assets/Session-CI-EMvNK.js` | 160,640 B | 54,061 B | 47,612 B |
+| `assets/Session-Bo5clKqk.js` | 165,408 B | 55,528 B | 48,941 B |
 | `favicon.svg` | 11,922 B | 4,987 B | 4,383 B |
-| `index.html` | 515 B | 305 B | 186 B |
-| `ui-manifest.json` | 2,559 B | 648 B* | 558 B* |
-| **Total staged UI** | **924,524 B** | **417,067 B** | **387,217 B** |
-| `dist/index.cjs` | 17,502,679 B | — | — |
+| `index.html` | 515 B | 309 B | 191 B |
+| `ui-manifest.json` | 3,296 B | 765 B* | 661 B* |
+| **Total staged UI** | **995,026 B** | **437,901 B** | **405,253 B** |
+| `dist/index.cjs` | 18,103,290 B | — | — |
 
 * no precompressed sibling; compressed by the script
 
 | First render (5 fresh contexts) | Median |
 |---|---:|
-| domContentLoadedEventEnd | 114.1 ms |
-| loadEventEnd | 145.3 ms |
-| firstPaint | 16 ms |
-| firstContentfulPaint | 148 ms |
-| firstUsefulContentMs | 185.2 ms |
+| domContentLoadedEventEnd | 117.7 ms |
+| loadEventEnd | 142.5 ms |
+| firstPaint | 20 ms |
+| firstContentfulPaint | 144 ms |
+| firstUsefulContentMs | 175.9 ms |
 
 | Long-history scroll | Frame p50 / p95 / max | Frames >50 ms | Long tasks (count / total / max) | Fixture frame p95 / max |
 |---|---:|---:|---:|---:|
-| desktop (1280×800) | 16.7 / 16.8 / 16.8 ms | 0 | 2 / 287 / 214 ms | 16.8 / 16.8 ms |
-| mobile (393×852, DPR 3) | 16.7 / 16.7 / 33.3 ms | 0 | 2 / 277 / 192 ms | 16.7 / 33.3 ms |
+| desktop (1280×800) | 16.7 / 16.7 / 16.8 ms | 0 | 2 / 258 / 179 ms | 16.7 / 16.8 ms |
+| mobile (393×852, DPR 3) | 16.7 / 16.7 / 33.4 ms | 0 | 2 / 257 / 180 ms | 16.7 / 33.4 ms |
 <!-- p1-measurements:end -->
 
 ### UI-07 fixture review
