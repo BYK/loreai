@@ -467,7 +467,9 @@ part, so every block has at least one part.
 `synthetic: true`, `lore: true` or `agent: "lore"`), `system` (role
 `system`) or `unknown` (any other stored role, shown with an "unrecognised
 role" badge and the raw role). Lore-injected messages and the system prompt
-render with their own badge and tint (#1508). Metadata is parsed
+render with their own badge and tint (#1508). Placeholder metadata older
+gateway rows stored (`agent: "gateway"` / `"unknown"`, `modelID: "unknown"`)
+is suppressed rather than rendered as noise badges. Metadata is parsed
 defensively: malformed JSON yields an empty `MessageMeta`, never a crash.
 
 `createdAt` is `null` unless the server sent a finite positive epoch;

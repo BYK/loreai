@@ -12,6 +12,7 @@
  *  3. Normal conversation turns → full pipeline.
  */
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
+import { detectHarness } from "./harness";
 import { boundFallbackHistory } from "./fallback-history";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
@@ -19829,6 +19830,7 @@ async function handleConversationTurnPrepared(
     checkpointBoundarySafe: req.sourceInput?.boundarySafe,
     sourcePrefix: requestSourcePrefix(req),
     timing: preparationTiming,
+    harness: detectHarness(req.rawHeaders),
   });
   preparation.assertActive();
   assertCurrentPipelineGeneration(req.signal, requestGeneration);
@@ -20504,6 +20506,7 @@ async function handleConversationTurnPrepared(
       forceFull: true,
       sourcePrefix: requestSourcePrefix(req),
       timing: preparationTiming,
+      harness: detectHarness(req.rawHeaders),
     }));
     assertCurrentPipelineGeneration(req.signal, requestGeneration);
     result = transform({

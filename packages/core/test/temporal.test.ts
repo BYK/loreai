@@ -97,6 +97,47 @@ describe("temporal", () => {
     expect(all[0].content).toContain("authentication");
   });
 
+  test("user row without agent/model persists no metadata keys for them", () => {
+    const project = "/test/temporal/user-meta-absent";
+    const info: LoreMessage = {
+      id: "meta-1",
+      sessionID: "sess-meta",
+      role: "user",
+      time: { created: Date.now() },
+    };
+    temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("meta-1", "hello"),
+    });
+
+    const row = temporal.bySession(project, "sess-meta")[0];
+    const meta = JSON.parse(row.metadata) as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("agent");
+    expect(meta).not.toHaveProperty("model");
+  });
+
+  test("user row with a harness agent keeps it and still omits model", () => {
+    const project = "/test/temporal/user-meta-agent";
+    const info: LoreMessage = {
+      id: "meta-2",
+      sessionID: "sess-meta",
+      role: "user",
+      time: { created: Date.now() },
+      agent: "codex",
+    };
+    temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts("meta-2", "hello again"),
+    });
+
+    const row = temporal.bySession(project, "sess-meta")[0];
+    const meta = JSON.parse(row.metadata) as Record<string, unknown>;
+    expect(meta.agent).toBe("codex");
+    expect(meta).not.toHaveProperty("model");
+  });
+
   test("stores multiple messages", () => {
     const project = "/test/temporal/store-multiple";
     temporal.store({
