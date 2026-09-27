@@ -609,6 +609,9 @@ export type SessionState = {
    *  auto-continuations. Used exclusively for inter-turn gap histogram
    *  recording (survival analysis). */
   lastUserTurnTime: number;
+  /** Last harness-provided title written to session_state.title; dedupes the
+   *  DB write so a resend of the same title costs nothing per turn. */
+  harnessTitle?: string;
   /** Total user+assistant messages seen in this session. */
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
@@ -851,6 +854,7 @@ const GATEWAY_MANAGED_HEADERS = new Set([
   "x-lore-project",
   "x-lore-git-remote",
   "x-lore-agent",
+  "x-lore-session-title",
   "x-lore-no-store",
   GATEWAY_AUTH_HEADER,
   "x-lore-recall-invoked",

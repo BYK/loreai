@@ -41,5 +41,7 @@
       "created_at": 1700000002000,
       "call_type": "batch"
     }
-  ]
+  ],
+  "title": "message 0 body",
+  "title_source": "first_message"
 }

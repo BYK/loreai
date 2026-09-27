@@ -177,6 +177,8 @@ describe("KnowledgeDocument", () => {
       {
         state: "summary_only" as const,
         detail: {
+          title: "s-1",
+          title_source: "id" as const,
           messages: [],
           distillations: [
             {
@@ -247,6 +249,8 @@ describe("KnowledgeDocument", () => {
       evidence: loader({
         state: "summary_only" as const,
         detail: {
+          title: "s-1",
+          title_source: "id" as const,
           messages: [],
           distillations: [
             {
@@ -287,6 +291,8 @@ describe("KnowledgeDocument", () => {
       evidence: loader({
         state: "summary_only" as const,
         detail: {
+          title: "s-1",
+          title_source: "id" as const,
           messages: [],
           distillations: [
             {
@@ -335,6 +341,8 @@ describe("KnowledgeDocument", () => {
       evidence: loader({
         state: "summary_only" as const,
         detail: {
+          title: "s-1",
+          title_source: "id" as const,
           messages: [],
           distillations: [
             {

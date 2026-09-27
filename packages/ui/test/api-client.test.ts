@@ -356,6 +356,8 @@ describe("api client: error classification", () => {
       distilled_count: 1,
       undistilled_count: 1,
       distillation_count: 0,
+      title: "s-1",
+      title_source: "id",
     };
     const detail = {
       messages: [
@@ -372,6 +374,8 @@ describe("api client: error classification", () => {
         },
       ],
       distillations: [],
+      title: "hi",
+      title_source: "first_message",
     };
     const { client, calls } = clientFor((url) =>
       json(url.includes("/sessions/") ? detail : [session]),
