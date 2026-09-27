@@ -11,7 +11,7 @@ import {
   pluralize,
   recordedWriter as recordedWriterOf,
 } from "~/lib/format";
-import { sessionHref } from "~/routes/Browse";
+import { sessionHref } from "~/lib/href";
 import type {
   DistillationDetail,
   KnowledgeEntry,

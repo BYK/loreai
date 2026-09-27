@@ -1344,9 +1344,10 @@ top of `/api/v1`. Status:
   budget set/disable, worker breakdown. — **PR3 (this change)**
 - [x] Warming — global enable/disable, circuit-breaker reset, per-session
   keep/stop/auto, project histograms. — **PR3 (this change)**
-- [x] Import history — no legacy page existed (API only,
-  `GET /api/v1/import/history`); the new screen reads the paged
-  `GET /api/v1/projects/:id/imports`. — **PR5 (this change)**
+- [x] Import history — no legacy page existed (API only); the legacy
+  unpaged `GET /api/v1/import/history` route is removed — the paged
+  `GET /api/v1/projects/:id/imports` is the only route, and the new
+  screen reads it. — **PR5 (this change)**
 
 All #1823 parity items are now covered by the screens above or by the
 earlier UI-04/05/06 slices; the exclusions listed below remain

@@ -12,7 +12,7 @@ import {
   sessionsHref,
   sessionHref,
   searchHref,
-} from "~/routes/Browse";
+} from "~/lib/href";
 import { DocHeader } from "./Document";
 import { ProjectActions } from "./ProjectActions";
 import { ListRow } from "./Panes";

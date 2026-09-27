@@ -8,7 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "~/components/ui/dialog";
-import { searchHref } from "~/routes/Browse";
+import { searchHref } from "~/lib/href";
 import { cn } from "~/lib/utils";
 
 export const SearchEntry: Component<{

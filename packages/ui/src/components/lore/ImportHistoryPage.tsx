@@ -11,14 +11,10 @@ import { useNavigate } from "@solidjs/router";
 import { formatWhen, pluralize } from "~/lib/format";
 import { createLoader } from "~/lib/loader";
 import { useWorkspace } from "~/routes/workspace";
+import { importsHref } from "~/lib/href";
 import { Button } from "~/components/ui/button";
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";
-
-export const importsHref = (projectId: string, cursor?: string | null) =>
-  `/projects/${encodeURIComponent(projectId)}/imports${
-    cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""
-  }`;
 
 export const ImportHistoryPage: Component<{
   projectId: string;

@@ -238,17 +238,17 @@ describe("GET /api/v1/entities", () => {
   });
 
   it("rejects malformed cursors and limits with 400", async () => {
-    for (const path of [
-      "/api/v1/entities?page=not!!!base64",
-      "/api/v1/entities?page=bm90LWpzb24", // base64url("not-json")
-      "/api/v1/entities?limit=abc",
-      "/api/v1/entities?limit=0",
-      "/api/v1/entities?limit=-3",
+    for (const [path, type] of [
+      ["/api/v1/entities?page=not!!!base64", "invalid_cursor"],
+      ["/api/v1/entities?page=bm90LWpzb24", "invalid_cursor"], // base64url("not-json")
+      ["/api/v1/entities?limit=abc", "invalid_request"],
+      ["/api/v1/entities?limit=0", "invalid_request"],
+      ["/api/v1/entities?limit=-3", "invalid_request"],
     ]) {
       const res = await api(path);
       expect(res.status, path).toBe(400);
       const body = (await res.json()) as { error: { type: string } };
-      expect(body.error.type).toBe("invalid_request");
+      expect(body.error.type, path).toBe(type);
     }
   });
 });
@@ -1010,9 +1010,16 @@ describe("GET /api/v1/projects/:id/imports", () => {
 
   it("rejects malformed cursor and limit", async () => {
     const project = await importsProject();
-    for (const suffix of ["page=%%%", "page=aGk!", "limit=abc", "limit=0"]) {
+    for (const [suffix, type] of [
+      ["page=%%%", "invalid_cursor"],
+      ["page=aGk!", "invalid_cursor"],
+      ["limit=abc", "invalid_request"],
+      ["limit=0", "invalid_request"],
+    ]) {
       const res = await api(`/api/v1/projects/${project.id}/imports?${suffix}`);
       expect(res.status, suffix).toBe(400);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type, suffix).toBe(type);
     }
   });
 

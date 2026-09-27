@@ -3,11 +3,8 @@ import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
 import type { KnowledgeQuery, ProjectSummary, RecallScope } from "~/contracts";
-import {
-  DEFAULT_KNOWLEDGE_QUERY,
-  knowledgeQueryToSearch,
-  parseKnowledgeQuery,
-} from "~/contracts";
+import { DEFAULT_KNOWLEDGE_QUERY, parseKnowledgeQuery } from "~/contracts";
+import { knowledgeHref, knowledgeListHref, projectHref } from "~/lib/href";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
@@ -22,31 +19,6 @@ import { StateCard } from "~/components/lore/StateCard";
 import { Nav } from "~/components/shell/Nav";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
-
-export const projectHref = (projectId: string) =>
-  `/projects/${encodeURIComponent(projectId)}`;
-export const knowledgeListHref = (
-  projectId: string,
-  query: KnowledgeQuery = DEFAULT_KNOWLEDGE_QUERY,
-) => `${projectHref(projectId)}/knowledge${knowledgeQueryToSearch(query)}`;
-export const knowledgeHref = (
-  projectId: string,
-  knowledgeId: string,
-  query?: KnowledgeQuery,
-) =>
-  `${projectHref(projectId)}/knowledge/${encodeURIComponent(knowledgeId)}${query ? knowledgeQueryToSearch(query) : ""}`;
-export const sessionsHref = (projectId: string, cursor?: string | null) =>
-  `${projectHref(projectId)}/sessions${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`;
-export const importsHref = (projectId: string, cursor?: string | null) =>
-  `${projectHref(projectId)}/imports${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`;
-export const sessionHref = (projectId: string, sessionId: string) =>
-  `${projectHref(projectId)}/sessions/${encodeURIComponent(sessionId)}`;
-export const searchHref = (
-  projectId: string,
-  q: string,
-  scope: RecallScope = "all",
-) =>
-  `${projectHref(projectId)}/search?q=${encodeURIComponent(q)}&scope=${encodeURIComponent(scope)}`;
 
 function decodeParam(segment: string | undefined) {
   if (segment === undefined) return undefined;
