@@ -773,6 +773,96 @@ describe("hosted-mode guards on project writes", () => {
   });
 });
 
+describe("configured hosted mode", () => {
+  it("refuses dashboard/project writes with 403 even before pipeline init", async () => {
+    // Core's `isHostedMode()` only turns true after the lazy pipeline init,
+    // so a configured `hostedMode: true` server must guard on config alone.
+    const { startServer } = await import("../src/server");
+    const { loadConfig } = await import("../src/config");
+    const { ensureProject, entities, isHostedMode } =
+      await import("@loreai/core");
+    expect(isHostedMode()).toBe(false);
+
+    const config = loadConfig();
+    config.remoteGateway = false;
+    config.hostedMode = true;
+    config.gatewayAuthToken = "t".repeat(32);
+    const hosted = await startServer(config);
+    const hostedApi = (path: string, init?: LoopbackRequestInit) =>
+      loopbackRequest(`http://127.0.0.1:${hosted.port}${path}`, init);
+
+    try {
+      const projectId = ensureProject(
+        `/test/configured-hosted/${Date.now()}`,
+        "guarded",
+      );
+      const entity = await seedEntity({
+        entityType: "tool",
+        canonicalName: `cfg-hosted-${Date.now()}`,
+      });
+      const pair = await seedContradictionPair(`cfg-hosted-${Date.now()}`);
+
+      const rename = await hostedApi(`/api/v1/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "blocked" }),
+      });
+      const patchEntity = await hostedApi(`/api/v1/entities/${entity.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role: "blocked" }),
+      });
+      const deleteEntity = await hostedApi(`/api/v1/entities/${entity.id}`, {
+        method: "DELETE",
+      });
+      const decide = await hostedApi(
+        `/api/v1/contradictions/${pair.a}/${pair.b}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ decision: "keep-a" }),
+        },
+      );
+      const move = await hostedApi("/api/v1/sessions/move", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session_ids: ["cfg-hosted-session"],
+          from_project_id: projectId,
+          to_project: { path: "/test/other" },
+        }),
+      });
+      const clear = await hostedApi(`/api/v1/projects/${projectId}/clear`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const del = await hostedApi(`/api/v1/projects/${projectId}`, {
+        method: "DELETE",
+      });
+      for (const res of [
+        rename,
+        patchEntity,
+        deleteEntity,
+        decide,
+        move,
+        clear,
+        del,
+      ]) {
+        expect(res.status).toBe(403);
+        expect(
+          ((await res.json()) as { error: { type: string } }).error.type,
+        ).toBe("forbidden");
+      }
+      const { data } = await import("@loreai/core");
+      expect(data.listProjects().some((p) => p.id === projectId)).toBe(true);
+      expect(entities.get(entity.id)).toBeTruthy();
+    } finally {
+      await hosted.stop();
+    }
+  });
+});
+
 describe("management boundary", () => {
   it("hides the dashboard routes from non-loopback peers", async () => {
     const { startServer } = await import("../src/server");

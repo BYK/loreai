@@ -76,7 +76,9 @@ export const dashboardRoutes: RouteModule = {
       "/api/v1/contradictions/:idA/:idB",
       ctx.declaredMethodsOnly(
         ["PATCH"],
-        wrap((dash, req, url) => dash.handleContradictionRequest(req, url)),
+        wrap((dash, req, url) =>
+          dash.handleContradictionRequest(req, url, ctx.config.hostedMode),
+        ),
       ),
     );
     // Literal before `:id` so "rebuild" is never read as an entity id.
@@ -92,7 +94,9 @@ export const dashboardRoutes: RouteModule = {
         "/api/v1/entities/:id",
         ctx.declaredMethodsOnly(
           ["GET", "PATCH", "DELETE"],
-          wrap((dash, req, url) => dash.handleEntityRequest(req, url)),
+          wrap((dash, req, url) =>
+            dash.handleEntityRequest(req, url, ctx.config.hostedMode),
+          ),
         ),
       );
     }
@@ -105,6 +109,7 @@ export const dashboardRoutes: RouteModule = {
         const res = await dash.handleRenameProject(
           c.var.request,
           c.req.param("id") ?? "",
+          ctx.config.hostedMode,
         );
         return withManagementCors(res, c.var.allowedManagementOrigin);
       }),

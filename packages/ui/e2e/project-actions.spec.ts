@@ -131,10 +131,9 @@ test.describe("project actions (UI-08)", () => {
     const target = dialog.getByRole("button", { name: "Target project" });
     await expect(target).toBeEnabled();
     await target.click();
-    await page
-      .getByRole("option")
-      .filter({ hasText: /^lore$/ })
-      .click();
+    // The Kobalte Select popup portals outside the dialog — which the modal
+    // dialog marks aria-hidden — so role queries can't see the options.
+    await page.locator("[role='option']").filter({ hasText: "lore" }).click();
     await dialog.getByRole("button", { name: /Move \d+ session/ }).click();
     await expect(
       page.getByTestId("project-actions").getByTestId("action-notice-result"),

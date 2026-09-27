@@ -264,8 +264,11 @@ function handleDeleteDistillation(id: string): Response {
   return errorResponse(404, "not_found", `Distillation not found: ${id}`);
 }
 
-function handleDeleteProject(id: string): Response {
-  if (isHostedMode()) {
+function handleDeleteProject(
+  id: string,
+  configuredHostedMode = false,
+): Response {
+  if (configuredHostedMode || isHostedMode()) {
     return errorResponse(
       403,
       "forbidden",
@@ -281,8 +284,9 @@ function handleDeleteProject(id: string): Response {
 async function handleClearProject(
   req: Request,
   projectPath: string,
+  configuredHostedMode = false,
 ): Promise<Response> {
-  if (isHostedMode()) {
+  if (configuredHostedMode || isHostedMode()) {
     return errorResponse(
       403,
       "forbidden",
@@ -341,8 +345,11 @@ function resolveTargetProject(
   return null;
 }
 
-async function handleMoveSessions(req: Request): Promise<Response> {
-  if (isHostedMode()) {
+async function handleMoveSessions(
+  req: Request,
+  configuredHostedMode = false,
+): Promise<Response> {
+  if (configuredHostedMode || isHostedMode()) {
     return errorResponse(
       403,
       "forbidden",
@@ -1029,7 +1036,7 @@ export async function handleAPIRequest(
 
     // DELETE /api/v1/projects/:id
     params = matchRoute(pathname, "/api/v1/projects/:id");
-    if (params) return handleDeleteProject(params.id);
+    if (params) return handleDeleteProject(params.id, config.hostedMode);
   }
 
   if (method === "POST") {
@@ -1072,7 +1079,7 @@ export async function handleAPIRequest(
 
     // POST /api/v1/sessions/move — move sessions between projects
     if (pathname === "/api/v1/sessions/move") {
-      return await handleMoveSessions(req);
+      return await handleMoveSessions(req, config.hostedMode);
     }
 
     // Parameterized routes
@@ -1093,7 +1100,7 @@ export async function handleAPIRequest(
           "not_found",
           `Project not found: ${params.id}`,
         );
-      return await handleClearProject(req, project.path);
+      return await handleClearProject(req, project.path, config.hostedMode);
     }
 
     // POST /api/v1/projects/:id/dedup — dry-run preview only; writes go

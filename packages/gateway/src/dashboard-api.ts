@@ -22,6 +22,15 @@ type EntityWithAliases = NonNullable<
   ReturnType<typeof entities.getWithAliases>
 >;
 
+/**
+ * `isHostedMode()` only reflects the lazy pipeline init, so a configured
+ * hosted deployment is invisible until the first proxied request — the
+ * configured flag is authoritative for request-time guards.
+ */
+function requestIsHosted(configuredHostedMode = false): boolean {
+  return configuredHostedMode || isHostedMode();
+}
+
 // ---------------------------------------------------------------------------
 // List item shaping
 // ---------------------------------------------------------------------------
@@ -251,6 +260,7 @@ function decodeContradictionId(segment: string): string | null {
 export async function handleContradictionRequest(
   req: Request,
   url: URL,
+  configuredHostedMode = false,
 ): Promise<Response> {
   if (req.method !== "PATCH") {
     return errorResponse(
@@ -259,7 +269,7 @@ export async function handleContradictionRequest(
       `No API route for ${req.method} ${url.pathname}`,
     );
   }
-  if (isHostedMode()) {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -427,8 +437,9 @@ function parseMetadataPatch(body: unknown): MetadataPatch | Response {
 export async function handlePatchEntity(
   req: Request,
   id: string,
+  configuredHostedMode = false,
 ): Promise<Response> {
-  if (isHostedMode()) {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -492,8 +503,9 @@ const MAX_PROJECT_PATCH_BODY_BYTES = 8 * 1024;
 export async function handleRenameProject(
   req: Request,
   id: string,
+  configuredHostedMode = false,
 ): Promise<Response> {
-  if (isHostedMode()) {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -550,8 +562,11 @@ export async function handleRenameProject(
 }
 
 /** `DELETE /api/v1/entities/:id`. Hosted mode → 403. */
-export function handleDeleteEntity(id: string): Response {
-  if (isHostedMode()) {
+export function handleDeleteEntity(
+  id: string,
+  configuredHostedMode = false,
+): Response {
+  if (requestIsHosted(configuredHostedMode)) {
     return errorResponse(
       403,
       "forbidden",
@@ -578,6 +593,7 @@ export async function handleEntityRebuildStatus(): Promise<Response> {
 export async function handleEntityRequest(
   req: Request,
   url: URL,
+  configuredHostedMode = false,
 ): Promise<Response> {
   const { pathname } = url;
   const match = /^\/api\/v1\/entities\/([^/]+)$/.exec(pathname);
@@ -600,9 +616,9 @@ export async function handleEntityRequest(
     case "GET":
       return handleGetEntity(id);
     case "PATCH":
-      return handlePatchEntity(req, id);
+      return handlePatchEntity(req, id, configuredHostedMode);
     case "DELETE":
-      return handleDeleteEntity(id);
+      return handleDeleteEntity(id, configuredHostedMode);
     default:
       return errorResponse(
         404,
