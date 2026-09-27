@@ -10,6 +10,7 @@ import {
 } from "solid-js";
 
 import type {
+  SessionContext,
   SessionDetail,
   SessionPage,
   SessionSearchPage,
@@ -504,5 +505,23 @@ export function createSessionsState({
     };
   }
 
-  return { list, detail, page, evidence, reader, store };
+  /**
+   * `GET /sessions/:id/context` (#1924): gateway-authoritative, so no
+   * IndexedDB cache — the loader re-fetches on remount/reload.
+   */
+  function context(
+    projectId: Accessor<string | null>,
+    sessionId: Accessor<string | null>,
+  ): { loader: Loader<SessionContext> } {
+    const loader = createLoader(
+      sessionSource(projectId, sessionId),
+      async (key, signal) => {
+        const { sid, path } = splitKey(key);
+        return tracked(() => client.getSessionContext(path, sid, signal));
+      },
+    );
+    return { loader };
+  }
+
+  return { list, detail, page, evidence, reader, context, store };
 }

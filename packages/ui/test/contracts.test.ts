@@ -28,6 +28,7 @@ import {
   projectList,
   recallResponse,
   safeParseContract,
+  sessionContext,
   sessionDetail,
   sessionList,
   sessionPage,
@@ -252,6 +253,77 @@ describe("contract violations", () => {
         expect(parsed.error.issues.length).toBeGreaterThan(0);
       }
     }
+  });
+
+  it("sessionContext accepts the real shape and rejects a wrong-typed layer", () => {
+    const sample = {
+      session_id: "s",
+      layer: 2,
+      history: { message_count: 3, token_estimate: 900 },
+      distilled_prefix: {
+        token_count: 40,
+        distillations: [
+          {
+            id: "d1",
+            generation: 0,
+            token_count: 40,
+            created_at: 1_700_000_000_000,
+            observations: "obs",
+          },
+        ],
+      },
+      knowledge: {
+        cache_text: null,
+        cache_tokens: null,
+        pin_tokens: 12,
+        stable_tokens: null,
+        injections: [
+          {
+            logical_id: "k1",
+            title: null,
+            category: null,
+            confidence: null,
+            created_at: 1_700_000_000_000,
+            credited: false,
+            verdict: null,
+          },
+        ],
+      },
+      prompt_deltas: [
+        {
+          seq: 0,
+          insert_at: null,
+          applied_at: null,
+          changed: [{ id: "k1", title: null }],
+          removed: [],
+          text: [],
+        },
+      ],
+      turns: [
+        {
+          message_id: "m1",
+          created_at: 1_700_000_000_000,
+          layer: 1,
+          raw_tokens: 100,
+          total_tokens: 50,
+          distilled_tokens: 10,
+          usage: null,
+        },
+      ],
+    };
+    const ok = safeParseContract("/sessions/s/context", sessionContext, sample);
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.value).toEqual(sample);
+
+    const broken = structuredClone(sample);
+    (broken as Record<string, unknown>).layer = "2";
+    const bad = safeParseContract(
+      "/sessions/s/context",
+      sessionContext,
+      broken,
+    );
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(isContractError(bad.error)).toBe(true);
   });
 
   it("apiErrorBody accepts the gateway error envelope", () => {

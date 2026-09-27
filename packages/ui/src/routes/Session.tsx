@@ -9,12 +9,14 @@ import { useParams, useSearchParams } from "@solidjs/router";
 
 import { DocHeader } from "~/components/lore/Document";
 import { StateCard } from "~/components/lore/StateCard";
+import { ContextWindowPane } from "~/components/reader/ContextWindow";
 import { SessionView } from "~/components/reader/SessionView";
+import { SessionWorkspace } from "~/components/reader/SessionWorkspace";
 import { Nav } from "~/components/shell/Nav";
 import { Shell } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 
-import { projectHref } from "./Browse";
+import { knowledgeHref, projectHref } from "./Browse";
 import { useWorkspace } from "./workspace";
 
 export const sessionHref = (projectId: string, sessionId: string) =>
@@ -71,6 +73,7 @@ export const Session: Component = () => {
   };
 
   const reader = ws.state.sessions.reader(projectId, sessionId);
+  const context = ws.state.sessions.context(projectId, sessionId);
   const projectsSettled = () =>
     ws.projects.data() !== undefined || ws.projects.error() !== undefined;
   const projectMissing = () =>
@@ -152,26 +155,49 @@ export const Session: Component = () => {
         </div>
       </Match>
       <Match when={reader.loader.data()}>
-        <SessionView
-          sessionId={sessionId() ?? ""}
-          messages={reader.messages()}
-          distillations={reader.distillations()}
-          messageCount={reader.messageCount()}
-          hasOlder={reader.hasOlder()}
-          loadingOlder={reader.loadingOlder()}
-          olderError={reader.olderError()}
-          onLoadOlder={reader.loadOlder}
-          onSearchWhole={reader.search}
-          status={reader.status()}
-          anchorParam={anchorParam()}
-          onAnchorChange={(encoded) =>
-            setSearch({ a: encoded ?? undefined }, { replace: true })
+        <SessionWorkspace
+          transcript={
+            <SessionView
+              sessionId={sessionId() ?? ""}
+              messages={reader.messages()}
+              distillations={reader.distillations()}
+              messageCount={reader.messageCount()}
+              hasOlder={reader.hasOlder()}
+              loadingOlder={reader.loadingOlder()}
+              olderError={reader.olderError()}
+              onLoadOlder={reader.loadOlder}
+              onSearchWhole={reader.search}
+              status={reader.status()}
+              anchorParam={anchorParam()}
+              onAnchorChange={(encoded) =>
+                setSearch({ a: encoded ?? undefined }, { replace: true })
+              }
+              linkBase={() => window.location.href}
+              loadDistillation={(id) =>
+                ws.tracked(() => ws.client.getDistillation(id))
+              }
+              context={context.loader.data() ?? null}
+              knowledgeHref={(id) =>
+                projectId()
+                  ? knowledgeHref(projectId()!, id)
+                  : `/ui/knowledge/${encodeURIComponent(id)}`
+              }
+              header={header()}
+            />
           }
-          linkBase={() => window.location.href}
-          loadDistillation={(id) =>
-            ws.tracked(() => ws.client.getDistillation(id))
+          context={
+            <ContextWindowPane
+              context={context.loader.data()}
+              loading={context.loader.loading()}
+              error={context.loader.error()}
+              onRetry={context.loader.reload}
+              knowledgeHref={(id) =>
+                projectId()
+                  ? knowledgeHref(projectId()!, id)
+                  : `/ui/knowledge/${encodeURIComponent(id)}`
+              }
+            />
           }
-          header={header()}
         />
       </Match>
     </Switch>

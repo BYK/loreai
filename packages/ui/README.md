@@ -773,6 +773,18 @@ server does not know displayed-text offsets. Contract:
 isolation across projects and sessions, cursor tampering, bounds, legacy
 route unchanged).
 
+**Session context route (opt-in, #1924).** `GET /api/v1/sessions/:id/context?path=…`
+(`packages/gateway/src/session-context-api.ts` `handleSessionContext`; core
+`sessionContext`) — the session's real context window: accepted gradient
+layer, history volume, the live distilled prefix, injected knowledge, the
+reshaped prompt deltas and per-turn transform stats. It resolves the
+project exactly like `GET /sessions/:id` and sits behind the same
+management access checks; the legacy session route is untouched. Contract:
+`src/contracts/session.ts` `sessionContext`; it feeds the session route's
+"Context window" pane (`components/reader/ContextWindow.tsx`,
+`SessionWorkspace.tsx`) and the transcript markers
+(`reader/markers.ts` interleaved by `reader/rows.ts`).
+
 **Reader (`src/reader/whole-search.ts`, `SessionView`).** The route only
 names messages; a hit becomes a highlight through the existing path:
 

@@ -183,9 +183,9 @@ describe("in-session search: rows", () => {
     expect(hits.hits.length).toBeGreaterThan(3);
     for (const h of hits.hits) {
       const row = rows[h.rowIndex]!;
-      expect(row.block.id).toBe(h.blockId);
-      expect(row.block.kind).toBe("message");
-      if (row.block.kind !== "message") continue;
+      expect(row.block?.id).toBe(h.blockId);
+      expect(row.block?.kind).toBe("message");
+      if (row.block?.kind !== "message") continue;
       const part = row.block.parts[h.partIndex]!;
       expect(
         displayedText(row.block, part).slice(h.start, h.end).toLowerCase(),
@@ -210,11 +210,11 @@ describe("in-session search: rows", () => {
   });
 
   it("skips distillation rows: compressed context is not session speech", () => {
-    const distilled = rows.filter((r) => r.block.kind === "distillation");
+    const distilled = rows.filter((r) => r.block?.kind === "distillation");
     expect(distilled.length).toBeGreaterThan(0);
     const hits = searchRows(rows, queryMatcher("compressed")!);
     expect(
-      hits.hits.every((h) => rows[h.rowIndex]!.block.kind === "message"),
+      hits.hits.every((h) => rows[h.rowIndex]!.block?.kind === "message"),
     ).toBe(true);
   });
 
@@ -245,7 +245,7 @@ describe("in-session search: rows", () => {
     // The last row is scanned when the total is not a multiple of the slice.
     const lastRow = busyRows.length - 1;
     const lastBlock = busyRows[lastRow]!.block;
-    if (lastBlock.kind === "message") {
+    if (lastBlock?.kind === "message") {
       const direct = findInBlock(lastBlock, matcher, lastRow);
       expect(sliced.filter((h) => h.rowIndex === lastRow)).toEqual(direct);
     }
