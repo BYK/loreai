@@ -96,10 +96,10 @@ export const SessionList: Component<{
         </Match>
       </Switch>
       <div class="mt-4 flex justify-between text-xs">
-        <Show when={props.cursor || q()}>
+        <Show when={props.cursor}>
           <button
             class="text-accent underline"
-            onClick={() => navigate(sessionsHref(props.projectId))}
+            onClick={() => navigate(sessionsHref(props.projectId, null, q()))}
           >
             First page
           </button>
