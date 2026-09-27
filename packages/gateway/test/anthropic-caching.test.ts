@@ -90,6 +90,40 @@ describe("buildAnthropicRequest — no caching", () => {
   });
 });
 
+describe("buildAnthropicRequest — tool schema compatibility", () => {
+  test("omits unsupported root combinators without mutating nested schemas", () => {
+    const schema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        value: {
+          oneOf: [{ type: "string" }, { type: "number" }],
+        },
+      },
+      oneOf: [{ required: ["value"] }],
+      allOf: [{ additionalProperties: false }],
+      anyOf: [{ required: ["value"] }],
+    };
+    const req = makeRequest({
+      tools: [{ name: "union", description: "union", inputSchema: schema }],
+    });
+
+    const body = getBody(req);
+    const tool = (body.tools as Array<Record<string, unknown>>)[0];
+    const inputSchema = tool?.input_schema as Record<string, unknown>;
+
+    expect(inputSchema).toEqual({
+      type: "object",
+      properties: schema.properties,
+    });
+    expect(inputSchema.oneOf).toBeUndefined();
+    expect(inputSchema.allOf).toBeUndefined();
+    expect(inputSchema.anyOf).toBeUndefined();
+    expect(schema.oneOf).toEqual([{ required: ["value"] }]);
+    expect(schema.allOf).toEqual([{ additionalProperties: false }]);
+    expect(schema.anyOf).toEqual([{ required: ["value"] }]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // System prompt caching — 5m TTL (conversation turns)
 // ---------------------------------------------------------------------------

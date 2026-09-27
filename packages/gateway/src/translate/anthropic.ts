@@ -435,6 +435,21 @@ export type AnthropicCacheOptions = {
   distilledPrefixLength?: number;
 };
 
+/**
+ * Anthropic Messages rejects combinators at the input schema root. Keep the
+ * full schema internally for validation and remove only the rejected root
+ * keywords on the wire; nested combinators remain valid JSON Schema.
+ */
+function sanitizeAnthropicToolInputSchema(
+  inputSchema: Record<string, unknown>,
+): Record<string, unknown> {
+  const schema = { ...inputSchema };
+  delete schema.oneOf;
+  delete schema.allOf;
+  delete schema.anyOf;
+  return schema;
+}
+
 // ---------------------------------------------------------------------------
 // buildAnthropicRequest
 // ---------------------------------------------------------------------------
@@ -594,7 +609,7 @@ export function buildAnthropicRequest(
     const tools = req.tools.map((t) => ({
       name: t.name,
       description: t.description,
-      input_schema: t.inputSchema,
+      input_schema: sanitizeAnthropicToolInputSchema(t.inputSchema),
     }));
 
     // Tool caching: place a breakpoint on the last tool definition.
