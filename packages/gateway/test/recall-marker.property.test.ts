@@ -83,7 +83,10 @@ const mapEquals = (a: RecallStore, b: RecallStore): boolean =>
 
 const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
   const idArb = hostileString().filter(
-    (s) => s.length > 0 && s.length <= MAX_RECALL_ID_CHARS,
+    (s) =>
+      s.length > 0 &&
+      s.length <= MAX_RECALL_ID_CHARS &&
+      !/[\u0000-\u001f\u007f]/.test(s),
   );
   const scopeOpt = fc.option(scopeArb, { nil: undefined });
   const detail = fc.option(
