@@ -54,6 +54,7 @@ import {
   buildOpenAIChatCompletionsUrl,
   buildOpenAIResponsesUrl,
   copilotHeaders,
+  isGitHubCopilotHost,
 } from "./translate/openai";
 import { accumulateOpenAISSEStream } from "./stream/openai";
 import { accumulateResponsesSSEStream } from "./stream/openai-responses";
@@ -3000,6 +3001,7 @@ function accumulateWorkerSSE(
   response: Response,
   signal?: AbortSignal,
   onSemanticContent?: () => void,
+  pinResponseId = false,
 ): Promise<GatewayResponse> {
   switch (protocol) {
     case "openai-codex-responses":
@@ -3015,6 +3017,7 @@ function accumulateWorkerSSE(
       // accumulator.
       return accumulateResponsesSSEStream(response, {
         validation: "public",
+        pinResponseId,
         stopAtTerminal: true,
         ...workerSSEStreamOptions(signal),
         onSemanticContent,
@@ -3044,6 +3047,30 @@ function accumulateWorkerSSE(
       });
   }
 }
+
+function shouldPinGithubCopilotWorkerResponseId(
+  target: Pick<ProviderTarget, "providerName" | "url">,
+): boolean {
+  if (target.providerName !== "github-copilot") return false;
+  try {
+    const url = new URL(target.url);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === "/" &&
+      url.hash === "" &&
+      isGitHubCopilotHost(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only access to the worker destination compatibility check. */
+export const shouldPinGithubCopilotWorkerResponseIdForTest =
+  shouldPinGithubCopilotWorkerResponseId;
 
 /**
  * Project an accumulated GatewayResponse down to the worker result shape
@@ -4245,6 +4272,7 @@ export function createGatewayLLMClient(
                       () => {
                         semanticContentConsumed = true;
                       },
+                      shouldPinGithubCopilotWorkerResponseId(target),
                     );
                   } catch (error) {
                     if (opts?.signal?.aborted) throw opts.signal.reason;
