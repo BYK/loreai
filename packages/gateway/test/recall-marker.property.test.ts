@@ -12,6 +12,7 @@ import { describe, expect, test } from "vitest";
 import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
+  isValidRecallId,
   type RecallScope,
 } from "@loreai/core";
 import {
@@ -82,12 +83,7 @@ const mapEquals = (a: RecallStore, b: RecallStore): boolean =>
   serializeRecallStore(a) === serializeRecallStore(b);
 
 const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
-  const idArb = hostileString().filter(
-    (s) =>
-      s.length > 0 &&
-      s.length <= MAX_RECALL_ID_CHARS &&
-      !/[\u0000-\u001f\u007f]/.test(s),
-  );
+  const idArb = hostileString().filter((s) => isValidRecallId(s));
   const scopeOpt = fc.option(scopeArb, { nil: undefined });
   const detail = fc.option(
     fc.record({
@@ -281,12 +277,7 @@ describe("recall marker property battery", () => {
   test("id markers round-trip and oversized ids are rejected", () => {
     fc.assert(
       fc.property(
-        hostileString().filter(
-          (s) =>
-            s.length > 0 &&
-            s.length <= MAX_RECALL_ID_CHARS &&
-            !LINE_TERMINATORS.test(s),
-        ),
+        hostileString().filter((s) => isValidRecallId(s)),
         (id) => {
           const parsed = parseRecallMarker(buildRecallMarker("", "all", id));
           expect(parsed).toEqual({ query: "", scope: "all", id });
