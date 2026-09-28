@@ -194,15 +194,12 @@ const MAX_RECALL_MARKER_CHARS = 1024;
 
 /** Regex to parse an id-based recall marker. */
 const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…(?=\n|$)/;
-const BATCH_MARKER_REGEX = /^📚 Fetching details for (\d+) sources…(?=\n|$)/;
+const BATCH_MARKER_REGEX = /^📚 Fetching details for ([1-8]) sources…(?=\n|$)/;
 
 function isValidBatchMarker(text: string): boolean {
   const match = BATCH_MARKER_REGEX.exec(text);
   if (!match) return false;
-  const count = Number(match[1]);
-  return (
-    Number.isSafeInteger(count) && count >= 1 && count <= MAX_RECALL_BATCH_IDS
-  );
+  return Number(match[1]) <= MAX_RECALL_BATCH_IDS;
 }
 
 /** Invisible Responses transcript anchor. Markdown renderers omit comments. */

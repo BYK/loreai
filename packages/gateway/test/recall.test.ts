@@ -704,6 +704,14 @@ describe("parseRecallMarker", () => {
     );
   });
 
+  test("rejects batch markers with non-canonical counts", () => {
+    expect(
+      parseRecallAnchorFromText(
+        `📚 Fetching details for ${"0".repeat(2048)}8 sources…\n<!-- lore-recall:019f0000-0000-4000-8000-000000000001 -->`,
+      ),
+    ).toBeNull();
+  });
+
   test("parses a query containing double quotes without truncating (#cache-bust)", () => {
     // Regression for the ses_14b9bf3d… recall rewrite: the lazy `(.+?)` query
     // capture stopped at the first `"`, so a query containing quotes parsed to a
