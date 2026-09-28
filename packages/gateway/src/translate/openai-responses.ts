@@ -739,7 +739,11 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Add tools in Responses API format
   if (req.tools.length > 0) {
     body.tools = req.tools.map((t) => {
-      if (t.name !== "recall" || t.inputSchema.additionalProperties !== false) {
+      if (
+        t.name !== "recall" ||
+        t.gatewayOwned !== true ||
+        t.inputSchema.additionalProperties !== false
+      ) {
         return {
           type: "function",
           name: t.name,

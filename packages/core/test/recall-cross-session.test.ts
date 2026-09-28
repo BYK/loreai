@@ -112,6 +112,40 @@ describe("recall — cross-session raw history demotion", () => {
     expect(otherScore).toBeLessThan(currentScore * 0.6);
   });
 
+  test("bounds malformed distillation source references", async () => {
+    const id = seedDistillation(
+      OTHER_SESSION,
+      "bounded source reference evidence",
+      Date.now(),
+    );
+    db()
+      .query("UPDATE distillations SET source_ids = ? WHERE id = ?")
+      .run(
+        JSON.stringify([
+          123,
+          "x".repeat(257),
+          "bad\nheading",
+          null,
+          {},
+          false,
+          "",
+          "\t",
+          "valid-source",
+        ]),
+        id,
+      );
+
+    const result = await runRecall({
+      query: "bounded source reference",
+      projectPath: PROJECT,
+      scope: "project",
+    });
+
+    expect(result).toContain("t:valid-source");
+    expect(result).not.toContain("x".repeat(257));
+    expect(result).not.toContain("bad\nheading");
+  });
+
   // Same isolation for the distillation source (the riskier session_id access).
   test("penalizes a cross-session distillation below an equal current-session one", async () => {
     const now = Date.now();

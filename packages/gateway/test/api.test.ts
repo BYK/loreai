@@ -13,6 +13,7 @@ import {
   type LoopbackRequestInit,
 } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { MAX_RECALL_QUERY_CHARS } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup
@@ -474,6 +475,17 @@ describe("GET /api/v1/recall", () => {
   it("returns 400 when project is not identified", async () => {
     const res = await api("/api/v1/recall?q=test");
     expect(res.status).toBe(400);
+  });
+
+  it("rejects an oversized query before resolving the project", async () => {
+    const res = await api(
+      `/api/v1/recall?q=${"x".repeat(MAX_RECALL_QUERY_CHARS + 1)}`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      `Recall query longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+    );
   });
 
   it("returns 400 for invalid scope", async () => {

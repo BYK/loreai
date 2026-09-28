@@ -21,9 +21,11 @@ import {
   runRecallWithMetadata,
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
+  MAX_RECALL_QUERY_CHARS,
+  isValidRecallId,
+  isValidRecallQuery,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
-  log,
   config as loreConfig,
   type RecallScope,
   type RecallCoverage,
@@ -45,6 +47,7 @@ import { promiseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader } from "./stream/anthropic";
 import { looksLikeSSE } from "./translate/types";
 import { MAX_RECALL_EXECUTIONS } from "./recall-budget";
+import { reportRecallDiagnostic } from "./recall-diagnostics";
 
 // ---------------------------------------------------------------------------
 // Tool definition
@@ -60,6 +63,7 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
     properties: {
       query: {
         type: "string",
+        maxLength: MAX_RECALL_QUERY_CHARS,
         description: RECALL_PARAM_DESCRIPTIONS.query,
       },
       scope: {
@@ -179,16 +183,24 @@ export function buildRecallMarker(
     return `📚 Fetching details for ${ids.length} sources…`;
   if (id)
     return `📚 Fetching detail for ${
-      id.length <= MAX_RECALL_ID_CHARS ? id : "an invalid source"
+      isValidRecallId(id) ? id : "an invalid source"
     }…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }
 
 /** Regex to parse a recall marker back into query + scope. */
-const MARKER_REGEX = /^📚 Searching (.+?) for "(.+)"…$/;
+const MARKER_REGEX = /^📚 Searching (.+?) for "([\s\S]+?)"…(?=\n|$)/;
+const MAX_RECALL_MARKER_CHARS = 1024;
 
 /** Regex to parse an id-based recall marker. */
-const ID_MARKER_REGEX = /^📚 Fetching detail for (.+?)…$/;
+const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…(?=\n|$)/;
+const BATCH_MARKER_REGEX = /^📚 Fetching details for ([1-8]) sources…(?=\n|$)/;
+
+function isValidBatchMarker(text: string): boolean {
+  const match = BATCH_MARKER_REGEX.exec(text);
+  if (!match) return false;
+  return Number(match[1]) <= MAX_RECALL_BATCH_IDS;
+}
 
 /** Invisible Responses transcript anchor. Markdown renderers omit comments. */
 const ANCHOR_REGEX =
@@ -214,12 +226,25 @@ export function parseRecallAnchor(text: string): string | null {
   return match && buildRecallAnchor(match[1]) === text ? match[1] : null;
 }
 
-function parseRecallAnchorFromText(text: string): string | null {
+export function parseRecallAnchorFromText(text: string): string | null {
   const direct = parseRecallAnchor(text);
   if (direct) return direct;
-  const newline = text.lastIndexOf("\n");
-  if (newline < 0) return null;
-  return parseRecallAnchor(text.slice(newline + 1));
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const anchor = parseRecallAnchor(line);
+    if (!anchor) continue;
+    const prefix = lines.slice(0, index).join("\n");
+    if (
+      (!prefix.endsWith("\n") &&
+        !prefix.endsWith("\r") &&
+        parseRecallMarker(prefix) !== null &&
+        recallMarkerContinuation(prefix) === "") ||
+      isValidBatchMarker(prefix)
+    )
+      return anchor;
+  }
+  return null;
 }
 
 /** Fingerprint the complete transcript prefix that precedes a replay anchor. */
@@ -397,25 +422,71 @@ function insertCompanionBundle(
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
   return (
-    parseRecallMarker(text) !== null || parseRecallAnchorFromText(text) !== null
+    parseRecallMarker(text) !== null ||
+    parseRecallAnchorFromText(text) !== null ||
+    isValidBatchMarker(text)
   );
 }
 
 function storedRecallForText(
   text: string,
   store: RecallStore,
-): { key: string; stored: StoredRecall; canonical: boolean } | null {
+): {
+  key: string;
+  stored: StoredRecall;
+  canonical: boolean;
+  continuation: string;
+} | null {
+  const anchorId = parseRecallAnchorFromText(text);
+  if (anchorId) {
+    const key = `anchor:${anchorId}`;
+    const stored = store.get(key);
+    if (stored) {
+      return {
+        key,
+        stored,
+        canonical: true,
+        continuation: recallAnchorContinuation(text, anchorId),
+      };
+    }
+    return null;
+  }
   const parsed = parseRecallMarker(text);
   if (parsed) {
     const key = recallStoreKey(parsed.query, parsed.scope, parsed.id);
     const stored = store.get(key);
-    return stored ? { key, stored, canonical: false } : null;
+    return stored
+      ? {
+          key,
+          stored,
+          canonical: false,
+          continuation: recallMarkerContinuation(text),
+        }
+      : null;
   }
-  const anchorId = parseRecallAnchorFromText(text);
-  if (!anchorId) return null;
-  const key = `anchor:${anchorId}`;
-  const stored = store.get(key);
-  return stored ? { key, stored, canonical: true } : null;
+  return null;
+}
+
+export function recallMarkerContinuation(text: string): string {
+  const idMatch = ID_MARKER_REGEX.exec(text);
+  const markerMatch = MARKER_REGEX.exec(text);
+  const batchMatch = isValidBatchMarker(text)
+    ? BATCH_MARKER_REGEX.exec(text)
+    : null;
+  const length =
+    idMatch?.[0].length ?? markerMatch?.[0].length ?? batchMatch?.[0].length;
+  if (length === undefined) return "";
+  return text.slice(length).replace(/^\n/, "");
+}
+
+export function recallAnchorContinuation(
+  text: string,
+  anchorId: string,
+): string {
+  const anchor = buildRecallAnchor(anchorId);
+  const index = text.indexOf(anchor);
+  if (index < 0) return "";
+  return text.slice(index + anchor.length).replace(/^\n/, "");
 }
 
 /**
@@ -428,10 +499,14 @@ export function parseRecallMarker(
   // Try id-based marker first
   const idMatch = ID_MARKER_REGEX.exec(text);
   if (idMatch) {
+    if (idMatch[0].length > MAX_RECALL_MARKER_CHARS) return null;
+    if (!isValidRecallId(idMatch[1])) return null;
     return { query: "", scope: "all", id: idMatch[1] };
   }
   const match = MARKER_REGEX.exec(text);
   if (!match) return null;
+  if (match[0].length > MAX_RECALL_MARKER_CHARS) return null;
+  if (!isValidRecallQuery(match[2])) return null;
   return {
     query: match[2],
     scope: labelToScope(match[1]),
@@ -457,6 +532,17 @@ export function addRecallStoreEntry(
   key: string,
   value: StoredRecall,
 ): void {
+  if (!isValidRecallQuery(value.input.query)) {
+    throw new Error("invalid recall store entry");
+  }
+  if (
+    (key.startsWith("anchor:") ||
+      key.startsWith("id:") ||
+      /^(all|session|project|knowledge):/.test(key)) &&
+    !isValidRecallStoreEntry(key, value)
+  ) {
+    throw new Error("invalid recall store entry");
+  }
   let minimumBytes = 0;
   const countStrings = (input: unknown): void => {
     if (minimumBytes > MAX_RECALL_STORE_BYTES) return;
@@ -512,8 +598,7 @@ export function deserializeRecallStore(json: string): RecallStore {
       }
     }
   } catch {
-    // Corrupt blob — start empty (markers fall back to raw text; recoverable
-    // once the recall re-executes).
+    // Corrupt blob — start empty; orphaned markers are removed before forwarding.
   }
   return store;
 }
@@ -533,8 +618,14 @@ function isValidRecallStoreEntry(key: string, item: StoredRecall): boolean {
   }
   if (!key.startsWith("anchor:")) {
     return (
-      item.anchorContextId === undefined ||
-      /^[0-9a-f]{64}$/.test(item.anchorContextId)
+      key ===
+        recallStoreKey(
+          item.input.query,
+          item.input.scope ?? "all",
+          item.input.id,
+        ) &&
+      (item.anchorContextId === undefined ||
+        /^[0-9a-f]{64}$/.test(item.anchorContextId))
     );
   }
   if (!item.anchorContextId || !/^[0-9a-f]{64}$/.test(item.anchorContextId)) {
@@ -556,14 +647,14 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     typeof item.result !== "string" ||
     typeof item.position !== "number" ||
     !input ||
-    typeof input.query !== "string" ||
+    !isValidRecallQuery(input.query) ||
     (input.scope !== undefined && typeof input.scope !== "string") ||
     ((item.input as Record<string, unknown>).id !== undefined &&
-      typeof (item.input as Record<string, unknown>).id !== "string") ||
+      !isValidRecallId((item.input as Record<string, unknown>).id)) ||
     ((item.input as Record<string, unknown>).ids !== undefined &&
       (!Array.isArray((item.input as Record<string, unknown>).ids) ||
         !((item.input as Record<string, unknown>).ids as unknown[]).every(
-          (id: unknown) => typeof id === "string",
+          (id: unknown) => isValidRecallId(id),
         ))) ||
     ((item.input as Record<string, unknown>).detailOffset !== undefined &&
       (!Number.isSafeInteger(
@@ -581,16 +672,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
   }
   const ids = input.ids;
   if (
-    (typeof input.id === "string" &&
-      (!input.id || input.id.length > MAX_RECALL_ID_CHARS)) ||
+    (typeof input.id === "string" && !isValidRecallId(input.id)) ||
     (ids !== undefined &&
       (!Array.isArray(ids) ||
         ids.length === 0 ||
         ids.length > MAX_RECALL_BATCH_IDS ||
-        !ids.every(
-          (id): id is string =>
-            typeof id === "string" && !!id && id.length <= MAX_RECALL_ID_CHARS,
-        ))) ||
+        !ids.every((id): id is string => isValidRecallId(id)))) ||
     (input.id !== undefined && ids !== undefined) ||
     ((input.detailOffset !== undefined || input.detailLimit !== undefined) &&
       typeof input.id !== "string") ||
@@ -652,7 +739,9 @@ export function recallStoreKey(
 export function expandRecallMarkers(
   req: GatewayRequest,
   store: RecallStore,
+  options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
+  if (options.gatewayRecallEnabled === false) return false;
   let expanded = false;
   const anchorValidity = new Map<string, boolean[]>();
   const incomingMessages = structuredClone(req.messages);
@@ -693,7 +782,7 @@ export function expandRecallMarkers(
     // We process one marker per assistant message per pass; the outer
     // loop will revisit if there's more than one (rare).
     let markerIdx = -1;
-    let match: { key: string; stored: StoredRecall } | null = null;
+    let match: ReturnType<typeof storedRecallForText> = null;
     for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
       if (block.type !== "text") continue;
@@ -702,11 +791,46 @@ export function expandRecallMarkers(
         markerIdx = j;
         break;
       }
+      if (isRecallMarker(block.text)) {
+        markerIdx = j;
+        break;
+      }
     }
 
-    if (markerIdx < 0 || !match) continue;
+    if (markerIdx < 0) continue;
+    if (!match) {
+      const block = msg.content[markerIdx];
+      if (block.type !== "text") throw new Error("recall marker is not text");
+      const anchorId = parseRecallAnchorFromText(block.text);
+      const continuation = anchorId
+        ? recallAnchorContinuation(block.text, anchorId)
+        : recallMarkerContinuation(block.text);
+      if (continuation) {
+        block.text = continuation;
+      } else {
+        removeVisibleContentBlock(msg, markerIdx);
+      }
+      expanded = true;
+      continue;
+    }
     const { stored } = match;
-    if (!(anchorValidity.get(match.key)?.shift() ?? false)) continue;
+    if (!(anchorValidity.get(match.key)?.shift() ?? false)) {
+      const block = msg.content[markerIdx];
+      if (block.type !== "text") throw new Error("recall marker is not text");
+      const continuation = match.key.startsWith("anchor:")
+        ? recallAnchorContinuation(
+            block.text,
+            parseRecallAnchorFromText(block.text) ?? "",
+          )
+        : recallMarkerContinuation(block.text);
+      if (continuation) {
+        block.text = continuation;
+      } else {
+        removeVisibleContentBlock(msg, markerIdx);
+      }
+      expanded = true;
+      continue;
+    }
 
     // Responses emits output text and function calls as separate input items,
     // which parse into adjacent assistant messages. Rejoin only tool calls that
@@ -809,13 +933,6 @@ export function expandRecallMarkers(
       }
     }
 
-    // Check if there's non-tool content AFTER the marker in this message.
-    // This happens when recall-only follow-up piped continuation content
-    // (text blocks) into the same assistant message. Tool_use blocks after
-    // the marker are from the same turn (mixed tools) and stay together.
-    const afterMarker = msg.content.slice(markerIdx + 1);
-    const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
-
     // Replace marker with tool_use
     replaceVisibleContentBlock(msg, markerIdx, {
       type: "tool_use",
@@ -823,6 +940,19 @@ export function expandRecallMarkers(
       name: RECALL_TOOL_NAME,
       input: stored.input,
     });
+    if (match.continuation) {
+      msg.content.splice(markerIdx + 1, 0, {
+        type: "text",
+        text: match.continuation,
+      });
+    }
+
+    // Check if there's non-tool content AFTER the marker in this message.
+    // This happens when recall-only follow-up piped continuation content
+    // (text blocks) into the same assistant message. Tool_use blocks after
+    // the marker are from the same turn (mixed tools) and stay together.
+    const afterMarker = msg.content.slice(markerIdx + 1);
+    const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
 
     // Truncate assistant message at the tool_use (remove continuation)
     if (hasContinuationAfter) {
@@ -887,7 +1017,9 @@ export function expandRecallMarkers(
 export function cleanupRecallStore(
   req: GatewayRequest,
   store: RecallStore,
+  options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
+  if (options.gatewayRecallEnabled === false) return false;
   if (store.size === 0) return false;
 
   // Collect all marker keys still present in assistant messages
@@ -954,6 +1086,18 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
   return tools.some((t) => t.name === RECALL_TOOL_NAME);
 }
 
+/** Check whether the gateway injected and owns the recall tool. */
+export function hasGatewayRecallTool(tools: GatewayTool[]): boolean {
+  return tools.some(
+    (tool) => tool.name === RECALL_TOOL_NAME && tool.gatewayOwned === true,
+  );
+}
+
+/** Replay Lore anchors unless the current request owns a colliding tool. */
+export function shouldEnableRecallMarkerReplay(tools: GatewayTool[]): boolean {
+  return hasGatewayRecallTool(tools) || !clientHasRecallTool(tools);
+}
+
 // ---------------------------------------------------------------------------
 // Recall execution
 // ---------------------------------------------------------------------------
@@ -996,11 +1140,14 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   if (queryValue !== undefined && typeof queryValue !== "string") {
     throw new Error("Recall query must be a string");
   }
+  if (typeof queryValue !== "undefined" && !isValidRecallQuery(queryValue)) {
+    throw new Error(
+      `Recall query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+    );
+  }
   if (
     idValue !== undefined &&
-    (typeof idValue !== "string" ||
-      !idValue ||
-      idValue.length > MAX_RECALL_ID_CHARS)
+    (typeof idValue !== "string" || !idValue || !isValidRecallId(idValue))
   ) {
     throw new Error("Recall id must be a non-empty string");
   }
@@ -1009,10 +1156,7 @@ function parseRecallInput(block: GatewayToolUseBlock): {
     (!Array.isArray(idsValue) ||
       idsValue.length === 0 ||
       idsValue.length > MAX_RECALL_BATCH_IDS ||
-      idsValue.some(
-        (id) =>
-          typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
-      ))
+      idsValue.some((id) => !isValidRecallId(id)))
   ) {
     throw new Error(
       `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
@@ -1086,11 +1230,11 @@ function parseRecallInput(block: GatewayToolUseBlock): {
 function reportRecallExecutionFailure(): void {
   const diagnostic = new Error("gateway recall execution failed");
   diagnostic.name = "RecallExecutionError";
-  try {
-    log.error(diagnostic);
-  } catch {
-    // Diagnostics must not turn a recall failure into a request failure.
-  }
+  reportRecallDiagnostic(
+    "gateway recall execution failed",
+    "error",
+    diagnostic,
+  );
 }
 
 export async function executeRecall(
@@ -1559,7 +1703,8 @@ export function buildRecallFollowUpRequest(
   stream: boolean,
   finalRecallRound = false,
 ): GatewayRequest {
-  if (finalRecallRound) log.info("recall final continuation: budget exhausted");
+  if (finalRecallRound)
+    reportRecallDiagnostic("recall final continuation: budget exhausted");
   // Build the follow-up using proper tool_use/tool_result pairs.
   //
   // Why: sending recall results as plain user text causes the LLM to treat
@@ -1958,7 +2103,10 @@ export async function runRecallFollowUpStreaming(
       detail = await readResponseTextLimited(response, 500, signal);
     } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read");
+      reportRecallDiagnostic(
+        "recall follow-up error body could not be read",
+        "warn",
+      );
     }
     return { ok: false, status: response.status, detail };
   }
@@ -2019,7 +2167,10 @@ async function runRecallJSONRequest(
       detail = await readResponseTextLimited(response, 500, signal);
     } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read");
+      reportRecallDiagnostic(
+        "recall follow-up error body could not be read",
+        "warn",
+      );
     }
     return { ok: false, status: response.status, detail };
   }
@@ -2097,7 +2248,10 @@ async function runRecallStreamAccumulatedRequest(
       detail = await readResponseTextLimited(response, 500, signal);
     } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read");
+      reportRecallDiagnostic(
+        "recall follow-up error body could not be read",
+        "warn",
+      );
     }
     return { ok: false, status: response.status, detail };
   }

@@ -3,6 +3,7 @@ import { log } from "@loreai/core";
 import {
   createRecallDiagnostics,
   MAX_RECALL_DIAGNOSTIC_ROUNDS,
+  reportRecallDiagnostic,
 } from "../src/recall-diagnostics";
 
 afterEach(() => vi.restoreAllMocks());
@@ -67,5 +68,23 @@ test("a throwing diagnostic sink cannot alter recall diagnostics", () => {
   expect(() => {
     diagnostics.record({ query: "private query" }, "private result");
     diagnostics.finish("failed");
+  }).not.toThrow();
+});
+
+test("all diagnostic levels swallow sink failures", () => {
+  vi.spyOn(log, "info").mockImplementation(() => {
+    throw new Error("info sink failed");
+  });
+  vi.spyOn(log, "warn").mockImplementation(() => {
+    throw new Error("warn sink failed");
+  });
+  vi.spyOn(log, "error").mockImplementation(() => {
+    throw new Error("error sink failed");
+  });
+
+  expect(() => {
+    reportRecallDiagnostic("info", "info");
+    reportRecallDiagnostic("warn", "warn");
+    reportRecallDiagnostic("error", "error");
   }).not.toThrow();
 });

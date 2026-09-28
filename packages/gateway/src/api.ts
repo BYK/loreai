@@ -18,7 +18,9 @@ import {
   embedding,
   conversationImport,
   entityRebuild,
+  isValidRecallQuery,
   runRecall,
+  MAX_RECALL_QUERY_CHARS,
   config as loreConfig,
   resolveProjectByRemoteOrPath,
   projectPath as getProjectPathById,
@@ -486,6 +488,13 @@ async function handleRecall(
       400,
       "invalid_request",
       "Missing required query parameter: q",
+    );
+  }
+  if (!isValidRecallQuery(query)) {
+    return errorResponse(
+      400,
+      "invalid_request",
+      `Recall query longer than ${MAX_RECALL_QUERY_CHARS} characters`,
     );
   }
 
