@@ -187,7 +187,7 @@ const storeEntryArb = (): fc.Arbitrary<[string, StoredRecall]> =>
       scopeArb,
       storedRecallArb(400),
     )
-    .chain(([kind, uuid, scope, rec]) => {
+    .chain(([kind, uuid, _scope, rec]) => {
       if (kind === "anchor") {
         const anchored: StoredRecall = {
           ...rec,
@@ -201,10 +201,9 @@ const storeEntryArb = (): fc.Arbitrary<[string, StoredRecall]> =>
       }
       const plain: StoredRecall = { ...rec, anchorId: undefined };
       delete plain.anchorId;
-      const key =
-        kind === "id" && rec.input.id
-          ? `id:${rec.input.id}`
-          : `${scope}:${rec.input.query}`;
+      const key = rec.input.id
+        ? `id:${rec.input.id}`
+        : `${rec.input.scope ?? "all"}:${rec.input.query}`;
       return fc.constant([key, plain] as [string, StoredRecall]);
     });
 
