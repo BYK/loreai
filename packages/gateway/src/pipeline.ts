@@ -448,6 +448,7 @@ import {
   hasOtherToolUse,
   clientHasRecallTool,
   hasGatewayRecallTool,
+  shouldEnableRecallMarkerReplay,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
@@ -19703,34 +19704,29 @@ async function handleConversationTurnPrepared(
   // persisted anchors. The gateway injects its own recall tool only when the
   // client has tools but no recall tool, so this decision is made before any
   // marker expansion mutates the request.
-  const gatewayRecallForRequest =
-    hasGatewayRecallTool(req.tools) ||
-    (req.tools.length > 0 && !clientHasRecallTool(req.tools));
+  const gatewayRecallForRequest = shouldEnableRecallMarkerReplay(req.tools);
 
   // --- Expand recall markers from previous turns ---
   // Scan all assistant messages for marker text blocks and restore them
   // to tool_use + tool_result pairs before forwarding upstream.
-  if (sessionState.recallStore.size > 0) {
-    // Cleanup must inspect the client transcript while anchors still exist.
-    // Expanding first would make every live anchor look orphaned.
-    const recallStoreChanged = cleanupRecallStore(
-      req,
-      sessionState.recallStore,
-      { gatewayRecallEnabled: gatewayRecallForRequest },
+  // Cleanup must inspect the client transcript while anchors still exist.
+  // Expanding first would make every live anchor look orphaned. Run this even
+  // with an empty store so corrupt persisted state cannot forward raw markers.
+  const recallStoreChanged = cleanupRecallStore(req, sessionState.recallStore, {
+    gatewayRecallEnabled: gatewayRecallForRequest,
+  });
+  const expanded = expandRecallMarkers(req, sessionState.recallStore, {
+    gatewayRecallEnabled: gatewayRecallForRequest,
+  });
+  if (expanded) {
+    reportRecallDiagnostic(
+      `expanded recall markers for session ${sessionID.slice(0, 16)}`,
     );
-    const expanded = expandRecallMarkers(req, sessionState.recallStore, {
-      gatewayRecallEnabled: gatewayRecallForRequest,
+  }
+  if (recallStoreChanged) {
+    saveSessionTracking(sessionID, {
+      recallStore: serializeRecallStore(sessionState.recallStore),
     });
-    if (expanded) {
-      reportRecallDiagnostic(
-        `expanded recall markers for session ${sessionID.slice(0, 16)}`,
-      );
-    }
-    if (recallStoreChanged) {
-      saveSessionTracking(sessionID, {
-        recallStore: serializeRecallStore(sessionState.recallStore),
-      });
-    }
   }
 
   // --- Strip context warning markers from previous turns ---

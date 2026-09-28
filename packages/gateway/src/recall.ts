@@ -518,8 +518,7 @@ export function deserializeRecallStore(json: string): RecallStore {
       }
     }
   } catch {
-    // Corrupt blob — start empty (markers fall back to raw text; recoverable
-    // once the recall re-executes).
+    // Corrupt blob — start empty; orphaned markers are removed before forwarding.
   }
   return store;
 }
@@ -539,8 +538,14 @@ function isValidRecallStoreEntry(key: string, item: StoredRecall): boolean {
   }
   if (!key.startsWith("anchor:")) {
     return (
-      item.anchorContextId === undefined ||
-      /^[0-9a-f]{64}$/.test(item.anchorContextId)
+      key ===
+        recallStoreKey(
+          item.input.query,
+          item.input.scope ?? "all",
+          item.input.id,
+        ) &&
+      (item.anchorContextId === undefined ||
+        /^[0-9a-f]{64}$/.test(item.anchorContextId))
     );
   }
   if (!item.anchorContextId || !/^[0-9a-f]{64}$/.test(item.anchorContextId)) {
@@ -661,6 +666,20 @@ export function expandRecallMarkers(
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
   if (options.gatewayRecallEnabled === false) return false;
+  if (store.size === 0) {
+    let removed = false;
+    for (const message of req.messages) {
+      if (message.role !== "assistant") continue;
+      for (let index = message.content.length - 1; index >= 0; index--) {
+        const block = message.content[index];
+        if (block.type === "text" && isRecallMarker(block.text)) {
+          removeVisibleContentBlock(message, index);
+          removed = true;
+        }
+      }
+    }
+    return removed;
+  }
   let expanded = false;
   const anchorValidity = new Map<string, boolean[]>();
   const incomingMessages = structuredClone(req.messages);
@@ -969,6 +988,11 @@ export function hasGatewayRecallTool(tools: GatewayTool[]): boolean {
   return tools.some(
     (tool) => tool.name === RECALL_TOOL_NAME && tool.gatewayOwned === true,
   );
+}
+
+/** Replay Lore anchors unless the current request owns a colliding tool. */
+export function shouldEnableRecallMarkerReplay(tools: GatewayTool[]): boolean {
+  return hasGatewayRecallTool(tools) || !clientHasRecallTool(tools);
 }
 
 // ---------------------------------------------------------------------------

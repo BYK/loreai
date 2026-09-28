@@ -17,6 +17,7 @@ import {
 import { db, ensureProject } from "../src/db";
 import type { LLMClient } from "../src/types";
 import { MAX_RECALL_QUERY_CHARS } from "../src/recall-limits";
+import * as log from "../src/log";
 
 describe("expandQuery", () => {
   test("aborts the worker when the expansion deadline expires", async () => {
@@ -61,6 +62,45 @@ describe("expandQuery", () => {
       "valid expansion",
       "second valid expansion",
     ]);
+  });
+
+  test("rejects an oversized original query before invoking the worker", async () => {
+    let invoked = false;
+    const llm: LLMClient = {
+      prompt: async () => {
+        invoked = true;
+        return "[]";
+      },
+    };
+
+    await expect(
+      expandQuery(llm, "x".repeat(MAX_RECALL_QUERY_CHARS + 1)),
+    ).rejects.toThrow("Recall query must be a string no longer than");
+    expect(invoked).toBe(false);
+  });
+
+  test("ignores a throwing diagnostic sink", async () => {
+    log.registerSink({
+      info: () => {
+        throw new Error("diagnostic sink failed");
+      },
+      warn: () => {},
+      error: () => {},
+      captureException: () => {},
+    });
+    try {
+      const llm: LLMClient = { prompt: async () => null };
+      await expect(expandQuery(llm, "architecture")).resolves.toEqual([
+        "architecture",
+      ]);
+    } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
   });
 });
 

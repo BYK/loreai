@@ -30,6 +30,7 @@ import {
   hasOtherToolUse,
   clientHasRecallTool,
   hasGatewayRecallTool,
+  shouldEnableRecallMarkerReplay,
   buildRecallFollowUpRequest,
   buildRecallRecoveryRequest,
   runRecallFollowUpStreaming,
@@ -520,6 +521,43 @@ describe("hasGatewayRecallTool", () => {
   });
 });
 
+describe("shouldEnableRecallMarkerReplay", () => {
+  test("replays persisted markers when the next turn has no tools", () => {
+    const store: RecallStore = new Map([
+      [recallStoreKey("test query", "all"), makeStoredRecall()],
+    ]);
+    const req = makeRequest([
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: buildRecallMarker("test query", "all") },
+        ],
+      },
+    ]);
+    bindReplayEntries(req, store);
+    const replayEnabled = shouldEnableRecallMarkerReplay(req.tools);
+
+    expect(replayEnabled).toBe(true);
+    expect(
+      expandRecallMarkers(req, store, { gatewayRecallEnabled: replayEnabled }),
+    ).toBe(true);
+    expect(req.messages[1].content[0]).toMatchObject({
+      type: "tool_use",
+      name: RECALL_TOOL_NAME,
+    });
+  });
+
+  test("does not replay markers for a client-owned recall collision", () => {
+    expect(
+      shouldEnableRecallMarkerReplay([
+        { name: RECALL_TOOL_NAME, description: "client", inputSchema: {} },
+      ]),
+    ).toBe(false);
+    expect(shouldEnableRecallMarkerReplay([RECALL_GATEWAY_TOOL])).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Marker utilities
 // ---------------------------------------------------------------------------
@@ -712,7 +750,7 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     const mixed = JSON.stringify([
       ["bad", { toolUseId: 123 }],
       [
-        "good",
+        "all:q",
         {
           toolUseId: "t",
           input: { query: "q" },
@@ -724,7 +762,7 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     ]);
     const restored = deserializeRecallStore(mixed);
     expect(restored.size).toBe(1);
-    expect(restored.get("good")?.result).toBe("r");
+    expect(restored.get("all:q")?.result).toBe("r");
 
     const oversized = makeStoredRecall({
       input: { query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1) },
@@ -758,6 +796,11 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     );
     expect(restored.get("all:old query")).toEqual(legacy);
     expect(restored.size).toBe(1);
+
+    expect(
+      deserializeRecallStore(JSON.stringify([["all:wrong query", legacy]]))
+        .size,
+    ).toBe(0);
 
     const req = makeRequest([
       {
@@ -828,7 +871,7 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     const entries = Array.from(
       { length: MAX_RECALL_STORE_ENTRIES + 1 },
       (_, i) => [
-        `legacy-${i}`,
+        `all:query-${i}`,
         {
           toolUseId: `tool-${i}`,
           input: { query: `query-${i}` },
@@ -3362,7 +3405,7 @@ describe("expandRecallMarkers", () => {
     expect(expandRecallMarkers(req, store)).toBe(false);
   });
 
-  test("returns false when marker present but no store entry", () => {
+  test("removes a marker when persisted state is unavailable", () => {
     const store: RecallStore = new Map(); // empty
     const req = makeRequest([
       {
@@ -3375,7 +3418,8 @@ describe("expandRecallMarkers", () => {
       },
     ]);
 
-    expect(expandRecallMarkers(req, store)).toBe(false);
+    expect(expandRecallMarkers(req, store)).toBe(true);
+    expect(req.messages[0].content).toEqual([]);
   });
 
   test("returns false with empty messages", () => {

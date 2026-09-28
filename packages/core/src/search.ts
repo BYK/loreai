@@ -580,7 +580,15 @@ import { QUERY_EXPANSION_SYSTEM } from "./prompt";
 import * as log from "./log";
 import { db } from "./db";
 import type { LLMClient } from "./types";
-import { isValidRecallQuery } from "./recall-limits";
+import { assertValidRecallQuery, isValidRecallQuery } from "./recall-limits";
+
+function reportQueryExpansionDiagnostic(message: string): void {
+  try {
+    log.info(message);
+  } catch {
+    // Diagnostics are best-effort and must never affect recall delivery.
+  }
+}
 
 /**
  * Expand a user query into multiple search variants using the configured LLM.
@@ -601,7 +609,7 @@ export async function expandQuery(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const TIMEOUT_MS = 3000;
-
+  assertValidRecallQuery(query);
   try {
     signal?.throwIfAborted();
     const timeout = AbortSignal.timeout(TIMEOUT_MS);
@@ -624,7 +632,9 @@ export async function expandQuery(
     promptSignal.throwIfAborted();
 
     if (!responseText) {
-      log.info("query expansion timed out or failed, using original query");
+      reportQueryExpansionDiagnostic(
+        "query expansion timed out or failed, using original query",
+      );
       return [query];
     }
 
@@ -647,10 +657,14 @@ export async function expandQuery(
   } catch (err) {
     if (signal?.aborted) throw signal.reason;
     if (err instanceof DOMException && err.name === "TimeoutError") {
-      log.info("query expansion timed out, using original query");
+      reportQueryExpansionDiagnostic(
+        "query expansion timed out, using original query",
+      );
       return [query];
     }
-    log.info("query expansion failed, using original query:", err);
+    reportQueryExpansionDiagnostic(
+      "query expansion failed, using original query",
+    );
     return [query];
   }
 }

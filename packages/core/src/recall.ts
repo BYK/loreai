@@ -40,6 +40,19 @@ import {
 } from "./read-offload";
 import { inline } from "./markdown";
 
+function reportRecallDiagnostic(
+  message: string,
+  level: "info" | "warn" | "error" = "info",
+): void {
+  try {
+    if (level === "error") log.error(message);
+    else if (level === "warn") log.warn(message);
+    else log.info(message);
+  } catch {
+    // Diagnostics are best-effort and must never affect recall delivery.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -943,9 +956,9 @@ export async function searchRecall(
         ),
       ];
       input.signal?.throwIfAborted();
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: query expansion failed, using original:", err);
+      reportRecallDiagnostic("recall: query expansion failed, using original");
     }
   }
 
@@ -963,8 +976,8 @@ export async function searchRecall(
         }
       }
     }
-  } catch (err) {
-    log.info("recall: entity query expansion failed (non-fatal):", err);
+  } catch {
+    reportRecallDiagnostic("recall: entity query expansion failed (non-fatal)");
   }
 
   // Determine vector boost weight: for queries with enough meaningful terms,
@@ -1009,9 +1022,9 @@ export async function searchRecall(
             }),
           )),
         );
-      } catch (err) {
+      } catch {
         if (input.signal?.aborted) throw input.signal.reason;
-        log.error("recall: knowledge search failed:", err);
+        reportRecallDiagnostic("recall: knowledge search failed", "error");
       }
     }
 
@@ -1030,9 +1043,9 @@ export async function searchRecall(
             }),
           )),
         );
-      } catch (err) {
+      } catch {
         if (input.signal?.aborted) throw input.signal.reason;
-        log.error("recall: distillation search failed:", err);
+        reportRecallDiagnostic("recall: distillation search failed", "error");
       }
     }
 
@@ -1051,9 +1064,9 @@ export async function searchRecall(
             }),
           )),
         );
-      } catch (err) {
+      } catch {
         if (input.signal?.aborted) throw input.signal.reason;
-        log.error("recall: temporal search failed:", err);
+        reportRecallDiagnostic("recall: temporal search failed", "error");
       }
     }
 
@@ -1342,9 +1355,9 @@ export async function searchRecall(
           });
         }
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: vector search failed:", err);
+      reportRecallDiagnostic("recall: vector search failed");
     }
   }
 
@@ -1370,9 +1383,9 @@ export async function searchRecall(
             `lat:${(r as { source: "lat-section"; item: latReader.ScoredLatSection }).item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: lat.md section search failed:", err);
+      reportRecallDiagnostic("recall: lat.md section search failed");
     }
   }
 
@@ -1403,9 +1416,9 @@ export async function searchRecall(
           key: (r) => `xk:${r.item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: cross-project knowledge search failed:", err);
+      reportRecallDiagnostic("recall: cross-project knowledge search failed");
     }
   }
 
@@ -1429,9 +1442,9 @@ export async function searchRecall(
           key: (r) => `e:${r.item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: entity search failed (non-fatal):", err);
+      reportRecallDiagnostic("recall: entity search failed (non-fatal)");
     }
   }
 
@@ -1462,9 +1475,11 @@ export async function searchRecall(
           key: (r) => `e:${r.item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: cross-project repo search failed (non-fatal):", err);
+      reportRecallDiagnostic(
+        "recall: cross-project repo search failed (non-fatal)",
+      );
     }
   }
 
@@ -1583,9 +1598,11 @@ export async function searchRecall(
           }
         }
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: entity-graph expansion failed (non-fatal):", err);
+      reportRecallDiagnostic(
+        "recall: entity-graph expansion failed (non-fatal)",
+      );
     }
   }
 
@@ -2349,8 +2366,11 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
             recalledInProjectId: pid,
           });
         }
-      } catch (err) {
-        log.warn("recall: transfer recording failed (non-fatal):", err);
+      } catch {
+        reportRecallDiagnostic(
+          "recall: transfer recording failed (non-fatal)",
+          "warn",
+        );
       }
     };
     if (input.deferTransferRecording) {
@@ -2382,8 +2402,8 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
         input.scope === "session" ? input.sessionID : undefined,
       );
       if (section) out += `\n\n${section}`;
-    } catch (err) {
-      log.warn("tool failure section failed (non-fatal):", err);
+    } catch {
+      reportRecallDiagnostic("tool failure section failed (non-fatal)", "warn");
     }
   }
 
