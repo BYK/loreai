@@ -10,7 +10,7 @@
  * function_call (emit marker, run follow-up, rebuild the terminal
  * `response.completed`).
  */
-import { log } from "@loreai/core";
+import { log, MAX_RECALL_QUERY_CHARS } from "@loreai/core";
 import { afterEach, describe, test, expect, vi } from "vitest";
 import { streamResponsesRecallAware } from "../src/pipeline";
 import { expandRecallMarkers } from "../src/recall";
@@ -10380,6 +10380,10 @@ describe("streamResponsesRecallAware", () => {
     ['{"query":"x","scope":42}', "scope_type"],
     ['{"query":"x","extra":true}', "unknown_property"],
     ['{"query":42}', "query_type"],
+    [
+      JSON.stringify({ query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1) }),
+      "query_length",
+    ],
     ['{"query":"x","id":42}', "id_type"],
   ])(
     "returns a repair result for invalid recall arguments %s",

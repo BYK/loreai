@@ -28,6 +28,7 @@ import {
   hasRecallToolUse,
   hasOtherToolUse,
   clientHasRecallTool,
+  hasGatewayRecallTool,
   buildRecallFollowUpRequest,
   buildRecallRecoveryRequest,
   runRecallFollowUpStreaming,
@@ -504,6 +505,17 @@ describe("clientHasRecallTool", () => {
         { name: "Bash", description: "Run command", inputSchema: {} },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("hasGatewayRecallTool", () => {
+  test("distinguishes the injected tool from a client-owned collision", () => {
+    expect(
+      hasGatewayRecallTool([
+        { name: "recall", description: "Client tool", inputSchema: {} },
+      ]),
+    ).toBe(false);
+    expect(hasGatewayRecallTool([RECALL_GATEWAY_TOOL])).toBe(true);
   });
 });
 

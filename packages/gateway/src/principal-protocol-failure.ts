@@ -59,6 +59,7 @@ export const INVALID_RECALL_ARGUMENT_ISSUES = [
   "expected_object",
   "unknown_property",
   "query_type",
+  "query_length",
   "id_type",
   "ids_type",
   "id_conflict",

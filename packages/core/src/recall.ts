@@ -143,6 +143,8 @@ export type RecallRun = {
 
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
+/** Bound untrusted search text before term filtering and query expansion. */
+export const MAX_RECALL_QUERY_CHARS = 512;
 /** Bound untrusted tool IDs before they are interpolated into a result. */
 export const MAX_RECALL_ID_CHARS = 256;
 export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
@@ -2225,6 +2227,14 @@ export async function runRecallWithMetadata(
   input: RecallInput,
 ): Promise<RecallRun> {
   input.signal?.throwIfAborted();
+  if (
+    typeof input.query !== "string" ||
+    input.query.length > MAX_RECALL_QUERY_CHARS
+  ) {
+    throw new Error(
+      `Recall query must be a string no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+    );
+  }
   if (input.id && input.ids) {
     throw new Error("Recall id and ids cannot be used together");
   }

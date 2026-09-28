@@ -21,6 +21,7 @@ import {
   runRecallWithMetadata,
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
+  MAX_RECALL_QUERY_CHARS,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
   log,
@@ -60,6 +61,7 @@ export const RECALL_GATEWAY_TOOL: GatewayTool = {
     properties: {
       query: {
         type: "string",
+        maxLength: MAX_RECALL_QUERY_CHARS,
         description: RECALL_PARAM_DESCRIPTIONS.query,
       },
       scope: {
@@ -954,6 +956,13 @@ export function clientHasRecallTool(tools: GatewayTool[]): boolean {
   return tools.some((t) => t.name === RECALL_TOOL_NAME);
 }
 
+/** Check whether the gateway injected and owns the recall tool. */
+export function hasGatewayRecallTool(tools: GatewayTool[]): boolean {
+  return tools.some(
+    (tool) => tool.name === RECALL_TOOL_NAME && tool.gatewayOwned === true,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Recall execution
 // ---------------------------------------------------------------------------
@@ -995,6 +1004,14 @@ function parseRecallInput(block: GatewayToolUseBlock): {
     record.detailLimit === null ? undefined : record.detailLimit;
   if (queryValue !== undefined && typeof queryValue !== "string") {
     throw new Error("Recall query must be a string");
+  }
+  if (
+    typeof queryValue === "string" &&
+    queryValue.length > MAX_RECALL_QUERY_CHARS
+  ) {
+    throw new Error(
+      `Recall query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+    );
   }
   if (
     idValue !== undefined &&

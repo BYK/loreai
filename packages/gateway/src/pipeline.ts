@@ -41,6 +41,7 @@ import {
   asString,
   estimateTokens as coreEstimateTokens,
   MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_QUERY_CHARS,
   MAX_RECALL_ID_CHARS,
 } from "@loreai/core";
 import {
@@ -443,6 +444,7 @@ import {
   projectRecallRecoveryResponse,
   hasOtherToolUse,
   clientHasRecallTool,
+  hasGatewayRecallTool,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
@@ -7761,6 +7763,15 @@ function maxReportedUsageForModelID(
   return maxReportedUsageForModel(contextWindow, maxOutput);
 }
 
+/** Recall diagnostics are best-effort and must never affect delivery. */
+function reportRecallDiagnostic(message: string): void {
+  try {
+    log.info(message);
+  } catch {
+    // A diagnostic sink cannot change the response path.
+  }
+}
+
 /**
  * Create a streaming SSE response from upstream with parallel accumulation.
  *
@@ -8098,7 +8109,7 @@ export function buildStreamingResponse(
             // principal turn plus its continuations.
             recallBudget.recordUsage(currentResp.usage);
             const logRecallBudgetStop = (reason: RecallStopReason): void => {
-              log.info(
+              reportRecallDiagnostic(
                 `recall final continuation: budget exhausted reason=${reason}`,
               );
             };
@@ -9205,6 +9216,15 @@ export function streamResponsesRecallAware(
       record.detailLimit === null ? undefined : record.detailLimit;
     if (queryValue !== undefined && typeof queryValue !== "string") {
       throw new InvalidRecallArguments("query_type", "query must be a string");
+    }
+    if (
+      typeof queryValue === "string" &&
+      queryValue.length > MAX_RECALL_QUERY_CHARS
+    ) {
+      throw new InvalidRecallArguments(
+        "query_length",
+        `query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+      );
     }
     if (
       idValue !== undefined &&
@@ -11026,7 +11046,7 @@ export function streamResponsesRecallAware(
       try {
         result.rollback?.();
       } catch {
-        log.error("late recall rollback failed");
+        reportRecallDiagnostic("late recall rollback failed");
       }
       throw signal.reason;
     }
@@ -11036,7 +11056,7 @@ export function streamResponsesRecallAware(
       coverage: result.coverage,
     });
     if (stopReason)
-      log.info(
+      reportRecallDiagnostic(
         `recall final continuation: budget exhausted reason=${stopReason}`,
       );
     return result;
@@ -18546,7 +18566,10 @@ async function handleProvisionalConversationTurn(
       true,
       requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
     );
-    if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
+    if (
+      error.status === "incomplete" &&
+      (!hasGatewayRecallTool(req.tools) || !hasRecallToolUse(error.response))
+    ) {
       const response = nonStreamHttpResponse(
         error.response,
         req.protocol,
@@ -21033,9 +21056,10 @@ async function handleConversationTurnPrepared(
         : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];
   }
+  const gatewayRecallEnabled = hasGatewayRecallTool(modifiedReq.tools);
   if (
     requestUpstreamRoute.effectiveProtocol === "openai-responses" &&
-    clientHasRecallTool(modifiedReq.tools)
+    gatewayRecallEnabled
   ) {
     modifiedReq.extras = {
       ...modifiedReq.extras,
@@ -21043,7 +21067,7 @@ async function handleConversationTurnPrepared(
     };
   }
   if (
-    clientHasRecallTool(modifiedReq.tools) &&
+    gatewayRecallEnabled &&
     (requestUpstreamRoute.effectiveProtocol === "anthropic" ||
       requestUpstreamRoute.effectiveProtocol === "vertex") &&
     !requestUpstreamRoute.bedrockMantle &&
@@ -21620,7 +21644,9 @@ async function handleConversationTurnPrepared(
     // subsequent continuation is recorded below exactly once.
     recallBudget.recordUsage(resp.usage);
     const logRecallBudgetStop = (reason: RecallStopReason): void => {
-      log.info(`recall final continuation: budget exhausted reason=${reason}`);
+      reportRecallDiagnostic(
+        `recall final continuation: budget exhausted reason=${reason}`,
+      );
     };
     const bufferedRecallTransaction = createRecallPersistenceTransaction(
       sessionState,
@@ -21682,7 +21708,7 @@ async function handleConversationTurnPrepared(
       pendingKnowledgeDelta,
     );
 
-    while (hasRecallToolUse(currentResp)) {
+    while (gatewayRecallEnabled && hasRecallToolUse(currentResp)) {
       if (
         currentResp.content.filter(
           (block) =>
@@ -21892,7 +21918,7 @@ async function handleConversationTurnPrepared(
           return failRecall(category, false);
         }
         if (
-          hasRecallToolUse(recovered) ||
+          (gatewayRecallEnabled && hasRecallToolUse(recovered)) ||
           !isUsableRecallContinuation(recovered)
         )
           return failRecall(category, false);
@@ -22011,12 +22037,13 @@ async function handleConversationTurnPrepared(
       }
       currentResp = continuationResp;
       if (
-        !hasRecallToolUse(currentResp) &&
+        !(gatewayRecallEnabled && hasRecallToolUse(currentResp)) &&
         !isUsableRecallContinuation(currentResp)
       )
         return recoverRecallContinuation("follow_up_failed");
       if (
         (finalRecallRound || continuationStopReason) &&
+        gatewayRecallEnabled &&
         hasRecallToolUse(currentResp)
       ) {
         return recoverRecallContinuation("depth_exhausted");
@@ -22024,7 +22051,8 @@ async function handleConversationTurnPrepared(
       // Loop continues — hasRecallToolUse checked at top
     }
 
-    if (hasRecallToolUse(currentResp)) return failRecall("depth_exhausted");
+    if (gatewayRecallEnabled && hasRecallToolUse(currentResp))
+      return failRecall("depth_exhausted");
     if (recallBudget.stopReason() && !isUsableRecallContinuation(currentResp))
       return failRecall("follow_up_failed");
     currentResp.usage = cumulativeUsage;
@@ -22032,7 +22060,7 @@ async function handleConversationTurnPrepared(
       currentResp.codexRateLimits = cumulativeCodexRateLimits;
     }
     if (recallBudget.stopReason())
-      log.info("recall final continuation: completed");
+      reportRecallDiagnostic("recall final continuation: completed");
     finishBufferedResponse(currentResp);
     // Telemetry: flag a completion we're about to hand back with NO usable
     // content (no text, no tool_use) — the "no response data" class
@@ -22532,7 +22560,7 @@ async function handleConversationTurnPrepared(
         return finishForeground(errorResponse(502, "Gateway request failed"));
       }
       if (!captured.successful) {
-        if (hasRecallToolUse(captured.response)) {
+        if (gatewayRecallEnabled && hasRecallToolUse(captured.response)) {
           return finishForeground(errorResponse(502, "Gateway request failed"));
         }
         return finishForeground(
@@ -22579,9 +22607,7 @@ async function handleConversationTurnPrepared(
 
     // Anthropic streaming: forward events and accumulate in parallel.
     // Pass recall context so the accumulator can intercept recall tool_use.
-    const hasRecallTool = modifiedReq.tools.some(
-      (t) => t.name === RECALL_TOOL_NAME,
-    );
+    const hasRecallTool = gatewayRecallEnabled;
     const anthropicSSE = buildStreamingResponse(
       upstreamResponse,
       finishStreaming,
@@ -22656,7 +22682,7 @@ async function handleConversationTurnPrepared(
     return finishForeground(errorResponse(502, "Gateway request failed"));
   }
   if (!captured.successful) {
-    if (hasRecallToolUse(captured.response)) {
+    if (gatewayRecallEnabled && hasRecallToolUse(captured.response)) {
       return finishForeground(errorResponse(502, "Gateway request failed"));
     }
     return finishForeground(
