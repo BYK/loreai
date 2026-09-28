@@ -3534,6 +3534,22 @@ describe("expandRecallMarkers", () => {
     expect(store).toHaveLength(0);
   });
 
+  test("cleans marker-free state only for gateway-owned replay", () => {
+    const entry = makeStoredRecall();
+    const gatewayStore: RecallStore = new Map([["all:test query", entry]]);
+    const clientStore: RecallStore = new Map([["all:test query", entry]]);
+    const req = makeRequest([{ role: "user", content: [] }]);
+
+    expect(
+      cleanupRecallStore(req, gatewayStore, { gatewayRecallEnabled: true }),
+    ).toBe(true);
+    expect(gatewayStore).toHaveLength(0);
+    expect(
+      cleanupRecallStore(req, clientStore, { gatewayRecallEnabled: false }),
+    ).toBe(false);
+    expect(clientStore).toHaveLength(1);
+  });
+
   test("replays legacy markers containing newlines", () => {
     const query = "first line\nsecond line";
     const store: RecallStore = new Map();
