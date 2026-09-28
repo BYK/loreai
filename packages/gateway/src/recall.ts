@@ -183,7 +183,7 @@ export function buildRecallMarker(
     return `📚 Fetching details for ${ids.length} sources…`;
   if (id)
     return `📚 Fetching detail for ${
-      id.length <= MAX_RECALL_ID_CHARS ? id : "an invalid source"
+      isValidRecallId(id) ? id : "an invalid source"
     }…`;
   return `📚 Searching ${scopeToLabel(scope)} for "${query}"…`;
 }

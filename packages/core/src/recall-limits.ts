@@ -16,7 +16,14 @@ export function isValidRecallId(id: unknown): id is string {
 }
 
 export function isValidRecallQuery(query: unknown): query is string {
-  return typeof query === "string" && query.length <= MAX_RECALL_QUERY_CHARS;
+  return (
+    typeof query === "string" &&
+    query.length <= MAX_RECALL_QUERY_CHARS &&
+    !Array.from(query).some((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 || code === 127 || char === "…";
+    })
+  );
 }
 
 export function assertValidRecallQuery(

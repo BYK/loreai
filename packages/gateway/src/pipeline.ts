@@ -43,6 +43,7 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_QUERY_CHARS,
   MAX_RECALL_ID_CHARS,
+  isValidRecallId,
 } from "@loreai/core";
 import {
   encodeContextBoundary,
@@ -9237,12 +9238,7 @@ export function streamResponsesRecallAware(
         `query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
       );
     }
-    if (
-      idValue !== undefined &&
-      (typeof idValue !== "string" ||
-        !idValue ||
-        idValue.length > MAX_RECALL_ID_CHARS)
-    ) {
+    if (idValue !== undefined && !isValidRecallId(idValue)) {
       throw new InvalidRecallArguments("id_type", "id must be a string");
     }
     if (
@@ -9250,10 +9246,7 @@ export function streamResponsesRecallAware(
       (!Array.isArray(idsValue) ||
         idsValue.length === 0 ||
         idsValue.length > MAX_RECALL_BATCH_IDS ||
-        idsValue.some(
-          (id) =>
-            typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
-        ))
+        idsValue.some((id) => !isValidRecallId(id)))
     ) {
       throw new InvalidRecallArguments(
         "ids_type",
