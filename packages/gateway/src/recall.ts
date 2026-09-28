@@ -188,11 +188,11 @@ export function buildRecallMarker(
 }
 
 /** Regex to parse a recall marker back into query + scope. */
-const MARKER_REGEX = /^📚 Searching (.+?) for "([\s\S]+)"…$/;
+const MARKER_REGEX = /^📚 Searching (.+?) for "([\s\S]+?)"…(?=\n|$)/;
 const MAX_RECALL_MARKER_CHARS = 1024;
 
 /** Regex to parse an id-based recall marker. */
-const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…$/;
+const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…(?=\n|$)/;
 
 /** Invisible Responses transcript anchor. Markdown renderers omit comments. */
 const ANCHOR_REGEX =
@@ -221,9 +221,11 @@ export function parseRecallAnchor(text: string): string | null {
 function parseRecallAnchorFromText(text: string): string | null {
   const direct = parseRecallAnchor(text);
   if (direct) return direct;
-  const newline = text.lastIndexOf("\n");
-  if (newline < 0) return null;
-  return parseRecallAnchor(text.slice(newline + 1));
+  for (const line of text.split("\n")) {
+    const anchor = parseRecallAnchor(line);
+    if (anchor) return anchor;
+  }
+  return null;
 }
 
 /** Fingerprint the complete transcript prefix that precedes a replay anchor. */
@@ -401,10 +403,8 @@ function insertCompanionBundle(
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
   if (text.length > MAX_RECALL_MARKER_CHARS) {
-    return (
-      text.startsWith("📚 Searching ") ||
-      text.startsWith("📚 Fetching detail for ") ||
-      text.startsWith("📚 Fetching details for ")
+    return /^(?:📚 Searching [^\n]+ for "[\s\S]+?"…|📚 Fetching (?:detail|details) for [\s\S]+?…)\n?$/.test(
+      text,
     );
   }
   return (
@@ -415,18 +415,52 @@ export function isRecallMarker(text: string): boolean {
 function storedRecallForText(
   text: string,
   store: RecallStore,
-): { key: string; stored: StoredRecall; canonical: boolean } | null {
+): {
+  key: string;
+  stored: StoredRecall;
+  canonical: boolean;
+  continuation: string;
+} | null {
   const parsed = parseRecallMarker(text);
   if (parsed) {
     const key = recallStoreKey(parsed.query, parsed.scope, parsed.id);
     const stored = store.get(key);
-    return stored ? { key, stored, canonical: false } : null;
+    return stored
+      ? {
+          key,
+          stored,
+          canonical: false,
+          continuation: recallMarkerContinuation(text),
+        }
+      : null;
   }
   const anchorId = parseRecallAnchorFromText(text);
   if (!anchorId) return null;
   const key = `anchor:${anchorId}`;
   const stored = store.get(key);
-  return stored ? { key, stored, canonical: true } : null;
+  return stored
+    ? {
+        key,
+        stored,
+        canonical: true,
+        continuation: recallAnchorContinuation(text, anchorId),
+      }
+    : null;
+}
+
+function recallMarkerContinuation(text: string): string {
+  const idMatch = ID_MARKER_REGEX.exec(text);
+  const markerMatch = MARKER_REGEX.exec(text);
+  const length = idMatch?.[0].length ?? markerMatch?.[0].length;
+  if (length === undefined) return "";
+  return text.slice(length).replace(/^\n/, "");
+}
+
+function recallAnchorContinuation(text: string, anchorId: string): string {
+  const anchor = buildRecallAnchor(anchorId);
+  const index = text.indexOf(anchor);
+  if (index < 0) return "";
+  return text.slice(index + anchor.length).replace(/^\n/, "");
 }
 
 /**
@@ -470,6 +504,14 @@ export function addRecallStoreEntry(
   value: StoredRecall,
 ): void {
   if (!isValidRecallQuery(value.input.query)) {
+    throw new Error("invalid recall store entry");
+  }
+  if (
+    (key.startsWith("anchor:") ||
+      key.startsWith("id:") ||
+      /^(all|session|project|knowledge):/.test(key)) &&
+    !isValidRecallStoreEntry(key, value)
+  ) {
     throw new Error("invalid recall store entry");
   }
   let minimumBytes = 0;
@@ -715,7 +757,7 @@ export function expandRecallMarkers(
     // We process one marker per assistant message per pass; the outer
     // loop will revisit if there's more than one (rare).
     let markerIdx = -1;
-    let match: { key: string; stored: StoredRecall } | null = null;
+    let match: ReturnType<typeof storedRecallForText> = null;
     for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
       if (block.type !== "text") continue;
@@ -732,12 +774,36 @@ export function expandRecallMarkers(
 
     if (markerIdx < 0) continue;
     if (!match) {
-      removeVisibleContentBlock(msg, markerIdx);
+      const block = msg.content[markerIdx];
+      if (block.type !== "text") throw new Error("recall marker is not text");
+      const anchorId = parseRecallAnchorFromText(block.text);
+      const continuation = anchorId
+        ? recallAnchorContinuation(block.text, anchorId)
+        : recallMarkerContinuation(block.text);
+      if (continuation) {
+        block.text = continuation;
+      } else {
+        removeVisibleContentBlock(msg, markerIdx);
+      }
       expanded = true;
       continue;
     }
     const { stored } = match;
-    if (!(anchorValidity.get(match.key)?.shift() ?? false)) continue;
+    if (!(anchorValidity.get(match.key)?.shift() ?? false)) {
+      const block = msg.content[markerIdx];
+      if (block.type !== "text") throw new Error("recall marker is not text");
+      const continuation = recallAnchorContinuation(
+        block.text,
+        parseRecallAnchorFromText(block.text) ?? "",
+      );
+      if (continuation) {
+        block.text = continuation;
+      } else {
+        removeVisibleContentBlock(msg, markerIdx);
+      }
+      expanded = true;
+      continue;
+    }
 
     // Responses emits output text and function calls as separate input items,
     // which parse into adjacent assistant messages. Rejoin only tool calls that
@@ -854,6 +920,12 @@ export function expandRecallMarkers(
       name: RECALL_TOOL_NAME,
       input: stored.input,
     });
+    if (match.continuation) {
+      msg.content.splice(markerIdx + 1, 0, {
+        type: "text",
+        text: match.continuation,
+      });
+    }
 
     // Truncate assistant message at the tool_use (remove continuation)
     if (hasContinuationAfter) {

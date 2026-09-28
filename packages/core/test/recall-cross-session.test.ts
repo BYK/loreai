@@ -121,7 +121,17 @@ describe("recall — cross-session raw history demotion", () => {
     db()
       .query("UPDATE distillations SET source_ids = ? WHERE id = ?")
       .run(
-        JSON.stringify([123, "x".repeat(257), "bad\nheading", "valid-source"]),
+        JSON.stringify([
+          123,
+          "x".repeat(257),
+          "bad\nheading",
+          null,
+          {},
+          false,
+          "",
+          "\t",
+          "valid-source",
+        ]),
         id,
       );
 

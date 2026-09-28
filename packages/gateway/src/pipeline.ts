@@ -19712,12 +19712,9 @@ async function handleConversationTurnPrepared(
   // Cleanup must inspect the client transcript while anchors still exist.
   // Expanding first would make every live anchor look orphaned. Run this even
   // with an empty store so corrupt persisted state cannot forward raw markers.
-  const recallStoreChanged =
-    req.tools.length > 0
-      ? cleanupRecallStore(req, sessionState.recallStore, {
-          gatewayRecallEnabled: gatewayRecallForRequest,
-        })
-      : false;
+  const recallStoreChanged = cleanupRecallStore(req, sessionState.recallStore, {
+    gatewayRecallEnabled: gatewayRecallForRequest,
+  });
   const expanded = expandRecallMarkers(req, sessionState.recallStore, {
     gatewayRecallEnabled: gatewayRecallForRequest,
   });

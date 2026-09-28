@@ -773,6 +773,14 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     expect(() =>
       addRecallStoreEntry(new Map(), "oversized", oversized),
     ).toThrow("invalid recall store entry");
+
+    const valid = makeStoredRecall({ input: { query: "round trip" } });
+    expect(() => addRecallStoreEntry(new Map(), "all:wrong", valid)).toThrow(
+      "invalid recall store entry",
+    );
+    expect(() =>
+      addRecallStoreEntry(new Map(), "all:round trip", valid),
+    ).not.toThrow();
   });
 
   test("restores pre-anchor query-keyed entries without weakening anchor validation", () => {
@@ -3045,8 +3053,8 @@ describe("expandRecallMarkers", () => {
       },
     ]);
 
-    expect(expandRecallMarkers(req, store)).toBe(false);
-    expect(req.messages[1].content[0]).toMatchObject({ type: "text" });
+    expect(expandRecallMarkers(req, store)).toBe(true);
+    expect(req.messages[1].content).toEqual([]);
   });
 
   test("binds an anchor to request-only Responses reasoning provenance", () => {
@@ -3091,7 +3099,7 @@ describe("expandRecallMarkers", () => {
     expect(expandRecallMarkers(valid, store)).toBe(true);
 
     const changed = makeReplay("changed");
-    expect(expandRecallMarkers(changed, store)).toBe(false);
+    expect(expandRecallMarkers(changed, store)).toBe(true);
   });
 
   test("binds an anchor to request-only Responses refusal provenance", () => {
@@ -3135,7 +3143,7 @@ describe("expandRecallMarkers", () => {
       ]);
 
     expect(expandRecallMarkers(replay("original"), store)).toBe(true);
-    expect(expandRecallMarkers(replay("changed"), store)).toBe(false);
+    expect(expandRecallMarkers(replay("changed"), store)).toBe(true);
   });
 
   test("round-trips producer provenance through Lore and parser replay", () => {
@@ -3250,7 +3258,7 @@ describe("expandRecallMarkers", () => {
       },
     ]);
 
-    expect(expandRecallMarkers(req, store)).toBe(false);
+    expect(expandRecallMarkers(req, store)).toBe(true);
   });
 
   test("does not expand an anchor moved within the same assistant turn", () => {
@@ -3277,7 +3285,7 @@ describe("expandRecallMarkers", () => {
       },
     ]);
 
-    expect(expandRecallMarkers(req, store)).toBe(false);
+    expect(expandRecallMarkers(req, store)).toBe(true);
   });
 
   test("does not coalesce a reused companion ID with different tool content", () => {
@@ -3338,7 +3346,7 @@ describe("expandRecallMarkers", () => {
       },
     ]);
 
-    expect(expandRecallMarkers(req, store)).toBe(false);
+    expect(expandRecallMarkers(req, store)).toBe(true);
   });
 
   test("expands marker in assistant message back to tool_use + tool_result", () => {
@@ -3435,6 +3443,31 @@ describe("expandRecallMarkers", () => {
     expect(expandRecallMarkers(req, store)).toBe(true);
     expect(req.messages[0].content).toEqual([]);
     expect(store.has(recallStoreKey("live", "all"))).toBe(true);
+  });
+
+  test("does not remove oversized text that only resembles a marker", () => {
+    const text = `📚 Searching ${"x".repeat(2_000)}`;
+    const req = makeRequest([
+      { role: "assistant", content: [{ type: "text", text }] },
+    ]);
+
+    expect(expandRecallMarkers(req, new Map())).toBe(false);
+    expect(req.messages[0].content[0]).toEqual({ type: "text", text });
+  });
+
+  test("scrubs stale anchored markers without a tool list", () => {
+    const store: RecallStore = new Map();
+    store.set(
+      "anchor:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      makeStoredRecall({
+        anchorId: "019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+        anchorContextId: "f".repeat(64),
+      }),
+    );
+    const req = makeRequest([]);
+
+    expect(cleanupRecallStore(req, store)).toBe(true);
+    expect(store).toHaveLength(0);
   });
 
   test("replays legacy markers containing newlines", () => {
