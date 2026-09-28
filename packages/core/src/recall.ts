@@ -32,13 +32,20 @@ import {
   runRelaxedSearchAsync,
   termIDF,
 } from "./search";
-import { assertValidRecallQuery, isValidRecallQuery } from "./recall-limits";
+import {
+  assertValidRecallQuery,
+  isValidRecallId,
+  isValidRecallQuery,
+  MAX_RECALL_ID_CHARS,
+} from "./recall-limits";
 import {
   offloadAll,
   offloadAllOrTimeout,
   isReadJobFailure,
 } from "./read-offload";
 import { inline } from "./markdown";
+
+export { isValidRecallId, MAX_RECALL_ID_CHARS } from "./recall-limits";
 
 function reportRecallDiagnostic(
   message: string,
@@ -158,7 +165,6 @@ export type RecallRun = {
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
 /** Bound untrusted tool IDs before they are interpolated into a result. */
-export const MAX_RECALL_ID_CHARS = 256;
 export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
 export const MAX_RECALL_DETAIL_CHARS = 16_000;
 export const MAX_RECALL_BATCH_CHARS = 32_000;
@@ -757,13 +763,7 @@ function getDistillationSourceIds(distillId: string): string[] {
     const parsed: unknown = JSON.parse(row.source_ids);
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter(
-        (sourceId): sourceId is string =>
-          typeof sourceId === "string" &&
-          sourceId.length > 0 &&
-          sourceId.length <= MAX_RECALL_ID_CHARS &&
-          !/[\u0000-\u001f\u007f]/.test(sourceId),
-      )
+      .filter((sourceId): sourceId is string => isValidRecallId(sourceId))
       .slice(0, MAX_RECALL_BATCH_IDS);
   } catch {
     return [];
@@ -2010,10 +2010,6 @@ function sourceCoverage(
     default:
       return null;
   }
-}
-
-function isValidRecallId(id: string): boolean {
-  return id.length > 0 && id.length <= MAX_RECALL_ID_CHARS;
 }
 
 function detailPage(

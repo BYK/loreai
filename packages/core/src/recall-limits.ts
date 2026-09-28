@@ -1,4 +1,14 @@
 export const MAX_RECALL_QUERY_CHARS = 512;
+export const MAX_RECALL_ID_CHARS = 256;
+
+export function isValidRecallId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    id.length > 0 &&
+    id.length <= MAX_RECALL_ID_CHARS &&
+    !/[\u0000-\u001f\u007f]/.test(id)
+  );
+}
 
 export function isValidRecallQuery(query: unknown): query is string {
   return typeof query === "string" && query.length <= MAX_RECALL_QUERY_CHARS;

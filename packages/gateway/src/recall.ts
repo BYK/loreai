@@ -22,6 +22,7 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_QUERY_CHARS,
+  isValidRecallId,
   isValidRecallQuery,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
@@ -624,11 +625,11 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     !isValidRecallQuery(input.query) ||
     (input.scope !== undefined && typeof input.scope !== "string") ||
     ((item.input as Record<string, unknown>).id !== undefined &&
-      typeof (item.input as Record<string, unknown>).id !== "string") ||
+      !isValidRecallId((item.input as Record<string, unknown>).id)) ||
     ((item.input as Record<string, unknown>).ids !== undefined &&
       (!Array.isArray((item.input as Record<string, unknown>).ids) ||
         !((item.input as Record<string, unknown>).ids as unknown[]).every(
-          (id: unknown) => typeof id === "string",
+          (id: unknown) => isValidRecallId(id),
         ))) ||
     ((item.input as Record<string, unknown>).detailOffset !== undefined &&
       (!Number.isSafeInteger(
@@ -646,16 +647,12 @@ function isStoredRecall(value: unknown): value is StoredRecall {
   }
   const ids = input.ids;
   if (
-    (typeof input.id === "string" &&
-      (!input.id || input.id.length > MAX_RECALL_ID_CHARS)) ||
+    (typeof input.id === "string" && !isValidRecallId(input.id)) ||
     (ids !== undefined &&
       (!Array.isArray(ids) ||
         ids.length === 0 ||
         ids.length > MAX_RECALL_BATCH_IDS ||
-        !ids.every(
-          (id): id is string =>
-            typeof id === "string" && !!id && id.length <= MAX_RECALL_ID_CHARS,
-        ))) ||
+        !ids.every((id): id is string => isValidRecallId(id)))) ||
     (input.id !== undefined && ids !== undefined) ||
     ((input.detailOffset !== undefined || input.detailLimit !== undefined) &&
       typeof input.id !== "string") ||
@@ -1002,12 +999,10 @@ export function cleanupRecallStore(
 
   // Collect all marker keys still present in assistant messages
   const activeKeys = new Set<string>();
-  let hasMarkerText = false;
   for (const msg of req.messages) {
     if (msg.role !== "assistant") continue;
     for (const block of msg.content) {
       if (block.type !== "text") continue;
-      hasMarkerText ||= isRecallMarker(block.text);
       const match = storedRecallForText(block.text, store);
       if (
         match &&
@@ -1023,8 +1018,6 @@ export function cleanupRecallStore(
       }
     }
   }
-
-  if (!hasMarkerText && options.gatewayRecallEnabled === false) return false;
 
   // Remove entries not referenced by any current marker
   let changed = false;
@@ -1129,9 +1122,7 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   }
   if (
     idValue !== undefined &&
-    (typeof idValue !== "string" ||
-      !idValue ||
-      idValue.length > MAX_RECALL_ID_CHARS)
+    (typeof idValue !== "string" || !idValue || !isValidRecallId(idValue))
   ) {
     throw new Error("Recall id must be a non-empty string");
   }
@@ -1140,10 +1131,7 @@ function parseRecallInput(block: GatewayToolUseBlock): {
     (!Array.isArray(idsValue) ||
       idsValue.length === 0 ||
       idsValue.length > MAX_RECALL_BATCH_IDS ||
-      idsValue.some(
-        (id) =>
-          typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
-      ))
+      idsValue.some((id) => !isValidRecallId(id)))
   ) {
     throw new Error(
       `Recall ids must contain from 1 to ${MAX_RECALL_BATCH_IDS} non-empty strings`,
