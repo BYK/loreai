@@ -474,7 +474,8 @@ function recallAnchorContinuation(text: string, anchorId: string): string {
 export function parseRecallMarker(
   text: string,
 ): { query: string; scope: RecallScope; id?: string } | null {
-  const markerText = text.slice(0, MAX_RECALL_MARKER_CHARS);
+  if (text.length > MAX_RECALL_MARKER_CHARS) return null;
+  const markerText = text;
   // Try id-based marker first
   const idMatch = ID_MARKER_REGEX.exec(markerText);
   if (idMatch) {
