@@ -684,6 +684,11 @@ describe("parseRecallMarker", () => {
     expect(parseRecallMarker(marker)).toBeNull();
   });
 
+  test("parses a valid legacy marker before a long continuation", () => {
+    const marker = `${buildRecallMarker("query")}\n${"continuation ".repeat(100)}`;
+    expect(parseRecallMarker(marker)).toEqual({ query: "query", scope: "all" });
+  });
+
   test("parses a query containing double quotes without truncating (#cache-bust)", () => {
     // Regression for the ses_14b9bf3d… recall rewrite: the lazy `(.+?)` query
     // capture stopped at the first `"`, so a query containing quotes parsed to a
