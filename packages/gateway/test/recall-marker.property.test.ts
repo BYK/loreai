@@ -93,7 +93,7 @@ const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
       s.length <= MAX_RECALL_ID_CHARS &&
       !Array.from(s).some((char) => {
         const code = char.charCodeAt(0);
-        return code < 32 || code === 127;
+        return code < 32 || code === 127 || char === "…";
       }),
   );
   const scopeOpt = fc.option(scopeArb, { nil: undefined });
@@ -295,7 +295,7 @@ describe("recall marker property battery", () => {
             s.length <= MAX_RECALL_ID_CHARS &&
             !Array.from(s).some((char) => {
               const code = char.charCodeAt(0);
-              return code < 32 || code === 127;
+              return code < 32 || code === 127 || char === "…";
             }),
         ),
         (id) => {

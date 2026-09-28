@@ -625,9 +625,9 @@ describe("recall replay anchors", () => {
     expect(parseRecallAnchor("ordinary assistant text")).toBeNull();
   });
 
-  test("finds an anchored status marker when the query contains newlines", () => {
+  test("finds an anchored status marker with safe query text", () => {
     const id = "123e4567-e89b-42d3-a456-426614174010";
-    const marker = `${buildRecallMarker("line one\nline two")}\n${buildRecallAnchor(id)}`;
+    const marker = `${buildRecallMarker("line one line two")}\n${buildRecallAnchor(id)}`;
     expect(isRecallMarker(marker)).toBe(true);
   });
 
@@ -3550,8 +3550,8 @@ describe("expandRecallMarkers", () => {
     expect(clientStore).toHaveLength(1);
   });
 
-  test("replays legacy markers containing newlines", () => {
-    const query = "first line\nsecond line";
+  test("replays legacy markers with safe query text", () => {
+    const query = "first line second line";
     const store: RecallStore = new Map();
     store.set(
       recallStoreKey(query, "all"),

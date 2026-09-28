@@ -478,10 +478,12 @@ export function parseRecallMarker(
   // Try id-based marker first
   const idMatch = ID_MARKER_REGEX.exec(markerText);
   if (idMatch) {
+    if (!isValidRecallId(idMatch[1])) return null;
     return { query: "", scope: "all", id: idMatch[1] };
   }
   const match = MARKER_REGEX.exec(markerText);
   if (!match) return null;
+  if (!isValidRecallQuery(match[2])) return null;
   return {
     query: match[2],
     scope: labelToScope(match[1]),
