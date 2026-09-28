@@ -44,6 +44,7 @@ import {
   MAX_RECALL_QUERY_CHARS,
   MAX_RECALL_ID_CHARS,
   isValidRecallId,
+  isValidRecallQuery,
 } from "@loreai/core";
 import {
   encodeContextBoundary,
@@ -9229,10 +9230,7 @@ export function streamResponsesRecallAware(
     if (queryValue !== undefined && typeof queryValue !== "string") {
       throw new InvalidRecallArguments("query_type", "query must be a string");
     }
-    if (
-      typeof queryValue === "string" &&
-      queryValue.length > MAX_RECALL_QUERY_CHARS
-    ) {
+    if (typeof queryValue === "string" && !isValidRecallQuery(queryValue)) {
       throw new InvalidRecallArguments(
         "query_length",
         `query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,

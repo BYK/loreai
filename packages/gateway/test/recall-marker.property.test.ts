@@ -12,7 +12,7 @@ import { describe, expect, test } from "vitest";
 import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
-  isValidRecallId,
+  MAX_RECALL_QUERY_CHARS,
   type RecallScope,
 } from "@loreai/core";
 import {
@@ -70,12 +70,16 @@ const scopeArb: fc.Arbitrary<RecallScope> = fc.constantFrom(
   "knowledge",
 );
 
-// \u2028/\u2029 are JS line terminators: MARKER_REGEX uses `.` which
-// cannot match them, so a query carrying them cannot round-trip — same
-// class as \n/\r. Counterexample found by shrinking: query "\u2028\"".
-const LINE_TERMINATORS = /[\n\r\u2028\u2029]/;
 const markerQuery = (): fc.Arbitrary<string> =>
-  hostileString().filter((q) => q.length > 0 && !LINE_TERMINATORS.test(q));
+  hostileString().filter(
+    (q) =>
+      q.length > 0 &&
+      q.length <= MAX_RECALL_QUERY_CHARS &&
+      !Array.from(q).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127 || char === "…";
+      }),
+  );
 
 // Structural equality: deserialized values are fresh objects, so compare
 // the canonical serialized form (entry order included).
@@ -83,7 +87,15 @@ const mapEquals = (a: RecallStore, b: RecallStore): boolean =>
   serializeRecallStore(a) === serializeRecallStore(b);
 
 const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
-  const idArb = hostileString().filter((s) => isValidRecallId(s));
+  const idArb = hostileString().filter(
+    (s) =>
+      s.length > 0 &&
+      s.length <= MAX_RECALL_ID_CHARS &&
+      !Array.from(s).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127;
+      }),
+  );
   const scopeOpt = fc.option(scopeArb, { nil: undefined });
   const detail = fc.option(
     fc.record({
@@ -104,7 +116,7 @@ const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
     .record({
       toolUseId: fc.string({ unit: "grapheme" }).filter((s) => s.length > 0),
       position: fc.integer({ min: 0, max: 10_000 }),
-      query: hostileString().filter((s) => Buffer.byteLength(s) <= idLenMax),
+      query: markerQuery().filter((s) => Buffer.byteLength(s) <= idLenMax),
       scope: scopeOpt,
       lookup,
       detail,
@@ -277,7 +289,15 @@ describe("recall marker property battery", () => {
   test("id markers round-trip and oversized ids are rejected", () => {
     fc.assert(
       fc.property(
-        hostileString().filter((s) => isValidRecallId(s)),
+        hostileString().filter(
+          (s) =>
+            s.length > 0 &&
+            s.length <= MAX_RECALL_ID_CHARS &&
+            !Array.from(s).some((char) => {
+              const code = char.charCodeAt(0);
+              return code < 32 || code === 127;
+            }),
+        ),
         (id) => {
           const parsed = parseRecallMarker(buildRecallMarker("", "all", id));
           expect(parsed).toEqual({ query: "", scope: "all", id });

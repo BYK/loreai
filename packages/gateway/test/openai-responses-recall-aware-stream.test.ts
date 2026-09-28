@@ -10384,6 +10384,8 @@ describe("streamResponsesRecallAware", () => {
       JSON.stringify({ query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1) }),
       "query_length",
     ],
+    ['{"query":"bad\\u0001query"}', "query_length"],
+    ['{"query":"foo…bar"}', "query_length"],
     ['{"query":"x","id":42}', "id_type"],
   ])(
     "returns a repair result for invalid recall arguments %s",
