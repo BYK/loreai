@@ -6759,7 +6759,10 @@ function supportsEffectiveRootToolSchemaCombinators(
     canonicalEndpoint.pathname = `${canonicalEndpoint.pathname.replace(/\/$/, "")}/v1/messages`;
     const effectiveOrigin = new URL(route.effectiveUpstreamBase).origin;
     const finalEndpoint = new URL(effectiveOrigin + route.headerUpstreamPath);
-    return finalEndpoint.href === canonicalEndpoint.href;
+    return (
+      finalEndpoint.origin === canonicalEndpoint.origin &&
+      finalEndpoint.pathname === canonicalEndpoint.pathname
+    );
   } catch {
     return false;
   }

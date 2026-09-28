@@ -221,6 +221,17 @@ describe("configured upstream routing", () => {
       },
       config,
     );
+    const canonicalQueryRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/v1/messages?trace=1",
+        },
+      },
+      config,
+    );
 
     expect(
       supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalRoute),
@@ -228,6 +239,9 @@ describe("configured upstream routing", () => {
     expect(
       supportsEffectiveRootToolSchemaCombinatorsForTest(noncanonicalRoute),
     ).toBe(false);
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalQueryRoute),
+    ).toBe(true);
   });
 
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
