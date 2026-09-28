@@ -221,9 +221,14 @@ export function parseRecallAnchor(text: string): string | null {
 function parseRecallAnchorFromText(text: string): string | null {
   const direct = parseRecallAnchor(text);
   if (direct) return direct;
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     const anchor = parseRecallAnchor(line);
-    if (anchor) return anchor;
+    if (!anchor) continue;
+    const prefix = lines.slice(0, index).join("\n");
+    if (prefix.length === 0 || parseRecallMarker(prefix) !== null)
+      return anchor;
   }
   return null;
 }
@@ -402,11 +407,6 @@ function insertCompanionBundle(
 
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
-  if (text.length > MAX_RECALL_MARKER_CHARS) {
-    return /^(?:📚 Searching [^\n]+ for "[\s\S]+?"…|📚 Fetching (?:detail|details) for [\s\S]+?…)\n?$/.test(
-      text,
-    );
-  }
   return (
     parseRecallMarker(text) !== null || parseRecallAnchorFromText(text) !== null
   );
@@ -421,6 +421,20 @@ function storedRecallForText(
   canonical: boolean;
   continuation: string;
 } | null {
+  const anchorId = parseRecallAnchorFromText(text);
+  if (anchorId) {
+    const key = `anchor:${anchorId}`;
+    const stored = store.get(key);
+    if (stored) {
+      return {
+        key,
+        stored,
+        canonical: true,
+        continuation: recallAnchorContinuation(text, anchorId),
+      };
+    }
+    return null;
+  }
   const parsed = parseRecallMarker(text);
   if (parsed) {
     const key = recallStoreKey(parsed.query, parsed.scope, parsed.id);
@@ -434,18 +448,7 @@ function storedRecallForText(
         }
       : null;
   }
-  const anchorId = parseRecallAnchorFromText(text);
-  if (!anchorId) return null;
-  const key = `anchor:${anchorId}`;
-  const stored = store.get(key);
-  return stored
-    ? {
-        key,
-        stored,
-        canonical: true,
-        continuation: recallAnchorContinuation(text, anchorId),
-      }
-    : null;
+  return null;
 }
 
 function recallMarkerContinuation(text: string): string {
@@ -470,13 +473,13 @@ function recallAnchorContinuation(text: string, anchorId: string): string {
 export function parseRecallMarker(
   text: string,
 ): { query: string; scope: RecallScope; id?: string } | null {
-  if (text.length > MAX_RECALL_MARKER_CHARS) return null;
+  const markerText = text.slice(0, MAX_RECALL_MARKER_CHARS);
   // Try id-based marker first
-  const idMatch = ID_MARKER_REGEX.exec(text);
+  const idMatch = ID_MARKER_REGEX.exec(markerText);
   if (idMatch) {
     return { query: "", scope: "all", id: idMatch[1] };
   }
-  const match = MARKER_REGEX.exec(text);
+  const match = MARKER_REGEX.exec(markerText);
   if (!match) return null;
   return {
     query: match[2],
@@ -792,10 +795,12 @@ export function expandRecallMarkers(
     if (!(anchorValidity.get(match.key)?.shift() ?? false)) {
       const block = msg.content[markerIdx];
       if (block.type !== "text") throw new Error("recall marker is not text");
-      const continuation = recallAnchorContinuation(
-        block.text,
-        parseRecallAnchorFromText(block.text) ?? "",
-      );
+      const continuation = match.key.startsWith("anchor:")
+        ? recallAnchorContinuation(
+            block.text,
+            parseRecallAnchorFromText(block.text) ?? "",
+          )
+        : recallMarkerContinuation(block.text);
       if (continuation) {
         block.text = continuation;
       } else {
@@ -906,13 +911,6 @@ export function expandRecallMarkers(
       }
     }
 
-    // Check if there's non-tool content AFTER the marker in this message.
-    // This happens when recall-only follow-up piped continuation content
-    // (text blocks) into the same assistant message. Tool_use blocks after
-    // the marker are from the same turn (mixed tools) and stay together.
-    const afterMarker = msg.content.slice(markerIdx + 1);
-    const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
-
     // Replace marker with tool_use
     replaceVisibleContentBlock(msg, markerIdx, {
       type: "tool_use",
@@ -926,6 +924,13 @@ export function expandRecallMarkers(
         text: match.continuation,
       });
     }
+
+    // Check if there's non-tool content AFTER the marker in this message.
+    // This happens when recall-only follow-up piped continuation content
+    // (text blocks) into the same assistant message. Tool_use blocks after
+    // the marker are from the same turn (mixed tools) and stay together.
+    const afterMarker = msg.content.slice(markerIdx + 1);
+    const hasContinuationAfter = afterMarker.some((b) => b.type !== "tool_use");
 
     // Truncate assistant message at the tool_use (remove continuation)
     if (hasContinuationAfter) {
@@ -997,10 +1002,12 @@ export function cleanupRecallStore(
 
   // Collect all marker keys still present in assistant messages
   const activeKeys = new Set<string>();
+  let hasMarkerText = false;
   for (const msg of req.messages) {
     if (msg.role !== "assistant") continue;
     for (const block of msg.content) {
       if (block.type !== "text") continue;
+      hasMarkerText ||= isRecallMarker(block.text);
       const match = storedRecallForText(block.text, store);
       if (
         match &&
@@ -1016,6 +1023,8 @@ export function cleanupRecallStore(
       }
     }
   }
+
+  if (!hasMarkerText) return false;
 
   // Remove entries not referenced by any current marker
   let changed = false;

@@ -3052,7 +3052,6 @@ describe("expandRecallMarkers", () => {
         content: [{ type: "text", text: buildRecallAnchor(anchorId) }],
       },
     ]);
-
     expect(expandRecallMarkers(req, store)).toBe(true);
     expect(req.messages[1].content).toEqual([]);
   });
@@ -3257,7 +3256,6 @@ describe("expandRecallMarkers", () => {
         content: [{ type: "text", text: buildRecallAnchor(anchorId) }],
       },
     ]);
-
     expect(expandRecallMarkers(req, store)).toBe(true);
   });
 
@@ -3455,16 +3453,80 @@ describe("expandRecallMarkers", () => {
     expect(req.messages[0].content[0]).toEqual({ type: "text", text });
   });
 
+  test("preserves an oversized complete marker lookalike", () => {
+    const text = `📚 Searching all for "${"x".repeat(2_000)}"…`;
+    const req = makeRequest([
+      { role: "assistant", content: [{ type: "text", text }] },
+    ]);
+
+    expect(expandRecallMarkers(req, new Map())).toBe(false);
+    expect(req.messages[0].content[0]).toEqual({ type: "text", text });
+  });
+
+  test("prefers a canonical anchor over a colliding legacy key", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174001";
+    const store: RecallStore = new Map([
+      [
+        recallStoreKey("same query", "all"),
+        makeStoredRecall({
+          toolUseId: "legacy-tool",
+          input: { query: "same query" },
+        }),
+      ],
+      [
+        `anchor:${anchorId}`,
+        makeStoredRecall({
+          anchorId,
+          anchorContextId: undefined,
+          toolUseId: "canonical-tool",
+          input: { query: "same query" },
+        }),
+      ],
+    ]);
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: `${buildRecallMarker("same query", "all")}\n${buildRecallAnchor(anchorId)}`,
+          },
+        ],
+      },
+    ]);
+    store.get(`anchor:${anchorId}`)!.anchorContextId = recallAnchorContext(
+      req.messages,
+      0,
+      [],
+    );
+
+    expect(expandRecallMarkers(req, store)).toBe(true);
+    expect(req.messages[0].content[0]).toMatchObject({
+      type: "tool_use",
+      id: "canonical-tool",
+    });
+  });
+
   test("scrubs stale anchored markers without a tool list", () => {
     const store: RecallStore = new Map();
     store.set(
-      "anchor:019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+      "anchor:123e4567-e89b-42d3-a456-426614174001",
       makeStoredRecall({
-        anchorId: "019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+        anchorId: "123e4567-e89b-42d3-a456-426614174001",
         anchorContextId: "f".repeat(64),
       }),
     );
-    const req = makeRequest([]);
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: `${buildRecallMarker("test query", "all")}\n${buildRecallAnchor("123e4567-e89b-42d3-a456-426614174001")}`,
+          },
+        ],
+      },
+    ]);
 
     expect(cleanupRecallStore(req, store)).toBe(true);
     expect(store).toHaveLength(0);
@@ -3489,6 +3551,42 @@ describe("expandRecallMarkers", () => {
 
     expect(expandRecallMarkers(req, store)).toBe(true);
     expect(req.messages[0].content[0].type).toBe("tool_use");
+  });
+
+  test("splits an anchored marker and continuation in one text block", () => {
+    const anchorId = "123e4567-e89b-42d3-a456-426614174001";
+    const store: RecallStore = new Map([
+      [
+        `anchor:${anchorId}`,
+        makeStoredRecall({ anchorId, anchorContextId: undefined }),
+      ],
+    ]);
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: `${buildRecallMarker("test query", "all")}\n${buildRecallAnchor(anchorId)}\ncontinued`,
+          },
+        ],
+      },
+    ]);
+    store.get(`anchor:${anchorId}`)!.anchorContextId = recallAnchorContext(
+      req.messages,
+      0,
+      [],
+    );
+
+    expect(expandRecallMarkers(req, store)).toBe(true);
+    expect(req.messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    expect(req.messages[2].content).toEqual([
+      { type: "text", text: "continued" },
+    ]);
   });
 
   test("returns false with empty messages", () => {
