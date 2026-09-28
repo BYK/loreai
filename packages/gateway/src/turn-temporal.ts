@@ -14,7 +14,7 @@ import {
 const MAX_RECALL_CONTINUATION_CHARS = 64 * 1024;
 
 function safeRecallContinuation(text: string): string {
-  return Array.from(text)
+  return Array.from(text.slice(0, MAX_RECALL_CONTINUATION_CHARS))
     .slice(0, MAX_RECALL_CONTINUATION_CHARS)
     .map((char) => {
       const code = char.charCodeAt(0);

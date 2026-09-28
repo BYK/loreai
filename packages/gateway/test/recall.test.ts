@@ -39,10 +39,12 @@ import {
   runRecallRecovery,
   type RecallFollowUpCtx,
   buildRecallMarker,
+  buildAnchoredRecallMarker,
   buildRecallAnchor,
   parseRecallAnchor,
   recallAnchorContext,
   parseRecallMarker,
+  parseRecallAnchorFromText,
   isRecallMarker,
   scopeToLabel,
   labelToScope,
@@ -687,6 +689,19 @@ describe("parseRecallMarker", () => {
   test("parses a valid legacy marker before a long continuation", () => {
     const marker = `${buildRecallMarker("query")}\n${"continuation ".repeat(100)}`;
     expect(parseRecallMarker(marker)).toEqual({ query: "query", scope: "all" });
+  });
+
+  test("parses anchored batch markers", () => {
+    const marker = buildAnchoredRecallMarker(
+      "query",
+      "all",
+      undefined,
+      ["k:one", "k:two"],
+      "019f0000-0000-4000-8000-000000000001",
+    );
+    expect(parseRecallAnchorFromText(`${marker}\ncontinuation`)).toBe(
+      "019f0000-0000-4000-8000-000000000001",
+    );
   });
 
   test("parses a query containing double quotes without truncating (#cache-bust)", () => {

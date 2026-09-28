@@ -194,7 +194,16 @@ const MAX_RECALL_MARKER_CHARS = 1024;
 
 /** Regex to parse an id-based recall marker. */
 const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…(?=\n|$)/;
-const BATCH_MARKER_REGEX = /^📚 Fetching details for \d+ sources…(?=\n|$)/;
+const BATCH_MARKER_REGEX = /^📚 Fetching details for (\d+) sources…(?=\n|$)/;
+
+function isValidBatchMarker(text: string): boolean {
+  const match = BATCH_MARKER_REGEX.exec(text);
+  if (!match) return false;
+  const count = Number(match[1]);
+  return (
+    Number.isSafeInteger(count) && count >= 1 && count <= MAX_RECALL_BATCH_IDS
+  );
+}
 
 /** Invisible Responses transcript anchor. Markdown renderers omit comments. */
 const ANCHOR_REGEX =
@@ -229,7 +238,11 @@ export function parseRecallAnchorFromText(text: string): string | null {
     const anchor = parseRecallAnchor(line);
     if (!anchor) continue;
     const prefix = lines.slice(0, index).join("\n");
-    if (prefix.length === 0 || parseRecallMarker(prefix) !== null)
+    if (
+      prefix.length === 0 ||
+      parseRecallMarker(prefix) !== null ||
+      isValidBatchMarker(prefix)
+    )
       return anchor;
   }
   return null;
@@ -412,7 +425,7 @@ export function isRecallMarker(text: string): boolean {
   return (
     parseRecallMarker(text) !== null ||
     parseRecallAnchorFromText(text) !== null ||
-    BATCH_MARKER_REGEX.test(text)
+    isValidBatchMarker(text)
   );
 }
 
@@ -458,7 +471,9 @@ function storedRecallForText(
 export function recallMarkerContinuation(text: string): string {
   const idMatch = ID_MARKER_REGEX.exec(text);
   const markerMatch = MARKER_REGEX.exec(text);
-  const batchMatch = BATCH_MARKER_REGEX.exec(text);
+  const batchMatch = isValidBatchMarker(text)
+    ? BATCH_MARKER_REGEX.exec(text)
+    : null;
   const length =
     idMatch?.[0].length ?? markerMatch?.[0].length ?? batchMatch?.[0].length;
   if (length === undefined) return "";
