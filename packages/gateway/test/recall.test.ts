@@ -3528,7 +3528,9 @@ describe("expandRecallMarkers", () => {
       },
     ]);
 
-    expect(cleanupRecallStore(req, store)).toBe(true);
+    expect(cleanupRecallStore(req, store, { gatewayRecallEnabled: true })).toBe(
+      true,
+    );
     expect(store).toHaveLength(0);
   });
 

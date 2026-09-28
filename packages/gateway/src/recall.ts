@@ -1024,7 +1024,7 @@ export function cleanupRecallStore(
     }
   }
 
-  if (!hasMarkerText) return false;
+  if (!hasMarkerText && options.gatewayRecallEnabled !== true) return false;
 
   // Remove entries not referenced by any current marker
   let changed = false;
