@@ -669,6 +669,15 @@ describe("parseRecallMarker", () => {
     expect(parseRecallMarker("")).toBeNull();
   });
 
+  test.each([
+    '📚 Searching all memory for "line\nforged"…',
+    '📚 Searching all memory for "bad\u0001query"…',
+    '📚 Searching all memory for "foo…bar"…',
+    "📚 Fetching detail for k:foo…bar…",
+  ])("rejects unsafe marker text %j", (marker) => {
+    expect(parseRecallMarker(marker)).toBeNull();
+  });
+
   test("parses a query containing double quotes without truncating (#cache-bust)", () => {
     // Regression for the ses_14b9bf3d… recall rewrite: the lazy `(.+?)` query
     // capture stopped at the first `"`, so a query containing quotes parsed to a
