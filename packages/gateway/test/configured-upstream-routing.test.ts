@@ -48,6 +48,63 @@ function openAIResponsesResponse(): Response {
   );
 }
 
+function openAIResponsesClientRecallStreamResponse(): Response {
+  const event = (type: string, payload: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`;
+  const args = JSON.stringify({ query: "client-owned" });
+  return new Response(
+    event("response.created", {
+      response: { id: "resp-client-recall", model: "gpt-5.6-codex" },
+    }) +
+      event("response.output_item.added", {
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc-client-recall",
+          call_id: "call-client-recall",
+          name: "recall",
+          arguments: "",
+        },
+      }) +
+      event("response.function_call_arguments.done", {
+        output_index: 0,
+        item_id: "fc-client-recall",
+        arguments: args,
+      }) +
+      event("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc-client-recall",
+          call_id: "call-client-recall",
+          name: "recall",
+          arguments: args,
+          status: "completed",
+        },
+      }) +
+      event("response.completed", {
+        response: {
+          id: "resp-client-recall",
+          model: "gpt-5.6-codex",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              id: "fc-client-recall",
+              call_id: "call-client-recall",
+              name: "recall",
+              arguments: args,
+              status: "completed",
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }) +
+      "data: [DONE]\n\n",
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
 describe("configured upstream routing", () => {
   let harness: Harness | undefined;
 
@@ -306,5 +363,42 @@ describe("configured upstream routing", () => {
     expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
       "https://api.anthropic.com/v1/responses",
     );
+  });
+
+  test("forwards a client-owned recall tool on Responses streaming ingress", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(openAIResponsesClientRecallStreamResponse());
+
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-key",
+        "x-lore-project": "/tmp/client-owned-responses-recall",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-codex",
+        input: "hi",
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            name: "recall",
+            description: "client tool",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    });
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(200);
+    expect(responseText).toContain('"name":"recall"');
+    expect(responseText).toContain("client-owned");
   });
 });

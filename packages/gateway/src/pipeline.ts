@@ -22242,9 +22242,7 @@ async function handleConversationTurnPrepared(
       // codex "waiting for response headers" hang — the buffered path below
       // withholds all client bytes until the (slow, reasoning-heavy) upstream
       // fully completes.
-      const hasRecallTool = modifiedReq.tools.some(
-        (t) => t.name === RECALL_TOOL_NAME,
-      );
+      const hasRecallTool = gatewayRecallEnabled;
 
       // Only stream through recall-aware when the client ALSO speaks the
       // Responses API AND no warning needs to be layered in. The recall-aware
