@@ -48,7 +48,7 @@ function openAIResponsesResponse(): Response {
   );
 }
 
-function openAIResponsesClientRecallStreamResponse(): Response {
+function openAIResponsesClientRecallStreamResponse(inputTokens = 1): Response {
   const event = (type: string, payload: Record<string, unknown>) =>
     `event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`;
   const args = JSON.stringify({ query: "client-owned" });
@@ -97,11 +97,44 @@ function openAIResponsesClientRecallStreamResponse(): Response {
               status: "completed",
             },
           ],
-          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          usage: {
+            input_tokens: inputTokens,
+            output_tokens: 1,
+            total_tokens: inputTokens + 1,
+          },
         },
       }) +
       "data: [DONE]\n\n",
     { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+function openAIResponsesClientRecallResponse(inputTokens = 128_001): Response {
+  const args = JSON.stringify({ query: "client-owned" });
+  return new Response(
+    JSON.stringify({
+      id: "resp-client-recall-buffered",
+      object: "response",
+      created_at: 1,
+      status: "completed",
+      model: "gpt-5.6-codex",
+      output: [
+        {
+          type: "function_call",
+          id: "fc-client-recall-buffered",
+          call_id: "call-client-recall-buffered",
+          name: "recall",
+          arguments: args,
+          status: "completed",
+        },
+      ],
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: 1,
+        total_tokens: inputTokens + 1,
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
   );
 }
 
@@ -372,7 +405,9 @@ describe("configured upstream routing", () => {
       makeReal(),
     );
     mockFetch.mockReset();
-    mockFetch.mockResolvedValue(openAIResponsesClientRecallStreamResponse());
+    mockFetch.mockResolvedValue(
+      openAIResponsesClientRecallStreamResponse(128_001),
+    );
 
     const response = await harness.request("/v1/responses", {
       method: "POST",
@@ -380,11 +415,51 @@ describe("configured upstream routing", () => {
         "content-type": "application/json",
         authorization: "Bearer test-key",
         "x-lore-project": "/tmp/client-owned-responses-recall",
+        "x-lore-session-id": "client-owned-responses-recall",
       },
       body: JSON.stringify({
         model: "gpt-5.6-codex",
         input: "hi",
         stream: true,
+        tools: [
+          {
+            type: "function",
+            name: "recall",
+            description: "client tool",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    });
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(200);
+    expect(responseText).toContain('"name":"recall"');
+    expect(responseText).toContain("client-owned");
+  });
+
+  test("does not apply the recall budget to a buffered client-owned recall call", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    const sessionHeaders = {
+      "content-type": "application/json",
+      authorization: "Bearer test-key",
+      "x-lore-project": "/tmp/client-owned-buffered-recall",
+      "x-lore-session-id": "client-owned-buffered-recall",
+    };
+    mockFetch.mockResolvedValue(openAIResponsesClientRecallResponse());
+
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: sessionHeaders,
+      body: JSON.stringify({
+        model: "gpt-5.6-codex",
+        input: "hi",
+        stream: false,
         tools: [
           {
             type: "function",

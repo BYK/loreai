@@ -32,6 +32,7 @@ import {
   runRelaxedSearchAsync,
   termIDF,
 } from "./search";
+import { assertValidRecallQuery, isValidRecallQuery } from "./recall-limits";
 import {
   offloadAll,
   offloadAllOrTimeout,
@@ -143,8 +144,6 @@ export type RecallRun = {
 
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
-/** Bound untrusted search text before term filtering and query expansion. */
-export const MAX_RECALL_QUERY_CHARS = 512;
 /** Bound untrusted tool IDs before they are interpolated into a result. */
 export const MAX_RECALL_ID_CHARS = 256;
 export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
@@ -154,6 +153,12 @@ export const MAX_RECALL_BATCH_CHARS = 32_000;
 const MAX_RECALL_ENTITY_ALIASES = 8;
 const MAX_RECALL_ENTITY_RELATIONS = 8;
 const MAX_RECALL_ENTITY_LABEL_CHARS = 256;
+
+export {
+  assertValidRecallQuery,
+  isValidRecallQuery,
+  MAX_RECALL_QUERY_CHARS,
+} from "./recall-limits";
 
 export type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
@@ -862,6 +867,7 @@ export async function searchRecall(
   input: RecallInput,
 ): Promise<ScoredTaggedResult[]> {
   input.signal?.throwIfAborted();
+  assertValidRecallQuery(input.query);
   const abortable = async <T>(promise: Promise<T>): Promise<T> => {
     const signal = input.signal;
     if (!signal) return promise;
@@ -925,11 +931,17 @@ export async function searchRecall(
     queryTermCount <= expansionMaxTerms
   ) {
     try {
-      queries = await abortable(
+      const expandedQueries = await abortable(
         timer.await(
           expandQuery(llm, query, undefined, sessionID, input.signal),
         ),
       );
+      queries = [
+        query,
+        ...expandedQueries.filter(
+          (expanded) => expanded !== query && isValidRecallQuery(expanded),
+        ),
+      ];
       input.signal?.throwIfAborted();
     } catch (err) {
       if (input.signal?.aborted) throw input.signal.reason;
@@ -946,7 +958,7 @@ export async function searchRecall(
     if (entityExpansions.length > 0) {
       // Add each alias as a separate query variant (up to 4)
       for (const alias of entityExpansions.slice(0, 4)) {
-        if (!queries.includes(alias)) {
+        if (isValidRecallQuery(alias) && !queries.includes(alias)) {
           queries.push(alias);
         }
       }
@@ -2227,14 +2239,7 @@ export async function runRecallWithMetadata(
   input: RecallInput,
 ): Promise<RecallRun> {
   input.signal?.throwIfAborted();
-  if (
-    typeof input.query !== "string" ||
-    input.query.length > MAX_RECALL_QUERY_CHARS
-  ) {
-    throw new Error(
-      `Recall query must be a string no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
-    );
-  }
+  assertValidRecallQuery(input.query);
   if (input.id && input.ids) {
     throw new Error("Recall id and ids cannot be used together");
   }

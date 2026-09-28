@@ -87,6 +87,8 @@ export {
   recallByIdWithMetadata,
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_QUERY_CHARS,
+  isValidRecallQuery,
+  assertValidRecallQuery,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_DETAIL_CHARS,
   RECALL_TOOL_DESCRIPTION,

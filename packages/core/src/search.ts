@@ -580,6 +580,7 @@ import { QUERY_EXPANSION_SYSTEM } from "./prompt";
 import * as log from "./log";
 import { db } from "./db";
 import type { LLMClient } from "./types";
+import { isValidRecallQuery } from "./recall-limits";
 
 /**
  * Expand a user query into multiple search variants using the configured LLM.
@@ -636,7 +637,8 @@ export async function expandQuery(
     if (!Array.isArray(parsed)) return [query];
 
     const expanded = parsed.filter(
-      (q): q is string => typeof q === "string" && q.trim().length > 0,
+      (q): q is string =>
+        typeof q === "string" && q.trim().length > 0 && isValidRecallQuery(q),
     );
     if (!expanded.length) return [query];
 

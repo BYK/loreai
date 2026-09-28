@@ -9,6 +9,7 @@ import {
   recallById,
   runRecall,
   runRecallWithMetadata,
+  searchRecall,
 } from "../src/recall";
 
 const PROJECT = "/test/recall-batch/project";
@@ -184,6 +185,12 @@ describe("recall detail batches", () => {
   test("rejects oversized search queries before search work", async () => {
     await expect(
       runRecall({
+        query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1),
+        projectPath: PROJECT,
+      }),
+    ).rejects.toThrow(`no longer than ${MAX_RECALL_QUERY_CHARS}`);
+    await expect(
+      searchRecall({
         query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1),
         projectPath: PROJECT,
       }),

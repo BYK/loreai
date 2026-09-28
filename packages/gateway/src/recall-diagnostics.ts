@@ -4,6 +4,31 @@ import { log, type RecallCoverage } from "@loreai/core";
 /** Keep request-local diagnostic state bounded while observing chains beyond ten rounds. */
 export const MAX_RECALL_DIAGNOSTIC_ROUNDS = 64;
 
+export type RecallDiagnosticLevel = "info" | "warn" | "error";
+
+/** Diagnostics are best-effort and must never change response delivery. */
+export function reportRecallDiagnostic(
+  message: string,
+  level: RecallDiagnosticLevel = "info",
+  diagnostic?: Error,
+): void {
+  try {
+    switch (level) {
+      case "info":
+        log.info(message);
+        return;
+      case "warn":
+        log.warn(message);
+        return;
+      case "error":
+        log.error(diagnostic ?? message);
+        return;
+    }
+  } catch {
+    // A diagnostic sink cannot change the response path.
+  }
+}
+
 /** Request-local comparisons only. Fingerprints and recall content never leave this closure. */
 export function createRecallDiagnostics(enabled = true) {
   const inputs = new Set<string>();
@@ -19,11 +44,7 @@ export function createRecallDiagnostics(enabled = true) {
   const fingerprint = (value: string) =>
     createHash("sha256").update(value).digest("hex");
   const report = (message: string): void => {
-    try {
-      log.info(message);
-    } catch {
-      // Diagnostics must never alter the model response path.
-    }
+    reportRecallDiagnostic(message);
   };
   return {
     record(

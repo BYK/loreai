@@ -18,6 +18,7 @@ import {
   responsesProvenanceContent,
   responsesProvenanceByMessageId,
   responsesAnchorContext,
+  shouldRejectUnusableRecallContinuation,
 } from "../src/pipeline";
 import {
   isUsableRecallContinuation,
@@ -55,7 +56,7 @@ import {
   MAX_RECALL_STORE_BYTES,
   executeRecall,
 } from "../src/recall";
-import { MAX_RECALL_ID_CHARS } from "@loreai/core";
+import { MAX_RECALL_ID_CHARS, MAX_RECALL_QUERY_CHARS } from "@loreai/core";
 import {
   buildOpenAIResponsesUpstreamRequest,
   parseOpenAIResponsesRequest,
@@ -724,6 +725,16 @@ describe("serializeRecallStore / deserializeRecallStore", () => {
     const restored = deserializeRecallStore(mixed);
     expect(restored.size).toBe(1);
     expect(restored.get("good")?.result).toBe("r");
+
+    const oversized = makeStoredRecall({
+      input: { query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1) },
+    });
+    expect(
+      deserializeRecallStore(JSON.stringify([["oversized", oversized]])).size,
+    ).toBe(0);
+    expect(() =>
+      addRecallStoreEntry(new Map(), "oversized", oversized),
+    ).toThrow("invalid recall store entry");
   });
 
   test("restores pre-anchor query-keyed entries without weakening anchor validation", () => {
@@ -946,6 +957,17 @@ describe("recallStoreKey", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildRecallFollowUpRequest", () => {
+  test("does not apply the unusable-continuation policy to client tools", () => {
+    const response = makeResponse([makeRecallToolUse()], "tool_use");
+
+    expect(
+      shouldRejectUnusableRecallContinuation(false, "tokens", response),
+    ).toBe(false);
+    expect(
+      shouldRejectUnusableRecallContinuation(true, "tokens", response),
+    ).toBe(true);
+  });
+
   test.each([
     ["anthropic", { type: "tool", name: "recall" }],
     ["openai-responses", { type: "function", name: "recall" }],
@@ -986,6 +1008,24 @@ describe("buildRecallFollowUpRequest", () => {
       expect(req.extras?.tool_choice).toBe(choice);
     },
   );
+
+  test("a throwing budget diagnostic cannot change the follow-up request", () => {
+    vi.spyOn(log, "info").mockImplementation(() => {
+      throw new Error("diagnostic sink failed");
+    });
+    const block = makeRecallToolUse("architecture");
+
+    expect(() =>
+      buildRecallFollowUpRequest(
+        makeRequest(),
+        makeResponse([block], "tool_use"),
+        "real result",
+        block,
+        false,
+        true,
+      ),
+    ).not.toThrow();
+  });
 
   test.each([
     ["anthropic", { tool_choice: { type: "tool", name: "recall" } }],
@@ -2361,6 +2401,36 @@ describe("runRecallRecovery", () => {
 // ---------------------------------------------------------------------------
 
 describe("expandRecallMarkers", () => {
+  test("does not touch anchors when the request owns a colliding recall tool", () => {
+    const store: RecallStore = new Map([
+      [
+        "all:private",
+        {
+          toolUseId: "toolu_private",
+          input: { query: "private", scope: "all" },
+          position: 0,
+          result: "private result",
+        },
+      ],
+    ]);
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallMarker("private", "all") }],
+      },
+    ]);
+    const before = structuredClone(req.messages);
+
+    expect(
+      cleanupRecallStore(req, store, { gatewayRecallEnabled: false }),
+    ).toBe(false);
+    expect(
+      expandRecallMarkers(req, store, { gatewayRecallEnabled: false }),
+    ).toBe(false);
+    expect(req.messages).toEqual(before);
+    expect(store.has("all:private")).toBe(true);
+  });
+
   test("expands a hidden Responses anchor without a visible status message", () => {
     const anchorId = "123e4567-e89b-42d3-a456-426614174001";
     const store: RecallStore = new Map([

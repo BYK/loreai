@@ -16,6 +16,7 @@ import {
 } from "../src/search";
 import { db, ensureProject } from "../src/db";
 import type { LLMClient } from "../src/types";
+import { MAX_RECALL_QUERY_CHARS } from "../src/recall-limits";
 
 describe("expandQuery", () => {
   test("aborts the worker when the expansion deadline expires", async () => {
@@ -43,6 +44,23 @@ describe("expandQuery", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("drops oversized generated variants", async () => {
+    const llm: LLMClient = {
+      prompt: async () =>
+        JSON.stringify([
+          "valid expansion",
+          "x".repeat(MAX_RECALL_QUERY_CHARS + 1),
+          "second valid expansion",
+        ]),
+    };
+
+    await expect(expandQuery(llm, "architecture")).resolves.toEqual([
+      "architecture",
+      "valid expansion",
+      "second valid expansion",
+    ]);
   });
 });
 

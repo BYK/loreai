@@ -22,9 +22,9 @@ import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
   MAX_RECALL_QUERY_CHARS,
+  isValidRecallQuery,
   RECALL_TOOL_DESCRIPTION,
   RECALL_PARAM_DESCRIPTIONS,
-  log,
   config as loreConfig,
   type RecallScope,
   type RecallCoverage,
@@ -46,6 +46,7 @@ import { promiseAgainstAbort } from "./abort-race";
 import { cancelAndReleaseReader } from "./stream/anthropic";
 import { looksLikeSSE } from "./translate/types";
 import { MAX_RECALL_EXECUTIONS } from "./recall-budget";
+import { reportRecallDiagnostic } from "./recall-diagnostics";
 
 // ---------------------------------------------------------------------------
 // Tool definition
@@ -459,6 +460,9 @@ export function addRecallStoreEntry(
   key: string,
   value: StoredRecall,
 ): void {
+  if (!isValidRecallQuery(value.input.query)) {
+    throw new Error("invalid recall store entry");
+  }
   let minimumBytes = 0;
   const countStrings = (input: unknown): void => {
     if (minimumBytes > MAX_RECALL_STORE_BYTES) return;
@@ -558,7 +562,7 @@ function isStoredRecall(value: unknown): value is StoredRecall {
     typeof item.result !== "string" ||
     typeof item.position !== "number" ||
     !input ||
-    typeof input.query !== "string" ||
+    !isValidRecallQuery(input.query) ||
     (input.scope !== undefined && typeof input.scope !== "string") ||
     ((item.input as Record<string, unknown>).id !== undefined &&
       typeof (item.input as Record<string, unknown>).id !== "string") ||
@@ -654,7 +658,9 @@ export function recallStoreKey(
 export function expandRecallMarkers(
   req: GatewayRequest,
   store: RecallStore,
+  options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
+  if (options.gatewayRecallEnabled === false) return false;
   let expanded = false;
   const anchorValidity = new Map<string, boolean[]>();
   const incomingMessages = structuredClone(req.messages);
@@ -889,7 +895,9 @@ export function expandRecallMarkers(
 export function cleanupRecallStore(
   req: GatewayRequest,
   store: RecallStore,
+  options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
+  if (options.gatewayRecallEnabled === false) return false;
   if (store.size === 0) return false;
 
   // Collect all marker keys still present in assistant messages
@@ -1005,10 +1013,7 @@ function parseRecallInput(block: GatewayToolUseBlock): {
   if (queryValue !== undefined && typeof queryValue !== "string") {
     throw new Error("Recall query must be a string");
   }
-  if (
-    typeof queryValue === "string" &&
-    queryValue.length > MAX_RECALL_QUERY_CHARS
-  ) {
+  if (typeof queryValue !== "undefined" && !isValidRecallQuery(queryValue)) {
     throw new Error(
       `Recall query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
     );
@@ -1103,11 +1108,11 @@ function parseRecallInput(block: GatewayToolUseBlock): {
 function reportRecallExecutionFailure(): void {
   const diagnostic = new Error("gateway recall execution failed");
   diagnostic.name = "RecallExecutionError";
-  try {
-    log.error(diagnostic);
-  } catch {
-    // Diagnostics must not turn a recall failure into a request failure.
-  }
+  reportRecallDiagnostic(
+    "gateway recall execution failed",
+    "error",
+    diagnostic,
+  );
 }
 
 export async function executeRecall(
@@ -1576,7 +1581,8 @@ export function buildRecallFollowUpRequest(
   stream: boolean,
   finalRecallRound = false,
 ): GatewayRequest {
-  if (finalRecallRound) log.info("recall final continuation: budget exhausted");
+  if (finalRecallRound)
+    reportRecallDiagnostic("recall final continuation: budget exhausted");
   // Build the follow-up using proper tool_use/tool_result pairs.
   //
   // Why: sending recall results as plain user text causes the LLM to treat
@@ -1975,7 +1981,10 @@ export async function runRecallFollowUpStreaming(
       detail = await readResponseTextLimited(response, 500, signal);
     } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read");
+      reportRecallDiagnostic(
+        "recall follow-up error body could not be read",
+        "warn",
+      );
     }
     return { ok: false, status: response.status, detail };
   }
@@ -2036,7 +2045,10 @@ async function runRecallJSONRequest(
       detail = await readResponseTextLimited(response, 500, signal);
     } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read");
+      reportRecallDiagnostic(
+        "recall follow-up error body could not be read",
+        "warn",
+      );
     }
     return { ok: false, status: response.status, detail };
   }
@@ -2114,7 +2126,10 @@ async function runRecallStreamAccumulatedRequest(
       detail = await readResponseTextLimited(response, 500, signal);
     } catch {
       if (signal?.aborted) throw signal.reason;
-      log.warn("recall follow-up error body could not be read");
+      reportRecallDiagnostic(
+        "recall follow-up error body could not be read",
+        "warn",
+      );
     }
     return { ok: false, status: response.status, detail };
   }
