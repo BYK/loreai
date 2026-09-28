@@ -11,7 +11,7 @@ export function isValidRecallId(id: unknown): id is string {
   }
   return !Array.from(id).some((char) => {
     const code = char.charCodeAt(0);
-    return code < 32 || code === 127;
+    return code < 32 || code === 127 || char === "…";
   });
 }
 

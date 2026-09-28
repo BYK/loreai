@@ -206,6 +206,15 @@ describe("recall detail batches", () => {
     expect(recallById(invalid)).toBe("Invalid recall id.");
   });
 
+  test("rejects recall IDs containing marker delimiters", async () => {
+    const invalid = "k:source…forged";
+
+    await expect(
+      runRecall({ query: "", id: invalid, projectPath: PROJECT }),
+    ).rejects.toThrow("Recall id must be a non-empty string");
+    expect(recallById(invalid)).toBe("Invalid recall id.");
+  });
+
   test("distinguishes a search preview from a subsequent full detail", async () => {
     const id = seed("Coverage source", "coverage evidence for a later detail");
     const logicalId = knowledge(id).logical_id;
