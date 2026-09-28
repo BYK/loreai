@@ -745,10 +745,24 @@ function getFullContentLength(tagged: TaggedResult): number {
 function getDistillationSourceIds(distillId: string): string[] {
   try {
     const row = db()
-      .query("SELECT source_ids FROM distillations WHERE id = ?")
-      .get(distillId) as { source_ids: string } | null;
+      .query(
+        `SELECT d.source_ids
+           FROM distillations d
+           JOIN projects p ON p.id = d.project_id
+          WHERE p.tenant_id = ? AND d.id = ?`,
+      )
+      .get(currentTenantId(), distillId) as { source_ids: string } | null;
     if (!row?.source_ids) return [];
-    return JSON.parse(row.source_ids);
+    const parsed: unknown = JSON.parse(row.source_ids);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (sourceId): sourceId is string =>
+          typeof sourceId === "string" &&
+          sourceId.length > 0 &&
+          sourceId.length <= MAX_RECALL_ID_CHARS,
+      )
+      .slice(0, MAX_RECALL_BATCH_IDS);
   } catch {
     return [];
   }
@@ -823,9 +837,20 @@ function renderResultLine(
       // Include source message IDs so the LLM can fetch full details
       // via the recall tool when the summary lacks specifics.
       const sourceIds = getDistillationSourceIds(d.id);
+      const sourceRefParts: string[] = [];
+      const sourceRefBudget = Math.max(0, charBudget - content.length);
+      let sourceRefLength = " (sources: ".length + 1;
+      for (const sourceId of sourceIds) {
+        const part = `t:${sourceId}`;
+        const nextLength =
+          sourceRefLength + part.length + (sourceRefParts.length > 0 ? 2 : 0);
+        if (nextLength > sourceRefBudget) break;
+        sourceRefParts.push(part);
+        sourceRefLength = nextLength;
+      }
       const sourceRef =
-        sourceIds.length > 0
-          ? ` (sources: ${sourceIds.map((s) => `t:${s}`).join(", ")})`
+        sourceRefParts.length > 0
+          ? ` (sources: ${sourceRefParts.join(", ")})`
           : "";
       return `- ${compressionHint}${content}${wasTruncated ? ` (${id})` : ""}${sourceRef}`;
     }
@@ -2181,12 +2206,15 @@ export function recallByIdWithMetadata(
       // capped and all untrusted display fields are clipped in SQLite.
       const aliases = db()
         .query(
-          `SELECT alias_type, substr(alias_value, 1, ?) AS alias_value
-             FROM entity_aliases WHERE entity_id = ?
+          `SELECT ea.alias_type, substr(ea.alias_value, 1, ?) AS alias_value
+             FROM entity_aliases ea
+             JOIN entities e ON e.id = ea.entity_id
+            WHERE e.tenant_id = ? AND ea.entity_id = ?
              ORDER BY alias_type, alias_value LIMIT ?`,
         )
         .all(
           MAX_RECALL_ENTITY_LABEL_CHARS,
+          currentTenantId(),
           rawId,
           MAX_RECALL_ENTITY_ALIASES,
         ) as Array<{ alias_type: string; alias_value: string }>;
