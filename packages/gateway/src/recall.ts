@@ -452,7 +452,7 @@ function storedRecallForText(
   return null;
 }
 
-function recallMarkerContinuation(text: string): string {
+export function recallMarkerContinuation(text: string): string {
   const idMatch = ID_MARKER_REGEX.exec(text);
   const markerMatch = MARKER_REGEX.exec(text);
   const length = idMatch?.[0].length ?? markerMatch?.[0].length;

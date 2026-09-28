@@ -4,7 +4,7 @@ import {
   withSavepoint,
   type LoreMessageWithParts,
 } from "@loreai/core";
-import { isRecallMarker } from "./recall";
+import { isRecallMarker, recallMarkerContinuation } from "./recall";
 import {
   gatewayMessagesToLore,
   updateAssistantMessageTokens,
@@ -66,9 +66,11 @@ export function storeTurnTemporal(input: {
       // directly in SQLite, without retaining/re-resolving its historical graph.
       temporal.recordToolCalls(message);
     }
-    const assistantContent = input.assistantContentBlocks.filter(
-      (b) => !(b.type === "text" && isRecallMarker(b.text)),
-    );
+    const assistantContent = input.assistantContentBlocks.flatMap((b) => {
+      if (b.type !== "text" || !isRecallMarker(b.text)) return [b];
+      const continuation = recallMarkerContinuation(b.text);
+      return continuation ? [{ ...b, text: continuation }] : [];
+    });
     const assistant = gatewayMessagesToLore(
       [{ role: "assistant", content: assistantContent }],
       sessionID,
