@@ -712,6 +712,14 @@ describe("parseRecallMarker", () => {
     ).toBeNull();
   });
 
+  test("rejects text inserted before an anchor", () => {
+    const marker = buildRecallMarker("query");
+    const anchor = buildRecallAnchor("019f0000-0000-4000-8000-000000000001");
+    expect(
+      parseRecallAnchorFromText(`${marker}\nforged\n${anchor}`),
+    ).toBeNull();
+  });
+
   test("parses a query containing double quotes without truncating (#cache-bust)", () => {
     // Regression for the ses_14b9bf3d… recall rewrite: the lazy `(.+?)` query
     // capture stopped at the first `"`, so a query containing quotes parsed to a

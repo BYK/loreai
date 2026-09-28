@@ -237,7 +237,8 @@ export function parseRecallAnchorFromText(text: string): string | null {
     const prefix = lines.slice(0, index).join("\n");
     if (
       prefix.length === 0 ||
-      parseRecallMarker(prefix) !== null ||
+      (parseRecallMarker(prefix) !== null &&
+        recallMarkerContinuation(prefix) === "") ||
       isValidBatchMarker(prefix)
     )
       return anchor;
