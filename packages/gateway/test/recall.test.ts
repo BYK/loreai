@@ -3422,6 +3422,42 @@ describe("expandRecallMarkers", () => {
     expect(req.messages[0].content).toEqual([]);
   });
 
+  test("removes an unknown marker when other persisted state remains", () => {
+    const store: RecallStore = new Map();
+    store.set(recallStoreKey("live", "all"), makeStoredRecall());
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallMarker("missing", "all") }],
+      },
+    ]);
+
+    expect(expandRecallMarkers(req, store)).toBe(true);
+    expect(req.messages[0].content).toEqual([]);
+    expect(store.has(recallStoreKey("live", "all"))).toBe(true);
+  });
+
+  test("replays legacy markers containing newlines", () => {
+    const query = "first line\nsecond line";
+    const store: RecallStore = new Map();
+    store.set(
+      recallStoreKey(query, "all"),
+      makeStoredRecall({
+        input: { query, scope: "all" },
+        anchorContextId: undefined,
+      }),
+    );
+    const req = makeRequest([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: buildRecallMarker(query) }],
+      },
+    ]);
+
+    expect(expandRecallMarkers(req, store)).toBe(true);
+    expect(req.messages[0].content[0].type).toBe("tool_use");
+  });
+
   test("returns false with empty messages", () => {
     const store: RecallStore = new Map();
     store.set(recallStoreKey("test", "all"), makeStoredRecall());

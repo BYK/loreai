@@ -120,7 +120,10 @@ describe("recall — cross-session raw history demotion", () => {
     );
     db()
       .query("UPDATE distillations SET source_ids = ? WHERE id = ?")
-      .run(JSON.stringify([123, "x".repeat(257), "valid-source"]), id);
+      .run(
+        JSON.stringify([123, "x".repeat(257), "bad\nheading", "valid-source"]),
+        id,
+      );
 
     const result = await runRecall({
       query: "bounded source reference",
@@ -130,6 +133,7 @@ describe("recall — cross-session raw history demotion", () => {
 
     expect(result).toContain("t:valid-source");
     expect(result).not.toContain("x".repeat(257));
+    expect(result).not.toContain("bad\nheading");
   });
 
   // Same isolation for the distillation source (the riskier session_id access).

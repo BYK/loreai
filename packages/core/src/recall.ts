@@ -753,16 +753,18 @@ function getDistillationSourceIds(distillId: string): string[] {
       )
       .get(currentTenantId(), distillId) as { source_ids: string } | null;
     if (!row?.source_ids) return [];
+    if (row.source_ids.length > MAX_RECALL_BATCH_CHARS) return [];
     const parsed: unknown = JSON.parse(row.source_ids);
     if (!Array.isArray(parsed)) return [];
     return parsed
+      .slice(0, MAX_RECALL_BATCH_IDS)
       .filter(
         (sourceId): sourceId is string =>
           typeof sourceId === "string" &&
           sourceId.length > 0 &&
-          sourceId.length <= MAX_RECALL_ID_CHARS,
-      )
-      .slice(0, MAX_RECALL_BATCH_IDS);
+          sourceId.length <= MAX_RECALL_ID_CHARS &&
+          !/[\u0000-\u001f\u007f]/.test(sourceId),
+      );
   } catch {
     return [];
   }

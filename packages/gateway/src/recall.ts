@@ -188,10 +188,11 @@ export function buildRecallMarker(
 }
 
 /** Regex to parse a recall marker back into query + scope. */
-const MARKER_REGEX = /^📚 Searching (.+?) for "(.+)"…$/;
+const MARKER_REGEX = /^📚 Searching (.+?) for "([\s\S]+)"…$/;
+const MAX_RECALL_MARKER_CHARS = 1024;
 
 /** Regex to parse an id-based recall marker. */
-const ID_MARKER_REGEX = /^📚 Fetching detail for (.+?)…$/;
+const ID_MARKER_REGEX = /^📚 Fetching detail for ([\s\S]+?)…$/;
 
 /** Invisible Responses transcript anchor. Markdown renderers omit comments. */
 const ANCHOR_REGEX =
@@ -399,6 +400,13 @@ function insertCompanionBundle(
 
 /** Check if a text string is a recall marker (search or detail). */
 export function isRecallMarker(text: string): boolean {
+  if (text.length > MAX_RECALL_MARKER_CHARS) {
+    return (
+      text.startsWith("📚 Searching ") ||
+      text.startsWith("📚 Fetching detail for ") ||
+      text.startsWith("📚 Fetching details for ")
+    );
+  }
   return (
     parseRecallMarker(text) !== null || parseRecallAnchorFromText(text) !== null
   );
@@ -428,6 +436,7 @@ function storedRecallForText(
 export function parseRecallMarker(
   text: string,
 ): { query: string; scope: RecallScope; id?: string } | null {
+  if (text.length > MAX_RECALL_MARKER_CHARS) return null;
   // Try id-based marker first
   const idMatch = ID_MARKER_REGEX.exec(text);
   if (idMatch) {
@@ -666,20 +675,6 @@ export function expandRecallMarkers(
   options: { gatewayRecallEnabled?: boolean } = {},
 ): boolean {
   if (options.gatewayRecallEnabled === false) return false;
-  if (store.size === 0) {
-    let removed = false;
-    for (const message of req.messages) {
-      if (message.role !== "assistant") continue;
-      for (let index = message.content.length - 1; index >= 0; index--) {
-        const block = message.content[index];
-        if (block.type === "text" && isRecallMarker(block.text)) {
-          removeVisibleContentBlock(message, index);
-          removed = true;
-        }
-      }
-    }
-    return removed;
-  }
   let expanded = false;
   const anchorValidity = new Map<string, boolean[]>();
   const incomingMessages = structuredClone(req.messages);
@@ -729,9 +724,18 @@ export function expandRecallMarkers(
         markerIdx = j;
         break;
       }
+      if (isRecallMarker(block.text)) {
+        markerIdx = j;
+        break;
+      }
     }
 
-    if (markerIdx < 0 || !match) continue;
+    if (markerIdx < 0) continue;
+    if (!match) {
+      removeVisibleContentBlock(msg, markerIdx);
+      expanded = true;
+      continue;
+    }
     const { stored } = match;
     if (!(anchorValidity.get(match.key)?.shift() ?? false)) continue;
 
