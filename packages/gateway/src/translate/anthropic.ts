@@ -646,7 +646,7 @@ export function buildAnthropicRequest(
           ? { ...t.inputSchema }
           : sanitizeAnthropicToolInputSchema(
               t.inputSchema,
-              t.name === "recall",
+              t.gatewayOwned === true,
             ),
     }));
 

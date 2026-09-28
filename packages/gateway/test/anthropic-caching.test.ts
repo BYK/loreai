@@ -113,7 +113,14 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
     };
     const originalSchema = structuredClone(schema);
     const req = makeRequest({
-      tools: [{ name: "recall", description: "recall", inputSchema: schema }],
+      tools: [
+        {
+          name: "recall",
+          description: "recall",
+          gatewayOwned: true,
+          inputSchema: schema,
+        },
+      ],
     });
 
     const body = getBody(req);
@@ -166,6 +173,7 @@ describe("buildAnthropicRequest — tool schema compatibility", () => {
         {
           name: "recall",
           description: "recall",
+          gatewayOwned: true,
           inputSchema: { anyOf: [{ type: "object" }] },
         },
       ],

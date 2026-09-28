@@ -54,6 +54,7 @@ import { MAX_RECALL_EXECUTIONS } from "./recall-budget";
 export const RECALL_GATEWAY_TOOL: GatewayTool = {
   name: "recall",
   description: RECALL_TOOL_DESCRIPTION,
+  gatewayOwned: true,
   inputSchema: {
     type: "object",
     properties: {
@@ -1082,6 +1083,16 @@ function parseRecallInput(block: GatewayToolUseBlock): {
  * catalog + knowledge-delta pair). Prevents silent 3-token agent loop exits
  * when a query's hits are entirely redundant.
  */
+function reportRecallExecutionFailure(): void {
+  const diagnostic = new Error("gateway recall execution failed");
+  diagnostic.name = "RecallExecutionError";
+  try {
+    log.error(diagnostic);
+  } catch {
+    // Diagnostics must not turn a recall failure into a request failure.
+  }
+}
+
 export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
@@ -1115,13 +1126,7 @@ export async function executeRecall(
       parseRecallInput(block));
   } catch {
     if (signal?.aborted) throw signal.reason;
-    const diagnostic = new Error("gateway recall execution failed");
-    diagnostic.name = "RecallExecutionError";
-    try {
-      log.error(diagnostic);
-    } catch {
-      // Diagnostics must not turn a malformed recall into a request failure.
-    }
+    reportRecallExecutionFailure();
     return {
       result: "Recall search failed. The memory system encountered an error.",
       input: { query, scope, id, ids, detailOffset, detailLimit },
@@ -1161,13 +1166,11 @@ export async function executeRecall(
     };
   } catch {
     if (signal?.aborted) throw signal.reason;
-    const diagnostic = new Error("gateway recall execution failed");
-    diagnostic.name = "RecallExecutionError";
-    log.error(diagnostic);
+    reportRecallExecutionFailure();
     return {
       result: "Recall search failed. The memory system encountered an error.",
       input: { query, scope, id, ids, detailOffset, detailLimit },
-      valid: true,
+      valid: false,
       coverage: [],
     };
   }

@@ -6750,7 +6750,26 @@ function supportsEffectiveRootToolSchemaCombinators(
   }
   const effectiveBase = normalizeUpstreamBase(route.effectiveUpstreamBase);
   const canonicalBase = normalizeUpstreamBase(providerRoute.url);
-  return effectiveBase !== undefined && effectiveBase === canonicalBase;
+  if (effectiveBase === undefined || effectiveBase !== canonicalBase) {
+    return false;
+  }
+  if (route.headerUpstreamPath === undefined) return true;
+  try {
+    const canonicalEndpoint = new URL(providerRoute.url);
+    canonicalEndpoint.pathname = `${canonicalEndpoint.pathname.replace(/\/$/, "")}/v1/messages`;
+    const effectiveOrigin = new URL(route.effectiveUpstreamBase).origin;
+    const finalEndpoint = new URL(effectiveOrigin + route.headerUpstreamPath);
+    return finalEndpoint.href === canonicalEndpoint.href;
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only access to the final-destination capability check. */
+export function supportsEffectiveRootToolSchemaCombinatorsForTest(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  return supportsEffectiveRootToolSchemaCombinators(route);
 }
 
 /** A headerless model route identifies a provider only when its final URL
@@ -10913,9 +10932,13 @@ export function streamResponsesRecallAware(
       const resultText =
         `Invalid recall arguments (${input.invalidIssue}). ` +
         "Call recall again with a non-empty query, one valid id, or a non-empty ids list. Set unused arguments to null.";
-      log.warn(
-        `openai-responses recall arguments rejected issue=${input.invalidIssue}`,
-      );
+      try {
+        log.warn(
+          `openai-responses recall arguments rejected issue=${input.invalidIssue}`,
+        );
+      } catch {
+        // Diagnostics must never alter the model response path.
+      }
       reportInvalidRecallArguments(input.invalidIssue);
       recallBudget.record({
         resultBytes: Buffer.byteLength(resultText),

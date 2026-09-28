@@ -847,7 +847,7 @@ export type ProviderRoute = {
     | "vertex"
     | "gemini"
     | null;
-  /** Whether this route accepts oneOf/allOf/anyOf at a tool schema root. */
+  /** Whether this route accepts the supported root combinators at tool-schema roots. */
   supportsRootToolSchemaCombinators?: boolean;
   /** AWS Bedrock via the `bedrock-mantle` endpoint. When true, the gateway
    *  builds the region-specific mantle URL (`bedrock-mantle.<region>.api.aws/
