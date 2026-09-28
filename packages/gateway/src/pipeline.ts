@@ -6745,6 +6745,48 @@ type ResolvedRequestUpstreamRoute = {
   bedrockMantle: boolean;
 };
 
+/**
+ * Provider capability is trusted only when the effective destination is the
+ * provider's canonical destination. An explicit upstream URL can override a
+ * compatible provider route with a destination that rejects root combinators.
+ */
+function supportsEffectiveRootToolSchemaCombinators(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  const providerRoute = route.providerRoute;
+  if (
+    providerRoute?.supportsRootToolSchemaCombinators !== true ||
+    providerRoute.url === null
+  ) {
+    return false;
+  }
+  const effectiveBase = normalizeUpstreamBase(route.effectiveUpstreamBase);
+  const canonicalBase = normalizeUpstreamBase(providerRoute.url);
+  if (effectiveBase === undefined || effectiveBase !== canonicalBase) {
+    return false;
+  }
+  if (route.headerUpstreamPath === undefined) return true;
+  try {
+    const canonicalEndpoint = new URL(providerRoute.url);
+    canonicalEndpoint.pathname = `${canonicalEndpoint.pathname.replace(/\/$/, "")}/v1/messages`;
+    const effectiveOrigin = new URL(route.effectiveUpstreamBase).origin;
+    const finalEndpoint = new URL(effectiveOrigin + route.headerUpstreamPath);
+    return (
+      finalEndpoint.origin === canonicalEndpoint.origin &&
+      finalEndpoint.pathname === canonicalEndpoint.pathname
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only access to the final-destination capability check. */
+export function supportsEffectiveRootToolSchemaCombinatorsForTest(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  return supportsEffectiveRootToolSchemaCombinators(route);
+}
+
 /** A headerless model route identifies a provider only when its final URL
  * matches that provider's built-in destination, without a caller override. */
 function canonicalModelRouteProviderID(
@@ -7395,7 +7437,9 @@ async function forwardToUpstream(
           conversationTTL: "5m" as const,
         }
       : cache;
-    const result = buildAnthropicRequest(req, effectiveCache);
+    const result = buildAnthropicRequest(req, effectiveCache, {
+      sanitizeRootToolSchemas: true,
+    });
 
     const project = await resolveVertexProject(config.vertexProject, signal);
     if (!project) {
@@ -7459,7 +7503,10 @@ async function forwardToUpstream(
             conversationTTL: "5m" as const,
           }
         : cache;
-    const result = buildAnthropicRequest(req, effectiveCache);
+    const result = buildAnthropicRequest(req, effectiveCache, {
+      sanitizeRootToolSchemas:
+        !supportsEffectiveRootToolSchemaCombinators(route),
+    });
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;
@@ -8097,7 +8144,7 @@ export function buildStreamingResponse(
                 throw new RecallContinuationFailure("depth_exhausted");
               }
               recallDepth++;
-              const { result, input, coverage } = await promiseAgainstAbort(
+              const recallExecution = await promiseAgainstAbort(
                 () =>
                   withTenant(
                     recallContext.sessionState.storageTenantId ?? "",
@@ -8114,6 +8161,10 @@ export function buildStreamingResponse(
                   ),
                 streamSignal,
               );
+              if (!recallExecution.valid) {
+                throw new RecallContinuationFailure("recall_execution");
+              }
+              const { result, input, coverage } = recallExecution;
 
               recallDiagnostics.record(input, result, coverage);
               const stopReason = recallBudget.record({
@@ -10924,9 +10975,13 @@ export function streamResponsesRecallAware(
       const resultText =
         `Invalid recall arguments (${input.invalidIssue}). ` +
         "Call recall again with a non-empty query, one valid id, or a non-empty ids list. Set unused arguments to null.";
-      log.warn(
-        `openai-responses recall arguments rejected issue=${input.invalidIssue}`,
-      );
+      try {
+        log.warn(
+          `openai-responses recall arguments rejected issue=${input.invalidIssue}`,
+        );
+      } catch {
+        // Diagnostics must never alter the model response path.
+      }
       reportInvalidRecallArguments(input.invalidIssue);
       recallBudget.record({
         resultBytes: Buffer.byteLength(resultText),
@@ -21646,7 +21701,7 @@ async function handleConversationTurnPrepared(
       }
       recallDepth++;
       recallPersistenceTransaction ??= bufferedRecallTransaction;
-      const { result, input, coverage } = await promiseAgainstAbort(
+      const recallExecution = await promiseAgainstAbort(
         () =>
           executeRecall(
             recallBlock,
@@ -21659,6 +21714,8 @@ async function handleConversationTurnPrepared(
           ),
         foregroundAbort.signal,
       );
+      if (!recallExecution.valid) return failRecall("recall_execution");
+      const { result, input, coverage } = recallExecution;
 
       bufferedRecallDiagnostics.record(input, result, coverage);
       const stopReason = recallBudget.record({
@@ -22209,7 +22266,7 @@ async function handleConversationTurnPrepared(
                   pendingKnowledgeDelta,
                 );
                 const deferredTransferRecordings: Array<() => void> = [];
-                const { result, input, coverage } = await withTenant(
+                const recallExecution = await withTenant(
                   sessionState.storageTenantId ?? "",
                   () =>
                     executeRecall(
@@ -22234,6 +22291,10 @@ async function handleConversationTurnPrepared(
                       (record) => deferredTransferRecordings.push(record),
                     ),
                 );
+                if (!recallExecution.valid) {
+                  throw new RecallContinuationFailure("recall_execution");
+                }
+                const { result, input, coverage } = recallExecution;
                 const recallBlock = acc.content[contentPosition];
                 if (
                   recallBlock?.type !== "tool_use" ||

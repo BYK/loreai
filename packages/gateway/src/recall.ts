@@ -54,6 +54,7 @@ import { MAX_RECALL_EXECUTIONS } from "./recall-budget";
 export const RECALL_GATEWAY_TOOL: GatewayTool = {
   name: "recall",
   description: RECALL_TOOL_DESCRIPTION,
+  gatewayOwned: true,
   inputSchema: {
     type: "object",
     properties: {
@@ -1082,6 +1083,16 @@ function parseRecallInput(block: GatewayToolUseBlock): {
  * catalog + knowledge-delta pair). Prevents silent 3-token agent loop exits
  * when a query's hits are entirely redundant.
  */
+function reportRecallExecutionFailure(): void {
+  const diagnostic = new Error("gateway recall execution failed");
+  diagnostic.name = "RecallExecutionError";
+  try {
+    log.error(diagnostic);
+  } catch {
+    // Diagnostics must not turn a recall failure into a request failure.
+  }
+}
+
 export async function executeRecall(
   block: GatewayToolUseBlock,
   projectPath: string,
@@ -1100,6 +1111,7 @@ export async function executeRecall(
     detailOffset?: number;
     detailLimit?: number;
   };
+  valid: boolean;
   coverage?: RecallCoverage[];
 }> {
   let query = "";
@@ -1112,6 +1124,18 @@ export async function executeRecall(
   try {
     ({ query, scope, id, ids, detailOffset, detailLimit } =
       parseRecallInput(block));
+  } catch {
+    if (signal?.aborted) throw signal.reason;
+    reportRecallExecutionFailure();
+    return {
+      result: "Recall search failed. The memory system encountered an error.",
+      input: { query, scope, id, ids, detailOffset, detailLimit },
+      valid: false,
+      coverage: [],
+    };
+  }
+
+  try {
     const cfg = loreConfig();
     signal?.throwIfAborted();
     const recall = await runRecallWithMetadata({
@@ -1137,16 +1161,16 @@ export async function executeRecall(
     return {
       result: recall.result,
       input: { query, scope, id, ids, detailOffset, detailLimit },
+      valid: true,
       coverage: recall.coverage,
     };
   } catch {
     if (signal?.aborted) throw signal.reason;
-    const diagnostic = new Error("gateway recall execution failed");
-    diagnostic.name = "RecallExecutionError";
-    log.error(diagnostic);
+    reportRecallExecutionFailure();
     return {
       result: "Recall search failed. The memory system encountered an error.",
       input: { query, scope, id, ids, detailOffset, detailLimit },
+      valid: false,
       coverage: [],
     };
   }

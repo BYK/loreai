@@ -218,6 +218,8 @@ export type GatewayTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** True only for tools injected and owned by the gateway. */
+  gatewayOwned?: boolean;
 };
 
 // ---------------------------------------------------------------------------

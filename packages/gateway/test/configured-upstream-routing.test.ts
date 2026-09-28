@@ -94,6 +94,156 @@ describe("configured upstream routing", () => {
     );
   });
 
+  test("preserves root tool combinators for compatible Anthropic providers", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    let capturedBody: Record<string, unknown> | undefined;
+    setUpstreamInterceptor(async (body, _model, _stream, makeReal) => {
+      capturedBody = body as Record<string, unknown>;
+      return makeReal();
+    });
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(anthropicResponse());
+
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+      oneOf: [{ required: ["value"] }, { additionalProperties: false }],
+      not: { type: "null" },
+    };
+    const response = await harness.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "test-key",
+        "x-lore-provider": "minimax",
+        "x-lore-upstream-url": "https://api.minimax.io/anthropic",
+        "x-lore-upstream-path": "/anthropic/v1/messages",
+        "x-lore-project": "/tmp/compatible-anthropic-provider",
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M2.7",
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "union", description: "union", input_schema: schema }],
+      }),
+    });
+    await response.text();
+
+    expect(response.status).toBe(200);
+    if (!capturedBody || !Array.isArray(capturedBody.tools)) {
+      throw new Error("upstream request did not contain tools");
+    }
+    const firstTool = capturedBody.tools[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(firstTool?.input_schema).toEqual(schema);
+  });
+
+  test("does not weaken a client-owned recall tool", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (body, _model, _stream, makeReal) => {
+      return makeReal();
+    });
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(anthropicResponse());
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+      oneOf: [{ required: ["value"] }],
+    };
+
+    const response = await harness.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "test-key",
+        "x-lore-provider": "minimax",
+        "x-lore-upstream-url": "https://api.anthropic.com",
+        "x-lore-project": "/tmp/client-owned-recall",
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M2.7",
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "recall",
+            description: "client tool",
+            input_schema: schema,
+          },
+        ],
+      }),
+    });
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(502);
+  });
+
+  test("trusts capability only for the final canonical endpoint", async () => {
+    const [
+      { loadConfig },
+      {
+        resolveRequestUpstreamRouteForTest,
+        supportsEffectiveRootToolSchemaCombinatorsForTest,
+      },
+    ] = await Promise.all([import("../src/config"), import("../src/pipeline")]);
+    const baseHeaders = {
+      "x-api-key": "test-key",
+      "x-lore-provider": "minimax",
+      "x-lore-upstream-url": "https://api.minimax.io/anthropic",
+    };
+    const config = { ...loadConfig(), remoteGateway: false };
+    const canonicalRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/v1/messages",
+        },
+      },
+      config,
+    );
+    const noncanonicalRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/custom/messages",
+        },
+      },
+      config,
+    );
+    const canonicalQueryRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/v1/messages?trace=1",
+        },
+      },
+      config,
+    );
+
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalRoute),
+    ).toBe(true);
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(noncanonicalRoute),
+    ).toBe(false);
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalQueryRoute),
+    ).toBe(true);
+  });
+
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
     const [
       { resolveProfile },

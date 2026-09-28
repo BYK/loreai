@@ -18,6 +18,13 @@ export function createRecallDiagnostics(enabled = true) {
   let resultBytes = 0;
   const fingerprint = (value: string) =>
     createHash("sha256").update(value).digest("hex");
+  const report = (message: string): void => {
+    try {
+      log.info(message);
+    } catch {
+      // Diagnostics must never alter the model response path.
+    }
+  };
   return {
     record(
       input: { query: string; scope?: string; id?: string; ids?: string[] },
@@ -56,7 +63,7 @@ export function createRecallDiagnostics(enabled = true) {
         coverage.add(key);
         return true;
       });
-      log.info(
+      report(
         `recall-round ${JSON.stringify({ round: rounds, kind: input.id || input.ids ? "detail" : "search", repeatedInput, repeatedResult, repeatedPair, coverageProgress, resultBytes: Buffer.byteLength(result) })}`,
       );
     },
@@ -64,7 +71,7 @@ export function createRecallDiagnostics(enabled = true) {
       if (finished) return;
       finished = true;
       if (enabled && rounds > 0) {
-        log.info(
+        report(
           `recall-chain ${JSON.stringify({ outcome, rounds, detailCalls, repeatedInputs: rounds - inputs.size, repeatedResults: rounds - results.size, repeatedPairs: rounds - pairs.size, emptyBodies, resultBytes, coverageItems: coverage.size, elapsedMs: Math.min(300_000, Math.max(0, Math.round(performance.now() - started))) })}`,
         );
       }

@@ -57,3 +57,15 @@ test.each([true, false])(
     );
   },
 );
+
+test("a throwing diagnostic sink cannot alter recall diagnostics", () => {
+  vi.spyOn(log, "info").mockImplementation(() => {
+    throw new Error("diagnostic sink failed");
+  });
+  const diagnostics = createRecallDiagnostics();
+
+  expect(() => {
+    diagnostics.record({ query: "private query" }, "private result");
+    diagnostics.finish("failed");
+  }).not.toThrow();
+});

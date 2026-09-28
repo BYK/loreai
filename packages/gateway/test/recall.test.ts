@@ -241,6 +241,7 @@ describe("executeRecall malformed input", () => {
     expect(result.result).toBe(
       "Recall search failed. The memory system encountered an error.",
     );
+    expect(result.valid).toBe(false);
     expect(result.input).toEqual({ query: "", scope: "all", id: undefined });
   });
 
@@ -271,6 +272,7 @@ describe("executeRecall malformed input", () => {
     expect(result.result).toBe(
       "Recall search failed. The memory system encountered an error.",
     );
+    expect(result.valid).toBe(false);
   });
 
   test("logs malformed recall input through a fixed error envelope", async () => {
@@ -305,6 +307,87 @@ describe("executeRecall malformed input", () => {
         sentinel,
       );
     } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
+  });
+
+  test("does not let a throwing log sink change malformed recall handling", async () => {
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: () => {
+        throw new Error("diagnostic sink failed");
+      },
+      captureException: () => {
+        throw new Error("diagnostic capture failed");
+      },
+    });
+
+    try {
+      await expect(
+        executeRecall(
+          {
+            type: "tool_use",
+            id: "recall-throwing-log-sink",
+            name: RECALL_TOOL_NAME,
+            input: { unknown: true },
+          },
+          process.cwd(),
+          "throwing-log-sink",
+        ),
+      ).resolves.toMatchObject({
+        result: "Recall search failed. The memory system encountered an error.",
+        valid: false,
+      });
+    } finally {
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        captureException: () => {},
+      });
+    }
+  });
+
+  test("does not let a throwing log sink change recall execution failures", async () => {
+    const core = await import("@loreai/core");
+    const runRecall = vi
+      .spyOn(core, "runRecallWithMetadata")
+      .mockRejectedValueOnce(new Error("search failed"));
+    log.registerSink({
+      info: () => {},
+      warn: () => {},
+      error: () => {
+        throw new Error("diagnostic sink failed");
+      },
+      captureException: () => {
+        throw new Error("diagnostic capture failed");
+      },
+    });
+
+    try {
+      await expect(
+        executeRecall(
+          {
+            type: "tool_use",
+            id: "recall-throwing-execution-log-sink",
+            name: RECALL_TOOL_NAME,
+            input: { query: "valid query" },
+          },
+          process.cwd(),
+          "throwing-execution-log-sink",
+        ),
+      ).resolves.toMatchObject({
+        result: "Recall search failed. The memory system encountered an error.",
+        valid: false,
+      });
+    } finally {
+      runRecall.mockRestore();
       log.registerSink({
         info: () => {},
         warn: () => {},
