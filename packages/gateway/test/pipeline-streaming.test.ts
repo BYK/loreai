@@ -380,6 +380,94 @@ describe("buffered passthrough cancellation", () => {
   });
 });
 
+describe("startup backfill shutdown", () => {
+  it("aborts foreground work before waiting for a stalled real startup backfill", async () => {
+    await resetPipelineState({ fast: true });
+    const originalNodeEnv = process.env.NODE_ENV;
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const warmup = vi
+      .spyOn(core.embedding, "warmupEmbedding")
+      .mockImplementation(() => {});
+    const startup = vi.spyOn(core.embedding, "runStartupBackfill");
+    const diagnostics = vi.spyOn(core.log, "info");
+    const project = core.ensureProject(process.cwd());
+    core
+      .db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES ('shutdown-backfill-pending', ?, 's', 'user', 'old temporal source awaiting the startup re-chunk walk', 0, 0, 0)",
+      )
+      .run(project);
+    core.setKV("lore:temporal_rechunk.queue_recovery_pending", "1");
+    core.setKV("lore:temporal_rechunk.done", "0");
+    core.embedding._restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          return texts.map(() =>
+            new Float32Array(core.config().search.embeddings.dimensions).fill(
+              1,
+            ),
+          );
+        },
+      },
+    });
+    core.embedding._setRecallEmbedsInFlightForTest(1);
+    setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
+    process.env.NODE_ENV = "development";
+    setPipelineResetSettleTimeoutForTest(100);
+    let foreground: ReturnType<typeof createForegroundAbortScope> | undefined;
+    let reset: Promise<void> | undefined;
+    let priming: Promise<Response> | undefined;
+    try {
+      const request = makeResponsesRequest({ sessionHeaders: {} });
+      request.rawHeaders["x-lore-no-store"] = "true";
+      priming = handleRequest(request, loadLocalConfig());
+      await vi.waitFor(() => expect(startup).toHaveBeenCalledOnce());
+      await vi.waitFor(
+        () =>
+          expect(
+            diagnostics.mock.calls.some(
+              ([message]) =>
+                typeof message === "string" &&
+                message.startsWith("temporal re-chunk parked"),
+            ),
+          ).toBe(true),
+        {
+          timeout: 6_000,
+        },
+      );
+      const backfill = startup.mock.results[0]?.value as Promise<unknown>;
+      let backfillSettled = false;
+      void backfill.then(
+        () => (backfillSettled = true),
+        () => (backfillSettled = true),
+      );
+      expect(backfillSettled).toBe(false);
+
+      foreground = createForegroundAbortScope();
+      reset = resetPipelineState({ fast: true });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(foreground.signal.aborted).toBe(true);
+      await reset;
+    } finally {
+      core.temporalEmbeddingQueue.stopTemporalEmbeddingScheduler();
+      core.embedding._setRecallEmbedsInFlightForTest(0);
+      await reset?.catch(() => {});
+      await core.temporalEmbeddingQueue.settleTemporalEmbeddingScheduler(1_000);
+      await priming?.catch(() => {});
+      foreground?.dispose();
+      setPipelineResetSettleTimeoutForTest();
+      setUpstreamInterceptor(undefined);
+      process.env.NODE_ENV = originalNodeEnv;
+      warmup.mockRestore();
+      startup.mockRestore();
+      diagnostics.mockRestore();
+      core.embedding._restoreProvider(savedProvider);
+      await resetPipelineState({ fast: true });
+    }
+  });
+});
+
 describe("principal Responses transport recovery", () => {
   it("retries the exact transformed request once before client-visible output", async () => {
     const forwardedBodies: string[] = [];
@@ -1387,34 +1475,39 @@ describe("Pipeline — streaming responses", () => {
   );
 
   it("reattaches a context selection after a caller leaves without recording phantom injections", async () => {
-    const projectPath = `/tmp/lore-context-queue-${Date.now()}`;
-    const sessionHeaders = {
-      "x-lore-session-id": `context-queue-${Date.now()}`,
-      "x-lore-project": projectPath,
-    };
-    const selectedId = ltm.create({
-      projectPath,
-      category: "gotcha",
-      title: "Queued context selection",
-      content: "Use the returned context after the retry",
-      scope: "project",
-    });
-    const overflowId = ltm.create({
-      projectPath,
-      category: "decision",
-      title: "Overflow context choice",
-      content: "Available through recall",
-      scope: "project",
-    });
-    const bodies: string[] = [];
-    setUpstreamInterceptor(async (body) => {
-      bodies.push(typeof body === "string" ? body : JSON.stringify(body));
-      return new Response(validResponsesSSE(`queue_${bodies.length}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
+    // A late fire-and-forget knowledge embedding changes the selection revision
+    // and correctly requires a new selection. Keep the revision stable here so
+    // this test isolates reattachment after a caller disconnects.
+    const savedProvider = core.embedding._saveAndClearProvider();
     let selection: { mockRestore(): void } | undefined;
     try {
+      core.embedding._restoreProvider({ provider: null });
+      const projectPath = `/tmp/lore-context-queue-${Date.now()}`;
+      const sessionHeaders = {
+        "x-lore-session-id": `context-queue-${Date.now()}`,
+        "x-lore-project": projectPath,
+      };
+      const selectedId = ltm.create({
+        projectPath,
+        category: "gotcha",
+        title: "Queued context selection",
+        content: "Use the returned context after the retry",
+        scope: "project",
+      });
+      const overflowId = ltm.create({
+        projectPath,
+        category: "decision",
+        title: "Overflow context choice",
+        content: "Available through recall",
+        scope: "project",
+      });
+      const bodies: string[] = [];
+      setUpstreamInterceptor(async (body) => {
+        bodies.push(typeof body === "string" ? body : JSON.stringify(body));
+        return new Response(validResponsesSSE(`queue_${bodies.length}`), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
       const initial = makeResponsesRequest({ sessionHeaders });
       await (await handleRequest(initial, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1440,6 +1533,7 @@ describe("Pipeline — streaming responses", () => {
           return original(...args);
         calls++;
         args[3].overflowSink?.push(ltm.get(overflowId)!);
+        if (calls > 1) return Promise.resolve([ltm.get(selectedId)!]);
         return new Promise((resolve) => (release = resolve));
       });
       const caller = new AbortController();
@@ -1476,6 +1570,7 @@ describe("Pipeline — streaming responses", () => {
       selection?.mockRestore();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
     }
   });
 

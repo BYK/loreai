@@ -126,11 +126,13 @@ import {
   updateSessionPromptDeltaContent,
   withSavepoint,
   loadHeaderSessionIndex,
+  clearLegacyCredentialHeaderMapping,
   isHostedMode,
   enableHostedMode,
   importLoreFileAs,
   resolveWorkspaces,
   currentTenantId,
+  LOCAL_TENANT_ID,
   withTenant,
   ReadPreparationUnavailableError,
 } from "@loreai/core";
@@ -1137,6 +1139,7 @@ export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
  */
 export async function resetPipelineState(opts?: {
   fast?: boolean;
+  deadlineAt?: number;
 }): Promise<void> {
   if (pipelineResetPromise) return pipelineResetPromise;
   pipelineResetInProgress = true;
@@ -1155,6 +1158,7 @@ export async function resetPipelineState(opts?: {
 
 async function resetPipelineStateInner(opts?: {
   fast?: boolean;
+  deadlineAt?: number;
 }): Promise<void> {
   streamingPostResponsesAccepting = false;
   await pipelineResetPauseForTest;
@@ -1175,9 +1179,25 @@ async function resetPipelineStateInner(opts?: {
     ]),
   ];
   for (const request of activeRequests) request.abort(resetReason);
+  const settleTimeoutMs = () =>
+    opts?.deadlineAt === undefined
+      ? pipelineResetSettleTimeoutMs
+      : Math.min(
+          pipelineResetSettleTimeoutMs,
+          Math.max(0, opts.deadlineAt - Date.now()),
+        );
+  // Cancel foreground work before a stalled writer can consume the shutdown
+  // budget. The startup walk owns the DB even during its initial delay; never
+  // report reset complete while that writer can still touch storage.
+  const startups = [...startupBackfills];
+  await boundedSettle(startups, settleTimeoutMs());
+  if (startups.some((startup) => startupBackfills.has(startup)))
+    throw new Error(
+      "startup backfill did not settle before pipeline reset deadline",
+    );
   await boundedSettle(
     activeRequests.map((request) => request.settled),
-    pipelineResetSettleTimeoutMs,
+    settleTimeoutMs(),
   );
   for (const request of activeRequests) {
     if (!activePipelineRequests.has(request)) continue;
@@ -1197,7 +1217,7 @@ async function resetPipelineStateInner(opts?: {
   // non-fast drain below will then observe.
   await boundedSettle(
     [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
-    pipelineResetSettleTimeoutMs,
+    settleTimeoutMs(),
   );
   streamingPostResponseGeneration++;
   pipelineGenerationAbort = new AbortController();
@@ -1317,6 +1337,7 @@ const streamingPostResponsePendingByAdmissionKey = new Map<string, number>();
 let streamingPostResponsePending = 0;
 let streamingPostResponseGeneration = 0;
 let pipelineGenerationAbort = new AbortController();
+const startupBackfills = new Set<Promise<void>>();
 let streamingPostResponsesAccepting = true;
 let maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
 let maxStreamingPostResponsesPerSession =
@@ -2124,10 +2145,11 @@ function restoreHeaderSessionMappings(config: GatewayConfig): {
   let cleared = 0;
   for (const entry of loadHeaderSessionIndex()) {
     if (isCredentialHeaderName(entry.headerName)) {
-      saveSessionTracking(entry.sessionId, {
-        headerSessionId: null,
-        headerName: null,
-      });
+      clearLegacyCredentialHeaderMapping(
+        entry.sessionId,
+        entry.headerName,
+        entry.headerSessionId,
+      );
       cleared++;
       continue;
     }
@@ -4787,18 +4809,37 @@ async function initIfNeeded(
     // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
     // pool to live traffic: park while the breaker is tripped or a live recall
     // embed is in flight, resume the instant the worker drains.
-    const startupBackfill = spanStartupBackfill(() => {
-      const backfill = embedding.runStartupBackfill({
-        shouldPause: () => isBackgroundPaused(),
-      });
-      // When embeddings are available, runStartupBackfill synchronously
-      // reconciles config and attempts vec0 cutover before its first await.
-      // Start durable live-message scheduling after those transitions.
-      temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
-      return backfill;
-    });
-    startupBackfill.catch((e) => {
-      log.error("embedding backfill failed:", e);
+    // The first request may belong to a remote tenant. The one process-wide
+    // scan and scheduler must not inherit that request's credential scope;
+    // each admitted row re-enters its authoritative project's tenant.
+    const startupSignal = pipelineGenerationAbort.signal;
+    const startupBackfill = withTenant(LOCAL_TENANT_ID, () =>
+      spanStartupBackfill(() => {
+        const backfill = embedding.runStartupBackfill({
+          shouldPause: () => isBackgroundPaused(),
+          signal: startupSignal,
+        });
+        // When embeddings are available, runStartupBackfill synchronously
+        // reconciles config and attempts vec0 cutover before its first await.
+        // Start durable live-message scheduling after those transitions.
+        temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
+        return backfill;
+      }),
+    );
+    startupBackfills.add(startupBackfill);
+    void startupBackfill.then(
+      () => startupBackfills.delete(startupBackfill),
+      () => startupBackfills.delete(startupBackfill),
+    );
+    startupBackfill.catch(() => {
+      if (startupSignal.aborted) return;
+      // Storage, callbacks and provider failures may contain private text.
+      // Startup diagnostics must never relay arbitrary exception values.
+      try {
+        log.error("embedding backfill failed");
+      } catch {
+        // Diagnostics cannot affect foreground response delivery.
+      }
     });
   }
 

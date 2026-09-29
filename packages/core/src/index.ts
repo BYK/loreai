@@ -203,6 +203,7 @@ export {
   type CacheBustStat,
   type CacheBustSummary,
   loadHeaderSessionIndex,
+  clearLegacyCredentialHeaderMapping,
   loadParentChildMap,
   type SessionTrackingState,
   type LoadedSessionTracking,

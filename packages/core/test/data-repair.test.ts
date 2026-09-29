@@ -4,9 +4,17 @@
  *   - backupDatabase (mandatory pre-write snapshot; never touches WAL/SHM)
  *   - validateDatabaseIntegrity (post-mutation safety check)
  */
-import { existsSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test, expect, beforeEach } from "vitest";
-import { db, dbPath, ensureProject } from "../src/db";
+import { close, db, dbPath, ensureProject } from "../src/db";
 import * as data from "../src/data";
 
 function setSessionState(
@@ -56,6 +64,52 @@ describe("getSessionConfidentProjectPath", () => {
 });
 
 describe("backupDatabase", () => {
+  function withIsolatedLiveDb(run: (live: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), "lore-backup-boundary-"));
+    const previousPath = process.env.LORE_DB_PATH;
+    try {
+      close();
+      process.env.LORE_DB_PATH = join(dir, "live.db");
+      ensureProject("/test/backup/boundary");
+      run(dbPath());
+    } finally {
+      close();
+      if (previousPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = previousPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test.each(["", "-wal", "-shm"])(
+    "rejects a destination overlapping the live database%s",
+    (suffix) => {
+      withIsolatedLiveDb((live) => {
+        const target = `${live}${suffix}`;
+        const before = readFileSync(target);
+        expect(() => data.backupDatabase(target)).toThrow(/destination/);
+        expect(readFileSync(target)).toEqual(before);
+      });
+    },
+  );
+
+  test("preserves an existing destination and its sidecars", () => {
+    withIsolatedLiveDb((live) => {
+      const target = `${live}.existing`;
+      for (const suffix of ["", "-wal", "-shm"]) {
+        writeFileSync(
+          `${target}${suffix}`,
+          `unrelated backup target ${suffix}`,
+        );
+      }
+      expect(() => data.backupDatabase(target)).toThrow(/exist|destination/);
+      for (const suffix of ["", "-wal", "-shm"]) {
+        expect(readFileSync(`${target}${suffix}`, "utf8")).toBe(
+          `unrelated backup target ${suffix}`,
+        );
+      }
+    });
+  });
+
   test("creates a consistent snapshot without touching WAL/SHM", () => {
     const pidA = ensureProject("/test/backup/proj");
     insertMessage(pidA, "backup-sess", `bk-${crypto.randomUUID()}`);

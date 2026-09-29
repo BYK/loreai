@@ -32,7 +32,10 @@ const provenance =
   '[{"type":"opaque","raw":{"encrypted_content":"synthetic private reasoning AABCD123456789"}}]';
 function parent(s = scope) {
   ensureProject(s.projectPath);
-  saveSessionTracking(s.sessionID, {});
+  saveSessionTracking(s.sessionID, {
+    projectPath: s.projectPath,
+    projectPathProvisional: false,
+  });
 }
 function fill(s = scope) {
   const cache = new SemanticTokenCache(s);
@@ -141,7 +144,12 @@ describe("exact derived provenance counts", () => {
     parent(other);
     expect(fill(other).stats.misses).toBe(1);
     withTenant("other-tenant", () => {
-      parent();
+      // The globally keyed state belongs to the original tenant. Its presence
+      // must not authorize another tenant's disposable cache publication.
+      ensureProject(scope.projectPath);
+      expect(() => saveSessionTracking(scope.sessionID, {})).toThrow(
+        "session state ownership unavailable",
+      );
       expect(fill().stats.misses).toBe(1);
     });
     expect(
@@ -153,7 +161,7 @@ describe("exact derived provenance counts", () => {
           n: number;
         }
       ).n,
-    ).toBe(3);
+    ).toBe(2);
   });
 
   it("never reads or writes a durable cache in no-store mode", () => {
@@ -278,6 +286,11 @@ describe("exact derived provenance counts", () => {
               "INSERT INTO session_state (session_id, updated_at) VALUES (?, ?)",
             )
             .run(scope.sessionID, Date.now());
+          other
+            .prepare(
+              "INSERT INTO session_state_owners (session_id, tenant_id) VALUES (?, ?)",
+            )
+            .run(scope.sessionID, "");
           other.exec("COMMIT");
         } finally {
           other.close();

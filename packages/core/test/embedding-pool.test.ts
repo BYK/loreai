@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { Worker } from "node:worker_threads";
+import * as log from "../src/log";
+import { withTenant } from "../src/tenant";
 import { config } from "../src/config";
 import * as ltm from "../src/ltm";
 import {
@@ -29,6 +31,7 @@ import {
   _setPoolFreememForTest,
   _setRecallEmbedsInFlightForTest,
   _setTestWorkerFactory,
+  warmupEmbedding,
 } from "../src/embedding";
 
 // Exercises the EmbeddingPool cross-worker dispatch (#999): least-busy routing,
@@ -44,6 +47,7 @@ const GB = 1024 * 1024 * 1024;
  *  embed requests posted to it and only completes them when the test says so. */
 class FakeWorker extends EventEmitter {
   readonly embedIds: number[] = [];
+  readonly embedTexts: string[][] = [];
   embedPostCount = 0;
   gotShutdown = false;
   terminated = false;
@@ -51,7 +55,7 @@ class FakeWorker extends EventEmitter {
   throwOnNextEmbed = false;
 
   postMessage(msg: unknown): void {
-    const m = msg as { type: string; id?: number };
+    const m = msg as { type: string; id?: number; texts?: string[] };
     if (m.type === "embed" && typeof m.id === "number") {
       if (this.throwOnNextEmbed) {
         this.throwOnNextEmbed = false;
@@ -59,6 +63,7 @@ class FakeWorker extends EventEmitter {
       }
       this.embedPostCount++;
       this.embedIds.push(m.id);
+      this.embedTexts.push(m.texts ?? []);
     } else if (m.type === "shutdown") {
       this.gotShutdown = true;
       // A real worker drains + exits; mirror that so awaitWorkerShutdown resolves.
@@ -92,6 +97,16 @@ class FakeWorker extends EventEmitter {
       type: "result",
       id,
       vectors: [new Float32Array([1, 0, 0])],
+    });
+  }
+
+  failNext(): void {
+    const id = this.embedIds.shift();
+    if (id === undefined) throw new Error("missing embedding request");
+    this.emit("message", {
+      type: "error",
+      id,
+      error: "ordinary inference error",
     });
   }
 
@@ -240,6 +255,313 @@ describe("EmbeddingPool dispatch (#999)", () => {
     fakes[1].completeAll();
     expect(await p3).toHaveLength(1);
     expect(await p4).toHaveLength(1);
+  });
+
+  it("keeps one worker available for recall while durable batches are queued", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const first = embedInTokenBatches(
+      ["first durable temporal message requires background inference"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+    const second = embedInTokenBatches(
+      ["second durable temporal message must wait for its turn"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    let recall: Promise<Float32Array[]> | undefined;
+    try {
+      await flush();
+      // A second slow durable batch must not occupy the last local worker.
+      expect(fakes).toHaveLength(1);
+      expect(fakes[0].embedIds).toHaveLength(1);
+      recall = embed(["foreground query"], "query");
+      await flush();
+      expect(fakes).toHaveLength(2);
+      expect(fakes[1].embedIds).toHaveLength(1);
+      fakes[1].completeAll();
+      await expect(recall).resolves.toHaveLength(1);
+      expect(fakes[0].embedIds).toHaveLength(1);
+    } finally {
+      for (let turn = 0; turn < 4; turn++) {
+        fakes.forEach((worker) => worker.completeAll());
+        await flush();
+      }
+      await Promise.allSettled([first, second, ...(recall ? [recall] : [])]);
+    }
+  });
+
+  it("serves queued durable work during a sustained foreground document stream", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const foreground = [embed(["foreground document 0"], "document")];
+    await flush();
+    const background = embedInTokenBatches(
+      ["durable background work must get a bounded turn"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    try {
+      for (let index = 1; index <= 4; index++) {
+        foreground.push(embed([`foreground document ${index}`], "document"));
+        fakes[0].completeNext();
+        await flush();
+      }
+      expect(fakes[0].embedTexts).toContainEqual([
+        "search_document: durable background work must get a bounded turn",
+      ]);
+    } finally {
+      for (let turn = 0; turn < 10; turn++) {
+        fakes[0].completeAll();
+        await flush();
+      }
+      await Promise.allSettled([...foreground, background]);
+    }
+  });
+
+  it("promotes a queued background operation when foreground work joins it", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const first = embedInTokenBatches(
+      ["first slow durable operation occupies the primary worker"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    await flush();
+    const text = "shared durable operation now needed by foreground work";
+    const queued = embedInTokenBatches([text], "document", undefined, {
+      background: true,
+    });
+    let foreground: Promise<Float32Array[]> | undefined;
+    try {
+      await flush();
+      expect(fakes).toHaveLength(1);
+      foreground = embed([text], "document");
+      await flush();
+      expect(fakes).toHaveLength(2);
+      expect(fakes[1].embedTexts).toContainEqual([`search_document: ${text}`]);
+      fakes[1].completeAll();
+      await expect(foreground).resolves.toHaveLength(1);
+      await expect(queued).resolves.toHaveLength(1);
+      expect(fakes[0].embedIds).toHaveLength(1);
+    } finally {
+      for (let turn = 0; turn < 5; turn++) {
+        fakes.forEach((worker) => worker.completeAll());
+        await flush();
+      }
+      await Promise.allSettled([
+        first,
+        queued,
+        ...(foreground ? [foreground] : []),
+      ]);
+    }
+  });
+
+  it("returns queued work to background priority when its foreground waiter cancels", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+
+    const first = embedInTokenBatches(
+      ["primary worker remains occupied by a durable batch"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    await flush();
+    expect(fakes[0].embedIds).toHaveLength(1);
+
+    // The pending batch cannot take a spare worker until memory recovers.
+    _setPoolFreememForTest(0);
+    const text = "shared durable batch briefly requested by foreground";
+    const queued = embedInTokenBatches([text], "document", undefined, {
+      background: true,
+    });
+    const controller = new AbortController();
+    const foreground = settle(embed([text], "document", controller.signal));
+    let recall: Promise<Float32Array[]> | undefined;
+    let trigger: Promise<Float32Array[]> | undefined;
+    try {
+      await flush();
+      expect(fakes).toHaveLength(1);
+      controller.abort();
+      expect(await foreground).toMatchObject({
+        ok: false,
+        err: expect.any(EmbeddingRequestAbortedError),
+      });
+
+      _setPoolFreememForTest(64 * GB);
+      trigger = embedInTokenBatches(
+        ["another durable batch wakes the dispatch queue"],
+        "document",
+        undefined,
+        { background: true },
+      );
+      await flush();
+      expect(fakes).toHaveLength(1);
+      expect(fakes[0].embedIds).toHaveLength(1);
+
+      recall = embed(["recall must get the spare after cancellation"], "query");
+      await flush();
+      expect(fakes).toHaveLength(2);
+      expect(fakes[1].embedTexts).toContainEqual([
+        "search_query: recall must get the spare after cancellation",
+      ]);
+      fakes[1].completeAll();
+      await expect(recall).resolves.toHaveLength(1);
+    } finally {
+      controller.abort();
+      for (let turn = 0; turn < 6; turn++) {
+        fakes.forEach((worker) => worker.completeAll());
+        await flush();
+      }
+      await Promise.allSettled([
+        first,
+        queued,
+        foreground,
+        ...(trigger ? [trigger] : []),
+        ...(recall ? [recall] : []),
+      ]);
+    }
+  });
+
+  it("warms a spare local worker after the first model is ready", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+
+    warmupEmbedding();
+    await flush();
+    expect(fakes).toHaveLength(1);
+    fakes[0].completeAll();
+    try {
+      await flush();
+      expect(fakes).toHaveLength(2);
+      expect(fakes[1].embedIds).toHaveLength(1);
+    } finally {
+      for (let turn = 0; turn < 3; turn++) {
+        fakes.forEach((worker) => worker.completeAll());
+        await flush();
+      }
+    }
+  });
+
+  it("does not let startup backlog take the first worker before spare warmup", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+    warmupEmbedding();
+    await flush();
+    const background = embedInTokenBatches(
+      ["durable historical work waits until foreground capacity is warm"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    try {
+      await flush();
+      expect(fakes[0].embedTexts).toEqual([["search_document: warmup"]]);
+      fakes[0].completeAll();
+      await flush();
+      expect(fakes[0].embedTexts[1]).toEqual([
+        "search_document: warmup primary embedding worker",
+      ]);
+      expect(fakes).toHaveLength(2);
+      fakes.forEach((worker) => worker.completeAll());
+      await flush();
+      fakes.forEach((worker) => worker.completeAll());
+      await expect(background).resolves.toHaveLength(1);
+    } finally {
+      for (let turn = 0; turn < 3; turn++) {
+        fakes.forEach((worker) => worker.completeAll());
+        await flush();
+      }
+      await Promise.allSettled([background]);
+    }
+  });
+
+  it("keeps durable work out of the primary when warmup fails before the spare settles", async () => {
+    _setEmbedPoolSizeForTest(2);
+    _setPoolFreememForTest(64 * GB);
+    const fakes = installFakeWorkers();
+    warmupEmbedding();
+    await flush();
+    expect(fakes).toHaveLength(1);
+    const background = embedInTokenBatches(
+      ["historical inference must not occupy the primary during spare warmup"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    try {
+      fakes[0].completeNext();
+      await flush();
+      expect(fakes).toHaveLength(2);
+      expect(fakes[0].embedTexts[1]).toEqual([
+        "search_document: warmup primary embedding worker",
+      ]);
+      expect(fakes[1].embedIds).toHaveLength(1);
+
+      fakes[0].failNext();
+      await flush();
+      expect(fakes[0].embedTexts).toHaveLength(2);
+      const recall = embed(["recall while spare still warms"], "query");
+      await flush();
+      expect(fakes[0].embedTexts.at(-1)).toEqual([
+        "search_query: recall while spare still warms",
+      ]);
+      fakes[0].completeNext();
+      await expect(recall).resolves.toHaveLength(1);
+    } finally {
+      for (const worker of fakes) worker.completeAll();
+      for (let turn = 0; turn < 5; turn++) {
+        await flush();
+        fakes.forEach((worker) => worker.completeAll());
+      }
+      await Promise.allSettled([background]);
+    }
+  });
+
+  it("does not park durable work for a spare on a one-worker host", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    warmupEmbedding();
+    await flush();
+    const background = embedInTokenBatches(
+      ["single-worker durable admission remains available after bootstrap"],
+      "document",
+      undefined,
+      { background: true },
+    );
+    try {
+      fakes[0].completeAll();
+      await flush();
+      expect(fakes).toHaveLength(1);
+      expect(fakes[0].embedTexts[1]).toEqual([
+        "search_document: single-worker durable admission remains available after bootstrap",
+      ]);
+      fakes[0].completeAll();
+      await expect(background).resolves.toHaveLength(1);
+    } finally {
+      fakes.forEach((worker) => worker.completeAll());
+      await Promise.allSettled([background]);
+    }
   });
 
   it("does not spawn a second worker for sequential (non-concurrent) embeds", async () => {
@@ -434,6 +756,94 @@ describe("EmbeddingPool dispatch (#999)", () => {
     fakes[0].completeNext();
     await expect(retry).resolves.toHaveLength(2);
     expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+  });
+
+  it("never resumes another tenant's incomplete token-batch checkpoint", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const texts = ["tenant-prefix".repeat(900), "tenant-suffix".repeat(900)];
+    const abort = new AbortController();
+    const first = withTenant("tenant-a", () =>
+      settle(embedInTokenBatches(texts, "document", abort.signal)),
+    );
+    await flush();
+    fakes[0].completeNext();
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+    abort.abort();
+    await expect(first).resolves.toMatchObject({ ok: false });
+    // Cancellation does not stop native inference; finish its occupied slot
+    // before testing whether B reuses A's completed prefix.
+    fakes[0].completeNext();
+    await flush();
+
+    const second = withTenant("tenant-b", () =>
+      embedInTokenBatches(texts, "document", new AbortController().signal),
+    );
+    await flush();
+    // B starts from its own prefix, never A's cached partial result.
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 3);
+    expect(
+      fakes[0].embedTexts
+        .at(-1)?.[0]
+        ?.startsWith("search_document: tenant-prefix"),
+    ).toBe(true);
+    fakes[0].completeNext();
+    await flush();
+    fakes[0].completeNext();
+    await expect(second).resolves.toHaveLength(2);
+  });
+
+  it("never resumes an owner-bound token batch using a former owner's vectors", async () => {
+    _setEmbedPoolSizeForTest(1);
+    const fakes = installFakeWorkers();
+    await warmPool(fakes);
+    const baselinePosts = fakes[0].embedPostCount;
+    const texts = ["owner-prefix-a".repeat(900), "owner-suffix-b".repeat(900)];
+    const owner = { current: true };
+    const options = {
+      beforeBatch: () => {
+        if (!owner.current) throw new Error("source ownership changed");
+      },
+    };
+    const first = settle(
+      embedInTokenBatches(
+        texts,
+        "document",
+        new AbortController().signal,
+        options,
+      ),
+    );
+    await flush();
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 1);
+    owner.current = false;
+    fakes[0].completeNext();
+    await expect(first).resolves.toMatchObject({
+      ok: false,
+      err: { message: "source ownership changed" },
+    });
+
+    owner.current = true;
+    const retry = embedInTokenBatches(
+      texts,
+      "document",
+      new AbortController().signal,
+      options,
+    );
+    await flush();
+    // The first owner's partial prefix must not be reused under a new owner.
+    expect(fakes[0].embedPostCount).toBe(baselinePosts + 2);
+    expect(
+      fakes[0].embedTexts
+        .at(-1)?.[0]
+        ?.startsWith("search_document: owner-prefix-a"),
+    ).toBe(true);
+    fakes[0].completeNext();
+    await flush();
+    fakes[0].completeNext();
+    await expect(retry).resolves.toHaveLength(2);
   });
 
   it("removes a queued token batch when its caller cancels", async () => {
@@ -708,6 +1118,39 @@ describe("EmbeddingPool dispatch (#999)", () => {
     expect(fakes).toHaveLength(2);
     fakes[1].completeNext();
     await expect(recovered).resolves.toHaveLength(1);
+  });
+
+  it("retires a timed-out worker even when its diagnostic sink throws", async () => {
+    _setEmbedPoolSizeForTest(1);
+    _setEmbeddingWorkerWatchdogsForTest(10, 60_000);
+    const fakes = installFakeWorkers();
+    log.registerSink({
+      info() {},
+      warn() {},
+      error() {
+        throw new Error("diagnostic sink failed");
+      },
+      captureException() {},
+    });
+    try {
+      await expect(embed(["stuck init"], "document")).rejects.toMatchObject({
+        name: "EmbeddingWorkerWatchdogError",
+        stage: "init",
+      });
+      expect(fakes[0].gotShutdown).toBe(true);
+      const recovered = embed(["fresh worker"], "document");
+      await flush();
+      expect(fakes).toHaveLength(2);
+      fakes[1].completeNext();
+      await expect(recovered).resolves.toHaveLength(1);
+    } finally {
+      log.registerSink({
+        info() {},
+        warn() {},
+        error() {},
+        captureException() {},
+      });
+    }
   });
 
   it("uses a separate execution watchdog after worker start", async () => {

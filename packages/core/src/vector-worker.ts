@@ -16,7 +16,11 @@
  */
 
 import { parentPort, workerData } from "node:worker_threads";
-import { openReaderConnection, type ReaderConnection } from "./db/reader";
+import {
+  isEmbeddingGenerationReady,
+  openReaderConnection,
+  type ReaderConnection,
+} from "./db/reader";
 import {
   resolveReadMode,
   readStorageMode,
@@ -49,11 +53,14 @@ function post(msg: VectorWorkerOutbound): void {
 let reader: ReaderConnection | null = null;
 try {
   reader = openReaderConnection(init.dbPath);
-  post({ type: "ready", vecAvailable: reader.vecAvailable });
-} catch (err) {
+  post({
+    type: "ready",
+    vecAvailable: reader.vecAvailable,
+  });
+} catch {
   post({
     type: "init-error",
-    error: err instanceof Error ? err.message : String(err),
+    error: "reader_init_failed",
   });
   // A failed reader open is persistent — don't linger as an idle thread waiting
   // for searches we can't serve. Exit so the pool reclaims us (its exit handler
@@ -81,10 +88,9 @@ port.on("message", (msg: VectorWorkerInbound) => {
         // (its sqlite-vec availability is fixed at open; the DB's storage mode
         // is read fresh each time so a mid-process blob→vec0 flip on the main
         // thread is picked up via WAL without respawning the worker).
-        const readMode = resolveReadMode(
-          readStorageMode(conn.db),
-          conn.vecAvailable,
-        );
+        const readMode = isEmbeddingGenerationReady(conn.db)
+          ? resolveReadMode(readStorageMode(conn.db), conn.vecAvailable)
+          : "degraded";
         const temporalPartitionMode =
           msg.spec.kind === "temporal"
             ? ((
@@ -104,13 +110,13 @@ port.on("message", (msg: VectorWorkerInbound) => {
           temporalPartitionMode,
         );
         post({ type: "result", id: msg.id, hits });
-      } catch (err) {
+      } catch {
         // Per-request failure — reject just this request, keep serving. The
         // pool resolves it via the in-process fallback.
         post({
           type: "error",
           id: msg.id,
-          error: err instanceof Error ? err.message : String(err),
+          error: "vector_search_failed",
         });
       }
       break;
@@ -130,13 +136,13 @@ port.on("message", (msg: VectorWorkerInbound) => {
         // The connection is query_only=TRUE, so a read job can only SELECT.
         const rows = runReadJob(conn.db, msg.spec);
         post({ type: "read-result", id: msg.id, rows });
-      } catch (err) {
+      } catch {
         // Per-request failure — reject just this request, keep serving. The
         // pool resolves it via the in-process fallback.
         post({
           type: "error",
           id: msg.id,
-          error: err instanceof Error ? err.message : String(err),
+          error: "read_job_failed",
         });
       }
       break;

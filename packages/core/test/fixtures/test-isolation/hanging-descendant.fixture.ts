@@ -12,6 +12,15 @@ test("starts a hanging descendant that inherits the coordinator pipes", async ()
 
   const marker = process.env.LORE_TEST_ISOLATION_MARKER;
   if (!marker) throw new Error("LORE_TEST_ISOLATION_MARKER is required");
+  const readyDelayMs = Number(
+    process.env.LORE_TEST_ISOLATION_READY_DELAY_MS ?? "0",
+  );
+  if (!Number.isSafeInteger(readyDelayMs) || readyDelayMs < 0) {
+    throw new Error("invalid fixture readiness delay");
+  }
+  if (readyDelayMs) {
+    await new Promise<void>((resolve) => setTimeout(resolve, readyDelayMs));
+  }
   const pendingMarker = `${marker}.pending`;
   writeFileSync(pendingMarker, JSON.stringify({ pid: descendant.pid }));
   renameSync(pendingMarker, marker);

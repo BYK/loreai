@@ -234,17 +234,41 @@ function startFixture(
   } = {};
   const result = new Promise<ChildResult>((resolveResult, reject) => {
     state.reject = reject;
-    let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    const onTimeout = () => {
       const error = new Error(`fixture ${fixtureLabel} did not exit`);
       void terminate(error).catch(() => {});
-    }, options.timeoutMs ?? CHILD_TIMEOUT_MS);
+    };
+    // The short descendant deadline measures cleanup after the fixture is
+    // ready, not Vitest startup. Under aggregate load startup can take longer
+    // than the cleanup deadline without the descendant being stuck.
+    let closed = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      onTimeout,
+      options.readyPath
+        ? CHILD_TIMEOUT_MS
+        : (options.timeoutMs ?? CHILD_TIMEOUT_MS),
+    );
+    if (options.readyPath) {
+      void ready
+        .then(() => {
+          if (closed || state.termination) return;
+          if (timeout) clearTimeout(timeout);
+          timeout = setTimeout(
+            onTimeout,
+            options.timeoutMs ?? CHILD_TIMEOUT_MS,
+          );
+        })
+        .catch(() => {});
+    }
     child.once("error", (error) => {
+      closed = true;
       if (timeout) clearTimeout(timeout);
       readyWatch?.cancel(error);
       children.delete(child);
       reject(error);
     });
     child.once("close", (code, signal) => {
+      closed = true;
       if (timeout) clearTimeout(timeout);
       if (options.readyPath && !existsSync(options.readyPath)) {
         readyWatch?.cancel(
@@ -285,6 +309,9 @@ function startFixture(
       })();
     });
   });
+  // A caller may await readiness before observing the result. A startup
+  // failure can settle the result first; retain its rejection for that caller.
+  void result.catch(() => {});
   const terminate = (error: Error): Promise<void> => {
     if (state.termination) return state.termination;
     state.error = error;
@@ -814,6 +841,25 @@ describe("Vitest database isolation harness", () => {
       await settleWithin(result, PROCESS_EXIT_TIMEOUT_MS);
     }
 
+    expect(outcome.status).toBe("rejected");
+    await waitForProcessExit(pid);
+  });
+
+  test("the descendant exit deadline starts after fixture readiness", async () => {
+    const parent = await makeParent();
+    const marker = join(parent, "slow-descendant.json");
+    const { ready, result } = startFixture(
+      "hanging-descendant.fixture.ts",
+      parent,
+      {
+        LORE_TEST_ISOLATION_MARKER: marker,
+        LORE_TEST_ISOLATION_READY_DELAY_MS: "750",
+      },
+      { timeoutMs: 250, readyPath: marker, descendantPidPath: marker },
+    );
+    await ready;
+    const { pid } = await readJson<{ pid: number }>(marker);
+    const outcome = await settleWithin(result, 10_000);
     expect(outcome.status).toBe("rejected");
     await waitForProcessExit(pid);
   });
