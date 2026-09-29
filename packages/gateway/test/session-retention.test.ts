@@ -22,13 +22,16 @@ import {
   setUpstreamInterceptor,
   singleFlightStableLtm,
   streamingPostResponsePendingForTest,
+  wrapIdleHandlerWithTenant,
 } from "../src/pipeline";
 import {
   _setConcurrencyForTest,
+  backgroundLimiterStats,
   runBackground,
   drainBackground,
 } from "../src/background-limiter";
-import type { GatewayRequest } from "../src/translate/types";
+import { startIdleScheduler } from "../src/idle";
+import type { GatewayRequest, SessionState } from "../src/translate/types";
 
 const HOUR = 3_600_000;
 const config = () => ({
@@ -315,7 +318,7 @@ it("retains a queued continuation when global admission remains full after its f
   }
 });
 
-it("protects incremental distillation while it waits outside the per-session limiter", async () => {
+it("coalesces incremental distillation before it enters the per-session limiter", async () => {
   const state = await startSession();
   _setConcurrencyForTest(1);
   const entered = deferred();
@@ -331,10 +334,13 @@ it("protects incremental distillation while it waits outside the per-session lim
     .spyOn(distillation, "run")
     .mockResolvedValue({ rounds: 0, distilled: 0 });
   try {
-    scheduleBackgroundWork(state, config());
+    for (const _ of Array.from({ length: 4 }))
+      scheduleBackgroundWork(state, config());
     await tick();
     expect(distill).not.toHaveBeenCalled();
     expect(distillLimiter.isBusy(state.sessionID)).toBe(false);
+    expect(backgroundLimiterStats().pendingCount).toBe(1);
+    expect(state.backgroundWorkCount).toBe(1);
     expect(
       evictIdlePipelineSessionsForTest(config(), Date.now() + 2 * HOUR),
     ).toBe(0);
@@ -346,9 +352,165 @@ it("protects incremental distillation while it waits outside the per-session lim
     await tick();
   }
   expect(distill).toHaveBeenCalledOnce();
+  expect(state.distillationScheduled).toBe(false);
   expect(
     evictIdlePipelineSessionsForTest(config(), Date.now() + 2 * HOUR),
   ).toBe(1);
+});
+
+it("does not queue idle work behind queued incremental distillation", async () => {
+  const state = await startSession();
+  state.lastRequestTime = Date.now() - 10 * 60 * 1000;
+  state.lastStopReason = "end_turn";
+  _setConcurrencyForTest(2);
+  const enteredA = deferred();
+  const enteredB = deferred();
+  const release = deferred();
+  const blockerA = runBackground(async () => {
+    enteredA.resolve();
+    await release.promise;
+  });
+  const blockerB = runBackground(async () => {
+    enteredB.resolve();
+    await release.promise;
+  });
+  await Promise.all([enteredA.promise, enteredB.promise]);
+  vi.spyOn(temporal, "undistilledTokens").mockReturnValue(100_000);
+  const distill = vi
+    .spyOn(distillation, "run")
+    .mockResolvedValue({ rounds: 0, distilled: 0 });
+  const idleWork = vi.fn(async () => {});
+  scheduleBackgroundWork(state, config());
+  expect(state.distillationScheduled).toBe(true);
+  vi.useFakeTimers({ toFake: ["Date", "setInterval"] });
+  const stop = startIdleScheduler(
+    config(),
+    new Map(getActiveSessions()),
+    idleWork,
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(idleWork).not.toHaveBeenCalled();
+    expect(backgroundLimiterStats().pendingCount).toBe(1);
+  } finally {
+    stop();
+    release.resolve();
+    await Promise.all([blockerA, blockerB]);
+    await vi.waitFor(() => expect(distill).toHaveBeenCalledOnce());
+    await drainBackground();
+    await tick();
+  }
+  expect(state.distillationScheduled).toBe(false);
+});
+
+it("does not queue incremental distillation behind queued idle work", async () => {
+  const state = await startSession();
+  state.lastRequestTime = Date.now() - 10 * 60 * 1000;
+  state.lastStopReason = "end_turn";
+  _setConcurrencyForTest(2);
+  const enteredA = deferred();
+  const enteredB = deferred();
+  const release = deferred();
+  const blockerA = runBackground(async () => {
+    enteredA.resolve();
+    await release.promise;
+  });
+  const blockerB = runBackground(async () => {
+    enteredB.resolve();
+    await release.promise;
+  });
+  await Promise.all([enteredA.promise, enteredB.promise]);
+  vi.spyOn(temporal, "undistilledTokens").mockReturnValue(100_000);
+  const distill = vi
+    .spyOn(distillation, "run")
+    .mockResolvedValue({ rounds: 0, distilled: 0 });
+  const idleWork = vi.fn(async () => {});
+  vi.useFakeTimers({ toFake: ["Date", "setInterval"] });
+  const stop = startIdleScheduler(
+    config(),
+    new Map(getActiveSessions()),
+    idleWork,
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(state.distillationScheduled).toBe(true);
+    expect(backgroundLimiterStats().pendingCount).toBe(1);
+    scheduleBackgroundWork(state, config());
+    expect(backgroundLimiterStats().pendingCount).toBe(1);
+    expect(distill).not.toHaveBeenCalled();
+  } finally {
+    stop();
+    const drain = drainBackground();
+    release.resolve();
+    await drain;
+    await Promise.all([blockerA, blockerB]);
+    await tick();
+  }
+  expect(idleWork).not.toHaveBeenCalled();
+  expect(state.distillationScheduled).toBe(false);
+  scheduleBackgroundWork(state, config());
+  await vi.waitFor(() => expect(distill).toHaveBeenCalledOnce());
+  await drainBackground();
+  await tick();
+  expect(state.distillationScheduled).toBe(false);
+});
+
+it("admits incremental distillation after idle distillation finishes while maintenance continues", async () => {
+  const state = await startSession();
+  state.lastRequestTime = Date.now() - 10 * 60 * 1000;
+  state.lastStopReason = "end_turn";
+  _setConcurrencyForTest(2);
+  vi.spyOn(temporal, "undistilledTokens").mockReturnValue(100_000);
+  const incrementalEntered = deferred();
+  const releaseIncremental = deferred();
+  const distill = vi.spyOn(distillation, "run").mockImplementation(async () => {
+    incrementalEntered.resolve();
+    await releaseIncremental.promise;
+    return { rounds: 0, distilled: 0 };
+  });
+  const idleDistillationDone = deferred();
+  const releaseMaintenance = deferred();
+  const maintenanceExited = deferred();
+  const idleWork = vi.fn(
+    async (
+      _sessionID: string,
+      _state: SessionState,
+      releaseDistillationClaim?: () => void,
+    ) => {
+      releaseDistillationClaim?.();
+      idleDistillationDone.resolve();
+      await releaseMaintenance.promise;
+      maintenanceExited.resolve();
+    },
+  );
+  vi.useFakeTimers({ toFake: ["Date", "setInterval"] });
+  const stop = startIdleScheduler(
+    config(),
+    new Map(getActiveSessions()),
+    wrapIdleHandlerWithTenant(idleWork),
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(31_000);
+    await idleDistillationDone.promise;
+    expect(state.distillationScheduled).toBe(false);
+    scheduleBackgroundWork(state, config());
+    await incrementalEntered.promise;
+    expect(idleWork).toHaveBeenCalledOnce();
+    expect(state.distillationScheduled).toBe(true);
+    releaseMaintenance.resolve();
+    await maintenanceExited.promise;
+    await tick();
+    // The idle owner's finalizer must not clear the newer incremental claim.
+    expect(state.distillationScheduled).toBe(true);
+  } finally {
+    stop();
+    releaseIncremental.resolve();
+    releaseMaintenance.resolve();
+    await drainBackground();
+    await tick();
+  }
+  expect(distill).toHaveBeenCalledOnce();
+  expect(state.distillationScheduled).toBe(false);
 });
 
 it("releases session ownership when a queued distillation is discarded", async () => {
@@ -376,6 +538,13 @@ it("releases session ownership when a queued distillation is discarded", async (
     await tick();
     expect(distill).not.toHaveBeenCalled();
     expect(state.backgroundWorkCount).toBe(0);
+    expect(state.distillationScheduled).toBe(false);
+    scheduleBackgroundWork(state, config());
+    await vi.waitFor(() => expect(distill).toHaveBeenCalledOnce());
+    await drainBackground();
+    await tick();
+    expect(state.backgroundWorkCount).toBe(0);
+    expect(state.distillationScheduled).toBe(false);
     expect(
       evictIdlePipelineSessionsForTest(config(), Date.now() + 2 * HOUR),
     ).toBe(1);
