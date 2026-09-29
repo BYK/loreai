@@ -1120,7 +1120,10 @@ describe("Pipeline — streaming responses", () => {
     async (scenario) => {
       const mixedProvenance = scenario === "provenance";
       const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
-      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      // Prime the session outside the deliberately tiny timeout used by the
+      // request under test. Under aggregate load, applying that timeout here
+      // can reject the priming request before it creates session state.
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "60000";
       const upstreamBodies: string[] = [];
       let stallFallback = false;
       let enteredFallback!: () => void;
@@ -1152,11 +1155,13 @@ describe("Pipeline — streaming responses", () => {
         const primingRequest = makeResponsesRequest({ sessionHeaders });
         primingRequest.model = "gpt-5.4-mini";
         await (await handleRequest(primingRequest, loadLocalConfig())).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        const state = [...getActiveSessions().values()].find(
-          (candidate) =>
-            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-        );
+        const activeState = () =>
+          [...getActiveSessions().values()].find(
+            (candidate) =>
+              candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+          );
+        await vi.waitFor(() => expect(activeState()).toBeDefined());
+        const state = activeState();
         expect(state).toBeDefined();
         state!.recallStore.set(recallStoreKey("secret", "all"), {
           toolUseId: "toolu_private_recall",
@@ -1165,6 +1170,7 @@ describe("Pipeline — streaming responses", () => {
           result: "PRIVATE_LORE_RECALL_RESULT",
         });
         upstreamBodies.length = 0;
+        process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
         selection = vi.spyOn(ltm, "forSession").mockImplementation(
           (_project, _session, _budget, options) =>
             new Promise((_, reject) => {
@@ -1214,10 +1220,11 @@ describe("Pipeline — streaming responses", () => {
           ],
           provenancePositions: [1, 2],
         };
+        const historyLength = 15_952;
         const request = makeResponsesRequest({
           sessionHeaders,
           messages: [
-            ...Array.from({ length: 16_383 }, (_, index) => ({
+            ...Array.from({ length: historyLength }, (_, index) => ({
               role: "user" as const,
               content: [{ type: "text" as const, text: `history-${index}` }],
             })),
@@ -1245,7 +1252,7 @@ describe("Pipeline — streaming responses", () => {
                   text:
                     scenario === "oversized"
                       ? "x ".repeat(300_000)
-                      : "continue after history-16382",
+                      : `continue after history-${historyLength - 1}`,
                 },
               ],
             },
@@ -1278,11 +1285,13 @@ describe("Pipeline — streaming responses", () => {
         expect(response.status).toBe(200);
         expect(await response.text()).toContain("still working");
         expect(upstreamBodies).toHaveLength(1);
-        expect(upstreamBodies[0].includes('"text":"history-16382"')).toBe(true);
+        expect(
+          upstreamBodies[0].includes(`"text":"history-${historyLength - 1}"`),
+        ).toBe(true);
         expect(upstreamBodies[0].includes('"text":"history-0"')).toBe(false);
         // Real preparation expands the marker in-place, but the emergency
         // forward must use the original transcript without the stored result.
-        expect(request.messages[16_383].content[0]).toMatchObject({
+        expect(request.messages[historyLength].content[0]).toMatchObject({
           type: "tool_use",
           name: "recall",
         });
@@ -1296,9 +1305,9 @@ describe("Pipeline — streaming responses", () => {
             true,
           );
         } else {
-          expect(JSON.stringify(request.messages.slice(16_383))).toContain(
-            "PRIVATE_LORE_RECALL_RESULT",
-          );
+          expect(
+            JSON.stringify(request.messages.slice(historyLength)),
+          ).toContain("PRIVATE_LORE_RECALL_RESULT");
         }
       } finally {
         unblockFallback();

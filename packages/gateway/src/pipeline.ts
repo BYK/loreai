@@ -51,6 +51,7 @@ import {
   supportsContextBoundary,
 } from "./context-boundary";
 import {
+  SOURCE_WINDOW_MAX_MESSAGES,
   SourceDeltaUnavailableError,
   sourceCheckpointProtocol,
 } from "./source-checkpoint";
@@ -4256,6 +4257,22 @@ async function precomputeStableLtmForIdleSession(
   }
 }
 
+type IdleWorkHandler = (
+  sessionID: string,
+  state: SessionState,
+  releaseDistillationClaim?: () => void,
+) => Promise<void>;
+
+export function wrapIdleHandlerWithTenant(
+  baseIdleHandler: IdleWorkHandler,
+): IdleWorkHandler {
+  return async (sessionID, state, releaseDistillationClaim) =>
+    withTenant(state.storageTenantId ?? "", async () => {
+      void precomputeStableLtmForIdleSession(sessionID, state);
+      await baseIdleHandler(sessionID, state, releaseDistillationClaim);
+    });
+}
+
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
 /** Whether the batch queue wrapper is active (set once in getLLMClient). */
@@ -4807,11 +4824,7 @@ async function initIfNeeded(
     // session tracking) so the resume turn reads it from cache instead. The
     // compute is single-flighted per session; a concurrent turn's
     // `singleFlightStableLtm` shares the same in-flight promise.
-    const idleHandler = async (sessionID: string, state: SessionState) =>
-      withTenant(state.storageTenantId ?? "", async () => {
-        void precomputeStableLtmForIdleSession(sessionID, state);
-        await baseIdleHandler(sessionID, state);
-      });
+    const idleHandler = wrapIdleHandlerWithTenant(baseIdleHandler);
     stopIdleScheduler = startIdleScheduler(
       config,
       sessions,
@@ -16215,18 +16228,20 @@ function scheduleBackgroundWorkForTenant(
     // Idle-time work in idle.ts also uses runBackground(), so under sustained
     // rate pressure everything defers until the breaker naturally expires.
     //
-    // Coalesce: if a distillation is already in-flight or queued for THIS
-    // session (distillLimiter is per-session p-limit(1)), skip scheduling
-    // another. The in-flight run will pick up the newly-arrived tokens on
-    // its next segment pass, and queuing duplicates just starves the global
-    // p-limit(2) background slot — distillations getting blocked behind
-    // each other in the global queue.
-    if (!distillLimiter.isBusy(sessionID)) {
+    // Coalesce both sides of the global queue boundary. distillLimiter only
+    // becomes busy after runBackground starts the task, so the synchronous
+    // flag prevents hot sessions from filling that queue with duplicate work.
+    // The inner limiter also covers urgent and idle runs.
+    if (
+      !sessionState.distillationScheduled &&
+      !distillLimiter.isBusy(sessionID)
+    ) {
       const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
       if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
         log.info(
           `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
         );
+        sessionState.distillationScheduled = true;
         trackBackground(
           runBackground(
             () =>
@@ -16246,7 +16261,11 @@ function scheduleBackgroundWorkForTenant(
               ),
             `incremental-distill session=${sessionID.slice(0, 16)}`,
             workerProviderID,
-          ).catch((e) => log.error("background distillation failed:", e)),
+          )
+            .catch((e) => log.error("background distillation failed:", e))
+            .finally(() => {
+              sessionState.distillationScheduled = false;
+            }),
           sessionState,
         );
       }
@@ -19106,9 +19125,14 @@ async function handleConversationTurn(
   const preparationTiming = new PreparationTiming(req);
   // Preparation can rewrite messages in place (notably recall expansion).
   // Preserve a pristine full request before those changes for the emergency
-  // upstream path. Suffix-only requests must never use this path.
+  // upstream path once it exceeds the durable source window. Otherwise a
+  // history can time out before publishing the checkpoint needed by its retry.
+  // Suffix-only requests must never use this path.
   let completeRequest: GatewayRequest | undefined;
-  if (!requestSourcePrefix(req) && requestSourceMessageCount(req) > 16_384) {
+  if (
+    !requestSourcePrefix(req) &&
+    requestSourceMessageCount(req) > SOURCE_WINDOW_MAX_MESSAGES
+  ) {
     try {
       completeRequest = preparationTiming.measure("fallback_snapshot", () => ({
         ...req,
