@@ -200,6 +200,62 @@ describe("Copilot-Integration-Id → github-copilot upstream routing", () => {
     expect(url).toContain("api.openai.com");
   });
 
+  test("keeps an explicit custom provider at the Copilot endpoint and rejects rotating IDs", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const {
+      setUpstreamInterceptor,
+      resolveRequestUpstreamRouteForTest,
+      getActiveSessions,
+    } = await import("../src/pipeline");
+    const { loadConfig } = await import("../src/config");
+    const headers = {
+      "copilot-integration-id": "copilot-cli",
+      "x-lore-provider": "custom-provider",
+      "x-lore-upstream-url": "https://api.githubcopilot.com",
+      "x-lore-upstream-path": "/responses?opaque=true",
+    };
+    const route = resolveRequestUpstreamRouteForTest(
+      {
+        protocol: "openai-responses",
+        model: "gpt-6-sol",
+        rawHeaders: {
+          ...headers,
+          authorization: "Bearer tid=copilot-token",
+        },
+      },
+      { ...loadConfig(), remoteGateway: false, hostedMode: false },
+    );
+    expect(route.providerID).toBe("custom-provider");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(copilotResponsesStream());
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer tid=copilot-token",
+        "x-lore-project": "/tmp/copilot-custom-provider-e2e",
+        "x-lore-session-id": "copilot-custom-provider-e2e",
+        ...headers,
+      },
+      body: JSON.stringify({ model: "gpt-6-sol", stream: true, input: "hi" }),
+    });
+    const body = await response.text();
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(fetchArgUrl(mockFetch.mock.calls[0][0])).toBe(
+      "https://api.githubcopilot.com/responses?opaque=true",
+    );
+    expect(body).toContain("event: response.failed");
+    expect(body).not.toContain("copilot reply");
+    expect(
+      [...getActiveSessions().values()].some(
+        (session) => session.lastUpstream?.providerID === "github-copilot",
+      ),
+    ).toBe(false);
+  });
+
   test("without the integration-id header, model-prefix routing is unchanged", async () => {
     harness = await createHarness({ fixtures: [] });
     const url = await captureUpstreamUrl(harness, "gpt-5.4", {});

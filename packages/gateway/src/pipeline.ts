@@ -7253,6 +7253,7 @@ function resolveRequestUpstreamRoute(
   }
   if (
     !providerRoute &&
+    providerHeader === undefined &&
     hasCopilotIntegrationHeader(req.rawHeaders) &&
     (!headerUpstream || isGitHubCopilotUpstreamBase(headerUpstream))
   ) {
@@ -9267,6 +9268,7 @@ export function streamResponsesRecallAware(
             created_at: Math.floor(Date.now() / 1000),
             model,
             status: event === "response.incomplete" ? "incomplete" : "failed",
+            output: [],
             usage: null,
             ...(event === "response.incomplete"
               ? {
@@ -11122,10 +11124,13 @@ export function streamResponsesRecallAware(
   let completionAttempted = false;
   let nextSequenceNumber = 0;
 
-  const sequenceChunk = (chunk: Uint8Array): Uint8Array => {
+  const sequenceChunk = (
+    chunk: Uint8Array,
+  ): { chunk: Uint8Array; sequenceCount: number } => {
     const text = new TextDecoder().decode(chunk);
-    if (!text.startsWith("event: ")) return chunk;
+    if (!text.startsWith("event: ")) return { chunk, sequenceCount: 0 };
     let output = "";
+    const sequence = { count: 0 };
     for (const frame of text.split("\n\n")) {
       if (!frame) continue;
       const lines = frame.split("\n");
@@ -11150,13 +11155,17 @@ export function streamResponsesRecallAware(
         const parsed = JSON.parse(data) as Record<string, unknown>;
         output += formatResponsesEvent(
           event,
-          JSON.stringify({ ...parsed, sequence_number: nextSequenceNumber++ }),
+          JSON.stringify({
+            ...parsed,
+            sequence_number: nextSequenceNumber + sequence.count,
+          }),
         );
+        sequence.count++;
       } catch {
         output += `${frame}\n\n`;
       }
     }
-    return encoder.encode(output);
+    return { chunk: encoder.encode(output), sequenceCount: sequence.count };
   };
 
   const finish = (resp: GatewayResponse, successful: boolean): boolean => {
@@ -11454,20 +11463,33 @@ export function streamResponsesRecallAware(
     }
     const terminalEvent = state.terminalEvent ?? "response.completed";
     const terminalResponse = state.terminalResponse;
+    const createdAt = terminalResponse?.created_at;
+    const incompleteDetails = terminalResponse?.incomplete_details;
+    const incompleteReason = isPlainRecord(incompleteDetails)
+      ? incompleteDetails.reason
+      : undefined;
     return formatResponsesEvent(
       terminalEvent,
       JSON.stringify({
         type: terminalEvent,
         response: {
-          ...terminalResponse,
           id: state.id,
           object: "response",
           created_at:
-            terminalResponse?.created_at ?? Math.floor(Date.now() / 1000),
+            typeof createdAt === "number" &&
+            Number.isSafeInteger(createdAt) &&
+            createdAt >= 0
+              ? createdAt
+              : Math.floor(Date.now() / 1000),
           model: res.model || state.model,
           status: finalStatus,
           output: finalOutput,
           usage: usageData,
+          ...(finalStatus === "incomplete" &&
+          (incompleteReason === "max_output_tokens" ||
+            incompleteReason === "content_filter")
+            ? { incomplete_details: { reason: incompleteReason } }
+            : {}),
         },
       }),
     );
@@ -12054,13 +12076,13 @@ export function streamResponsesRecallAware(
           if (cancelled) return false;
           await waitForDemand();
           if (cancelled) return false;
-          const sequencedChunk = sequenceChunk(chunk);
+          const sequenced = sequenceChunk(chunk);
           const reservedFailureBytes = reserveFailure
             ? failureReserveChunkForState().byteLength + 64
             : 0;
           if (
             emittedStreamBytes +
-              sequencedChunk.byteLength +
+              sequenced.chunk.byteLength +
               reservedFailureBytes >
             maxStreamBytes
           ) {
@@ -12070,12 +12092,13 @@ export function streamResponsesRecallAware(
             );
           }
           try {
-            controller.enqueue(sequencedChunk);
+            controller.enqueue(sequenced.chunk);
           } catch {
             cancelled = true;
             return false;
           }
-          emittedStreamBytes += sequencedChunk.byteLength;
+          nextSequenceNumber += sequenced.sequenceCount;
+          emittedStreamBytes += sequenced.chunk.byteLength;
           afterEnqueue?.();
           return true;
         };
