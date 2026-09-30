@@ -787,6 +787,83 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
+  test.each(["principal", "continuation"] as const)(
+    "accepts a sparse Codex %s terminal without a repeated response ID",
+    async (phase) => {
+      const sparseTerminal = sseEvent("response.completed", {
+        response: { status: "completed", output: [] },
+      });
+      const followUp = streamFrom([
+        created("resp_sparse_followup", "gpt-5.6-terra"),
+        textItem(0, "Done", "msg_sparse_followup"),
+        sparseTerminal,
+      ]);
+      const client = streamResponsesRecallAware(
+        streamFrom(
+          phase === "principal"
+            ? [
+                created("resp_sparse_principal", "gpt-5.6-terra"),
+                textItem(0, "Done", "msg_sparse_principal"),
+                sparseTerminal,
+              ]
+            : [
+                created("resp_sparse_principal", "gpt-5.6-terra"),
+                recallCall(0, { query: "architecture" }),
+                completed("resp_sparse_principal"),
+              ],
+        ),
+        {
+          validation: "codex",
+          onComplete: () => {},
+          onRecall: async () => ({
+            anchorText: "anchor",
+            resultText: "results",
+          }),
+          runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+        },
+      );
+
+      const out = await drain(client);
+      expect(out).toContain("Done");
+      expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(out).not.toContain("event: response.failed");
+    },
+  );
+
+  test.each([
+    ["mismatched Codex ID", "resp_wrong", false],
+    ["missing pinned ID", undefined, true],
+  ] as const)(
+    "rejects a %s at the terminal",
+    async (_case, id, pinResponseId) => {
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_expected", "gpt-5.6-terra"),
+          sseEvent("response.completed", {
+            response: {
+              ...(id === undefined ? {} : { id }),
+              status: "completed",
+              output: [],
+            },
+          }),
+        ]),
+        {
+          validation: "codex",
+          pinResponseId,
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not be called");
+          },
+        },
+      );
+
+      const out = await drain(client);
+      expect(out).not.toContain("event: response.completed");
+      expect(out.match(/^event: response.failed$/gm)).toHaveLength(1);
+    },
+  );
+
   test("pins rotating Copilot IDs in a recall continuation without recovery", async () => {
     const privateProviderField = "private_followup_provider_metadata";
     const followUp = streamFrom([

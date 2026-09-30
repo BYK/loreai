@@ -10565,9 +10565,11 @@ export function streamResponsesRecallAware(
         opts.validation !== "codex" || opts.pinResponseId === true;
       if (
         !response ||
-        typeof response.id !== "string" ||
-        !response.id ||
-        response.id !== acc.id
+        (requireCompleteLifecycle
+          ? typeof response.id !== "string" ||
+            !response.id ||
+            response.id !== acc.id
+          : acc.id && response.id !== undefined && response.id !== acc.id)
       ) {
         throw new Error("Responses terminal event changed response identity");
       }
@@ -10822,7 +10824,7 @@ export function streamResponsesRecallAware(
   ): void => {
     const response = parsed.response as Record<string, unknown> | undefined;
     if (!response) throw new Error("Responses terminal event missing response");
-    if (acc.id && response.id !== acc.id) {
+    if (acc.id && response.id !== undefined && response.id !== acc.id) {
       throw new Error("Responses terminal event changed response identity");
     }
     if (response.output === undefined) {
