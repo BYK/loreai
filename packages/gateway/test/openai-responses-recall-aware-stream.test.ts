@@ -798,6 +798,7 @@ describe("streamResponsesRecallAware", () => {
         textItem(0, "Done", "msg_sparse_followup"),
         sparseTerminal,
       ]);
+      const completions: GatewayResponse[] = [];
       const client = streamResponsesRecallAware(
         streamFrom(
           phase === "principal"
@@ -814,7 +815,7 @@ describe("streamResponsesRecallAware", () => {
         ),
         {
           validation: "codex",
-          onComplete: () => {},
+          onComplete: (response) => completions.push(response),
           onRecall: async () => ({
             anchorText: "anchor",
             resultText: "results",
@@ -827,6 +828,44 @@ describe("streamResponsesRecallAware", () => {
       expect(out).toContain("Done");
       expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
       expect(out).not.toContain("event: response.failed");
+      expect(completions).toHaveLength(1);
+      expect(completions[0]).toMatchObject({
+        id: "resp_sparse_principal",
+        model: "gpt-5.6-terra",
+      });
+      expect(completions[0]?.rawOutputItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "message",
+            content: expect.arrayContaining([
+              expect.objectContaining({ text: "Done" }),
+            ]),
+          }),
+        ]),
+      );
+      if (phase === "continuation") {
+        const terminalData = out.match(
+          /event: response\.completed\ndata: ([^\n]+)\n/,
+        )?.[1];
+        expect(terminalData).toBeDefined();
+        if (terminalData === undefined)
+          throw new Error("missing terminal event");
+        const terminal = JSON.parse(terminalData) as {
+          response: Record<string, unknown>;
+        };
+        expect(terminal.response).toMatchObject({
+          id: "resp_sparse_principal",
+          model: "gpt-5.6-terra",
+          output: expect.arrayContaining([
+            expect.objectContaining({
+              type: "message",
+              content: expect.arrayContaining([
+                expect.objectContaining({ text: "Done" }),
+              ]),
+            }),
+          ]),
+        });
+      }
     },
   );
 
