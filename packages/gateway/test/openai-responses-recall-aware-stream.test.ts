@@ -871,6 +871,66 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain('"name":"recall"');
   });
 
+  test("drops unreviewed terminal metadata from a stable-ID recall continuation", async () => {
+    const privateValue = "private_continuation_terminal_metadata";
+    const followUp = streamFrom([
+      created("resp_stable_followup", "gpt-5.6-terra"),
+      textItem(0, "Done", "msg_stable_followup"),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_stable_followup",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          provider_metadata: { secret: privateValue },
+          output: [
+            {
+              type: "message",
+              id: "msg_stable_followup",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "Done" }],
+            },
+          ],
+        },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_stable_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_stable_principal",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_0",
+                call_id: "call_0",
+                name: "recall",
+                arguments: '{"query":"architecture"}',
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "public",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "anchor", resultText: "results" }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("Done");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain(privateValue);
+    expect(out).not.toContain('"name":"recall"');
+  });
+
   test("charges only emitted continuation bytes after lifecycle-ID pinning", async () => {
     const principalEvents = [
       created("resp_principal_limit", "gpt-5.6-terra"),

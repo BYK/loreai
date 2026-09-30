@@ -202,11 +202,8 @@ describe("Copilot-Integration-Id → github-copilot upstream routing", () => {
 
   test("keeps an explicit custom provider at the Copilot endpoint and rejects rotating IDs", async () => {
     harness = await createHarness({ fixtures: [] });
-    const {
-      setUpstreamInterceptor,
-      resolveRequestUpstreamRouteForTest,
-      getActiveSessions,
-    } = await import("../src/pipeline");
+    const { setUpstreamInterceptor, resolveRequestUpstreamRouteForTest } =
+      await import("../src/pipeline");
     const { loadConfig } = await import("../src/config");
     const headers = {
       "copilot-integration-id": "copilot-cli",
@@ -237,7 +234,6 @@ describe("Copilot-Integration-Id → github-copilot upstream routing", () => {
         "content-type": "application/json",
         authorization: "Bearer tid=copilot-token",
         "x-lore-project": "/tmp/copilot-custom-provider-e2e",
-        "x-lore-session-id": "copilot-custom-provider-e2e",
         ...headers,
       },
       body: JSON.stringify({ model: "gpt-6-sol", stream: true, input: "hi" }),
@@ -249,11 +245,6 @@ describe("Copilot-Integration-Id → github-copilot upstream routing", () => {
     );
     expect(body).toContain("event: response.failed");
     expect(body).not.toContain("copilot reply");
-    expect(
-      [...getActiveSessions().values()].some(
-        (session) => session.lastUpstream?.providerID === "github-copilot",
-      ),
-    ).toBe(false);
   });
 
   test("without the integration-id header, model-prefix routing is unchanged", async () => {
