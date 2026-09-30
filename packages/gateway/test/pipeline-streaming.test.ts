@@ -65,6 +65,8 @@ import {
   resetPipelineState,
   scheduleStreamingPostResponseForTest,
   setPipelinePreUpstreamPauseForTest,
+  setPassthroughBodyReadPauseForTest,
+  setForegroundAbortTimeoutForTest,
   setPipelineResponseReadFailureForTest,
   setMaxActivePipelineRequestsForTest,
   setMaxDetachedPipelineRequestsForTest,
@@ -315,6 +317,68 @@ function makeResponsesRequest(input: {
     },
   };
 }
+
+async function exerciseBufferedPassthroughAbort(input: {
+  abort?: AbortController;
+  timeoutMs?: number;
+}): Promise<Response> {
+  let releasePause = (): void => {};
+  let reachedPause = (): void => {};
+  const paused = new Promise<void>((resolve) => {
+    reachedPause = resolve;
+  });
+  const pause = new Promise<void>((resolve) => {
+    releasePause = resolve;
+  });
+  setPassthroughBodyReadPauseForTest(pause, reachedPause);
+  setForegroundAbortTimeoutForTest(input.timeoutMs);
+  setUpstreamInterceptor(
+    async () =>
+      new Response(validResponsesSSE("resp_passthrough_abort"), {
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  const request = makeResponsesRequest({ sessionHeaders: {} });
+  request.stream = false;
+  request.tools = [];
+  request.rawHeaders["x-lore-agent"] = "title";
+  request.rawHeaders["x-lore-provider"] = "github-copilot";
+  request.rawHeaders["x-lore-upstream-url"] = "https://api.githubcopilot.com";
+  request.rawHeaders["x-lore-upstream-path"] = "/responses";
+  request.signal = input.abort?.signal;
+
+  const responsePromise = handleRequest(request, loadLocalConfig());
+  await paused;
+  input.abort?.abort(new DOMException("client disconnected", "AbortError"));
+  const timeoutMs = input.timeoutMs;
+  if (timeoutMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs + 10));
+  }
+  releasePause();
+  return responsePromise;
+}
+
+describe("buffered passthrough cancellation", () => {
+  it("keeps caller cancellation live after buffering SSE", async () => {
+    try {
+      const response = await exerciseBufferedPassthroughAbort({
+        abort: new AbortController(),
+      });
+      expect(response.status).toBe(502);
+    } finally {
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps the foreground deadline live after buffering SSE", async () => {
+    try {
+      const response = await exerciseBufferedPassthroughAbort({ timeoutMs: 5 });
+      expect(response.status).toBe(502);
+    } finally {
+      await resetPipelineState();
+    }
+  });
+});
 
 describe("principal Responses transport recovery", () => {
   it("retries the exact transformed request once before client-visible output", async () => {
@@ -2917,6 +2981,48 @@ describe("Pipeline — streaming responses", () => {
     }
   });
 
+  it("rejects a provisional Responses terminal without response.created", async () => {
+    const privateId = "private_unanchored_provisional";
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          `event: response.completed\ndata: ${JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: privateId,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "provisional-unanchored-responses",
+          },
+        }),
+        loadLocalConfig(),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("Gateway request failed");
+      expect(body.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(body).not.toContain("event: response.completed");
+      expect(body).not.toContain(privateId);
+      expect(store).not.toHaveBeenCalled();
+    } finally {
+      store.mockRestore();
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
   it("does not expose recall from an incomplete buffered response", async () => {
     const sessionHeader = "incomplete-private-recall";
     let upstreamCall = 0;
@@ -5402,7 +5508,11 @@ describe("Pipeline — streaming responses", () => {
         if (failure === "missing-terminal") {
           return new Response(
             responsesEvent("response.created", {
-              response: { id: `resp_${failure}`, status: "in_progress" },
+              response: {
+                id: `resp_${failure}`,
+                model: "gpt-5.6-sol",
+                status: "in_progress",
+              },
             }),
             { headers: { "content-type": "text/event-stream" } },
           );
@@ -8521,7 +8631,7 @@ describe("Pipeline — streaming responses", () => {
       path: "/v1/responses",
       request: { model: "gpt-4o", stream: true, input: "meta" },
       upstream:
-        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_meta","model":"gpt-4o","status":"in_progress","output":[]}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_meta","model":"gpt-4o","status":"completed","output":[]}}\n\n',
       expected: "response.completed",
     },
     {

@@ -219,8 +219,10 @@ import {
 import { buildVertexUpstream, vertexHost } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
 import {
+  buildOpenAIResponsesUrl,
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
+  isGitHubCopilotHost,
 } from "./translate/openai";
 import {
   buildOpenAIResponsesUpstreamRequest,
@@ -242,6 +244,7 @@ import {
   responsesDoneItemMatchesAdded,
   responsesTerminalItemMatches,
   normalizeCodexResponsesEvent,
+  pinResponsesLifecycleIdentity,
   assertSuccessfulResponsesCompletion,
   ResponsesTerminalError,
   type ResponsesAccState,
@@ -914,6 +917,10 @@ let pipelineResetPauseForTest: Promise<void> | undefined;
 let pipelinePreUpstreamPauseForTest:
   | { pause: Promise<void>; onWait: () => void }
   | undefined;
+let passthroughBodyReadPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let foregroundAbortTimeoutMsForTest: number | undefined;
 let provisionalFinalizerPauseForTest:
   | { pause: Promise<void>; onWait: () => void }
   | undefined;
@@ -1097,6 +1104,19 @@ export function setPipelinePreUpstreamPauseForTest(
   pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
+export function setPassthroughBodyReadPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  passthroughBodyReadPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setForegroundAbortTimeoutForTest(
+  timeoutMs: number | undefined,
+): void {
+  foregroundAbortTimeoutMsForTest = timeoutMs;
+}
+
 export function setProvisionalFinalizerPauseForTest(
   pause: Promise<void> | undefined,
   onWait: () => void = () => {},
@@ -1249,6 +1269,8 @@ async function resetPipelineStateInner(opts?: {
   postResponseStartObserver = undefined;
   recallPersistenceCommitObserver = undefined;
   pipelineResponseReadFailureForTest = undefined;
+  passthroughBodyReadPauseForTest = undefined;
+  foregroundAbortTimeoutMsForTest = undefined;
   provisionalFinalizerPauseForTest = undefined;
   foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
   if (stopFileWatcher) {
@@ -6801,6 +6823,58 @@ function supportsEffectiveRootToolSchemaCombinators(
   }
 }
 
+function shouldPinGithubCopilotResponseId(
+  route: ResolvedRequestUpstreamRoute,
+  finalUrl: string,
+): boolean {
+  if (route.providerID !== "github-copilot" || !route.providerRoute) {
+    return false;
+  }
+  try {
+    const effectiveEndpoint = new URL(finalUrl);
+    if (
+      effectiveEndpoint.protocol !== "https:" ||
+      effectiveEndpoint.port !== "" ||
+      effectiveEndpoint.username !== "" ||
+      effectiveEndpoint.password !== "" ||
+      effectiveEndpoint.hash !== "" ||
+      !isGitHubCopilotHost(effectiveEndpoint.hostname)
+    ) {
+      return false;
+    }
+    const canonicalEndpoint = new URL(
+      buildOpenAIResponsesUrl(effectiveEndpoint.origin),
+    );
+    return (
+      effectiveEndpoint.origin === canonicalEndpoint.origin &&
+      effectiveEndpoint.pathname === canonicalEndpoint.pathname
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isGitHubCopilotUpstreamBase(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === "/" &&
+      url.hash === "" &&
+      isGitHubCopilotHost(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only access to the final-destination Copilot compatibility check. */
+export const shouldPinGithubCopilotResponseIdForTest =
+  shouldPinGithubCopilotResponseId;
+
 /** Test-only access to the final-destination capability check. */
 export function supportsEffectiveRootToolSchemaCombinatorsForTest(
   route: ResolvedRequestUpstreamRoute,
@@ -7179,8 +7253,9 @@ function resolveRequestUpstreamRoute(
   }
   if (
     !providerRoute &&
-    !headerUpstream &&
-    hasCopilotIntegrationHeader(req.rawHeaders)
+    providerHeader === undefined &&
+    hasCopilotIntegrationHeader(req.rawHeaders) &&
+    (!headerUpstream || isGitHubCopilotUpstreamBase(headerUpstream))
   ) {
     providerID = "github-copilot";
     providerRoute = resolveProviderRoute(providerID);
@@ -7303,6 +7378,8 @@ type UpstreamResult = {
   serializedBody: string;
   /** Content-free request dimensions, computed only for rejected requests. */
   requestShape?: UpstreamRequestShape;
+  /** Whether the exact dispatched endpoint permits Copilot lifecycle-ID pinning. */
+  pinResponseId: boolean;
   /** The wire protocol used for the upstream request (may differ from ingress). */
   effectiveProtocol:
     | "anthropic"
@@ -7671,6 +7748,7 @@ async function forwardToUpstream(
     retry: dispatch,
     serializedBody,
     effectiveProtocol,
+    pinResponseId: shouldPinGithubCopilotResponseId(route, url),
     ...(response.status === 400
       ? {
           requestShape: upstreamRequestShape(
@@ -8802,6 +8880,8 @@ export function streamResponsesRecallAware(
     maxStreamBytes?: number;
     maxSSEFrames?: number;
     validation?: "public" | "codex";
+    /** Canonicalize a provider that rotates response.id across lifecycle events. */
+    pinResponseId?: boolean;
     /** Caller abort combined with the stream's client-disconnect controller. */
     signal?: AbortSignal;
     /** Absolute request deadline inherited from the foreground abort scope. */
@@ -8951,6 +9031,7 @@ export function streamResponsesRecallAware(
       event,
       parsed,
       maxSparseIndex,
+      opts.pinResponseId,
     );
     return normalizationState;
   };
@@ -9162,6 +9243,7 @@ export function streamResponsesRecallAware(
   const maxStreamBytes = opts.maxStreamBytes ?? 64 * 1024 * 1024;
   let retainedStateBytes = 0;
   let streamBytes = 0;
+  let emittedStreamBytes = 0;
   let hiddenRecallBytes = 0;
   const frameCounter = { count: 0 };
   const sseInactivityMs =
@@ -9169,6 +9251,62 @@ export function streamResponsesRecallAware(
     getSSEInactivityDeadlines().foregroundSseInactivityMs;
   const maxPrincipalTransportRetries = 1;
   const maxRecallContinuationTransportRetries = 1;
+  const buildClientFailureChunk = (
+    event: "response.failed" | "response.incomplete",
+    id: string,
+    model: string,
+    message: string,
+  ): Uint8Array =>
+    encoder.encode(
+      formatResponsesEvent(
+        event,
+        JSON.stringify({
+          type: event,
+          response: {
+            id,
+            object: "response",
+            created_at: Math.floor(Date.now() / 1000),
+            model,
+            status: event === "response.incomplete" ? "incomplete" : "failed",
+            output: [],
+            usage: null,
+            ...(event === "response.incomplete"
+              ? {
+                  incomplete_details: {
+                    reason: PRINCIPAL_TRANSPORT_INCOMPLETE_REASON,
+                  },
+                }
+              : {}),
+            error: {
+              type: "server_error",
+              code: "server_error",
+              message,
+            },
+          },
+        }),
+      ),
+    );
+  const fallbackFailureReserve = buildClientFailureChunk(
+    "response.incomplete",
+    "resp_error",
+    "unknown",
+    "Lore could not continue the response after recall",
+  );
+  let failureReserveState: ResponsesAccState | undefined;
+  let anchoredFailureReserve: Uint8Array | undefined;
+  const failureReserveChunkForState = (): Uint8Array => {
+    if (!state.createdId) return fallbackFailureReserve;
+    if (failureReserveState !== state) {
+      failureReserveState = state;
+      anchoredFailureReserve = buildClientFailureChunk(
+        "response.incomplete",
+        state.createdId,
+        state.model,
+        "Lore could not continue the response after recall",
+      );
+    }
+    return anchoredFailureReserve ?? fallbackFailureReserve;
+  };
 
   type RecallArguments = {
     query: string;
@@ -10357,6 +10495,9 @@ export function streamResponsesRecallAware(
       if (!response || typeof response.id !== "string" || !response.id) {
         throw new Error("response.created missing response identity");
       }
+      if (typeof response.model !== "string" || !response.model) {
+        throw new Error("response.created missing response model");
+      }
       if (
         response.status !== undefined &&
         response.status !== "in_progress" &&
@@ -10378,10 +10519,30 @@ export function streamResponsesRecallAware(
     }
     if (event === "response.in_progress") {
       const response = parsed.response as Record<string, unknown> | undefined;
-      if (acc.id && response?.id !== undefined && response.id !== acc.id) {
+      const requireCompleteLifecycle =
+        opts.validation !== "codex" || opts.pinResponseId === true;
+      if (
+        requireCompleteLifecycle
+          ? !response ||
+            typeof response.id !== "string" ||
+            !response.id ||
+            response.id !== acc.id
+          : acc.id && response?.id !== undefined && response.id !== acc.id
+      ) {
         throw new Error(
           "Responses in-progress event changed response identity",
         );
+      }
+      if (
+        requireCompleteLifecycle
+          ? typeof response?.model !== "string" ||
+            !response.model ||
+            response.model !== acc.model
+          : acc.model &&
+            response?.model !== undefined &&
+            response.model !== acc.model
+      ) {
+        throw new Error("Responses lifecycle event changed response model");
       }
       if (response?.status !== undefined && response.status !== "in_progress") {
         throw new Error("response.in_progress has invalid status");
@@ -10400,10 +10561,30 @@ export function streamResponsesRecallAware(
       event === "response.failed"
     ) {
       const response = parsed.response as Record<string, unknown> | undefined;
-      if (acc.id && response?.id !== acc.id) {
+      const requireCompleteLifecycle =
+        opts.validation !== "codex" || opts.pinResponseId === true;
+      if (
+        !response ||
+        (requireCompleteLifecycle
+          ? typeof response.id !== "string" ||
+            !response.id ||
+            response.id !== acc.id
+          : acc.id && response.id !== undefined && response.id !== acc.id)
+      ) {
         throw new Error("Responses terminal event changed response identity");
       }
-      const status = response?.status;
+      if (
+        requireCompleteLifecycle
+          ? typeof response.model !== "string" ||
+            !response.model ||
+            response.model !== acc.model
+          : acc.model &&
+            response.model !== undefined &&
+            response.model !== acc.model
+      ) {
+        throw new Error("Responses lifecycle event changed response model");
+      }
+      const status = response.status;
       const terminalStatuses = new Set([
         "completed",
         "incomplete",
@@ -10425,7 +10606,7 @@ export function streamResponsesRecallAware(
         throw new Error("Responses terminal event contradicts response status");
       }
       if (status === "incomplete") {
-        const details = response?.incomplete_details;
+        const details = response.incomplete_details;
         if (
           details !== undefined &&
           details !== null &&
@@ -10643,7 +10824,7 @@ export function streamResponsesRecallAware(
   ): void => {
     const response = parsed.response as Record<string, unknown> | undefined;
     if (!response) throw new Error("Responses terminal event missing response");
-    if (acc.id && response.id !== acc.id) {
+    if (acc.id && response.id !== undefined && response.id !== acc.id) {
       throw new Error("Responses terminal event changed response identity");
     }
     if (response.output === undefined) {
@@ -10945,10 +11126,13 @@ export function streamResponsesRecallAware(
   let completionAttempted = false;
   let nextSequenceNumber = 0;
 
-  const sequenceChunk = (chunk: Uint8Array): Uint8Array => {
+  const sequenceChunk = (
+    chunk: Uint8Array,
+  ): { chunk: Uint8Array; sequenceCount: number } => {
     const text = new TextDecoder().decode(chunk);
-    if (!text.startsWith("event: ")) return chunk;
+    if (!text.startsWith("event: ")) return { chunk, sequenceCount: 0 };
     let output = "";
+    const sequence = { count: 0 };
     for (const frame of text.split("\n\n")) {
       if (!frame) continue;
       const lines = frame.split("\n");
@@ -10973,13 +11157,17 @@ export function streamResponsesRecallAware(
         const parsed = JSON.parse(data) as Record<string, unknown>;
         output += formatResponsesEvent(
           event,
-          JSON.stringify({ ...parsed, sequence_number: nextSequenceNumber++ }),
+          JSON.stringify({
+            ...parsed,
+            sequence_number: nextSequenceNumber + sequence.count,
+          }),
         );
+        sequence.count++;
       } catch {
         output += `${frame}\n\n`;
       }
     }
-    return encoder.encode(output);
+    return { chunk: encoder.encode(output), sequenceCount: sequence.count };
   };
 
   const finish = (resp: GatewayResponse, successful: boolean): boolean => {
@@ -11277,20 +11465,33 @@ export function streamResponsesRecallAware(
     }
     const terminalEvent = state.terminalEvent ?? "response.completed";
     const terminalResponse = state.terminalResponse;
+    const createdAt = terminalResponse?.created_at;
+    const incompleteDetails = terminalResponse?.incomplete_details;
+    const incompleteReason = isPlainRecord(incompleteDetails)
+      ? incompleteDetails.reason
+      : undefined;
     return formatResponsesEvent(
       terminalEvent,
       JSON.stringify({
         type: terminalEvent,
         response: {
-          ...terminalResponse,
           id: state.id,
           object: "response",
           created_at:
-            terminalResponse?.created_at ?? Math.floor(Date.now() / 1000),
+            typeof createdAt === "number" &&
+            Number.isSafeInteger(createdAt) &&
+            createdAt >= 0
+              ? createdAt
+              : Math.floor(Date.now() / 1000),
           model: res.model || state.model,
           status: finalStatus,
           output: finalOutput,
           usage: usageData,
+          ...(finalStatus === "incomplete" &&
+          (incompleteReason === "max_output_tokens" ||
+            incompleteReason === "content_filter")
+            ? { incomplete_details: { reason: incompleteReason } }
+            : {}),
         },
       }),
     );
@@ -11872,16 +12073,34 @@ export function streamResponsesRecallAware(
         const safeEnqueue = async (
           chunk: Uint8Array,
           afterEnqueue?: () => void,
+          reserveFailure = true,
         ): Promise<boolean> => {
           if (cancelled) return false;
           await waitForDemand();
           if (cancelled) return false;
+          const sequenced = sequenceChunk(chunk);
+          const reservedFailureBytes = reserveFailure
+            ? failureReserveChunkForState().byteLength + 64
+            : 0;
+          if (
+            emittedStreamBytes +
+              sequenced.chunk.byteLength +
+              reservedFailureBytes >
+            maxStreamBytes
+          ) {
+            if (!reserveFailure) return false;
+            throw new SSEStreamLimitError(
+              "Responses stream exceeded output byte limit",
+            );
+          }
           try {
-            controller.enqueue(sequenceChunk(chunk));
+            controller.enqueue(sequenced.chunk);
           } catch {
             cancelled = true;
             return false;
           }
+          nextSequenceNumber += sequenced.sequenceCount;
+          emittedStreamBytes += sequenced.chunk.byteLength;
           afterEnqueue?.();
           return true;
         };
@@ -11918,8 +12137,15 @@ export function streamResponsesRecallAware(
           if (keepaliveTimer) clearTimeout(keepaliveTimer);
           keepaliveTimer = setTimeout(function tick() {
             if (cancelled || signal.aborted) return;
-            if ((controller.desiredSize ?? 1) > 0) {
-              void safeEnqueue(keepaliveComment);
+            if (
+              (controller.desiredSize ?? 1) > 0 &&
+              emittedStreamBytes +
+                keepaliveComment.byteLength +
+                failureReserveChunkForState().byteLength +
+                64 <=
+                maxStreamBytes
+            ) {
+              void safeEnqueue(keepaliveComment).catch(() => {});
             }
             if (!signal.aborted) {
               keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
@@ -12018,6 +12244,16 @@ export function streamResponsesRecallAware(
             return "terminal_reasoning_changed";
           if (message.startsWith("Responses terminal output "))
             return "terminal_output";
+          if (message === "Responses lifecycle event changed response model")
+            return "response_model";
+          if (
+            message === "Responses in-progress event changed response identity"
+          )
+            return "response_identity";
+          if (message === "response.in_progress has invalid status")
+            return "response_status";
+          if (message === "response.in_progress must have empty output")
+            return "response_snapshot_output";
           if (
             message ===
             "invalid recall function arguments: expected JSON string"
@@ -12291,14 +12527,19 @@ export function streamResponsesRecallAware(
             ) {
               recallDetected = true;
             }
+            const normalizedData =
+              opts.pinResponseId &&
+              pinResponsesLifecycleIdentity(state, event, parsed)
+                ? JSON.stringify(parsed)
+                : data;
+            principalPhase = "validate_response";
+            validateResponseLifecycle(state, event, parsed);
             principalPhase = "normalize";
             const normalizationState = normalizeCodexEvent(
               state,
               event,
               parsed,
             );
-            principalPhase = "validate_response";
-            validateResponseLifecycle(state, event, parsed);
             principalPhase = "seed_implicit";
             seedImplicitCodexItem(state, normalizationState, event, parsed);
 
@@ -12385,7 +12626,7 @@ export function streamResponsesRecallAware(
               : undefined;
             const publicData = publicCodexRateLimit
               ? JSON.stringify(publicCodexRateLimit)
-              : data;
+              : normalizedData;
             if (
               event === "response.output_item.done" &&
               outputIndex !== undefined
@@ -12600,7 +12841,7 @@ export function streamResponsesRecallAware(
                       formatResponsesEvent(
                         event,
                         terminalParsed === parsed
-                          ? data
+                          ? normalizedData
                           : JSON.stringify(terminalParsed),
                       ),
                     ),
@@ -12979,12 +13220,21 @@ export function streamResponsesRecallAware(
                               `Responses payload type does not match ${ce}`,
                             );
                           }
+                          const normalizedContinuationData =
+                            opts.pinResponseId &&
+                            pinResponsesLifecycleIdentity(
+                              contState,
+                              ce,
+                              cparsed,
+                            )
+                              ? JSON.stringify(cparsed)
+                              : cd;
+                          validateResponseLifecycle(contState, ce, cparsed);
                           const contNormalizationState = normalizeCodexEvent(
                             contState,
                             ce,
                             cparsed,
                           );
-                          validateResponseLifecycle(contState, ce, cparsed);
                           if (
                             consumeReferenceEvent(
                               contState,
@@ -13018,7 +13268,9 @@ export function streamResponsesRecallAware(
                             contState,
                           );
                           if (ci !== undefined) {
-                            retainedStateBytes += encoder.encode(cd).byteLength;
+                            retainedStateBytes += encoder.encode(
+                              normalizedContinuationData,
+                            ).byteLength;
                             if (retainedStateBytes > maxRetainedStateBytes) {
                               throw new RecallContinuationFailure(
                                 "resource_limit",
@@ -13076,7 +13328,7 @@ export function streamResponsesRecallAware(
                             : undefined;
                           const publicContinuationData = publicCodexRateLimit
                             ? JSON.stringify(publicCodexRateLimit)
-                            : cd;
+                            : normalizedContinuationData;
                           if (
                             ce === "response.output_item.done" &&
                             ci !== undefined
@@ -14291,46 +14543,27 @@ export function streamResponsesRecallAware(
                     hiddenOutputIdentities.has(identity),
                 )),
           );
-          await safeEnqueue(
-            encoder.encode(
-              formatResponsesEvent(
-                continueAfterPrincipalTransport
-                  ? "response.incomplete"
-                  : "response.failed",
-                JSON.stringify({
-                  type: continueAfterPrincipalTransport
-                    ? "response.incomplete"
-                    : "response.failed",
-                  response: {
-                    id: state.id || "resp_error",
-                    object: "response",
-                    created_at: Math.floor(Date.now() / 1000),
-                    model: state.model,
-                    status: continueAfterPrincipalTransport
-                      ? "incomplete"
-                      : "failed",
-                    output: buildOutputItems(hiddenOutputIndices),
-                    usage: null,
-                    ...(continueAfterPrincipalTransport
-                      ? {
-                          incomplete_details: {
-                            reason: PRINCIPAL_TRANSPORT_INCOMPLETE_REASON,
-                          },
-                        }
-                      : {}),
-                    error: {
-                      type: "server_error",
-                      code: "server_error",
-                      message: recallFailure
-                        ? "Lore could not continue the response after recall"
-                        : "Gateway request failed",
-                    },
-                  },
-                }),
-              ),
-            ),
-            () => finish(failedResponse, false),
+          const failureEvent = continueAfterPrincipalTransport
+            ? "response.incomplete"
+            : "response.failed";
+          const useCreatedIdentity =
+            principalEventEmitted && state.createdId !== undefined;
+          const failureChunk = buildClientFailureChunk(
+            failureEvent,
+            useCreatedIdentity
+              ? (state.createdId ?? "resp_error")
+              : "resp_error",
+            useCreatedIdentity ? state.model : "unknown",
+            recallFailure
+              ? "Lore could not continue the response after recall"
+              : "Gateway request failed",
           );
+          const failureEnqueued = await safeEnqueue(
+            failureChunk,
+            () => finish(failedResponse, false),
+            false,
+          );
+          if (!failureEnqueued && !cancelled) finish(failedResponse, false);
           safeClose();
         }
       })().catch((error) => {
@@ -14560,6 +14793,7 @@ export async function accumulateNonStreamResponse(
   codex = false,
   signal?: AbortSignal,
   requireValidCompletion = false,
+  pinResponseId = false,
 ): Promise<GatewayResponse> {
   const finish = (response: GatewayResponse): GatewayResponse => {
     if (!requireValidCompletion) return response;
@@ -14602,6 +14836,7 @@ export async function accumulateNonStreamResponse(
           await accumulateResponsesSSEStream(sse, {
             signal,
             validation: codex ? "codex" : "public",
+            pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
             requireSuccessfulCompletion: requireValidCompletion,
@@ -17790,6 +18025,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
   const requestTimeoutMs =
+    foregroundAbortTimeoutMsForTest ??
     getSSEInactivityDeadlines().foregroundRequestTimeoutMs;
   const deadlineAt = Date.now() + requestTimeoutMs;
   const timer = setTimeout(
@@ -18109,7 +18345,9 @@ export function validatedMetaStream(
   response: Response,
   protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
   codex: boolean,
-  streamOptions: SSEStreamOptions = foregroundSSEStreamOptions(),
+  streamOptions: SSEStreamOptions & {
+    pinResponseId?: boolean;
+  } = foregroundSSEStreamOptions(),
 ): Response {
   const {
     signal,
@@ -18121,7 +18359,7 @@ export function validatedMetaStream(
       () => {},
       undefined,
       codex ? "codex" : "public",
-      { signal, inactivityMs },
+      { signal, inactivityMs, pinResponseId: streamOptions.pinResponseId },
     );
   }
   const abort = new AbortController();
@@ -18289,9 +18527,10 @@ async function handlePassthrough(
     throw error;
   }
   const effectiveProtocol = forwarded.effectiveProtocol;
+  const pinResponseId = forwarded.pinResponseId;
   const upstreamResponse = wrapBodyWithCleanup(
     forwarded.response,
-    abortScope.dispose,
+    req.stream || !forwarded.response.ok ? abortScope.dispose : () => {},
     abortScope.signal,
   );
 
@@ -18340,24 +18579,65 @@ async function handlePassthrough(
           upstreamResponse,
           wireProtocol,
           req.codex === true,
-          foregroundSSEStreamOptions(abortScope.signal),
+          {
+            ...foregroundSSEStreamOptions(abortScope.signal),
+            pinResponseId,
+          },
         ),
       );
     }
-    const body = await readForegroundBody(
-      upstreamResponse,
-      false,
-      undefined,
-      abortScope.signal,
-    );
-    if (wireProtocol === "openai-responses") {
-      parseResponsesNonStreamEnvelope(
-        JSON.parse(body) as Record<string, unknown>,
+    try {
+      const body = await readForegroundBody(
+        upstreamResponse,
+        false,
+        undefined,
+        abortScope.signal,
       );
+      const bodyReadPause = passthroughBodyReadPauseForTest;
+      if (bodyReadPause) {
+        bodyReadPause.onWait();
+        await bodyReadPause.pause;
+        abortScope.signal.throwIfAborted();
+      }
+      if (wireProtocol === "openai-responses") {
+        if (
+          looksLikeSSE(upstreamResponse.headers.get("content-type") ?? "", body)
+        ) {
+          const resp = await preserveIncompleteResponsesTerminal(
+            accumulateNonStreamResponse(
+              new Response(body, {
+                headers: {
+                  "content-type":
+                    upstreamResponse.headers.get("content-type") ?? "",
+                },
+              }),
+              wireProtocol,
+              req.codex === true,
+              abortScope.signal,
+              false,
+              pinResponseId,
+            ),
+          );
+          return withLimits(
+            nonStreamHttpResponse(
+              resp,
+              req.protocol,
+              req.stream,
+              undefined,
+              requestEnablesLongContext(req),
+            ),
+          );
+        }
+        parseResponsesNonStreamEnvelope(
+          JSON.parse(body) as Record<string, unknown>,
+        );
+      }
+      const headers = new Headers({ "content-type": "application/json" });
+      copyUsageLimitHeaders(upstreamResponse.headers, headers);
+      return new Response(body, { status: upstreamResponse.status, headers });
+    } finally {
+      abortScope.dispose();
     }
-    const headers = new Headers({ "content-type": "application/json" });
-    copyUsageLimitHeaders(upstreamResponse.headers, headers);
-    return new Response(body, { status: upstreamResponse.status, headers });
   }
 
   // Cross-protocol: accumulate the upstream response and re-emit in the
@@ -18412,6 +18692,7 @@ async function handlePassthrough(
           ? accumulateResponsesSSEStream(upstreamResponse, {
               ...foregroundSSEStreamOptions(abortScope.signal),
               validation: req.codex === true ? "codex" : "public",
+              pinResponseId,
               stopAtTerminal: true,
               requireCompletedTerminal: true,
             })
@@ -18439,23 +18720,29 @@ async function handlePassthrough(
   }
 
   // Non-streaming cross-protocol: accumulate + re-emit
-  const resp = await preserveIncompleteResponsesTerminal(
-    accumulateNonStreamResponse(
-      upstreamResponse,
-      wireProtocol,
-      req.codex === true,
-      abortScope.signal,
-    ),
-  );
-  return withLimits(
-    nonStreamHttpResponse(
-      resp,
-      req.protocol,
-      req.stream,
-      undefined,
-      requestEnablesLongContext(req),
-    ),
-  );
+  try {
+    const resp = await preserveIncompleteResponsesTerminal(
+      accumulateNonStreamResponse(
+        upstreamResponse,
+        wireProtocol,
+        req.codex === true,
+        abortScope.signal,
+        false,
+        pinResponseId,
+      ),
+    );
+    return withLimits(
+      nonStreamHttpResponse(
+        resp,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
+    );
+  } finally {
+    abortScope.dispose();
+  }
 }
 
 /**
@@ -18516,6 +18803,7 @@ async function handleProvisionalConversationTurn(
         ? await accumulateResponsesSSEStream(upstreamResponse, {
             ...foregroundSSEStreamOptions(abortScope.signal),
             validation: req.codex ? "codex" : "public",
+            pinResponseId: forwarded.pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           })
@@ -18546,6 +18834,7 @@ async function handleProvisionalConversationTurn(
           req.codex === true,
           abortScope.signal,
           true,
+          forwarded.pinResponseId,
         );
   } catch (error) {
     abortScope.dispose();
@@ -21531,6 +21820,7 @@ async function handleConversationTurnPrepared(
     }
   };
   const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
+  const { pinResponseId } = upstreamResult;
 
   if (!upstreamResponse.ok) {
     rollback.preparation?.();
@@ -21896,11 +22186,13 @@ async function handleConversationTurnPrepared(
             false,
             signal,
             recovery || finalRecallRound,
+            pinResponseId,
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
             ...foregroundSSEStreamOptions(signal),
             validation: currentModifiedReq.codex ? "codex" : "public",
+            pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
             requireSuccessfulCompletion: recovery,
@@ -22301,6 +22593,7 @@ async function handleConversationTurnPrepared(
           return finishForeground(
             streamResponsesRecallAware(upstreamResponse, {
               validation: req.codex ? "codex" : "public",
+              pinResponseId,
               onComplete: (response, successful) => {
                 if (successful) finishStreaming(response);
                 else finishUnsuccessfulStreaming(response);
@@ -22550,6 +22843,7 @@ async function handleConversationTurnPrepared(
                     accumulateResponsesSSEStream(response, {
                       signal: recoverySignal,
                       validation: req.codex ? "codex" : "public",
+                      pinResponseId,
                       stopAtTerminal: true,
                       requireCompletedTerminal: true,
                       requireSuccessfulCompletion: true,
@@ -22582,7 +22876,10 @@ async function handleConversationTurnPrepared(
             },
             sessionState.sessionID,
             req.codex ? "codex" : "public",
-            foregroundSSEStreamOptions(foregroundAbort.signal),
+            {
+              ...foregroundSSEStreamOptions(foregroundAbort.signal),
+              pinResponseId,
+            },
           ),
         );
       }
@@ -22593,6 +22890,7 @@ async function handleConversationTurnPrepared(
           accumulateResponsesSSEStream(upstreamResponse, {
             ...foregroundSSEStreamOptions(foregroundAbort.signal),
             validation: req.codex ? "codex" : "public",
+            pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           }),
@@ -22717,6 +23015,8 @@ async function handleConversationTurnPrepared(
         effectiveProtocol,
         modifiedReq.codex === true,
         foregroundAbort.signal,
+        false,
+        pinResponseId,
       ),
     ),
   );

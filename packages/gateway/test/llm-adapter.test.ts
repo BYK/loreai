@@ -40,6 +40,7 @@ import {
   normalizeOpenAIUsage,
   resolveWorkerProtocol,
   resolveTarget,
+  shouldPinGithubCopilotWorkerResponseIdForTest,
   AUTH_ERROR_CODES,
   isTemperatureUnsupportedModel,
   isAnthropicClaudeModel,
@@ -595,6 +596,39 @@ describe("resolveWorkerProtocol", () => {
     expect(
       resolveWorkerProtocol("github-copilot", undefined, "claude-sonnet-4.5"),
     ).toBe("openai");
+  });
+
+  test("pins worker response IDs only for the canonical Copilot destination", () => {
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "https://api.githubcopilot.com?opaque=true",
+      }),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "https://api.individual.githubcopilot.com",
+      }),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "https://api.githubcopilot.com/custom",
+      }),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "http://127.0.0.1:3207",
+      }),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "openai",
+        url: "https://api.githubcopilot.com",
+      }),
+    ).toBe(false);
   });
 
   test("per-model override does NOT trigger for non-github-copilot providers", () => {
@@ -1407,6 +1441,346 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(distillationCost?.calls).toBe(1);
     expect(distillationCost?.cost).toBeGreaterThan(0);
   });
+
+  test("github-copilot worker accepts rotating Responses lifecycle IDs", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(
+        event("response.created", {
+          response: {
+            id: "resp_copilot_created",
+            model: "gpt-5.6-sol",
+            status: "in_progress",
+            output: [],
+          },
+        }) +
+          event("response.in_progress", {
+            response: {
+              id: "resp_copilot_in_progress",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          }) +
+          event("response.output_item.added", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: "msg_copilot",
+              role: "assistant",
+            },
+          }) +
+          event("response.output_text.delta", {
+            output_index: 0,
+            item_id: "msg_copilot",
+            content_index: 0,
+            delta: "copilot worker reply",
+          }) +
+          event("response.output_text.done", {
+            output_index: 0,
+            item_id: "msg_copilot",
+            content_index: 0,
+            text: "copilot worker reply",
+          }) +
+          event("response.output_item.done", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: "msg_copilot",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "copilot worker reply" }],
+            },
+          }) +
+          event("response.completed", {
+            response: {
+              id: "resp_copilot_completed",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_copilot",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    { type: "output_text", text: "copilot worker reply" },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 12, output_tokens: 3 },
+            },
+          }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com?opaque=true",
+        openai: "https://api.githubcopilot.com?opaque=true",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com?opaque=true",
+      }),
+    ).resolves.toBe("copilot worker reply");
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const url = new URL(fetchArgUrl(mockFetch.mock.calls[0][0]));
+    expect(url.pathname).toBe("/responses");
+    expect(url.search).toBe("?opaque=true");
+  });
+
+  test("github-copilot worker does not serialize pinned lifecycle projections", async () => {
+    const createdId = `resp_${"x".repeat(16_384)}`;
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const responseBody =
+      event("response.created", {
+        response: {
+          id: createdId,
+          model: "gpt-5.6-sol",
+          status: "in_progress",
+          output: [],
+        },
+      }) +
+      event("response.in_progress", {
+        response: {
+          id: "resp_short",
+          model: "gpt-5.6-sol",
+          status: "in_progress",
+          output: [],
+        },
+      }) +
+      event("response.completed", {
+        response: {
+          id: "resp_terminal",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          output: [],
+        },
+      });
+    mockFetch.mockResolvedValue(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    try {
+      await expect(
+        client.prompt("system", "user", {
+          workerID: "lore-distill",
+          upstreamProviderID: "github-copilot",
+          upstreamUrl: "https://api.githubcopilot.com",
+        }),
+      ).resolves.toBeNull();
+      const pinnedProjections = stringify.mock.calls.filter(([value]) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          Array.isArray(value)
+        ) {
+          return false;
+        }
+        const response = (value as Record<string, unknown>).response;
+        return (
+          typeof response === "object" &&
+          response !== null &&
+          !Array.isArray(response) &&
+          (response as Record<string, unknown>).id === createdId
+        );
+      });
+      expect(pinnedProjections).toHaveLength(0);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
+  test("github-copilot worker rejects hidden output in response.in_progress", async () => {
+    const privateValue = "private_worker_snapshot";
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(
+        event("response.created", {
+          response: {
+            id: "resp_worker_created",
+            model: "gpt-5.6-sol",
+            status: "in_progress",
+            output: [],
+          },
+        }) +
+          event("response.in_progress", {
+            response: {
+              id: "resp_worker_rotated",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_private_worker",
+                  call_id: "call_private_worker",
+                  name: "recall",
+                  arguments: JSON.stringify({ query: privateValue }),
+                  status: "completed",
+                },
+              ],
+            },
+          }) +
+          event("response.completed", {
+            response: {
+              id: "resp_worker_completed",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com",
+      }),
+    ).resolves.toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      expect.any(String),
+      "lore-distill",
+      "upstream-error",
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(markWorkerIncapable).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain(
+      "malformed Responses terminal event",
+    );
+    expect(getLastWorkerError()).not.toContain(privateValue);
+  });
+
+  test("github-copilot worker rejects a terminal without response.created", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        `event: response.completed\ndata: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "resp_unanchored_worker",
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [],
+          },
+        })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com",
+      }),
+    ).resolves.toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      expect.any(String),
+      "lore-distill",
+      "upstream-error",
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(markWorkerIncapable).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain("malformed Responses stream event");
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["non-string", 7],
+  ])(
+    "github-copilot worker rejects a %s created response ID",
+    async (_case, id) => {
+      const event = (type: string, data: Record<string, unknown>) =>
+        `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+      mockFetch.mockResolvedValue(
+        new Response(
+          event("response.created", {
+            response: {
+              ...(id === undefined ? {} : { id }),
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          }) +
+            event("response.completed", {
+              response: {
+                id: "resp_terminal",
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [],
+              },
+            }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+      const client = createGatewayLLMClient(
+        {
+          anthropic: "https://api.githubcopilot.com",
+          openai: "https://api.githubcopilot.com",
+        },
+        () => ({ scheme: "bearer", value: "copilot-token" }),
+        { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+      );
+
+      await expect(
+        client.prompt("system", "user", {
+          workerID: "lore-distill",
+          upstreamProviderID: "github-copilot",
+          upstreamUrl: "https://api.githubcopilot.com",
+        }),
+      ).resolves.toBeNull();
+      expect(recordWorkerFailure).toHaveBeenCalledWith(
+        expect.any(String),
+        "lore-distill",
+        "upstream-error",
+      );
+      expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+      expect(getLastWorkerError()).toContain(
+        "malformed Responses terminal event",
+      );
+    },
+  );
 
   test("OpenAI worker ignores an unproven ChatGPT backend URL", async () => {
     mockFetch.mockResolvedValue(
@@ -2226,7 +2600,7 @@ describe("createGatewayLLMClient.prompt", () => {
     [
       "response ID mismatch",
       `event: response.created\ndata: ${JSON.stringify({
-        response: { id: "resp_created" },
+        response: { id: "resp_created", model: "gpt-5.1-codex-mini" },
       })}\n\n` +
         `event: response.output_item.added\ndata: ${JSON.stringify({
           output_index: 0,
@@ -2237,7 +2611,11 @@ describe("createGatewayLLMClient.prompt", () => {
           item: { type: "message", id: "msg_response_mismatch" },
         })}\n\n` +
         `event: response.completed\ndata: ${JSON.stringify({
-          response: { id: "resp_terminal", status: "completed" },
+          response: {
+            id: "resp_terminal",
+            model: "gpt-5.1-codex-mini",
+            status: "completed",
+          },
         })}\n\n`,
       "malformed Responses terminal event",
     ],
@@ -2292,7 +2670,11 @@ describe("createGatewayLLMClient.prompt", () => {
     [
       "completed response.created status",
       `event: response.created\ndata: ${JSON.stringify({
-        response: { id: "resp_bad_created", status: "completed" },
+        response: {
+          id: "resp_bad_created",
+          model: "gpt-5.1-codex-mini",
+          status: "completed",
+        },
       })}\n\n`,
       "malformed Responses stream event",
     ],

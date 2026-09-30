@@ -146,6 +146,38 @@ describe("configured upstream routing", () => {
     harness = undefined;
   });
 
+  test("never dispatches credentials through a malformed configured OpenAI base", async () => {
+    harness = await createHarness({
+      fixtures: [],
+      configOverrides: { upstreamOpenAI: "https:/" },
+    });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(openAIResponsesResponse());
+
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer private-openai-credential",
+        "x-lore-agent": "title",
+        "x-lore-project": "/tmp/malformed-configured-upstream",
+      },
+      body: JSON.stringify({
+        model: "custom-model",
+        stream: false,
+        input: "hi",
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(await response.text()).not.toContain("private-openai-credential");
+  });
+
   test("uses the configured Anthropic upstream for claude models", async () => {
     harness = await createHarness({
       fixtures: [],
@@ -332,6 +364,82 @@ describe("configured upstream routing", () => {
     expect(
       supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalQueryRoute),
     ).toBe(true);
+  });
+
+  test("pins Copilot response IDs only for the canonical Responses endpoint", async () => {
+    const [
+      { loadConfig },
+      {
+        resolveRequestUpstreamRouteForTest,
+        shouldPinGithubCopilotResponseIdForTest,
+      },
+    ] = await Promise.all([import("../src/config"), import("../src/pipeline")]);
+    const config = { ...loadConfig(), remoteGateway: false };
+    const route = (
+      upstreamPath?: string,
+      upstreamUrl = "https://api.githubcopilot.com",
+    ) =>
+      resolveRequestUpstreamRouteForTest(
+        {
+          model: "gpt-5.6-sol",
+          protocol: "openai-responses",
+          rawHeaders: {
+            "x-api-key": "test-key",
+            "x-lore-provider": "github-copilot",
+            "x-lore-upstream-url": upstreamUrl,
+            ...(upstreamPath ? { "x-lore-upstream-path": upstreamPath } : {}),
+          },
+        },
+        config,
+      );
+
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route(),
+        "https://api.githubcopilot.com/responses",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/responses?opaque=true"),
+        "https://api.githubcopilot.com/responses?opaque=true",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/v1/responses"),
+        "https://api.githubcopilot.com/v1/responses",
+      ),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/responses", "https://api.individual.githubcopilot.com"),
+        "https://api.individual.githubcopilot.com/responses",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/custom/responses"),
+        "https://api.githubcopilot.com/custom/responses",
+      ),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/responses", "https://example.com"),
+        "https://example.com/responses",
+      ),
+    ).toBe(false);
+    for (const finalUrl of [
+      "https://user:pass@api.githubcopilot.com/responses",
+      "https://api.githubcopilot.com/responses#fragment",
+      "http://api.githubcopilot.com/responses",
+      "https://api.githubcopilot.com:8443/responses",
+    ]) {
+      expect(
+        shouldPinGithubCopilotResponseIdForTest(route(), finalUrl),
+        finalUrl,
+      ).toBe(false);
+    }
   });
 
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
