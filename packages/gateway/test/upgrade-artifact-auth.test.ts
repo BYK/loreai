@@ -192,6 +192,81 @@ describe("stable upgrade artifact authentication", () => {
     ).toThrow();
   });
 
+  it("preserves an unrelated output planted after checksum metadata resolves", async () => {
+    const {
+      executable,
+      lifecycleLock,
+      version,
+      privateRoot,
+      downloadDirectory,
+    } = fixture();
+    const output = join(privateRoot, `${basename(executable)}.download`);
+    const fetchBefore = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+      const result = await fetchBefore(input);
+      if (requestUrl(input).endsWith("lore-checksums.txt"))
+        writeFileSync(output, "keep this");
+      return result;
+    }) as unknown as typeof fetch;
+    if (process.platform === "linux") {
+      const result = await downloadBinaryToTemp(
+        version,
+        lifecycleLock,
+        undefined,
+        false,
+        executable,
+        downloadDirectory,
+      );
+      expect(readFileSync(result.tempBinaryPath)).toEqual(
+        Buffer.from("authenticated replacement binary"),
+      );
+    } else {
+      await expect(
+        downloadBinaryToTemp(
+          version,
+          lifecycleLock,
+          undefined,
+          false,
+          executable,
+          downloadDirectory,
+        ),
+      ).rejects.toThrow();
+    }
+    expect(readFileSync(output, "utf8")).toBe("keep this");
+  });
+
+  it("preserves a planted output name when publisher checksum fails", async () => {
+    const {
+      executable,
+      lifecycleLock,
+      version,
+      privateRoot,
+      downloadDirectory,
+    } = fixture({ expectedBinarySha256: "0".repeat(64) });
+    const output = join(privateRoot, `${basename(executable)}.download`);
+    const fetchBefore = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+      const result = await fetchBefore(input);
+      if (requestUrl(input).endsWith(`${getPlatformBinaryName()}.gz`)) {
+        if (process.platform === "darwin")
+          renameSync(output, `${output}.opened`);
+        writeFileSync(output, "keep this");
+      }
+      return result;
+    }) as unknown as typeof fetch;
+    await expect(
+      downloadBinaryToTemp(
+        version,
+        lifecycleLock,
+        undefined,
+        false,
+        executable,
+        downloadDirectory,
+      ),
+    ).rejects.toThrow(/checksum mismatch/i);
+    expect(readFileSync(output, "utf8")).toBe("keep this");
+  });
+
   it("rejects checksum metadata that differs from its GitHub asset digest", async () => {
     const { executable, fetchMock, lifecycleLock, version, downloadDirectory } =
       fixture({

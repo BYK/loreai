@@ -200,12 +200,7 @@ describe("upgrade command stale-receipt ordering", () => {
       expect(readFileSync(fixture.receipt)).toEqual(receipt);
       expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
       expect(readdirSync(fixture.installDir)).toEqual(["lore"]);
-      expect(readdirSync(join(state.home, ".lore"))).toEqual([
-        "install-path",
-        expect.stringMatching(
-          /^install-path\.upgrade-download-record-[a-f0-9]{32}$/,
-        ),
-      ]);
+      expect(readdirSync(join(state.home, ".lore"))).toEqual(["install-path"]);
       expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
     },
   );

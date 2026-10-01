@@ -1,9 +1,10 @@
 /** Private, identity-bound staging for standalone upgrade downloads. */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
   fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   mkdtempSync,
@@ -11,7 +12,6 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,14 +20,7 @@ import { UpgradeError } from "./errors";
 
 const PREFIX = "lore-upgrade-download-";
 const MARKER = ".owner";
-const RECORD_SUFFIX = ".upgrade-download-record-";
-
-interface DownloadRecord {
-  path: string;
-  scope: string;
-  device: string;
-  inode: string;
-}
+const LINUX_O_TMPFILE = 0o20000000 | constants.O_DIRECTORY;
 
 function requireHandleBoundDownloads(): void {
   if (process.platform === "win32") {
@@ -44,7 +37,6 @@ export interface UpgradeDownloadDirectory {
   readonly device: bigint;
   readonly inode: bigint;
   outputName?: string;
-  receiptPath?: string;
   expectedScope?: string;
   fileFd?: number;
 }
@@ -94,181 +86,28 @@ function scope(executable: string, receiptPath: string): string {
     .digest("hex");
 }
 
-function recordName(executable: string, receiptPath: string): string {
-  return `${basename(receiptPath)}${RECORD_SUFFIX}${scope(executable, receiptPath).slice(0, 16)}`;
-}
-
-function openRecordDirectory(receiptPath: string): number {
-  const parent = resolve(dirname(receiptPath));
-  const fd = openSync(
-    parent,
-    constants.O_RDONLY |
-      (constants.O_DIRECTORY ?? 0) |
-      (constants.O_NOFOLLOW ?? 0),
-  );
-  try {
-    const stat = fstatSync(fd, { bigint: true });
-    if (
-      !stat.isDirectory() ||
-      realpathSync(parent) !== parent ||
-      (process.getuid !== undefined && stat.uid !== BigInt(process.getuid())) ||
-      (stat.mode & 0o022n) !== 0n
-    ) {
-      throw new UpgradeError(
-        "execution_failed",
-        "Standalone upgrade receipt directory is not trusted",
-      );
-    }
-    return fd;
-  } catch (error) {
-    closeSync(fd);
-    throw error;
-  }
-}
-
-function readRecords(
-  executable: string,
-  receiptPath: string,
-): DownloadRecord[] {
-  const parentFd = (() => {
-    try {
-      return openRecordDirectory(receiptPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
-  })();
-  if (parentFd === null) return [];
-  try {
-    const records: DownloadRecord[] = [];
-    const prefix = recordName(executable, receiptPath);
-    for (const name of readdirSync(anchoredDirectoryFile(parentFd, "."))) {
-      if (
-        !name.startsWith(prefix) ||
-        !/^[a-f0-9]{16}$/.test(name.slice(prefix.length))
-      )
-        continue;
-      const fd = (() => {
-        try {
-          return openSync(
-            anchoredDirectoryFile(parentFd, name),
-            constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-          );
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-          throw error;
-        }
-      })();
-      if (fd === null) continue;
-      try {
-        const stat = fstatSync(fd);
-        if (
-          !stat.isFile() ||
-          stat.size > 1024 ||
-          stat.size === 0 ||
-          (process.getuid !== undefined && stat.uid !== process.getuid()) ||
-          (stat.mode & 0o077) !== 0
-        )
-          continue;
-        const value: unknown = JSON.parse(readFileSync(fd, "utf8"));
-        if (!value || typeof value !== "object" || Array.isArray(value))
-          continue;
-        const record = value as Record<string, unknown>;
-        const root = trustedTempRoot();
-        if (
-          typeof record.path !== "string" ||
-          dirname(record.path) !== root ||
-          !/^lore-upgrade-download-[\w-]+(?:\.cleanup-[a-f0-9]{32})?$/.test(
-            basename(record.path),
-          ) ||
-          typeof record.scope !== "string" ||
-          !/^[a-f0-9]{64}$/.test(record.scope) ||
-          typeof record.device !== "string" ||
-          !/^(0|[1-9][0-9]*)$/.test(record.device) ||
-          typeof record.inode !== "string" ||
-          !/^(0|[1-9][0-9]*)$/.test(record.inode)
-        )
-          continue;
-        records.push(record as unknown as DownloadRecord);
-      } catch {
-        // An invalid record cannot authorize reuse or cleanup.
-      } finally {
-        closeSync(fd);
-      }
-    }
-    return records;
-  } finally {
-    closeSync(parentFd);
-  }
-}
-
-function writeRecord(
-  directory: UpgradeDownloadDirectory,
-  receiptPath: string,
-  expected: string,
-): void {
-  const parentFd = openRecordDirectory(receiptPath);
-  try {
-    const fd = openSync(
-      anchoredDirectoryFile(
-        parentFd,
-        `${basename(receiptPath)}${RECORD_SUFFIX}${expected.slice(0, 16)}${randomBytes(8).toString("hex")}`,
-      ),
-      constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_WRONLY |
-        (constants.O_NOFOLLOW ?? 0),
-      0o600,
-    );
-    try {
-      writeFileSync(
-        fd,
-        JSON.stringify({
-          path: directory.path,
-          scope: expected,
-          device: directory.device.toString(),
-          inode: directory.inode.toString(),
-        }),
-      );
-      fsyncSync(fd);
-      fsyncSync(parentFd);
-    } finally {
-      closeSync(fd);
-    }
-  } finally {
-    closeSync(parentFd);
-  }
-}
-
-function recordedEmptyDirectory(
+function reusableDownloadDirectory(
   executable: string,
   receiptPath: string,
 ): UpgradeDownloadDirectory | null {
-  const records = readRecords(executable, receiptPath).filter(
-    (record) => record.scope === scope(executable, receiptPath),
-  );
   const root = trustedTempRoot();
   for (const name of readdirSync(root)) {
     if (!name.startsWith(PREFIX)) continue;
     try {
       const directory = openUpgradeDownloadDirectory(join(root, name));
+      const selected = { value: false };
       try {
         if (
-          records.some(
-            (record) =>
-              directory.device === BigInt(record.device) &&
-              directory.inode === BigInt(record.inode),
-          ) &&
           readdirSync(anchoredPath(directory, ".")).join("\n") === MARKER &&
           hasMarker(directory, scope(executable, receiptPath))
         ) {
           directory.outputName = `${basename(executable)}.download`;
-          directory.receiptPath = receiptPath;
           directory.expectedScope = scope(executable, receiptPath);
+          selected.value = true;
           return directory;
         }
       } finally {
-        if (!directory.receiptPath) closeUpgradeDownloadDirectory(directory);
+        if (!selected.value) closeUpgradeDownloadDirectory(directory);
       }
     } catch {
       // Unrelated or changed names cannot be reused.
@@ -310,7 +149,15 @@ export function closeUpgradeDownloadDirectory(
   directory: UpgradeDownloadDirectory,
 ): void {
   try {
-    if (directory.fileFd !== undefined) closeSync(directory.fileFd);
+    if (directory.fileFd !== undefined) {
+      try {
+        ftruncateSync(directory.fileFd, 0);
+      } catch {
+        // Closing an unnamed inode always releases its bytes even if truncation fails.
+      } finally {
+        closeSync(directory.fileFd);
+      }
+    }
   } finally {
     if (directory.fd >= 0) closeSync(directory.fd);
   }
@@ -325,18 +172,33 @@ export function openUpgradeDownloadFile(
   if (directory.fileFd !== undefined) {
     throw new Error("Upgrade download file has already been opened");
   }
-  const fd = openSync(
-    anchoredPath(directory, name),
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_RDWR |
-      (constants.O_NOFOLLOW ?? 0),
-    0o700,
-  );
+  const fd =
+    process.platform === "linux"
+      ? (() => {
+          try {
+            return openSync(
+              anchoredPath(directory, "."),
+              constants.O_RDWR | LINUX_O_TMPFILE,
+              0o700,
+            );
+          } catch {
+            throw new UpgradeError(
+              "execution_failed",
+              "Anonymous standalone upgrade downloads are unavailable on this filesystem",
+            );
+          }
+        })()
+      : openSync(
+          anchoredPath(directory, name),
+          constants.O_CREAT |
+            constants.O_EXCL |
+            constants.O_RDWR |
+            (constants.O_NOFOLLOW ?? 0),
+          0o700,
+        );
   directory.fileFd = fd;
-  // The open inode remains available through /proc/self/fd or /dev/fd.
-  // A crash closes it and frees partial downloads without trusting filenames.
-  unlinkSync(anchoredPath(directory, name));
+  // Linux opens an unnamed inode. Darwin retains its exclusive filename and
+  // never unlinks a potentially replaced directory entry.
   return process.platform === "linux"
     ? `/proc/self/fd/${fd}`
     : process.platform === "darwin"
@@ -372,11 +234,10 @@ export function createUpgradeDownloadDirectory(
   receiptPath: string,
 ): UpgradeDownloadDirectory {
   requireHandleBoundDownloads();
-  const reused = recordedEmptyDirectory(executable, receiptPath);
+  const reused = reusableDownloadDirectory(executable, receiptPath);
   const path = reused?.path ?? mkdtempSync(join(trustedTempRoot(), PREFIX));
   const directory = reused ?? openUpgradeDownloadDirectory(path);
   directory.outputName = `${basename(executable)}.download`;
-  directory.receiptPath = receiptPath;
   directory.expectedScope = scope(executable, receiptPath);
   try {
     if (reused) return directory;
@@ -395,7 +256,6 @@ export function createUpgradeDownloadDirectory(
     } finally {
       closeSync(markerFd);
     }
-    writeRecord(directory, receiptPath, scope(executable, receiptPath));
     return directory;
   } catch (error) {
     // An interrupted setup has not established ownership of any new output.
@@ -419,8 +279,31 @@ export function removeUpgradeDownloadDirectory(
     current.ino !== directory.inode
   )
     return false;
+  const names = readdirSync(anchoredPath(directory, "."));
+  const expectedNames =
+    process.platform === "darwin" && directory.fileFd !== undefined
+      ? [MARKER, outputName]
+      : [MARKER];
+  if (
+    names.length !== expectedNames.length ||
+    expectedNames.some((name) => !names.includes(name))
+  )
+    return false;
+  if (expectedNames.length === 2) {
+    const fileFd = directory.fileFd;
+    if (fileFd === undefined) return false;
+    const output = lstatSync(anchoredPath(directory, outputName), {
+      bigint: true,
+    });
+    const opened = fstatSync(fileFd, { bigint: true });
+    if (
+      !output.isFile() ||
+      output.dev !== opened.dev ||
+      output.ino !== opened.ino
+    )
+      return false;
+  }
   return (
-    readdirSync(anchoredPath(directory, ".")).join("\n") === MARKER &&
     directory.expectedScope !== undefined &&
     hasMarker(directory, directory.expectedScope) &&
     (() => {

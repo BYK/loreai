@@ -24,7 +24,6 @@ import {
   lstatSync,
   readFileSync,
   statSync,
-  unlinkSync,
 } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -484,14 +483,6 @@ export async function downloadBinaryToTemp(
     );
   }
   const canonicalTempPath = getBinaryPaths(currentExecutable).tempPath;
-  // Anchor the file name to the opened directory before opening its inode.
-  const anchoredDir =
-    process.platform === "linux"
-      ? `/proc/self/fd/${downloadDir.fd}`
-      : process.platform === "darwin"
-        ? `/dev/fd/${downloadDir.fd}`
-        : downloadDir.path;
-  const tempPath = join(anchoredDir, basename(canonicalTempPath));
   const nightly = isNightlyVersion(version);
   let expectedStableSha256: string | null = null;
 
@@ -513,13 +504,6 @@ export async function downloadBinaryToTemp(
     }
   }
 
-  // Clean up leftover temp file
-  lifecycleLock.assertOwned();
-  try {
-    unlinkSync(tempPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
   // Binpatch and both full-download writers receive the file descriptor path.
   // Even if the directory or file name changes mid-stream, writes, verification,
   // chmod, and installation still use the original opened inode.
@@ -576,12 +560,6 @@ export async function downloadBinaryToTemp(
       .update(readFileSync(writePath))
       .digest("hex");
     if (actualSha256 !== expectedStableSha256) {
-      lifecycleLock.assertOwned();
-      try {
-        unlinkSync(tempPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
       throw new UpgradeError(
         "execution_failed",
         `Downloaded binary checksum mismatch: got ${actualSha256}, expected ${expectedStableSha256}`,
