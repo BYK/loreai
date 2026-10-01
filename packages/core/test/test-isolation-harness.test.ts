@@ -45,6 +45,7 @@ interface FixtureMarker {
 
 interface StartFixtureOptions {
   timeoutMs?: number;
+  timeoutAfterReadyMs?: number;
   readyPath?: string;
   descendantPidPath?: string;
 }
@@ -238,27 +239,27 @@ function startFixture(
       const error = new Error(`fixture ${fixtureLabel} did not exit`);
       void terminate(error).catch(() => {});
     };
-    // The short descendant deadline measures cleanup after the fixture is
-    // ready, not Vitest startup. Under aggregate load startup can take longer
-    // than the cleanup deadline without the descendant being stuck.
     let closed = false;
     let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(
       onTimeout,
-      options.readyPath
-        ? CHILD_TIMEOUT_MS
-        : (options.timeoutMs ?? CHILD_TIMEOUT_MS),
+      options.timeoutMs ?? CHILD_TIMEOUT_MS,
     );
-    if (options.readyPath) {
-      void ready
-        .then(() => {
-          if (closed || state.termination) return;
+    if (options.timeoutAfterReadyMs !== undefined) {
+      void ready.then(
+        () => {
+          if (
+            closed ||
+            state.termination ||
+            child.exitCode !== null ||
+            child.signalCode !== null
+          ) {
+            return;
+          }
           if (timeout) clearTimeout(timeout);
-          timeout = setTimeout(
-            onTimeout,
-            options.timeoutMs ?? CHILD_TIMEOUT_MS,
-          );
-        })
-        .catch(() => {});
+          timeout = setTimeout(onTimeout, options.timeoutAfterReadyMs);
+        },
+        () => {},
+      );
     }
     child.once("error", (error) => {
       closed = true;
@@ -826,7 +827,7 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        timeoutMs: 2_000,
+        timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
       },
@@ -889,7 +890,7 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        timeoutMs: 2_000,
+        timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
       },

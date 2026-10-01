@@ -24,8 +24,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VERSION } from "./version";
 import { isDowngrade, installBinary } from "./lib/binary";
@@ -272,7 +272,7 @@ Examples:
 
     // An upgrade attempt must validate its standalone installation even when
     // the requested version is already current or cannot be resolved offline.
-    // --check remains a read-only version query.
+    // --check still skips standalone provenance checks when querying versions.
     const destination = flags.check
       ? null
       : (() => {
@@ -374,109 +374,135 @@ Examples:
     const downloadTag =
       channel === "nightly" && !cleanVersionArg ? NIGHTLY_TAG : undefined;
 
-    // Download the new binary
-    const downloadResult = await executeUpgrade(
-      target,
-      lifecycleLock,
-      downloadTag,
-      offline,
-      upgradeExecutable,
-    );
-
-    // Install: replace the current binary atomically
-    const downloadedSha256 = createHash("sha256")
-      .update(readFileSync(downloadResult.tempBinaryPath))
-      .digest("hex");
-    const receiptInstallDir =
-      provenance.pathInstallDir ??
-      (process.platform === "win32" ? undefined : dirname(upgradeExecutable));
-    if (
-      resolve(dirname(upgradeExecutable)) !== targetDir ||
-      !provenance.receiptPath ||
-      !provenance.receiptIdentity ||
-      !provenance.executableIdentity ||
-      !receiptInstallDir
-    ) {
-      throw new Error(
-        "Refusing standalone upgrade because the verified executable path/receipt provenance could not be preserved",
-      );
+    if (!provenance.receiptPath) {
+      throw new Error("Upgrade receipt path missing after installation check");
     }
-    // Permissions can change while the download is in flight. Reject before
-    // backup links are staged as well as before starting the download.
     preflightStandaloneUpgradeRecovery({
       executable: upgradeExecutable,
       receiptPath: provenance.receiptPath,
     });
-    const receiptPath = provenance.receiptPath;
-    const oldReceipt = provenance.receiptIdentity;
-    const oldExecutable = provenance.executableIdentity;
-    const previousBackupTokens =
-      standaloneUpgradeBackupTokens(upgradeExecutable);
-    const receiptTransaction = stageStandaloneUpgradeReceipt({
-      executable: upgradeExecutable,
-      executableIdentity: oldExecutable,
-      receiptPath,
-      receiptIdentity: oldReceipt,
-      pathInstallDir: receiptInstallDir,
-    });
-    let installedPath: string;
+    // Delta application and full downloads both write by pathname. Keep that
+    // pathname inside the verified, owner-only receipt directory until the
+    // download has finished, even if the install directory changes permissions.
+    const downloadDir = mkdtempSync(
+      join(dirname(provenance.receiptPath), ".upgrade-download-"),
+    );
     try {
-      lifecycleLock.assertOwned();
-      installedPath = await installBinary(
-        downloadResult.tempBinaryPath,
-        targetDir,
+      // Download the new binary
+      const downloadResult = await executeUpgrade(
+        target,
         lifecycleLock,
-        {
-          expectedInstallIdentity: oldExecutable,
-          beforeQuarantine: () => {
-            lifecycleLock.assertOwned();
-            persistStandaloneUpgradeRecoveryJournal({
-              executable: upgradeExecutable,
-              receiptPath,
-              pathInstallDir: receiptInstallDir,
-              oldExecutable,
-              oldReceipt,
-              replacementPath: `${upgradeExecutable}.download`,
-              expectedReplacementSha256: downloadedSha256,
-              previousBackupTokens,
-            });
-          },
-        },
+        downloadTag,
+        offline,
+        upgradeExecutable,
+        downloadDir,
       );
-      lifecycleLock.assertOwned();
-      if (resolve(installedPath) !== resolve(upgradeExecutable)) {
+
+      // Install: replace the current binary atomically
+      const downloadedSha256 = createHash("sha256")
+        .update(readFileSync(downloadResult.tempBinaryPath))
+        .digest("hex");
+      const receiptInstallDir =
+        provenance.pathInstallDir ??
+        (process.platform === "win32" ? undefined : dirname(upgradeExecutable));
+      if (
+        resolve(dirname(upgradeExecutable)) !== targetDir ||
+        !provenance.receiptPath ||
+        !provenance.receiptIdentity ||
+        !provenance.executableIdentity ||
+        !receiptInstallDir
+      ) {
         throw new Error(
-          "Standalone upgrade changed install path before receipt refresh",
+          "Refusing standalone upgrade because the verified executable path/receipt provenance could not be preserved",
         );
       }
-      receiptTransaction.refresh(downloadedSha256);
-      lifecycleLock.assertOwned();
-      verifyStandaloneUpgradePublicationDurable({
+      // Permissions can change while the download is in flight. Reject before
+      // backup links are staged as well as before starting the download.
+      preflightStandaloneUpgradeRecovery({
         executable: upgradeExecutable,
-        receiptPath,
+        receiptPath: provenance.receiptPath,
       });
-      receiptTransaction.commit();
-      lifecycleLock.assertOwned();
-      recoverStandaloneUpgradePublication({ executable: upgradeExecutable });
-    } catch (error) {
+      const receiptPath = provenance.receiptPath;
+      const oldReceipt = provenance.receiptIdentity;
+      const oldExecutable = provenance.executableIdentity;
+      const previousBackupTokens =
+        standaloneUpgradeBackupTokens(upgradeExecutable);
+      const receiptTransaction = stageStandaloneUpgradeReceipt({
+        executable: upgradeExecutable,
+        executableIdentity: oldExecutable,
+        receiptPath,
+        receiptIdentity: oldReceipt,
+        pathInstallDir: receiptInstallDir,
+      });
+      let installedPath: string;
       try {
         lifecycleLock.assertOwned();
+        installedPath = await installBinary(
+          downloadResult.tempBinaryPath,
+          targetDir,
+          lifecycleLock,
+          {
+            expectedInstallIdentity: oldExecutable,
+            beforeQuarantine: () => {
+              lifecycleLock.assertOwned();
+              persistStandaloneUpgradeRecoveryJournal({
+                executable: upgradeExecutable,
+                receiptPath,
+                pathInstallDir: receiptInstallDir,
+                oldExecutable,
+                oldReceipt,
+                replacementPath: `${upgradeExecutable}.download`,
+                expectedReplacementSha256: downloadedSha256,
+                previousBackupTokens,
+              });
+            },
+          },
+        );
+        lifecycleLock.assertOwned();
+        if (resolve(installedPath) !== resolve(upgradeExecutable)) {
+          throw new Error(
+            "Standalone upgrade changed install path before receipt refresh",
+          );
+        }
+        receiptTransaction.refresh(downloadedSha256);
+        lifecycleLock.assertOwned();
+        verifyStandaloneUpgradePublicationDurable({
+          executable: upgradeExecutable,
+          receiptPath,
+        });
+        receiptTransaction.commit();
+        lifecycleLock.assertOwned();
         recoverStandaloneUpgradePublication({ executable: upgradeExecutable });
-      } catch (rollbackError) {
-        throw new AggregateError(
-          [error, rollbackError],
-          "Upgrade failed and the standalone executable/receipt generation could not be restored deterministically.",
+      } catch (error) {
+        try {
+          lifecycleLock.assertOwned();
+          recoverStandaloneUpgradePublication({
+            executable: upgradeExecutable,
+          });
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            "Upgrade failed and the standalone executable/receipt generation could not be restored deterministically.",
+          );
+        }
+        throw error;
+      }
+
+      console.error(
+        `[lore] ${downgrade ? "Downgraded" : "Upgraded"} successfully: ${VERSION} -> ${target}`,
+      );
+      console.error(`[lore] Binary installed at: ${installedPath}`);
+      if (offline) {
+        console.error("[lore] (upgraded from cached patches)");
+      }
+    } finally {
+      try {
+        rmSync(downloadDir, { recursive: true, force: true });
+      } catch {
+        console.error(
+          "[lore] Could not clean up private upgrade download files.",
         );
       }
-      throw error;
-    }
-
-    console.error(
-      `[lore] ${downgrade ? "Downgraded" : "Upgraded"} successfully: ${VERSION} -> ${target}`,
-    );
-    console.error(`[lore] Binary installed at: ${installedPath}`);
-    if (offline) {
-      console.error("[lore] (upgraded from cached patches)");
     }
   });
 }

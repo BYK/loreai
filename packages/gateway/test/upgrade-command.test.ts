@@ -8,10 +8,11 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { commandUpgrade } from "../src/cli/upgrade";
 import { VERSION } from "../src/cli/version";
@@ -145,7 +146,13 @@ describe("upgrade command stale-receipt ordering", () => {
       const download = join(state.home, "download");
       writeFileSync(download, "verified download", { mode: 0o700 });
       vi.mocked(fetchLatestVersion).mockResolvedValue("0.41.0-dev.9999999999");
-      vi.mocked(executeUpgrade).mockImplementation(async () => {
+      vi.mocked(executeUpgrade).mockImplementation(async (...args) => {
+        const downloadDir = args[5];
+        if (downloadDir === undefined) {
+          throw new Error("Upgrade download directory was not provided");
+        }
+        expect(dirname(downloadDir)).toBe(join(state.home, ".lore"));
+        expect(statSync(downloadDir).mode & 0o777).toBe(0o700);
         chmodSync(fixture.installDir, 0o775);
         return { tempBinaryPath: download };
       });
@@ -157,6 +164,7 @@ describe("upgrade command stale-receipt ordering", () => {
       expect(readFileSync(fixture.receipt)).toEqual(receipt);
       expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
       expect(readdirSync(fixture.installDir)).toEqual(["lore"]);
+      expect(readdirSync(join(state.home, ".lore"))).toEqual(["install-path"]);
       expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
     },
   );

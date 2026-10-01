@@ -12,6 +12,8 @@
  */
 
 import {
+  constants,
+  createReadStream,
   existsSync,
   linkSync,
   lstatSync,
@@ -21,7 +23,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, copyFile, mkdir, unlink } from "node:fs/promises";
+import { mkdir, open, unlink } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import { compare as semverCompare } from "semver";
 import { makeCache, type PatchCache } from "binpatch";
@@ -277,11 +279,39 @@ export async function installBinary(
     }
 
     lifecycleLock.assertOwned();
-    await copyFile(sourcePath, tempPath);
-
-    if (process.platform !== "win32") {
-      lifecycleLock.assertOwned();
-      await chmod(tempPath, 0o755);
+    // The install directory may become writable after preflight. An exclusive,
+    // no-follow open prevents a planted symlink from redirecting the copy;
+    // chmod the opened inode rather than looking the pathname up again.
+    const destination = await open(
+      tempPath,
+      constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_WRONLY |
+        (constants.O_NOFOLLOW ?? 0),
+      0o700,
+    );
+    try {
+      for await (const bytes of createReadStream(sourcePath)) {
+        const chunk = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+        let offset = 0;
+        while (offset < chunk.length) {
+          const { bytesWritten } = await destination.write(
+            chunk,
+            offset,
+            chunk.length - offset,
+          );
+          if (bytesWritten === 0) {
+            throw new Error("Could not write staged standalone binary");
+          }
+          offset += bytesWritten;
+        }
+      }
+      if (process.platform !== "win32") {
+        lifecycleLock.assertOwned();
+        await destination.chmod(0o755);
+      }
+    } finally {
+      await destination.close();
     }
   }
 

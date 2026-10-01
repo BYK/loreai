@@ -20,13 +20,14 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   createWriteStream,
+  lstatSync,
   readFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -451,8 +452,28 @@ export async function downloadBinaryToTemp(
   downloadTag?: string,
   offline?: OfflineMode,
   currentExecutable: string = process.execPath,
+  downloadDir?: string,
 ): Promise<DownloadResult> {
-  const tempPath = getBinaryPaths(currentExecutable).tempPath;
+  if (downloadDir === undefined) {
+    throw new UpgradeError(
+      "execution_failed",
+      "A private standalone upgrade download directory is required",
+    );
+  }
+  const directory = lstatSync(downloadDir);
+  if (
+    !directory.isDirectory() ||
+    directory.isSymbolicLink() ||
+    (process.getuid !== undefined && directory.uid !== process.getuid()) ||
+    (process.platform !== "win32" && (directory.mode & 0o077) !== 0)
+  ) {
+    throw new UpgradeError(
+      "execution_failed",
+      "Standalone upgrade download directory is not private",
+    );
+  }
+  const canonicalTempPath = getBinaryPaths(currentExecutable).tempPath;
+  const tempPath = join(downloadDir, basename(canonicalTempPath));
   const nightly = isNightlyVersion(version);
   let expectedStableSha256: string | null = null;
 
@@ -573,6 +594,7 @@ export async function executeUpgrade(
   downloadTag?: string,
   offline?: OfflineMode,
   currentExecutable?: string,
+  downloadDir?: string,
 ): Promise<DownloadResult> {
   return downloadBinaryToTemp(
     version,
@@ -580,5 +602,6 @@ export async function executeUpgrade(
     downloadTag,
     offline,
     currentExecutable,
+    downloadDir,
   );
 }
