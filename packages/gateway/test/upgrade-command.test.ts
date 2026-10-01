@@ -203,7 +203,7 @@ describe("upgrade command stale-receipt ordering", () => {
       expect(readdirSync(join(state.home, ".lore"))).toEqual([
         "install-path",
         expect.stringMatching(
-          /^install-path\.upgrade-download-record-[a-f0-9]{16}$/,
+          /^install-path\.upgrade-download-record-[a-f0-9]{32}$/,
         ),
       ]);
       expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
@@ -239,7 +239,7 @@ describe("upgrade command stale-receipt ordering", () => {
     },
   );
 
-  test("reclaims an authenticated interrupted download on the next attempt", async () => {
+  test("leaves an interrupted named file and its symlink target untouched", async () => {
     const fixture = receiptFixture(false);
     const tempRoot = join(state.home, "temp");
     mkdirSync(tempRoot, { mode: 0o700 });
@@ -268,7 +268,7 @@ describe("upgrade command stale-receipt ordering", () => {
     vi.mocked(executeUpgrade).mockRejectedValue(new Error("stopped"));
 
     await expect(commandUpgrade([])).rejects.toThrow("stopped");
-    expect(existsSync(abandoned)).toBe(false);
+    expect(existsSync(abandoned)).toBe(true);
     expect(readFileSync(victim, "utf8")).toBe("do not change");
     expect(readFileSync(join(unrelated, "other"), "utf8")).toBe("preserve");
     expect(readFileSync(join(otherOwner, "other"), "utf8")).toBe(
@@ -276,7 +276,7 @@ describe("upgrade command stale-receipt ordering", () => {
     );
   });
 
-  test("reclaims an authenticated interrupted download before an already-current return", async () => {
+  test("leaves an interrupted named file untouched on an already-current return", async () => {
     const fixture = receiptFixture(false);
     const tempRoot = join(state.home, "temp");
     mkdirSync(tempRoot, { mode: 0o700 });
@@ -292,7 +292,9 @@ describe("upgrade command stale-receipt ordering", () => {
     vi.mocked(executeUpgrade).mockClear();
 
     await commandUpgrade([]);
-    expect(existsSync(abandoned)).toBe(false);
+    expect(readFileSync(join(abandoned, "lore.download"), "utf8")).toBe(
+      "partial binary",
+    );
     expect(executeUpgrade).not.toHaveBeenCalled();
     expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
   });

@@ -56,7 +56,6 @@ import {
 import {
   closeUpgradeDownloadDirectory,
   createUpgradeDownloadDirectory,
-  reclaimUpgradeDownloads,
   removeUpgradeDownloadDirectory,
 } from "./lib/upgrade-download";
 import { withLifecycleLock } from "../lifecycle-lock";
@@ -293,15 +292,6 @@ Examples:
             ),
           };
         })();
-    // A verified installation can reclaim its own interrupted downloads even
-    // when version resolution or an already-current check returns early.
-    if (destination?.provenance.receiptPath && process.platform !== "win32") {
-      reclaimUpgradeDownloads(
-        upgradeExecutable,
-        destination.provenance.receiptPath,
-      );
-    }
-
     // Resolve target version
     let target: string;
     let offline: OfflineMode = false;
@@ -513,12 +503,12 @@ Examples:
       try {
         if (!removeUpgradeDownloadDirectory(openedDownloadDir)) {
           console.error(
-            "[lore] Private upgrade download directory changed; cleanup skipped.",
+            "[lore] Private upgrade download directory changed; reuse skipped.",
           );
         }
       } catch {
         console.error(
-          "[lore] Could not clean up private upgrade download files.",
+          "[lore] Could not verify the private upgrade download directory.",
         );
       } finally {
         closeUpgradeDownloadDirectory(openedDownloadDir);
