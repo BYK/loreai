@@ -12,7 +12,6 @@ import {
   realpathSync,
   statSync,
   symlinkSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +20,10 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { commandUpgrade } from "../src/cli/upgrade";
 import { VERSION } from "../src/cli/version";
 import { executeUpgrade, fetchLatestVersion } from "../src/cli/lib/upgrade";
+import {
+  closeUpgradeDownloadDirectory,
+  createUpgradeDownloadDirectory,
+} from "../src/cli/lib/upgrade-download";
 import { formatStandaloneInstallReceipt } from "../src/cli/uninstall";
 import { standaloneUpgradeBackupTokens } from "../src/cli/upgrade-recovery";
 
@@ -197,7 +200,12 @@ describe("upgrade command stale-receipt ordering", () => {
       expect(readFileSync(fixture.receipt)).toEqual(receipt);
       expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
       expect(readdirSync(fixture.installDir)).toEqual(["lore"]);
-      expect(readdirSync(join(state.home, ".lore"))).toEqual(["install-path"]);
+      expect(readdirSync(join(state.home, ".lore"))).toEqual([
+        "install-path",
+        expect.stringMatching(
+          /^install-path\.upgrade-download-record-[a-f0-9]{16}$/,
+        ),
+      ]);
       expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
     },
   );
@@ -236,16 +244,17 @@ describe("upgrade command stale-receipt ordering", () => {
     const tempRoot = join(state.home, "temp");
     mkdirSync(tempRoot, { mode: 0o700 });
     vi.stubEnv("TMPDIR", tempRoot);
-    const abandoned = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
-    const scope = createHash("sha256")
-      .update(`${fixture.executable}\n${fixture.receipt}`)
-      .digest("hex");
-    writeFileSync(join(abandoned, ".owner"), `${scope}\n`, { mode: 0o600 });
+    const interrupted = createUpgradeDownloadDirectory(
+      fixture.executable,
+      fixture.receipt,
+    );
+    const abandoned = interrupted.path;
+    closeUpgradeDownloadDirectory(interrupted);
     writeFileSync(join(abandoned, "lore.download"), "partial binary");
     const victim = join(state.home, "victim");
     writeFileSync(victim, "do not change", { mode: 0o600 });
     if (process.platform !== "win32") {
-      unlinkSync(join(abandoned, "lore.download"));
+      rmSync(join(abandoned, "lore.download"));
       symlinkSync(victim, join(abandoned, "lore.download"));
     }
     const unrelated = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
@@ -272,11 +281,12 @@ describe("upgrade command stale-receipt ordering", () => {
     const tempRoot = join(state.home, "temp");
     mkdirSync(tempRoot, { mode: 0o700 });
     vi.stubEnv("TMPDIR", tempRoot);
-    const abandoned = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
-    const scope = createHash("sha256")
-      .update(`${fixture.executable}\n${fixture.receipt}`)
-      .digest("hex");
-    writeFileSync(join(abandoned, ".owner"), `${scope}\n`, { mode: 0o600 });
+    const interrupted = createUpgradeDownloadDirectory(
+      fixture.executable,
+      fixture.receipt,
+    );
+    const abandoned = interrupted.path;
+    closeUpgradeDownloadDirectory(interrupted);
     writeFileSync(join(abandoned, "lore.download"), "partial binary");
     vi.mocked(fetchLatestVersion).mockResolvedValue(VERSION);
     vi.mocked(executeUpgrade).mockClear();

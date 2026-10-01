@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  constants,
   existsSync,
   lstatSync,
   mkdtempSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -31,9 +33,57 @@ vi.mock("node:fs", async (importOriginal) => {
   return {
     ...fs,
     lstatSync: vi.fn(fs.lstatSync),
+    openSync: vi.fn(fs.openSync),
     rmSync: vi.fn(fs.rmSync),
   };
 });
+
+test.skipIf(process.platform === "win32")(
+  "writes its durable record to the opened receipt directory after a path swap",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-record-parent-"));
+    vi.stubEnv("TMPDIR", root);
+    const state = join(root, "state");
+    const moved = join(root, "state-moved");
+    const victim = join(root, "victim");
+    mkdirSync(state, { mode: 0o700 });
+    mkdirSync(victim, { mode: 0o700 });
+    writeFileSync(join(victim, "sentinel"), "keep this");
+    const originalFs =
+      await vi.importActual<typeof import("node:fs")>("node:fs");
+    const swapped = { value: false };
+    vi.mocked(openSync).mockImplementation((...args) => {
+      if (
+        !swapped.value &&
+        String(args[0]).includes("install-path.upgrade-download-record-") &&
+        (Number(args[1]) & constants.O_CREAT) !== 0
+      ) {
+        swapped.value = true;
+        renameSync(state, moved);
+        symlinkSync(victim, state);
+      }
+      return Reflect.apply(originalFs.openSync, originalFs, args);
+    });
+    try {
+      const directory = createUpgradeDownloadDirectory(
+        join(root, "lore"),
+        join(state, "install-path"),
+      );
+      closeUpgradeDownloadDirectory(directory);
+      expect(swapped.value).toBe(true);
+      expect(readdirSync(victim)).toEqual(["sentinel"]);
+      expect(readdirSync(moved)).toEqual([
+        expect.stringMatching(
+          /^install-path\.upgrade-download-record-[a-f0-9]{16}$/,
+        ),
+      ]);
+    } finally {
+      vi.mocked(openSync).mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test.skipIf(process.platform === "win32")(
   "preserves a file added to the opened directory after quarantine moves",
@@ -41,8 +91,8 @@ test.skipIf(process.platform === "win32")(
     const root = mkdtempSync(join(tmpdir(), "lore-upgrade-moved-"));
     vi.stubEnv("TMPDIR", root);
     const directory = createUpgradeDownloadDirectory(
-      "/home/user/lore",
-      "/home/user/.lore/install-path",
+      join(root, "lore"),
+      join(root, "install-path"),
     );
     writeFileSync(join(directory.path, "lore.download"), "partial binary");
     const originalFs =
@@ -81,8 +131,8 @@ test.skipIf(process.platform === "win32")(
     const root = mkdtempSync(join(tmpdir(), "lore-upgrade-empty-swap-"));
     vi.stubEnv("TMPDIR", root);
     const directory = createUpgradeDownloadDirectory(
-      "/home/user/lore",
-      "/home/user/.lore/install-path",
+      join(root, "lore"),
+      join(root, "install-path"),
     );
     const originalFs =
       await vi.importActual<typeof import("node:fs")>("node:fs");
@@ -127,6 +177,116 @@ test.skipIf(process.platform === "win32")(
     try {
       reclaimUpgradeDownloads(executable, receipt);
       expect(readFileSync(join(forged, "unrelated"), "utf8")).toBe("keep this");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "preserves an unrecorded directory even when its marker and output name match",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-forged-output-"));
+    vi.stubEnv("TMPDIR", root);
+    const executable = join(root, "lore");
+    const receipt = join(root, "install-path");
+    const forged = mkdtempSync(join(root, "lore-upgrade-download-"));
+    const scope = createHash("sha256")
+      .update(`${executable}\n${receipt}`)
+      .digest("hex");
+    writeFileSync(join(forged, ".owner"), `${scope}\n`, { mode: 0o600 });
+    writeFileSync(join(forged, "lore.download"), "keep this");
+    try {
+      reclaimUpgradeDownloads(executable, receipt);
+      expect(readFileSync(join(forged, "lore.download"), "utf8")).toBe(
+        "keep this",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "reuses one recorded empty staging generation across upgrades",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-reuse-"));
+    vi.stubEnv("TMPDIR", root);
+    const executable = join(root, "lore");
+    const receipt = join(root, "install-path");
+    try {
+      for (const attempt of [1, 2, 3]) {
+        const directory = createUpgradeDownloadDirectory(executable, receipt);
+        writeFileSync(
+          join(directory.path, "lore.download"),
+          `attempt ${attempt}`,
+        );
+        expect(removeUpgradeDownloadDirectory(directory)).toBe(true);
+        closeUpgradeDownloadDirectory(directory);
+        expect(
+          readdirSync(root).filter((name) =>
+            name.startsWith("lore-upgrade-download-"),
+          ),
+        ).toHaveLength(1);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "reclaims the recorded inode without consuming a matching forged sibling",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-recorded-"));
+    vi.stubEnv("TMPDIR", root);
+    const executable = join(root, "lore");
+    const receipt = join(root, "install-path");
+    const owned = createUpgradeDownloadDirectory(executable, receipt);
+    writeFileSync(join(owned.path, "lore.download"), "partial binary");
+    closeUpgradeDownloadDirectory(owned);
+    const forged = mkdtempSync(join(root, "lore-upgrade-download-"));
+    const scope = createHash("sha256")
+      .update(`${executable}\n${receipt}`)
+      .digest("hex");
+    writeFileSync(join(forged, ".owner"), `${scope}\n`, { mode: 0o600 });
+    writeFileSync(join(forged, "lore.download"), "keep this");
+    try {
+      reclaimUpgradeDownloads(executable, receipt);
+      expect(existsSync(owned.path)).toBe(false);
+      expect(readFileSync(join(forged, "lore.download"), "utf8")).toBe(
+        "keep this",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "keeps a prior install path's record separate after a verified path change",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-path-change-"));
+    vi.stubEnv("TMPDIR", root);
+    const receipt = join(root, "install-path");
+    try {
+      for (const executable of [
+        join(root, "old", "lore"),
+        join(root, "new", "lore"),
+      ]) {
+        const directory = createUpgradeDownloadDirectory(executable, receipt);
+        expect(removeUpgradeDownloadDirectory(directory)).toBe(true);
+        closeUpgradeDownloadDirectory(directory);
+      }
+      expect(
+        readdirSync(root).filter((name) =>
+          name.startsWith("install-path.upgrade-download-record-"),
+        ),
+      ).toHaveLength(2);
     } finally {
       vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });
@@ -184,8 +344,8 @@ test.skipIf(process.platform === "win32")(
     const root = mkdtempSync(join(tmpdir(), "lore-upgrade-cleanup-race-"));
     vi.stubEnv("TMPDIR", root);
     const directory = createUpgradeDownloadDirectory(
-      "/home/user/lore",
-      "/home/user/.lore/install-path",
+      join(root, "lore"),
+      join(root, "install-path"),
     );
     writeFileSync(join(directory.path, "lore.download"), "partial binary");
     const originalFs =
@@ -228,8 +388,8 @@ test.skipIf(process.platform === "win32")(
   () => {
     const root = mkdtempSync(join(tmpdir(), "lore-upgrade-crash-"));
     vi.stubEnv("TMPDIR", root);
-    const executable = "/home/user/lore";
-    const receipt = "/home/user/.lore/install-path";
+    const executable = join(root, "lore");
+    const receipt = join(root, "install-path");
     const directory = createUpgradeDownloadDirectory(executable, receipt);
     const quarantined = `${directory.path}.cleanup-${"a".repeat(32)}`;
     const victim = join(root, "victim");
