@@ -36,6 +36,7 @@ import {
   type StandaloneInstallProvenance,
 } from "./uninstall";
 import {
+  preflightStandaloneUpgradeRecovery,
   persistStandaloneUpgradeRecoveryJournal,
   recoverStandaloneUpgradePublication,
   standaloneUpgradeBackupTokens,
@@ -60,13 +61,35 @@ const CHANNEL_VERSIONS = new Set(["nightly", "stable"]);
 export function standaloneUpgradeTargetDir(
   executable: string,
   provenance: StandaloneInstallProvenance,
+  home?: string,
+  channel: ReleaseChannel = "stable",
 ): string {
   if (!provenance.hostedInstall) {
+    const reinstallCommand =
+      channel === "nightly"
+        ? "curl -fsSL https://withlore.ai/install | bash -s -- --version nightly"
+        : "curl -fsSL https://withlore.ai/install | bash";
     throw new UpgradeError(
       "execution_failed",
-      "This Lore CLI is package-managed or lacks a verified standalone receipt. Upgrade it with its package manager (for global npm: npm install -g @loreai/gateway@latest); no standalone binary was created or overwritten.",
+      `This Lore CLI is package-managed or lacks a verified standalone receipt. For curl installs, restore the binary and receipt with \`${reinstallCommand}\` (set LORE_INSTALL_DIR to the original directory if customized). For global npm, use \`npm install -g @loreai/gateway@latest\`; no standalone binary was created or overwritten.`,
     );
   }
+  if (
+    !provenance.receiptPath ||
+    !provenance.receiptIdentity ||
+    !provenance.executableIdentity ||
+    !provenance.pathInstallDir
+  ) {
+    throw new UpgradeError(
+      "execution_failed",
+      "Refusing standalone upgrade without complete verified executable and receipt provenance",
+    );
+  }
+  preflightStandaloneUpgradeRecovery({
+    executable,
+    receiptPath: provenance.receiptPath,
+    home,
+  });
   return resolve(dirname(executable));
 }
 
@@ -328,7 +351,12 @@ Examples:
     // standalone binary. Check before download/publication work so guidance is
     // immediate and a verified custom hosted path remains authoritative.
     const provenance = standaloneInstallProvenance(upgradeExecutable);
-    const targetDir = standaloneUpgradeTargetDir(upgradeExecutable, provenance);
+    const targetDir = standaloneUpgradeTargetDir(
+      upgradeExecutable,
+      provenance,
+      undefined,
+      channel,
+    );
 
     // Use the rolling "nightly" tag only when upgrading to latest nightly
     const downloadTag =
