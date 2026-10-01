@@ -12,6 +12,7 @@ import {
   realpathSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -118,6 +119,31 @@ function receiptFixture(stale = true): {
 }
 
 describe("upgrade command stale-receipt ordering", () => {
+  test.skipIf(process.platform === "win32")(
+    "preserves a verified Windows already-current upgrade as a no-op",
+    async () => {
+      const fixture = receiptFixture(false);
+      vi.mocked(fetchLatestVersion).mockResolvedValue(VERSION);
+      vi.mocked(executeUpgrade).mockClear();
+      const platform = Object.getOwnPropertyDescriptor(process, "platform");
+      if (!platform) throw new Error("Missing process platform descriptor");
+      try {
+        Object.defineProperty(process, "platform", {
+          ...platform,
+          value: "win32",
+        });
+        await commandUpgrade([]);
+        expect(executeUpgrade).not.toHaveBeenCalled();
+        expect(readFileSync(fixture.executable, "utf8")).toBe(
+          "previous nightly",
+        );
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+        vi.mocked(fetchLatestVersion).mockClear();
+      }
+    },
+  );
+
   test("explains receipt repair even when the installed version is current", async () => {
     const fixture = receiptFixture();
     const receipt = readFileSync(fixture.receipt);
@@ -219,7 +245,8 @@ describe("upgrade command stale-receipt ordering", () => {
     const victim = join(state.home, "victim");
     writeFileSync(victim, "do not change", { mode: 0o600 });
     if (process.platform !== "win32") {
-      symlinkSync(victim, join(abandoned, "foreign-link"));
+      unlinkSync(join(abandoned, "lore.download"));
+      symlinkSync(victim, join(abandoned, "lore.download"));
     }
     const unrelated = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
     writeFileSync(join(unrelated, "other"), "preserve");

@@ -11,12 +11,11 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
-  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, parse, resolve } from "node:path";
+import { basename, dirname, join, parse, resolve } from "node:path";
 import { UpgradeError } from "./errors";
 
 const PREFIX = "lore-upgrade-download-";
@@ -36,6 +35,7 @@ export interface UpgradeDownloadDirectory {
   readonly path: string;
   readonly device: bigint;
   readonly inode: bigint;
+  outputName?: string;
   fileFd?: number;
 }
 
@@ -174,6 +174,7 @@ export function createUpgradeDownloadDirectory(
   requireHandleBoundDownloads();
   const path = mkdtempSync(join(trustedTempRoot(), PREFIX));
   const directory = openUpgradeDownloadDirectory(path);
+  directory.outputName = `${basename(executable)}.download`;
   try {
     writeFileSync(
       anchoredPath(directory, MARKER),
@@ -201,6 +202,8 @@ export function removeUpgradeDownloadDirectory(
   directory: UpgradeDownloadDirectory,
 ): boolean {
   if (directory.fd < 0) return false;
+  const outputName = directory.outputName;
+  if (!outputName) return false;
   const current = lstatSync(directory.path, { bigint: true });
   if (
     !current.isDirectory() ||
@@ -208,6 +211,19 @@ export function removeUpgradeDownloadDirectory(
     current.ino !== directory.inode
   )
     return false;
+  const names = readdirSync(anchoredPath(directory, "."));
+  if (
+    !names.includes(MARKER) ||
+    names.some((name) => name !== MARKER && name !== outputName)
+  )
+    return false;
+  if (directory.fileFd !== undefined && names.includes(outputName)) {
+    const output = lstatSync(anchoredPath(directory, outputName), {
+      bigint: true,
+    });
+    const opened = fstatSync(directory.fileFd, { bigint: true });
+    if (output.dev !== opened.dev || output.ino !== opened.ino) return false;
+  }
   const alreadyQuarantined = /\.cleanup-[a-f0-9]{32}$/.test(directory.path);
   const quarantine = alreadyQuarantined
     ? directory.path
@@ -223,14 +239,16 @@ export function removeUpgradeDownloadDirectory(
     // between inspection and quarantine. Keep it for manual recovery.
     return false;
   }
-  // Remove only non-directory entries through the opened directory. Recursive removal
-  // by the quarantine name could follow a replacement after the identity check.
-  const names = readdirSync(anchoredPath(directory, "."));
-  if (!names.includes(MARKER)) return false;
-  for (const name of names) {
-    if (lstatSync(anchoredPath(directory, name)).isDirectory()) return false;
-  }
-  for (const name of names) unlinkSync(anchoredPath(directory, name));
+  // Recheck the allowlist after quarantine: another actor may have moved the
+  // opened directory and inserted unrelated files. Never unlink those entries.
+  const quarantinedNames = readdirSync(anchoredPath(directory, "."));
+  if (
+    !quarantinedNames.includes(MARKER) ||
+    quarantinedNames.some((name) => name !== MARKER && name !== outputName)
+  )
+    return false;
+  for (const name of quarantinedNames)
+    unlinkSync(anchoredPath(directory, name));
   const final = lstatSync(quarantine, { bigint: true });
   if (
     !final.isDirectory() ||
@@ -238,19 +256,9 @@ export function removeUpgradeDownloadDirectory(
     final.ino !== directory.inode
   )
     return false;
-  try {
-    // rmdir can only remove an empty replacement; it never deletes its files.
-    rmdirSync(quarantine);
-    return true;
-  } catch (error) {
-    if (
-      (error as NodeJS.ErrnoException).code === "ENOTEMPTY" ||
-      (error as NodeJS.ErrnoException).code === "EEXIST" ||
-      (error as NodeJS.ErrnoException).code === "ENOENT"
-    )
-      return false;
-    throw error;
-  }
+  // Node exposes no inode-bound rmdir. Leave an empty quarantine rather than
+  // removing a same-name replacement after the final identity check.
+  return true;
 }
 
 /** A crash can leave large partial binaries. Reclaim only our scoped, private generations. */
@@ -269,6 +277,7 @@ export function reclaimUpgradeDownloads(
       continue;
     try {
       const directory = openUpgradeDownloadDirectory(join(root, name));
+      directory.outputName = `${basename(executable)}.download`;
       try {
         if (hasMarker(directory, expected)) {
           removeUpgradeDownloadDirectory(directory);

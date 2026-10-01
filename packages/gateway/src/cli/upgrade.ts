@@ -295,7 +295,7 @@ Examples:
         })();
     // A verified installation can reclaim its own interrupted downloads even
     // when version resolution or an already-current check returns early.
-    if (destination?.provenance.receiptPath) {
+    if (destination?.provenance.receiptPath && process.platform !== "win32") {
       reclaimUpgradeDownloads(
         upgradeExecutable,
         destination.provenance.receiptPath,

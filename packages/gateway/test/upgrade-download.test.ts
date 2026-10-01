@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
-  rmdirSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -26,8 +28,111 @@ import {
 
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
-  return { ...fs, rmSync: vi.fn(fs.rmSync), rmdirSync: vi.fn(fs.rmdirSync) };
+  return {
+    ...fs,
+    lstatSync: vi.fn(fs.lstatSync),
+    rmSync: vi.fn(fs.rmSync),
+  };
 });
+
+test.skipIf(process.platform === "win32")(
+  "preserves a file added to the opened directory after quarantine moves",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-moved-"));
+    vi.stubEnv("TMPDIR", root);
+    const directory = createUpgradeDownloadDirectory(
+      "/home/user/lore",
+      "/home/user/.lore/install-path",
+    );
+    writeFileSync(join(directory.path, "lore.download"), "partial binary");
+    const originalFs =
+      await vi.importActual<typeof import("node:fs")>("node:fs");
+    const moved = `${directory.path}.moved`;
+    const swapped = { value: false };
+    vi.mocked(lstatSync).mockImplementation((path) => {
+      const stat = originalFs.lstatSync(path, { bigint: true });
+      if (!swapped.value && String(path).includes(".cleanup-")) {
+        swapped.value = true;
+        renameSync(String(path), moved);
+        writeFileSync(join(moved, "unrelated"), "keep this");
+      }
+      return stat;
+    });
+    try {
+      try {
+        removeUpgradeDownloadDirectory(directory);
+      } catch {
+        // The original implementation also fails its final path check.
+      }
+      expect(swapped.value).toBe(true);
+      expect(readFileSync(join(moved, "unrelated"), "utf8")).toBe("keep this");
+    } finally {
+      vi.mocked(lstatSync).mockRestore();
+      closeUpgradeDownloadDirectory(directory);
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "never removes an empty replacement after the final identity check",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-empty-swap-"));
+    vi.stubEnv("TMPDIR", root);
+    const directory = createUpgradeDownloadDirectory(
+      "/home/user/lore",
+      "/home/user/.lore/install-path",
+    );
+    const originalFs =
+      await vi.importActual<typeof import("node:fs")>("node:fs");
+    const moved = `${directory.path}.moved`;
+    const replacement = { path: "" };
+    const checked = { count: 0 };
+    vi.mocked(lstatSync).mockImplementation((path) => {
+      const stat = originalFs.lstatSync(path, { bigint: true });
+      if (String(path).includes(".cleanup-") && ++checked.count === 2) {
+        replacement.path = String(path);
+        renameSync(String(path), moved);
+        mkdirSync(String(path), { mode: 0o700 });
+      }
+      return stat;
+    });
+    try {
+      removeUpgradeDownloadDirectory(directory);
+      expect(replacement.path).not.toBe("");
+      expect(existsSync(replacement.path)).toBe(true);
+    } finally {
+      vi.mocked(lstatSync).mockRestore();
+      closeUpgradeDownloadDirectory(directory);
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "does not consume a fabricated scoped directory with unrelated contents",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-forged-"));
+    vi.stubEnv("TMPDIR", root);
+    const executable = "/home/user/lore";
+    const receipt = "/home/user/.lore/install-path";
+    const forged = mkdtempSync(join(root, "lore-upgrade-download-"));
+    const scope = createHash("sha256")
+      .update(`${executable}\n${receipt}`)
+      .digest("hex");
+    writeFileSync(join(forged, ".owner"), `${scope}\n`, { mode: 0o600 });
+    writeFileSync(join(forged, "unrelated"), "keep this");
+    try {
+      reclaimUpgradeDownloads(executable, receipt);
+      expect(readFileSync(join(forged, "unrelated"), "utf8")).toBe("keep this");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test.skipIf(process.platform === "win32")(
   "binpatch writes to an opened inode after its output name is swapped",
@@ -87,31 +192,25 @@ test.skipIf(process.platform === "win32")(
       await vi.importActual<typeof import("node:fs")>("node:fs");
     const moved = `${directory.path}.moved`;
     const replacement = { path: "" };
-    const swap = (path: string) => {
-      if (String(path).includes(".cleanup-")) {
+    const checked = { count: 0 };
+    vi.mocked(lstatSync).mockImplementation((path) => {
+      const stat = originalFs.lstatSync(path, { bigint: true });
+      if (String(path).includes(".cleanup-") && ++checked.count === 2) {
         replacement.path = String(path);
         renameSync(String(path), moved);
         mkdirSync(String(path), { mode: 0o700 });
         writeFileSync(join(String(path), "unrelated"), "keep this");
       }
-    };
-    vi.mocked(rmSync).mockImplementation((path, options) => {
-      swap(String(path));
-      return originalFs.rmSync(path, options);
-    });
-    vi.mocked(rmdirSync).mockImplementation((path, options) => {
-      swap(String(path));
-      return originalFs.rmdirSync(path, options);
+      return stat;
     });
     try {
-      expect(removeUpgradeDownloadDirectory(directory)).toBe(false);
+      removeUpgradeDownloadDirectory(directory);
       expect(replacement.path).not.toBe("");
       expect(readFileSync(join(replacement.path, "unrelated"), "utf8")).toBe(
         "keep this",
       );
     } finally {
-      vi.mocked(rmSync).mockRestore();
-      vi.mocked(rmdirSync).mockRestore();
+      vi.mocked(lstatSync).mockRestore();
       closeUpgradeDownloadDirectory(directory);
       vi.unstubAllEnvs();
       rmSync(directory.path, { recursive: true, force: true });
@@ -140,7 +239,7 @@ test.skipIf(process.platform === "win32")(
     renameSync(directory.path, quarantined);
     try {
       reclaimUpgradeDownloads(executable, receipt);
-      expect(existsSync(quarantined)).toBe(false);
+      expect(readdirSync(quarantined)).toEqual([]);
       expect(readFileSync(victim, "utf8")).toBe("do not change");
     } finally {
       vi.unstubAllEnvs();
