@@ -270,6 +270,24 @@ Examples:
     console.error(`[lore] Current version: ${VERSION}`);
     console.error(`[lore] Channel: ${channel}`);
 
+    // An upgrade attempt must validate its standalone installation even when
+    // the requested version is already current or cannot be resolved offline.
+    // --check remains a read-only version query.
+    const destination = flags.check
+      ? null
+      : (() => {
+          const provenance = standaloneInstallProvenance(upgradeExecutable);
+          return {
+            provenance,
+            targetDir: standaloneUpgradeTargetDir(
+              upgradeExecutable,
+              provenance,
+              undefined,
+              channel,
+            ),
+          };
+        })();
+
     // Resolve target version
     let target: string;
     let offline: OfflineMode = false;
@@ -326,6 +344,11 @@ Examples:
       return;
     }
 
+    if (destination === null) {
+      throw new Error("Upgrade destination missing after installation check");
+    }
+    const { provenance, targetDir } = destination;
+
     // Already on target — unless forced or switching channels
     if (VERSION === target && !flags.force && !channelChanged) {
       console.error(`[lore] Already up to date (${VERSION})`);
@@ -346,17 +369,6 @@ Examples:
     const downgrade = isDowngrade(VERSION, target);
     const verb = downgrade ? "Downgrading" : "Upgrading";
     console.error(`[lore] ${verb} to ${target}...`);
-
-    // A package invocation must never manufacture or overwrite an unreceipted
-    // standalone binary. Check before download/publication work so guidance is
-    // immediate and a verified custom hosted path remains authoritative.
-    const provenance = standaloneInstallProvenance(upgradeExecutable);
-    const targetDir = standaloneUpgradeTargetDir(
-      upgradeExecutable,
-      provenance,
-      undefined,
-      channel,
-    );
 
     // Use the rolling "nightly" tag only when upgrading to latest nightly
     const downloadTag =
@@ -389,6 +401,12 @@ Examples:
         "Refusing standalone upgrade because the verified executable path/receipt provenance could not be preserved",
       );
     }
+    // Permissions can change while the download is in flight. Reject before
+    // backup links are staged as well as before starting the download.
+    preflightStandaloneUpgradeRecovery({
+      executable: upgradeExecutable,
+      receiptPath: provenance.receiptPath,
+    });
     const receiptPath = provenance.receiptPath;
     const oldReceipt = provenance.receiptIdentity;
     const oldExecutable = provenance.executableIdentity;
