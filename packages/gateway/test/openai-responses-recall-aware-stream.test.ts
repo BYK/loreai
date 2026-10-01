@@ -8066,7 +8066,109 @@ describe("streamResponsesRecallAware", () => {
     expect(recalled).toBe(0);
   });
 
-  test("rejects an over-budget principal response before its first recall", async () => {
+  test("continues after recall when the principal context exceeds 128k tokens", async () => {
+    const completedResponses: GatewayResponse[] = [];
+    const recalled = vi.fn(async () => ({
+      anchorText: "recalled",
+      resultText: "result",
+    }));
+    const followUp = streamFrom([
+      created("resp_long_context_followup", "gpt-5.6-terra"),
+      textItem(0, "answer from recall", "msg_long_context_answer"),
+      completed("resp_long_context_followup", {
+        input_tokens: 241_000,
+        output_tokens: 30,
+        input_tokens_details: { cached_tokens: 200_000 },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_long_context_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "first" }),
+        completed("resp_long_context_principal", {
+          input_tokens: 240_000,
+          output_tokens: 10,
+          input_tokens_details: { cached_tokens: 200_000 },
+        }),
+      ]),
+      {
+        modelContextTokens: 1_000_000,
+        expectedPrincipalModel: "gpt-5.6-terra",
+        onComplete: (response, successful) => {
+          if (successful) completedResponses.push(response);
+        },
+        onRecall: recalled,
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalled).toHaveBeenCalledTimes(1);
+    expect(output).toContain("answer from recall");
+    expect(output).toContain("response.completed");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(completedResponses).toHaveLength(1);
+    expect(completedResponses[0]?.usage).toMatchObject({
+      inputTokens: 81_000,
+      outputTokens: 40,
+      cacheReadInputTokens: 400_000,
+    });
+  });
+
+  test.each([
+    { failure: "unmetered", usage: undefined },
+    {
+      failure: "over-budget",
+      usage: { input_tokens: 970_000, output_tokens: 1 },
+    },
+  ])(
+    "never accepts recall persistence after an $failure expanded final answer",
+    async ({ failure, usage }) => {
+      const commit = vi.fn();
+      const rollback = vi.fn();
+      const onTransactionReady = vi.fn();
+      const onComplete = vi.fn();
+      const followUp = streamFrom([
+        created(`resp_${failure}_followup`, "gpt-5.6-terra"),
+        textItem(0, `${failure} answer`, `msg_${failure}_answer`),
+        completed(`resp_${failure}_followup`, usage),
+      ]);
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_unmetered_principal", "gpt-5.6-terra"),
+          recallCall(0, { query: "first" }),
+          completed("resp_unmetered_principal", {
+            input_tokens: 240_000,
+            output_tokens: 10,
+          }),
+        ]),
+        {
+          modelContextTokens: 1_000_000,
+          expectedPrincipalModel: "gpt-5.6-terra",
+          onComplete,
+          onTransactionReady,
+          onRecall: async () => ({
+            anchorText: "recalled",
+            resultText: "result",
+            commit,
+            rollback,
+          }),
+          runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).toContain(PUBLIC_RECALL_ERROR);
+      expect(output).not.toContain(`${failure} answer`);
+      expect(output).not.toContain("response.completed");
+      expect(onTransactionReady).not.toHaveBeenCalled();
+      expect(onComplete).not.toHaveBeenCalledWith(expect.anything(), true);
+      expect(commit).not.toHaveBeenCalled();
+      expect(rollback).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("rejects an implausibly large principal response before its first recall", async () => {
     let recalled = 0;
     const followUp = streamFrom([
       created("resp_chained_usage_overflow", "gpt-5.6-terra"),

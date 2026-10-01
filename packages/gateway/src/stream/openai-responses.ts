@@ -54,6 +54,7 @@ export interface ResponsesAccState {
   createdId?: string;
   stopReason: string;
   usage: GatewayUsage;
+  usageComplete: boolean;
   terminalEvent?:
     | "response.completed"
     | "response.incomplete"
@@ -600,6 +601,7 @@ export function makeResponsesAccState(): ResponsesAccState {
     model: "",
     stopReason: "end_turn",
     usage: { inputTokens: 0, outputTokens: 0 },
+    usageComplete: false,
     items: new Map(),
     rawItems: new Map(),
     itemIndexById: new Map(),
@@ -795,6 +797,9 @@ export function applyResponsesEvent(
           "malformed Responses usage",
         );
         if (respUsage) {
+          state.usageComplete =
+            typeof respUsage.input_tokens === "number" &&
+            typeof respUsage.output_tokens === "number";
           if (typeof respUsage.output_tokens === "number") {
             state.usage.outputTokens = respUsage.output_tokens;
           }
@@ -924,6 +929,7 @@ export function finalizeResponsesAcc(
       .filter((item) => item.type !== "item_reference"),
     stopReason,
     usage: state.usage,
+    usageComplete: state.usageComplete,
     ...(state.codexRateLimits
       ? { codexRateLimits: state.codexRateLimits }
       : {}),
@@ -2133,16 +2139,6 @@ export async function accumulateResponsesSSEStream(
         throw new Error("malformed Responses stream event");
       }
       if (
-        opts.requireSuccessfulCompletion &&
-        (event === "response.completed" || event === "response.done")
-      ) {
-        const terminal = parsed.response;
-        if (!isRecord(terminal)) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        assertSuccessfulResponsesCompletion(terminal);
-      }
-      if (
         opts.validation &&
         doneItems.has(parsed.output_index as number) &&
         (event === "response.output_text.delta" ||
@@ -2296,6 +2292,24 @@ export async function accumulateResponsesSSEStream(
         throw new Error("malformed Responses stream event");
       }
       const acceptedCodexRateLimit = applyResponsesEvent(state, event, parsed);
+      if (
+        opts.requireSuccessfulCompletion &&
+        (event === "response.completed" || event === "response.done")
+      ) {
+        try {
+          if (!isRecord(parsed.response)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          assertSuccessfulResponsesCompletion(parsed.response);
+        } catch {
+          // The terminal's validated usage remains authoritative even when
+          // its content or usage completeness prevents recovery delivery.
+          throw new ResponsesTerminalError(
+            finalizeResponsesAcc(state),
+            state.terminalEvent ?? "unknown",
+          );
+        }
+      }
       if (event === "response.output_text.done") {
         state.textDoneItems.add(parsed.output_index as number);
       } else if (event === "response.refusal.done") {
@@ -2498,6 +2512,42 @@ export async function accumulateResponsesSSEStream(
         }
       }
     }
+  } catch (error) {
+    // Terminal usage is authoritative even if a later output or lifecycle
+    // check rejects the response. Keep it available to the caller for billing
+    // and recovery admission, without accepting any of the terminal's output.
+    // An incomplete terminal must carry validated usage and a known reason;
+    // malformed provider-specific reasons retain their original parser error.
+    const terminalEvent = state.terminalEvent;
+    const validation = opts.validation;
+    const incompleteWithUsage =
+      terminalEvent === "response.incomplete" &&
+      state.terminalResponse?.usage !== undefined &&
+      state.terminalResponse.usage !== null &&
+      validation !== undefined;
+    if (incompleteWithUsage && validation !== undefined) {
+      try {
+        validatedTerminalStatus(
+          "response.incomplete",
+          { response: state.terminalResponse },
+          validation,
+          opts.requireCompletedTerminal,
+        );
+      } catch {
+        throw error;
+      }
+    }
+    if (
+      opts.requireCompletedTerminal &&
+      (terminalEvent === "response.completed" || incompleteWithUsage) &&
+      !(error instanceof ResponsesTerminalError)
+    ) {
+      throw new ResponsesTerminalError(
+        finalizeResponsesAcc(state),
+        terminalEvent ?? "unknown",
+      );
+    }
+    throw error;
   } finally {
     cancelAndReleaseReader(reader);
   }

@@ -760,6 +760,9 @@ export function parseAnthropicResponseJSON(
     stopReason: normalizeAnthropicStopReason(
       String((json.stop_reason as string) ?? "end_turn"),
     ),
+    usageComplete:
+      typeof usage?.input_tokens === "number" &&
+      typeof usage?.output_tokens === "number",
     usage: {
       inputTokens: (usage?.input_tokens as number | undefined) ?? 0,
       outputTokens: (usage?.output_tokens as number | undefined) ?? 0,
