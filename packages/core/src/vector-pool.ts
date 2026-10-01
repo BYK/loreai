@@ -732,22 +732,27 @@ function makeWorker(): PoolWorker | null {
           // request; the worker keeps serving. Caller applies its failure policy.
           const pending = pw.inflight.get(msg.id);
           if (pending) {
-            finishPending(pending, "error", null, new Error(msg.error));
+            finishPending(
+              pending,
+              "error",
+              null,
+              new Error("read worker request failed"),
+            );
             pumpQueue();
           }
           break;
         }
         case "init-error": {
           // Reader connection failed to open — the worker is structurally dead.
-          markDead(pw, new Error(`vector worker init failed: ${msg.error}`));
+          markDead(pw, new Error("vector worker init failed"));
           break;
         }
         // "ready" is informational; nothing to do.
       }
     });
 
-    worker.on("error", (err: Error) => {
-      markDead(pw, err instanceof Error ? err : new Error(String(err)));
+    worker.on("error", () => {
+      markDead(pw, new Error("vector worker crashed"));
     });
 
     worker.on("exit", () => {
@@ -755,7 +760,7 @@ function makeWorker(): PoolWorker | null {
     });
 
     return pw;
-  } catch (err) {
+  } catch {
     // Synchronous spawn failure (e.g. unresolvable worker URL). Latch broken so
     // we stop trying — heavy reads follow their failure policy until restart.
     poolBroken = true;
@@ -767,10 +772,7 @@ function makeWorker(): PoolWorker | null {
     }
     if (spawned) terminateRetiredVectorWorker(spawned);
     workers = [];
-    log.info(
-      "vector worker pool disabled (spawn failed):",
-      err instanceof Error ? err.message : String(err),
-    );
+    log.info("vector worker pool disabled (spawn failed)");
     return null;
   }
 }
@@ -963,15 +965,12 @@ async function dispatchToPool(
     if (settled === POOL_REQUEST_TIMED_OUT) return { status: "timeout" };
     if (settled === POOL_REQUEST_UNAVAILABLE) return { status: "unavailable" };
     return { status: "ok", value: settled };
-  } catch (err) {
+  } catch {
     // shutdownVectorPoolAsync rejects in-flight work via failAll(). Treat that
     // transition as closed admission, not as a reason to run the same SQLite
     // operation in-process while the writer is being closed.
     if (shuttingDown) return { status: "shutting-down" };
-    log.info(
-      `${label} failed; degrading off-thread read:`,
-      err instanceof Error ? err.message : String(err),
-    );
+    log.info(`${label} failed; degrading off-thread read`);
     return { status: "unavailable" };
   }
 }
@@ -1090,11 +1089,11 @@ export async function checkVecWorker(
   let worker: Worker;
   try {
     worker = spawnWorker({ dbPath: dbPath() });
-  } catch (err) {
+  } catch {
     return {
       status: "spawn-error",
       vecAvailable: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: "vector_worker_spawn_failed",
     };
   }
 
@@ -1123,15 +1122,19 @@ export async function checkVecWorker(
       if (msg.type === "ready") {
         finish({ status: "ready", vecAvailable: msg.vecAvailable });
       } else if (msg.type === "init-error") {
-        finish({ status: "init-error", vecAvailable: false, error: msg.error });
+        finish({
+          status: "init-error",
+          vecAvailable: false,
+          error: "reader_init_failed",
+        });
       }
       // result/read-result/error can't occur — the probe never posts a request.
     });
-    worker.on("error", (err: Error) => {
+    worker.on("error", () => {
       finish({
         status: "spawn-error",
         vecAvailable: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: "vector_worker_crashed",
       });
     });
     worker.on("exit", () => {
@@ -1205,10 +1208,10 @@ export async function checkReadOffload(
   let worker: Worker;
   try {
     worker = spawnWorker({ dbPath: dbPath() });
-  } catch (err) {
+  } catch {
     return {
       status: "spawn-error",
-      error: err instanceof Error ? err.message : String(err),
+      error: "read_worker_spawn_failed",
     };
   }
 
@@ -1240,14 +1243,14 @@ export async function checkReadOffload(
             id: READ_OFFLOAD_PROBE_ID,
             spec: { sql: "SELECT 1 AS one", params: [], mode: "get" },
           });
-        } catch (err) {
+        } catch {
           finish({
             status: "spawn-error",
-            error: err instanceof Error ? err.message : String(err),
+            error: "read_worker_dispatch_failed",
           });
         }
       } else if (msg.type === "init-error") {
-        finish({ status: "init-error", error: msg.error });
+        finish({ status: "init-error", error: "reader_init_failed" });
       } else if (
         msg.type === "read-result" &&
         msg.id === READ_OFFLOAD_PROBE_ID
@@ -1256,17 +1259,17 @@ export async function checkReadOffload(
         finish(
           row && row.one === 1
             ? { status: "ok" }
-            : { status: "bad-result", error: JSON.stringify(msg.rows) },
+            : { status: "bad-result", error: "read_probe_bad_result" },
         );
       } else if (msg.type === "error" && msg.id === READ_OFFLOAD_PROBE_ID) {
-        finish({ status: "read-error", error: msg.error });
+        finish({ status: "read-error", error: "read_job_failed" });
       }
       // A "result" (vector search) reply can't occur — the probe never posts one.
     });
-    worker.on("error", (err: Error) => {
+    worker.on("error", () => {
       finish({
         status: "spawn-error",
-        error: err instanceof Error ? err.message : String(err),
+        error: "read_worker_crashed",
       });
     });
     worker.on("exit", () => {

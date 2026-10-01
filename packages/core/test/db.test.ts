@@ -1,8 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
 import { DatabaseSync } from "node:sqlite";
+import {
+  isEmbeddingGenerationReady,
+  openReaderConnection,
+} from "../src/db/reader";
 import { registerSink, type LogSink } from "../src/log";
 import {
   db,
+  dbPath,
   close,
   ensureProject,
   projectId,
@@ -44,6 +49,28 @@ import {
   MIGRATIONS,
 } from "../src/db";
 import { enableHostedMode, _resetHostedModeForTest } from "../src/hosted";
+import * as temporal from "../src/temporal";
+import { enqueueTemporalEmbedding } from "../src/temporal-embedding-admission";
+import { vectorSearchTemporal } from "../src/embedding/search";
+import {
+  backfillTemporalEmbeddings,
+  checkConfigChange,
+  maybeCutoverToVec0,
+} from "../src/embedding/backfill";
+import {
+  ensureVec0Store,
+  copyBlobsToVec0,
+  embeddingColumnExists,
+  readStorageMode,
+  readVecDimension,
+  setStorageMode,
+  storeEmbedding,
+  storeTemporalChunks,
+} from "../src/db/vec-store";
+import { config } from "../src/config";
+import { withTenant } from "../src/tenant";
+import { SourceWindowStore } from "../src/source-window-store";
+import { drainTemporalEmbeddingQueueOnce } from "../src/temporal-embedding-queue";
 import {
   deleteProject,
   invalidateProjectsCache,
@@ -63,6 +90,8 @@ const passthroughLogSink: LogSink = {
   error() {},
   captureException() {},
 };
+// v95 verifies legacy session ownership; later migrations must not shift this fixture.
+const PRE_VERIFIED_LEGACY_OWNER_VERSION = 94;
 
 describe("db", () => {
   test("initializes and creates tables", () => {
@@ -81,6 +110,140 @@ describe("db", () => {
     expect(names).toContain("metadata");
     expect(names).toContain("import_history");
     expect(names).toContain("tool_calls");
+    expect(names).toContain("temporal_embedding_parked");
+  });
+
+  test("upgrades v95 with a source-owned fair-retry park", () => {
+    const connection = db();
+    connection.exec(`DROP TABLE temporal_embedding_parked;
+      UPDATE schema_version SET version = 95;`);
+    close();
+
+    const recovered = db();
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_embedding_parked'",
+        )
+        .get(),
+    ).not.toBeNull();
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_temporal_embedding_parked_retry'",
+        )
+        .get(),
+    ).not.toBeNull();
+  });
+
+  test("upgrades v96 move triggers without carrying queued or parked retry debt", () => {
+    const connection = db();
+    const original = ensureProject("/test/retry-migration-original");
+    const moved = withTenant("retry-migration-other-tenant", () =>
+      ensureProject("/test/retry-migration-destination"),
+    );
+    for (const id of ["v96-queued-move", "v96-parked-move"]) {
+      connection
+        .query(
+          `INSERT INTO temporal_messages
+             (id, project_id, session_id, role, content, tokens, distilled, created_at)
+           VALUES (?, ?, 'migration-session', 'user', 'a temporal message to embed', 0, 0, 1)`,
+        )
+        .run(id, original);
+      enqueueTemporalEmbedding(id, "a temporal message to embed", "backfill");
+    }
+    connection
+      .query(
+        "UPDATE temporal_embedding_queue SET failures = 1, retry_at = ? WHERE message_id = 'v96-queued-move'",
+      )
+      .run(Date.now() + 60_000);
+    connection.exec(`
+      INSERT INTO temporal_embedding_parked
+        (message_id, content_hash, fingerprint, enqueued_at, failures, retry_at)
+      SELECT message_id, content_hash, fingerprint, enqueued_at, 1, 9999999999999
+        FROM temporal_embedding_queue WHERE message_id = 'v96-parked-move';
+      DELETE FROM temporal_embedding_queue WHERE message_id = 'v96-parked-move';
+      DROP TRIGGER temporal_embedding_queue_project_update;
+      DROP TRIGGER temporal_embedding_parked_project_update;
+      CREATE TRIGGER temporal_embedding_queue_project_update
+        AFTER UPDATE OF project_id ON temporal_messages BEGIN
+          UPDATE temporal_embedding_queue SET project_id = NEW.project_id
+          WHERE message_id = NEW.id;
+        END;
+      UPDATE schema_version SET version = 96;
+    `);
+    // The v96 queue trigger copied the new project but kept the old failure;
+    // parked retries had no move trigger at all. Move before upgrading.
+    connection
+      .query(
+        "UPDATE temporal_messages SET project_id = ? WHERE id IN ('v96-queued-move', 'v96-parked-move')",
+      )
+      .run(moved);
+    expect(
+      connection
+        .query(
+          "SELECT project_id, failures FROM temporal_embedding_queue WHERE message_id = 'v96-queued-move'",
+        )
+        .get(),
+    ).toEqual({ project_id: moved, failures: 1 });
+    expect(
+      connection
+        .query(
+          "SELECT failures FROM temporal_embedding_parked WHERE message_id = 'v96-parked-move'",
+        )
+        .get(),
+    ).toEqual({ failures: 1 });
+    close();
+
+    const recovered = db();
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+    expect(
+      recovered
+        .query(
+          "SELECT project_id, failures, retry_at FROM temporal_embedding_queue WHERE message_id = 'v96-queued-move'",
+        )
+        .get(),
+    ).toEqual({ project_id: moved, failures: 0, retry_at: 0 });
+    expect(
+      recovered
+        .query(
+          "SELECT failures, retry_at FROM temporal_embedding_parked WHERE message_id = 'v96-parked-move'",
+        )
+        .get(),
+    ).toEqual({ failures: 0, retry_at: 0 });
+  });
+
+  test("rearms the source walk when a current database loses its parked retries", () => {
+    const connection = db();
+    setKV("lore:temporal_rechunk.done", "1");
+    setKV("lore:temporal_rechunk.cursor", "previously-complete");
+    connection.exec("DROP TABLE temporal_embedding_parked");
+    close();
+
+    const recovered = db();
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+    expect(getKV("lore:temporal_rechunk.done")).toBe("0");
+    expect(getKV("lore:temporal_rechunk.cursor")).toBe("");
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_embedding_parked'",
+        )
+        .get(),
+    ).not.toBeNull();
   });
 
   describe("assertFts5Available", () => {
@@ -147,7 +310,122 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
-  test("upgrades an existing v91 context selection schema through v93", () => {
+  test("upgrades legacy pending embeddings in place without dropping their work", () => {
+    const connection = db();
+    const project = ensureProject("/test/legacy-temporal-queue-upgrade");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+       (id, project_id, session_id, role, content, tokens, distilled, created_at)
+       VALUES ('legacy-queued', ?, 'legacy-session', 'user', ?, 1, 0, 0)`,
+      )
+      .run(project, "pending work survives the queue metadata upgrade");
+    connection
+      .query(
+        `INSERT INTO temporal_embedding_queue
+       (message_id, content_hash, fingerprint, enqueued_at)
+       VALUES ('legacy-queued', 'existing-hash', 'existing-fingerprint', 123)`,
+      )
+      .run();
+    connection.exec(`
+      DROP INDEX idx_temporal_embedding_queue_fresh;
+      DROP INDEX idx_temporal_embedding_queue_retry;
+      DROP INDEX idx_temporal_embedding_queue_priority;
+      DROP INDEX idx_temporal_embedding_queue_owner;
+      DROP INDEX idx_temporal_embedding_queue_fresh_owner;
+      DROP INDEX idx_temporal_embedding_queue_fair_ahead;
+      DROP INDEX idx_temporal_project_message_id;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN fair_ahead;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN project_id;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN priority;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN retry_at;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN failures;
+      UPDATE schema_version SET version = 93;
+    `);
+    close();
+
+    const upgraded = db();
+    expect(upgraded.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(
+      upgraded
+        .query(
+          "SELECT content_hash, fingerprint, enqueued_at, priority, retry_at, failures, project_id, fair_ahead FROM temporal_embedding_queue WHERE message_id = 'legacy-queued'",
+        )
+        .get(),
+    ).toEqual({
+      content_hash: "existing-hash",
+      fingerprint: "existing-fingerprint",
+      enqueued_at: 123,
+      priority: 0,
+      retry_at: 0,
+      failures: 0,
+      project_id: project,
+      fair_ahead: 0,
+    });
+  });
+
+  test("upgrades v93 with a missing temporal queue before applying v94 scheduling", () => {
+    const connection = db();
+    const project = ensureProject("/test/missing-v93-temporal-queue");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES ('before-upgrade', ?, 's', 'user', ?, 1, 0, 0)`,
+      )
+      .run(project, "existing temporal content survives queue recovery");
+    setKV("lore:temporal_rechunk.done", "1");
+    setKV("lore:temporal_rechunk.cursor", "before-upgrade");
+    connection.exec(`
+      DROP TABLE temporal_embedding_queue;
+      UPDATE schema_version SET version = 93;
+    `);
+    close();
+
+    const upgraded = db();
+    expect(upgraded.query("SELECT version FROM schema_version").get()).toEqual({
+      version: MIGRATIONS.length,
+    });
+    expect(getKV("lore:temporal_rechunk.done")).toBe("0");
+    expect(getKV("lore:temporal_rechunk.cursor")).toBe("");
+    expect(
+      upgraded
+        .query(
+          "SELECT content FROM temporal_messages WHERE id = 'before-upgrade'",
+        )
+        .get(),
+    ).toEqual({ content: "existing temporal content survives queue recovery" });
+    const stored = temporal.store({
+      projectPath: "/test/missing-v93-temporal-queue",
+      info: {
+        id: "after-upgrade",
+        sessionID: "s",
+        role: "user",
+        time: { created: Date.now() },
+      },
+      parts: [
+        {
+          id: "after-upgrade-part",
+          sessionID: "s",
+          messageID: "after-upgrade",
+          type: "text",
+          text: "A new temporal message must enqueue after upgrading the missing queue",
+          time: { start: Date.now(), end: Date.now() },
+        },
+      ],
+    });
+    expect(
+      upgraded
+        .query(
+          "SELECT priority, retry_at, failures FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(stored),
+    ).toEqual({ priority: 1, retry_at: 0, failures: 0 });
+  });
+
+  test("upgrades an existing v91 context selection schema through current version", () => {
     const database = db();
     database.exec(`
       DROP TRIGGER IF EXISTS knowledge_meta_context_revision_update;
@@ -308,12 +586,12 @@ describe("db", () => {
       recovered
         .query("SELECT value FROM kv_meta WHERE key = ?")
         .get("lore:temporal_rechunk.done"),
-    ).toEqual({ value: "1" });
+    ).toEqual({ value: "0" });
     expect(
       recovered
         .query("SELECT value FROM kv_meta WHERE key = ?")
         .get("lore:temporal_rechunk.cursor"),
-    ).toEqual({ value: "legacy-complete-cursor" });
+    ).toEqual({ value: "" });
   });
 
   test("v81 quarantines sync bookkeeping that predates tenant provenance", () => {
@@ -1671,6 +1949,40 @@ describe("db", () => {
     expect(projectScoped.sort()).toEqual([...registered].sort());
   });
 
+  test("merging projects preserves queued embeddings and removes retired fair cursors", () => {
+    const source = ensureProject("/test/merge-embedding-owner/source");
+    const target = ensureProject("/test/merge-embedding-owner/target");
+    const messageId = "pending-project-merge-embedding";
+    const content =
+      "the queued embedding follows its original message to the merged project";
+    db()
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES (?, ?, 's', 'user', ?, 1, 0, 0)`,
+      )
+      .run(messageId, source, content);
+    expect(enqueueTemporalEmbedding(messageId, content, "backfill")).toBe(true);
+    const fairKey = `lore:temporal_rechunk.fair:${source}`;
+    const scanKey = `lore:temporal_rechunk.fair_scan:${source}`;
+    setKV(fairKey, messageId);
+    setKV(scanKey, messageId);
+    setKV("lore:temporal_rechunk.skip", source);
+
+    mergeProjectInternal(source, target);
+
+    expect(
+      db()
+        .query(
+          "SELECT project_id FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(messageId),
+    ).toEqual({ project_id: target });
+    expect(getKV(fairKey)).toBeNull();
+    expect(getKV(scanKey)).toBeNull();
+    expect(getKV("lore:temporal_rechunk.skip")).toBe("");
+  });
+
   test("mergeProjectInternal preserves collision-prone project sidecars", () => {
     const d = db();
     const sourceId = ensureProject("/test/merge-sidecars/source");
@@ -2369,6 +2681,244 @@ describe("db", () => {
     ).toEqual({ name: "project_id_aliases" });
   });
 
+  test("restores the local session-owner ledger without claiming legacy rows", () => {
+    saveSessionTracking("owner-before-loss", {
+      projectPath: "/test/owner-ledger",
+    });
+    db().exec("DROP TABLE session_state_owners");
+    close();
+
+    const recovered = db();
+    expect(
+      recovered
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get("owner-before-loss"),
+    ).toBeNull();
+    expect(() =>
+      saveSessionTracking("owner-before-loss", {
+        projectPath: "/test/owner-ledger",
+      }),
+    ).toThrow("session state ownership unavailable");
+    expect(
+      recovered
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get("owner-before-loss"),
+    ).toBeNull();
+    withTenant("new-owner", () =>
+      saveSessionTracking("owner-after-loss", {
+        projectPath: "/test/owner-ledger",
+      }),
+    );
+    expect(
+      recovered
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get("owner-after-loss"),
+    ).toEqual({ tenant_id: "new-owner" });
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      { version: MIGRATIONS.length },
+    );
+  });
+
+  test.each(["", "tenant-a"])(
+    "upgrades a verified legacy session without losing its state (tenant=%s)",
+    (tenantId) => {
+      const path = `/test/legacy-session-owner-${tenantId || "local"}`;
+      const sessionID = `legacy-resume-${tenantId || "local"}`;
+      withTenant(tenantId, () => {
+        const project = ensureProject(path);
+        saveSessionTracking(sessionID, {
+          projectPath: path,
+          projectPathProvisional: false,
+          credentialFingerprint: tenantId,
+          messageCount: 4,
+        });
+        db()
+          .query(
+            `INSERT INTO temporal_messages
+             (id, project_id, session_id, role, content, tokens, distilled, created_at)
+             VALUES (?, ?, ?, 'user', 'previously stored source content', 5, 0, 1)`,
+          )
+          .run(`legacy-source-${sessionID}`, project, sessionID);
+      });
+      db().exec(`DROP TABLE session_state_owners;
+        UPDATE schema_version SET version = ${PRE_VERIFIED_LEGACY_OWNER_VERSION};`);
+      close();
+
+      const recovered = db();
+      expect(
+        recovered
+          .query(
+            "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+          )
+          .get(sessionID),
+      ).toEqual({ tenant_id: tenantId });
+      withTenant(tenantId, () =>
+        saveSessionTracking(sessionID, { messageCount: 5 }),
+      );
+      expect(loadSessionTracking(sessionID)?.messageCount).toBe(5);
+    },
+  );
+
+  test("upgrades a confirmed source-only session with an accepted checkpoint", () => {
+    const projectPath = "/test/legacy-source-only-session";
+    const sessionID = "legacy-source-only-session";
+    ensureProject(projectPath);
+    saveSessionTracking(sessionID, {
+      projectPath,
+      projectPathProvisional: false,
+      credentialFingerprint: "local-auth-fingerprint",
+    });
+    const store = new SourceWindowStore({
+      projectPath,
+      sessionID,
+      noStore: false,
+    });
+    withSavepoint("legacy_source_only_checkpoint", () => {
+      expect(store.claim()).toBe(true);
+      expect(store.publish({ input: "accepted request source" })).toBe(true);
+    });
+    db().exec(`DROP TABLE session_state_owners;
+      UPDATE schema_version SET version = ${PRE_VERIFIED_LEGACY_OWNER_VERSION};`);
+    close();
+
+    expect(
+      db()
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get(sessionID),
+    ).toEqual({ tenant_id: "" });
+    saveSessionTracking(sessionID, { messageCount: 2 });
+    expect(loadSessionTracking(sessionID)?.messageCount).toBe(2);
+  });
+
+  test("keeps a verified legacy session whose confirmed path is a project alias", () => {
+    const project = ensureProject("/test/legacy-alias-canonical");
+    const alias = "/test/legacy-alias-confirmed";
+    db()
+      .query(
+        "INSERT INTO project_path_aliases (tenant_id, path, project_id) VALUES ('', ?, ?)",
+      )
+      .run(alias, project);
+    saveSessionTracking("legacy-alias-session", {
+      projectPath: alias,
+      projectPathProvisional: false,
+    });
+    db()
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES ('legacy-alias-message', ?, 'legacy-alias-session', 'user', 'stored source', 1, 0, 1)`,
+      )
+      .run(project);
+    db().exec(`DROP TABLE session_state_owners;
+      UPDATE schema_version SET version = ${PRE_VERIFIED_LEGACY_OWNER_VERSION};`);
+    close();
+
+    expect(
+      db()
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get("legacy-alias-session"),
+    ).toEqual({ tenant_id: "" });
+  });
+
+  test("never assigns a legacy owner from a mismatched fingerprint", () => {
+    const path = "/test/legacy-foreign-fingerprint";
+    const project = withTenant("tenant-a", () => ensureProject(path));
+    db()
+      .query(
+        `INSERT INTO session_state
+         (session_id, force_min_layer, updated_at, project_path,
+          project_path_provisional, credential_fingerprint)
+         VALUES ('legacy-foreign', 0, 1, ?, 0, 'tenant-b')`,
+      )
+      .run(path);
+    db()
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES ('legacy-foreign-message', ?, 'legacy-foreign', 'user', 'source', 1, 0, 1)`,
+      )
+      .run(project);
+    db().exec(`DROP TABLE session_state_owners;
+      UPDATE schema_version SET version = ${PRE_VERIFIED_LEGACY_OWNER_VERSION};`);
+    close();
+
+    expect(
+      db()
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get("legacy-foreign"),
+    ).toBeNull();
+    expect(() =>
+      withTenant("tenant-a", () =>
+        saveSessionTracking("legacy-foreign", { messageCount: 5 }),
+      ),
+    ).toThrow("session state ownership unavailable");
+  });
+
+  test.each(["foreign", "ownerless"] as const)(
+    "never writes a $case session state from another tenant",
+    (caseName) => {
+      const id = `session-writer-${caseName}`;
+      if (caseName === "foreign") {
+        withTenant("tenant-a", () =>
+          saveSessionTracking(id, { projectPath: "/test/tenant-a" }),
+        );
+      } else {
+        db()
+          .query(
+            "INSERT INTO session_state (session_id, force_min_layer, updated_at, project_path) VALUES (?, 0, 1, '/test/legacy')",
+          )
+          .run(id);
+      }
+      const before = db()
+        .query("SELECT * FROM session_state WHERE session_id = ?")
+        .get(id);
+      const attempts = [
+        () => saveForceMinLayer(id, 3),
+        () =>
+          saveSessionCosts(id, {
+            conversationCost: 1,
+            workerCost: 0,
+            conversationTurns: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            warmupSavings: 0,
+            warmupCost: 0,
+            warmupHits: 0,
+            ttlSavings: 0,
+            ttlHits: 0,
+            batchSavings: 0,
+            avoidedCompactions: 0,
+            avoidedCompactionCost: 0,
+          }),
+        () => saveSessionTracking(id, { projectPath: "/test/tenant-b" }),
+      ];
+      for (const attempt of attempts) {
+        expect(() => withTenant("tenant-b", attempt)).toThrow(
+          "session state ownership unavailable",
+        );
+        expect(
+          db()
+            .query("SELECT * FROM session_state WHERE session_id = ?")
+            .get(id),
+        ).toEqual(before);
+      }
+    },
+  );
+
   test("recoverMissingObjects creates the temporal embedding queue and index when missing", () => {
     const d = db();
     d.exec("DROP TABLE IF EXISTS temporal_embedding_queue");
@@ -2396,6 +2946,770 @@ describe("db", () => {
         )
         .get(),
     ).toEqual({ name: "idx_temporal_embedding_queue_enqueued" });
+
+    const stored = temporal.store({
+      projectPath: "/test/recovered-temporal-queue",
+      info: {
+        id: "recovered-message",
+        sessionID: "recovered-session",
+        role: "user",
+        time: { created: Date.now() },
+      },
+      parts: [
+        {
+          id: "recovered-part",
+          sessionID: "recovered-session",
+          messageID: "recovered-message",
+          type: "text",
+          text: "The recovered queue must accept this durable temporal message",
+          time: { start: Date.now(), end: Date.now() },
+        },
+      ],
+    });
+    expect(stored).toBeDefined();
+    expect(
+      fresh
+        .query("SELECT content FROM temporal_messages WHERE id = ?")
+        .get(stored),
+    ).toEqual({
+      content: "The recovered queue must accept this durable temporal message",
+    });
+    expect(
+      fresh
+        .query(
+          "SELECT priority, retry_at, failures FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get(stored),
+    ).toEqual({ priority: 1, retry_at: 0, failures: 0 });
+  });
+
+  test.each(["blob", "vec0"] as const)(
+    "reconstructs lost undrained %s embedding work after queue recovery",
+    async (mode) => {
+      const connection = db();
+      const project = ensureProject(`/test/lost-${mode}-embedding-work`);
+      if (mode === "vec0") {
+        ensureVec0Store(connection, config().search.embeddings.dimensions);
+        setStorageMode(connection, "vec0");
+      }
+      const content = `undrained ${mode} message must recover from its authoritative temporal source`;
+      connection
+        .query(
+          `INSERT INTO temporal_messages
+            (id, project_id, session_id, role, content, tokens, distilled, created_at)
+           VALUES (?, ?, 's', 'user', ?, 1, 0, 0)`,
+        )
+        .run(`lost-${mode}`, project, content);
+      enqueueTemporalEmbedding(`lost-${mode}`, content, "backfill");
+      setKV("lore:temporal_rechunk.cursor", `lost-${mode}`);
+      setKV(`lore:temporal_rechunk.fair:${project}`, `lost-${mode}`);
+      if (mode === "vec0") setKV("lore:temporal_rechunk.done", "1");
+      connection.exec("DROP TABLE temporal_embedding_queue");
+      close();
+
+      const recovered = db();
+      expect(getKV("lore:temporal_rechunk.cursor")).toBe("");
+      expect(getKV(`lore:temporal_rechunk.fair:${project}`)).toBeNull();
+      await backfillTemporalEmbeddings();
+      expect(
+        recovered
+          .query(
+            "SELECT priority, failures FROM temporal_embedding_queue WHERE message_id = ?",
+          )
+          .get(`lost-${mode}`),
+      ).toEqual({ priority: 0, failures: 0 });
+      if (mode === "blob") {
+        expect(getKV("lore:temporal_rechunk.done")).not.toBe("1");
+      }
+    },
+  );
+
+  test.each(["blob", "vec0"] as const)(
+    "reconstructs undrained %s work when the queue and metadata table are both lost",
+    async (mode) => {
+      const connection = db();
+      if (mode === "vec0") maybeCutoverToVec0();
+      else {
+        // This file reuses one test database and other tests explicitly
+        // revert vec0 to blob. A real pre-cutover blob database has no vec0
+        // tables; remove those leftover fixtures before losing metadata.
+        setStorageMode(connection, "blob");
+        for (const table of [
+          "knowledge_vec",
+          "entity_vec",
+          "distillation_vec",
+          "temporal_vec",
+        ]) {
+          connection.exec(`DROP TABLE IF EXISTS ${table}`);
+        }
+      }
+      const project = ensureProject(`/test/lost-queue-and-metadata-${mode}`);
+      const id = `lost-queue-and-metadata-${mode}`;
+      const content = `durable ${mode} embedding work still needs recovery when both local tables disappear`;
+      connection
+        .query(
+          `INSERT INTO temporal_messages
+           (id, project_id, session_id, role, content, tokens, distilled, created_at)
+           VALUES (?, ?, 's', 'user', ?, 1, 0, 0)`,
+        )
+        .run(id, project, content);
+      enqueueTemporalEmbedding(id, content, "backfill");
+      connection.exec(
+        "DROP TABLE temporal_embedding_queue; DROP TABLE kv_meta;",
+      );
+      close();
+
+      const recovered = db();
+      expect(readStorageMode(recovered)).toBe(mode);
+      expect(getKV("lore:temporal_rechunk.cursor")).toBe("");
+      await backfillTemporalEmbeddings();
+      expect(
+        recovered
+          .query(
+            "SELECT priority FROM temporal_embedding_queue WHERE message_id = ?",
+          )
+          .get(id),
+      ).toEqual({ priority: 0 });
+      expect(getKV("lore:temporal_rechunk.queue_recovery_pending")).toBe("0");
+    },
+  );
+
+  test("preserves a surviving vec0 queue when only its metadata table is lost", () => {
+    const connection = db();
+    maybeCutoverToVec0();
+    const project = ensureProject("/test/lost-vec0-metadata-only");
+    const content =
+      "this pending vec0 message must keep its queue and storage layout after metadata loss";
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES ('vec0-metadata-only', ?, 's', 'user', ?, 1, 0, 0)`,
+      )
+      .run(project, content);
+    enqueueTemporalEmbedding("vec0-metadata-only", content, "backfill");
+    connection.exec("DROP TABLE kv_meta");
+    close();
+
+    const recovered = db();
+    expect(readStorageMode(recovered)).toBe("vec0");
+    expect(
+      recovered
+        .query(
+          "SELECT priority FROM temporal_embedding_queue WHERE message_id = ?",
+        )
+        .get("vec0-metadata-only"),
+    ).toEqual({ priority: 0 });
+  });
+
+  test("recovers a pre-queue vec0 database whose metadata was lost before upgrade", async () => {
+    const connection = db();
+    checkConfigChange();
+    maybeCutoverToVec0();
+    const id = "pre-queue-metadata-loss";
+    const project = ensureProject("/test/pre-queue-metadata-loss");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES (?, ?, 'pre-queue-session', 'user', 'old generation', 1, 0, 0)`,
+      )
+      .run(id, project);
+    const dimensions = config().search.embeddings.dimensions;
+    storeTemporalChunks(connection, id, [new Float32Array(dimensions).fill(1)]);
+    // Version 84 predates the local queue. A vec0 cutover and the lost metadata
+    // both precede the first upgrade attempt; repair must not need a second open.
+    connection.exec("DROP TABLE temporal_embedding_queue; DROP TABLE kv_meta");
+    connection.query("UPDATE schema_version SET version = 84").run();
+    close();
+
+    const recovered = db();
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+    expect(readStorageMode(recovered)).toBe("vec0");
+    expect(
+      recovered
+        .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+        .get(`${id}#0`),
+    ).toBeNull();
+    expect(
+      await vectorSearchTemporal(new Float32Array(dimensions).fill(1), project),
+    ).toEqual([]);
+    storeTemporalChunks(recovered, id, [new Float32Array(dimensions).fill(1)]);
+    expect(
+      (
+        await vectorSearchTemporal(
+          new Float32Array(dimensions).fill(1),
+          project,
+        )
+      ).map((hit) => hit.id),
+    ).toContain(id);
+  });
+
+  test("rebuilds a pre-queue vec0 store missing both metadata and the temporal table", async () => {
+    const connection = db();
+    checkConfigChange();
+    maybeCutoverToVec0();
+    const id = "pre-queue-lost-temporal-store";
+    const project = ensureProject("/test/pre-queue-lost-temporal-store");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES (?, ?, 's', 'user', 'historical text must be re-embedded', 1, 0, 0)`,
+      )
+      .run(id, project);
+    const dimensions = config().search.embeddings.dimensions;
+    storeTemporalChunks(connection, id, [new Float32Array(dimensions).fill(1)]);
+    expect(
+      connection
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_vec'",
+        )
+        .get(),
+    ).not.toBeNull();
+    connection.exec(`DROP TABLE temporal_embedding_queue;
+      DROP TABLE temporal_vec;
+      DROP TABLE kv_meta;
+      UPDATE schema_version SET version = 84;`);
+    close();
+
+    const recovered = db();
+    expect(readStorageMode(recovered)).toBe("vec0");
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_vec'",
+        )
+        .get(),
+    ).not.toBeNull();
+    expect(
+      await vectorSearchTemporal(new Float32Array(dimensions).fill(1), project),
+    ).toEqual([]);
+    await backfillTemporalEmbeddings();
+    expect(
+      recovered
+        .query("SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?")
+        .get(id),
+    ).not.toBeNull();
+  });
+
+  test("does not mistake an unfinished vec0 copy with intact blobs for a completed cutover", () => {
+    const connection = db();
+    checkConfigChange();
+    maybeCutoverToVec0();
+    for (const table of ["knowledge", "entities", "distillations"] as const)
+      if (!embeddingColumnExists(connection, table))
+        connection.exec(`ALTER TABLE ${table} ADD COLUMN embedding BLOB`);
+    if (!embeddingColumnExists(connection, "temporal"))
+      connection.exec(
+        "ALTER TABLE temporal_messages ADD COLUMN embedding BLOB",
+      );
+    connection.exec(`DROP TABLE temporal_embedding_queue;
+      DROP TABLE temporal_vec;
+      DROP TABLE kv_meta;
+      UPDATE schema_version SET version = 84;`);
+    close();
+
+    const recovered = db();
+    expect(readStorageMode(recovered)).toBe("blob");
+    for (const table of [
+      "knowledge",
+      "entities",
+      "distillations",
+      "temporal",
+    ] as const)
+      expect(embeddingColumnExists(recovered, table)).toBe(true);
+  });
+
+  test("recovers a pre-queue vec0 layout after only its storage-mode key is lost", async () => {
+    const connection = db();
+    checkConfigChange();
+    maybeCutoverToVec0();
+    const id = "pre-queue-mode-key-loss";
+    const project = ensureProject("/test/pre-queue-mode-key-loss");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES (?, ?, 'pre-queue-session', 'user', 'untrusted old vector', 1, 0, 0)`,
+      )
+      .run(id, project);
+    const dimensions = config().search.embeddings.dimensions;
+    storeTemporalChunks(connection, id, [new Float32Array(dimensions).fill(1)]);
+    connection.exec(`DROP TABLE temporal_embedding_queue;
+      DELETE FROM kv_meta WHERE key = 'vec.storage_mode';
+      UPDATE schema_version SET version = 84;`);
+    close();
+
+    const recovered = db();
+    expect(readStorageMode(recovered)).toBe("vec0");
+    expect(
+      recovered
+        .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+        .get(`${id}#0`),
+    ).toBeNull();
+    expect(
+      await vectorSearchTemporal(new Float32Array(dimensions).fill(1), project),
+    ).toEqual([]);
+  });
+
+  test("retries pre-queue vec0 recovery after metadata creation was interrupted", () => {
+    const connection = db();
+    checkConfigChange();
+    maybeCutoverToVec0();
+    const id = "interrupted-v84-recovery";
+    const project = ensureProject("/test/interrupted-v84-recovery");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES (?, ?, 'pre-queue-session', 'user', 'old generation', 1, 0, 0)`,
+      )
+      .run(id, project);
+    storeTemporalChunks(connection, id, [
+      new Float32Array(config().search.embeddings.dimensions).fill(1),
+    ]);
+    connection.exec(`DROP TABLE temporal_embedding_queue; DROP TABLE kv_meta;
+      CREATE TABLE kv_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO kv_meta VALUES ('lore:embedding_generation_unknown', '1');
+      INSERT INTO kv_meta VALUES ('lore:embedding_config', 'unknown-vector-generation');`);
+    connection.query("UPDATE schema_version SET version = 84").run();
+    close();
+
+    const recovered = db();
+    expect(readStorageMode(recovered)).toBe("vec0");
+    expect(recovered.query("SELECT version FROM schema_version").get()).toEqual(
+      {
+        version: MIGRATIONS.length,
+      },
+    );
+    expect(
+      recovered
+        .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+        .get(`${id}#0`),
+    ).toBeNull();
+  });
+
+  test.each([
+    { queueLost: false, dimensionChanged: false },
+    { queueLost: false, dimensionChanged: true },
+    { queueLost: true, dimensionChanged: false },
+    { queueLost: true, dimensionChanged: true },
+  ])(
+    "invalidates unknown vec0 generation before reads (queueLost=$queueLost dimensionChanged=$dimensionChanged)",
+    ({ queueLost, dimensionChanged }) => {
+      const embeddingConfig = config().search.embeddings;
+      const originalModel = embeddingConfig.model;
+      const originalDimensions = embeddingConfig.dimensions;
+      try {
+        embeddingConfig.model = "lost-metadata-model-a";
+        embeddingConfig.dimensions = 8;
+        const connection = db();
+        checkConfigChange();
+        maybeCutoverToVec0();
+        const id = `unknown-vec-generation-${Number(queueLost)}-${Number(dimensionChanged)}`;
+        const project = ensureProject("/test/unknown-vec-generation");
+        connection
+          .query(
+            `INSERT INTO temporal_messages
+             (id, project_id, session_id, role, content, tokens, distilled, created_at)
+             VALUES (?, ?, 's', 'user', 'old model vector', 1, 0, 0)`,
+          )
+          .run(id, project);
+        storeTemporalChunks(connection, id, [new Float32Array(8).fill(1)]);
+        expect(
+          connection
+            .query("SELECT COUNT(*) AS n FROM temporal_vec WHERE chunk_id = ?")
+            .get(`${id}#0`),
+        ).toEqual({ n: 1 });
+        if (queueLost) connection.exec("DROP TABLE temporal_embedding_queue");
+        connection.exec("DROP TABLE kv_meta");
+        close();
+
+        embeddingConfig.model = "lost-metadata-model-b";
+        embeddingConfig.dimensions = dimensionChanged ? 12 : 8;
+        const recovered = db();
+        expect(readStorageMode(recovered)).toBe("vec0");
+        // No request can read an old-model vector before startup backfill runs.
+        expect(
+          recovered
+            .query("SELECT COUNT(*) AS n FROM temporal_vec WHERE chunk_id = ?")
+            .get(`${id}#0`),
+        ).toEqual({ n: 0 });
+        expect(readVecDimension(recovered)).toBe(embeddingConfig.dimensions);
+        expect(checkConfigChange()).toBe(true);
+        expect(getKV("lore:temporal_rechunk.done")).toBe("0");
+        storeTemporalChunks(recovered, id, [
+          new Float32Array(embeddingConfig.dimensions).fill(2),
+        ]);
+        expect(
+          recovered
+            .query("SELECT COUNT(*) AS n FROM temporal_vec WHERE chunk_id = ?")
+            .get(`${id}#0`),
+        ).toEqual({ n: 1 });
+      } finally {
+        close();
+        embeddingConfig.model = originalModel;
+        embeddingConfig.dimensions = originalDimensions;
+        // This file shares a temporary database across its cases. Restore its
+        // physical vec0 width as well as the mutable test configuration.
+        checkConfigChange();
+      }
+    },
+  );
+
+  test.each(["copied", "flipped"] as const)(
+    "does not resurrect copied vectors after metadata loss during %s cutover",
+    (phase) => {
+      const embeddingConfig = config().search.embeddings;
+      const originalModel = embeddingConfig.model;
+      const originalDimensions = embeddingConfig.dimensions;
+      const id = `partial-cutover-${phase}`;
+      try {
+        embeddingConfig.model = `partial-cutover-old-${phase}`;
+        embeddingConfig.dimensions = 8;
+        const connection = db();
+        for (const table of [
+          "knowledge",
+          "entities",
+          "distillations",
+          "temporal",
+        ] as const) {
+          if (!embeddingColumnExists(connection, table)) {
+            connection.exec(
+              `ALTER TABLE ${table === "temporal" ? "temporal_messages" : table} ADD COLUMN embedding BLOB`,
+            );
+          }
+        }
+        setStorageMode(connection, "blob");
+        checkConfigChange();
+        ensureVec0Store(connection, 8, { forceRecreate: true });
+        const project = ensureProject(`/test/partial-cutover-${phase}`);
+        connection
+          .query(
+            `INSERT INTO temporal_messages
+              (id, project_id, session_id, role, content, tokens, distilled, created_at, embedding)
+             VALUES (?, ?, 's', 'user', 'old generation', 1, 0, 0, ?)`,
+          )
+          .run(id, project, Buffer.from(new Float32Array(8).fill(1).buffer));
+        copyBlobsToVec0(connection, "temporal", 8);
+        if (phase === "flipped") setStorageMode(connection, "vec0");
+        expect(
+          connection
+            .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+            .get(`${id}#0`),
+        ).not.toBeNull();
+        const preexistingReader =
+          phase === "flipped" ? openReaderConnection(dbPath()) : null;
+        try {
+          if (preexistingReader)
+            expect(readStorageMode(preexistingReader.db)).toBe("vec0");
+          connection.exec("DROP TABLE kv_meta");
+          close();
+
+          embeddingConfig.model = `partial-cutover-new-${phase}`;
+          const recovered = db();
+          if (phase === "flipped") {
+            // A mode flip remains authoritative even if its old blob columns
+            // have not yet been dropped when the metadata table disappears.
+            expect(readStorageMode(recovered)).toBe("vec0");
+          }
+          expect(
+            recovered
+              .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+              .get(`${id}#0`),
+          ).toBeNull();
+          expect(checkConfigChange()).toBe(true);
+          maybeCutoverToVec0();
+          expect(
+            recovered
+              .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+              .get(`${id}#0`),
+          ).toBeNull();
+          if (preexistingReader) {
+            storeEmbedding(
+              recovered,
+              "temporal",
+              id,
+              new Float32Array(8).fill(2),
+            );
+            expect(
+              preexistingReader.db
+                .query("SELECT chunk_id FROM temporal_vec WHERE chunk_id = ?")
+                .get(`${id}#0`),
+            ).toEqual({ chunk_id: `${id}#0` });
+          }
+        } finally {
+          preexistingReader?.db.close();
+        }
+      } finally {
+        close();
+        embeddingConfig.model = originalModel;
+        embeddingConfig.dimensions = originalDimensions;
+        const connection = db();
+        ensureVec0Store(connection, originalDimensions, {
+          forceRecreate: true,
+        });
+        setStorageMode(connection, "vec0");
+        checkConfigChange();
+        maybeCutoverToVec0();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "rejects a missing fingerprint while the metadata table survives (dimensionLost=%s)",
+    (dimensionLost) => {
+      const embeddingConfig = config().search.embeddings;
+      const originalModel = embeddingConfig.model;
+      const originalDimensions = embeddingConfig.dimensions;
+      const id = `partial-metadata-${dimensionLost}`;
+      try {
+        embeddingConfig.model = "partial-metadata-old";
+        embeddingConfig.dimensions = 8;
+        const connection = db();
+        checkConfigChange();
+        maybeCutoverToVec0();
+        const project = ensureProject("/test/partial-metadata");
+        connection
+          .query(
+            `INSERT INTO temporal_messages
+              (id, project_id, session_id, role, content, tokens, distilled, created_at)
+             VALUES (?, ?, 's', 'user', 'old model vector', 1, 0, 0)`,
+          )
+          .run(id, project);
+        storeTemporalChunks(connection, id, [new Float32Array(8).fill(1)]);
+        connection
+          .query("DELETE FROM kv_meta WHERE key = ?")
+          .run("lore:embedding_config");
+        if (dimensionLost)
+          connection
+            .query("DELETE FROM kv_meta WHERE key = ?")
+            .run("vec.dimension");
+        close();
+
+        embeddingConfig.model = "partial-metadata-new";
+        embeddingConfig.dimensions = dimensionLost ? 12 : 8;
+        const reader = openReaderConnection(dbPath());
+        try {
+          expect(isEmbeddingGenerationReady(reader.db)).toBe(false);
+        } finally {
+          reader.db.close();
+        }
+        const recovered = db();
+        expect(
+          recovered
+            .query("SELECT 1 FROM temporal_vec WHERE chunk_id = ?")
+            .get(`${id}#0`),
+        ).toBeNull();
+        expect(readVecDimension(recovered)).toBe(embeddingConfig.dimensions);
+        expect(checkConfigChange()).toBe(true);
+        expect(getKV("lore:temporal_rechunk.done")).toBe("0");
+        storeTemporalChunks(recovered, id, [
+          new Float32Array(embeddingConfig.dimensions).fill(2),
+        ]);
+      } finally {
+        close();
+        embeddingConfig.model = originalModel;
+        embeddingConfig.dimensions = originalDimensions;
+        const connection = db();
+        ensureVec0Store(connection, originalDimensions, {
+          forceRecreate: true,
+        });
+        checkConfigChange();
+      }
+    },
+  );
+
+  test("read workers reject an unresolved vector generation", () => {
+    const connection = db();
+    connection
+      .query("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, '1')")
+      .run("lore:embedding_generation_unknown");
+    try {
+      const reader = openReaderConnection(process.env.LORE_DB_PATH!);
+      try {
+        expect(reader.embeddingGenerationReady).toBe(false);
+        connection
+          .query("DELETE FROM kv_meta WHERE key = ?")
+          .run("lore:embedding_generation_unknown");
+        expect(isEmbeddingGenerationReady(reader.db)).toBe(true);
+        connection
+          .query("INSERT INTO kv_meta (key, value) VALUES (?, '1')")
+          .run("lore:embedding_generation_unknown");
+        expect(isEmbeddingGenerationReady(reader.db)).toBe(false);
+      } finally {
+        reader.db.close();
+      }
+    } finally {
+      connection
+        .query("DELETE FROM kv_meta WHERE key = ?")
+        .run("lore:embedding_generation_unknown");
+    }
+    const recoveredReader = openReaderConnection(process.env.LORE_DB_PATH!);
+    try {
+      expect(recoveredReader.embeddingGenerationReady).toBe(true);
+    } finally {
+      recoveredReader.db.close();
+    }
+  });
+
+  test("queue loss reconstructs short updates that must clear an old vector", async () => {
+    const connection = db();
+    const project = ensureProject("/test/lost-short-embedding-work");
+    const mode = readStorageMode(connection);
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+          (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES ('lost-short', ?, 's', 'user', 'short', 1, 0, 0)`,
+      )
+      .run(project);
+    const oldVector = new Float32Array(config().search.embeddings.dimensions);
+    if (mode === "vec0") {
+      storeTemporalChunks(connection, "lost-short", [oldVector]);
+    } else {
+      connection
+        .query(
+          "UPDATE temporal_messages SET embedding = ? WHERE id = 'lost-short'",
+        )
+        .run(new Uint8Array(oldVector.buffer));
+    }
+    enqueueTemporalEmbedding("lost-short", "short", "backfill");
+    setKV("lore:temporal_rechunk.cursor", "lost-short");
+    connection.exec("DROP TABLE temporal_embedding_queue");
+    close();
+
+    const recovered = db();
+    await backfillTemporalEmbeddings();
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'lost-short'",
+        )
+        .get(),
+    ).not.toBeNull();
+    const pending = recovered
+      .query("SELECT COUNT(*) AS n FROM temporal_embedding_queue")
+      .get() as { n: number };
+    for (const _turn of Array.from(
+      { length: pending.n },
+      (_, index) => index,
+    )) {
+      if (
+        recovered
+          .query(
+            "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'lost-short'",
+          )
+          .get() === null
+      )
+        break;
+      expect(await drainTemporalEmbeddingQueueOnce()).toBeGreaterThanOrEqual(1);
+    }
+    expect(
+      recovered
+        .query(
+          "SELECT 1 FROM temporal_embedding_queue WHERE message_id = 'lost-short'",
+        )
+        .get(),
+    ).toBeNull();
+    if (mode === "vec0") {
+      expect(
+        recovered
+          .query("SELECT 1 FROM temporal_vec WHERE chunk_id = 'lost-short#0'")
+          .get(),
+      ).toBeNull();
+    } else {
+      expect(
+        recovered
+          .query(
+            "SELECT embedding FROM temporal_messages WHERE id = 'lost-short'",
+          )
+          .get(),
+      ).toEqual({ embedding: null });
+    }
+  });
+
+  test("recovers missing queue scheduling columns without losing pending work", () => {
+    const connection = db();
+    const project = ensureProject("/test/partial-temporal-queue-recovery");
+    connection
+      .query(
+        `INSERT INTO temporal_messages
+         (id, project_id, session_id, role, content, tokens, distilled, created_at)
+         VALUES ('partial-queued', ?, 'partial-session', 'user', ?, 1, 0, 0)`,
+      )
+      .run(project, "pending work remains after partial queue recovery");
+    connection
+      .query(
+        `INSERT INTO temporal_embedding_queue
+         (message_id, content_hash, fingerprint, enqueued_at)
+         VALUES ('partial-queued', 'original-hash', 'original-fingerprint', 123)`,
+      )
+      .run();
+    connection.exec(`
+      DROP INDEX idx_temporal_embedding_queue_fresh;
+      DROP INDEX idx_temporal_embedding_queue_retry;
+      DROP INDEX idx_temporal_embedding_queue_priority;
+      DROP INDEX idx_temporal_embedding_queue_owner;
+      DROP INDEX idx_temporal_embedding_queue_fresh_owner;
+      DROP INDEX idx_temporal_embedding_queue_fair_ahead;
+      DROP INDEX idx_temporal_project_message_id;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN fair_ahead;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN project_id;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN priority;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN retry_at;
+      ALTER TABLE temporal_embedding_queue DROP COLUMN failures;
+    `);
+    close();
+
+    const recovered = db();
+    expect(
+      recovered
+        .query(
+          "SELECT content_hash, fingerprint, enqueued_at, priority, retry_at, failures, project_id, fair_ahead FROM temporal_embedding_queue WHERE message_id = 'partial-queued'",
+        )
+        .get(),
+    ).toEqual({
+      content_hash: "original-hash",
+      fingerprint: "original-fingerprint",
+      enqueued_at: 123,
+      priority: 0,
+      retry_at: 0,
+      failures: 0,
+      project_id: project,
+      fair_ahead: 0,
+    });
+    expect(
+      recovered
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_temporal_embedding_queue_retry'",
+        )
+        .get(),
+    ).toEqual({ name: "idx_temporal_embedding_queue_retry" });
+    expect(
+      recovered
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_temporal_embedding_queue_owner'",
+        )
+        .get(),
+    ).toEqual({ name: "idx_temporal_embedding_queue_owner" });
+    expect(
+      recovered
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_temporal_project_message_id'",
+        )
+        .get(),
+    ).toEqual({ name: "idx_temporal_project_message_id" });
   });
 
   test("saveSessionCosts and loadSessionCosts round-trip", () => {

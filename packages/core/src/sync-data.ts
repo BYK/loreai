@@ -2072,7 +2072,7 @@ export function applyRemoteTemporal(row: Record<string, unknown>): void {
         previous.content !== current.content ||
         !hasTemporalEmbedding(messageId)
       ) {
-        enqueueTemporalEmbedding(messageId, current.content);
+        enqueueTemporalEmbedding(messageId, current.content, "backfill");
       }
     });
   });

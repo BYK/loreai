@@ -3,13 +3,19 @@ import { DEDUP_APPLY_SCHEMA } from "./dedup-apply-schema";
 import { Database, registerScalarFunction } from "#db/driver";
 import { isVecAvailable, loadVecExtension, resetVecState } from "./db/vec";
 import {
+  VEC_STORAGE_MODE_KEY,
+  clearAllEmbeddings,
+  embeddingColumnExists,
   ensureVec0Store,
   readStorageMode,
   readVecDimension,
   repartitionVec0Project,
+  setStorageMode,
   vec0Rebuild,
 } from "./db/vec-store";
+import { config } from "./config";
 import { join, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { getGitRemote } from "./git";
 import { isHostedMode } from "./hosted";
@@ -215,6 +221,154 @@ export function repoNameFromRemote(remote: string | null): string | null {
   const name = remote.slice(lastSlash + 1);
   return name.length > 0 ? name : null;
 }
+
+const TEMPORAL_QUEUE_BASE_SCHEMA = `
+  -- Version 85: durable local scheduling for temporal embeddings.
+  -- Content remains authoritative in temporal_messages; this queue stores only
+  -- validation metadata and is never synchronized.
+  CREATE TABLE IF NOT EXISTS temporal_embedding_queue (
+    message_id TEXT PRIMARY KEY REFERENCES temporal_messages(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    enqueued_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
+    ON temporal_embedding_queue(enqueued_at, message_id);
+`;
+
+const SESSION_STATE_OWNER_SCHEMA = `
+  -- New sessions have an explicit server-derived owner. Legacy states cannot
+  -- acquire an owner merely because another tenant knows their global ID.
+  CREATE TABLE IF NOT EXISTS session_state_owners (
+    session_id TEXT PRIMARY KEY REFERENCES session_state(session_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL
+  );
+`;
+
+// Restore ownership only during the one-time upgrade from a pre-ledger schema.
+// A surviving ownerless state after that upgrade (or a lost ledger table) must
+// never acquire a new owner simply because a caller presents its session ID.
+// Both the confirmed project binding and persisted temporal source rows must
+// agree with the server-derived tenant; a header or fingerprint alone is not
+// proof of ownership.
+const VERIFIED_LEGACY_SESSION_OWNER_MIGRATION = `${SESSION_STATE_OWNER_SCHEMA}
+  INSERT OR IGNORE INTO session_state_owners (session_id, tenant_id)
+  SELECT s.session_id, p.tenant_id
+  FROM session_state s
+  JOIN projects p ON (p.path = s.project_path OR EXISTS (
+    SELECT 1 FROM project_path_aliases a
+    WHERE a.project_id = p.id AND a.tenant_id = p.tenant_id
+      AND a.path = s.project_path
+  ))
+  WHERE s.project_path_provisional = 0
+    AND (p.tenant_id = '' OR s.credential_fingerprint = p.tenant_id)
+    AND (
+      EXISTS (
+        SELECT 1 FROM temporal_messages t
+        WHERE t.session_id = s.session_id AND t.project_id = p.id
+      )
+      OR (
+        EXISTS (
+          SELECT 1 FROM source_windows w
+          WHERE w.session_id = s.session_id AND w.project_id = p.id
+            AND w.payload IS NOT NULL AND w.checksum IS NOT NULL
+        )
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM temporal_messages t
+      WHERE t.session_id = s.session_id AND t.project_id != p.id
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM source_windows w
+      WHERE w.session_id = s.session_id AND w.project_id != p.id
+    );
+`;
+
+// Reuse the exact base and scheduling migrations when restoring a missing or
+// partially rebuilt queue. v93 must create the table before v94 adds columns;
+// an already-v94 database skips the migration loop and relies on recovery.
+const TEMPORAL_QUEUE_SCHEDULING_SCHEMA = `${TEMPORAL_QUEUE_BASE_SCHEMA}
+  -- Version 94: recover existing local embedding work without a queue rebuild.
+  -- Legacy rows become historical work; live admission upgrades its own row.
+  -- Row-local retry state lets a failed inference yield to healthy work.
+  ALTER TABLE temporal_embedding_queue ADD COLUMN priority INTEGER NOT NULL DEFAULT 0 CHECK(priority IN (0, 1));
+  ALTER TABLE temporal_embedding_queue ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE temporal_embedding_queue ADD COLUMN failures INTEGER NOT NULL DEFAULT 0;
+  -- Cache the authoritative temporal project's ID for bounded owner-specific
+  -- admission and recovery probes. Existing queue rows stay in place.
+  ALTER TABLE temporal_embedding_queue ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
+  -- Count only outstanding fair-ahead rows. Legacy debt can be much larger
+  -- than 512, so a frozen queue high-water mark is not a fair-slot budget.
+  ALTER TABLE temporal_embedding_queue ADD COLUMN fair_ahead INTEGER NOT NULL DEFAULT 0 CHECK(fair_ahead IN (0, 1));
+  UPDATE temporal_embedding_queue SET project_id = COALESCE(
+    (SELECT t.project_id FROM temporal_messages t WHERE t.id = temporal_embedding_queue.message_id),
+    ''
+  ) WHERE project_id = '';
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_fresh
+    ON temporal_embedding_queue(priority, enqueued_at, message_id)
+    WHERE failures = 0;
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_retry
+    ON temporal_embedding_queue(priority, retry_at, enqueued_at, message_id)
+    WHERE failures > 0;
+  -- Admission counts both fresh and deferred historical rows. Its probe must
+  -- not scan a large live-priority backlog on every legacy message.
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_priority
+    ON temporal_embedding_queue(priority);
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_owner
+    ON temporal_embedding_queue(priority, project_id, failures, retry_at, enqueued_at, message_id);
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_fresh_owner
+    ON temporal_embedding_queue(priority, project_id, enqueued_at, message_id)
+    WHERE failures = 0;
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_fair_ahead
+    ON temporal_embedding_queue(message_id)
+    WHERE priority = 0 AND fair_ahead = 1;
+  CREATE TRIGGER IF NOT EXISTS temporal_embedding_queue_project_update
+    AFTER UPDATE OF project_id ON temporal_messages BEGIN
+      UPDATE temporal_embedding_queue SET project_id = NEW.project_id
+      WHERE message_id = NEW.id;
+    END;
+  -- Fair historical admission reads the next eligible ID for one project.
+  -- Keep that lookup indexed even when another project owns a large backlog.
+  CREATE INDEX IF NOT EXISTS idx_temporal_project_message_id
+    ON temporal_messages(project_id, id);
+`;
+
+const TEMPORAL_EMBEDDING_PARKED_SCHEMA = `
+  -- Version 96: retain failed fair-ahead retries outside the bounded runnable
+  -- queue. The source row remains authoritative and owns this local retry debt.
+  CREATE TABLE IF NOT EXISTS temporal_embedding_parked (
+    message_id TEXT PRIMARY KEY REFERENCES temporal_messages(id) ON DELETE CASCADE,
+    content_hash TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    enqueued_at INTEGER NOT NULL,
+    failures INTEGER NOT NULL,
+    retry_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_parked_retry
+    ON temporal_embedding_parked(retry_at, message_id);
+`;
+
+const TEMPORAL_OWNER_RETRY_RESET_SCHEMA = `
+  -- Version 97: a project move is a new owner, not a continuation of the
+  -- previous owner's failed provider attempt. The v94 trigger did not reset
+  -- retry debt; replacing it also repairs already-upgraded databases.
+  DROP TRIGGER IF EXISTS temporal_embedding_queue_project_update;
+  CREATE TRIGGER temporal_embedding_queue_project_update
+    AFTER UPDATE OF project_id ON temporal_messages
+    WHEN OLD.project_id != NEW.project_id BEGIN
+      UPDATE temporal_embedding_queue
+         SET project_id = NEW.project_id, failures = 0, retry_at = 0
+       WHERE message_id = NEW.id;
+    END;
+  DROP TRIGGER IF EXISTS temporal_embedding_parked_project_update;
+  CREATE TRIGGER temporal_embedding_parked_project_update
+    AFTER UPDATE OF project_id ON temporal_messages
+    WHEN OLD.project_id != NEW.project_id BEGIN
+      UPDATE temporal_embedding_parked SET failures = 0, retry_at = 0
+       WHERE message_id = NEW.id;
+    END;
+`;
 
 export const MIGRATIONS: readonly string[] = Object.freeze([
   `
@@ -2047,19 +2201,7 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
   CREATE INDEX IF NOT EXISTS idx_project_id_aliases_project
     ON project_id_aliases(project_id);
   `,
-  `
-  -- Version 85: durable local scheduling for temporal embeddings.
-  -- Content remains authoritative in temporal_messages; this queue stores only
-  -- validation metadata and is never synchronized.
-  CREATE TABLE IF NOT EXISTS temporal_embedding_queue (
-    message_id TEXT PRIMARY KEY REFERENCES temporal_messages(id) ON DELETE CASCADE,
-    content_hash TEXT NOT NULL,
-    fingerprint TEXT NOT NULL,
-    enqueued_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
-    ON temporal_embedding_queue(enqueued_at, message_id);
-  `,
+  TEMPORAL_QUEUE_BASE_SCHEMA,
   `
   -- Version 86: bounded local derived token counts; no transcript or vectors.
   CREATE TABLE IF NOT EXISTS semantic_token_cache (
@@ -2269,6 +2411,17 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
        AND is_deleted = 0 AND category != 'preference'
     ON CONFLICT(tenant_id, scope_id) DO UPDATE SET revision = revision + 1;
   END;
+  `,
+  TEMPORAL_QUEUE_SCHEDULING_SCHEMA,
+  VERIFIED_LEGACY_SESSION_OWNER_MIGRATION,
+  TEMPORAL_EMBEDDING_PARKED_SCHEMA,
+  `${TEMPORAL_OWNER_RETRY_RESET_SCHEMA}
+    -- v96 copied queued project IDs without clearing retries and did not
+    -- track parked moves. Former owners cannot be recovered, so discard
+    -- ambiguous retry debt once on upgrade, never on ordinary reopen.
+    UPDATE temporal_embedding_queue SET failures = 0, retry_at = 0
+      WHERE failures != 0 OR retry_at != 0;
+    UPDATE temporal_embedding_parked SET failures = 0, retry_at = 0;
   `,
 ]);
 
@@ -3234,6 +3387,60 @@ export function db(): Database {
   // before the tracing Proxy wrap. Never throws — when unavailable, vector
   // search falls back to the pure-JS brute-force path (see db/vec.ts).
   loadVecExtension(database);
+  // A missing fingerprint in a populated vector store is not a first run.
+  // Probe actual vectors only for this exceptional metadata-loss state, after
+  // sqlite-vec has loaded and before publishing the writer to readers.
+  if (
+    database
+      .query("SELECT 1 FROM kv_meta WHERE key = 'lore:embedding_config'")
+      .get() === null &&
+    hasStoredEmbeddings(database)
+  ) {
+    database
+      .query("INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?, '1')")
+      .run(UNKNOWN_EMBEDDING_GENERATION_KEY);
+  }
+  // Losing kv_meta also loses the model fingerprint and vec0 dimension. Treat
+  // every old vector as untrusted BEFORE publishing this connection to readers.
+  // A degraded vec0 runtime cannot read vectors and retains the marker so the
+  // next capable startup can finish the invalidation.
+  if (
+    database
+      .query("SELECT 1 FROM kv_meta WHERE key = ?")
+      .get(UNKNOWN_EMBEDDING_GENERATION_KEY) !== null &&
+    (readStorageMode(database) === "blob" || isVecAvailable())
+  ) {
+    database.exec("SAVEPOINT recover_unknown_embedding_generation");
+    try {
+      const hasVec0Tables =
+        database
+          .query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('knowledge_vec', 'entity_vec', 'distillation_vec', 'temporal_vec') LIMIT 1",
+          )
+          .get() !== null;
+      if (hasVec0Tables && isVecAvailable()) {
+        // Metadata may disappear between the copy and the mode flip, while all
+        // blob columns still exist. Those copied vec0 rows are untrusted too:
+        // always replace their physical tables before cutover can reuse them.
+        ensureVec0Store(database, config().search.embeddings.dimensions, {
+          forceRecreate: true,
+        });
+      }
+      clearAllEmbeddings(database);
+      armLostTemporalQueueRecovery(database);
+      // Blob vectors can be cleared without sqlite-vec, but any copied vec0
+      // rows remain unsafe until a capable runtime replaces the old tables.
+      if (!hasVec0Tables || isVecAvailable())
+        database
+          .query("DELETE FROM kv_meta WHERE key = ?")
+          .run(UNKNOWN_EMBEDDING_GENERATION_KEY);
+      database.exec("RELEASE recover_unknown_embedding_generation");
+    } catch (e) {
+      database.exec("ROLLBACK TO recover_unknown_embedding_generation");
+      database.exec("RELEASE recover_unknown_embedding_generation");
+      throw e;
+    }
+  }
   // For an already-vec0 DB on a capable runtime, ensure the vec0 tables exist
   // BEFORE any read can reach them — the blob→vec0 cutover only runs later, in
   // runStartupBackfill. Recovery uses the persisted dimension (set at cutover);
@@ -3674,6 +3881,148 @@ export function assertFts5Available(database: Database): void {
   }
 }
 
+const UNKNOWN_EMBEDDING_GENERATION_KEY = "lore:embedding_generation_unknown";
+const TEMPORAL_QUEUE_OWNER_REPAIRED_KEY = "lore:temporal_queue_owner_repaired";
+
+function hasStoredEmbeddings(database: Database): boolean {
+  const vecTables = database
+    .query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('knowledge_vec', 'entity_vec', 'distillation_vec', 'temporal_vec')",
+    )
+    .all() as Array<{ name: string }>;
+  // In a degraded runtime the existing vec0 rows cannot be inspected or
+  // cleared. Preserve the unknown-generation fence for a capable restart.
+  if (vecTables.length > 0 && !isVecAvailable()) return true;
+  for (const { name } of vecTables) {
+    if (database.query(`SELECT 1 FROM ${name} LIMIT 1`).get() !== null)
+      return true;
+  }
+  for (const [logical, table] of [
+    ["knowledge", "knowledge"],
+    ["entities", "entities"],
+    ["distillations", "distillations"],
+    ["temporal", "temporal_messages"],
+  ] as const) {
+    if (
+      embeddingColumnExists(database, logical) &&
+      database
+        .query(`SELECT 1 FROM ${table} WHERE embedding IS NOT NULL LIMIT 1`)
+        .get() !== null
+    )
+      return true;
+  }
+  return false;
+}
+
+/** Restore storage metadata from the physical layout before other recovery. */
+function recoverEmbeddingMetadata(database: Database): void {
+  // The unknown-generation marker and the physical vec0 mode must commit as
+  // one write unit, including for databases predating the local queue.
+  database.exec("SAVEPOINT recover_embedding_metadata");
+  try {
+    // The queue may survive even when kv_meta is lost. Once any base embedding
+    // column has been dropped, blob mode can never safely read the database.
+    if (
+      database
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+        )
+        .get() === null
+    ) {
+      database.exec("SAVEPOINT recover_missing_embedding_metadata");
+      try {
+        database.exec(
+          "CREATE TABLE IF NOT EXISTS kv_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        );
+        // The old model and dimension are unknowable. The sentinel also forces
+        // checkConfigChange() to refill the cleared indexes after startup.
+        database
+          .query("INSERT INTO kv_meta (key, value) VALUES (?, ?), (?, ?)")
+          .run(
+            UNKNOWN_EMBEDDING_GENERATION_KEY,
+            "1",
+            "lore:embedding_config",
+            "unknown-vector-generation",
+          );
+        database.exec("RELEASE recover_missing_embedding_metadata");
+      } catch (e) {
+        database.exec("ROLLBACK TO recover_missing_embedding_metadata");
+        database.exec("RELEASE recover_missing_embedding_metadata");
+        throw e;
+      }
+    }
+    const mode = database
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(VEC_STORAGE_MODE_KEY) as { value: string } | null;
+    const hasVec0Tables =
+      database
+        .query(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('knowledge_vec', 'entity_vec', 'distillation_vec', 'temporal_vec') LIMIT 1",
+        )
+        .get() !== null;
+    if (
+      mode?.value !== "vec0" &&
+      ((mode === null && hasVec0Tables) ||
+        (["knowledge", "entities", "distillations", "temporal"] as const).some(
+          (table) => !embeddingColumnExists(database, table),
+        ))
+    ) {
+      // Missing mode metadata cannot distinguish an interrupted copy from a
+      // completed flip whose old columns remain. Both layouts are invalidated
+      // below, so retain vec0 and re-admit the authoritative source rows.
+      if (!hasVec0Tables) {
+        throw new Error("vector storage layout unavailable");
+      }
+      setStorageMode(database, "vec0");
+      if (mode === null)
+        database
+          .query("INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?, '1')")
+          .run(UNKNOWN_EMBEDDING_GENERATION_KEY);
+    }
+    // An existing vec0 table without its dimension cannot be reused at a
+    // guessed width. A lost fingerprint is checked for actual vectors after the
+    // extension loads; an empty first-run store preserves its backfill cursor.
+    const modeNow = database
+      .query("SELECT value FROM kv_meta WHERE key = ?")
+      .get(VEC_STORAGE_MODE_KEY) as { value: string } | null;
+    if (
+      (modeNow?.value === "vec0" || hasVec0Tables) &&
+      readVecDimension(database) === null
+    ) {
+      database
+        .query("INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?, '1')")
+        .run(UNKNOWN_EMBEDDING_GENERATION_KEY);
+    }
+    database.exec("RELEASE recover_embedding_metadata");
+  } catch (error) {
+    database.exec("ROLLBACK TO recover_embedding_metadata");
+    database.exec("RELEASE recover_embedding_metadata");
+    throw error;
+  }
+}
+
+/** Losing a local-only queue must re-admit its authoritative temporal rows. */
+function armLostTemporalQueueRecovery(database: Database): void {
+  const upsert = database.query(
+    "INSERT INTO kv_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  );
+  for (const [key, value] of [
+    ["lore:temporal_rechunk.epoch", randomUUID()],
+    ["lore:temporal_rechunk.done", "0"],
+    ["lore:temporal_rechunk.cursor", ""],
+    ["lore:temporal_rechunk.max_rowid", "0"],
+    ["lore:temporal_rechunk.skip", ""],
+    ["lore:temporal_rechunk.queue_recovery_pending", "1"],
+  ]) {
+    upsert.run(key, value);
+  }
+  database
+    .query(
+      "DELETE FROM kv_meta WHERE key LIKE 'lore:temporal_rechunk.fair:%' OR key LIKE 'lore:temporal_rechunk.fair_scan:%' OR key = 'lore:temporal_rechunk.fair_baseline'",
+    )
+    .run();
+}
+
 function migrate(database: Database) {
   const row = database
     .query(
@@ -3687,6 +4036,67 @@ function migrate(database: Database) {
         }
       )?.version ?? 0)
     : 0;
+  // Recovery and the queue walk need kv_meta, even when the queue survived.
+  // A pre-queue database can already have cut over to vec0. Restore its mode
+  // before later migrations and unknown-generation cleanup can mistake dropped
+  // blob columns for a usable blob store. Do not classify a fresh or partial
+  // schema as a prior cutover merely because one derived table exists.
+  const preQueueVec0MetadataLoss =
+    current > 0 &&
+    current < 85 &&
+    (database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kv_meta'",
+      )
+      .get() === null ||
+      database
+        .query("SELECT 1 FROM kv_meta WHERE key = ?")
+        .get(VEC_STORAGE_MODE_KEY) === null) &&
+    database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('knowledge_vec', 'entity_vec', 'distillation_vec', 'temporal_vec') LIMIT 1",
+      )
+      .get() !== null &&
+    (database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_vec'",
+      )
+      .get() !== null ||
+      (["knowledge", "entities", "distillations", "temporal"] as const).some(
+        (table) => !embeddingColumnExists(database, table),
+      )) &&
+    ["knowledge", "entities", "distillations", "temporal_messages"].every(
+      (table) =>
+        database
+          .query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+          .get(table) !== null,
+    );
+  if (current >= 85 || preQueueVec0MetadataLoss)
+    recoverEmbeddingMetadata(database);
+  // Record the loss before rebuilding the table: if a later migration fails,
+  // the next open still knows that previously admitted work needs recovery.
+  if (
+    current >= 85 &&
+    database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_embedding_queue'",
+      )
+      .get() === null
+  ) {
+    armLostTemporalQueueRecovery(database);
+  }
+  if (
+    current >= 96 &&
+    database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='temporal_embedding_parked'",
+      )
+      .get() === null
+  ) {
+    // Parked retries are local-only. When their table is lost, the source walk
+    // must re-admit them even if its previous epoch had completed.
+    armLostTemporalQueueRecovery(database);
+  }
   if (current >= MIGRATIONS.length) {
     // Schema is at the expected version but a prior partial run may have left
     // holes (e.g. ALTER TABLE succeeded but CREATE TABLE in the same migration
@@ -4326,16 +4736,62 @@ function recoverMissingObjects(database: Database) {
   `);
   // Version 85: local durable temporal-embedding queue. The base row owns the
   // content and cascades pending work on deletion.
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS temporal_embedding_queue (
-      message_id TEXT PRIMARY KEY REFERENCES temporal_messages(id) ON DELETE CASCADE,
-      content_hash TEXT NOT NULL,
-      fingerprint TEXT NOT NULL,
-      enqueued_at INTEGER NOT NULL
+  const missingQueueOwnerTrigger =
+    database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'temporal_embedding_queue_project_update'",
+      )
+      .get() === null;
+  const missingParkedOwnerTrigger =
+    database
+      .query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'temporal_embedding_parked_project_update'",
+      )
+      .get() === null;
+  const ownerRepairPending =
+    database
+      .query("SELECT 1 FROM kv_meta WHERE key = ?")
+      .get(TEMPORAL_QUEUE_OWNER_REPAIRED_KEY) === null;
+  database.exec("SAVEPOINT recover_temporal_queue");
+  try {
+    database.exec(TEMPORAL_QUEUE_BASE_SCHEMA);
+    database.exec(
+      stripAppliedAlters(TEMPORAL_QUEUE_SCHEDULING_SCHEMA, database),
     );
-    CREATE INDEX IF NOT EXISTS idx_temporal_embedding_queue_enqueued
-      ON temporal_embedding_queue(enqueued_at, message_id);
-  `);
+    database.exec(TEMPORAL_EMBEDDING_PARKED_SCHEMA);
+    database.exec(TEMPORAL_OWNER_RETRY_RESET_SCHEMA);
+    if (missingParkedOwnerTrigger) {
+      // Parked rows have no old project_id to compare. When their move trigger
+      // was missing, reset debt conservatively before a new owner can inherit it.
+      database.exec(
+        "UPDATE temporal_embedding_parked SET failures = 0, retry_at = 0 WHERE failures != 0 OR retry_at != 0",
+      );
+    }
+    if (missingQueueOwnerTrigger || ownerRepairPending) {
+      // A partial v94 migration can fill project_id but stop before the move
+      // trigger is installed. Only the temporal row is authoritative; repair
+      // nonempty stale owners as well as missing ones before the queue drains.
+      database
+        .query(
+          `UPDATE temporal_embedding_queue AS q
+           SET project_id = (SELECT t.project_id FROM temporal_messages t WHERE t.id = q.message_id),
+               failures = 0, retry_at = 0
+            WHERE EXISTS (SELECT 1 FROM temporal_messages t
+              WHERE t.id = q.message_id AND t.project_id != q.project_id)`,
+        )
+        .run();
+      database
+        .query(
+          "INSERT INTO kv_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .run(TEMPORAL_QUEUE_OWNER_REPAIRED_KEY);
+    }
+    database.exec("RELEASE recover_temporal_queue");
+  } catch (e) {
+    database.exec("ROLLBACK TO recover_temporal_queue");
+    database.exec("RELEASE recover_temporal_queue");
+    throw e;
+  }
   database.exec(`
     CREATE TABLE IF NOT EXISTS semantic_token_cache (
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -4348,6 +4804,7 @@ function recoverMissingObjects(database: Database) {
       ON semantic_token_cache(updated_at);
   `);
   database.exec(SOURCE_WINDOW_SCHEMA);
+  database.exec(SESSION_STATE_OWNER_SCHEMA);
   database.exec(DEDUP_APPLY_SCHEMA);
   // Version 54: knowledge_session_injections.verdict (outcome impact, #497).
   // The verdict-keyed index MUST be created here, AFTER the column is ensured —
@@ -4475,6 +4932,7 @@ export const PROJECT_MERGE_TABLES = Object.freeze([
   "source_windows", // Disposable; source-project deletion cascades it away.
   "semantic_token_cache", // Disposable; source-project deletion cascades it away.
   "session_rollup",
+  "temporal_embedding_queue", // Local metadata follows temporal_messages via its project-update trigger.
   "temporal_messages",
   "temporal_vec",
   "tool_calls",
@@ -4627,6 +5085,19 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     d.query(
       "UPDATE temporal_messages SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
+    // The queue's project-update trigger preserves pending work. A source
+    // message below the target's fair cursor may not have been admitted yet;
+    // invalidate both owners' fair cursors in this savepoint so the main walk
+    // cannot skip it after the merge. This does not discard queued jobs.
+    d.query("DELETE FROM kv_meta WHERE key IN (?, ?, ?, ?)").run(
+      `lore:temporal_rechunk.fair:${sourceId}`,
+      `lore:temporal_rechunk.fair_scan:${sourceId}`,
+      `lore:temporal_rechunk.fair:${targetId}`,
+      `lore:temporal_rechunk.fair_scan:${targetId}`,
+    );
+    d.query(
+      "UPDATE kv_meta SET value = '' WHERE key = 'lore:temporal_rechunk.skip' AND value = ?",
+    ).run(sourceId);
     d.query("UPDATE distillations SET project_id = ? WHERE project_id = ?").run(
       targetId,
       sourceId,
@@ -5787,6 +6258,30 @@ export function loadForceMinLayer(sessionID: string): number {
   return row?.force_min_layer ?? 0;
 }
 
+/** Create a session state and its owner ledger as one write unit. */
+function ensureOwnedSessionState(sessionID: string, now: number): void {
+  withSavepoint("ensure_owned_session_state", () => {
+    const inserted = db()
+      .query(
+        "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
+      )
+      .run(sessionID, now);
+    if (inserted.changes) {
+      db()
+        .query(
+          "INSERT INTO session_state_owners (session_id, tenant_id) VALUES (?, ?)",
+        )
+        .run(sessionID, currentTenantId());
+    }
+    const owner = db()
+      .query("SELECT tenant_id FROM session_state_owners WHERE session_id = ?")
+      .get(sessionID) as { tenant_id: string } | null;
+    if (!owner || owner.tenant_id !== currentTenantId()) {
+      throw new Error("session state ownership unavailable");
+    }
+  });
+}
+
 /**
  * Persist forceMinLayer for a session. Resets to 0 when consumed.
  * Uses INSERT OR IGNORE + UPDATE to preserve sibling columns
@@ -5794,18 +6289,15 @@ export function loadForceMinLayer(sessionID: string): number {
  */
 export function saveForceMinLayer(sessionID: string, layer: number): void {
   const now = Date.now();
-  // Ensure row exists (no-op if it already does)
-  db()
-    .query(
-      "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
-    )
-    .run(sessionID, now);
-  // Update only the force_min_layer column, preserving all others
-  db()
-    .query(
-      "UPDATE session_state SET force_min_layer = ?, updated_at = ? WHERE session_id = ?",
-    )
-    .run(layer, now, sessionID);
+  withSavepoint("save_force_min_layer", () => {
+    ensureOwnedSessionState(sessionID, now);
+    // The ownership check and update share the same writer transaction.
+    db()
+      .query(
+        "UPDATE session_state SET force_min_layer = ?, updated_at = ? WHERE session_id = ?",
+      )
+      .run(layer, now, sessionID);
+  });
 }
 
 /** Persisted cost snapshot for a session. */
@@ -5860,9 +6352,11 @@ export function saveSessionCosts(
   sessionID: string,
   costs: SessionCostSnapshot,
 ): void {
-  db()
-    .query(
-      `INSERT INTO session_state (session_id, force_min_layer, updated_at,
+  withSavepoint("save_session_costs", () => {
+    ensureOwnedSessionState(sessionID, Date.now());
+    db()
+      .query(
+        `INSERT INTO session_state (session_id, force_min_layer, updated_at,
          conversation_cost, worker_cost, conversation_turns,
          input_tokens, output_tokens,
          cache_read_tokens, cache_write_tokens,
@@ -5892,31 +6386,32 @@ export function saveSessionCosts(
          cost_shadow_last_actual_input = excluded.cost_shadow_last_actual_input,
          cost_shadow_last_output_tokens = excluded.cost_shadow_last_output_tokens,
          updated_at = excluded.updated_at`,
-    )
-    .run(
-      sessionID,
-      sessionID,
-      Date.now(),
-      costs.conversationCost,
-      costs.workerCost,
-      costs.conversationTurns,
-      costs.inputTokens,
-      costs.outputTokens,
-      costs.cacheReadTokens,
-      costs.cacheWriteTokens,
-      costs.warmupSavings,
-      costs.warmupCost,
-      costs.warmupHits,
-      costs.ttlSavings,
-      costs.ttlHits,
-      costs.batchSavings,
-      costs.avoidedCompactions,
-      costs.avoidedCompactionCost,
-      costs.workerBreakdown ? JSON.stringify(costs.workerBreakdown) : null,
-      costs.shadowContextTokens ?? null,
-      costs.shadowLastActualInput ?? null,
-      costs.shadowLastOutputTokens ?? null,
-    );
+      )
+      .run(
+        sessionID,
+        sessionID,
+        Date.now(),
+        costs.conversationCost,
+        costs.workerCost,
+        costs.conversationTurns,
+        costs.inputTokens,
+        costs.outputTokens,
+        costs.cacheReadTokens,
+        costs.cacheWriteTokens,
+        costs.warmupSavings,
+        costs.warmupCost,
+        costs.warmupHits,
+        costs.ttlSavings,
+        costs.ttlHits,
+        costs.batchSavings,
+        costs.avoidedCompactions,
+        costs.avoidedCompactionCost,
+        costs.workerBreakdown ? JSON.stringify(costs.workerBreakdown) : null,
+        costs.shadowContextTokens ?? null,
+        costs.shadowLastActualInput ?? null,
+        costs.shadowLastOutputTokens ?? null,
+      );
+  });
 }
 
 /**
@@ -6197,13 +6692,6 @@ export function saveSessionTracking(
 ): void {
   const now = Date.now();
 
-  // Ensure row exists (no-op if it already does)
-  db()
-    .query(
-      "INSERT OR IGNORE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, 0, ?)",
-    )
-    .run(sessionID, now);
-
   // Build SET clauses for only the provided fields
   const sets: string[] = ["updated_at = ?"];
   const vals: (string | number | null)[] = [now];
@@ -6360,9 +6848,12 @@ export function saveSessionTracking(
     vals.push(state.amnesia ? 1 : 0);
   }
   // Update only the specified columns
-  db()
-    .query(`UPDATE session_state SET ${sets.join(", ")} WHERE session_id = ?`)
-    .run(...vals, sessionID);
+  withSavepoint("save_session_tracking", () => {
+    ensureOwnedSessionState(sessionID, now);
+    db()
+      .query(`UPDATE session_state SET ${sets.join(", ")} WHERE session_id = ?`)
+      .run(...vals, sessionID);
+  });
 }
 
 /** Loaded session tracking state. */
@@ -6942,6 +7433,24 @@ export function loadHeaderSessionIndex(): Array<{
     headerName: row.header_name,
     credentialFingerprint: row.credential_fingerprint,
   }));
+}
+
+/**
+ * Remove an old credential-shaped header binding during gateway startup.
+ * This is narrow cleanup of leaked metadata, not adoption or a normal write to
+ * an ownerless legacy session. Match the observed binding before clearing it.
+ */
+export function clearLegacyCredentialHeaderMapping(
+  sessionID: string,
+  headerName: string,
+  headerSessionID: string,
+): void {
+  db()
+    .query(
+      `UPDATE session_state SET header_name = NULL, header_session_id = NULL
+       WHERE session_id = ? AND header_name = ? AND header_session_id = ?`,
+    )
+    .run(sessionID, headerName, headerSessionID);
 }
 
 /**

@@ -3,8 +3,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import * as data from "../src/data";
-import { db, ensureProject } from "../src/db";
+import {
+  db,
+  ensureProject,
+  saveSessionTracking,
+  withSavepoint,
+} from "../src/db";
 import * as ltm from "../src/ltm";
+import { SourceWindowStore } from "../src/source-window-store";
+import { withTenant } from "../src/tenant";
 
 // #996: the outcome-reward injection log (knowledge_session_injections, #497) is
 // the same orphan-leak class the #990 fix addressed — keyed on logical_id, no FK
@@ -181,5 +188,271 @@ describe("orphan injection-log cleanup on knowledge/session delete (#996)", () =
 
     expect(injBySession(s2)).toBe(0);
     expect(injBySession(s1)).toBe(1); // sibling session untouched
+  });
+
+  test("deleting a session from another project cannot erase its owner state or bookkeeping", () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "lore-inj-other-"));
+    const sameTenantRoot = mkdtempSync(join(tmpdir(), "lore-inj-same-tenant-"));
+    const sessionId = `project-isolated-delete-${++seedCounter}`;
+    try {
+      const ownerProject = withTenant("owner-tenant", () => {
+        const project = ensureProject(root);
+        saveSessionTracking(sessionId, {
+          projectPath: root,
+          projectPathProvisional: false,
+          credentialFingerprint: "owner-tenant",
+        });
+        db()
+          .query(
+            `INSERT INTO session_prompt_deltas
+               (session_id, seq, project_id, selector, content)
+             VALUES (?, 1, ?, 'selector', 'private delta')`,
+          )
+          .run(sessionId, project);
+        seedInjection({
+          sessionId,
+          logicalId: `owner-injection-${seedCounter}`,
+          projectId: project,
+        });
+        return project;
+      });
+      withTenant("other-tenant", () => {
+        ensureProject(otherRoot);
+        expect(data.deleteSession(otherRoot, sessionId)).toEqual({
+          messages_deleted: 0,
+          distillations_deleted: 0,
+        });
+      });
+      withTenant("owner-tenant", () => {
+        ensureProject(sameTenantRoot);
+        expect(data.deleteSession(sameTenantRoot, sessionId)).toEqual({
+          messages_deleted: 0,
+          distillations_deleted: 0,
+        });
+      });
+
+      expect(
+        db()
+          .query("SELECT project_path FROM session_state WHERE session_id = ?")
+          .get(sessionId),
+      ).toEqual({ project_path: root });
+      expect(
+        db()
+          .query(
+            "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+          )
+          .get(sessionId),
+      ).toEqual({ tenant_id: "owner-tenant" });
+      expect(
+        db()
+          .query(
+            "SELECT project_id FROM session_prompt_deltas WHERE session_id = ?",
+          )
+          .get(sessionId),
+      ).toEqual({ project_id: ownerProject });
+      expect(injByProject(ownerProject)).toBe(1);
+
+      withTenant("owner-tenant", () => data.deleteSession(root, sessionId));
+      expect(
+        db()
+          .query("SELECT 1 FROM session_state WHERE session_id = ?")
+          .get(sessionId),
+      ).toBeNull();
+      expect(injByProject(ownerProject)).toBe(0);
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+      rmSync(sameTenantRoot, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["clear", "other-tenant"],
+    ["delete", "other-tenant"],
+    ["clear", "owner-tenant"],
+    ["delete", "owner-tenant"],
+  ] as const)(
+    "%s project preserves another project's state with the same session ID under %s",
+    (operation, otherTenant) => {
+      const otherRoot = mkdtempSync(join(tmpdir(), "lore-inj-collision-"));
+      const sessionId = `bulk-project-collision-${++seedCounter}`;
+      try {
+        const ownerProject = withTenant("owner-tenant", () => {
+          const project = ensureProject(root);
+          saveSessionTracking(sessionId, {
+            projectPath: root,
+            projectPathProvisional: false,
+            credentialFingerprint: "owner-tenant",
+          });
+          const window = new SourceWindowStore({
+            projectPath: root,
+            sessionID: sessionId,
+            noStore: false,
+          });
+          withSavepoint("seed_owned_checkpoint", () => {
+            expect(window.claim()).toBe(true);
+            expect(window.publish({ private: "owned checkpoint" })).toBe(true);
+          });
+          return project;
+        });
+        const otherProject = withTenant(otherTenant, () => {
+          const project = ensureProject(otherRoot);
+          // A persisted message can share a global session ID with a state
+          // already owned by another project. No owner state is created here.
+          db()
+            .query(
+              `INSERT INTO temporal_messages
+                 (id, project_id, session_id, role, content, tokens, distilled, created_at)
+               VALUES (?, ?, ?, 'user', 'other project message', 0, 0, 1)`,
+            )
+            .run(`foreign-message-${seedCounter}`, project, sessionId);
+          return project;
+        });
+        withTenant(otherTenant, () => {
+          if (operation === "clear") data.clearProject(otherRoot);
+          else data.deleteProject(otherProject);
+        });
+        expect(
+          db()
+            .query(
+              "SELECT project_path FROM session_state WHERE session_id = ?",
+            )
+            .get(sessionId),
+        ).toEqual({ project_path: root });
+        expect(
+          db()
+            .query(
+              "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+            )
+            .get(sessionId),
+        ).toEqual({ tenant_id: "owner-tenant" });
+        expect(
+          db()
+            .query("SELECT project_id FROM source_windows WHERE session_id = ?")
+            .get(sessionId),
+        ).toEqual({ project_id: ownerProject });
+        expect(
+          withTenant("owner-tenant", () =>
+            new SourceWindowStore({
+              projectPath: root,
+              sessionID: sessionId,
+              noStore: false,
+            }).load(),
+          ),
+        ).toEqual({ private: "owned checkpoint" });
+      } finally {
+        rmSync(otherRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("deleteProject rejects an ID belonging to another tenant", () => {
+    const sessionId = `foreign-project-id-${++seedCounter}`;
+    const ownerProject = withTenant("owner-tenant", () => {
+      const project = ensureProject(root);
+      saveSessionTracking(sessionId, {
+        projectPath: root,
+        projectPathProvisional: false,
+        credentialFingerprint: "owner-tenant",
+      });
+      return project;
+    });
+    expect(
+      withTenant("other-tenant", () => data.deleteProject(ownerProject)),
+    ).toBeNull();
+    expect(
+      db()
+        .query("SELECT path, tenant_id FROM projects WHERE id = ?")
+        .get(ownerProject),
+    ).toEqual({ path: root, tenant_id: "owner-tenant" });
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get(sessionId),
+    ).toEqual({ project_path: root });
+  });
+
+  test.each(["clear", "delete"] as const)(
+    "%s project removes its own confirmed source-only session state",
+    (operation) => {
+      const sessionId = `bulk-source-only-${++seedCounter}`;
+      const project = ensureProject(root);
+      saveSessionTracking(sessionId, {
+        projectPath: root,
+        projectPathProvisional: false,
+      });
+      const window = new SourceWindowStore({
+        projectPath: root,
+        sessionID: sessionId,
+        noStore: false,
+      });
+      withSavepoint("seed_owned_source_only", () => {
+        expect(window.claim()).toBe(true);
+        expect(window.publish({ private: "owned" })).toBe(true);
+      });
+      if (operation === "clear") data.clearProject(root);
+      else data.deleteProject(project);
+      expect(
+        db()
+          .query("SELECT 1 FROM session_state WHERE session_id = ?")
+          .get(sessionId),
+      ).toBeNull();
+      expect(
+        db()
+          .query("SELECT 1 FROM source_windows WHERE session_id = ?")
+          .get(sessionId),
+      ).toBeNull();
+    },
+  );
+
+  test("deleteSession clears a provisional source-only checkpoint without touching another project", () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "lore-inj-checkpoint-"));
+    const sessionId = `source-only-delete-${++seedCounter}`;
+    const siblingId = `source-only-sibling-${seedCounter}`;
+    try {
+      const project = ensureProject(root);
+      const siblingProject = ensureProject(otherRoot);
+      for (const [path, id] of [
+        [root, sessionId],
+        [otherRoot, siblingId],
+      ] as const) {
+        saveSessionTracking(id, {
+          projectPath: path,
+          projectPathProvisional: true,
+        });
+        const window = new SourceWindowStore({
+          projectPath: path,
+          sessionID: id,
+          noStore: false,
+        });
+        withSavepoint("seed_provisional_checkpoint", () => {
+          expect(window.claim()).toBe(true);
+          expect(window.publish({ private: id })).toBe(true);
+        });
+      }
+      expect(data.deleteSession(root, sessionId)).toEqual({
+        messages_deleted: 0,
+        distillations_deleted: 0,
+      });
+      expect(
+        db()
+          .query("SELECT project_id FROM source_windows WHERE session_id = ?")
+          .get(sessionId),
+      ).toBeNull();
+      expect(
+        db()
+          .query("SELECT 1 FROM session_state WHERE session_id = ?")
+          .get(sessionId),
+      ).not.toBeNull();
+      expect(
+        db()
+          .query("SELECT project_id FROM source_windows WHERE session_id = ?")
+          .get(siblingId),
+      ).toEqual({ project_id: siblingProject });
+      expect(
+        db().query("SELECT id FROM projects WHERE id = ?").get(project),
+      ).not.toBeNull();
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
   });
 });

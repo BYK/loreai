@@ -13,6 +13,7 @@ import { sanitizeSurrogates } from "./markdown";
 import * as log from "./log";
 import {
   enqueueTemporalEmbedding,
+  hasPendingHistoricalTemporalEmbedding,
   hasTemporalEmbedding,
   invalidateTemporalEmbedding,
 } from "./temporal-embedding-admission";
@@ -510,7 +511,10 @@ export function store(input: {
       if (existing.content !== content) {
         invalidateTemporalEmbedding(storageId);
         enqueueTemporalEmbedding(storageId, content);
-      } else if (!hasTemporalEmbedding(storageId)) {
+      } else if (
+        !hasTemporalEmbedding(storageId) ||
+        hasPendingHistoricalTemporalEmbedding(storageId, pid)
+      ) {
         enqueueTemporalEmbedding(storageId, content);
       }
       return;

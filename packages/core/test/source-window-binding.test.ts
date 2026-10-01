@@ -15,7 +15,10 @@ it("rejects an existing private checkpoint moved under the old trigger set", () 
     noStore: false,
   };
   const pid = ensureProject(scope.projectPath);
-  saveSessionTracking(scope.sessionID, { projectPath: scope.projectPath });
+  saveSessionTracking(scope.sessionID, {
+    projectPath: scope.projectPath,
+    projectPathProvisional: false,
+  });
   const store = new SourceWindowStore(scope);
   withSavepoint("save_before_move", () => {
     expect(store.claim()).toBe(true);
