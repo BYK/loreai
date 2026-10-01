@@ -242,9 +242,12 @@ function startFixture(
     let closed = false;
     let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(
       onTimeout,
-      options.timeoutMs ?? CHILD_TIMEOUT_MS,
+      options.readyPath
+        ? CHILD_TIMEOUT_MS
+        : (options.timeoutMs ?? CHILD_TIMEOUT_MS),
     );
-    if (options.timeoutAfterReadyMs !== undefined) {
+    const afterReadyTimeout = options.timeoutAfterReadyMs ?? options.timeoutMs;
+    if (options.readyPath && afterReadyTimeout !== undefined) {
       void ready.then(
         () => {
           if (
@@ -256,7 +259,7 @@ function startFixture(
             return;
           }
           if (timeout) clearTimeout(timeout);
-          timeout = setTimeout(onTimeout, options.timeoutAfterReadyMs);
+          timeout = setTimeout(onTimeout, afterReadyTimeout);
         },
         () => {},
       );
