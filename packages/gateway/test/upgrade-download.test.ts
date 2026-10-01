@@ -1,7 +1,11 @@
 import {
+  existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
+  rmdirSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -13,9 +17,17 @@ import { applyPatch } from "binpatch";
 import { expect, test, vi } from "vitest";
 import {
   closeUpgradeDownloadDirectory,
+  createUpgradeDownloadDirectory,
   openUpgradeDownloadDirectory,
   openUpgradeDownloadFile,
+  reclaimUpgradeDownloads,
+  removeUpgradeDownloadDirectory,
 } from "../src/cli/lib/upgrade-download";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, rmSync: vi.fn(fs.rmSync), rmdirSync: vi.fn(fs.rmdirSync) };
+});
 
 test.skipIf(process.platform === "win32")(
   "binpatch writes to an opened inode after its output name is swapped",
@@ -60,3 +72,100 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "preserves a replacement swapped after quarantine identity verification",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-cleanup-race-"));
+    vi.stubEnv("TMPDIR", root);
+    const directory = createUpgradeDownloadDirectory(
+      "/home/user/lore",
+      "/home/user/.lore/install-path",
+    );
+    writeFileSync(join(directory.path, "lore.download"), "partial binary");
+    const originalFs =
+      await vi.importActual<typeof import("node:fs")>("node:fs");
+    const moved = `${directory.path}.moved`;
+    const replacement = { path: "" };
+    const swap = (path: string) => {
+      if (String(path).includes(".cleanup-")) {
+        replacement.path = String(path);
+        renameSync(String(path), moved);
+        mkdirSync(String(path), { mode: 0o700 });
+        writeFileSync(join(String(path), "unrelated"), "keep this");
+      }
+    };
+    vi.mocked(rmSync).mockImplementation((path, options) => {
+      swap(String(path));
+      return originalFs.rmSync(path, options);
+    });
+    vi.mocked(rmdirSync).mockImplementation((path, options) => {
+      swap(String(path));
+      return originalFs.rmdirSync(path, options);
+    });
+    try {
+      expect(removeUpgradeDownloadDirectory(directory)).toBe(false);
+      expect(replacement.path).not.toBe("");
+      expect(readFileSync(join(replacement.path, "unrelated"), "utf8")).toBe(
+        "keep this",
+      );
+    } finally {
+      vi.mocked(rmSync).mockRestore();
+      vi.mocked(rmdirSync).mockRestore();
+      closeUpgradeDownloadDirectory(directory);
+      vi.unstubAllEnvs();
+      rmSync(directory.path, { recursive: true, force: true });
+      if (replacement.path) {
+        rmSync(replacement.path, { recursive: true, force: true });
+      }
+      rmSync(moved, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "reclaims a scoped download left in quarantine after a crash",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-crash-"));
+    vi.stubEnv("TMPDIR", root);
+    const executable = "/home/user/lore";
+    const receipt = "/home/user/.lore/install-path";
+    const directory = createUpgradeDownloadDirectory(executable, receipt);
+    const quarantined = `${directory.path}.cleanup-${"a".repeat(32)}`;
+    const victim = join(root, "victim");
+    writeFileSync(victim, "do not change");
+    symlinkSync(victim, join(directory.path, "lore.download"));
+    closeUpgradeDownloadDirectory(directory);
+    renameSync(directory.path, quarantined);
+    try {
+      reclaimUpgradeDownloads(executable, receipt);
+      expect(existsSync(quarantined)).toBe(false);
+      expect(readFileSync(victim, "utf8")).toBe("do not change");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("refuses Windows pathname staging before creating an output file", () => {
+  const root = mkdtempSync(join(tmpdir(), "lore-upgrade-windows-guard-"));
+  vi.stubEnv("TMPDIR", root);
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!platform) throw new Error("Missing process platform descriptor");
+  try {
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    expect(() =>
+      createUpgradeDownloadDirectory(
+        "C:/Users/user/lore.exe",
+        "C:/Users/user/install-path",
+      ),
+    ).toThrow(/Windows.*handle-bound/i);
+    expect(existsSync(join(root, "lore.download"))).toBe(false);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

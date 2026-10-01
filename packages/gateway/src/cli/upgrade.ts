@@ -293,6 +293,14 @@ Examples:
             ),
           };
         })();
+    // A verified installation can reclaim its own interrupted downloads even
+    // when version resolution or an already-current check returns early.
+    if (destination?.provenance.receiptPath) {
+      reclaimUpgradeDownloads(
+        upgradeExecutable,
+        destination.provenance.receiptPath,
+      );
+    }
 
     // Resolve target version
     let target: string;
@@ -389,7 +397,6 @@ Examples:
     });
     // Delta and full-download writers use an opened inode in a private temp
     // directory. Changes to the install directory cannot redirect those writes.
-    reclaimUpgradeDownloads(upgradeExecutable, provenance.receiptPath);
     const openedDownloadDir = createUpgradeDownloadDirectory(
       upgradeExecutable,
       provenance.receiptPath,

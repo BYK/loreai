@@ -239,4 +239,24 @@ describe("upgrade command stale-receipt ordering", () => {
       "other installation",
     );
   });
+
+  test("reclaims an authenticated interrupted download before an already-current return", async () => {
+    const fixture = receiptFixture(false);
+    const tempRoot = join(state.home, "temp");
+    mkdirSync(tempRoot, { mode: 0o700 });
+    vi.stubEnv("TMPDIR", tempRoot);
+    const abandoned = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
+    const scope = createHash("sha256")
+      .update(`${fixture.executable}\n${fixture.receipt}`)
+      .digest("hex");
+    writeFileSync(join(abandoned, ".owner"), `${scope}\n`, { mode: 0o600 });
+    writeFileSync(join(abandoned, "lore.download"), "partial binary");
+    vi.mocked(fetchLatestVersion).mockResolvedValue(VERSION);
+    vi.mocked(executeUpgrade).mockClear();
+
+    await commandUpgrade([]);
+    expect(existsSync(abandoned)).toBe(false);
+    expect(executeUpgrade).not.toHaveBeenCalled();
+    expect(readFileSync(fixture.executable, "utf8")).toBe("previous nightly");
+  });
 });

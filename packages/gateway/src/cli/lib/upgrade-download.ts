@@ -11,7 +11,8 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
-  rmSync,
+  rmdirSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +21,15 @@ import { UpgradeError } from "./errors";
 
 const PREFIX = "lore-upgrade-download-";
 const MARKER = ".owner";
+
+function requireHandleBoundDownloads(): void {
+  if (process.platform === "win32") {
+    throw new UpgradeError(
+      "execution_failed",
+      "Windows standalone upgrades require handle-bound download staging",
+    );
+  }
+}
 
 export interface UpgradeDownloadDirectory {
   readonly fd: number;
@@ -73,18 +83,7 @@ function scope(executable: string, receiptPath: string): string {
 export function openUpgradeDownloadDirectory(
   path: string,
 ): UpgradeDownloadDirectory {
-  if (process.platform === "win32") {
-    const stat = lstatSync(path, { bigint: true });
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new UpgradeError(
-        "execution_failed",
-        "Standalone upgrade download directory is not private",
-      );
-    }
-    // Windows does not permit ordinary read-only directory descriptors. Its
-    // private temp directory is still checked by generation before cleanup.
-    return { fd: -1, path, device: stat.dev, inode: stat.ino };
-  }
+  requireHandleBoundDownloads();
   const fd = openSync(
     path,
     constants.O_RDONLY |
@@ -125,10 +124,10 @@ export function openUpgradeDownloadFile(
   directory: UpgradeDownloadDirectory,
   name: string,
 ): string {
+  requireHandleBoundDownloads();
   if (directory.fileFd !== undefined) {
     throw new Error("Upgrade download file has already been opened");
   }
-  if (process.platform === "win32") return anchoredPath(directory, name);
   const fd = openSync(
     anchoredPath(directory, name),
     constants.O_CREAT |
@@ -172,6 +171,7 @@ export function createUpgradeDownloadDirectory(
   executable: string,
   receiptPath: string,
 ): UpgradeDownloadDirectory {
+  requireHandleBoundDownloads();
   const path = mkdtempSync(join(trustedTempRoot(), PREFIX));
   const directory = openUpgradeDownloadDirectory(path);
   try {
@@ -200,6 +200,7 @@ export function createUpgradeDownloadDirectory(
 export function removeUpgradeDownloadDirectory(
   directory: UpgradeDownloadDirectory,
 ): boolean {
+  if (directory.fd < 0) return false;
   const current = lstatSync(directory.path, { bigint: true });
   if (
     !current.isDirectory() ||
@@ -207,8 +208,11 @@ export function removeUpgradeDownloadDirectory(
     current.ino !== directory.inode
   )
     return false;
-  const quarantine = `${directory.path}.cleanup-${randomBytes(16).toString("hex")}`;
-  renameSync(directory.path, quarantine);
+  const alreadyQuarantined = /\.cleanup-[a-f0-9]{32}$/.test(directory.path);
+  const quarantine = alreadyQuarantined
+    ? directory.path
+    : `${directory.path}.cleanup-${randomBytes(16).toString("hex")}`;
+  if (!alreadyQuarantined) renameSync(directory.path, quarantine);
   const displaced = lstatSync(quarantine, { bigint: true });
   if (
     !displaced.isDirectory() ||
@@ -219,8 +223,34 @@ export function removeUpgradeDownloadDirectory(
     // between inspection and quarantine. Keep it for manual recovery.
     return false;
   }
-  rmSync(quarantine, { recursive: true, force: true });
-  return true;
+  // Remove only non-directory entries through the opened directory. Recursive removal
+  // by the quarantine name could follow a replacement after the identity check.
+  const names = readdirSync(anchoredPath(directory, "."));
+  if (!names.includes(MARKER)) return false;
+  for (const name of names) {
+    if (lstatSync(anchoredPath(directory, name)).isDirectory()) return false;
+  }
+  for (const name of names) unlinkSync(anchoredPath(directory, name));
+  const final = lstatSync(quarantine, { bigint: true });
+  if (
+    !final.isDirectory() ||
+    final.dev !== directory.device ||
+    final.ino !== directory.inode
+  )
+    return false;
+  try {
+    // rmdir can only remove an empty replacement; it never deletes its files.
+    rmdirSync(quarantine);
+    return true;
+  } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === "ENOTEMPTY" ||
+      (error as NodeJS.ErrnoException).code === "EEXIST" ||
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    )
+      return false;
+    throw error;
+  }
 }
 
 /** A crash can leave large partial binaries. Reclaim only our scoped, private generations. */
@@ -228,10 +258,15 @@ export function reclaimUpgradeDownloads(
   executable: string,
   receiptPath: string,
 ): void {
+  requireHandleBoundDownloads();
   const root = trustedTempRoot();
   const expected = scope(executable, receiptPath);
   for (const name of readdirSync(root)) {
-    if (!name.startsWith(PREFIX) || name.includes(".cleanup-")) continue;
+    if (
+      !name.startsWith(PREFIX) ||
+      (name.includes(".cleanup-") && !/\.cleanup-[a-f0-9]{32}$/.test(name))
+    )
+      continue;
     try {
       const directory = openUpgradeDownloadDirectory(join(root, name));
       try {
