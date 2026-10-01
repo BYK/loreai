@@ -24,8 +24,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { VERSION } from "./version";
 import { isDowngrade, installBinary } from "./lib/binary";
@@ -53,6 +53,12 @@ import {
   versionExists,
   VERSION_PREFIX_REGEX,
 } from "./lib/upgrade";
+import {
+  closeUpgradeDownloadDirectory,
+  createUpgradeDownloadDirectory,
+  reclaimUpgradeDownloads,
+  removeUpgradeDownloadDirectory,
+} from "./lib/upgrade-download";
 import { withLifecycleLock } from "../lifecycle-lock";
 
 /** Special version strings that select a channel */
@@ -381,11 +387,12 @@ Examples:
       executable: upgradeExecutable,
       receiptPath: provenance.receiptPath,
     });
-    // Delta application and full downloads both write by pathname. Keep that
-    // pathname inside the verified, owner-only receipt directory until the
-    // download has finished, even if the install directory changes permissions.
-    const downloadDir = mkdtempSync(
-      join(dirname(provenance.receiptPath), ".upgrade-download-"),
+    // Delta and full-download writers use an opened inode in a private temp
+    // directory. Changes to the install directory cannot redirect those writes.
+    reclaimUpgradeDownloads(upgradeExecutable, provenance.receiptPath);
+    const openedDownloadDir = createUpgradeDownloadDirectory(
+      upgradeExecutable,
+      provenance.receiptPath,
     );
     try {
       // Download the new binary
@@ -395,7 +402,7 @@ Examples:
         downloadTag,
         offline,
         upgradeExecutable,
-        downloadDir,
+        openedDownloadDir,
       );
 
       // Install: replace the current binary atomically
@@ -497,11 +504,17 @@ Examples:
       }
     } finally {
       try {
-        rmSync(downloadDir, { recursive: true, force: true });
+        if (!removeUpgradeDownloadDirectory(openedDownloadDir)) {
+          console.error(
+            "[lore] Private upgrade download directory changed; cleanup skipped.",
+          );
+        }
       } catch {
         console.error(
           "[lore] Could not clean up private upgrade download files.",
         );
+      } finally {
+        closeUpgradeDownloadDirectory(openedDownloadDir);
       }
     }
   });

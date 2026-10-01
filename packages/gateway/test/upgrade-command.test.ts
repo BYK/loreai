@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,9 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  realpathSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +24,7 @@ import { formatStandaloneInstallReceipt } from "../src/cli/uninstall";
 import { standaloneUpgradeBackupTokens } from "../src/cli/upgrade-recovery";
 
 const state = vi.hoisted(() => ({ home: "" }));
+const leftoverDirs: string[] = [];
 
 vi.mock("../src/lifecycle-lock", () => ({
   withLifecycleLock: async (
@@ -55,6 +59,9 @@ afterEach(() => {
   process.execPath = originalExecutable;
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
+  for (const path of leftoverDirs.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
   if (state.home) rmSync(state.home, { recursive: true, force: true });
   state.home = "";
 });
@@ -147,11 +154,11 @@ describe("upgrade command stale-receipt ordering", () => {
       writeFileSync(download, "verified download", { mode: 0o700 });
       vi.mocked(fetchLatestVersion).mockResolvedValue("0.41.0-dev.9999999999");
       vi.mocked(executeUpgrade).mockImplementation(async (...args) => {
-        const downloadDir = args[5];
+        const downloadDir = args[5]?.path;
         if (downloadDir === undefined) {
           throw new Error("Upgrade download directory was not provided");
         }
-        expect(dirname(downloadDir)).toBe(join(state.home, ".lore"));
+        expect(dirname(downloadDir)).toBe(realpathSync(tmpdir()));
         expect(statSync(downloadDir).mode & 0o777).toBe(0o700);
         chmodSync(fixture.installDir, 0o775);
         return { tempBinaryPath: download };
@@ -168,4 +175,68 @@ describe("upgrade command stale-receipt ordering", () => {
       expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
     },
   );
+
+  test.skipIf(process.platform === "win32")(
+    "preserves a replacement private directory during upgrade cleanup",
+    async () => {
+      const fixture = receiptFixture(false);
+      const download = join(state.home, "download");
+      writeFileSync(download, "verified download", { mode: 0o700 });
+      vi.mocked(fetchLatestVersion).mockResolvedValue("0.41.0-dev.9999999999");
+      let replacement = "";
+      vi.mocked(executeUpgrade).mockImplementation(async (...args) => {
+        const directory = args[5];
+        if (!directory) throw new Error("Missing private download directory");
+        replacement = directory.path;
+        renameSync(replacement, `${replacement}-moved`);
+        leftoverDirs.push(`${replacement}-moved`, replacement);
+        mkdirSync(replacement, { mode: 0o700 });
+        writeFileSync(join(replacement, "unrelated"), "keep this");
+        chmodSync(fixture.installDir, 0o775);
+        return { tempBinaryPath: download };
+      });
+
+      await expect(commandUpgrade([])).rejects.toThrow(
+        /unsafe standalone upgrade recovery directory/,
+      );
+      expect(readFileSync(join(replacement, "unrelated"), "utf8")).toBe(
+        "keep this",
+      );
+    },
+  );
+
+  test("reclaims an authenticated interrupted download on the next attempt", async () => {
+    const fixture = receiptFixture(false);
+    const tempRoot = join(state.home, "temp");
+    mkdirSync(tempRoot, { mode: 0o700 });
+    vi.stubEnv("TMPDIR", tempRoot);
+    const abandoned = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
+    const scope = createHash("sha256")
+      .update(`${fixture.executable}\n${fixture.receipt}`)
+      .digest("hex");
+    writeFileSync(join(abandoned, ".owner"), `${scope}\n`, { mode: 0o600 });
+    writeFileSync(join(abandoned, "lore.download"), "partial binary");
+    const victim = join(state.home, "victim");
+    writeFileSync(victim, "do not change", { mode: 0o600 });
+    if (process.platform !== "win32") {
+      symlinkSync(victim, join(abandoned, "foreign-link"));
+    }
+    const unrelated = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
+    writeFileSync(join(unrelated, "other"), "preserve");
+    const otherOwner = mkdtempSync(join(tempRoot, "lore-upgrade-download-"));
+    writeFileSync(join(otherOwner, ".owner"), `${"0".repeat(64)}\n`, {
+      mode: 0o600,
+    });
+    writeFileSync(join(otherOwner, "other"), "other installation");
+    vi.mocked(fetchLatestVersion).mockResolvedValue("0.41.0-dev.9999999999");
+    vi.mocked(executeUpgrade).mockRejectedValue(new Error("stopped"));
+
+    await expect(commandUpgrade([])).rejects.toThrow("stopped");
+    expect(existsSync(abandoned)).toBe(false);
+    expect(readFileSync(victim, "utf8")).toBe("do not change");
+    expect(readFileSync(join(unrelated, "other"), "utf8")).toBe("preserve");
+    expect(readFileSync(join(otherOwner, "other"), "utf8")).toBe(
+      "other installation",
+    );
+  });
 });

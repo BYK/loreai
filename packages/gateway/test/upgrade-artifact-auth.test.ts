@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -22,16 +23,25 @@ vi.mock("../src/cli/lib/delta-upgrade", () => ({
 import type { LifecycleLock } from "../src/lifecycle-lock";
 import { getPlatformBinaryName } from "../src/cli/lib/binary";
 import { downloadBinaryToTemp } from "../src/cli/lib/upgrade";
+import {
+  closeUpgradeDownloadDirectory,
+  openUpgradeDownloadDirectory,
+  type UpgradeDownloadDirectory,
+} from "../src/cli/lib/upgrade-download";
 
 const originalFetch = globalThis.fetch;
 const originalConfigDir = process.env.LORE_CONFIG_DIR;
 const temporaryDirectories: string[] = [];
+const openedDirectories: UpgradeDownloadDirectory[] = [];
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalConfigDir === undefined) delete process.env.LORE_CONFIG_DIR;
   else process.env.LORE_CONFIG_DIR = originalConfigDir;
   vi.restoreAllMocks();
+  for (const directory of openedDirectories.splice(0)) {
+    closeUpgradeDownloadDirectory(directory);
+  }
   for (const path of temporaryDirectories.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -60,6 +70,8 @@ function fixture(
   mkdirSync(process.env.LORE_CONFIG_DIR);
   const privateRoot = join(root, "private-download");
   mkdirSync(privateRoot, { mode: 0o700 });
+  const downloadDirectory = openUpgradeDownloadDirectory(privateRoot);
+  openedDirectories.push(downloadDirectory);
   const executable = join(
     root,
     process.platform === "win32" ? "lore.exe" : "lore",
@@ -105,12 +117,20 @@ function fixture(
   const lifecycleLock = {
     assertOwned: vi.fn(),
   } as unknown as LifecycleLock;
-  return { binary, executable, fetchMock, lifecycleLock, version, privateRoot };
+  return {
+    binary,
+    executable,
+    fetchMock,
+    lifecycleLock,
+    version,
+    privateRoot,
+    downloadDirectory,
+  };
 }
 
 describe("stable upgrade artifact authentication", () => {
   it("installs a download matching publisher checksum metadata", async () => {
-    const { binary, executable, lifecycleLock, version, privateRoot } =
+    const { binary, executable, lifecycleLock, version, downloadDirectory } =
       fixture();
 
     const result = await downloadBinaryToTemp(
@@ -119,14 +139,14 @@ describe("stable upgrade artifact authentication", () => {
       undefined,
       false,
       executable,
-      privateRoot,
+      downloadDirectory,
     );
 
     expect(readFileSync(result.tempBinaryPath)).toEqual(binary);
   });
 
   it("fails closed before binary download when checksum metadata is missing", async () => {
-    const { executable, fetchMock, lifecycleLock, version, privateRoot } =
+    const { executable, fetchMock, lifecycleLock, version, downloadDirectory } =
       fixture({
         includeChecksums: false,
       });
@@ -138,7 +158,7 @@ describe("stable upgrade artifact authentication", () => {
         undefined,
         false,
         executable,
-        privateRoot,
+        downloadDirectory,
       ),
     ).rejects.toThrow(/checksum metadata/i);
     expect(
@@ -147,7 +167,13 @@ describe("stable upgrade artifact authentication", () => {
   });
 
   it("rejects and removes a stable binary whose checksum mismatches", async () => {
-    const { executable, lifecycleLock, version, privateRoot } = fixture({
+    const {
+      executable,
+      lifecycleLock,
+      version,
+      privateRoot,
+      downloadDirectory,
+    } = fixture({
       expectedBinarySha256: "0".repeat(64),
     });
 
@@ -158,7 +184,7 @@ describe("stable upgrade artifact authentication", () => {
         undefined,
         false,
         executable,
-        privateRoot,
+        downloadDirectory,
       ),
     ).rejects.toThrow(/binary checksum mismatch/i);
     expect(() =>
@@ -167,7 +193,7 @@ describe("stable upgrade artifact authentication", () => {
   });
 
   it("rejects checksum metadata that differs from its GitHub asset digest", async () => {
-    const { executable, fetchMock, lifecycleLock, version, privateRoot } =
+    const { executable, fetchMock, lifecycleLock, version, downloadDirectory } =
       fixture({
         tamperChecksums: true,
       });
@@ -179,7 +205,7 @@ describe("stable upgrade artifact authentication", () => {
         undefined,
         false,
         executable,
-        privateRoot,
+        downloadDirectory,
       ),
     ).rejects.toThrow(/checksum metadata digest mismatch/i);
     expect(
@@ -188,12 +214,11 @@ describe("stable upgrade artifact authentication", () => {
   });
 
   it("keeps pre-checksum releases installable when metadata is absent", async () => {
-    const { binary, executable, lifecycleLock, version, privateRoot } = fixture(
-      {
+    const { binary, executable, lifecycleLock, version, downloadDirectory } =
+      fixture({
         version: "0.40.0",
         includeChecksums: false,
-      },
-    );
+      });
 
     const result = await downloadBinaryToTemp(
       version,
@@ -201,14 +226,14 @@ describe("stable upgrade artifact authentication", () => {
       undefined,
       false,
       executable,
-      privateRoot,
+      downloadDirectory,
     );
 
     expect(readFileSync(result.tempBinaryPath)).toEqual(binary);
   });
 
   it("fails closed on a new stable release in offline mode", async () => {
-    const { executable, fetchMock, lifecycleLock, version, privateRoot } =
+    const { executable, fetchMock, lifecycleLock, version, downloadDirectory } =
       fixture();
 
     await expect(
@@ -218,7 +243,7 @@ describe("stable upgrade artifact authentication", () => {
         undefined,
         "explicit",
         executable,
-        privateRoot,
+        downloadDirectory,
       ),
     ).rejects.toThrow(/publisher checksum metadata is unavailable/i);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -227,7 +252,7 @@ describe("stable upgrade artifact authentication", () => {
   it.skipIf(process.platform === "win32")(
     "never writes or chmods a swapped download symlink while permissions change mid-stream",
     async () => {
-      const { binary, executable, lifecycleLock, version, privateRoot } =
+      const { binary, executable, lifecycleLock, version, downloadDirectory } =
         fixture();
       const installDir = dirname(executable);
       const victim = join(installDir, "victim");
@@ -269,11 +294,133 @@ describe("stable upgrade artifact authentication", () => {
         undefined,
         false,
         executable,
-        privateRoot,
+        downloadDirectory,
       );
 
       expect(pulled).toBe(2);
       expect(readFileSync(result.tempBinaryPath)).toEqual(binary);
+      expect(readFileSync(victim, "utf8")).toBe("do not change");
+      expect(lstatSync(victim).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "never writes or chmods through a replaced private download directory",
+    async () => {
+      const {
+        executable,
+        lifecycleLock,
+        version,
+        privateRoot,
+        binary,
+        downloadDirectory,
+      } = fixture();
+      const moved = `${privateRoot}-moved`;
+      const victim = join(dirname(executable), "private-victim");
+      writeFileSync(victim, "do not change", { mode: 0o600 });
+      const originalFetch = globalThis.fetch;
+      const compressed = gzipSync(binary);
+      let pulled = 0;
+      globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+        if (!requestUrl(input).endsWith(`${getPlatformBinaryName()}.gz`)) {
+          return originalFetch(input);
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (pulled++ === 0) {
+                controller.enqueue(compressed.subarray(0, 10));
+                return;
+              }
+              renameSync(privateRoot, moved);
+              temporaryDirectories.push(moved);
+              mkdirSync(privateRoot, { mode: 0o700 });
+              symlinkSync(
+                victim,
+                join(privateRoot, `${basename(executable)}.download`),
+              );
+              controller.enqueue(compressed.subarray(10));
+              controller.close();
+            },
+          }),
+        );
+      }) as unknown as typeof fetch;
+
+      try {
+        await downloadBinaryToTemp(
+          version,
+          lifecycleLock,
+          undefined,
+          false,
+          executable,
+          downloadDirectory,
+        );
+      } catch {
+        // Refusing a replaced directory is also safe.
+      }
+      expect(pulled).toBe(2);
+      expect(readFileSync(victim, "utf8")).toBe("do not change");
+      expect(lstatSync(victim).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "never follows a swapped file inside the opened private directory",
+    async () => {
+      const {
+        executable,
+        lifecycleLock,
+        version,
+        privateRoot,
+        binary,
+        downloadDirectory,
+      } = fixture();
+      const victim = join(dirname(executable), "inner-victim");
+      writeFileSync(victim, "do not change", { mode: 0o600 });
+      const originalFetch = globalThis.fetch;
+      const compressed = gzipSync(binary);
+      const output = join(privateRoot, `${basename(executable)}.download`);
+      let pulled = 0;
+      globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+        if (!requestUrl(input).endsWith(`${getPlatformBinaryName()}.gz`)) {
+          return originalFetch(input);
+        }
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (pulled++ === 0) {
+                controller.enqueue(compressed.subarray(0, 10));
+                return;
+              }
+              chmodSync(privateRoot, 0o775);
+              try {
+                unlinkSync(output);
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                  throw error;
+                }
+              }
+              symlinkSync(victim, output);
+              controller.enqueue(compressed.subarray(10));
+              controller.close();
+            },
+          }),
+        );
+      }) as unknown as typeof fetch;
+
+      try {
+        await downloadBinaryToTemp(
+          version,
+          lifecycleLock,
+          undefined,
+          false,
+          executable,
+          downloadDirectory,
+        );
+      } catch {
+        // Refusal is safe as long as it cannot write or chmod the victim.
+      }
+      expect(pulled).toBe(2);
       expect(readFileSync(victim, "utf8")).toBe("do not change");
       expect(lstatSync(victim).mode & 0o777).toBe(0o600);
     },
