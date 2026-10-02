@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeEach, vi } from "vitest";
 import * as Sentry from "@sentry/bun";
+import { scrubTelemetryEnvelope } from "../src/telemetry-privacy";
 import {
   recordWorkerFailure,
   recordWorkerResponseAlertDelivery,
@@ -35,7 +36,8 @@ vi.mock("@sentry/bun", () => ({
   addBreadcrumb: vi.fn(),
 }));
 
-vi.mock("@loreai/core", () => ({
+vi.mock("@loreai/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@loreai/core")>()),
   log: {
     info: vi.fn(),
     warn: vi.fn(),
@@ -1004,7 +1006,7 @@ describe("worker-health", () => {
       expect(getWorkerHealth()[0]?.failureCount).toBe(97);
     });
 
-    test("degraded alert uses stable message + fingerprint, ids in tags", () => {
+    test("degraded alert uses stable message + fingerprint without session identity", () => {
       // 3 rapid failures in the window fire the degraded alert.
       recordWorkerFailure("s1", "lore-distill", "no-response");
       recordWorkerFailure("s1", "lore-distill", "no-response");
@@ -1018,8 +1020,7 @@ describe("worker-health", () => {
         "worker-health-degraded",
         "lore-distill",
       ]);
-      // Variable data must live in tags, NOT the grouping message.
-      expect(opts.tags.session_id).toBe("s1");
+      expect(opts.tags).not.toHaveProperty("session_id");
       expect(opts.tags.worker_id).toBe("lore-distill");
     });
 
@@ -1045,7 +1046,64 @@ describe("worker-health", () => {
         "worker-health-critical",
         "lore-distill",
       ]);
-      expect(opts.tags.session_id).toBe("s1");
+      expect(opts.tags).not.toHaveProperty("session_id");
+    });
+
+    test("never sends private session or unknown worker IDs in health alerts or recovery breadcrumbs", () => {
+      const privateSession = "private-session-sentinel";
+      const privateWorker = "private-worker-sentinel";
+      const privateReason = "private-reason-sentinel" as FailureReason;
+      let t = 1_000_000;
+      for (let i = 0; i <= 16; i++) {
+        _setNowForTest(() => t);
+        recordWorkerFailure(privateSession, privateWorker, privateReason);
+        t += 4 * 60_000;
+      }
+      expect(Sentry.captureMessage).toHaveBeenCalled();
+      expect(Sentry.captureException).toHaveBeenCalled();
+      vi.mocked(Sentry.addBreadcrumb).mockImplementationOnce(() => {
+        throw new Error("private-provider-secret");
+      });
+      expect(() =>
+        recordWorkerSuccess(privateSession, privateWorker),
+      ).not.toThrow();
+      expect(getWorkerHealth()).toHaveLength(0);
+
+      const captured = [
+        ...vi.mocked(Sentry.captureMessage).mock.calls,
+        ...vi.mocked(Sentry.captureException).mock.calls,
+        ...vi.mocked(Sentry.addBreadcrumb).mock.calls,
+      ];
+      expect(JSON.stringify(captured)).not.toContain(privateSession);
+      expect(JSON.stringify(captured)).not.toContain(privateWorker);
+      expect(JSON.stringify(captured)).not.toContain(privateReason);
+      for (const [message, options] of vi.mocked(Sentry.captureMessage).mock
+        .calls) {
+        const context = options && typeof options === "object" ? options : {};
+        const envelope = scrubTelemetryEnvelope([
+          { event_id: "00000000000000000000000000000008" },
+          [[{ type: "event" }, Object.assign({ message }, context)]],
+        ]);
+        expect(JSON.stringify(envelope)).not.toContain(privateSession);
+        expect(JSON.stringify(envelope)).not.toContain(privateWorker);
+        expect(JSON.stringify(envelope)).not.toContain(privateReason);
+      }
+      for (const [_error, options] of vi.mocked(Sentry.captureException).mock
+        .calls) {
+        const context = options && typeof options === "object" ? options : {};
+        const envelope = scrubTelemetryEnvelope([
+          { event_id: "00000000000000000000000000000009" },
+          [
+            [
+              { type: "event" },
+              Object.assign({ message: "Worker health critical" }, context),
+            ],
+          ],
+        ]);
+        expect(JSON.stringify(envelope)).not.toContain(privateSession);
+        expect(JSON.stringify(envelope)).not.toContain(privateWorker);
+        expect(JSON.stringify(envelope)).not.toContain(privateReason);
+      }
     });
 
     test("recovery is a breadcrumb, not a captured issue", () => {

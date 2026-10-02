@@ -74,6 +74,51 @@ describe("worker response alert delivery", () => {
     expect(getWorkerHealth()).toHaveLength(3);
   });
 
+  test("starts the long cooldown when a delayed transport send confirms delivery", async () => {
+    const clock = { now: 1_000_000 };
+    _setNowForTest(() => clock.now);
+    const eventID = "00000000000000000000000000000007";
+    vi.mocked(Sentry.captureMessage).mockReturnValueOnce(eventID);
+    const confirmation = Promise.withResolvers<{ statusCode: number }>();
+    const transport = buildSentryOptions(() => ({
+      send: () => confirmation.promise,
+      flush: () => Promise.resolve(true),
+    })).transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+    const diagnostic: WorkerResponseDiagnostic = {
+      protocol: "anthropic",
+      stage: "decode",
+      content: "json",
+      category: "malformed JSON body",
+      finishReason: "n/a",
+      httpStatus: 200,
+    };
+
+    recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+    const sending = transport.send([
+      { event_id: eventID, sent_at: new Date(0).toISOString() },
+      [
+        [
+          { type: "event" },
+          { event_id: eventID, message: "Worker response rejected" },
+        ],
+      ],
+    ]);
+    clock.now += 14 * 60_000;
+    confirmation.resolve({ statusCode: 200 });
+    await sending;
+    clock.now += 2 * 60_000;
+    recordWorkerFailure("s2", "lore-distill", "upstream-error", diagnostic);
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+    clock.now += 14 * 60_000;
+    recordWorkerFailure("s3", "lore-distill", "upstream-error", diagnostic);
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+    expect(getWorkerHealth()).toHaveLength(3);
+  });
+
   test.each([{ statusCode: 429 }, {}])(
     "does not treat a non-delivery transport response as success: %j",
     async (response) => {

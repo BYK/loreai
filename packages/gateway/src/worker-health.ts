@@ -86,6 +86,24 @@ export type FailureReason =
   // breaker. Recorded (warn) for visibility.
   | "data-policy";
 
+const SENTRY_HEALTH_REASONS: ReadonlySet<string> = new Set<FailureReason>([
+  "no-auth",
+  "auth-rejected",
+  "protocol-mismatch",
+  "cross-provider",
+  "upstream-error",
+  "no-response",
+  "transport-error",
+  "timeout",
+  "parse-error",
+  "rate-limit",
+  "circuit-breaker",
+]);
+
+function sentryWorkerID(workerID: string): string {
+  return RESPONSE_ALERT_WORKER_IDS.has(workerID) ? workerID : "unknown";
+}
+
 /** Only structural, bounded metadata from a rejected 2xx worker response. */
 export type WorkerResponseDiagnostic = Readonly<{
   protocol: string;
@@ -368,7 +386,7 @@ export function recordWorkerResponseAlertDelivery(
   pendingResponseAlerts.delete(eventID);
   const alert = responseAlerts.get(key);
   if (alert && !alert.delivered && delivered) {
-    responseAlerts.set(key, { ...alert, delivered: true });
+    responseAlerts.set(key, { attemptedAt: now(), delivered: true });
   }
 }
 
@@ -873,9 +891,7 @@ export function recordWorkerFailure(
     // Match the Sentry fingerprint so one outage has one response event per
     // worker/protocol/category, regardless of how many sessions it affects.
     expireResponseAlerts(t);
-    const alertWorkerID = RESPONSE_ALERT_WORKER_IDS.has(workerID)
-      ? workerID
-      : "unknown";
+    const alertWorkerID = sentryWorkerID(workerID);
     const responseKey = `${alertWorkerID}/${safeResponse.protocol}/${safeResponse.category}`;
     const previousAlert = responseAlerts.get(responseKey);
     const shouldCapture =
@@ -957,24 +973,21 @@ export function recordWorkerFailure(
     (degradedFailedAt === undefined || t - degradedFailedAt >= ALERT_RETRY_MS);
   if (shouldAlert) {
     // Stable message + fingerprint so Sentry groups all degradations of a
-    // given worker into ONE issue. The session ID / counts vary per event and
-    // MUST live in tags+contexts only — embedding them in the message text
-    // spawns a new Sentry issue per session (LOREAI-GATEWAY worker-health noise).
+    // given worker into ONE issue. Keep session identity in local health state;
+    // only allowlisted categories and generated counts enter Sentry.
+    const alertWorkerID = sentryWorkerID(workerID);
+    const alertReason = SENTRY_HEALTH_REASONS.has(reason) ? reason : "unknown";
     try {
       Sentry.captureMessage("Worker health degraded", {
         level: "error",
-        fingerprint: ["worker-health-degraded", workerID],
+        fingerprint: ["worker-health-degraded", alertWorkerID],
         tags: {
-          worker_id: workerID,
-          reason,
-          session_id: sessionID,
+          worker_id: alertWorkerID,
+          reason: alertReason,
           failure_count: String(entry.failureCount),
         },
         contexts: {
           worker_health: {
-            sessionID,
-            workerIDs: [...entry.workerIDs],
-            reasons: [...entry.reasons],
             failureCount: entry.failureCount,
             firstFailureAt: entry.firstFailureAt,
             lastFailureAt: entry.lastFailureAt,
@@ -1010,23 +1023,23 @@ export function recordWorkerFailure(
       // outages of a given worker into ONE issue. The previous message
       // embedded the failure count, duration, AND session ID, so EVERY event
       // was a unique issue (dozens of one-off LOREAI-GATEWAY issues). The
-      // varying detail lives in tags+contexts below.
+      // bounded, generated detail lives in tags+contexts below.
       const err = new Error("Worker health critical: sustained worker failure");
+      const alertWorkerID = sentryWorkerID(workerID);
+      const alertReason = SENTRY_HEALTH_REASONS.has(reason)
+        ? reason
+        : "unknown";
       try {
         Sentry.captureException(err, {
-          fingerprint: ["worker-health-critical", workerID],
+          fingerprint: ["worker-health-critical", alertWorkerID],
           tags: {
-            worker_id: workerID,
-            reason,
-            session_id: sessionID,
+            worker_id: alertWorkerID,
+            reason: alertReason,
             failure_count: String(entry.failureCount),
             sustained: formatDuration(sustainedMs),
           },
           contexts: {
             worker_health: {
-              sessionID,
-              workerIDs: [...entry.workerIDs],
-              reasons: [...entry.reasons],
               failureCount: entry.failureCount,
               sustainedMs,
             },
@@ -1069,12 +1082,16 @@ export function recordWorkerSuccess(sessionID: string, workerID: string): void {
     `[worker-health] ${workerID} recovered for session=${sessionID.slice(0, 16)}`,
   );
   if (entry.alertSentAt !== undefined) {
-    Sentry.addBreadcrumb({
-      category: "worker-health",
-      level: "info",
-      message: "Worker health recovered",
-      data: { session_id: sessionID, worker_id: workerID },
-    });
+    try {
+      Sentry.addBreadcrumb({
+        category: "worker-health",
+        level: "info",
+        message: "Worker health recovered",
+        data: { worker_id: sentryWorkerID(workerID) },
+      });
+    } catch {
+      // A failing telemetry sink cannot alter worker recovery.
+    }
   }
 }
 
