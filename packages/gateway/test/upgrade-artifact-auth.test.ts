@@ -166,7 +166,7 @@ describe("stable upgrade artifact authentication", () => {
     ).toBe(false);
   });
 
-  it("rejects and removes a stable binary whose checksum mismatches", async () => {
+  it("rejects a mismatched stable binary without publishing it", async () => {
     const {
       executable,
       lifecycleLock,
@@ -187,10 +187,66 @@ describe("stable upgrade artifact authentication", () => {
         downloadDirectory,
       ),
     ).rejects.toThrow(/binary checksum mismatch/i);
-    expect(() =>
-      readFileSync(join(privateRoot, `${basename(executable)}.download`)),
-    ).toThrow();
+    expect(readFileSync(executable, "utf8")).toBe("old binary");
+    const namedOutput = join(privateRoot, `${basename(executable)}.download`);
+    if (process.platform === "darwin") {
+      expect(readFileSync(namedOutput)).toEqual(
+        Buffer.from("authenticated replacement binary"),
+      );
+    } else {
+      expect(() => readFileSync(namedOutput)).toThrow();
+    }
+    openedDirectories.splice(openedDirectories.indexOf(downloadDirectory), 1);
+    closeUpgradeDownloadDirectory(downloadDirectory);
+    if (process.platform === "darwin") {
+      expect(readFileSync(namedOutput)).toHaveLength(0);
+    } else {
+      expect(() => readFileSync(namedOutput)).toThrow();
+    }
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "retains and truncates a rejected Darwin download without unlinking its name",
+    async () => {
+      const platform = Object.getOwnPropertyDescriptor(process, "platform");
+      if (!platform) throw new Error("Missing platform descriptor");
+      Object.defineProperty(process, "platform", { value: "darwin" });
+      try {
+        const {
+          binary,
+          executable,
+          lifecycleLock,
+          version,
+          privateRoot,
+          downloadDirectory,
+        } = fixture({ expectedBinarySha256: "0".repeat(64) });
+        await expect(
+          downloadBinaryToTemp(
+            version,
+            lifecycleLock,
+            undefined,
+            false,
+            executable,
+            downloadDirectory,
+          ),
+        ).rejects.toThrow(/binary checksum mismatch/i);
+        const namedOutput = join(
+          privateRoot,
+          `${basename(executable)}.download`,
+        );
+        expect(readFileSync(namedOutput)).toEqual(binary);
+        openedDirectories.splice(
+          openedDirectories.indexOf(downloadDirectory),
+          1,
+        );
+        closeUpgradeDownloadDirectory(downloadDirectory);
+        expect(readFileSync(namedOutput)).toHaveLength(0);
+        expect(readFileSync(executable, "utf8")).toBe("old binary");
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
+    },
+  );
 
   it("preserves an unrelated output planted after checksum metadata resolves", async () => {
     const {
