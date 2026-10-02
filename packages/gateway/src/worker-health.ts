@@ -234,7 +234,9 @@ export type SessionHealth = {
   // noise by getDegradationWarning's suppression gate.
   sawGenuineReason: boolean;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
+  alertFailedAt?: number; // last failed Sentry message attempt (retry bound)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
+  exceptionFailedAt?: number; // last failed exception attempt (retry bound)
 };
 
 /** State of the worker health for a session. Used in response headers. */
@@ -252,6 +254,7 @@ const DEGRADED_THRESHOLD = 3;
 
 /** Minimum time between Sentry message events for the same session and worker. */
 const ALERT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+const ALERT_RETRY_MS = 60 * 1000; // 1 minute after a failed capture
 
 /** Sustained failure duration that triggers response-message injection. */
 const RESPONSE_MESSAGE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
@@ -296,11 +299,14 @@ const state = new Map<string, Map<string, SessionHealth>>();
  * Each component is a fixed allowlisted value, bounding this map by
  * (WORKER_IDS.length + 1) * RESPONSE_PROTOCOLS.size * RESPONSE_CATEGORIES.size.
  */
-const responseAlerts = new Map<string, number>();
+const responseAlerts = new Map<
+  string,
+  { attemptedAt: number; delivered: boolean }
+>();
 
 function expireResponseAlerts(t: number): void {
-  for (const [key, sentAt] of responseAlerts) {
-    if (t - sentAt > ALERT_COOLDOWN_MS) responseAlerts.delete(key);
+  for (const [key, alert] of responseAlerts) {
+    if (t - alert.attemptedAt > ALERT_COOLDOWN_MS) responseAlerts.delete(key);
   }
 }
 
@@ -796,10 +802,15 @@ export function recordWorkerFailure(
       ? workerID
       : "unknown";
     const responseKey = `${alertWorkerID}/${safeResponse.protocol}/${safeResponse.category}`;
-    const lastSentAt = responseAlerts.get(responseKey);
-    if (lastSentAt === undefined || t - lastSentAt > ALERT_COOLDOWN_MS) {
-      // One searchable event per category, then a cooldown. Telemetry failure
-      // must never alter worker results or prevent health bookkeeping.
+    const previousAlert = responseAlerts.get(responseKey);
+    const shouldCapture =
+      previousAlert === undefined ||
+      (previousAlert.delivered
+        ? t - previousAlert.attemptedAt > ALERT_COOLDOWN_MS
+        : t - previousAlert.attemptedAt >= ALERT_RETRY_MS);
+    if (shouldCapture) {
+      // A successful capture starts the normal cooldown. Failed captures retry
+      // at most once per minute; neither path changes worker health.
       try {
         Sentry.captureMessage("Worker response rejected", {
           level: "error",
@@ -817,9 +828,9 @@ export function recordWorkerFailure(
           },
           contexts: { worker_response: safeResponse },
         });
-        responseAlerts.set(responseKey, t);
+        responseAlerts.set(responseKey, { attemptedAt: t, delivered: true });
       } catch {
-        // Diagnostic delivery is best-effort.
+        responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
       }
     }
   }
@@ -855,9 +866,11 @@ export function recordWorkerFailure(
   // outage reason in the same window can still fire the first real alert.
   const shouldAlert =
     !allCredentialClass &&
-    (!entry.alertSentAt || t - entry.alertSentAt > ALERT_COOLDOWN_MS);
+    (entry.alertSentAt === undefined ||
+      t - entry.alertSentAt > ALERT_COOLDOWN_MS) &&
+    (entry.alertFailedAt === undefined ||
+      t - entry.alertFailedAt >= ALERT_RETRY_MS);
   if (shouldAlert) {
-    entry.alertSentAt = t;
     // Stable message + fingerprint so Sentry groups all degradations of a
     // given worker into ONE issue. The session ID / counts vary per event and
     // MUST live in tags+contexts only — embedding them in the message text
@@ -884,7 +897,10 @@ export function recordWorkerFailure(
           ...(safeResponse ? { worker_response: safeResponse } : {}),
         },
       });
+      entry.alertSentAt = t;
+      entry.alertFailedAt = undefined;
     } catch {
+      entry.alertFailedAt = t;
       // Telemetry cannot interrupt worker health or delivery.
     }
   }
@@ -895,9 +911,11 @@ export function recordWorkerFailure(
   if (sustainedMs >= CRITICAL_THRESHOLD_MS) {
     const shouldException =
       !allCredentialClass &&
-      (!entry.exceptionSentAt || t - entry.exceptionSentAt > 60 * 60 * 1000);
+      (entry.exceptionSentAt === undefined ||
+        t - entry.exceptionSentAt > 60 * 60 * 1000) &&
+      (entry.exceptionFailedAt === undefined ||
+        t - entry.exceptionFailedAt >= ALERT_RETRY_MS);
     if (shouldException) {
-      entry.exceptionSentAt = t;
       // Stable Error message + fingerprint so Sentry groups all critical
       // outages of a given worker into ONE issue. The previous message
       // embedded the failure count, duration, AND session ID, so EVERY event
@@ -925,7 +943,10 @@ export function recordWorkerFailure(
             ...(safeResponse ? { worker_response: safeResponse } : {}),
           },
         });
+        entry.exceptionSentAt = t;
+        entry.exceptionFailedAt = undefined;
       } catch {
+        entry.exceptionFailedAt = t;
         // A failing telemetry sink must not alter worker health.
       }
     }

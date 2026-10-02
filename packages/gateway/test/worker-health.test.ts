@@ -47,7 +47,7 @@ describe("worker-health", () => {
   beforeEach(() => {
     _resetForTest();
     _setNowForTest(() => 1_000_000);
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   describe("worker-scoped recovery (#1718)", () => {
@@ -709,6 +709,64 @@ describe("worker-health", () => {
       ).not.toContain("private-provider-secret");
     });
 
+    test("bounds response alert attempts while the Sentry sink stays broken", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "anthropic",
+        stage: "decode",
+        content: "json",
+        category: "malformed JSON body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => {
+        throw new Error("private-provider-secret");
+      });
+      for (const index of Array.from({ length: 80 }, (_, i) => i)) {
+        expect(() =>
+          recordWorkerFailure(
+            `session-${index}`,
+            "lore-distill",
+            "upstream-error",
+            diagnostic,
+          ),
+        ).not.toThrow();
+      }
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(getWorkerHealth()).toHaveLength(80);
+      expect(getWorkerHealth().every((entry) => entry.failureCount === 1)).toBe(
+        true,
+      );
+
+      clock.now += 60_000;
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => "event-id");
+      recordWorkerFailure(
+        "session-retry",
+        "lore-distill",
+        "upstream-error",
+        diagnostic,
+      );
+      recordWorkerFailure(
+        "session-debounced",
+        "lore-distill",
+        "upstream-error",
+        diagnostic,
+      );
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()).toHaveLength(82);
+
+      clock.now += 15 * 60_000 + 1;
+      recordWorkerFailure(
+        "session-after-cooldown",
+        "lore-distill",
+        "upstream-error",
+        diagnostic,
+      );
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(3);
+      expect(getWorkerHealth()).toHaveLength(83);
+    });
+
     test("debounces a first event recorded at timestamp zero", () => {
       _setNowForTest(() => 0);
       const diagnostic: WorkerResponseDiagnostic = {
@@ -823,6 +881,95 @@ describe("worker-health", () => {
         ).not.toThrow();
       }
       expect(getWorkerHealth()[0]?.failureCount).toBe(3);
+    });
+
+    test("retries a degraded alert after a failed capture", () => {
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      vi.mocked(Sentry.captureMessage).mockImplementationOnce(() => {
+        throw new Error("private-provider-secret");
+      });
+      expect(() =>
+        recordWorkerFailure("s1", "lore-distill", "no-response"),
+      ).not.toThrow();
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+
+      clock.now += 60_000;
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      clock.now += 60_000;
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(5);
+    });
+
+    test("bounds degraded alert attempts while the sink stays broken", () => {
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => {
+        throw new Error("private-provider-secret");
+      });
+      for (const _ of Array.from({ length: 80 })) {
+        recordWorkerFailure("s1", "lore-distill", "no-response");
+      }
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(82);
+
+      clock.now += 60_000;
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => "event-id");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(84);
+    });
+
+    test("retries a critical alert after a failed capture", () => {
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      vi.mocked(Sentry.captureException).mockImplementationOnce(() => {
+        throw new Error("private-provider-secret");
+      });
+      for (const _ of Array.from({ length: 16 })) {
+        expect(() =>
+          recordWorkerFailure("s1", "lore-distill", "no-response"),
+        ).not.toThrow();
+        clock.now += 4 * 60_000;
+      }
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureException).toHaveBeenCalledTimes(2);
+      clock.now += 4 * 60_000;
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureException).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(18);
+    });
+
+    test("bounds critical alert attempts while the sink stays broken", () => {
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      vi.mocked(Sentry.captureException).mockImplementation(() => {
+        throw new Error("private-provider-secret");
+      });
+      for (const _ of Array.from({ length: 15 })) {
+        recordWorkerFailure("s1", "lore-distill", "no-response");
+        clock.now += 4 * 60_000;
+      }
+      for (const _ of Array.from({ length: 80 })) {
+        recordWorkerFailure("s1", "lore-distill", "no-response");
+      }
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(95);
+
+      clock.now += 60_000;
+      vi.mocked(Sentry.captureException).mockImplementation(() => "event-id");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureException).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(97);
     });
 
     test("degraded alert uses stable message + fingerprint, ids in tags", () => {
