@@ -798,7 +798,6 @@ export function recordWorkerFailure(
     const responseKey = `${alertWorkerID}/${safeResponse.protocol}/${safeResponse.category}`;
     const lastSentAt = responseAlerts.get(responseKey);
     if (lastSentAt === undefined || t - lastSentAt > ALERT_COOLDOWN_MS) {
-      responseAlerts.set(responseKey, t);
       // One searchable event per category, then a cooldown. Telemetry failure
       // must never alter worker results or prevent health bookkeeping.
       try {
@@ -818,6 +817,7 @@ export function recordWorkerFailure(
           },
           contexts: { worker_response: safeResponse },
         });
+        responseAlerts.set(responseKey, t);
       } catch {
         // Diagnostic delivery is best-effort.
       }

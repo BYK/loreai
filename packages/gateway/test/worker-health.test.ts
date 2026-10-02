@@ -672,6 +672,43 @@ describe("worker-health", () => {
       ).not.toContain("private-provider-secret");
     });
 
+    test("retries a response alert after the Sentry sink recovers", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "anthropic",
+        stage: "decode",
+        content: "json",
+        category: "malformed JSON body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      vi.mocked(Sentry.captureMessage).mockImplementationOnce(() => {
+        throw new Error("private-provider-secret");
+      });
+
+      expect(() =>
+        recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic),
+      ).not.toThrow();
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+
+      clock.now += 60_000;
+      recordWorkerFailure("s2", "lore-distill", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()).toHaveLength(2);
+      expect(getWorkerHealth().every((entry) => entry.failureCount === 1)).toBe(
+        true,
+      );
+
+      clock.now += 60_000;
+      recordWorkerFailure("s3", "lore-distill", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()).toHaveLength(3);
+      expect(
+        JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
+      ).not.toContain("private-provider-secret");
+    });
+
     test("debounces a first event recorded at timestamp zero", () => {
       _setNowForTest(() => 0);
       const diagnostic: WorkerResponseDiagnostic = {
