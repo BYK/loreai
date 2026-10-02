@@ -320,15 +320,60 @@ export function scrubTelemetryEvent<T extends Event>(event: T): T {
 }
 
 /** Add a final privacy boundary around a Sentry-compatible transport. */
-export function wrapTelemetryTransport<Envelope, Response>(transport: {
-  send(envelope: Envelope): PromiseLike<Response>;
-  flush(timeout?: number): PromiseLike<boolean>;
-}): {
+export function wrapTelemetryTransport<Envelope, Response>(
+  transport: {
+    send(envelope: Envelope): PromiseLike<Response>;
+    flush(timeout?: number): PromiseLike<boolean>;
+  },
+  onDelivery?: (eventID: string, delivered: boolean) => void,
+): {
   send(envelope: Envelope): PromiseLike<Response>;
   flush(timeout?: number): PromiseLike<boolean>;
 } {
+  const notify = (eventID: string | undefined, delivered: boolean): void => {
+    if (!eventID) return;
+    try {
+      onDelivery?.(eventID, delivered);
+    } catch {
+      // Telemetry callbacks cannot change Sentry transport results.
+    }
+  };
   return {
-    send: (envelope) => transport.send(scrubEnvelope(envelope)),
+    send: (envelope) => {
+      const scrubbed = scrubEnvelope(envelope);
+      const header = Array.isArray(scrubbed) ? scrubbed[0] : undefined;
+      const eventID =
+        isRecord(header) &&
+        typeof header.event_id === "string" &&
+        /^[0-9a-f]{32}$/.test(header.event_id)
+          ? header.event_id
+          : undefined;
+      try {
+        return Promise.resolve(transport.send(scrubbed)).then(
+          (response) => {
+            try {
+              const status = isRecord(response)
+                ? response.statusCode
+                : undefined;
+              notify(
+                eventID,
+                typeof status === "number" && status >= 200 && status < 300,
+              );
+            } catch {
+              notify(eventID, false);
+            }
+            return response;
+          },
+          (error) => {
+            notify(eventID, false);
+            throw error;
+          },
+        );
+      } catch (error) {
+        notify(eventID, false);
+        throw error;
+      }
+    },
     flush: (timeout) => transport.flush(timeout),
   };
 }

@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, vi } from "vitest";
 import * as Sentry from "@sentry/bun";
 import {
   recordWorkerFailure,
+  recordWorkerResponseAlertDelivery,
   recordWorkerSuccess,
   makeWorkerHealth,
   allowWorkerProbe,
@@ -431,7 +432,10 @@ describe("worker-health", () => {
       };
       const clock = { now: 1_000_000 };
       _setNowForTest(() => clock.now);
+      const eventID = "00000000000000000000000000000003";
+      vi.mocked(Sentry.captureMessage).mockReturnValueOnce(eventID);
       recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+      recordWorkerResponseAlertDelivery(eventID, true);
       recordWorkerSuccess("s1", "lore-distill");
       expect(getWorkerHealth()).toEqual([]);
       clock.now += 60_000;
@@ -693,7 +697,10 @@ describe("worker-health", () => {
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
 
       clock.now += 60_000;
+      const eventID = "00000000000000000000000000000004";
+      vi.mocked(Sentry.captureMessage).mockReturnValueOnce(eventID);
       recordWorkerFailure("s2", "lore-distill", "upstream-error", diagnostic);
+      recordWorkerResponseAlertDelivery(eventID, true);
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
       expect(getWorkerHealth()).toHaveLength(2);
       expect(getWorkerHealth().every((entry) => entry.failureCount === 1)).toBe(

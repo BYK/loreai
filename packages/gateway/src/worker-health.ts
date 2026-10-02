@@ -355,10 +355,31 @@ const responseAlerts = new Map<
   string,
   { attemptedAt: number; delivered: boolean }
 >();
+/** Correlate only SDK-generated event IDs with pending, allowlisted alert keys. */
+const pendingResponseAlerts = new Map<string, string>();
+
+/** Called after the Sentry transport settles, never from the worker result path. */
+export function recordWorkerResponseAlertDelivery(
+  eventID: string,
+  delivered: boolean,
+): void {
+  const key = pendingResponseAlerts.get(eventID);
+  if (!key) return;
+  pendingResponseAlerts.delete(eventID);
+  const alert = responseAlerts.get(key);
+  if (alert && !alert.delivered && delivered) {
+    responseAlerts.set(key, { ...alert, delivered: true });
+  }
+}
 
 function expireResponseAlerts(t: number): void {
   for (const [key, alert] of responseAlerts) {
-    if (t - alert.attemptedAt > ALERT_COOLDOWN_MS) responseAlerts.delete(key);
+    if (t - alert.attemptedAt > ALERT_COOLDOWN_MS) {
+      responseAlerts.delete(key);
+      for (const [eventID, pendingKey] of pendingResponseAlerts) {
+        if (pendingKey === key) pendingResponseAlerts.delete(eventID);
+      }
+    }
   }
 }
 
@@ -543,6 +564,7 @@ export function _resetForTest(): void {
   state.clear();
   failedAlertCaptures.clear();
   responseAlerts.clear();
+  pendingResponseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
   incapableModels.clear();
@@ -862,10 +884,13 @@ export function recordWorkerFailure(
         ? t - previousAlert.attemptedAt > ALERT_COOLDOWN_MS
         : t - previousAlert.attemptedAt >= ALERT_RETRY_MS);
     if (shouldCapture) {
-      // A successful capture starts the normal cooldown. Failed captures retry
-      // at most once per minute; neither path changes worker health.
+      // Enqueueing is not delivery: only a confirmed 2xx transport send starts
+      // the long cooldown. Failed or unconfirmed sends retry at most once/min.
+      for (const [pendingID, key] of pendingResponseAlerts) {
+        if (key === responseKey) pendingResponseAlerts.delete(pendingID);
+      }
       try {
-        Sentry.captureMessage("Worker response rejected", {
+        const eventID = Sentry.captureMessage("Worker response rejected", {
           level: "error",
           fingerprint: [
             "worker-response-rejected",
@@ -881,7 +906,10 @@ export function recordWorkerFailure(
           },
           contexts: { worker_response: safeResponse },
         });
-        responseAlerts.set(responseKey, { attemptedAt: t, delivered: true });
+        responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
+        if (typeof eventID === "string" && /^[0-9a-f]{32}$/.test(eventID)) {
+          pendingResponseAlerts.set(eventID, responseKey);
+        }
       } catch {
         responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
       }
@@ -1287,6 +1315,7 @@ export function clearAll(): void {
   state.clear();
   failedAlertCaptures.clear();
   responseAlerts.clear();
+  pendingResponseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
   if (sweepTimer) {

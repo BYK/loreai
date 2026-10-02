@@ -46,6 +46,7 @@ import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
 import { eventHasTransientError } from "./src/transient-errors";
+import { recordWorkerResponseAlertDelivery } from "./src/worker-health";
 import {
   SENTRY_DATA_COLLECTION,
   isolateRecallContinuationEvent,
@@ -178,7 +179,10 @@ export function buildSentryOptions(
     // Final boundary: sanitize every envelope item, including payload types
     // added by future SDK integrations that do not pass through hooks above.
     transport(options) {
-      return wrapTelemetryTransport(makeTransport(options));
+      return wrapTelemetryTransport(
+        makeTransport(options),
+        recordWorkerResponseAlertDelivery,
+      );
     },
   };
 }
