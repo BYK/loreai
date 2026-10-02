@@ -241,6 +241,32 @@ test.skipIf(process.platform !== "linux")(
   },
 );
 
+test.skipIf(process.platform !== "linux")(
+  "keeps the first anonymous output when opening a second one is attempted",
+  () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-double-open-"));
+    vi.stubEnv("TMPDIR", root);
+    const directory = createUpgradeDownloadDirectory(
+      join(root, "lore"),
+      join(root, "install-path"),
+    );
+    try {
+      const output = openUpgradeDownloadFile(directory, "lore.download");
+      writeFileSync(output, "first download");
+      expect(() => openUpgradeDownloadFile(directory, "lore.download")).toThrow(
+        "Upgrade download file has already been opened",
+      );
+      expect(directory.fileFd).toBe(Number(output.split("/").at(-1)));
+      expect(readFileSync(output, "utf8")).toBe("first download");
+      expect(readdirSync(directory.path)).toEqual([".owner"]);
+    } finally {
+      closeUpgradeDownloadDirectory(directory);
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test.skipIf(process.platform === "win32")(
   "releases an interrupted download when its opened descriptor closes",
   () => {
