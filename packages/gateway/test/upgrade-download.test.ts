@@ -307,7 +307,7 @@ test.skipIf(process.platform !== "linux")(
 );
 
 test.skipIf(process.platform === "win32")(
-  "reclaims the recorded inode without consuming a matching forged sibling",
+  "preserves a matching forged sibling across later staging",
   () => {
     const root = mkdtempSync(join(tmpdir(), "lore-upgrade-recorded-"));
     vi.stubEnv("TMPDIR", root);
@@ -326,12 +326,46 @@ test.skipIf(process.platform === "win32")(
     try {
       expect(existsSync(owned.path)).toBe(true);
       const reused = createUpgradeDownloadDirectory(executable, receipt);
-      expect(reused.path).toBe(owned.path);
+      if (process.platform === "darwin") {
+        expect(reused.path).not.toBe(owned.path);
+        expect(readFileSync(join(owned.path, "lore.download"))).toHaveLength(0);
+      } else {
+        expect(reused.path).toBe(owned.path);
+      }
       closeUpgradeDownloadDirectory(reused);
       expect(readFileSync(join(forged, "lore.download"), "utf8")).toBe(
         "keep this",
       );
     } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "Darwin retains a truncated output and starts the next download in a new directory",
+  () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    if (!platform) throw new Error("Missing platform descriptor");
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-darwin-retain-"));
+    vi.stubEnv("TMPDIR", root);
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    try {
+      const executable = join(root, "lore");
+      const receipt = join(root, "install-path");
+      const first = createUpgradeDownloadDirectory(executable, receipt);
+      const output = openUpgradeDownloadFile(first, "lore.download");
+      writeFileSync(output, "partial binary");
+      closeUpgradeDownloadDirectory(first);
+      expect(readFileSync(join(first.path, "lore.download"))).toHaveLength(0);
+
+      const second = createUpgradeDownloadDirectory(executable, receipt);
+      expect(second.path).not.toBe(first.path);
+      closeUpgradeDownloadDirectory(second);
+      expect(readFileSync(join(first.path, "lore.download"))).toHaveLength(0);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
       vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });
     }
