@@ -415,6 +415,74 @@ describe("worker-health", () => {
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(3);
     });
 
+    test("reports a new response category after 64 distinct safe signatures", () => {
+      _setNowForTest(() => 1_000_000);
+      const categories = [
+        "invalid response body",
+        "malformed JSON body",
+        "worker response incomplete",
+        "missing Anthropic message_stop terminal",
+        "missing OpenAI finish_reason terminal",
+        "missing OpenAI [DONE] terminal",
+        "missing Gemini finishReason terminal",
+        "missing terminal response status",
+        "malformed Anthropic response body",
+        "malformed OpenAI response body",
+        "malformed Responses response body",
+      ];
+      const protocols = [
+        "anthropic",
+        "openai",
+        "openai-responses",
+        "openai-codex-responses",
+        "vertex",
+        "gemini",
+      ];
+      const diagnostics = protocols
+        .flatMap((protocol) =>
+          categories.map((category) => ({
+            protocol,
+            stage: "parse",
+            content: "json",
+            category,
+            finishReason: "n/a",
+            httpStatus: 200,
+          })),
+        )
+        .slice(0, 65);
+
+      for (const diagnostic of diagnostics) {
+        recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+      }
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        "Worker response rejected",
+        expect.objectContaining({
+          contexts: {
+            worker_response: diagnostics[64],
+          },
+        }),
+      );
+      const responseEvents = vi
+        .mocked(Sentry.captureMessage)
+        .mock.calls.filter(
+          ([message]) => message === "Worker response rejected",
+        );
+      expect(responseEvents).toHaveLength(65);
+
+      recordWorkerFailure("s1", "lore-distill", "upstream-error", {
+        ...diagnostics[64],
+        stage: "stream",
+        finishReason: "length",
+      });
+      expect(
+        vi
+          .mocked(Sentry.captureMessage)
+          .mock.calls.filter(
+            ([message]) => message === "Worker response rejected",
+          ),
+      ).toHaveLength(65);
+    });
+
     test("rejects hostile metadata and isolates a throwing Sentry sink", () => {
       const diagnostic: WorkerResponseDiagnostic = {
         protocol: "anthropic",

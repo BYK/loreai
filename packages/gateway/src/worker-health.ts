@@ -783,17 +783,15 @@ export function recordWorkerFailure(
       ? safeResponseDiagnostic(responseDiagnostic)
       : undefined;
   if (safeResponse) {
-    // The key set is finite and small; release expired categories so a long
-    // outage can still report a new failure after the cooldown.
+    // Match the Sentry fingerprint. Both fields come from fixed allowlists, so
+    // the map has at most RESPONSE_PROTOCOLS.size * RESPONSE_CATEGORIES.size
+    // entries. Release expired categories after the cooldown.
     for (const [key, sentAt] of entry.responseAlerts ?? []) {
       if (t - sentAt > ALERT_COOLDOWN_MS) entry.responseAlerts?.delete(key);
     }
-    const responseKey = `${safeResponse.protocol}/${safeResponse.stage}/${safeResponse.category}/${safeResponse.finishReason}`;
+    const responseKey = `${safeResponse.protocol}/${safeResponse.category}`;
     const lastSentAt = entry.responseAlerts?.get(responseKey);
-    if (
-      (lastSentAt === undefined || t - lastSentAt > ALERT_COOLDOWN_MS) &&
-      (entry.responseAlerts?.size ?? 0) < 64
-    ) {
+    if (lastSentAt === undefined || t - lastSentAt > ALERT_COOLDOWN_MS) {
       entry.responseAlerts ??= new Map();
       entry.responseAlerts.set(responseKey, t);
       // One searchable event per category, then a cooldown. Telemetry failure
