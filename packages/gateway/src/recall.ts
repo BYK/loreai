@@ -1672,6 +1672,9 @@ export function projectRecallRecoveryResponse(
       : {}),
     stopReason: resp.stopReason,
     ...(resp.usage ? { usage: { ...resp.usage } } : {}),
+    ...(resp.usageComplete !== undefined
+      ? { usageComplete: resp.usageComplete }
+      : {}),
   };
 }
 

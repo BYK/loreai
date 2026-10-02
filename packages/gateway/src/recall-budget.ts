@@ -3,7 +3,11 @@ import type { GatewayUsage } from "./translate/types";
 
 /** Finite backstop only; normal termination is time, tokens, bytes, items, or stall. */
 export const MAX_RECALL_EXECUTIONS = 24;
+/** Minimum budget for additional provider calls, excluding the principal turn. */
 export const MAX_RECALL_CHAIN_TOKENS = 128_000;
+/** Hard ceiling for additional calls even when the principal has a 1M context. */
+export const MAX_RECALL_ADDITIONAL_TOKENS = 4_000_000;
+export const MAX_RECALL_PRINCIPAL_TOKENS = 1_000_000;
 export const MAX_RECALL_CHAIN_RESULT_BYTES = 512 * 1024;
 export const MAX_RECALL_CHAIN_ITEMS = 64;
 /** The formatter's configured maximum for source previews in one search. */
@@ -23,6 +27,10 @@ export type RecallStopReason =
 type RecallBudgetOptions = {
   maxExecutions?: number;
   maxTokens?: number;
+  /** Validated context window for the request's model. */
+  modelContextTokens?: number;
+  /** Whether the context window belongs to the effective upstream route. */
+  allowExpandedContext?: boolean;
   maxResultBytes?: number;
   maxItems?: number;
   maxConsecutiveNoProgress?: number;
@@ -38,12 +46,13 @@ type RecallBudgetOptions = {
  */
 export class RecallChainBudget {
   readonly maxExecutions: number;
-  readonly maxTokens: number;
+  maxTokens: number;
   readonly maxResultBytes: number;
   readonly maxItems: number;
   readonly maxConsecutiveNoProgress: number;
   private readonly deadlineAt: number;
   private readonly now: () => number;
+  private readonly modelContextTokens: number;
   private readonly deliveredCoverage = new Set<string>();
   private readonly deliveredItems = new Set<string>();
   private stop: RecallStopReason | undefined;
@@ -57,10 +66,32 @@ export class RecallChainBudget {
   private cacheReadInputTokens = 0;
   private cacheCreationInputTokens = 0;
   private consecutiveNoProgress = 0;
+  private finalizationReserveTokens = RECALL_FINALIZATION_RESERVE_TOKENS;
+  private principalRecorded = false;
+  private readonly explicitMaxTokens: boolean;
+  private readonly allowExpandedContext: boolean;
+  private principalModel: string | undefined;
+  private unverifiedContinuation = false;
 
   constructor(options: RecallBudgetOptions = {}) {
     this.maxExecutions = options.maxExecutions ?? MAX_RECALL_EXECUTIONS;
     this.maxTokens = options.maxTokens ?? MAX_RECALL_CHAIN_TOKENS;
+    this.explicitMaxTokens = options.maxTokens !== undefined;
+    this.allowExpandedContext =
+      options.allowExpandedContext ?? options.modelContextTokens !== undefined;
+    if (
+      options.modelContextTokens !== undefined &&
+      (!Number.isSafeInteger(options.modelContextTokens) ||
+        options.modelContextTokens < 1)
+    ) {
+      throw new Error(
+        "recall budget modelContextTokens must be a positive integer",
+      );
+    }
+    this.modelContextTokens = Math.min(
+      options.modelContextTokens ?? MAX_RECALL_PRINCIPAL_TOKENS,
+      MAX_RECALL_PRINCIPAL_TOKENS,
+    );
     this.maxResultBytes =
       options.maxResultBytes ?? MAX_RECALL_CHAIN_RESULT_BYTES;
     this.maxItems = options.maxItems ?? MAX_RECALL_CHAIN_ITEMS;
@@ -75,6 +106,55 @@ export class RecallChainBudget {
             startedAt,
             options.deadlineAt - RECALL_FINALIZATION_RESERVE_MS,
           );
+  }
+
+  /** Record the sunk principal turn without charging it to the recall budget. */
+  recordPrincipalUsage(
+    usage: Partial<GatewayUsage> | undefined,
+    model: { expectedModel?: string; actualModel?: string },
+    completeUsage: boolean,
+  ): RecallStopReason | undefined {
+    if (this.principalRecorded)
+      throw new Error("recall budget principal usage already recorded");
+    this.principalRecorded = true;
+    if (!usage) return this.stop;
+    const principalTokens =
+      validTokens(usage.inputTokens) +
+      validTokens(usage.outputTokens) +
+      validTokens(usage.cacheReadInputTokens) +
+      validTokens(usage.cacheCreationInputTokens);
+    // A routed provider can answer with a different, narrower model. Only
+    // matching principal identity can justify a budget above the old 128k cap.
+    const matchesModel =
+      completeUsage &&
+      !!model.expectedModel &&
+      model.expectedModel === model.actualModel;
+    if (
+      !Number.isSafeInteger(principalTokens) ||
+      principalTokens >
+        (matchesModel
+          ? this.modelContextTokens
+          : Math.min(this.modelContextTokens, MAX_RECALL_CHAIN_TOKENS))
+    ) {
+      return this.setStop("tokens");
+    }
+    if (matchesModel && this.allowExpandedContext && !this.explicitMaxTokens) {
+      // Two productive follow-ups and a full-context final answer fit inside
+      // the additional budget. Small turns keep the existing 128k floor.
+      this.maxTokens = Math.min(
+        MAX_RECALL_ADDITIONAL_TOKENS,
+        Math.max(MAX_RECALL_CHAIN_TOKENS, 4 * principalTokens),
+      );
+      this.finalizationReserveTokens = Math.max(
+        RECALL_FINALIZATION_RESERVE_TOKENS,
+        Math.min(principalTokens, Math.floor(this.maxTokens / 4)),
+      );
+      this.principalModel = model.actualModel;
+    } else {
+      // Unverified identity or route may only spend the original combined cap.
+      this.recordUsage(usage);
+    }
+    return this.stop;
   }
 
   /** Reserve the maximum source count an operation can expose. */
@@ -99,11 +179,14 @@ export class RecallChainBudget {
     return undefined;
   }
 
-  /** Account actual provider usage; missing values remain conservatively zero. */
+  /** Account each additional provider call; missing values remain conservatively zero. */
   recordUsage(
     usage: Partial<GatewayUsage> | undefined,
   ): RecallStopReason | undefined {
-    if (!usage) return this.stop;
+    if (!usage) {
+      if (this.maxTokens > MAX_RECALL_CHAIN_TOKENS) this.setStop("tokens");
+      return this.stop;
+    }
     this.inputTokens += validTokens(usage.inputTokens);
     this.outputTokens += validTokens(usage.outputTokens);
     this.cacheReadInputTokens += validTokens(usage.cacheReadInputTokens);
@@ -113,6 +196,30 @@ export class RecallChainBudget {
     if (!this.stop && this.totalTokens() >= this.maxTokens)
       this.setStop("tokens");
     return this.stop;
+  }
+
+  /** Never use a principal's expanded budget for a different model or unmetered call. */
+  continuationModelMatches(model: string | undefined): boolean {
+    return (
+      this.maxTokens <= MAX_RECALL_CHAIN_TOKENS ||
+      (!!model && model === this.principalModel)
+    );
+  }
+
+  recordContinuationUsage(
+    usage: Partial<GatewayUsage> | undefined,
+    model: string | undefined,
+    completeUsage: boolean,
+  ): RecallStopReason | undefined {
+    const stop = this.recordUsage(usage);
+    if (
+      this.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+      (!this.continuationModelMatches(model) || !completeUsage)
+    ) {
+      this.unverifiedContinuation = true;
+      return this.setStop("tokens");
+    }
+    return stop;
   }
 
   /** Account rendered bytes and delivered source coverage after execution. */
@@ -182,6 +289,16 @@ export class RecallChainBudget {
     return this.stop;
   }
 
+  /** A full final or recovery call may finish exactly at the ceiling, never above it. */
+  exceedsTokenCeiling(): boolean {
+    return this.totalTokens() > this.maxTokens;
+  }
+
+  /** A stopped chain may recover only when all expanded calls were metered. */
+  canRecover(): boolean {
+    return !this.unverifiedContinuation && !this.exceedsTokenCeiling();
+  }
+
   snapshot(): {
     executions: number;
     items: number;
@@ -220,17 +337,14 @@ export class RecallChainBudget {
   private tokenAdmissionLimit(): number {
     return (
       this.maxTokens -
-      Math.min(
-        RECALL_FINALIZATION_RESERVE_TOKENS,
-        Math.floor(this.maxTokens / 4),
-      )
+      Math.min(this.finalizationReserveTokens, Math.floor(this.maxTokens / 4))
     );
   }
 
   /** True when the next provider turn must be dedicated to final synthesis. */
   mustFinalizeNext(): boolean {
     const reserve = Math.min(
-      RECALL_FINALIZATION_RESERVE_TOKENS,
+      this.finalizationReserveTokens,
       Math.floor(this.maxTokens / 4),
     );
     return (

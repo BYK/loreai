@@ -826,7 +826,9 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        timeoutMs: 2_000,
+        // Leave enough time for nested Vitest startup before timing out the
+        // fixture itself.
+        timeoutMs: 15_000,
         readyPath: marker,
         descendantPidPath: marker,
       },
@@ -834,7 +836,7 @@ describe("Vitest database isolation harness", () => {
     await ready;
     const { pid } = await readJson<{ pid: number }>(marker);
 
-    const outcome = await settleWithin(result, 10_000);
+    const outcome = await settleWithin(result, 20_000);
     if (outcome.status === "timeout") {
       if (processExists(pid)) process.kill(pid, "SIGKILL");
       await killFixtureTree(child, new Set([pid]));
@@ -889,7 +891,9 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        timeoutMs: 2_000,
+        // Nested Vitest startup can exceed two seconds even when the fixture
+        // exits promptly; the timer must allow its marker to become ready.
+        timeoutMs: 15_000,
         readyPath: marker,
         descendantPidPath: marker,
       },

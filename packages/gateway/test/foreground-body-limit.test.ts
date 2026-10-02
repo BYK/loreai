@@ -353,15 +353,17 @@ describe("foreground response body limits", () => {
     ).rejects.toThrow("upstream Responses request did not complete");
   });
 
-  test("rejects provider-specific incomplete reasons in sniffed Codex SSE", async () => {
-    const wire =
-      'event: response.incomplete\ndata: {"type":"response.incomplete","response":{"id":"resp_codex_sse_incomplete","status":"incomplete","incomplete_details":{"reason":"provider_specific"}}}\n\n';
-    const response = new Response(wire, {
-      headers: { "content-type": "text/event-stream" },
-    });
+  test.each([undefined, { input_tokens: 7, output_tokens: 2 }])(
+    "rejects provider-specific incomplete reasons in sniffed Codex SSE with usage %j",
+    async (usage) => {
+      const wire = `event: response.incomplete\ndata: ${JSON.stringify({ type: "response.incomplete", response: { id: "resp_codex_sse_incomplete", status: "incomplete", incomplete_details: { reason: "provider_specific" }, ...(usage ? { usage } : {}) } })}\n\n`;
+      const response = new Response(wire, {
+        headers: { "content-type": "text/event-stream" },
+      });
 
-    await expect(
-      accumulateNonStreamResponse(response, "openai-responses", true),
-    ).rejects.toThrow("malformed Responses terminal event");
-  });
+      await expect(
+        accumulateNonStreamResponse(response, "openai-responses", true),
+      ).rejects.toThrow("malformed Responses terminal event");
+    },
+  );
 });

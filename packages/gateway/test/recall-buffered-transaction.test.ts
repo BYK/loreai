@@ -293,11 +293,9 @@ describe.each([
         inputTokens:
           TEST_RECALL_EXECUTION_CAP * 3 +
           (outcome === "invalid" ? 1000 : 0) +
-          (codex ? 0 : 3),
+          3,
         outputTokens:
-          TEST_RECALL_EXECUTION_CAP * 2 +
-          (outcome === "invalid" ? 100 : 0) +
-          (codex ? 0 : 2),
+          TEST_RECALL_EXECUTION_CAP * 2 + (outcome === "invalid" ? 100 : 0) + 2,
         turns: 1,
       });
     },
