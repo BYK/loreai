@@ -102,8 +102,12 @@ const SENTRY_HEALTH_REASONS: ReadonlySet<string> = new Set<FailureReason>([
   "circuit-breaker",
 ]);
 
-function sentryWorkerID(workerID: string): string {
+export function sentryWorkerID(workerID: string): string {
   return RESPONSE_ALERT_WORKER_IDS.has(workerID) ? workerID : "unknown";
+}
+
+export function sentryHealthReason(reason: string): string {
+  return SENTRY_HEALTH_REASONS.has(reason) ? reason : "unknown";
 }
 
 /** Worker alerts contain only reviewed fields, never the active request scope. */
@@ -203,7 +207,7 @@ const RESPONSE_CATEGORIES = new Set([
   "Anthropic response has no body",
 ]);
 
-function safeResponseDiagnostic(
+export function safeResponseDiagnostic(
   diagnostic: WorkerResponseDiagnostic | undefined,
 ): WorkerResponseDiagnostic | undefined {
   if (!diagnostic || typeof diagnostic !== "object") return undefined;

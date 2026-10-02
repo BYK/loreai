@@ -238,7 +238,11 @@ describe("telemetry privacy boundary", () => {
       contexts: {
         worker_response: {
           protocol: "openai",
+          stage: "parse",
+          content: "json",
           category: "malformed OpenAI response body",
+          finishReason: "n/a",
+          httpStatus: 200,
         },
       },
       extra: { detail: marker },
@@ -329,7 +333,7 @@ describe("telemetry privacy boundary", () => {
         [
           {
             type: "span",
-            item_count: 1,
+            item_count: 2,
             content_type: "application/vnd.sentry.items.span.v2+json",
           },
           {
@@ -351,6 +355,18 @@ describe("telemetry privacy boundary", () => {
                   },
                 },
               },
+              {
+                name: "sqlite query",
+                span_id: "cccccccccccccccc",
+                trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                attributes: {
+                  "sentry.op": { value: "db", type: "string" },
+                  "sentry.segment.name": {
+                    value: "sqlite query",
+                    type: "string",
+                  },
+                },
+              },
             ],
           },
         ],
@@ -358,7 +374,29 @@ describe("telemetry privacy boundary", () => {
     ];
     await transport.send(envelope as Parameters<typeof transport.send>[0]);
     expect(JSON.stringify(sent)).not.toContain(privateModel);
-    expect(JSON.stringify(sent)).toContain("AI worker call");
+    const outbound = sent as [
+      { trace: { transaction: string } },
+      Array<
+        [
+          unknown,
+          {
+            items: Array<{
+              name: string;
+              attributes: Record<string, unknown>;
+            }>;
+          },
+        ]
+      >,
+    ];
+    expect(outbound[0].trace.transaction).toBe("Telemetry transaction");
+    expect(outbound[1][0]?.[1].items[0]?.name).toBe("AI worker call");
+    expect(outbound[1][0]?.[1].items[1]?.name).toBe("sqlite query");
+    expect(
+      outbound[1][0]?.[1].items[1]?.attributes["sentry.segment.name"],
+    ).toEqual({
+      value: "sqlite query",
+      type: "string",
+    });
   });
 
   it("scrubs request data, breadcrumbs, contexts, and span attributes", () => {

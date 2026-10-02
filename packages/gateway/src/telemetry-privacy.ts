@@ -4,6 +4,12 @@ import {
   redactCredentialHeaderAssignments,
 } from "./credential-headers";
 import { RECALL_CONTINUATION_FAILURE_CATEGORIES } from "./recall-continuation-failure";
+import {
+  safeResponseDiagnostic,
+  sentryHealthReason,
+  sentryWorkerID,
+  type WorkerResponseDiagnostic,
+} from "./worker-health";
 
 export const SENTRY_DATA_COLLECTION = {
   userInfo: false,
@@ -247,6 +253,21 @@ function scrubRequest(value: Record<string, unknown>): Record<string, unknown> {
   return request;
 }
 
+function safeGenAiSpanName(value: unknown): string {
+  return value === "AI conversation turn" ? value : "AI worker call";
+}
+
+function isGenAiSpanAttributes(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const op = value["sentry.op"];
+  return (
+    (typeof op === "string" && op.startsWith("gen_ai.")) ||
+    (isRecord(op) &&
+      typeof op.value === "string" &&
+      op.value.startsWith("gen_ai."))
+  );
+}
+
 function scrubValue(
   value: unknown,
   seen: WeakMap<object, unknown>,
@@ -296,22 +317,122 @@ function scrubValue(
     } else if (key.toLowerCase() === "request" && isRecord(child)) {
       copy[key] = scrubRequest(child);
     } else if (key === "transaction") {
-      copy[key] = "AI worker call";
-    } else if (key === "sentry.segment.name") {
-      copy[key] = isRecord(child)
-        ? { value: "AI worker call", type: "string" }
-        : "AI worker call";
+      copy[key] = "Telemetry transaction";
+    } else if (key === "sentry.segment.name" && isGenAiSpanAttributes(record)) {
+      const name = safeGenAiSpanName(isRecord(child) ? child.value : child);
+      copy[key] = isRecord(child) ? { value: name, type: "string" } : name;
     } else if (
       key === "name" &&
       ((typeof record.op === "string" && record.op.startsWith("gen_ai.")) ||
-        ("span_id" in record && "trace_id" in record))
+        isGenAiSpanAttributes(record.attributes))
     ) {
-      copy[key] = "AI worker call";
+      copy[key] = safeGenAiSpanName(child);
     } else {
       copy[key] = scrubValue(child, seen, key);
     }
   }
   return copy;
+}
+
+/** Rebuild worker alerts from reviewed fields after global scope has merged. */
+function isolateWorkerAlertEvent<T extends Event>(event: T): T | null {
+  const fingerprint = event.fingerprint;
+  if (!Array.isArray(fingerprint)) return null;
+  const kind = fingerprint[0];
+  const workerID = sentryWorkerID(
+    typeof fingerprint[1] === "string" ? fingerprint[1] : "unknown",
+  );
+  const critical = event.exception?.values?.some(
+    (value) =>
+      value.value === "Worker health critical: sustained worker failure",
+  );
+  if (
+    (kind !== "worker-response-rejected" ||
+      event.message !== "Worker response rejected") &&
+    (kind !== "worker-health-degraded" ||
+      event.message !== "Worker health degraded") &&
+    (kind !== "worker-health-critical" || !critical)
+  ) {
+    return null;
+  }
+
+  const diagnostic = safeResponseDiagnostic(
+    event.contexts?.worker_response as WorkerResponseDiagnostic | undefined,
+  );
+  const health = event.contexts?.worker_health;
+  const safeHealth: Record<string, number> = {};
+  if (kind !== "worker-response-rejected" && isRecord(health)) {
+    for (const field of [
+      "failureCount",
+      "firstFailureAt",
+      "lastFailureAt",
+      "sustainedMs",
+    ]) {
+      const value = health[field];
+      if (
+        typeof value === "number" &&
+        Number.isSafeInteger(value) &&
+        value >= 0
+      ) {
+        safeHealth[field] = value;
+      }
+    }
+  }
+  const tags: Record<string, string> = {};
+  const contexts: Record<string, Record<string, unknown>> = {};
+  const safeEvent: Record<string, unknown> = {
+    ...(typeof event.event_id === "string" &&
+    /^[0-9a-f]{32}$/.test(event.event_id)
+      ? { event_id: event.event_id }
+      : {}),
+    ...(typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+      ? { timestamp: event.timestamp }
+      : {}),
+    platform: "node",
+    level: "error",
+  };
+  if (diagnostic) contexts.worker_response = diagnostic;
+  if (kind === "worker-response-rejected") {
+    safeEvent.message = "Worker response rejected";
+    safeEvent.fingerprint = [
+      kind,
+      workerID,
+      diagnostic?.protocol ?? "unknown",
+      diagnostic?.category ?? "invalid response body",
+    ];
+    if (diagnostic) {
+      tags.response_protocol = diagnostic.protocol;
+      tags.response_stage = diagnostic.stage;
+      tags.response_content = diagnostic.content;
+      tags.response_category = diagnostic.category;
+    }
+  } else {
+    safeEvent.message = critical
+      ? "Worker health critical: sustained worker failure"
+      : "Worker health degraded";
+    safeEvent.fingerprint = [kind, workerID];
+    tags.worker_id = workerID;
+    tags.reason = sentryHealthReason(
+      typeof event.tags?.reason === "string" ? event.tags.reason : "unknown",
+    );
+    if (safeHealth.failureCount !== undefined) {
+      tags.failure_count = String(safeHealth.failureCount);
+    }
+    if (Object.keys(safeHealth).length > 0) contexts.worker_health = safeHealth;
+    if (critical) {
+      safeEvent.exception = {
+        values: [
+          {
+            type: "Error",
+            value: "Worker health critical: sustained worker failure",
+          },
+        ],
+      };
+    }
+  }
+  if (Object.keys(tags).length > 0) safeEvent.tags = tags;
+  if (Object.keys(contexts).length > 0) safeEvent.contexts = contexts;
+  return safeEvent as T;
 }
 
 /** Deep-copy and redact an arbitrary telemetry payload or envelope. */
@@ -324,6 +445,8 @@ export function scrubTelemetryEvent<T extends Event>(event: T): T {
   if (event.message === "Recall continuation failed") {
     return isolateRecallContinuationEvent(event) ?? ({} as T);
   }
+  const workerAlert = isolateWorkerAlertEvent(event);
+  if (workerAlert) return workerAlert;
   const originalMessage = event.message;
   const originalExceptions = event.exception?.values;
   const scrubbed = scrubTelemetryValue(event);
