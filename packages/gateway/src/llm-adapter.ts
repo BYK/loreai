@@ -617,6 +617,8 @@ function diagnosticContentKind(contentType: string): string {
 
 function diagnosticFinishReason(reason: string | undefined): string {
   if (!reason) return "n/a";
+  if (reason.length > 32) return "unknown";
+  const normalized = reason.toLowerCase();
   return new Set([
     "stop",
     "end_turn",
@@ -626,8 +628,8 @@ function diagnosticFinishReason(reason: string | undefined): string {
     "content_filter",
     "tool_calls",
     "tool_use",
-  ]).has(reason)
-    ? reason
+  ]).has(normalized)
+    ? normalized
     : "unknown";
 }
 

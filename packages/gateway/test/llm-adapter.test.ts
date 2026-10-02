@@ -1282,6 +1282,27 @@ describe("createGatewayLLMClient.prompt", () => {
         ),
     ],
     [
+      "uppercase native truncation",
+      "openai",
+      "completion",
+      "json",
+      "worker response incomplete",
+      "max_tokens",
+      (secret: string) =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: { role: "assistant", content: secret },
+                finish_reason: null,
+                native_finish_reason: "MAX_TOKENS",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+    [
       "missing OpenAI [DONE] terminal",
       "openai",
       "stream",
@@ -1353,6 +1374,11 @@ describe("createGatewayLLMClient.prompt", () => {
             upstreamProviderID: protocol,
           }),
         ).resolves.toMatchObject({ kind: "failure", attempts: 1 });
+        if (_name === "uppercase native truncation") {
+          expect(getLastWorkerError()).toContain(
+            "worker response incomplete (max_tokens) (stage=completion, content=json)",
+          );
+        }
 
         expect(Sentry.captureMessage).toHaveBeenCalledWith(
           "Worker response rejected",

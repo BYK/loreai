@@ -234,9 +234,7 @@ export type SessionHealth = {
   // noise by getDegradationWarning's suppression gate.
   sawGenuineReason: boolean;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
-  alertFailedAt?: number; // last failed Sentry message attempt (retry bound)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
-  exceptionFailedAt?: number; // last failed exception attempt (retry bound)
 };
 
 /** State of the worker health for a session. Used in response headers. */
@@ -294,6 +292,60 @@ const CIRCUIT_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // ---------------------------------------------------------------------------
 
 const state = new Map<string, Map<string, SessionHealth>>();
+
+type HealthAlertKind = "degraded" | "critical";
+/** Failed Sentry attempts outlive worker recovery, but expire after the retry interval. */
+const failedAlertCaptures = new Map<
+  string,
+  Map<string, Map<HealthAlertKind, number>>
+>();
+
+function lastFailedAlertCapture(
+  sessionID: string,
+  workerID: string,
+  kind: HealthAlertKind,
+): number | undefined {
+  return failedAlertCaptures.get(sessionID)?.get(workerID)?.get(kind);
+}
+
+function recordFailedAlertCapture(
+  sessionID: string,
+  workerID: string,
+  kind: HealthAlertKind,
+  t: number,
+): void {
+  const workers = failedAlertCaptures.get(sessionID) ?? new Map();
+  const attempts = workers.get(workerID) ?? new Map();
+  attempts.set(kind, t);
+  workers.set(workerID, attempts);
+  failedAlertCaptures.set(sessionID, workers);
+}
+
+function clearFailedAlertCapture(
+  sessionID: string,
+  workerID: string,
+  kind: HealthAlertKind,
+): void {
+  const workers = failedAlertCaptures.get(sessionID);
+  if (!workers) return;
+  const attempts = workers.get(workerID);
+  if (!attempts) return;
+  attempts.delete(kind);
+  if (!attempts.size) workers.delete(workerID);
+  if (!workers.size) failedAlertCaptures.delete(sessionID);
+}
+
+function expireFailedAlertCaptures(t: number): void {
+  for (const [sessionID, workers] of failedAlertCaptures) {
+    for (const [workerID, attempts] of workers) {
+      for (const [kind, failedAt] of attempts) {
+        if (t - failedAt >= ALERT_RETRY_MS) attempts.delete(kind);
+      }
+      if (!attempts.size) workers.delete(workerID);
+    }
+    if (!workers.size) failedAlertCaptures.delete(sessionID);
+  }
+}
 
 /** One cooldown per Sentry fingerprint across sessions and worker recovery.
  * Each component is a fixed allowlisted value, bounding this map by
@@ -489,6 +541,7 @@ export function _setNowForTest(fn: () => number): void {
 /** Internal accessor for tests. Resets the global state. */
 export function _resetForTest(): void {
   state.clear();
+  failedAlertCaptures.clear();
   responseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
@@ -864,12 +917,16 @@ export function recordWorkerFailure(
   // Debounce: don't re-alert within ALERT_COOLDOWN_MS. Skipping the alert when
   // allCredentialClass ALSO leaves `alertSentAt` unset, so a later genuine
   // outage reason in the same window can still fire the first real alert.
+  const degradedFailedAt = lastFailedAlertCapture(
+    sessionID,
+    workerID,
+    "degraded",
+  );
   const shouldAlert =
     !allCredentialClass &&
     (entry.alertSentAt === undefined ||
       t - entry.alertSentAt > ALERT_COOLDOWN_MS) &&
-    (entry.alertFailedAt === undefined ||
-      t - entry.alertFailedAt >= ALERT_RETRY_MS);
+    (degradedFailedAt === undefined || t - degradedFailedAt >= ALERT_RETRY_MS);
   if (shouldAlert) {
     // Stable message + fingerprint so Sentry groups all degradations of a
     // given worker into ONE issue. The session ID / counts vary per event and
@@ -898,9 +955,9 @@ export function recordWorkerFailure(
         },
       });
       entry.alertSentAt = t;
-      entry.alertFailedAt = undefined;
+      clearFailedAlertCapture(sessionID, workerID, "degraded");
     } catch {
-      entry.alertFailedAt = t;
+      recordFailedAlertCapture(sessionID, workerID, "degraded", t);
       // Telemetry cannot interrupt worker health or delivery.
     }
   }
@@ -909,12 +966,17 @@ export function recordWorkerFailure(
   // Throttled to once per hour per session and worker to avoid alert fatigue.
   const sustainedMs = t - entry.firstFailureAt;
   if (sustainedMs >= CRITICAL_THRESHOLD_MS) {
+    const criticalFailedAt = lastFailedAlertCapture(
+      sessionID,
+      workerID,
+      "critical",
+    );
     const shouldException =
       !allCredentialClass &&
       (entry.exceptionSentAt === undefined ||
         t - entry.exceptionSentAt > 60 * 60 * 1000) &&
-      (entry.exceptionFailedAt === undefined ||
-        t - entry.exceptionFailedAt >= ALERT_RETRY_MS);
+      (criticalFailedAt === undefined ||
+        t - criticalFailedAt >= ALERT_RETRY_MS);
     if (shouldException) {
       // Stable Error message + fingerprint so Sentry groups all critical
       // outages of a given worker into ONE issue. The previous message
@@ -944,9 +1006,9 @@ export function recordWorkerFailure(
           },
         });
         entry.exceptionSentAt = t;
-        entry.exceptionFailedAt = undefined;
+        clearFailedAlertCapture(sessionID, workerID, "critical");
       } catch {
-        entry.exceptionFailedAt = t;
+        recordFailedAlertCapture(sessionID, workerID, "critical", t);
         // A failing telemetry sink must not alter worker health.
       }
     }
@@ -1223,6 +1285,7 @@ export function makeWorkerHealth(
  */
 export function clearAll(): void {
   state.clear();
+  failedAlertCaptures.clear();
   responseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
@@ -1261,6 +1324,7 @@ function ensureSweepTimer(): void {
   sweepTimer = setInterval(() => {
     const t = now();
     expireResponseAlerts(t);
+    expireFailedAlertCaptures(t);
     for (const sessionID of state.keys()) workerFailures(sessionID);
     // Preserve the session-level authenticated-history predicate while any
     // worker still has unresolved failures; recovery ownership remains per worker.

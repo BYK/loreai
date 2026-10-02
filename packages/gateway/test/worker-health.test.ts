@@ -927,6 +927,31 @@ describe("worker-health", () => {
       expect(getWorkerHealth()[0]?.failureCount).toBe(84);
     });
 
+    test("retains the failed degraded-alert retry clock across worker recovery", () => {
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => {
+        throw new Error("private-provider-secret");
+      });
+      for (const _ of Array.from({ length: 3 })) {
+        recordWorkerFailure("s1", "lore-distill", "no-response");
+      }
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      recordWorkerSuccess("s1", "lore-distill");
+      for (const _ of Array.from({ length: 3 })) {
+        recordWorkerFailure("s1", "lore-distill", "no-response");
+      }
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(3);
+
+      clock.now += 60_000;
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => "event-id");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      recordWorkerFailure("s1", "lore-distill", "no-response");
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(getWorkerHealth()[0]?.failureCount).toBe(5);
+    });
+
     test("retries a critical alert after a failed capture", () => {
       const clock = { now: 1_000_000 };
       _setNowForTest(() => clock.now);
