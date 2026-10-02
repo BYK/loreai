@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   constants,
   existsSync,
   lstatSync,
@@ -423,24 +424,53 @@ test.skipIf(process.platform === "win32")(
 );
 
 test.skipIf(process.platform === "win32")(
-  "does not accumulate durable records after repeated temp cleanup",
+  "rejects an accessible download directory without touching its contents",
   () => {
-    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-stale-records-"));
-    vi.stubEnv("TMPDIR", root);
-    const executable = join(root, "lore");
-    const receipt = join(root, "install-path");
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-unsafe-dir-"));
+    const unsafe = join(root, "staging");
+    mkdirSync(unsafe, { mode: 0o700 });
+    writeFileSync(join(unsafe, "sentinel"), "keep this");
+    chmodSync(unsafe, 0o750);
     try {
-      for (const _attempt of [1, 2, 3]) {
-        const directory = createUpgradeDownloadDirectory(executable, receipt);
-        closeUpgradeDownloadDirectory(directory);
-        rmSync(directory.path, { recursive: true });
-      }
-      expect(
-        readdirSync(root).filter((name) =>
-          name.startsWith("install-path.upgrade-download-record-"),
-        ),
-      ).toEqual([]);
+      expect(() => openUpgradeDownloadDirectory(unsafe)).toThrow(
+        "Standalone upgrade download directory is not private",
+      );
+      expect(readFileSync(join(unsafe, "sentinel"), "utf8")).toBe("keep this");
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "refuses anonymous downloads when the filesystem cannot open an unnamed inode",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "lore-upgrade-no-tmpfile-"));
+    vi.stubEnv("TMPDIR", root);
+    const directory = createUpgradeDownloadDirectory(
+      join(root, "lore"),
+      join(root, "install-path"),
+    );
+    const originalFs =
+      await vi.importActual<typeof import("node:fs")>("node:fs");
+    const refused = { value: false };
+    vi.mocked(openSync).mockImplementation((...args) => {
+      if ((Number(args[1]) & 0o20000000) !== 0) {
+        refused.value = true;
+        throw new Error("O_TMPFILE unavailable");
+      }
+      return Reflect.apply(originalFs.openSync, originalFs, args);
+    });
+    try {
+      expect(() => openUpgradeDownloadFile(directory, "lore.download")).toThrow(
+        "Anonymous standalone upgrade downloads are unavailable on this filesystem",
+      );
+      expect(refused.value).toBe(true);
+      expect(readdirSync(directory.path)).toEqual([".owner"]);
+      expect(directory.fileFd).toBeUndefined();
+    } finally {
+      vi.mocked(openSync).mockRestore();
+      closeUpgradeDownloadDirectory(directory);
       vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });
     }
