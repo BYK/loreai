@@ -170,6 +170,19 @@ function isPrivateContentKey(key: string): boolean {
   );
 }
 
+function isPrivateRequestIdentityKey(key: string): boolean {
+  const { words, canonical } = canonicalKey(key);
+  return (
+    words.includes("model") ||
+    canonical.endsWith("modelid") ||
+    canonical.endsWith("sessionid") ||
+    canonical.endsWith("conversationid") ||
+    canonical === "authfingerprint" ||
+    canonical === "projecthash" ||
+    canonical === "upstreamorigin"
+  );
+}
+
 function scrubErrorTelemetryMessage(value: string): string {
   const scrubbed = scrubTelemetryText(value);
   return SAFE_ERROR_TELEMETRY_MESSAGES.some((pattern) => pattern.test(scrubbed))
@@ -274,6 +287,7 @@ function scrubValue(
     if (
       isSensitiveTelemetryKey(key) ||
       isPrivateContentKey(key) ||
+      isPrivateRequestIdentityKey(key) ||
       QUERY_VALUE_KEY.test(key)
     ) {
       copy[key] = FILTERED;
@@ -281,6 +295,12 @@ function scrubValue(
       copy[key] = [];
     } else if (key.toLowerCase() === "request" && isRecord(child)) {
       copy[key] = scrubRequest(child);
+    } else if (
+      key === "name" &&
+      typeof record.op === "string" &&
+      record.op.startsWith("gen_ai.")
+    ) {
+      copy[key] = "AI worker call";
     } else {
       copy[key] = scrubValue(child, seen, key);
     }

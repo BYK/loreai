@@ -52,6 +52,8 @@ const WORKER_IDS = [
   "cache-warmer",
   "lore-batch",
   "lore-semantic-lint",
+  "lore-contradiction",
+  "lore-entity-rebuild",
 ] as const;
 export type WorkerID = (typeof WORKER_IDS)[number];
 const RESPONSE_ALERT_WORKER_IDS: ReadonlySet<string> = new Set(WORKER_IDS);
@@ -102,6 +104,20 @@ const SENTRY_HEALTH_REASONS: ReadonlySet<string> = new Set<FailureReason>([
 
 function sentryWorkerID(workerID: string): string {
   return RESPONSE_ALERT_WORKER_IDS.has(workerID) ? workerID : "unknown";
+}
+
+/** Worker alerts contain only reviewed fields, never the active request scope. */
+function captureWorkerAlert<T>(capture: () => T): T {
+  const client = Sentry.getClient();
+  const isolationScope = new Sentry.Scope();
+  const scope = new Sentry.Scope();
+  if (client) {
+    isolationScope.setClient(client);
+    scope.setClient(client);
+  }
+  return Sentry.withIsolationScope(isolationScope, () =>
+    Sentry.withScope(scope, capture),
+  );
 }
 
 /** Only structural, bounded metadata from a rejected 2xx worker response. */
@@ -373,30 +389,39 @@ const responseAlerts = new Map<
   string,
   { attemptedAt: number; delivered: boolean }
 >();
-/** Correlate only SDK-generated event IDs with pending, allowlisted alert keys. */
-const pendingResponseAlerts = new Map<string, string>();
+/** Retain unsettled SDK event IDs across retries and response-alert expiry. */
+const PENDING_RESPONSE_ALERT_TTL_MS = 60 * 60 * 1000;
+const MAX_PENDING_RESPONSE_ALERTS = 4_096;
+const pendingResponseAlerts = new Map<
+  string,
+  { key: string; attemptedAt: number }
+>();
 
 /** Called after the Sentry transport settles, never from the worker result path. */
 export function recordWorkerResponseAlertDelivery(
   eventID: string,
   delivered: boolean,
 ): void {
-  const key = pendingResponseAlerts.get(eventID);
-  if (!key) return;
+  const pending = pendingResponseAlerts.get(eventID);
+  if (!pending) return;
   pendingResponseAlerts.delete(eventID);
-  const alert = responseAlerts.get(key);
-  if (alert && !alert.delivered && delivered) {
-    responseAlerts.set(key, { attemptedAt: now(), delivered: true });
+  if (
+    delivered &&
+    now() - pending.attemptedAt <= PENDING_RESPONSE_ALERT_TTL_MS
+  ) {
+    responseAlerts.set(pending.key, { attemptedAt: now(), delivered: true });
   }
 }
 
 function expireResponseAlerts(t: number): void {
+  for (const [eventID, pending] of pendingResponseAlerts) {
+    if (t - pending.attemptedAt > PENDING_RESPONSE_ALERT_TTL_MS) {
+      pendingResponseAlerts.delete(eventID);
+    }
+  }
   for (const [key, alert] of responseAlerts) {
     if (t - alert.attemptedAt > ALERT_COOLDOWN_MS) {
       responseAlerts.delete(key);
-      for (const [eventID, pendingKey] of pendingResponseAlerts) {
-        if (pendingKey === key) pendingResponseAlerts.delete(eventID);
-      }
     }
   }
 }
@@ -899,32 +924,37 @@ export function recordWorkerFailure(
       (previousAlert.delivered
         ? t - previousAlert.attemptedAt > ALERT_COOLDOWN_MS
         : t - previousAlert.attemptedAt >= ALERT_RETRY_MS);
-    if (shouldCapture) {
+    if (
+      shouldCapture &&
+      pendingResponseAlerts.size < MAX_PENDING_RESPONSE_ALERTS
+    ) {
       // Enqueueing is not delivery: only a confirmed 2xx transport send starts
       // the long cooldown. Failed or unconfirmed sends retry at most once/min.
-      for (const [pendingID, key] of pendingResponseAlerts) {
-        if (key === responseKey) pendingResponseAlerts.delete(pendingID);
-      }
       try {
-        const eventID = Sentry.captureMessage("Worker response rejected", {
-          level: "error",
-          fingerprint: [
-            "worker-response-rejected",
-            alertWorkerID,
-            safeResponse.protocol,
-            safeResponse.category,
-          ],
-          tags: {
-            response_protocol: safeResponse.protocol,
-            response_stage: safeResponse.stage,
-            response_content: safeResponse.content,
-            response_category: safeResponse.category,
-          },
-          contexts: { worker_response: safeResponse },
-        });
+        const eventID = captureWorkerAlert(() =>
+          Sentry.captureMessage("Worker response rejected", {
+            level: "error",
+            fingerprint: [
+              "worker-response-rejected",
+              alertWorkerID,
+              safeResponse.protocol,
+              safeResponse.category,
+            ],
+            tags: {
+              response_protocol: safeResponse.protocol,
+              response_stage: safeResponse.stage,
+              response_content: safeResponse.content,
+              response_category: safeResponse.category,
+            },
+            contexts: { worker_response: safeResponse },
+          }),
+        );
         responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
         if (typeof eventID === "string" && /^[0-9a-f]{32}$/.test(eventID)) {
-          pendingResponseAlerts.set(eventID, responseKey);
+          pendingResponseAlerts.set(eventID, {
+            key: responseKey,
+            attemptedAt: t,
+          });
         }
       } catch {
         responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
@@ -978,23 +1008,25 @@ export function recordWorkerFailure(
     const alertWorkerID = sentryWorkerID(workerID);
     const alertReason = SENTRY_HEALTH_REASONS.has(reason) ? reason : "unknown";
     try {
-      Sentry.captureMessage("Worker health degraded", {
-        level: "error",
-        fingerprint: ["worker-health-degraded", alertWorkerID],
-        tags: {
-          worker_id: alertWorkerID,
-          reason: alertReason,
-          failure_count: String(entry.failureCount),
-        },
-        contexts: {
-          worker_health: {
-            failureCount: entry.failureCount,
-            firstFailureAt: entry.firstFailureAt,
-            lastFailureAt: entry.lastFailureAt,
+      captureWorkerAlert(() =>
+        Sentry.captureMessage("Worker health degraded", {
+          level: "error",
+          fingerprint: ["worker-health-degraded", alertWorkerID],
+          tags: {
+            worker_id: alertWorkerID,
+            reason: alertReason,
+            failure_count: String(entry.failureCount),
           },
-          ...(safeResponse ? { worker_response: safeResponse } : {}),
-        },
-      });
+          contexts: {
+            worker_health: {
+              failureCount: entry.failureCount,
+              firstFailureAt: entry.firstFailureAt,
+              lastFailureAt: entry.lastFailureAt,
+            },
+            ...(safeResponse ? { worker_response: safeResponse } : {}),
+          },
+        }),
+      );
       entry.alertSentAt = t;
       clearFailedAlertCapture(sessionID, workerID, "degraded");
     } catch {
@@ -1030,22 +1062,24 @@ export function recordWorkerFailure(
         ? reason
         : "unknown";
       try {
-        Sentry.captureException(err, {
-          fingerprint: ["worker-health-critical", alertWorkerID],
-          tags: {
-            worker_id: alertWorkerID,
-            reason: alertReason,
-            failure_count: String(entry.failureCount),
-            sustained: formatDuration(sustainedMs),
-          },
-          contexts: {
-            worker_health: {
-              failureCount: entry.failureCount,
-              sustainedMs,
+        captureWorkerAlert(() =>
+          Sentry.captureException(err, {
+            fingerprint: ["worker-health-critical", alertWorkerID],
+            tags: {
+              worker_id: alertWorkerID,
+              reason: alertReason,
+              failure_count: String(entry.failureCount),
+              sustained: formatDuration(sustainedMs),
             },
-            ...(safeResponse ? { worker_response: safeResponse } : {}),
-          },
-        });
+            contexts: {
+              worker_health: {
+                failureCount: entry.failureCount,
+                sustainedMs,
+              },
+              ...(safeResponse ? { worker_response: safeResponse } : {}),
+            },
+          }),
+        );
         entry.exceptionSentAt = t;
         clearFailedAlertCapture(sessionID, workerID, "critical");
       } catch {

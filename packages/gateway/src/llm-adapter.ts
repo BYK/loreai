@@ -3860,12 +3860,9 @@ export function createGatewayLLMClient(
         return await Sentry.startSpan(
           {
             op: "gen_ai.chat",
-            name: `chat ${diagnosticToken(model.modelID)}`,
+            name: "AI worker call",
             attributes: {
               "gen_ai.operation.name": "chat",
-              "gen_ai.request.model": diagnosticToken(model.modelID),
-              "gen_ai.provider.name": diagnosticToken(target.providerName),
-              "lore.worker_id": diagnosticToken(opts?.workerID),
               "lore.call_type": "direct",
               "lore.urgent": urgent,
             },

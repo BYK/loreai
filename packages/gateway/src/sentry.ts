@@ -8,7 +8,6 @@
 
 import * as Sentry from "@sentry/bun";
 import { getInstanceId, embedding } from "@loreai/core";
-import { createHash } from "node:crypto";
 import { freemem } from "node:os";
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import {
@@ -76,9 +75,8 @@ export function captureUpstream400(
 /**
  * Configure Sentry scope for a gateway request.
  *
- * Sets user identity, tags, and conversation ID. Called once per
- * conversation turn before forwarding to upstream. All values are
- * non-sensitive (hashed or random identifiers only).
+ * Sets only installation identity and the gateway's configured port.
+ * Request model, session, origin, and project fields are private.
  */
 export function setSentryRequestContext(opts: {
   authFingerprint: string | null;
@@ -93,60 +91,21 @@ export function setSentryRequestContext(opts: {
   // Installation identity — integrates with Sentry's unique users feature
   Sentry.setUser({ id: getInstanceId() });
 
-  // Request-scoped tags (filterable in Sentry UI)
-  if (opts.authFingerprint) {
-    Sentry.setTag("auth_fingerprint", opts.authFingerprint);
-  }
-  Sentry.setTag("model", opts.model);
-  Sentry.setTag("upstream_origin", safeTelemetryOrigin(opts.upstreamUrl));
   Sentry.setTag("port", String(opts.port));
-
-  // Hash project path — sensitive info for secret projects
-  const projectHash = createHash("sha256")
-    .update(opts.projectPath)
-    .digest("hex")
-    .slice(0, 16);
-  Sentry.setTag("project_hash", projectHash);
-
-  // Link to Sentry AI monitoring conversation tracking
-  Sentry.setConversationId(opts.sessionID);
-}
-
-function safeTelemetryOrigin(value: string): string {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:"
-      ? url.origin
-      : "unknown";
-  } catch {
-    return "unknown";
-  }
 }
 
 /**
  * Lighter-weight scope enrichment for passthrough and compaction handlers.
  *
- * Sets just the installation identity and basic tags so errors in these
- * paths are attributable, without the full conversation turn context.
+ * Sets just the installation identity, without private request fields.
  */
-export function setSentryLightContext(opts: {
+export function setSentryLightContext(_opts: {
   model?: string;
   projectPath?: string;
 }): void {
   if (!Sentry.isInitialized()) return;
 
   Sentry.setUser({ id: getInstanceId() });
-
-  if (opts.model) {
-    Sentry.setTag("model", opts.model);
-  }
-  if (opts.projectPath) {
-    const projectHash = createHash("sha256")
-      .update(opts.projectPath)
-      .digest("hex")
-      .slice(0, 16);
-    Sentry.setTag("project_hash", projectHash);
-  }
 }
 
 // ---------------------------------------------------------------------------

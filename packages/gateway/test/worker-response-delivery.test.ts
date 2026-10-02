@@ -160,7 +160,7 @@ describe("worker response alert delivery", () => {
     },
   );
 
-  test("ignores late delivery from an attempt superseded by a failed capture", async () => {
+  test("accepts late delivery from an attempt followed by a failed capture", async () => {
     const clock = { now: 1_000_000 };
     _setNowForTest(() => clock.now);
     const eventID = "00000000000000000000000000000006";
@@ -199,7 +199,99 @@ describe("worker response alert delivery", () => {
     ]);
     clock.now += 60_000;
     recordWorkerFailure("s3", "lore-distill", "upstream-error", diagnostic);
-    expect(Sentry.captureMessage).toHaveBeenCalledTimes(3);
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
     expect(getWorkerHealth()).toHaveLength(3);
+  });
+
+  test("accepts an in-flight delivery after an earlier attempt expires", async () => {
+    const clock = { now: 1_000_000 };
+    _setNowForTest(() => clock.now);
+    const firstID = "00000000000000000000000000000010";
+    const secondID = "00000000000000000000000000000011";
+    vi.mocked(Sentry.captureMessage)
+      .mockReturnValueOnce(firstID)
+      .mockReturnValueOnce(secondID);
+    const transport = buildSentryOptions(() => ({
+      send: () => Promise.resolve({ statusCode: 200 }),
+      flush: () => Promise.resolve(true),
+    })).transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+    const diagnostic: WorkerResponseDiagnostic = {
+      protocol: "anthropic",
+      stage: "decode",
+      content: "json",
+      category: "malformed JSON body",
+      finishReason: "n/a",
+      httpStatus: 200,
+    };
+
+    recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+    clock.now += 16 * 60_000;
+    recordWorkerFailure("s2", "lore-distill", "upstream-error", diagnostic);
+    await transport.send([
+      { event_id: firstID, sent_at: new Date(0).toISOString() },
+      [
+        [
+          { type: "event" },
+          { event_id: firstID, message: "Worker response rejected" },
+        ],
+      ],
+    ]);
+    clock.now += 60_000;
+    recordWorkerFailure("s3", "lore-distill", "upstream-error", diagnostic);
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+    expect(getWorkerHealth()).toHaveLength(3);
+  });
+
+  test("a later failed transport cannot undo an earlier confirmed delivery", async () => {
+    const clock = { now: 1_000_000 };
+    _setNowForTest(() => clock.now);
+    const firstID = "00000000000000000000000000000013";
+    const secondID = "00000000000000000000000000000014";
+    vi.mocked(Sentry.captureMessage)
+      .mockReturnValueOnce(firstID)
+      .mockReturnValueOnce(secondID);
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ statusCode: 200 })
+      .mockResolvedValueOnce({ statusCode: 503 });
+    const transport = buildSentryOptions(() => ({
+      send,
+      flush: () => Promise.resolve(true),
+    })).transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+    const diagnostic: WorkerResponseDiagnostic = {
+      protocol: "anthropic",
+      stage: "decode",
+      content: "json",
+      category: "malformed JSON body",
+      finishReason: "n/a",
+      httpStatus: 200,
+    };
+    const envelope = (eventID: string) =>
+      [
+        { event_id: eventID, sent_at: new Date(0).toISOString() },
+        [
+          [
+            { type: "event" },
+            { event_id: eventID, message: "Worker response rejected" },
+          ],
+        ],
+      ] as Parameters<typeof transport.send>[0];
+
+    recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+    clock.now += 60_000;
+    recordWorkerFailure("s2", "lore-distill", "upstream-error", diagnostic);
+    await transport.send(envelope(firstID));
+    await transport.send(envelope(secondID));
+    clock.now += 60_000;
+    recordWorkerFailure("s3", "lore-distill", "upstream-error", diagnostic);
+    expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
   });
 });

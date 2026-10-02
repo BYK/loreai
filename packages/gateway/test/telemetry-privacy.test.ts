@@ -63,6 +63,7 @@ describe("telemetry privacy boundary", () => {
     }));
     expect(options).not.toHaveProperty("sendDefaultPii");
     expect(options.dataCollection).toEqual(SENTRY_DATA_COLLECTION);
+    expect(options.environment).toBe("production");
     expect(options).not.toHaveProperty("enableLogs");
     expect(options.beforeSend).toBeTypeOf("function");
     expect(options.beforeSendLog).toBeTypeOf("function");
@@ -256,6 +257,52 @@ describe("telemetry privacy boundary", () => {
       "malformed OpenAI response body",
     );
     expect(JSON.stringify(envelope)).not.toContain(marker);
+  });
+
+  it("drops private session and model scope fields from outbound events and gen-AI spans", async () => {
+    const privateSession = "private-session-sentinel";
+    const privateModel = "private-model-sentinel";
+    let sent: unknown;
+    const options = buildSentryOptions(() => ({
+      send(envelope) {
+        sent = envelope;
+        return Promise.resolve({ statusCode: 200 });
+      },
+      flush: () => Promise.resolve(true),
+    }));
+    const transport = options.transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+
+    const envelope: unknown = [
+      { event_id: "00000000000000000000000000000012" },
+      [
+        [
+          { type: "event" },
+          {
+            message: "Worker health degraded",
+            tags: { model: privateModel, session_id: privateSession },
+          },
+        ],
+        [
+          { type: "span" },
+          {
+            op: "gen_ai.request",
+            name: `chat ${privateModel}`,
+            attributes: {
+              "gen_ai.conversation.id": privateSession,
+              "gen_ai.request.model": privateModel,
+            },
+          },
+        ],
+      ],
+    ];
+    await transport.send(envelope as Parameters<typeof transport.send>[0]);
+    expect(JSON.stringify(sent)).not.toContain(privateSession);
+    expect(JSON.stringify(sent)).not.toContain(privateModel);
+    expect(JSON.stringify(sent)).toContain("Worker health degraded");
   });
 
   it("scrubs request data, breadcrumbs, contexts, and span attributes", () => {

@@ -131,7 +131,7 @@ export function buildSentryOptions(
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",
 
     release: VERSION,
-    environment: isDev ? "development" : "production",
+    environment: "production",
 
     // Lore proxies private prompts and provider credentials. Collection is
     // default-deny, and the hooks/transport below provide defense in depth for

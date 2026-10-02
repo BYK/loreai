@@ -30,7 +30,8 @@ import {
   type WorkerResponseDiagnostic,
 } from "../src/worker-health";
 
-vi.mock("@sentry/bun", () => ({
+vi.mock("@sentry/bun", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@sentry/bun")>()),
   captureMessage: vi.fn(),
   captureException: vi.fn(),
   addBreadcrumb: vi.fn(),
@@ -560,6 +561,55 @@ describe("worker-health", () => {
       expect(
         JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
       ).not.toContain("private-provider-secret");
+    });
+
+    test("attributes contradiction and entity-rebuild response alerts separately", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "openai",
+        stage: "parse",
+        content: "json",
+        category: "malformed OpenAI response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      recordWorkerFailure(
+        "s1",
+        "lore-contradiction",
+        "upstream-error",
+        diagnostic,
+      );
+      recordWorkerFailure(
+        "s2",
+        "lore-entity-rebuild",
+        "upstream-error",
+        diagnostic,
+      );
+      const fingerprints = vi
+        .mocked(Sentry.captureMessage)
+        .mock.calls.filter(
+          ([message]) => message === "Worker response rejected",
+        )
+        .map(([, options]) =>
+          typeof options === "object" &&
+          options !== null &&
+          "fingerprint" in options
+            ? options.fingerprint
+            : undefined,
+        );
+      expect(fingerprints).toEqual([
+        [
+          "worker-response-rejected",
+          "lore-contradiction",
+          "openai",
+          "malformed OpenAI response body",
+        ],
+        [
+          "worker-response-rejected",
+          "lore-entity-rebuild",
+          "openai",
+          "malformed OpenAI response body",
+        ],
+      ]);
     });
 
     test("clears response cooldown state on gateway shutdown", () => {
