@@ -24,6 +24,7 @@ import {
   _resetForTest,
   _setNowForTest,
   type FailureReason,
+  type WorkerResponseDiagnostic,
 } from "../src/worker-health";
 
 vi.mock("@sentry/bun", () => ({
@@ -389,6 +390,174 @@ describe("worker-health", () => {
   // session — dozens of one-off LOREAI-GATEWAY worker-health issues. Stable
   // message + fingerprint groups them into one issue per worker.
   describe("Sentry grouping", () => {
+    test("captures the first rejected response, debounces repeats, and annotates health alerts", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "anthropic",
+        stage: "stream",
+        content: "sse",
+        category: "missing Anthropic message_stop terminal",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+      recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(2);
+      expect(Sentry.captureMessage).toHaveBeenLastCalledWith(
+        "Worker health degraded",
+        expect.objectContaining({
+          contexts: expect.objectContaining({ worker_response: diagnostic }),
+        }),
+      );
+      recordWorkerFailure("s2", "lore-distill", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(3);
+    });
+
+    test("rejects hostile metadata and isolates a throwing Sentry sink", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "anthropic",
+        stage: "decode",
+        content: "json",
+        category: "malformed JSON body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      recordWorkerFailure("s1", "lore-distill", "upstream-error", {
+        ...diagnostic,
+        category: "malformed JSON body private-provider-secret",
+      });
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+
+      vi.mocked(Sentry.captureMessage).mockImplementationOnce(() => {
+        throw new Error("private-provider-secret");
+      });
+      expect(() =>
+        recordWorkerFailure("s1", "lore-distill", "upstream-error", diagnostic),
+      ).not.toThrow();
+      expect(getWorkerHealth()[0]?.failureCount).toBe(2);
+      expect(
+        JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
+      ).not.toContain("private-provider-secret");
+    });
+
+    test("debounces a first event recorded at timestamp zero", () => {
+      _setNowForTest(() => 0);
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "openai",
+        stage: "parse",
+        content: "json",
+        category: "malformed OpenAI response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      recordWorkerFailure("s1", "lore-curator", "upstream-error", diagnostic);
+      recordWorkerFailure("s1", "lore-curator", "upstream-error", diagnostic);
+      expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test("a hostile diagnostic getter cannot interrupt health tracking", () => {
+      const diagnostic = {
+        get protocol(): string {
+          throw new Error("private-provider-secret");
+        },
+        stage: "parse",
+        content: "json",
+        category: "malformed OpenAI response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      expect(() =>
+        recordWorkerFailure("s1", "lore-curator", "upstream-error", diagnostic),
+      ).not.toThrow();
+      expect(Sentry.captureMessage).not.toHaveBeenCalled();
+      expect(getWorkerHealth()[0]?.failureCount).toBe(1);
+    });
+
+    test("does not put an unregistered worker ID into a response alert", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "openai",
+        stage: "parse",
+        content: "json",
+        category: "malformed OpenAI response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      recordWorkerFailure(
+        "s1",
+        "private-provider-secret",
+        "upstream-error",
+        diagnostic,
+      );
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        "Worker response rejected",
+        expect.objectContaining({
+          fingerprint: [
+            "worker-response-rejected",
+            "unknown",
+            "openai",
+            "malformed OpenAI response body",
+          ],
+        }),
+      );
+      expect(
+        JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
+      ).not.toContain("private-provider-secret");
+    });
+
+    test("snapshots a changing diagnostic getter before validating it", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "openai",
+        get stage(): string {
+          return thisStage();
+        },
+        content: "json",
+        category: "malformed OpenAI response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      const thisStage = vi
+        .fn<() => string>()
+        .mockReturnValueOnce("parse")
+        .mockReturnValue("private-provider-secret");
+      recordWorkerFailure("s1", "lore-curator", "upstream-error", diagnostic);
+      expect(thisStage).toHaveBeenCalledTimes(1);
+      expect(Sentry.captureMessage).toHaveBeenCalledWith(
+        "Worker response rejected",
+        expect.objectContaining({
+          contexts: expect.objectContaining({
+            worker_response: expect.objectContaining({ stage: "parse" }),
+          }),
+        }),
+      );
+    });
+
+    test("Sentry sink failure at the third rejection cannot change health bookkeeping", () => {
+      const diagnostic: WorkerResponseDiagnostic = {
+        protocol: "anthropic",
+        stage: "read",
+        content: "json",
+        category: "malformed worker response UTF-8",
+        finishReason: "n/a",
+        httpStatus: 200,
+      };
+      vi.mocked(Sentry.captureMessage).mockImplementation(() => {
+        throw new Error("private-provider-secret");
+      });
+      for (const _ of [1, 2, 3]) {
+        expect(() =>
+          recordWorkerFailure(
+            "s1",
+            "lore-distill",
+            "upstream-error",
+            diagnostic,
+          ),
+        ).not.toThrow();
+      }
+      expect(getWorkerHealth()[0]?.failureCount).toBe(3);
+    });
+
     test("degraded alert uses stable message + fingerprint, ids in tags", () => {
       // 3 rapid failures in the window fire the degraded alert.
       recordWorkerFailure("s1", "lore-distill", "no-response");

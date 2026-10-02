@@ -13,6 +13,7 @@ vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
   return {
     ...actual,
+    captureMessage: vi.fn(actual.captureMessage),
     captureException: vi.fn(actual.captureException),
   };
 });
@@ -1056,6 +1057,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "OpenAI Chat JSON",
       "openai" as const,
       "length",
+      "json",
       () =>
         new Response(
           JSON.stringify({
@@ -1073,6 +1075,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "Anthropic JSON",
       "anthropic" as const,
       "max_tokens",
+      "json",
       () =>
         new Response(
           JSON.stringify({
@@ -1091,6 +1094,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "OpenAI SSE",
       "openai" as const,
       "max_tokens",
+      "sse",
       () =>
         new Response(
           [
@@ -1107,7 +1111,7 @@ describe("createGatewayLLMClient.prompt", () => {
     ],
   ])(
     "%s truncation is incomplete even when text is valid verdict JSON",
-    async (_name, protocol, expectedFinishReason, response) => {
+    async (_name, protocol, expectedFinishReason, contentKind, response) => {
       mockFetch.mockResolvedValueOnce(response());
       const providerID = protocol === "anthropic" ? "anthropic" : "openai";
       const client = createGatewayLLMClient(
@@ -1131,6 +1135,9 @@ describe("createGatewayLLMClient.prompt", () => {
         finishReason: expectedFinishReason,
         attempts: 1,
       });
+      expect(getLastWorkerError()).toContain(
+        `worker response incomplete (${expectedFinishReason}) (stage=completion, content=${contentKind})`,
+      );
     },
   );
 
@@ -1201,6 +1208,167 @@ describe("createGatewayLLMClient.prompt", () => {
 
   test.each([
     [
+      "application/json",
+      "malformed worker response UTF-8 (stage=read, content=json)",
+    ],
+    ["text/event-stream", "malformed SSE UTF-8 (stage=stream, content=sse)"],
+  ])(
+    "malformed %s worker bytes retain only a safe category",
+    async (contentType, detail) => {
+      mockFetch.mockResolvedValueOnce(
+        new Response(new Uint8Array([0xff]), {
+          headers: { "content-type": contentType },
+        }),
+      );
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-test" },
+      );
+
+      await expect(
+        client.promptDetailed("system", "user", {
+          workerID: "lore-distill",
+          protocol: "anthropic",
+          upstreamProviderID: "anthropic",
+        }),
+      ).resolves.toMatchObject({ kind: "failure", code: "invalid-response" });
+      expect(getLastWorkerError()).toContain(detail);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each([
+    [
+      "malformed UTF-8",
+      "anthropic",
+      "read",
+      "json",
+      "malformed worker response UTF-8",
+      "n/a",
+      (_secret: string) =>
+        new Response(new Uint8Array([0xff]), {
+          headers: { "content-type": "application/json" },
+        }),
+    ],
+    [
+      "malformed JSON",
+      "anthropic",
+      "decode",
+      "json",
+      "malformed JSON body",
+      "n/a",
+      (secret: string) =>
+        new Response(`{"text":"${secret}"`, {
+          headers: {
+            "content-type": "application/json; private=provider-secret",
+          },
+        }),
+    ],
+    [
+      "truncated completion",
+      "anthropic",
+      "completion",
+      "json",
+      "worker response incomplete",
+      "max_tokens",
+      (secret: string) =>
+        new Response(
+          JSON.stringify({
+            content: [{ type: "text", text: secret }],
+            stop_reason: "max_tokens",
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+    [
+      "missing OpenAI [DONE] terminal",
+      "openai",
+      "stream",
+      "sse",
+      "missing OpenAI [DONE] terminal",
+      "n/a",
+      (secret: string) =>
+        new Response(
+          [
+            `data: ${JSON.stringify({ choices: [{ delta: { content: secret }, finish_reason: null }] })}`,
+            "",
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    ],
+  ] as const)(
+    "%s sends only structural worker diagnostics to Sentry",
+    async (
+      _name,
+      protocol,
+      stage,
+      content,
+      category,
+      finishReason,
+      response,
+    ) => {
+      const secret = "private-provider-response-secret";
+      _resetWorkerHealthForTest();
+      vi.mocked(Sentry.captureMessage).mockClear();
+      try {
+        mockFetch.mockResolvedValueOnce(response(secret));
+        const client = createGatewayLLMClient(
+          UPSTREAMS,
+          () => ({
+            scheme: "api-key",
+            value:
+              protocol === "anthropic"
+                ? "sk-ant-private-credential"
+                : "sk-openai-private-credential",
+          }),
+          { providerID: protocol, modelID: "test-model" },
+        );
+        await expect(
+          client.promptDetailed("system", "user", {
+            workerID: "lore-distill",
+            protocol,
+            upstreamProviderID: protocol,
+          }),
+        ).resolves.toMatchObject({ kind: "failure", attempts: 1 });
+
+        expect(Sentry.captureMessage).toHaveBeenCalledWith(
+          "Worker response rejected",
+          expect.objectContaining({
+            fingerprint: [
+              "worker-response-rejected",
+              "lore-distill",
+              protocol,
+              category,
+            ],
+            contexts: {
+              worker_response: {
+                protocol,
+                stage,
+                content,
+                category,
+                finishReason,
+                httpStatus: 200,
+              },
+            },
+          }),
+        );
+        expect(
+          JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
+        ).not.toMatch(
+          /private-provider-response-secret|private=provider-secret|sk-(?:ant|openai)-private-credential/,
+        );
+      } finally {
+        _resetWorkerHealthForTest();
+      }
+    },
+  );
+
+  test.each([
+    [
       "finish_reason",
       [
         'data: {"choices":[{"delta":{"content":"{\\"verdict\\":\\"holds\\",\\"reason\\":\\"ok\\"}"},"finish_reason":null}]}',
@@ -1209,7 +1377,7 @@ describe("createGatewayLLMClient.prompt", () => {
         "",
         "",
       ].join("\r\n"),
-      "missing OpenAI finish_reason terminal",
+      "missing OpenAI finish_reason terminal (stage=stream, content=sse)",
     ],
     [
       "[DONE]",
@@ -1220,7 +1388,7 @@ describe("createGatewayLLMClient.prompt", () => {
         "",
         "",
       ].join("\r\n"),
-      "invalid response body",
+      "missing OpenAI [DONE] terminal (stage=stream, content=sse)",
     ],
   ])(
     "OpenAI chat SSE without %s is invalid even with a complete verdict",
@@ -1674,6 +1842,7 @@ describe("createGatewayLLMClient.prompt", () => {
       expect.any(String),
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(markWorkerIncapable).not.toHaveBeenCalled();
@@ -1718,6 +1887,7 @@ describe("createGatewayLLMClient.prompt", () => {
       expect.any(String),
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(markWorkerIncapable).not.toHaveBeenCalled();
@@ -1774,6 +1944,7 @@ describe("createGatewayLLMClient.prompt", () => {
         expect.any(String),
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(getLastWorkerError()).toContain(
@@ -2088,6 +2259,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "sess-chatgpt-oversized",
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(getLastWorkerError()).toContain(
@@ -2210,6 +2382,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "sess-array-json-root",
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(getLastWorkerError()).toContain(
@@ -2243,6 +2416,7 @@ describe("createGatewayLLMClient.prompt", () => {
         `sess-json-status-${status}`,
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(getLastWorkerError()).toContain(
@@ -2415,6 +2589,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "sess-public-responses-strict",
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(getLastWorkerError()).toContain("malformed Responses stream event");
@@ -2738,6 +2913,7 @@ describe("createGatewayLLMClient.prompt", () => {
         "sess-codex-failed-stream",
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(markWorkerIncapable).not.toHaveBeenCalled();
@@ -3569,6 +3745,7 @@ describe("worker provider body validation", () => {
         sessionID,
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(markWorkerIncapable).not.toHaveBeenCalled();

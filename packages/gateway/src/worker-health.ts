@@ -51,6 +51,17 @@ export type WorkerID =
   | "cache-warmer"
   | "lore-batch";
 
+const RESPONSE_ALERT_WORKER_IDS = new Set<string>([
+  "lore-distill",
+  "lore-curator",
+  "lore-pattern-echo",
+  "lore-query-expand",
+  "lore-compact",
+  "lore-import",
+  "cache-warmer",
+  "lore-batch",
+]);
+
 /** Categorical reason for a failure. Drives metric tags and dashboards. */
 export type FailureReason =
   | "no-auth"
@@ -80,6 +91,116 @@ export type FailureReason =
   // it must not drive the degraded/critical Sentry ladder or the circuit
   // breaker. Recorded (warn) for visibility.
   | "data-policy";
+
+/** Only structural, bounded metadata from a rejected 2xx worker response. */
+export type WorkerResponseDiagnostic = Readonly<{
+  protocol: string;
+  stage: string;
+  content: string;
+  category: string;
+  finishReason: string;
+  httpStatus: number;
+}>;
+
+const RESPONSE_PROTOCOLS = new Set([
+  "anthropic",
+  "openai",
+  "openai-responses",
+  "openai-codex-responses",
+  "vertex",
+  "gemini",
+]);
+const RESPONSE_STAGES = new Set([
+  "read",
+  "decode",
+  "stream",
+  "parse",
+  "completion",
+]);
+const RESPONSE_CONTENT = new Set(["missing", "sse", "json", "other"]);
+const RESPONSE_FINISH_REASONS = new Set([
+  "n/a",
+  "unknown",
+  "stop",
+  "end_turn",
+  "length",
+  "max_tokens",
+  "max_output_tokens",
+  "content_filter",
+  "tool_calls",
+  "tool_use",
+]);
+const RESPONSE_CATEGORIES = new Set([
+  "invalid response body",
+  "malformed JSON body",
+  "worker response incomplete",
+  "worker response exceeded # byte limit",
+  "SSE stream exceeded # frame limit",
+  "SSE event exceeded # byte limit",
+  "unterminated SSE event at EOF",
+  "missing Anthropic message_stop terminal",
+  "missing OpenAI finish_reason terminal",
+  "missing OpenAI [DONE] terminal",
+  "missing Gemini finishReason terminal",
+  "missing terminal response status",
+  "missing Responses compatibility terminal status",
+  "malformed Anthropic stream event",
+  "malformed Anthropic response body",
+  "malformed Anthropic usage",
+  "malformed Anthropic terminal event",
+  "malformed OpenAI stream event",
+  "malformed OpenAI response body",
+  "malformed OpenAI usage",
+  "malformed OpenAI terminal event",
+  "malformed Responses stream event",
+  "malformed Responses response body",
+  "malformed Responses usage",
+  "malformed Responses terminal event",
+  "malformed Gemini stream event",
+  "malformed Gemini response body",
+  "malformed Gemini usage",
+  "malformed Gemini terminal event",
+  "OpenAI stream emitted a non-empty frame after finish_reason terminal",
+  "worker JSON response root must be an object",
+  "non-success Responses response status",
+  "response.failed terminal",
+  "Responses terminal reported failure",
+  "Responses terminal event/status mismatch",
+  "incomplete Responses output lifecycle",
+  "Anthropic stream error event",
+  "malformed worker response UTF-8",
+  "malformed SSE UTF-8",
+  "Response has no body",
+  "Upstream response has no body",
+  "Anthropic response has no body",
+]);
+
+function safeResponseDiagnostic(
+  diagnostic: WorkerResponseDiagnostic | undefined,
+): WorkerResponseDiagnostic | undefined {
+  if (!diagnostic || typeof diagnostic !== "object") return undefined;
+  try {
+    const { protocol, stage, content, category, finishReason, httpStatus } =
+      diagnostic;
+    if (
+      !RESPONSE_PROTOCOLS.has(protocol) ||
+      !RESPONSE_STAGES.has(stage) ||
+      !RESPONSE_CONTENT.has(content) ||
+      !RESPONSE_CATEGORIES.has(category) ||
+      !RESPONSE_FINISH_REASONS.has(finishReason) ||
+      !Number.isInteger(httpStatus) ||
+      httpStatus < 200 ||
+      httpStatus > 299
+    ) {
+      return undefined;
+    }
+    // Copy only validated primitives: never pass caller-owned fields to Sentry.
+    return { protocol, stage, content, category, finishReason, httpStatus };
+  } catch {
+    // A hostile accessor must not affect the worker's failure handling.
+    return undefined;
+  }
+}
 
 /**
  * Failure reasons that are credential/config conditions rather than upstream
@@ -120,6 +241,7 @@ export type SessionHealth = {
   sawGenuineReason: boolean;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
+  responseAlerts?: Map<string, number>; // per-category Sentry cooldown
 };
 
 /** State of the worker health for a session. Used in response headers. */
@@ -592,6 +714,7 @@ export function recordWorkerFailure(
   sessionID: string,
   workerID: WorkerID | (string & {}),
   reason: FailureReason,
+  responseDiagnostic?: WorkerResponseDiagnostic,
 ): void {
   const t = now();
 
@@ -655,6 +778,49 @@ export function recordWorkerFailure(
     entry.sawGenuineReason = true;
   }
 
+  const safeResponse =
+    reason === "upstream-error"
+      ? safeResponseDiagnostic(responseDiagnostic)
+      : undefined;
+  if (safeResponse) {
+    // The key set is finite and small; release expired categories so a long
+    // outage can still report a new failure after the cooldown.
+    for (const [key, sentAt] of entry.responseAlerts ?? []) {
+      if (t - sentAt > ALERT_COOLDOWN_MS) entry.responseAlerts?.delete(key);
+    }
+    const responseKey = `${safeResponse.protocol}/${safeResponse.stage}/${safeResponse.category}/${safeResponse.finishReason}`;
+    const lastSentAt = entry.responseAlerts?.get(responseKey);
+    if (
+      (lastSentAt === undefined || t - lastSentAt > ALERT_COOLDOWN_MS) &&
+      (entry.responseAlerts?.size ?? 0) < 64
+    ) {
+      entry.responseAlerts ??= new Map();
+      entry.responseAlerts.set(responseKey, t);
+      // One searchable event per category, then a cooldown. Telemetry failure
+      // must never alter worker results or prevent health bookkeeping.
+      try {
+        Sentry.captureMessage("Worker response rejected", {
+          level: "error",
+          fingerprint: [
+            "worker-response-rejected",
+            RESPONSE_ALERT_WORKER_IDS.has(workerID) ? workerID : "unknown",
+            safeResponse.protocol,
+            safeResponse.category,
+          ],
+          tags: {
+            response_protocol: safeResponse.protocol,
+            response_stage: safeResponse.stage,
+            response_content: safeResponse.content,
+            response_category: safeResponse.category,
+          },
+          contexts: { worker_response: safeResponse },
+        });
+      } catch {
+        // Diagnostic delivery is best-effort.
+      }
+    }
+  }
+
   // First 1-2 failures: silent at the warn level. This preserves the
   // existing behavior for transient errors (OAuth refresh, momentary 429).
   if (entry.failureCount < DEGRADED_THRESHOLD) {
@@ -693,26 +859,31 @@ export function recordWorkerFailure(
     // given worker into ONE issue. The session ID / counts vary per event and
     // MUST live in tags+contexts only — embedding them in the message text
     // spawns a new Sentry issue per session (LOREAI-GATEWAY worker-health noise).
-    Sentry.captureMessage("Worker health degraded", {
-      level: "error",
-      fingerprint: ["worker-health-degraded", workerID],
-      tags: {
-        worker_id: workerID,
-        reason,
-        session_id: sessionID,
-        failure_count: String(entry.failureCount),
-      },
-      contexts: {
-        worker_health: {
-          sessionID,
-          workerIDs: [...entry.workerIDs],
-          reasons: [...entry.reasons],
-          failureCount: entry.failureCount,
-          firstFailureAt: entry.firstFailureAt,
-          lastFailureAt: entry.lastFailureAt,
+    try {
+      Sentry.captureMessage("Worker health degraded", {
+        level: "error",
+        fingerprint: ["worker-health-degraded", workerID],
+        tags: {
+          worker_id: workerID,
+          reason,
+          session_id: sessionID,
+          failure_count: String(entry.failureCount),
         },
-      },
-    });
+        contexts: {
+          worker_health: {
+            sessionID,
+            workerIDs: [...entry.workerIDs],
+            reasons: [...entry.reasons],
+            failureCount: entry.failureCount,
+            firstFailureAt: entry.firstFailureAt,
+            lastFailureAt: entry.lastFailureAt,
+          },
+          ...(safeResponse ? { worker_response: safeResponse } : {}),
+        },
+      });
+    } catch {
+      // Telemetry cannot interrupt worker health or delivery.
+    }
   }
 
   // Critical escalation: sustained 1h+ of failure → Sentry exception.
@@ -730,25 +901,30 @@ export function recordWorkerFailure(
       // was a unique issue (dozens of one-off LOREAI-GATEWAY issues). The
       // varying detail lives in tags+contexts below.
       const err = new Error("Worker health critical: sustained worker failure");
-      Sentry.captureException(err, {
-        fingerprint: ["worker-health-critical", workerID],
-        tags: {
-          worker_id: workerID,
-          reason,
-          session_id: sessionID,
-          failure_count: String(entry.failureCount),
-          sustained: formatDuration(sustainedMs),
-        },
-        contexts: {
-          worker_health: {
-            sessionID,
-            workerIDs: [...entry.workerIDs],
-            reasons: [...entry.reasons],
-            failureCount: entry.failureCount,
-            sustainedMs,
+      try {
+        Sentry.captureException(err, {
+          fingerprint: ["worker-health-critical", workerID],
+          tags: {
+            worker_id: workerID,
+            reason,
+            session_id: sessionID,
+            failure_count: String(entry.failureCount),
+            sustained: formatDuration(sustainedMs),
           },
-        },
-      });
+          contexts: {
+            worker_health: {
+              sessionID,
+              workerIDs: [...entry.workerIDs],
+              reasons: [...entry.reasons],
+              failureCount: entry.failureCount,
+              sustainedMs,
+            },
+            ...(safeResponse ? { worker_response: safeResponse } : {}),
+          },
+        });
+      } catch {
+        // A failing telemetry sink must not alter worker health.
+      }
     }
   }
 
