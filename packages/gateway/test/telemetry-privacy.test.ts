@@ -305,6 +305,62 @@ describe("telemetry privacy boundary", () => {
     expect(JSON.stringify(sent)).toContain("Worker health degraded");
   });
 
+  it("scrubs SDK-shaped streamed span names and envelope trace transactions", async () => {
+    const privateModel = "private-model-sentinel";
+    let sent: unknown;
+    const transport = buildSentryOptions(() => ({
+      send(envelope) {
+        sent = envelope;
+        return Promise.resolve({ statusCode: 200 });
+      },
+      flush: () => Promise.resolve(true),
+    })).transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+
+    const envelope: unknown = [
+      {
+        event_id: "00000000000000000000000000000015",
+        trace: { transaction: `chat ${privateModel}` },
+      },
+      [
+        [
+          {
+            type: "span",
+            item_count: 1,
+            content_type: "application/vnd.sentry.items.span.v2+json",
+          },
+          {
+            version: 2,
+            items: [
+              {
+                name: `chat ${privateModel}`,
+                span_id: "aaaaaaaaaaaaaaaa",
+                trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                attributes: {
+                  "sentry.op": { value: "gen_ai.chat", type: "string" },
+                  "sentry.segment.name": {
+                    value: `chat ${privateModel}`,
+                    type: "string",
+                  },
+                  "gen_ai.request.model": {
+                    value: privateModel,
+                    type: "string",
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      ],
+    ];
+    await transport.send(envelope as Parameters<typeof transport.send>[0]);
+    expect(JSON.stringify(sent)).not.toContain(privateModel);
+    expect(JSON.stringify(sent)).toContain("AI worker call");
+  });
+
   it("scrubs request data, breadcrumbs, contexts, and span attributes", () => {
     const event = scrubTelemetryEvent({
       request: {

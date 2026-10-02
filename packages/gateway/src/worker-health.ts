@@ -924,10 +924,7 @@ export function recordWorkerFailure(
       (previousAlert.delivered
         ? t - previousAlert.attemptedAt > ALERT_COOLDOWN_MS
         : t - previousAlert.attemptedAt >= ALERT_RETRY_MS);
-    if (
-      shouldCapture &&
-      pendingResponseAlerts.size < MAX_PENDING_RESPONSE_ALERTS
-    ) {
+    if (shouldCapture) {
       // Enqueueing is not delivery: only a confirmed 2xx transport send starts
       // the long cooldown. Failed or unconfirmed sends retry at most once/min.
       try {
@@ -951,6 +948,10 @@ export function recordWorkerFailure(
         );
         responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
         if (typeof eventID === "string" && /^[0-9a-f]{32}$/.test(eventID)) {
+          if (pendingResponseAlerts.size >= MAX_PENDING_RESPONSE_ALERTS) {
+            const oldestID = pendingResponseAlerts.keys().next().value;
+            if (oldestID !== undefined) pendingResponseAlerts.delete(oldestID);
+          }
           pendingResponseAlerts.set(eventID, {
             key: responseKey,
             attemptedAt: t,

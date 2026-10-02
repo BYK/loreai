@@ -295,10 +295,16 @@ function scrubValue(
       copy[key] = [];
     } else if (key.toLowerCase() === "request" && isRecord(child)) {
       copy[key] = scrubRequest(child);
+    } else if (key === "transaction") {
+      copy[key] = "AI worker call";
+    } else if (key === "sentry.segment.name") {
+      copy[key] = isRecord(child)
+        ? { value: "AI worker call", type: "string" }
+        : "AI worker call";
     } else if (
       key === "name" &&
-      typeof record.op === "string" &&
-      record.op.startsWith("gen_ai.")
+      ((typeof record.op === "string" && record.op.startsWith("gen_ai.")) ||
+        ("span_id" in record && "trace_id" in record))
     ) {
       copy[key] = "AI worker call";
     } else {

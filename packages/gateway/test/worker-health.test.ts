@@ -612,6 +612,83 @@ describe("worker-health", () => {
       ]);
     });
 
+    test("reports a new response signature when unsettled receipts reach capacity", () => {
+      const clock = { now: 1_000_000 };
+      _setNowForTest(() => clock.now);
+      const workers = ["lore-distill", "lore-curator"] as const;
+      const protocols = [
+        "anthropic",
+        "openai",
+        "openai-responses",
+        "openai-codex-responses",
+        "vertex",
+        "gemini",
+      ];
+      const categories = [
+        "invalid response body",
+        "malformed JSON body",
+        "worker response incomplete",
+        "malformed Anthropic response body",
+        "malformed OpenAI response body",
+        "malformed Gemini response body",
+      ];
+      let alerts = 0;
+      vi.mocked(Sentry.captureMessage).mockImplementation((message) => {
+        if (message !== "Worker response rejected") return "";
+        alerts++;
+        return alerts.toString(16).padStart(32, "0");
+      });
+
+      for (let minute = 0; minute < 57 && alerts < 4_096; minute++) {
+        for (const worker of workers) {
+          for (const protocol of protocols) {
+            for (const category of categories) {
+              if (alerts === 4_096) break;
+              recordWorkerFailure("s1", worker, "upstream-error", {
+                protocol,
+                stage: "parse",
+                content: "json",
+                category,
+                finishReason: "n/a",
+                httpStatus: 200,
+              });
+            }
+          }
+        }
+        clock.now += 60_000;
+      }
+      expect(alerts).toBe(4_096);
+
+      recordWorkerFailure("s2", "lore-pattern-echo", "upstream-error", {
+        protocol: "anthropic",
+        stage: "parse",
+        content: "json",
+        category: "invalid response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      });
+      expect(alerts).toBe(4_097);
+      expect(
+        getWorkerHealth().find((entry) => entry.sessionID === "s2")
+          ?.failureCount,
+      ).toBe(1);
+
+      recordWorkerResponseAlertDelivery(
+        "00000000000000000000000000000001",
+        true,
+      );
+      clock.now += 60_000;
+      recordWorkerFailure("s3", "lore-distill", "upstream-error", {
+        protocol: "anthropic",
+        stage: "parse",
+        content: "json",
+        category: "invalid response body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      });
+      expect(alerts).toBe(4_098);
+    });
+
     test("clears response cooldown state on gateway shutdown", () => {
       const diagnostic: WorkerResponseDiagnostic = {
         protocol: "anthropic",

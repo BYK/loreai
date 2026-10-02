@@ -3416,6 +3416,11 @@ describe("Pipeline — streaming responses", () => {
       await response.text();
       await vi.waitFor(() => expect(postResponses).toBe(1));
 
+      const workerSpanOptions = vi
+        .mocked(Sentry.startInactiveSpan)
+        .mock.calls.find(([options]) => options.op === "gen_ai.chat")?.[0];
+      expect(workerSpanOptions?.name).toBe("AI worker call");
+      expect(JSON.stringify(workerSpanOptions)).not.toContain("gpt-5.6-sol");
       expect(end).toHaveBeenCalledOnce();
       expect(streamingPostResponsePendingForTest()).toBe(0);
     } finally {

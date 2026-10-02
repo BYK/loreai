@@ -158,11 +158,8 @@ export type AnthropicUsage = {
 export function setGenAiUsageAttributes(
   span: Sentry.Span,
   usage: AnthropicUsage,
-  responseModel?: string,
+  _responseModel?: string,
 ): void {
-  if (responseModel) {
-    span.setAttribute("gen_ai.response.model", responseModel);
-  }
   span.setAttribute("gen_ai.usage.input_tokens", usage.input_tokens ?? 0);
   span.setAttribute("gen_ai.usage.output_tokens", usage.output_tokens ?? 0);
   if (usage.cache_read_input_tokens != null) {
@@ -237,7 +234,7 @@ export function setCacheAnalyticsAttributes(
  * Emit cache-bust cause metrics for observability and cost analysis.
  *
  * Emits a counter per cause category and a distribution of cache-write
- * token counts, both tagged by cause and model. Enables identifying which
+ * token counts, tagged by cause. Enables identifying which
  * bust causes dominate and tracking improvements over time.
  *
  * The `idle_resume` tag separates AVOIDABLE busts from FREE ones — critical for
@@ -256,7 +253,7 @@ export function setCacheAnalyticsAttributes(
 export function emitCacheBustMetric(
   cause: string,
   writeTokens: number,
-  model: string,
+  _model: string,
   /** issue #791: whether a system[0] divergence looked relocatable. */
   relocatable = false,
   /** True when this bust was a post-idle cold-cache re-warm (the write was
@@ -267,12 +264,12 @@ export function emitCacheBustMetric(
   if (!Sentry.isInitialized()) return;
 
   Sentry.metrics.count("lore.cache_bust", 1, {
-    attributes: { cause, model, relocatable, idle_resume: isIdleResume },
+    attributes: { cause, relocatable, idle_resume: isIdleResume },
   });
 
   if (writeTokens > 0) {
     Sentry.metrics.distribution("lore.cache_bust_tokens", writeTokens, {
-      attributes: { cause, model, relocatable, idle_resume: isIdleResume },
+      attributes: { cause, relocatable, idle_resume: isIdleResume },
       unit: "token",
     });
   }
@@ -337,7 +334,7 @@ import type { SessionState, WarmupResult } from "./translate/types";
  * Emit metrics for a cache warmup attempt.
  *
  * Tracks warmup sent/hit/miss counts and estimated cost/savings for
- * ROI analysis. All metrics are tagged by model and TTL.
+ * ROI analysis. Metrics are tagged by TTL; the model stays local for pricing.
  */
 export function emitWarmupMetric(
   state: SessionState,
@@ -347,7 +344,7 @@ export function emitWarmupMetric(
 
   const model = state.lastUpstream?.model ?? "unknown";
   const ttl = state.resolvedConversationTTL ?? "5m";
-  const attrs = { model, ttl };
+  const attrs = { ttl };
 
   // Count every warmup sent
   Sentry.metrics.count("lore.cache_warmup.sent", 1, { attributes: attrs });
@@ -394,10 +391,10 @@ export function emitWarmupMetric(
 /**
  * Emit a metric when a user returns after a warmup (confirmed save).
  */
-export function emitWarmupHitMetric(model: string, ttl: string): void {
+export function emitWarmupHitMetric(_model: string, ttl: string): void {
   if (!Sentry.isInitialized()) return;
   Sentry.metrics.count("lore.cache_warmup.hit", 1, {
-    attributes: { model, ttl },
+    attributes: { ttl },
   });
 }
 
@@ -454,7 +451,7 @@ export function emitCostMetric(
         uncachedInputCost + cacheReadCost + cacheWriteCost + outputCost;
 
       Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
-        attributes: { model, call_type: callType },
+        attributes: { call_type: callType },
         unit: "dollar",
       });
     })
@@ -978,7 +975,6 @@ export function captureEmptyCompletion(info: EmptyCompletionInfo): void {
       contexts: {
         empty_completion: {
           protocol: info.protocol,
-          model: info.model,
           stopReason: info.stopReason,
           outputTokens: info.outputTokens,
           recallDepth: info.recallDepth,

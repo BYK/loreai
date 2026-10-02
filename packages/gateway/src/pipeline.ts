@@ -21939,13 +21939,9 @@ async function handleConversationTurnPrepared(
   // The span is ended in postResponse() after usage attributes are set.
   const genAiSpan = Sentry.startInactiveSpan({
     op: "gen_ai.chat",
-    name: `chat ${req.model}`,
+    name: "AI worker call",
     attributes: {
       "gen_ai.operation.name": "chat",
-      "gen_ai.request.model": req.model,
-      "gen_ai.provider.name":
-        requestUpstreamRoute.providerID ??
-        requestUpstreamRoute.effectiveProtocol,
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },

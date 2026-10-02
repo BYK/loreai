@@ -96,7 +96,7 @@ describe("worker telemetry request scope", () => {
       });
       await Sentry.startSpan(
         {
-          name: "AI worker call",
+          name: `chat ${privateModel}`,
           op: "gen_ai.chat",
           attributes: { "gen_ai.operation.name": "chat" },
         },
