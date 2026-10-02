@@ -45,6 +45,7 @@ interface FixtureMarker {
 
 interface StartFixtureOptions {
   timeoutMs?: number;
+  timeoutAfterReadyMs?: number;
   readyPath?: string;
   descendantPidPath?: string;
 }
@@ -238,9 +239,6 @@ function startFixture(
       const error = new Error(`fixture ${fixtureLabel} did not exit`);
       void terminate(error).catch(() => {});
     };
-    // The short descendant deadline measures cleanup after the fixture is
-    // ready, not Vitest startup. Under aggregate load startup can take longer
-    // than the cleanup deadline without the descendant being stuck.
     let closed = false;
     let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(
       onTimeout,
@@ -248,17 +246,23 @@ function startFixture(
         ? CHILD_TIMEOUT_MS
         : (options.timeoutMs ?? CHILD_TIMEOUT_MS),
     );
-    if (options.readyPath) {
-      void ready
-        .then(() => {
-          if (closed || state.termination) return;
+    const afterReadyTimeout = options.timeoutAfterReadyMs ?? options.timeoutMs;
+    if (options.readyPath && afterReadyTimeout !== undefined) {
+      void ready.then(
+        () => {
+          if (
+            closed ||
+            state.termination ||
+            child.exitCode !== null ||
+            child.signalCode !== null
+          ) {
+            return;
+          }
           if (timeout) clearTimeout(timeout);
-          timeout = setTimeout(
-            onTimeout,
-            options.timeoutMs ?? CHILD_TIMEOUT_MS,
-          );
-        })
-        .catch(() => {});
+          timeout = setTimeout(onTimeout, afterReadyTimeout);
+        },
+        () => {},
+      );
     }
     child.once("error", (error) => {
       closed = true;
@@ -826,9 +830,9 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        // Leave enough time for nested Vitest startup before timing out the
-        // fixture itself.
-        timeoutMs: 15_000,
+        // The short descendant deadline starts after nested Vitest is ready;
+        // startup retains the separate CHILD_TIMEOUT_MS bound.
+        timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
       },
@@ -891,9 +895,9 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        // Nested Vitest startup can exceed two seconds even when the fixture
-        // exits promptly; the timer must allow its marker to become ready.
-        timeoutMs: 15_000,
+        // The coordinator gets time to start before its descendant exit
+        // deadline begins.
+        timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
       },
