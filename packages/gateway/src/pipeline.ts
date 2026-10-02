@@ -409,6 +409,7 @@ import {
   reportRecallDiagnostic,
 } from "./recall-diagnostics";
 import {
+  MAX_RECALL_CHAIN_TOKENS,
   MAX_RECALL_EXECUTIONS,
   MAX_RECALL_SEARCH_ITEMS,
   RecallChainBudget,
@@ -4383,8 +4384,14 @@ const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
  */
 export function getModelSpec(model: string, providerID?: string): ModelSpec {
   const entry = getModelEntrySyncForProvider(providerID, model);
+  const context = entry.limit?.context;
   return {
-    context: entry.limit?.context ?? DEFAULT_MODEL_SPEC.context,
+    context:
+      typeof context === "number" &&
+      Number.isSafeInteger(context) &&
+      context > 0
+        ? context
+        : DEFAULT_MODEL_SPEC.context,
     output: entry.limit?.output ?? DEFAULT_MODEL_SPEC.output,
     cacheReadCost:
       entry.cost?.cache_read != null
@@ -7974,6 +7981,9 @@ export function buildStreamingResponse(
     };
     /** Absolute request deadline inherited from the foreground abort scope. */
     recallDeadlineAt?: number;
+    modelContextTokens?: number;
+    allowExpandedContext?: boolean;
+    expectedPrincipalModel?: string;
   },
   /** When set, prepend a synthetic warning content block to the stream.
    *  Currently used for the worker-degradation warning (#797 removed the
@@ -8244,12 +8254,17 @@ export function buildStreamingResponse(
             const recallBudget = new RecallChainBudget({
               maxExecutions: loreConfig().search.recall.chainMaxExecutions,
               deadlineAt: recallContext.recallDeadlineAt,
+              modelContextTokens: recallContext.modelContextTokens,
+              allowExpandedContext: recallContext.allowExpandedContext,
             });
-            // This response already consumed the model's context/token budget
-            // before it asked for recall. Include it before admitting the first
-            // recall so the chain cannot repeatedly spend an untracked
-            // principal turn plus its continuations.
-            recallBudget.recordUsage(currentResp.usage);
+            recallBudget.recordPrincipalUsage(
+              currentResp.usage,
+              {
+                expectedModel: recallContext.expectedPrincipalModel,
+                actualModel: currentResp.model,
+              },
+              currentResp.usageComplete === true,
+            );
             const logRecallBudgetStop = (reason: RecallStopReason): void => {
               reportRecallDiagnostic(
                 `recall final continuation: budget exhausted reason=${reason}`,
@@ -8564,7 +8579,10 @@ export function buildStreamingResponse(
                 );
               } catch (error) {
                 if (streamSignal.aborted) throw error;
-                if (finalRecallRound)
+                if (
+                  finalRecallRound ||
+                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                )
                   throw new RecallContinuationFailure("follow_up_setup");
                 reportRecallDiagnostic(
                   `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
@@ -8591,7 +8609,10 @@ export function buildStreamingResponse(
               }
 
               if (!streamingFollowUp.ok) {
-                if (finalRecallRound)
+                if (
+                  finalRecallRound ||
+                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                )
                   throw new RecallContinuationFailure("follow_up_failed");
                 reportRecallDiagnostic(
                   `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
@@ -8661,6 +8682,9 @@ export function buildStreamingResponse(
               activeReader = contReader;
 
               const finalTerminalEvents: string[] = [];
+              // Usage arrives at the terminal event. Until it is validated,
+              // expanded-budget continuation text must not reach the client.
+              const heldContinuation = { events: [] as string[], bytes: 0 };
               const continuationValidator = new AnthropicSSEValidator();
               try {
                 for await (const {
@@ -8677,6 +8701,14 @@ export function buildStreamingResponse(
                   continuationValidator.process(contEvent, contData);
                   const forwarded = contAccum.processEvent(contEvent, contData);
                   if (
+                    contEvent === "message_start" &&
+                    !recallBudget.continuationModelMatches(
+                      contAccum.getResponse().model,
+                    )
+                  ) {
+                    throw new RecallContinuationFailure("follow_up_failed");
+                  }
+                  if (
                     forwarded &&
                     finalRecallRound &&
                     (contEvent === "message_delta" ||
@@ -8687,7 +8719,18 @@ export function buildStreamingResponse(
                     // Forward non-recall, non-held-back events to client.
                     // message_delta usage scaling is handled by a separate pass
                     // below only for the final continuation's terminal events.
-                    if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                    if (recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS) {
+                      heldContinuation.bytes += Buffer.byteLength(forwarded);
+                      if (
+                        heldContinuation.bytes > MAX_FOREGROUND_RESPONSE_BYTES
+                      )
+                        throw new RecallContinuationFailure("follow_up_failed");
+                      heldContinuation.events.push(forwarded);
+                    } else if (
+                      !(await safeEnqueue(encoder.encode(forwarded)))
+                    ) {
+                      break;
+                    }
                   }
                   if (continuationValidator.isDone()) break;
                 }
@@ -8707,14 +8750,29 @@ export function buildStreamingResponse(
                 continuationResp.usage ?? ZERO_USAGE,
               );
               activeContinuation = undefined;
-              const continuationStopReason = recallBudget.recordUsage(
-                continuationResp.usage,
-              );
+              const continuationStopReason =
+                recallBudget.recordContinuationUsage(
+                  continuationResp.usage,
+                  continuationResp.model,
+                  continuationResp.usageComplete === true,
+                );
+              if (
+                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                continuationResp.usageComplete !== true
+              ) {
+                throw new RecallContinuationFailure("follow_up_failed");
+              }
+              if (recallBudget.exceedsTokenCeiling())
+                throw new RecallContinuationFailure("follow_up_failed");
               if (finalRecallRound || continuationStopReason) {
                 if (contAccum.hasRecall())
                   throw new RecallContinuationFailure("depth_exhausted");
                 if (!isUsableRecallContinuation(continuationResp))
                   throw new RecallContinuationFailure("follow_up_failed");
+              }
+
+              for (const forwarded of heldContinuation.events) {
+                if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
               }
 
               // Check if continuation contained recall — if so, loop
@@ -8927,6 +8985,9 @@ export function streamResponsesRecallAware(
     signal?: AbortSignal;
     /** Absolute request deadline inherited from the foreground abort scope. */
     recallDeadlineAt?: number;
+    modelContextTokens?: number;
+    allowExpandedContext?: boolean;
+    expectedPrincipalModel?: string;
     /**
      * Reissue the byte-stable principal request after a pre-output body-read
      * failure. The caller must retain the original transformed request, route,
@@ -9273,6 +9334,8 @@ export function streamResponsesRecallAware(
     maxExecutions:
       opts.maxRecallExecutions ?? opts.maxRecallDepth ?? MAX_RECALL_EXECUTIONS,
     deadlineAt: opts.recallDeadlineAt,
+    modelContextTokens: opts.modelContextTokens,
+    allowExpandedContext: opts.allowExpandedContext,
   });
   const maxDeferredBytes = opts.maxDeferredBytes ?? 1024 * 1024;
   const maxHiddenRecallBytes = opts.maxHiddenRecallBytes ?? maxDeferredBytes;
@@ -11234,7 +11297,10 @@ export function streamResponsesRecallAware(
     const admission = recallBudget.admit(
       input.invalidIssue ? 1 : recallItemReservation(input),
     );
-    if (admission) throw new RecallContinuationFailure("depth_exhausted");
+    if (admission) {
+      reportRecallDiagnostic(`recall admission denied reason=${admission}`);
+      throw new RecallContinuationFailure("depth_exhausted");
+    }
     if (input.invalidIssue) {
       const resultText =
         `Invalid recall arguments (${input.invalidIssue}). ` +
@@ -12203,6 +12269,7 @@ export function streamResponsesRecallAware(
         let principalRetrySucceededReported = false;
         let principalReadFinished = false;
         let continuationAttempted = false;
+        let continuationUsagePending = false;
         let continuationFailureCategory:
           | RecallContinuationFailureCategory
           | undefined;
@@ -12933,10 +13000,16 @@ export function streamResponsesRecallAware(
               };
               transactionRetainedStateBytes = retainedStateBytes;
               transactionProviderUsage = { ...ZERO_USAGE };
-              // The principal Responses stream is part of the same request
-              // budget. Count it once before its first recall is admitted;
-              // continuation streams are accounted for after each follow-up.
-              recallBudget.recordUsage(state.usage);
+              // The principal stream is sunk work. Bound its validated size,
+              // then charge each additional continuation against its own cap.
+              recallBudget.recordPrincipalUsage(
+                state.usage,
+                {
+                  expectedModel: opts.expectedPrincipalModel,
+                  actualModel: state.model,
+                },
+                state.usageComplete,
+              );
               type TransactionalEvent = {
                 chunk: Uint8Array;
                 sourceIndex?: number;
@@ -13058,6 +13131,7 @@ export function streamResponsesRecallAware(
                     continuationAttempted = true;
                     continuationFailureCategory = "follow_up_setup";
                     signal.throwIfAborted();
+                    continuationUsagePending = true;
                     let follow = await settleFollowUp({
                       finalRecallRound: recallBudget.mustFinalizeNext(),
                       anchorText: executed.anchorText,
@@ -13093,6 +13167,22 @@ export function streamResponsesRecallAware(
                       activeReader = follow.reader;
                       let retryFollowUp = false;
                       const contState = makeResponsesAccState();
+                      let continuationUsageCharged = false;
+                      const chargeContinuationUsage = (): void => {
+                        if (continuationUsageCharged) return;
+                        assertUsageMergeable(
+                          transactionProviderUsage,
+                          contState.usage,
+                        );
+                        mergeUsage(transactionProviderUsage, contState.usage);
+                        continuationUsageCharged = true;
+                        recallBudget.recordContinuationUsage(
+                          contState.usage,
+                          contState.model,
+                          contState.usageComplete,
+                        );
+                        continuationUsagePending = false;
+                      };
                       const contRecallIndices = new Set<number>();
                       const contReferenceIndices = new Map<
                         number,
@@ -13271,6 +13361,20 @@ export function streamResponsesRecallAware(
                               ? JSON.stringify(cparsed)
                               : cd;
                           validateResponseLifecycle(contState, ce, cparsed);
+                          if (
+                            ce === "response.created" &&
+                            !recallBudget.continuationModelMatches(
+                              (
+                                cparsed.response as
+                                  | { model?: string }
+                                  | undefined
+                              )?.model,
+                            )
+                          ) {
+                            throw new RecallContinuationFailure(
+                              "follow_up_failed",
+                            );
+                          }
                           const contNormalizationState = normalizeCodexEvent(
                             contState,
                             ce,
@@ -13601,6 +13705,10 @@ export function streamResponsesRecallAware(
                           }
                         }
                       } catch (error) {
+                        // A validated terminal can still fail output/lifecycle
+                        // checks. Its provider usage remains spent even though
+                        // none of its output may enter recovery or persistence.
+                        chargeContinuationUsage();
                         if (
                           error instanceof SSEStreamLimitError ||
                           frameCounter.count > maxSSEFrames ||
@@ -13614,6 +13722,8 @@ export function streamResponsesRecallAware(
                         if (
                           error instanceof SSEStreamTransportError &&
                           !continuationFollowUpInput.finalRecallRound &&
+                          (recallBudget.maxTokens <= MAX_RECALL_CHAIN_TOKENS ||
+                            recallBudget.canRecover()) &&
                           recallContinuationTransportRetries <
                             maxRecallContinuationTransportRetries
                         ) {
@@ -13656,6 +13766,7 @@ export function streamResponsesRecallAware(
                       }
                       if (retryFollowUp) {
                         continuationFailureCategory = "follow_up_setup";
+                        continuationUsagePending = true;
                         follow = await settleFollowUp(
                           continuationFollowUpInput,
                         );
@@ -13682,12 +13793,17 @@ export function streamResponsesRecallAware(
                         }
                         mergeUsage(state.usage, contState.usage);
                       };
-                      assertUsageMergeable(
-                        transactionProviderUsage,
-                        contState.usage,
-                      );
-                      mergeUsage(transactionProviderUsage, contState.usage);
-                      recallBudget.recordUsage(contState.usage);
+                      chargeContinuationUsage();
+                      if (
+                        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                        !contState.usageComplete
+                      ) {
+                        throw new RecallContinuationFailure(
+                          "follow_up_usage_missing",
+                        );
+                      }
+                      if (recallBudget.exceedsTokenCeiling())
+                        throw new RecallContinuationFailure("follow_up_failed");
                       if (
                         continuationFailed ||
                         (continuationFollowUpInput.finalRecallRound &&
@@ -14225,12 +14341,21 @@ export function streamResponsesRecallAware(
             (recallDetected ||
               continuationAttempted ||
               err instanceof RecallContinuationFailure);
+          if (continuationUsagePending) {
+            recallBudget.recordContinuationUsage(undefined, undefined, false);
+            continuationUsagePending = false;
+          }
           // Recovery items are appended after every source index, so sparse
           // visible indices do not reindex output already sent to the client.
           if (
             recallFailure &&
             opts.runRecovery &&
             recoverySeed &&
+            recallBudget.canRecover() &&
+            !(
+              err instanceof RecallContinuationFailure &&
+              err.category === "follow_up_usage_missing"
+            ) &&
             !signal.aborted
           ) {
             const recoveryStateBaseline = state;
@@ -14247,6 +14372,20 @@ export function streamResponsesRecallAware(
                 transactionProviderUsage,
                 rawRecovered.usage ?? ZERO_USAGE,
               );
+              if (
+                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                (!recallBudget.continuationModelMatches(rawRecovered.model) ||
+                  rawRecovered.usageComplete !== true)
+              ) {
+                throw new RecallContinuationFailure("follow_up_failed");
+              }
+              recallBudget.recordContinuationUsage(
+                rawRecovered.usage,
+                rawRecovered.model,
+                rawRecovered.usageComplete === true,
+              );
+              if (recallBudget.exceedsTokenCeiling())
+                throw new RecallContinuationFailure("follow_up_failed");
               for (const quota of rawRecovered.codexRateLimits ?? []) {
                 appendCodexRateLimitEvent(publicCodexRateLimits, quota);
               }
@@ -14501,6 +14640,18 @@ export function streamResponsesRecallAware(
               return;
             } catch (recoveryError) {
               if (signal.aborted) throw recoveryError;
+              if (recoveryError instanceof ResponsesTerminalError) {
+                try {
+                  transactionProviderUsage = mergeRecallUsage(
+                    transactionProviderUsage,
+                    recoveryError.response.usage ?? ZERO_USAGE,
+                  );
+                } catch {
+                  reportRecallStreamFailure(
+                    "failed to merge recall recovery usage for accounting",
+                  );
+                }
+              }
               if (!terminalDelivered) {
                 state = recoveryStateBaseline;
                 syntheticIdentities.clear();
@@ -15477,6 +15628,9 @@ export function accumulateOpenAINonStreamJSON(
     model: asString(json.model),
     content,
     stopReason,
+    usageComplete:
+      typeof usage?.prompt_tokens === "number" &&
+      typeof usage?.completion_tokens === "number",
     usage: {
       // prompt_tokens is inclusive of cache reads/writes; convert to the
       // gateway's disjoint convention so cache tokens aren't double-counted.
@@ -15587,6 +15741,9 @@ export function accumulateResponsesNonStreamJSON(
     content,
     rawOutputItems: replayableOutput,
     stopReason,
+    usageComplete:
+      typeof usage?.input_tokens === "number" &&
+      typeof usage?.output_tokens === "number",
     usage: {
       inputTokens: disjointOpenAIInputTokens(
         usage?.input_tokens as number | undefined,
@@ -20124,6 +20281,22 @@ async function handleConversationTurnPrepared(
     req.model,
     extractProviderHeader(req.rawHeaders),
   );
+  // Flat models.dev entries can belong to a different provider. Expand recall
+  // only when the qualified context belongs to the final upstream destination.
+  const recallProviderID = requestUpstreamRoute.headerUpstream
+    ? undefined
+    : requestUpstreamRoute.providerID &&
+        requestUpstreamRoute.providerRoute?.url ===
+          requestUpstreamRoute.effectiveUpstreamBase
+      ? requestUpstreamRoute.providerID
+      : canonicalModelRouteProviderID(requestUpstreamRoute);
+  const verifiedRecallContext = knownModelContextLimit(
+    recallProviderID,
+    req.model,
+  );
+  const recallModelContextTokens =
+    verifiedRecallContext ??
+    Math.min(modelSpec.context, MAX_RECALL_CHAIN_TOKENS);
   const cfg = loreConfig();
 
   // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
@@ -22005,10 +22178,17 @@ async function handleConversationTurnPrepared(
     const recallBudget = new RecallChainBudget({
       maxExecutions: loreConfig().search.recall.chainMaxExecutions,
       deadlineAt: foregroundAbort.deadlineAt,
+      modelContextTokens: recallModelContextTokens,
+      allowExpandedContext: verifiedRecallContext !== undefined,
     });
-    // Account the principal response before the first recall admission. Each
-    // subsequent continuation is recorded below exactly once.
-    recallBudget.recordUsage(resp.usage);
+    recallBudget.recordPrincipalUsage(
+      resp.usage,
+      {
+        expectedModel: req.model,
+        actualModel: resp.model,
+      },
+      resp.usageComplete === true,
+    );
     const logRecallBudgetStop = (reason: RecallStopReason): void => {
       reportRecallDiagnostic(
         `recall final continuation: budget exhausted reason=${reason}`,
@@ -22196,11 +22376,18 @@ async function handleConversationTurnPrepared(
               error.response.usage ?? ZERO_USAGE,
             ),
           );
+          recallBudget.recordContinuationUsage(
+            error.response.usage,
+            error.response.model,
+            error.response.usageComplete === true,
+          );
           if (error.response.codexRateLimits?.length) {
             for (const quota of error.response.codexRateLimits) {
               appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
             }
           }
+        } else {
+          recallBudget.recordContinuationUsage(undefined, undefined, false);
         }
       };
       const followUpRequiresStream = currentModifiedReq.codex === true;
@@ -22243,6 +22430,7 @@ async function handleConversationTurnPrepared(
         category: RecallContinuationFailureCategory,
       ): Promise<Response> => {
         reportRecallContinuationFailure(category);
+        if (!recallBudget.canRecover()) return failRecall(category, false);
         let recovered: GatewayResponse;
         try {
           const recovery = await runRecallRecovery(
@@ -22255,6 +22443,22 @@ async function handleConversationTurnPrepared(
             foregroundAbort.signal,
           );
           if (!recovery.ok) return failRecall(category, false);
+          Object.assign(
+            cumulativeUsage,
+            mergeRecallUsage(
+              cumulativeUsage,
+              recovery.continuation.usage ?? ZERO_USAGE,
+            ),
+          );
+          if (
+            recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+            (!recallBudget.continuationModelMatches(
+              recovery.continuation.model,
+            ) ||
+              recovery.continuation.usageComplete !== true)
+          ) {
+            return failRecall(category, false);
+          }
           const projected = projectRecallRecoveryResponse(
             recovery.continuation,
           );
@@ -22262,10 +22466,13 @@ async function handleConversationTurnPrepared(
             throw new Error("recall recovery produced unsafe output");
           }
           recovered = projected;
-          Object.assign(
-            cumulativeUsage,
-            mergeRecallUsage(cumulativeUsage, recovered.usage ?? ZERO_USAGE),
+          recallBudget.recordContinuationUsage(
+            recovered.usage,
+            recovered.model,
+            recovered.usageComplete === true,
           );
+          if (recallBudget.exceedsTokenCeiling())
+            return failRecall("follow_up_failed", false);
           if (recovered.codexRateLimits?.length) {
             for (const quota of recovered.codexRateLimits) {
               appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
@@ -22365,6 +22572,7 @@ async function handleConversationTurnPrepared(
       }
 
       if (!jsonFollowUp.ok) {
+        recallBudget.recordContinuationUsage(undefined, undefined, false);
         reportRecallDiagnostic(
           `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
           "error",
@@ -22386,11 +22594,25 @@ async function handleConversationTurnPrepared(
 
       // Accumulate usage from this iteration
       const contUsage = continuationResp.usage ?? ZERO_USAGE;
-      const continuationStopReason = recallBudget.recordUsage(contUsage);
+      const continuationStopReason = recallBudget.recordContinuationUsage(
+        continuationResp.usage,
+        continuationResp.model,
+        continuationResp.usageComplete === true,
+      );
       Object.assign(
         cumulativeUsage,
         mergeRecallUsage(cumulativeUsage, contUsage),
       );
+      if (!recallBudget.continuationModelMatches(continuationResp.model))
+        return recoverRecallContinuation("follow_up_failed");
+      if (
+        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+        continuationResp.usageComplete !== true
+      ) {
+        return failRecall("follow_up_failed");
+      }
+      if (recallBudget.exceedsTokenCeiling())
+        return failRecall("follow_up_failed");
       if (continuationResp.codexRateLimits?.length) {
         for (const quota of continuationResp.codexRateLimits) {
           appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
@@ -22649,6 +22871,9 @@ async function handleConversationTurnPrepared(
               noStore: suppressTemporalStorage,
               signal: foregroundAbort.signal,
               recallDeadlineAt: foregroundAbort.deadlineAt,
+              modelContextTokens: recallModelContextTokens,
+              allowExpandedContext: verifiedRecallContext !== undefined,
+              expectedPrincipalModel: req.model,
               retryPrincipal: async ({ signal }) => {
                 const retried = await upstreamResult.retry(signal);
                 return wrapBodyWithCleanup(retried, () => {}, signal);
@@ -23009,6 +23234,9 @@ async function handleConversationTurnPrepared(
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             recallDeadlineAt: foregroundAbort.deadlineAt,
+            modelContextTokens: recallModelContextTokens,
+            allowExpandedContext: verifiedRecallContext !== undefined,
+            expectedPrincipalModel: req.model,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
           }
         : undefined,

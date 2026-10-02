@@ -830,6 +830,8 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
+        // The short descendant deadline starts after nested Vitest is ready;
+        // startup retains the separate CHILD_TIMEOUT_MS bound.
         timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
@@ -838,7 +840,7 @@ describe("Vitest database isolation harness", () => {
     await ready;
     const { pid } = await readJson<{ pid: number }>(marker);
 
-    const outcome = await settleWithin(result, 10_000);
+    const outcome = await settleWithin(result, 20_000);
     if (outcome.status === "timeout") {
       if (processExists(pid)) process.kill(pid, "SIGKILL");
       await killFixtureTree(child, new Set([pid]));
@@ -893,6 +895,8 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
+        // The coordinator gets time to start before its descendant exit
+        // deadline begins.
         timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
