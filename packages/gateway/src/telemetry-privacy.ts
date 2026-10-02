@@ -60,6 +60,7 @@ const SAFE_ERROR_TELEMETRY_MESSAGES = [
   /^Recall continuation failed$/,
   /^Worker health critical: sustained worker failure$/,
   /^Worker health degraded$/,
+  /^Worker response rejected$/,
   /^Worker upstream auth error: HTTP \d+$/,
   /^Worker upstream exhausted \d+ retries: HTTP \d+(?: embedded \d+)?$/,
   /^Upstream request rejected \(HTTP 400\)$/,

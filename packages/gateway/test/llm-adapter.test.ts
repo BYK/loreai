@@ -1300,6 +1300,25 @@ describe("createGatewayLLMClient.prompt", () => {
           { headers: { "content-type": "text/event-stream" } },
         ),
     ],
+    [
+      "missing OpenAI [DONE] terminal with mislabeled SSE",
+      "openai",
+      "stream",
+      "sse",
+      "missing OpenAI [DONE] terminal",
+      "n/a",
+      (secret: string) =>
+        new Response(
+          [
+            `data: ${JSON.stringify({ choices: [{ delta: { content: secret }, finish_reason: null }] })}`,
+            "",
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
   ] as const)(
     "%s sends only structural worker diagnostics to Sentry",
     async (

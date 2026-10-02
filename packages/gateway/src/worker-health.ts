@@ -30,7 +30,8 @@
  *  - Usable worker output: clear that worker's state, optionally log recovery
  *
  * All public functions are safe to call concurrently (single-threaded event
- * loop). State is per session and worker kind, and TTL-evicted.
+ * loop). Health state is per session and worker kind; response-alert cooldowns
+ * are process-wide per Sentry fingerprint. Both are TTL-evicted.
  */
 
 import * as Sentry from "@sentry/bun";
@@ -40,18 +41,8 @@ import { log } from "@loreai/core";
 // Types
 // ---------------------------------------------------------------------------
 
-/** Stable IDs for the worker kinds. Used in metrics tags and Sentry scope. */
-export type WorkerID =
-  | "lore-distill"
-  | "lore-curator"
-  | "lore-pattern-echo"
-  | "lore-query-expand"
-  | "lore-compact"
-  | "lore-import"
-  | "cache-warmer"
-  | "lore-batch";
-
-const RESPONSE_ALERT_WORKER_IDS = new Set<string>([
+/** Stable IDs for worker kinds. Also controls which IDs enter response alerts. */
+const WORKER_IDS = [
   "lore-distill",
   "lore-curator",
   "lore-pattern-echo",
@@ -60,7 +51,10 @@ const RESPONSE_ALERT_WORKER_IDS = new Set<string>([
   "lore-import",
   "cache-warmer",
   "lore-batch",
-]);
+  "lore-semantic-lint",
+] as const;
+export type WorkerID = (typeof WORKER_IDS)[number];
+const RESPONSE_ALERT_WORKER_IDS: ReadonlySet<string> = new Set(WORKER_IDS);
 
 /** Categorical reason for a failure. Drives metric tags and dashboards. */
 export type FailureReason =
@@ -241,7 +235,6 @@ export type SessionHealth = {
   sawGenuineReason: boolean;
   alertSentAt?: number; // last Sentry message timestamp (debounce)
   exceptionSentAt?: number; // last Sentry exception timestamp (per-hour cap)
-  responseAlerts?: Map<string, number>; // per-category Sentry cooldown
 };
 
 /** State of the worker health for a session. Used in response headers. */
@@ -298,6 +291,18 @@ const CIRCUIT_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // ---------------------------------------------------------------------------
 
 const state = new Map<string, Map<string, SessionHealth>>();
+
+/** One cooldown per Sentry fingerprint across sessions and worker recovery.
+ * Each component is a fixed allowlisted value, bounding this map by
+ * (WORKER_IDS.length + 1) * RESPONSE_PROTOCOLS.size * RESPONSE_CATEGORIES.size.
+ */
+const responseAlerts = new Map<string, number>();
+
+function expireResponseAlerts(t: number): void {
+  for (const [key, sentAt] of responseAlerts) {
+    if (t - sentAt > ALERT_COOLDOWN_MS) responseAlerts.delete(key);
+  }
+}
 
 /** Expire each worker independently, including reads between periodic sweeps. */
 function workerFailures(
@@ -478,6 +483,7 @@ export function _setNowForTest(fn: () => number): void {
 /** Internal accessor for tests. Resets the global state. */
 export function _resetForTest(): void {
   state.clear();
+  responseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
   incapableModels.clear();
@@ -783,17 +789,16 @@ export function recordWorkerFailure(
       ? safeResponseDiagnostic(responseDiagnostic)
       : undefined;
   if (safeResponse) {
-    // Match the Sentry fingerprint. Both fields come from fixed allowlists, so
-    // the map has at most RESPONSE_PROTOCOLS.size * RESPONSE_CATEGORIES.size
-    // entries. Release expired categories after the cooldown.
-    for (const [key, sentAt] of entry.responseAlerts ?? []) {
-      if (t - sentAt > ALERT_COOLDOWN_MS) entry.responseAlerts?.delete(key);
-    }
-    const responseKey = `${safeResponse.protocol}/${safeResponse.category}`;
-    const lastSentAt = entry.responseAlerts?.get(responseKey);
+    // Match the Sentry fingerprint so one outage has one response event per
+    // worker/protocol/category, regardless of how many sessions it affects.
+    expireResponseAlerts(t);
+    const alertWorkerID = RESPONSE_ALERT_WORKER_IDS.has(workerID)
+      ? workerID
+      : "unknown";
+    const responseKey = `${alertWorkerID}/${safeResponse.protocol}/${safeResponse.category}`;
+    const lastSentAt = responseAlerts.get(responseKey);
     if (lastSentAt === undefined || t - lastSentAt > ALERT_COOLDOWN_MS) {
-      entry.responseAlerts ??= new Map();
-      entry.responseAlerts.set(responseKey, t);
+      responseAlerts.set(responseKey, t);
       // One searchable event per category, then a cooldown. Telemetry failure
       // must never alter worker results or prevent health bookkeeping.
       try {
@@ -801,7 +806,7 @@ export function recordWorkerFailure(
           level: "error",
           fingerprint: [
             "worker-response-rejected",
-            RESPONSE_ALERT_WORKER_IDS.has(workerID) ? workerID : "unknown",
+            alertWorkerID,
             safeResponse.protocol,
             safeResponse.category,
           ],
@@ -1197,6 +1202,7 @@ export function makeWorkerHealth(
  */
 export function clearAll(): void {
   state.clear();
+  responseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
   if (sweepTimer) {
@@ -1233,6 +1239,7 @@ function ensureSweepTimer(): void {
   if (typeof setInterval !== "function") return; // edge case: tests with no timers
   sweepTimer = setInterval(() => {
     const t = now();
+    expireResponseAlerts(t);
     for (const sessionID of state.keys()) workerFailures(sessionID);
     // Preserve the session-level authenticated-history predicate while any
     // worker still has unresolved failures; recovery ownership remains per worker.

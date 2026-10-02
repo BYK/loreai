@@ -4011,8 +4011,12 @@ export function createGatewayLLMClient(
                 const rejectInvalidWorkerBody = (
                   error: unknown,
                   stage: "read" | "decode" | "stream" | "parse" | "completion",
+                  observedSSE = false,
                 ): null => {
-                  const detail = `${safeWorkerBodyErrorDetail(error)} (stage=${stage}, content=${diagnosticContentKind(contentType)})`;
+                  const content = observedSSE
+                    ? "sse"
+                    : diagnosticContentKind(contentType);
+                  const detail = `${safeWorkerBodyErrorDetail(error)} (stage=${stage}, content=${content})`;
                   const category =
                     error instanceof IncompleteWorkerResponseError
                       ? "worker response incomplete"
@@ -4038,7 +4042,7 @@ export function createGatewayLLMClient(
                     {
                       protocol: target.protocol,
                       stage,
-                      content: diagnosticContentKind(contentType),
+                      content,
                       category,
                       finishReason:
                         error instanceof IncompleteWorkerResponseError
@@ -4314,7 +4318,7 @@ export function createGatewayLLMClient(
                       );
                       continue;
                     }
-                    return rejectInvalidWorkerBody(error, "stream");
+                    return rejectInvalidWorkerBody(error, "stream", true);
                   }
                   sseStopReason = gwResp.stopReason;
                   parsed = gatewayResponseToWorkerResult(gwResp);
@@ -4337,6 +4341,7 @@ export function createGatewayLLMClient(
                   return rejectInvalidWorkerBody(
                     new IncompleteWorkerResponseError(finishReason),
                     "completion",
+                    isSSE,
                   );
                 }
 

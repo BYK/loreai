@@ -223,6 +223,41 @@ describe("telemetry privacy boundary", () => {
     ).toBeNull();
   });
 
+  it("keeps the fixed worker rejection message through both Sentry privacy boundaries", async () => {
+    const marker = "PRIVATE_WORKER_RESPONSE_MARKER";
+    const options = buildSentryOptions();
+    const input: Event = {
+      message: "Worker response rejected",
+      fingerprint: [
+        "worker-response-rejected",
+        "lore-distill",
+        "openai",
+        "malformed OpenAI response body",
+      ],
+      contexts: {
+        worker_response: {
+          protocol: "openai",
+          category: "malformed OpenAI response body",
+        },
+      },
+      extra: { detail: marker },
+    };
+    const event = await options.beforeSend?.(
+      input as Parameters<NonNullable<typeof options.beforeSend>>[0],
+      {},
+    );
+    expect(event?.message).toBe("Worker response rejected");
+    const envelope = scrubTelemetryEnvelope([
+      { event_id: "event-id" },
+      [[{ type: "event" }, event]],
+    ] as const);
+    expect(envelope[1][0][1]?.message).toBe("Worker response rejected");
+    expect(envelope[1][0][1]?.contexts?.worker_response?.category).toBe(
+      "malformed OpenAI response body",
+    );
+    expect(JSON.stringify(envelope)).not.toContain(marker);
+  });
+
   it("scrubs request data, breadcrumbs, contexts, and span attributes", () => {
     const event = scrubTelemetryEvent({
       request: {
