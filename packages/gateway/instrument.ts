@@ -46,6 +46,7 @@ import * as Sentry from "@sentry/bun";
 import { log } from "@loreai/core";
 import { VERSION } from "./src/cli/version";
 import { eventHasTransientError } from "./src/transient-errors";
+import { recordWorkerResponseAlertDelivery } from "./src/worker-health";
 import {
   SENTRY_DATA_COLLECTION,
   isolateRecallContinuationEvent,
@@ -130,7 +131,7 @@ export function buildSentryOptions(
     dsn: "https://0282201d6a3df3bc46423e61012ae62b@o275100.ingest.us.sentry.io/4511355222622208",
 
     release: VERSION,
-    environment: isDev ? "development" : "production",
+    environment: "production",
 
     // Lore proxies private prompts and provider credentials. Collection is
     // default-deny, and the hooks/transport below provide defense in depth for
@@ -178,7 +179,10 @@ export function buildSentryOptions(
     // Final boundary: sanitize every envelope item, including payload types
     // added by future SDK integrations that do not pass through hooks above.
     transport(options) {
-      return wrapTelemetryTransport(makeTransport(options));
+      return wrapTelemetryTransport(
+        makeTransport(options),
+        recordWorkerResponseAlertDelivery,
+      );
     },
   };
 }

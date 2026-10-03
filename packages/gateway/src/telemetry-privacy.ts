@@ -4,6 +4,12 @@ import {
   redactCredentialHeaderAssignments,
 } from "./credential-headers";
 import { RECALL_CONTINUATION_FAILURE_CATEGORIES } from "./recall-continuation-failure";
+import {
+  safeResponseDiagnostic,
+  sentryHealthReason,
+  sentryWorkerID,
+  type WorkerResponseDiagnostic,
+} from "./worker-health";
 
 export const SENTRY_DATA_COLLECTION = {
   userInfo: false,
@@ -60,6 +66,7 @@ const SAFE_ERROR_TELEMETRY_MESSAGES = [
   /^Recall continuation failed$/,
   /^Worker health critical: sustained worker failure$/,
   /^Worker health degraded$/,
+  /^Worker response rejected$/,
   /^Worker upstream auth error: HTTP \d+$/,
   /^Worker upstream exhausted \d+ retries: HTTP \d+(?: embedded \d+)?$/,
   /^Upstream request rejected \(HTTP 400\)$/,
@@ -169,6 +176,19 @@ function isPrivateContentKey(key: string): boolean {
   );
 }
 
+function isPrivateRequestIdentityKey(key: string): boolean {
+  const { words, canonical } = canonicalKey(key);
+  return (
+    words.includes("model") ||
+    canonical.endsWith("modelid") ||
+    canonical.endsWith("sessionid") ||
+    canonical.endsWith("conversationid") ||
+    canonical === "authfingerprint" ||
+    canonical === "projecthash" ||
+    canonical === "upstreamorigin"
+  );
+}
+
 function scrubErrorTelemetryMessage(value: string): string {
   const scrubbed = scrubTelemetryText(value);
   return SAFE_ERROR_TELEMETRY_MESSAGES.some((pattern) => pattern.test(scrubbed))
@@ -233,6 +253,21 @@ function scrubRequest(value: Record<string, unknown>): Record<string, unknown> {
   return request;
 }
 
+function safeGenAiSpanName(value: unknown): string {
+  return value === "AI conversation turn" ? value : "AI worker call";
+}
+
+function isGenAiSpanAttributes(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const op = value["sentry.op"];
+  return (
+    (typeof op === "string" && op.startsWith("gen_ai.")) ||
+    (isRecord(op) &&
+      typeof op.value === "string" &&
+      op.value.startsWith("gen_ai."))
+  );
+}
+
 function scrubValue(
   value: unknown,
   seen: WeakMap<object, unknown>,
@@ -273,6 +308,7 @@ function scrubValue(
     if (
       isSensitiveTelemetryKey(key) ||
       isPrivateContentKey(key) ||
+      isPrivateRequestIdentityKey(key) ||
       QUERY_VALUE_KEY.test(key)
     ) {
       copy[key] = FILTERED;
@@ -280,11 +316,123 @@ function scrubValue(
       copy[key] = [];
     } else if (key.toLowerCase() === "request" && isRecord(child)) {
       copy[key] = scrubRequest(child);
+    } else if (key === "transaction") {
+      copy[key] = "Telemetry transaction";
+    } else if (key === "sentry.segment.name" && isGenAiSpanAttributes(record)) {
+      const name = safeGenAiSpanName(isRecord(child) ? child.value : child);
+      copy[key] = isRecord(child) ? { value: name, type: "string" } : name;
+    } else if (
+      key === "name" &&
+      ((typeof record.op === "string" && record.op.startsWith("gen_ai.")) ||
+        isGenAiSpanAttributes(record.attributes))
+    ) {
+      copy[key] = safeGenAiSpanName(child);
     } else {
       copy[key] = scrubValue(child, seen, key);
     }
   }
   return copy;
+}
+
+/** Rebuild worker alerts from reviewed fields after global scope has merged. */
+function isolateWorkerAlertEvent<T extends Event>(event: T): T | null {
+  const fingerprint = event.fingerprint;
+  if (!Array.isArray(fingerprint)) return null;
+  const kind = fingerprint[0];
+  const workerID = sentryWorkerID(
+    typeof fingerprint[1] === "string" ? fingerprint[1] : "unknown",
+  );
+  const critical = event.exception?.values?.some(
+    (value) =>
+      value.value === "Worker health critical: sustained worker failure",
+  );
+  if (
+    (kind !== "worker-response-rejected" ||
+      event.message !== "Worker response rejected") &&
+    (kind !== "worker-health-degraded" ||
+      event.message !== "Worker health degraded") &&
+    (kind !== "worker-health-critical" || !critical)
+  ) {
+    return null;
+  }
+
+  const diagnostic = safeResponseDiagnostic(
+    event.contexts?.worker_response as WorkerResponseDiagnostic | undefined,
+  );
+  const health = event.contexts?.worker_health;
+  const safeHealth: Record<string, number> = {};
+  if (kind !== "worker-response-rejected" && isRecord(health)) {
+    for (const field of [
+      "failureCount",
+      "firstFailureAt",
+      "lastFailureAt",
+      "sustainedMs",
+    ]) {
+      const value = health[field];
+      if (
+        typeof value === "number" &&
+        Number.isSafeInteger(value) &&
+        value >= 0
+      ) {
+        safeHealth[field] = value;
+      }
+    }
+  }
+  const tags: Record<string, string> = {};
+  const contexts: Record<string, Record<string, unknown>> = {};
+  const safeEvent: Record<string, unknown> = {
+    ...(typeof event.event_id === "string" &&
+    /^[0-9a-f]{32}$/.test(event.event_id)
+      ? { event_id: event.event_id }
+      : {}),
+    ...(typeof event.timestamp === "number" && Number.isFinite(event.timestamp)
+      ? { timestamp: event.timestamp }
+      : {}),
+    platform: "node",
+    level: "error",
+  };
+  if (diagnostic) contexts.worker_response = diagnostic;
+  if (kind === "worker-response-rejected") {
+    safeEvent.message = "Worker response rejected";
+    safeEvent.fingerprint = [
+      kind,
+      workerID,
+      diagnostic?.protocol ?? "unknown",
+      diagnostic?.category ?? "invalid response body",
+    ];
+    if (diagnostic) {
+      tags.response_protocol = diagnostic.protocol;
+      tags.response_stage = diagnostic.stage;
+      tags.response_content = diagnostic.content;
+      tags.response_category = diagnostic.category;
+    }
+  } else {
+    safeEvent.message = critical
+      ? "Worker health critical: sustained worker failure"
+      : "Worker health degraded";
+    safeEvent.fingerprint = [kind, workerID];
+    tags.worker_id = workerID;
+    tags.reason = sentryHealthReason(
+      typeof event.tags?.reason === "string" ? event.tags.reason : "unknown",
+    );
+    if (safeHealth.failureCount !== undefined) {
+      tags.failure_count = String(safeHealth.failureCount);
+    }
+    if (Object.keys(safeHealth).length > 0) contexts.worker_health = safeHealth;
+    if (critical) {
+      safeEvent.exception = {
+        values: [
+          {
+            type: "Error",
+            value: "Worker health critical: sustained worker failure",
+          },
+        ],
+      };
+    }
+  }
+  if (Object.keys(tags).length > 0) safeEvent.tags = tags;
+  if (Object.keys(contexts).length > 0) safeEvent.contexts = contexts;
+  return safeEvent as T;
 }
 
 /** Deep-copy and redact an arbitrary telemetry payload or envelope. */
@@ -297,6 +445,8 @@ export function scrubTelemetryEvent<T extends Event>(event: T): T {
   if (event.message === "Recall continuation failed") {
     return isolateRecallContinuationEvent(event) ?? ({} as T);
   }
+  const workerAlert = isolateWorkerAlertEvent(event);
+  if (workerAlert) return workerAlert;
   const originalMessage = event.message;
   const originalExceptions = event.exception?.values;
   const scrubbed = scrubTelemetryValue(event);
@@ -319,15 +469,60 @@ export function scrubTelemetryEvent<T extends Event>(event: T): T {
 }
 
 /** Add a final privacy boundary around a Sentry-compatible transport. */
-export function wrapTelemetryTransport<Envelope, Response>(transport: {
-  send(envelope: Envelope): PromiseLike<Response>;
-  flush(timeout?: number): PromiseLike<boolean>;
-}): {
+export function wrapTelemetryTransport<Envelope, Response>(
+  transport: {
+    send(envelope: Envelope): PromiseLike<Response>;
+    flush(timeout?: number): PromiseLike<boolean>;
+  },
+  onDelivery?: (eventID: string, delivered: boolean) => void,
+): {
   send(envelope: Envelope): PromiseLike<Response>;
   flush(timeout?: number): PromiseLike<boolean>;
 } {
+  const notify = (eventID: string | undefined, delivered: boolean): void => {
+    if (!eventID) return;
+    try {
+      onDelivery?.(eventID, delivered);
+    } catch {
+      // Telemetry callbacks cannot change Sentry transport results.
+    }
+  };
   return {
-    send: (envelope) => transport.send(scrubEnvelope(envelope)),
+    send: (envelope) => {
+      const scrubbed = scrubEnvelope(envelope);
+      const header = Array.isArray(scrubbed) ? scrubbed[0] : undefined;
+      const eventID =
+        isRecord(header) &&
+        typeof header.event_id === "string" &&
+        /^[0-9a-f]{32}$/.test(header.event_id)
+          ? header.event_id
+          : undefined;
+      try {
+        return Promise.resolve(transport.send(scrubbed)).then(
+          (response) => {
+            try {
+              const status = isRecord(response)
+                ? response.statusCode
+                : undefined;
+              notify(
+                eventID,
+                typeof status === "number" && status >= 200 && status < 300,
+              );
+            } catch {
+              notify(eventID, false);
+            }
+            return response;
+          },
+          (error) => {
+            notify(eventID, false);
+            throw error;
+          },
+        );
+      } catch (error) {
+        notify(eventID, false);
+        throw error;
+      }
+    },
     flush: (timeout) => transport.flush(timeout),
   };
 }
@@ -341,14 +536,14 @@ function scrubEnvelope<T>(envelope: T): T {
   return scrubTelemetryValue(scrubEnvelopeEvents(envelope));
 }
 
-/** Drop Sentry log envelope items at the final transport boundary. */
+/** Drop log and binary attachment items at the final transport boundary. */
 function scrubEnvelopeEvents<T>(envelope: T): T {
   if (!Array.isArray(envelope) || !Array.isArray(envelope[1])) return envelope;
   const copy = [...envelope];
   copy[1] = envelope[1]
     .filter((item) => {
       if (!Array.isArray(item) || !isRecord(item[0])) return true;
-      return item[0].type !== "log";
+      return item[0].type !== "log" && item[0].type !== "attachment";
     })
     .map((item) => {
       if (

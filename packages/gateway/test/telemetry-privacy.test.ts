@@ -63,6 +63,7 @@ describe("telemetry privacy boundary", () => {
     }));
     expect(options).not.toHaveProperty("sendDefaultPii");
     expect(options.dataCollection).toEqual(SENTRY_DATA_COLLECTION);
+    expect(options.environment).toBe("production");
     expect(options).not.toHaveProperty("enableLogs");
     expect(options.beforeSend).toBeTypeOf("function");
     expect(options.beforeSendLog).toBeTypeOf("function");
@@ -221,6 +222,181 @@ describe("telemetry privacy boundary", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it("keeps the fixed worker rejection message through both Sentry privacy boundaries", async () => {
+    const marker = "PRIVATE_WORKER_RESPONSE_MARKER";
+    const options = buildSentryOptions();
+    const input: Event = {
+      message: "Worker response rejected",
+      fingerprint: [
+        "worker-response-rejected",
+        "lore-distill",
+        "openai",
+        "malformed OpenAI response body",
+      ],
+      contexts: {
+        worker_response: {
+          protocol: "openai",
+          stage: "parse",
+          content: "json",
+          category: "malformed OpenAI response body",
+          finishReason: "n/a",
+          httpStatus: 200,
+        },
+      },
+      extra: { detail: marker },
+    };
+    const event = await options.beforeSend?.(
+      input as Parameters<NonNullable<typeof options.beforeSend>>[0],
+      {},
+    );
+    expect(event?.message).toBe("Worker response rejected");
+    const envelope = scrubTelemetryEnvelope([
+      { event_id: "event-id" },
+      [[{ type: "event" }, event]],
+    ] as const);
+    expect(envelope[1][0][1]?.message).toBe("Worker response rejected");
+    expect(envelope[1][0][1]?.contexts?.worker_response?.category).toBe(
+      "malformed OpenAI response body",
+    );
+    expect(JSON.stringify(envelope)).not.toContain(marker);
+  });
+
+  it("drops private session and model scope fields from outbound events and gen-AI spans", async () => {
+    const privateSession = "private-session-sentinel";
+    const privateModel = "private-model-sentinel";
+    let sent: unknown;
+    const options = buildSentryOptions(() => ({
+      send(envelope) {
+        sent = envelope;
+        return Promise.resolve({ statusCode: 200 });
+      },
+      flush: () => Promise.resolve(true),
+    }));
+    const transport = options.transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+
+    const envelope: unknown = [
+      { event_id: "00000000000000000000000000000012" },
+      [
+        [
+          { type: "event" },
+          {
+            message: "Worker health degraded",
+            tags: { model: privateModel, session_id: privateSession },
+          },
+        ],
+        [
+          { type: "span" },
+          {
+            op: "gen_ai.request",
+            name: `chat ${privateModel}`,
+            attributes: {
+              "gen_ai.conversation.id": privateSession,
+              "gen_ai.request.model": privateModel,
+            },
+          },
+        ],
+      ],
+    ];
+    await transport.send(envelope as Parameters<typeof transport.send>[0]);
+    expect(JSON.stringify(sent)).not.toContain(privateSession);
+    expect(JSON.stringify(sent)).not.toContain(privateModel);
+    expect(JSON.stringify(sent)).toContain("Worker health degraded");
+  });
+
+  it("scrubs SDK-shaped streamed span names and envelope trace transactions", async () => {
+    const privateModel = "private-model-sentinel";
+    let sent: unknown;
+    const transport = buildSentryOptions(() => ({
+      send(envelope) {
+        sent = envelope;
+        return Promise.resolve({ statusCode: 200 });
+      },
+      flush: () => Promise.resolve(true),
+    })).transport?.({
+      url: "https://sentry.invalid",
+      recordDroppedEvent: () => {},
+    });
+    if (!transport) throw new Error("missing transport");
+
+    const envelope: unknown = [
+      {
+        event_id: "00000000000000000000000000000015",
+        trace: { transaction: `chat ${privateModel}` },
+      },
+      [
+        [
+          {
+            type: "span",
+            item_count: 2,
+            content_type: "application/vnd.sentry.items.span.v2+json",
+          },
+          {
+            version: 2,
+            items: [
+              {
+                name: `chat ${privateModel}`,
+                span_id: "aaaaaaaaaaaaaaaa",
+                trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                attributes: {
+                  "sentry.op": { value: "gen_ai.chat", type: "string" },
+                  "sentry.segment.name": {
+                    value: `chat ${privateModel}`,
+                    type: "string",
+                  },
+                  "gen_ai.request.model": {
+                    value: privateModel,
+                    type: "string",
+                  },
+                },
+              },
+              {
+                name: "sqlite query",
+                span_id: "cccccccccccccccc",
+                trace_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                attributes: {
+                  "sentry.op": { value: "db", type: "string" },
+                  "sentry.segment.name": {
+                    value: "sqlite query",
+                    type: "string",
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      ],
+    ];
+    await transport.send(envelope as Parameters<typeof transport.send>[0]);
+    expect(JSON.stringify(sent)).not.toContain(privateModel);
+    const outbound = sent as [
+      { trace: { transaction: string } },
+      Array<
+        [
+          unknown,
+          {
+            items: Array<{
+              name: string;
+              attributes: Record<string, unknown>;
+            }>;
+          },
+        ]
+      >,
+    ];
+    expect(outbound[0].trace.transaction).toBe("Telemetry transaction");
+    expect(outbound[1][0]?.[1].items[0]?.name).toBe("AI worker call");
+    expect(outbound[1][0]?.[1].items[1]?.name).toBe("sqlite query");
+    expect(
+      outbound[1][0]?.[1].items[1]?.attributes["sentry.segment.name"],
+    ).toEqual({
+      value: "sqlite query",
+      type: "string",
+    });
   });
 
   it("scrubs request data, breadcrumbs, contexts, and span attributes", () => {
