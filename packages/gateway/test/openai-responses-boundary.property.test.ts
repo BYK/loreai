@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { expect, test } from "vitest";
 import { digestChain } from "../src/chain-digest";
 import { encodeContextBoundary } from "../src/context-boundary";
+import { InvalidCrossProviderRequestError } from "../src/translate/errors";
 import {
   parseOpenAIResponsesRequest,
   parseOpenAIResponsesRequestChunks,
@@ -40,10 +41,20 @@ test("every advertised Responses item seam reconstructs the full normalization",
     fc.asyncProperty(
       fc.array(item, { minLength: 2, maxLength: 12 }),
       async (items) => {
-        const full = parseOpenAIResponsesRequest(
-          { model: "gpt", input: items },
-          {},
-        );
+        const full = (() => {
+          try {
+            return parseOpenAIResponsesRequest(
+              { model: "gpt", input: items },
+              {},
+            );
+          } catch (error) {
+            if (error instanceof InvalidCrossProviderRequestError) return null;
+            throw error;
+          }
+        })();
+        // An order that cannot be normalized is rejected before any seam is
+        // advertised; only accepted histories can have a valid checkpoint.
+        if (!full) return;
         for (let split = 1; split < items.length; split++) {
           const prefix = parseOpenAIResponsesRequest(
             { model: "gpt", input: items.slice(0, split) },

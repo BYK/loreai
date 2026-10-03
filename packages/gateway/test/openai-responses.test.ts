@@ -26,6 +26,7 @@ import {
   buildOpenAIResponsesUpstreamRequest,
   buildOpenAIResponsesResponse,
 } from "../src/translate/openai-responses";
+import { InvalidCrossProviderRequestError } from "../src/translate/errors";
 import { gzipSync, inflateSync } from "node:zlib";
 import { decodedRequestChunks } from "../src/http-body";
 import { createHarness, type Harness } from "./helpers/harness";
@@ -357,7 +358,19 @@ describe("parseOpenAIResponsesRequest", () => {
     );
 
     expect(next.messages).toEqual([
-      { role: "user", content: [{ type: "text", text: "new question" }] },
+      {
+        role: "user",
+        content: [{ type: "text", text: "new question" }],
+        provenanceContent: [
+          {
+            type: "opaque",
+            raw: nextBody.input[0],
+            responsesItem: true,
+            requestOnly: true,
+          },
+        ],
+        provenancePositions: [0],
+      },
     ]);
     expect(next.sourceInput?.sourcePrefix).toEqual({
       messageCount: first.messages.length,
@@ -521,6 +534,8 @@ describe("parseOpenAIResponsesRequest", () => {
     // The Responses API also allows `output` to be an array of content parts
     // instead of a plain string. Its text must be extracted (not flattened to
     // "") and any non-text parts preserved as opaque blocks.
+    const imageURL =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9FeAAAAABJRU5ErkJggg==";
     const req = parseOpenAIResponsesRequest(
       {
         model: "gpt-4o",
@@ -539,7 +554,7 @@ describe("parseOpenAIResponsesRequest", () => {
               { type: "output_text", text: "chart summary" },
               {
                 type: "input_image",
-                image_url: "data:image/png;base64,AAA",
+                image_url: imageURL,
               },
             ],
           },
@@ -553,13 +568,14 @@ describe("parseOpenAIResponsesRequest", () => {
       {
         type: "tool_result",
         toolUseId: "call_img",
+        nativeResponsesOutputArray: true,
         content: [
           { type: "text", text: "chart summary" },
           {
             type: "opaque",
             raw: {
               type: "input_image",
-              image_url: "data:image/png;base64,AAA",
+              image_url: imageURL,
             },
           },
         ],
@@ -984,39 +1000,25 @@ describe("parseOpenAIResponsesRequest", () => {
     expect(ids).toEqual(["call_A", "call_B"]);
   });
 
-  test("drops item_reference items without breaking surrounding messages", () => {
+  test("rejects an item_reference rather than dropping it from surrounding messages", () => {
     const reference = { type: "item_reference", id: "msg_server_123" };
-    const req = parseOpenAIResponsesRequest(
-      {
-        model: "gpt-5.5",
-        input: [
-          { type: "message", role: "user", content: "hello" },
-          // Server-side reference the gateway cannot resolve — must be dropped,
-          // not crash, and not corrupt the surrounding messages.
-          reference,
-          {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "hi" }],
-          },
-        ],
-      },
-      headers,
-    );
-
-    expect(req.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-    expect(req.messages[0].content).toEqual([{ type: "text", text: "hello" }]);
-    expect(req.messages[1].content).toEqual([{ type: "text", text: "hi" }]);
-    expect(
-      req.messages.flatMap(
-        (message) => message.provenanceContent ?? message.content,
+    expect(() =>
+      parseOpenAIResponsesRequest(
+        {
+          model: "gpt-5.5",
+          input: [
+            { type: "message", role: "user", content: "hello" },
+            reference,
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "hi" }],
+            },
+          ],
+        },
+        headers,
       ),
-    ).not.toContainEqual(reference);
-    const body = buildOpenAIResponsesUpstreamRequest(
-      req,
-      "https://api.openai.com",
-    ).body as { input: Array<Record<string, unknown>> };
-    expect(body.input).not.toContainEqual(reference);
+    ).toThrow(InvalidCrossProviderRequestError);
   });
 
   test("never logs an item_reference id", () => {
@@ -1029,13 +1031,13 @@ describe("parseOpenAIResponsesRequest", () => {
       captureException: () => {},
     });
     try {
-      parseOpenAIResponsesRequest(
-        { input: [{ type: "item_reference", id }] },
-        headers,
-      );
-      expect(warnings).toEqual([
-        "dropping unresolvable Responses API item_reference; gateway is stateless full-history and cannot resolve server-side item references",
-      ]);
+      expect(() =>
+        parseOpenAIResponsesRequest(
+          { input: [{ type: "item_reference", id }] },
+          headers,
+        ),
+      ).toThrow(InvalidCrossProviderRequestError);
+      expect(warnings).toEqual([]);
       expect(warnings.join(" ")).not.toContain(id);
     } finally {
       log.registerSink({
@@ -1074,15 +1076,10 @@ describe("parseOpenAIResponsesRequest", () => {
               properties: { city: { type: "string" } },
             },
           },
-          {
-            type: "web_search",
-            name: "web_search",
-          },
         ],
       },
       headers,
     );
-    // Only function tools are parsed
     expect(req.tools).toHaveLength(1);
     expect(req.tools[0]).toEqual({
       name: "get_weather",
@@ -1182,6 +1179,106 @@ describe("streamed Responses ingress", () => {
     originalFetch = undefined;
     await harness?.teardown();
     harness = undefined;
+  });
+
+  test("does not checkpoint Responses input that carries elevated instructions", async () => {
+    const projectPath = process.cwd();
+    harness = await createHarness({ fixtures: [], projectPath });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    const upstream: Array<Record<string, unknown>> = [];
+    setUpstreamInterceptor(async (body) => {
+      upstream.push(body as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          id: `resp_elevated_${upstream.length}`,
+          model: "gpt-test",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: `msg_elevated_${upstream.length}`,
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "ok" }],
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const originalInput = [
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "keep the developer rule" }],
+      },
+      { type: "message", role: "user", content: "older question" },
+      { type: "message", role: "assistant", content: "older answer" },
+      { type: "message", role: "user", content: "first question" },
+    ];
+    const gatewayCalls: Array<{ inputItems: number; boundary: string | null }> =
+      [];
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (!url.href.startsWith(harness!.baseURL)) {
+          return originalFetch!(input, init);
+        }
+        const body = new Uint8Array(await request.arrayBuffer());
+        gatewayCalls.push({
+          inputItems: (
+            JSON.parse(Buffer.from(body).toString("utf8")) as {
+              input: unknown[];
+            }
+          ).input.length,
+          boundary: request.headers.get("x-lore-context-boundary"),
+        });
+        return harness!.request(`${url.pathname}${url.search}`, {
+          method: request.method,
+          headers: request.headers,
+          body,
+        });
+      },
+    ) as unknown as typeof globalThis.fetch;
+    interceptorCleanup = installFetchInterceptor({
+      gatewayBase: harness.baseURL,
+      getHeaders: () => ({
+        "x-lore-session-id": "elevated-responses-checkpoint",
+        "x-lore-project": projectPath,
+      }),
+    });
+    const send = (input: unknown[]) =>
+      fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-key",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "gpt-test", input }),
+      });
+
+    const first = await send(originalInput);
+    expect(first.status, await first.text()).toBe(200);
+    expect(first.headers.get("x-lore-context-boundary")).toBeNull();
+    const second = await send([
+      ...originalInput,
+      { type: "message", role: "assistant", content: "ok" },
+      { type: "message", role: "user", content: "second question" },
+    ]);
+    expect(second.status, await second.text()).toBe(200);
+    expect(second.headers.get("x-lore-context-boundary")).toBeNull();
+    expect(gatewayCalls).toEqual([
+      { inputItems: 4, boundary: null },
+      { inputItems: 6, boundary: null },
+    ]);
+    expect(upstream).toHaveLength(2);
+    for (const request of upstream) {
+      expect(JSON.stringify(request)).toContain("keep the developer rule");
+    }
   });
 
   test("normalizes a compressed body above the streaming threshold", async () => {
@@ -1539,6 +1636,74 @@ describe("streamed Responses ingress", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildOpenAIResponsesUpstreamRequest", () => {
+  test("does not mutate adjacent native user envelopes while building input", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        status: "completed",
+        content: [{ type: "input_text", text: "first" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        status: "completed",
+        content: [{ type: "input_text", text: "second" }],
+      },
+    ];
+    const req = parseOpenAIResponsesRequest({ model: "gpt-test", input }, {});
+    const before = structuredClone(req);
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+
+    expect(body.input).toEqual(input);
+    expect(req).toEqual(before);
+    expect(input[0].content).toEqual([{ type: "input_text", text: "first" }]);
+  });
+
+  test("keeps native user items around coalesced synthesized parts", () => {
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "first" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "last" }],
+      },
+    ];
+    const req = parseOpenAIResponsesRequest({ model: "gpt-test", input }, {});
+    req.messages.splice(1, 0, {
+      role: "user",
+      content: [
+        { type: "text", text: "middle" },
+        { type: "text", text: " fragment" },
+      ],
+    });
+    const body = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://api.openai.com",
+    ).body as Record<string, unknown>;
+
+    expect(body.input).toEqual([
+      input[0],
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "middle" },
+          { type: "input_text", text: " fragment" },
+        ],
+      },
+      input[1],
+    ]);
+    expect(input[0].content).toEqual([{ type: "input_text", text: "first" }]);
+  });
+
   test("builds correct URL and body structure", () => {
     const req = parseOpenAIResponsesRequest(
       {

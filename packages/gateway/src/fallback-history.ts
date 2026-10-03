@@ -5,11 +5,51 @@ import type {
   GatewayRequest,
 } from "./translate/types";
 
+/** Only text-only native user items have a bounded serialized context cost. */
+function nativeUserTextParts(block: GatewayContentBlock): string[] | null {
+  if (
+    block.type !== "opaque" ||
+    !block.responsesItem ||
+    !block.requestOnly ||
+    (block.raw.type !== undefined && block.raw.type !== "message") ||
+    block.raw.role !== "user" ||
+    Object.keys(block.raw).some(
+      (key) => !["type", "role", "content", "id", "status"].includes(key),
+    ) ||
+    (block.raw.status !== undefined && block.raw.status !== "completed") ||
+    (block.raw.id !== undefined &&
+      (typeof block.raw.id !== "string" || block.raw.id.length === 0))
+  )
+    return null;
+  if (typeof block.raw.content === "string") return [block.raw.content];
+  if (!Array.isArray(block.raw.content) || block.raw.content.length === 0)
+    return null;
+  const parts: string[] = [];
+  for (const part of block.raw.content) {
+    if (
+      part === null ||
+      typeof part !== "object" ||
+      Array.isArray(part) ||
+      !["input_text", "output_text"].includes(part.type) ||
+      typeof part.text !== "string" ||
+      Object.keys(part).some(
+        (key) => !["type", "text", "annotations"].includes(key),
+      ) ||
+      (part.annotations !== undefined &&
+        (part.type !== "output_text" || !Array.isArray(part.annotations)))
+    )
+      return null;
+    parts.push(part.text);
+  }
+  return parts;
+}
+
 /** A native media item may consume far more model context than its short URL
  * or serialized payload suggests. Never guess its cost on the timeout path. */
 function countable(block: GatewayContentBlock): boolean {
   if (block.type === "tool_result") return block.content.every(countable);
   if (block.type !== "opaque") return true;
+  if (nativeUserTextParts(block) !== null) return true;
   return (
     block.raw.type === "reasoning" &&
     typeof block.raw.encrypted_content === "string"
@@ -25,6 +65,31 @@ function alignedProvenance(message: GatewayMessage): boolean {
     provenancePositions.length !== message.content.length
   )
     return false;
+  if (provenanceContent.length === 1) {
+    const nativeParts = nativeUserTextParts(provenanceContent[0]);
+    const rawContent =
+      provenanceContent[0].type === "opaque"
+        ? provenanceContent[0].raw.content
+        : undefined;
+    const visibleParts = nativeParts?.filter(
+      (text, index) =>
+        text !== "" ||
+        (Array.isArray(rawContent) &&
+          rawContent[index]?.type === "output_text" &&
+          Array.isArray(rawContent[index]?.annotations) &&
+          rawContent[index].annotations.length > 0),
+    );
+    if (
+      visibleParts !== undefined &&
+      visibleParts.length === message.content.length &&
+      provenancePositions.every((position) => position === 0) &&
+      message.content.every(
+        (block, index) =>
+          block.type === "text" && block.text === visibleParts[index],
+      )
+    )
+      return true;
+  }
   let previous = -1;
   for (const position of provenancePositions) {
     if (

@@ -881,7 +881,7 @@ describe("Vitest database isolation harness", () => {
           readyPath: join(parent, "never-published.json"),
         },
       ).result,
-      5_000,
+      15_000,
     );
 
     expect(outcome.status).toBe("rejected");

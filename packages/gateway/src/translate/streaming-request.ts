@@ -6,6 +6,7 @@ import {
   type ContextBoundary,
 } from "@loreai/core";
 import type { GatewayRequest } from "./types";
+import { InvalidCrossProviderRequestError } from "./errors";
 
 export const STREAMING_PARSE_SPOOL_BYTES = 256 * 1024;
 
@@ -443,6 +444,7 @@ async function parseStreamedRequestInternal<M>(
     }
   }
   if (parseError instanceof StreamedRequestError) throw parseError;
+  if (parseError instanceof InvalidCrossProviderRequestError) throw parseError;
   if (parseError || !sawToken || active || !tokenizer.isEnded) {
     throw new Error("Invalid JSON body");
   }

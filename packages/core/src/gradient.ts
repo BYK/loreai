@@ -2589,14 +2589,18 @@ export function deduplicateToolOutputs(
       if (!collapse) return part;
 
       // This is a duplicate — replace with compact annotation.
-      // Drop structured `blocks` — the content is being compressed away.
+      // Drop source blocks. A native Responses output array keeps its shape
+      // with one synthesized text part containing the annotation.
       partsChanged = true;
+      const annotation = dedupAnnotation(part.tool, readRange?.path, readRange);
       return {
         ...part,
         state: {
           ...part.state,
-          output: dedupAnnotation(part.tool, readRange?.path, readRange),
-          blocks: undefined,
+          output: annotation,
+          blocks: part.state.nativeResponsesOutputArray
+            ? [{ type: "text", text: annotation }]
+            : undefined,
         },
       };
     });
@@ -2662,13 +2666,16 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
   return parts.map((part) => {
     if (!isToolPart(part)) return part;
     if (part.state.status === "completed") {
-      // Drop structured `blocks` — content is being compressed to annotation.
+      // Replace native array parts with one annotation part when stripping.
+      const output = toolStripAnnotation(part.tool, part.state.output);
       return {
         ...part,
         state: {
           ...part.state,
-          output: toolStripAnnotation(part.tool, part.state.output),
-          blocks: undefined,
+          output,
+          blocks: part.state.nativeResponsesOutputArray
+            ? [{ type: "text", text: output }]
+            : undefined,
         },
       };
     }
@@ -2676,12 +2683,15 @@ function stripToolOutputs(parts: LorePart[]): LorePart[] {
     // aggressive (Layer 2) compression — otherwise failure-heavy turns evade
     // the strip entirely and can overflow the context.
     if (part.state.status === "error") {
+      const error = toolStripAnnotation(part.tool, part.state.error);
       return {
         ...part,
         state: {
           ...part.state,
-          error: toolStripAnnotation(part.tool, part.state.error),
-          blocks: undefined,
+          error,
+          blocks: part.state.nativeResponsesOutputArray
+            ? [{ type: "text", text: error }]
+            : undefined,
         },
       };
     }

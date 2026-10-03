@@ -309,7 +309,7 @@ describe.each([
         ],
         maxTokens: 1024,
         metadata:
-          protocol === "anthropic"
+          protocol === "anthropic" && upstreamProtocol === "anthropic"
             ? { tool_choice: { type: "tool", name: "recall" } }
             : {},
         extras:

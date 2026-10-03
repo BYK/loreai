@@ -35,6 +35,11 @@ import {
   type StreamedItemsBuilder,
 } from "./streaming-request";
 import { parseContextBoundary } from "../context-boundary";
+import { isImageBlock } from "./images";
+import {
+  InvalidCrossProviderRequestError,
+  requireTextOnlyToolResult,
+} from "./errors";
 
 /** Default Gemini API version segment used when building upstream URLs. */
 const GEMINI_API_VERSION = "v1beta";
@@ -250,7 +255,12 @@ export function createGeminiContentsBuilder(): StreamedItemsBuilder<
         const signature = geminiPartThoughtSignature(part);
         provenancePositions.push(provenance.length);
         visible.push(block);
-        if (signature !== undefined) {
+        if (
+          signature !== undefined ||
+          part.thought === true ||
+          Object.hasOwn(part, "thoughtSignature") ||
+          Object.hasOwn(part, "thought_signature")
+        ) {
           hasRequestOnlyProvenance = true;
           provenance.push({ type: "opaque", raw: part });
         } else {
@@ -288,7 +298,20 @@ export function parseGeminiRequest(
   const raw = (body ?? {}) as Record<string, unknown>;
 
   // System prompt: `systemInstruction` (camelCase) or `system_instruction`.
-  const system = partsText(raw.systemInstruction ?? raw.system_instruction);
+  const rawSystem = raw.systemInstruction ?? raw.system_instruction;
+  const system = partsText(rawSystem);
+  const systemParts = (rawSystem as { parts?: unknown } | undefined)?.parts;
+  const geminiSystemInstructionHasThoughtMetadata =
+    Array.isArray(systemParts) &&
+    systemParts.some(
+      (part: unknown) =>
+        part !== null &&
+        typeof part === "object" &&
+        !Array.isArray(part) &&
+        (Object.hasOwn(part, "thoughtSignature") ||
+          Object.hasOwn(part, "thought_signature") ||
+          (part as Record<string, unknown>).thought === true),
+    );
 
   const rawContents = Array.isArray(raw.contents) ? raw.contents : [];
   const messageBuilder = createGeminiContentsBuilder();
@@ -299,12 +322,27 @@ export function parseGeminiRequest(
 
   // Tools: `[{functionDeclarations:[{name,description,parameters}]}]`.
   const tools: GatewayTool[] = [];
+  if (raw.tools !== undefined && !Array.isArray(raw.tools)) {
+    throw new InvalidCrossProviderRequestError();
+  }
   const rawTools = Array.isArray(raw.tools) ? raw.tools : [];
   for (const t of rawTools as Array<Record<string, unknown>>) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    if (
+      t.functionDeclarations !== undefined &&
+      !Array.isArray(t.functionDeclarations)
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
     const decls = Array.isArray(t.functionDeclarations)
       ? (t.functionDeclarations as Array<Record<string, unknown>>)
       : [];
     for (const d of decls) {
+      if (!d || typeof d !== "object" || Array.isArray(d)) {
+        throw new InvalidCrossProviderRequestError();
+      }
       tools.push({
         name: asString(d.name),
         description: asString(d.description),
@@ -326,6 +364,33 @@ export function parseGeminiRequest(
   if (raw.safetySettings) metadata.safetySettings = raw.safetySettings;
   if (raw.toolConfig) metadata.toolConfig = raw.toolConfig;
   if (raw.cachedContent) metadata.cachedContent = raw.cachedContent;
+  if (geminiSystemInstructionHasThoughtMetadata) {
+    metadata.geminiNativeSystemInstruction = rawSystem;
+  }
+  if (
+    rawTools.some(
+      (tool) =>
+        !tool ||
+        typeof tool !== "object" ||
+        Array.isArray(tool) ||
+        Object.keys(tool).some((key) => key !== "functionDeclarations") ||
+        (Array.isArray(tool.functionDeclarations) &&
+          tool.functionDeclarations.some(
+            (declaration: unknown) =>
+              !declaration ||
+              typeof declaration !== "object" ||
+              Array.isArray(declaration) ||
+              Object.keys(declaration).some(
+                (key) =>
+                  key !== "name" &&
+                  key !== "description" &&
+                  key !== "parameters",
+              ),
+          )),
+    )
+  ) {
+    metadata.geminiNativeTools = { raw: rawTools, parsed: tools };
+  }
 
   return {
     protocol: "gemini",
@@ -337,6 +402,9 @@ export function parseGeminiRequest(
     maxTokens,
     metadata,
     rawHeaders: { ...headers },
+    ...(geminiSystemInstructionHasThoughtMetadata
+      ? { geminiSystemInstructionHasThoughtMetadata: true }
+      : {}),
     sourceInput: {
       itemCount: rawContents.length,
       inputDigest: digestChain(rawContents),
@@ -398,7 +466,10 @@ export function buildGeminiUpstreamUrl(
 }
 
 /** Convert a gateway content block to Gemini part(s). */
-function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
+function blockToGeminiParts(
+  block: GatewayContentBlock,
+  source: GatewayRequest["protocol"] = "gemini",
+): GeminiPart[] {
   switch (block.type) {
     case "text":
       return block.raw ? [block.raw] : block.text ? [{ text: block.text }] : [];
@@ -431,6 +502,7 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
             },
           ];
     case "tool_result": {
+      requireTextOnlyToolResult(block);
       const text = blocksToText(block.content);
       let response: unknown;
       try {
@@ -455,8 +527,21 @@ function blockToGeminiParts(block: GatewayContentBlock): GeminiPart[] {
       // protocol that produced them, not Gemini content. In particular,
       // Anthropic redacted_thinking is opaque encrypted data and cannot be
       // serialized as a Gemini Part without corrupting the response shape.
-      if (block.requestOnly || block.raw.type === "redacted_thinking")
+      if (block.requestOnly || block.raw.type === "redacted_thinking") {
+        if (source !== "gemini") throw new InvalidCrossProviderRequestError();
         return [];
+      }
+      if (
+        isImageBlock(block.raw) &&
+        (source !== "gemini" ||
+          (block.raw.inlineData === undefined &&
+            block.raw.fileData === undefined))
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      if (!isImageBlock(block.raw) && source !== "gemini") {
+        throw new InvalidCrossProviderRequestError();
+      }
       return [block.raw];
   }
 }
@@ -473,6 +558,15 @@ export function buildGeminiUpstreamRequest(
   req: GatewayRequest,
   upstreamBase: string,
 ): { url: string; headers: Record<string, string>; body: unknown } {
+  const responseFormat = req.extras?.response_format;
+  if (
+    (responseFormat !== undefined &&
+      (responseFormat.type !== "text" ||
+        Object.keys(responseFormat).some((key) => key !== "type"))) ||
+    req.extras?.text !== undefined
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
   const headers: Record<string, string> = {
     ...forwardClientHeaders(req.rawHeaders),
     "content-type": "application/json",
@@ -488,18 +582,46 @@ export function buildGeminiUpstreamRequest(
   for (const msg of req.messages) {
     const role = msg.role === "assistant" ? "model" : "user";
     const parts: GeminiPart[] = [];
-    for (const block of msg.provenanceContent ?? msg.content)
-      parts.push(...blockToGeminiParts(block));
+    const nativeUser =
+      req.protocol === "openai-responses" &&
+      msg.role === "user" &&
+      msg.provenanceContent?.length === 1 &&
+      msg.provenanceContent[0].type === "opaque" &&
+      msg.provenanceContent[0].responsesItem &&
+      msg.provenanceContent[0].raw.role === "user";
+    for (const block of nativeUser
+      ? msg.content
+      : (msg.provenanceContent ?? msg.content))
+      parts.push(...blockToGeminiParts(block, req.protocol));
     if (parts.length > 0) contents.push({ role, parts });
   }
 
   const body: Record<string, unknown> = { contents };
 
-  if (req.system) {
+  const nativeSystem = req.metadata.geminiNativeSystemInstruction;
+  if (nativeSystem !== undefined) {
+    if (req.protocol !== "gemini" || partsText(nativeSystem) !== req.system) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    body.systemInstruction = nativeSystem;
+  } else if (req.system) {
     body.systemInstruction = { parts: [{ text: req.system }] };
   }
 
-  if (req.tools.length > 0) {
+  const nativeTools = req.metadata.geminiNativeTools;
+  if (nativeTools !== undefined) {
+    if (
+      req.protocol !== "gemini" ||
+      !nativeTools ||
+      typeof nativeTools !== "object" ||
+      Array.isArray(nativeTools) ||
+      JSON.stringify(req.tools) !==
+        JSON.stringify((nativeTools as { parsed?: unknown }).parsed)
+    ) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    body.tools = (nativeTools as { raw: unknown }).raw;
+  } else if (req.tools.length > 0) {
     body.tools = [
       {
         functionDeclarations: req.tools.map((t) => ({

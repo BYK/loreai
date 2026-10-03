@@ -233,13 +233,15 @@ describe("Codex recall through the real ingress and forwarding path", () => {
       const output = await response.text();
       expect(response.status).toBe(200);
       expect(mock.pendingInterceptors()).toEqual([]);
+      // The client supplied a shorthand user item with no `type`; replay
+      // keeps that native envelope through both recall turns.
       expect(gatewayInputTypes).toEqual([
-        ["message"],
-        ["message", "function_call", "function_call_output"],
+        ["unknown"],
+        ["unknown", "function_call", "function_call_output"],
       ]);
       expect(forwardedInputTypes).toEqual([
-        ["message"],
-        ["message", "function_call", "function_call_output"],
+        ["unknown"],
+        ["unknown", "function_call", "function_call_output"],
       ]);
       expect(output).toContain("answer after recall");
       expect(output).toContain("response.completed");

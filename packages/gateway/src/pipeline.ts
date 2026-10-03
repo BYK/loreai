@@ -219,6 +219,10 @@ import {
   buildAnthropicRequest,
   buildAnthropicNonStreamResponse,
   parseAnthropicResponseJSON,
+  portableResponsesAssistantText,
+  portableResponsesFunctionCall,
+  portableResponsesToolOutput,
+  portableResponsesUserMessage,
   type AnthropicCacheOptions,
 } from "./translate/anthropic";
 import {
@@ -245,6 +249,7 @@ import {
   buildOpenAIResponsesResponse,
   parseOpenAIResponsesRequest,
 } from "./translate/openai-responses";
+import { InvalidCrossProviderRequestError } from "./translate/errors";
 import {
   accumulateResponsesSSEStream,
   streamResponsesPassthrough,
@@ -808,6 +813,20 @@ export function stripContextWarnings(messages: GatewayMessage[]): void {
         block.text.startsWith(CONTEXT_WARNING_MARKER)
       ) {
         const hasAlignedProvenance = hasAlignedGatewayProvenance(msg);
+        if (
+          !hasAlignedProvenance &&
+          msg.provenanceContent?.some(
+            (part) =>
+              part.type === "opaque" &&
+              part.responsesItem &&
+              (part.raw.type === "message" ||
+                (part.raw.type === undefined && part.raw.role === "assistant")),
+          )
+        ) {
+          // Multipart native items share one provenance position. Removing
+          // their warning must never discard the remaining item's metadata.
+          throw new InvalidCrossProviderRequestError();
+        }
         msg.content.splice(i, 1);
         // Request-only provenance is safe to replay only when its visible
         // index mapping is complete. A malformed/legacy message may contain
@@ -6195,13 +6214,64 @@ export function extractProjectMarker(
  * Mutates the message array in place.
  */
 export function stripContextMarkers(messages: GatewayMessage[]): void {
+  const strip = (text: string): string => {
+    LORE_CONTEXT_MARKER_RE.lastIndex = 0;
+    if (!LORE_CONTEXT_MARKER_RE.test(text)) return text;
+    LORE_CONTEXT_MARKER_RE.lastIndex = 0;
+    return text.replace(LORE_CONTEXT_MARKER_RE, "").trimEnd();
+  };
   for (const msg of messages) {
     if (msg.role !== "user") continue;
-    for (const block of msg.content) {
-      if (block.type === "text" && LORE_CONTEXT_MARKER_RE.test(block.text)) {
-        // Reset lastIndex since the regex has the global flag
-        LORE_CONTEXT_MARKER_RE.lastIndex = 0;
-        block.text = block.text.replace(LORE_CONTEXT_MARKER_RE, "").trimEnd();
+    const markedTextBlocks = msg.content.filter((block) => {
+      if (block.type !== "text") return false;
+      LORE_CONTEXT_MARKER_RE.lastIndex = 0;
+      return LORE_CONTEXT_MARKER_RE.test(block.text);
+    });
+    for (const block of markedTextBlocks) {
+      if (block.type === "text") {
+        block.text = strip(block.text);
+        if (block.raw?.type === "text" && typeof block.raw.text === "string") {
+          block.raw = { ...block.raw, text: strip(block.raw.text) };
+        }
+      }
+    }
+    if (markedTextBlocks.length === 0) continue;
+    // Source-native items are request-only, but replay builders can forward
+    // them verbatim. Clean cloned text fields too; never mutate the parsed raw
+    // request or leave a marker in a later provenance replay.
+    for (const block of msg.provenanceContent ?? []) {
+      if (block.type === "text" && block.raw?.type === "text") {
+        if (typeof block.raw.text === "string") {
+          block.raw = { ...block.raw, text: strip(block.raw.text) };
+        }
+      } else if (
+        block.type === "opaque" &&
+        block.responsesItem &&
+        block.raw.role === "user"
+      ) {
+        const original = block.raw.content;
+        if (typeof original === "string") {
+          block.raw = { ...block.raw, content: strip(original) };
+        } else if (Array.isArray(original)) {
+          block.raw = {
+            ...block.raw,
+            content: original.map((part: unknown) => {
+              if (
+                part !== null &&
+                typeof part === "object" &&
+                !Array.isArray(part) &&
+                typeof (part as Record<string, unknown>).text === "string" &&
+                ["input_text", "output_text", "text"].includes(
+                  String((part as Record<string, unknown>).type),
+                )
+              ) {
+                const rawPart = part as Record<string, unknown>;
+                return { ...rawPart, text: strip(rawPart.text as string) };
+              }
+              return part;
+            }),
+          };
+        }
       }
     }
   }
@@ -7440,6 +7510,187 @@ function resolveRequestUpstreamRoute(
   };
 }
 
+/** Check client controls before the gateway adds its own tool restrictions. */
+function assertCrossProviderRequestControls(
+  req: GatewayRequest,
+  effectiveProtocol: EffectiveUpstreamProtocol,
+): void {
+  const extras = req.extras;
+  if (
+    ((req.protocol === "openai" && effectiveProtocol !== "openai") ||
+      (req.protocol === "openai-responses" &&
+        effectiveProtocol !== "openai-responses")) &&
+    extras &&
+    Object.hasOwn(extras, "tool_choice")
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (
+    req.protocol === "openai-responses" &&
+    effectiveProtocol !== "openai-responses" &&
+    (req.tools.some((tool) => tool.responsesBuiltin !== undefined) ||
+      (extras &&
+        (Object.hasOwn(extras, "parallel_tool_calls") ||
+          Object.hasOwn(extras, "truncation"))) ||
+      (effectiveProtocol !== "openai" &&
+        req.tools.some((tool) => tool.strict !== undefined)))
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (
+    req.protocol === "openai" &&
+    effectiveProtocol !== "openai" &&
+    effectiveProtocol !== "openai-responses" &&
+    (req.tools.some((tool) => tool.strict !== undefined) ||
+      (extras && Object.hasOwn(extras, "parallel_tool_calls")))
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (
+    req.codex === true &&
+    effectiveProtocol !== "openai-responses" &&
+    extras &&
+    (["include", "prompt_cache_key", "service_tier"] as const).some((field) =>
+      Object.hasOwn(extras, field),
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (
+    req.protocol === "anthropic" &&
+    effectiveProtocol !== "anthropic" &&
+    effectiveProtocol !== "vertex" &&
+    Object.keys(req.metadata).length > 0
+  ) {
+    // Anthropic-specific controls (including forced tool_choice) cannot be
+    // dropped when the destination uses a different wire format.
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (
+    req.protocol === "gemini" &&
+    effectiveProtocol !== "gemini" &&
+    Object.entries(req.metadata).some(
+      ([key, value]) =>
+        key !== "generationConfig" ||
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).some((field) => field !== "maxOutputTokens"),
+    )
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+}
+
+/** Reject source-only provenance before preparation can project it into visible text. */
+function assertCrossProviderProvenance(
+  req: GatewayRequest,
+  effectiveProtocol: EffectiveUpstreamProtocol,
+): void {
+  if (req.protocol === "gemini" && effectiveProtocol !== "gemini") {
+    if (req.geminiSystemInstructionHasThoughtMetadata) {
+      throw new InvalidCrossProviderRequestError();
+    }
+    for (const message of req.messages) {
+      if (
+        message.provenanceContent?.some((block) => {
+          if (block.type !== "opaque") return false;
+          const raw = block.raw;
+          return (
+            raw !== null &&
+            typeof raw === "object" &&
+            !Array.isArray(raw) &&
+            (Object.hasOwn(raw, "thoughtSignature") ||
+              Object.hasOwn(raw, "thought_signature") ||
+              raw.thought === true)
+          );
+        })
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+    }
+  }
+  if (
+    (req.protocol === "anthropic" &&
+      (effectiveProtocol === "anthropic" || effectiveProtocol === "vertex")) ||
+    (req.protocol === "openai-responses" &&
+      effectiveProtocol === "openai-responses") ||
+    (req.protocol !== "anthropic" &&
+      req.protocol !== "openai-responses" &&
+      req.protocol !== "openai")
+  ) {
+    return;
+  }
+  if (req.protocol === "openai") {
+    if (effectiveProtocol !== "openai") {
+      for (const message of req.messages) {
+        if (
+          message.content.some(
+            (block) => block.type === "text" && block.raw !== undefined,
+          )
+        ) {
+          throw new InvalidCrossProviderRequestError();
+        }
+      }
+    }
+    return;
+  }
+  if (
+    req.protocol === "openai-responses" &&
+    req.extras?.reasoning !== undefined
+  ) {
+    throw new InvalidCrossProviderRequestError();
+  }
+  for (const message of req.messages) {
+    for (const block of message.provenanceContent ?? message.content) {
+      if (block.type !== "opaque") continue;
+      if (
+        req.protocol === "anthropic" &&
+        effectiveProtocol !== "anthropic" &&
+        effectiveProtocol !== "vertex" &&
+        (block.requestOnly ||
+          block.raw.type === "thinking" ||
+          block.raw.type === "redacted_thinking")
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      if (
+        req.protocol === "openai-responses" &&
+        effectiveProtocol !== "openai-responses" &&
+        block.requestOnly &&
+        !block.responsesItem
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+      if (
+        req.protocol === "openai-responses" &&
+        effectiveProtocol !== "openai-responses" &&
+        block.responsesItem
+      ) {
+        if (
+          block.raw.role === "user" &&
+          (block.raw.type === "message" || block.raw.type === undefined)
+        ) {
+          portableResponsesUserMessage(block.raw);
+          continue;
+        }
+        if (
+          block.raw.type === "message" ||
+          (block.raw.type === undefined && block.raw.role === "assistant")
+        ) {
+          portableResponsesAssistantText(block.raw);
+        } else if (block.raw.type === "function_call_output") {
+          portableResponsesToolOutput(block.raw);
+        } else if (block.raw.type === "function_call") {
+          portableResponsesFunctionCall(block.raw);
+        } else {
+          throw new InvalidCrossProviderRequestError();
+        }
+      }
+    }
+  }
+}
+
 /** Test-only access to the pure foreground route resolver. */
 export function resolveRequestUpstreamRouteForTest(
   req: Pick<GatewayRequest, "model" | "protocol" | "rawHeaders">,
@@ -7494,6 +7745,7 @@ async function forwardToUpstream(
   let body: unknown;
 
   const route = resolvedRoute ?? resolveRequestUpstreamRoute(req, config);
+  assertCrossProviderProvenance(req, route.effectiveProtocol);
   const {
     providerHeader,
     providerID,
@@ -7505,6 +7757,41 @@ async function forwardToUpstream(
     effectiveUpstreamBase,
     bedrockMantle,
   } = route;
+
+  const nativeInstructions =
+    req.protocol === "openai-responses"
+      ? req.extras?.nativeInstructionPrefix
+      : undefined;
+  if (
+    nativeInstructions?.hasLateItems ||
+    (req.protocol === "openai" &&
+      req.extras?.nativeChatInstructionPrefix?.hasLateItems) ||
+    (effectiveProtocol !== "openai-responses" &&
+      nativeInstructions?.items.some((item) => item.role === "developer")) ||
+    (req.protocol === "openai" &&
+      effectiveProtocol !== "openai" &&
+      (req.extras?.chatDeveloperInstruction ||
+        req.extras?.nativeChatInstructionPrefix?.items.some(
+          (item) =>
+            Array.isArray(item.content) &&
+            item.content.some((part) => part.cache_control !== undefined),
+        )))
+  ) {
+    // A late instruction cannot be moved to the front, and other providers
+    // cannot carry Responses developer instructions at their original tier.
+    throw new InvalidCrossProviderRequestError();
+  }
+  if (
+    req.protocol === "openai-responses" &&
+    req.extras?.text !== undefined &&
+    !headerUpstream &&
+    effectiveProtocol === "openai-responses" &&
+    ((providerRoute && providerRoute.protocol === "openai") ||
+      (!providerRoute && modelRoute?.protocol === "openai"))
+  ) {
+    // A Chat-only provider route cannot represent Responses output controls.
+    throw new InvalidCrossProviderRequestError();
+  }
 
   // Warn when a provider route exists but has no URL and no header override —
   // the request will fall through to config defaults which likely have wrong
@@ -19615,6 +19902,14 @@ export function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
     });
   }
   stripContextMarkers(req.messages);
+  const markerCleanedTexts = new Map<GatewayMessage, (string | undefined)[]>(
+    req.messages.map((message) => [
+      message,
+      message.content.map((block) =>
+        block.type === "text" ? block.text : undefined,
+      ),
+    ]),
+  );
   stripSyntheticRoundTrips(req);
   stripContextWarnings(req.messages);
   for (const message of req.messages) {
@@ -19638,6 +19933,54 @@ export function sanitizeCompleteRequestForFallback(req: GatewayRequest): void {
             message.content[position].text !== original.texts[index]),
       );
     if (!changed) continue;
+    const nativeUserItem =
+      original.provenance.length === 1 ? original.provenance[0] : undefined;
+    if (
+      nativeUserItem?.type === "opaque" &&
+      nativeUserItem.responsesItem &&
+      (nativeUserItem.raw.type === undefined ||
+        nativeUserItem.raw.type === "message") &&
+      nativeUserItem.raw.role === "user" &&
+      original.texts.some(
+        (text, index) => text !== markerCleanedTexts.get(message)?.[index],
+      )
+    ) {
+      const rawContent = nativeUserItem.raw.content;
+      const rawTexts = Array.isArray(rawContent)
+        ? rawContent.map((part: unknown) =>
+            part !== null && typeof part === "object" && !Array.isArray(part)
+              ? (part as Record<string, unknown>).text
+              : undefined,
+          )
+        : [rawContent];
+      const visibleRawTexts = rawTexts.filter(
+        (text, index) =>
+          text !== "" ||
+          (Array.isArray(rawContent) &&
+            rawContent[index]?.type === "output_text" &&
+            Array.isArray(rawContent[index]?.annotations) &&
+            rawContent[index].annotations.length > 0),
+      );
+      if (
+        retained.length === original.content.length &&
+        retained.every((index, position) => index === position) &&
+        original.positions.length === original.content.length &&
+        original.positions.every((position) => position === 0) &&
+        message.provenanceContent?.[0] === nativeUserItem &&
+        message.content.length === visibleRawTexts.length &&
+        message.content.every(
+          (block, index) =>
+            block.type === "text" &&
+            block.text === markerCleanedTexts.get(message)?.[index] &&
+            visibleRawTexts[index] === block.text,
+        )
+      ) {
+        // The source item was cloned and cleaned in stripContextMarkers.
+        // Duplicate positions identify its multipart text, not a lost item.
+        continue;
+      }
+      throw new InvalidCrossProviderRequestError();
+    }
     if (!original.aligned || retained.includes(undefined)) {
       delete message.provenanceContent;
       delete message.provenancePositions;
@@ -19812,7 +20155,14 @@ async function handleConversationTurn(
             config,
             rollback.route,
           );
-        } catch {
+        } catch (error) {
+          if (error instanceof InvalidCrossProviderRequestError) {
+            return errorResponse(
+              400,
+              "Unsupported cross-provider request",
+              "invalid_request_error",
+            );
+          }
           log.error("memory preparation fallback forwarding failed");
           return errorResponse(502, "Gateway request failed");
         }
@@ -21704,6 +22054,15 @@ async function handleConversationTurnPrepared(
         req.protocol,
         requestUpstreamRoute.effectiveProtocol,
       ),
+    req.protocol === "openai-responses" &&
+      requestUpstreamRoute.effectiveProtocol === "openai-responses",
+    req.protocol === "openai" &&
+      requestUpstreamRoute.effectiveProtocol === "openai",
+    req.protocol === "openai-responses" &&
+      requestUpstreamRoute.effectiveProtocol === "openai-responses" &&
+      result.layer < 4,
+    req.protocol === "openai-responses" &&
+      requestUpstreamRoute.effectiveProtocol === "openai-responses",
   );
   removeOrphanedToolResults(transformedMessages);
 
@@ -21716,9 +22075,17 @@ async function handleConversationTurnPrepared(
 
   // --- 8b. Inject recall tool (with git reminder appended to description) ---
   // Only inject if the client doesn't already have a recall tool (e.g. from
-  // a host plugin like OpenCode) and the request has other tools (so it's a
-  // coding agent, not a bare chat).
-  if (modifiedReq.tools.length > 0 && !clientHasRecallTool(modifiedReq.tools)) {
+  // a host plugin like OpenCode) and the request has a callable function tool.
+  // A provider-owned built-in cannot execute recall, and a client's explicit
+  // parallel-tool setting must not be replaced by our serial recall policy.
+  if (
+    modifiedReq.tools.some((tool) => tool.responsesBuiltin === undefined) &&
+    // Native Gemini built-ins are replayed as an exact tool set. Adding recall
+    // here would change the set and invalidate that replay.
+    !modifiedReq.metadata.geminiNativeTools &&
+    modifiedReq.extras?.parallel_tool_calls !== true &&
+    !clientHasRecallTool(modifiedReq.tools)
+  ) {
     // Build the recall tool with git reminder baked into its description.
     // This keeps the reminder in the stable tools prefix (1h cache) rather
     // than the volatile system prompt.
@@ -23557,7 +23924,17 @@ function toolResultContent(state: {
   output?: string;
   error?: string;
   blocks?: unknown[];
+  nativeResponsesOutputArray?: true;
 }): GatewayContentBlock[] {
+  if (state.nativeResponsesOutputArray) {
+    if (
+      !state.blocks ||
+      blocksToText(state.blocks as GatewayContentBlock[]) !==
+        (state.status === "error" ? state.error : state.output)
+    )
+      throw new InvalidCrossProviderRequestError();
+    return state.blocks as GatewayContentBlock[];
+  }
   if (state.blocks && state.blocks.length > 0) {
     // Re-emit the structured blocks that were preserved from ingress.
     return state.blocks as GatewayContentBlock[];
@@ -23580,6 +23957,10 @@ export function loreMessagesToGateway(
     >
   > = new Map(),
   allowProvenance = true,
+  allowNativeUserProvenance = false,
+  allowNativeChatTextProvenance = false,
+  allowNativeToolOutputProvenance = false,
+  nativeToolOutputRoute = false,
 ): GatewayMessage[] {
   const out: GatewayMessage[] = [];
 
@@ -23625,6 +24006,8 @@ export function loreMessagesToGateway(
               input?: unknown;
               output?: string;
               error?: string;
+              blocks?: GatewayContentBlock[];
+              nativeResponsesOutputArray?: true;
             };
           };
           if (toolPart.tool === "result") {
@@ -23635,6 +24018,9 @@ export function loreMessagesToGateway(
               toolUseId: toolPart.callID,
               ...(toolPart.toolName ? { toolName: toolPart.toolName } : {}),
               content: toolResultContent(toolPart.state),
+              ...(toolPart.state.nativeResponsesOutputArray
+                ? { nativeResponsesOutputArray: true as const }
+                : {}),
             });
           } else {
             // Emit tool_use on this assistant message
@@ -23653,6 +24039,9 @@ export function loreMessagesToGateway(
                 toolUseId: toolPart.callID,
                 toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
+                ...(toolPart.state.nativeResponsesOutputArray
+                  ? { nativeResponsesOutputArray: true as const }
+                  : {}),
               });
             } else if (toolPart.state.status === "error") {
               pendingToolResults.push({
@@ -23660,6 +24049,9 @@ export function loreMessagesToGateway(
                 toolUseId: toolPart.callID,
                 toolName: toolPart.toolName ?? toolPart.tool,
                 content: toolResultContent(toolPart.state),
+                ...(toolPart.state.nativeResponsesOutputArray
+                  ? { nativeResponsesOutputArray: true as const }
+                  : {}),
                 isError: true,
               });
             }
@@ -23689,17 +24081,163 @@ export function loreMessagesToGateway(
     }
 
     const message: GatewayMessage = { role: msg.info.role, content };
-    const provenance = allowProvenance
-      ? provenanceByMessageId.get(msg.info.id)
-      : undefined;
+    const candidate = provenanceByMessageId.get(msg.info.id);
+    const userNativeProvenance =
+      allowNativeUserProvenance &&
+      msg.info.role === "user" &&
+      candidate !== undefined &&
+      candidate.provenanceContent?.some(
+        (block) =>
+          block.type === "opaque" &&
+          block.requestOnly &&
+          ((block.responsesItem &&
+            (block.raw.type === undefined || block.raw.type === "message") &&
+            block.raw.role === "user") ||
+            (!block.responsesItem &&
+              ["input_text", "output_text", "text"].includes(
+                String(block.raw.type),
+              ))),
+      );
+    const chatNativeTextProvenance =
+      allowNativeChatTextProvenance &&
+      candidate !== undefined &&
+      candidate.provenanceContent?.some(
+        (block) => block.type === "text" && block.raw?.type === "text",
+      );
+    if (userNativeProvenance) {
+      if (
+        JSON.stringify(content) !== JSON.stringify(candidate.content) ||
+        !candidate.provenanceContent?.every(
+          (block) =>
+            block.type !== "opaque" ||
+            (!block.requestOnly && !block.responsesItem) ||
+            (block.requestOnly &&
+              ((block.responsesItem &&
+                (block.raw.type === undefined ||
+                  block.raw.type === "message") &&
+                block.raw.role === "user") ||
+                (!block.responsesItem &&
+                  ["input_text", "output_text", "text"].includes(
+                    String(block.raw.type),
+                  )))),
+        )
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+    }
+    if (chatNativeTextProvenance) {
+      if (
+        !candidate.provenanceContent?.every(
+          (block) =>
+            (block.type !== "opaque" ||
+              (!block.requestOnly && !block.responsesItem)) &&
+            (block.type !== "text" ||
+              block.raw === undefined ||
+              (block.raw.type === "text" &&
+                typeof block.raw.text === "string" &&
+                block.raw.text === block.text)),
+        ) ||
+        JSON.stringify(content) !==
+          JSON.stringify(
+            candidate.content.map((block) =>
+              block.type === "text" && block.raw
+                ? { type: "text", text: block.text }
+                : block,
+            ),
+          )
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
+    }
+    // Unlike encrypted reasoning, a validated function output can cross a
+    // gradient-layer boundary when its reconstructed result is unchanged.
+    const nativeToolOutputProvenance =
+      allowNativeToolOutputProvenance &&
+      candidate !== undefined &&
+      candidate.content.length > 0 &&
+      candidate.content.every((block) => block.type === "tool_result") &&
+      candidate.provenanceContent !== undefined &&
+      candidate.provenanceContent.length > 0 &&
+      candidate.provenanceContent.every(
+        (block) =>
+          block.type === "opaque" &&
+          block.responsesItem === true &&
+          block.requestOnly !== true &&
+          block.raw.type === "function_call_output",
+      );
+    const provenance =
+      allowProvenance ||
+      userNativeProvenance ||
+      chatNativeTextProvenance ||
+      nativeToolOutputProvenance
+        ? candidate
+        : undefined;
+    const toolResultsUnchanged =
+      provenance?.provenanceContent &&
+      provenance.content.length > 0 &&
+      content.length >= provenance.content.length &&
+      provenance.content.every((original, index) => {
+        const block = content[index];
+        return (
+          block?.type === "tool_result" &&
+          original.type === "tool_result" &&
+          block.toolUseId === original.toolUseId &&
+          block.isError === original.isError &&
+          JSON.stringify(block.content) === JSON.stringify(original.content)
+        );
+      });
     if (
       provenance?.provenanceContent &&
-      JSON.stringify(content) === JSON.stringify(provenance.content)
+      (JSON.stringify(content) === JSON.stringify(provenance.content) ||
+        chatNativeTextProvenance ||
+        toolResultsUnchanged)
     ) {
-      message.provenanceContent = [...provenance.provenanceContent];
+      const preservedProvenance = provenance.provenanceContent;
+      const added = toolResultsUnchanged
+        ? content.slice(provenance.content.length)
+        : [];
+      message.provenanceContent = [...preservedProvenance, ...added];
       if (provenance.provenancePositions) {
-        message.provenancePositions = [...provenance.provenancePositions];
+        message.provenancePositions = [
+          ...provenance.provenancePositions,
+          ...added.map((_block, index) => preservedProvenance.length + index),
+        ];
       }
+    }
+    // Emergency compaction drops source-native envelopes. Only a plain
+    // output_text part can be rebuilt from the visible text without changing
+    // its type or losing fields (including empty annotations).
+    if (
+      nativeToolOutputRoute &&
+      content.some((block) => block.type === "tool_result") &&
+      candidate?.provenanceContent?.some(
+        (block) =>
+          block.type === "opaque" &&
+          block.responsesItem &&
+          block.raw.type === "function_call_output" &&
+          (Object.keys(block.raw).some(
+            (key) => !["type", "call_id", "output"].includes(key),
+          ) ||
+            (Array.isArray(block.raw.output) &&
+              block.raw.output.some(
+                (part: unknown) =>
+                  part === null ||
+                  typeof part !== "object" ||
+                  Array.isArray(part) ||
+                  (part as Record<string, unknown>).type !== "output_text" ||
+                  Object.keys(part).some(
+                    (key) => key !== "type" && key !== "text",
+                  ),
+              ))),
+      ) &&
+      !message.provenanceContent?.some(
+        (block) =>
+          block.type === "opaque" &&
+          block.responsesItem &&
+          block.raw.type === "function_call_output",
+      )
+    ) {
+      throw new InvalidCrossProviderRequestError();
     }
     out.push(message);
   }
@@ -24260,12 +24798,16 @@ function slashResponse(
 // Error response builder
 // ---------------------------------------------------------------------------
 
-function errorResponse(status: number, message: string): Response {
+function errorResponse(
+  status: number,
+  message: string,
+  type: "server_error" | "invalid_request_error" = "server_error",
+): Response {
   return new Response(
     JSON.stringify({
       type: "error",
       error: {
-        type: "server_error",
+        type,
         message,
       },
     }),
@@ -24367,8 +24909,19 @@ async function handleRequestInner(
     // compaction, and meta branches can take alternate paths. This resolver is
     // synchronous and performs no network I/O.
     try {
-      resolveRequestUpstreamRoute(req, config);
+      const route = resolveRequestUpstreamRoute(req, config);
+      assertCrossProviderRequestControls(req, route.effectiveProtocol);
+      assertCrossProviderProvenance(req, route.effectiveProtocol);
+      if (
+        req.extras?.nativeChatInstructionPrefix?.hasLateItems ||
+        req.extras?.nativeInstructionPrefix?.hasLateItems
+      ) {
+        throw new InvalidCrossProviderRequestError();
+      }
     } catch (error) {
+      if (error instanceof InvalidCrossProviderRequestError) {
+        return errorResponse(400, error.message, "invalid_request_error");
+      }
       return errorResponse(
         400,
         error instanceof Error ? error.message : "Invalid upstream route",
@@ -24484,6 +25037,13 @@ async function handleRequestInner(
       claimSession,
     );
   } catch (err) {
+    if (err instanceof InvalidCrossProviderRequestError) {
+      return errorResponse(
+        400,
+        "Unsupported cross-provider request",
+        "invalid_request_error",
+      );
+    }
     if (err instanceof SourceDeltaUnavailableError) {
       const response = errorResponse(
         409,

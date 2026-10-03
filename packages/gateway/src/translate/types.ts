@@ -73,6 +73,8 @@ export type GatewayToolResultBlock = {
    * text-only wire forms (OpenAI `role:"tool"`, Responses `function_call_output`).
    */
   content: GatewayContentBlock[];
+  /** Responses output was an array, even when it contained one text part. */
+  nativeResponsesOutputArray?: true;
   isError?: boolean;
 };
 
@@ -218,6 +220,10 @@ export type GatewayTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Responses function schema strictness, retained for native replay. */
+  strict?: boolean;
+  /** Verified native Responses tool definition; never synthesize as a function. */
+  responsesBuiltin?: "web_search_preview";
   /** True only for tools injected and owned by the gateway. */
   gatewayOwned?: boolean;
 };
@@ -277,6 +283,37 @@ export type GatewayRequest = {
     previous_response_id?: string;
     /** OpenAI Responses API: reasoning configuration. */
     reasoning?: unknown;
+    /** Native instruction items retained outside the user/assistant history. */
+    nativeInstructionPrefix?: {
+      originalInstructions: string;
+      normalizedSystem: string;
+      /** Replaying these items before the conversation would change their order. */
+      hasLateItems: boolean;
+      items: Array<{
+        type?: "message";
+        role: "system" | "developer";
+        content: string | Array<{ type: "input_text"; text: string }>;
+      }>;
+    };
+    /** Chat developer content must not inherit another provider's system tier. */
+    chatDeveloperInstruction?: boolean;
+    /** Original Chat instruction roles must survive native forwarding. */
+    nativeChatInstructionPrefix?: {
+      normalizedSystem: string;
+      hasLateItems: boolean;
+      items: Array<{
+        role: "system" | "developer";
+        content:
+          | string
+          | Array<{
+              type: "text";
+              text: string;
+              cache_control?: { type: "ephemeral"; ttl?: "1h" };
+            }>;
+      }>;
+    };
+    /** OpenAI Chat Completions structured-output constraint. */
+    response_format?: Record<string, unknown>;
     /** OpenAI Responses API: truncation settings. */
     truncation?: unknown;
     /**
@@ -299,6 +336,8 @@ export type GatewayRequest = {
      */
     stream_options?: { include_usage?: boolean };
   };
+  /** A Gemini system part carries source-only thought/signature metadata. */
+  geminiSystemInstructionHasThoughtMetadata?: boolean;
   /**
    * Set when the request originated from Pi's `openai-codex` provider (ingress
    * path `/v1/codex/responses`). The protocol stays `"openai-responses"`; this
