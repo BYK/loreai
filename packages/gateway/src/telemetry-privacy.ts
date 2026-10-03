@@ -536,14 +536,14 @@ function scrubEnvelope<T>(envelope: T): T {
   return scrubTelemetryValue(scrubEnvelopeEvents(envelope));
 }
 
-/** Drop Sentry log envelope items at the final transport boundary. */
+/** Drop log and binary attachment items at the final transport boundary. */
 function scrubEnvelopeEvents<T>(envelope: T): T {
   if (!Array.isArray(envelope) || !Array.isArray(envelope[1])) return envelope;
   const copy = [...envelope];
   copy[1] = envelope[1]
     .filter((item) => {
       if (!Array.isArray(item) || !isRecord(item[0])) return true;
-      return item[0].type !== "log";
+      return item[0].type !== "log" && item[0].type !== "attachment";
     })
     .map((item) => {
       if (

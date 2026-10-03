@@ -185,4 +185,50 @@ describe("worker telemetry request scope", () => {
     expect(JSON.stringify(sent)).toContain("lore.cache_bust");
     expect(JSON.stringify(sent)).not.toContain(privateModel);
   });
+
+  test("a rejected worker response never exports global-scope attachments", async () => {
+    const privateFilename = "private-attachment-marker.bin";
+    const sent: unknown[] = [];
+    Sentry.init({
+      ...buildSentryOptions(() => ({
+        send(envelope) {
+          sent.push(envelope);
+          return Promise.resolve({ statusCode: 200 });
+        },
+        flush: () => Promise.resolve(true),
+      })),
+      integrations: () => [],
+    });
+    Sentry.getGlobalScope().addAttachment({
+      filename: privateFilename,
+      data: new TextEncoder().encode("private-attachment-bytes"),
+    });
+
+    try {
+      recordWorkerFailure("private-session", "lore-distill", "upstream-error", {
+        protocol: "anthropic",
+        stage: "decode",
+        content: "json",
+        category: "malformed JSON body",
+        finishReason: "n/a",
+        httpStatus: 200,
+      });
+      await Sentry.flush(1000);
+
+      expect(JSON.stringify(sent)).toContain("Worker response rejected");
+      expect(JSON.stringify(sent)).not.toContain(privateFilename);
+      const items = sent.flatMap((envelope) =>
+        Array.isArray(envelope) && Array.isArray(envelope[1])
+          ? envelope[1]
+          : [],
+      );
+      expect(
+        items.some(
+          (item) => Array.isArray(item) && item[0]?.type === "attachment",
+        ),
+      ).toBe(false);
+    } finally {
+      Sentry.getGlobalScope().clearAttachments();
+    }
+  });
 });
