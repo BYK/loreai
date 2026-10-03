@@ -792,6 +792,301 @@ describe("non-stream recall usage aggregation", () => {
     },
   );
 
+  it.each([
+    { principalTokens: 240_000, continuationTokens: 241_000 },
+    { principalTokens: 70_000, continuationTokens: 90_000 },
+  ])(
+    "continues a canonical Codex recall with $principalTokens principal and $continuationTokens follow-up tokens",
+    async ({ principalTokens, continuationTokens }) => {
+      _setModelDataForTest(
+        {
+          "gpt-6-sol": {
+            id: "gpt-6-sol",
+            limit: { context: 1_050_000, output: 128_000 },
+          },
+        },
+        {
+          "openai/gpt-6-sol": {
+            id: "gpt-6-sol",
+            limit: { context: 1_050_000, output: 128_000 },
+          },
+        },
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_codex_recall_principal",
+                "find prior context",
+                "gpt-6-sol",
+                { input_tokens: principalTokens, output_tokens: 10 },
+              )
+            : validResponsesSSE(
+                "resp_codex_recall_answer",
+                "recalled answer",
+                { input_tokens: continuationTokens, output_tokens: 10 },
+                "gpt-6-sol",
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": `codex-recall-${principalTokens}`,
+          },
+        });
+        request.model = "gpt-6-sol";
+        request.codex = true;
+        request.rawHeaders["x-lore-upstream-url"] =
+          "https://chatgpt.com/backend-api";
+        request.rawHeaders["x-lore-upstream-path"] =
+          "/backend-api/codex/responses";
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(2);
+        expect(output).toContain("recalled answer");
+        expect(output).toContain("response.completed");
+        expect(output).not.toContain("response.failed");
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it("rejects a Codex principal that fits the OpenAI API window but exceeds Codex's window", async () => {
+    const modelEntry = {
+      id: "gpt-6-sol",
+      limit: { context: 1_050_000, output: 128_000 },
+    };
+    _setModelDataForTest(
+      { "gpt-6-sol": modelEntry },
+      { "openai/gpt-6-sol": modelEntry },
+    );
+    const calls = { count: 0 };
+    setUpstreamInterceptor(async () => {
+      calls.count++;
+      return new Response(
+        calls.count === 1
+          ? recallResponsesSSE(
+              "resp_codex_over_context_principal",
+              "find prior context",
+              "gpt-6-sol",
+              { input_tokens: 300_000, output_tokens: 10 },
+            )
+          : validResponsesSSE(
+              "resp_codex_over_context_answer",
+              "unverified Codex answer",
+              { input_tokens: 100, output_tokens: 10 },
+              "gpt-6-sol",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "codex-over-context" },
+      });
+      request.model = "gpt-6-sol";
+      request.codex = true;
+      request.rawHeaders["x-lore-provider"] = "openai-codex";
+      delete request.rawHeaders["x-lore-upstream-url"];
+      request.rawHeaders["x-lore-no-store"] = "true";
+      const response = await handleRequest(request, loadLocalConfig());
+      const output = await response.text();
+      expect(calls.count).toBe(1);
+      expect(output).toContain("response.failed");
+      expect(output).not.toContain("unverified Codex answer");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearModelDataCache();
+    }
+  });
+
+  it.each([
+    {
+      scenario: "a different destination",
+      upstreamURL: "https://example.invalid/backend-api",
+      upstreamPath: "/backend-api/codex/responses",
+      codex: true,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "a different endpoint",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/other",
+      codex: true,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "a query-modified endpoint",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/responses?model=other",
+      codex: true,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "a non-Codex request",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/responses",
+      codex: false,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "missing provider-qualified model data",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/responses",
+      codex: true,
+      qualifiedContext: false,
+    },
+  ])(
+    "does not expand recall for $scenario",
+    async ({
+      scenario,
+      upstreamURL,
+      upstreamPath,
+      codex,
+      qualifiedContext,
+    }) => {
+      const modelEntry = {
+        id: "gpt-6-sol",
+        limit: { context: 1_050_000, output: 128_000 },
+      };
+      _setModelDataForTest(
+        { "gpt-6-sol": modelEntry },
+        qualifiedContext ? { "openai/gpt-6-sol": modelEntry } : {},
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_unverified_codex_route",
+                "find prior context",
+                "gpt-6-sol",
+                { input_tokens: 240_000, output_tokens: 10 },
+              )
+            : validResponsesSSE(
+                "resp_unverified_codex_answer",
+                "unverified answer",
+                { input_tokens: 241_000, output_tokens: 10 },
+                "gpt-6-sol",
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": `unverified-codex-${scenario}`,
+          },
+        });
+        request.model = "gpt-6-sol";
+        request.codex = codex;
+        request.rawHeaders["x-lore-upstream-url"] = upstreamURL;
+        request.rawHeaders["x-lore-upstream-path"] = upstreamPath;
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(1);
+        expect(output).toContain("response.failed");
+        expect(output).not.toContain("unverified answer");
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it.each([
+    {
+      scenario: "a switched continuation model",
+      continuationModel: "gpt-5.6-mini",
+      continuationUsage: { input_tokens: 241_000, output_tokens: 10 },
+    },
+    {
+      scenario: "an unmetered continuation",
+      continuationModel: "gpt-6-sol",
+      continuationUsage: null,
+    },
+    {
+      scenario: "an over-budget continuation",
+      continuationModel: "gpt-6-sol",
+      continuationUsage: { input_tokens: 970_000, output_tokens: 10 },
+    },
+    {
+      scenario: "a continuation beyond Codex's context window",
+      continuationModel: "gpt-6-sol",
+      continuationUsage: { input_tokens: 300_000, output_tokens: 10 },
+    },
+  ])(
+    "rejects $scenario on the canonical Codex route",
+    async ({ scenario, continuationModel, continuationUsage }) => {
+      const modelEntry = {
+        id: "gpt-6-sol",
+        limit: { context: 1_050_000, output: 128_000 },
+      };
+      _setModelDataForTest(
+        { "gpt-6-sol": modelEntry },
+        { "openai/gpt-6-sol": modelEntry },
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_codex_guard_principal",
+                "find prior context",
+                "gpt-6-sol",
+                { input_tokens: 240_000, output_tokens: 10 },
+              )
+            : validResponsesSSE(
+                "resp_codex_guard_answer",
+                "rejected answer",
+                continuationUsage,
+                continuationModel,
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": `codex-guard-${scenario}` },
+        });
+        request.model = "gpt-6-sol";
+        request.codex = true;
+        request.rawHeaders["x-lore-upstream-url"] =
+          "https://chatgpt.com/backend-api";
+        request.rawHeaders["x-lore-upstream-path"] =
+          "/backend-api/codex/responses";
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(2);
+        expect(output).toContain("response.failed");
+        expect(output).not.toContain("rejected answer");
+        expect(output).not.toContain("response.completed");
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
   it.each(
     [
       {
@@ -883,6 +1178,15 @@ describe("non-stream recall usage aggregation", () => {
         recoveryUsage: { input_tokens: 700_000, output_tokens: 1 },
       },
       {
+        scenario: "over-context Codex recovery answer",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 1, output_tokens: 1 },
+        recoveryModel: "gpt-5.6-sol",
+        recoveryUsage: { input_tokens: 300_000, output_tokens: 1 },
+      },
+      {
         scenario: "metered recovery answer",
         provider: true,
         principalTokens: 140_000,
@@ -914,6 +1218,7 @@ describe("non-stream recall usage aggregation", () => {
       const originalMaxExecutions =
         core.config().search.recall.chainMaxExecutions;
       core.config().search.queryExpansion = false;
+      const codexRecovery = scenario === "over-context Codex recovery answer";
       if (scenario.endsWith("recovery answer")) {
         // Exhaust execution depth after the accepted principal recall. The
         // follow-up must remain metered and on the principal's model so only
@@ -945,7 +1250,7 @@ describe("non-stream recall usage aggregation", () => {
         const calls = { count: 0 };
         const recoveryCalls = { count: 0 };
         const committed = vi.fn();
-        if (scenario.startsWith("over-budget"))
+        if (scenario.startsWith("over-budget") || codexRecovery)
           setRecallPersistenceCommitObserverForTest(committed);
         setUpstreamInterceptor(async (body) => {
           const tools = (
@@ -960,7 +1265,7 @@ describe("non-stream recall usage aggregation", () => {
             )
           ) {
             recoveryCalls.count++;
-            if (streaming)
+            if (streaming || codexRecovery)
               return new Response(
                 validResponsesSSE(
                   "recovery_budget_boundary",
@@ -979,6 +1284,7 @@ describe("non-stream recall usage aggregation", () => {
                 status: "completed",
                 output:
                   scenario === "over-budget recovery answer" ||
+                  codexRecovery ||
                   scenario === "metered recovery answer"
                     ? [
                         {
@@ -1011,7 +1317,7 @@ describe("non-stream recall usage aggregation", () => {
             );
           }
           calls.count++;
-          if (streaming) {
+          if (streaming || (codexRecovery && calls.count > 1)) {
             const sse =
               calls.count === 1
                 ? recallResponsesSSE(
@@ -1104,9 +1410,12 @@ describe("non-stream recall usage aggregation", () => {
             },
           });
           request.stream = streaming;
-          request.rawHeaders["x-lore-provider"] = "openai";
+          request.rawHeaders["x-lore-provider"] = codexRecovery
+            ? "openai-codex"
+            : "openai";
+          if (codexRecovery) request.codex = true;
           if (!override) delete request.rawHeaders["x-lore-upstream-url"];
-          if (!scenario.startsWith("over-budget"))
+          if (!scenario.startsWith("over-budget") && !codexRecovery)
             request.rawHeaders["x-lore-no-store"] = "true";
           const response = await handleRequest(request, loadLocalConfig());
           const output = await response.text();
@@ -1130,9 +1439,10 @@ describe("non-stream recall usage aggregation", () => {
             if (streaming) expect(output).toContain("response.failed");
             else expect(response.status).not.toBe(200);
           }
+          if (codexRecovery) expect(output).not.toContain("response.completed");
           if (finalAnswer && streaming) expect(recoveryCalls.count).toBe(0);
           if (recoveryModel) expect(recoveryCalls.count).toBe(1);
-          if (scenario.startsWith("over-budget")) {
+          if (scenario.startsWith("over-budget") || codexRecovery) {
             expect(committed).not.toHaveBeenCalled();
             const state = [...getActiveSessions().values()].find(
               (candidate) =>
@@ -1146,6 +1456,17 @@ describe("non-stream recall usage aggregation", () => {
                   getSessionCosts(state?.sessionID ?? "")?.conversation,
                 ).toMatchObject({
                   inputTokens: 840_001,
+                  outputTokens: 3,
+                  turns: 1,
+                }),
+              );
+            }
+            if (codexRecovery) {
+              await vi.waitFor(() =>
+                expect(
+                  getSessionCosts(state?.sessionID ?? "")?.conversation,
+                ).toMatchObject({
+                  inputTokens: 540_001,
                   outputTokens: 3,
                   turns: 1,
                 }),

@@ -173,6 +173,28 @@ describe("RecallChainBudget", () => {
     }
   });
 
+  test("rejects a metered continuation larger than the verified route's context", () => {
+    const budget = new RecallChainBudget({ modelContextTokens: 272_000 });
+    expect(
+      budget.recordPrincipalUsage(
+        { inputTokens: 240_000, outputTokens: 10 },
+        { expectedModel: "gpt-6-sol", actualModel: "gpt-6-sol" },
+        true,
+      ),
+    ).toBeUndefined();
+    expect(budget.maxTokens).toBe(960_040);
+    expect(
+      budget.recordContinuationUsage(
+        { inputTokens: 300_000, outputTokens: 10 },
+        "gpt-6-sol",
+        true,
+      ),
+    ).toBe("tokens");
+    expect(budget.exceedsTokenCeiling()).toBe(false);
+    expect(budget.canRecover()).toBe(false);
+    expect(budget.snapshot().inputTokens).toBe(300_000);
+  });
+
   test("never expands for an unverified answering model", () => {
     const mismatch = new RecallChainBudget({ modelContextTokens: 1_000_000 });
     expect(

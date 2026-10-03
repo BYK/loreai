@@ -570,6 +570,23 @@ export function knownModelContextLimit(
     : undefined;
 }
 
+/** Codex's own model catalog, not OpenAI API metadata, bounds ChatGPT turns.
+ * https://github.com/openai/codex/blob/b1e72963c3b71a9265a551e54beff078384efed9/codex-rs/models-manager/models.json
+ * Unknown/new models retain the conservative recall budget until verified. */
+const CODEX_272K_CONTEXT_MODELS = Object.freeze([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-6-astra",
+  "gpt-6-sol",
+  "gpt-6-luna",
+  "gpt-6.1-sol",
+]);
+
+export function knownCodexContextLimit(modelID: string): number | undefined {
+  return CODEX_272K_CONTEXT_MODELS.includes(modelID) ? 272_000 : undefined;
+}
+
 /** True when models.dev data has been loaded into the in-memory cache. */
 export function isModelDataLoaded(): boolean {
   return cachedModelData !== null;

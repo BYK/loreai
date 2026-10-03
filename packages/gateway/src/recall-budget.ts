@@ -71,7 +71,7 @@ export class RecallChainBudget {
   private readonly explicitMaxTokens: boolean;
   private readonly allowExpandedContext: boolean;
   private principalModel: string | undefined;
-  private unverifiedContinuation = false;
+  private invalidContinuation = false;
 
   constructor(options: RecallBudgetOptions = {}) {
     this.maxExecutions = options.maxExecutions ?? MAX_RECALL_EXECUTIONS;
@@ -212,11 +212,20 @@ export class RecallChainBudget {
     completeUsage: boolean,
   ): RecallStopReason | undefined {
     const stop = this.recordUsage(usage);
+    const continuationTokens = usage
+      ? validTokens(usage.inputTokens) +
+        validTokens(usage.outputTokens) +
+        validTokens(usage.cacheReadInputTokens) +
+        validTokens(usage.cacheCreationInputTokens)
+      : 0;
     if (
       this.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
-      (!this.continuationModelMatches(model) || !completeUsage)
+      (!this.continuationModelMatches(model) ||
+        !completeUsage ||
+        !Number.isSafeInteger(continuationTokens) ||
+        continuationTokens > this.modelContextTokens)
     ) {
-      this.unverifiedContinuation = true;
+      this.invalidContinuation = true;
       return this.setStop("tokens");
     }
     return stop;
@@ -294,9 +303,9 @@ export class RecallChainBudget {
     return this.totalTokens() > this.maxTokens;
   }
 
-  /** A stopped chain may recover only when all expanded calls were metered. */
+  /** A stopped chain may recover only when expanded calls were metered and fit their model. */
   canRecover(): boolean {
-    return !this.unverifiedContinuation && !this.exceedsTokenCeiling();
+    return !this.invalidContinuation && !this.exceedsTokenCeiling();
   }
 
   snapshot(): {

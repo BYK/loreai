@@ -221,6 +221,7 @@ import {
 import { buildVertexUpstream, vertexHost } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
 import {
+  buildOpenAICodexResponsesUrl,
   buildOpenAIResponsesUrl,
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
@@ -359,6 +360,7 @@ import {
   ensureModelDataReady,
   getModelEntrySync,
   getModelEntrySyncForProvider,
+  knownCodexContextLimit,
   knownModelContextLimit,
   isModelDataLoaded,
   lookupProviderRoute,
@@ -6958,6 +6960,33 @@ function canonicalModelRouteProviderID(
   );
 }
 
+/** The built-in ChatGPT Codex endpoint serves OpenAI models even when the
+ * fetch interceptor supplies its explicit upstream URL. A different path,
+ * protocol, or destination cannot borrow OpenAI's context window. */
+function isCanonicalCodexRecallRoute(
+  route: ResolvedRequestUpstreamRoute,
+  codex: boolean | undefined,
+): boolean {
+  const canonicalBase = resolveProviderRoute("openai-codex")?.url;
+  if (
+    codex !== true ||
+    route.effectiveProtocol !== "openai-responses" ||
+    !canonicalBase ||
+    route.effectiveUpstreamBase !== canonicalBase ||
+    (route.providerID !== undefined &&
+      route.providerID !== "openai" &&
+      route.providerID !== "openai-codex")
+  ) {
+    return false;
+  }
+  const canonicalPath = new URL(buildOpenAICodexResponsesUrl(canonicalBase))
+    .pathname;
+  return (
+    route.headerUpstreamPath === undefined ||
+    route.headerUpstreamPath === canonicalPath
+  );
+}
+
 /** OpenCode Zen may append an empty choice frame after finish_reason. */
 function isOpenCodeZenOpenAIStream(
   route: ResolvedRequestUpstreamRoute,
@@ -8763,6 +8792,8 @@ export function buildStreamingResponse(
                 throw new RecallContinuationFailure("follow_up_failed");
               }
               if (recallBudget.exceedsTokenCeiling())
+                throw new RecallContinuationFailure("follow_up_failed");
+              if (!recallBudget.canRecover())
                 throw new RecallContinuationFailure("follow_up_failed");
               if (finalRecallRound || continuationStopReason) {
                 if (contAccum.hasRecall())
@@ -13804,6 +13835,8 @@ export function streamResponsesRecallAware(
                       }
                       if (recallBudget.exceedsTokenCeiling())
                         throw new RecallContinuationFailure("follow_up_failed");
+                      if (!recallBudget.canRecover())
+                        throw new RecallContinuationFailure("follow_up_failed");
                       if (
                         continuationFailed ||
                         (continuationFollowUpInput.finalRecallRound &&
@@ -14384,7 +14417,7 @@ export function streamResponsesRecallAware(
                 rawRecovered.model,
                 rawRecovered.usageComplete === true,
               );
-              if (recallBudget.exceedsTokenCeiling())
+              if (!recallBudget.canRecover())
                 throw new RecallContinuationFailure("follow_up_failed");
               for (const quota of rawRecovered.codexRateLimits ?? []) {
                 appendCodexRateLimitEvent(publicCodexRateLimits, quota);
@@ -20283,17 +20316,31 @@ async function handleConversationTurnPrepared(
   );
   // Flat models.dev entries can belong to a different provider. Expand recall
   // only when the qualified context belongs to the final upstream destination.
-  const recallProviderID = requestUpstreamRoute.headerUpstream
-    ? undefined
-    : requestUpstreamRoute.providerID &&
-        requestUpstreamRoute.providerRoute?.url ===
-          requestUpstreamRoute.effectiveUpstreamBase
-      ? requestUpstreamRoute.providerID
-      : canonicalModelRouteProviderID(requestUpstreamRoute);
-  const verifiedRecallContext = knownModelContextLimit(
+  const canonicalCodexRecallRoute = isCanonicalCodexRecallRoute(
+    requestUpstreamRoute,
+    req.codex,
+  );
+  const recallProviderID = canonicalCodexRecallRoute
+    ? "openai"
+    : requestUpstreamRoute.headerUpstream
+      ? undefined
+      : requestUpstreamRoute.providerID &&
+          requestUpstreamRoute.providerRoute?.url ===
+            requestUpstreamRoute.effectiveUpstreamBase
+        ? requestUpstreamRoute.providerID
+        : canonicalModelRouteProviderID(requestUpstreamRoute);
+  const providerRecallContext = knownModelContextLimit(
     recallProviderID,
     req.model,
   );
+  const codexRecallContext = canonicalCodexRecallRoute
+    ? knownCodexContextLimit(req.model)
+    : undefined;
+  const verifiedRecallContext = canonicalCodexRecallRoute
+    ? providerRecallContext !== undefined && codexRecallContext !== undefined
+      ? Math.min(providerRecallContext, codexRecallContext)
+      : undefined
+    : providerRecallContext;
   const recallModelContextTokens =
     verifiedRecallContext ??
     Math.min(modelSpec.context, MAX_RECALL_CHAIN_TOKENS);
@@ -22455,6 +22502,13 @@ async function handleConversationTurnPrepared(
           ) {
             return failRecall(category, false);
           }
+          recallBudget.recordContinuationUsage(
+            recovery.continuation.usage,
+            recovery.continuation.model,
+            recovery.continuation.usageComplete === true,
+          );
+          if (!recallBudget.canRecover())
+            return failRecall("follow_up_failed", false);
           const projected = projectRecallRecoveryResponse(
             recovery.continuation,
           );
@@ -22462,13 +22516,6 @@ async function handleConversationTurnPrepared(
             throw new Error("recall recovery produced unsafe output");
           }
           recovered = projected;
-          recallBudget.recordContinuationUsage(
-            recovered.usage,
-            recovered.model,
-            recovered.usageComplete === true,
-          );
-          if (recallBudget.exceedsTokenCeiling())
-            return failRecall("follow_up_failed", false);
           if (recovered.codexRateLimits?.length) {
             for (const quota of recovered.codexRateLimits) {
               appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
@@ -22609,6 +22656,7 @@ async function handleConversationTurnPrepared(
       }
       if (recallBudget.exceedsTokenCeiling())
         return failRecall("follow_up_failed");
+      if (!recallBudget.canRecover()) return failRecall("follow_up_failed");
       if (continuationResp.codexRateLimits?.length) {
         for (const quota of continuationResp.codexRateLimits) {
           appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
