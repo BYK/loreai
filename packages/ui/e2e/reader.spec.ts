@@ -424,10 +424,12 @@ test.describe("session reader", () => {
     await expect(page).toHaveURL(/[?&]a=1(~|%7E)m\.lore_tm_v1_/);
     await expect(page.locator("mark.passage-target")).toHaveText("needle-150");
 
-    // A hit on an older page is not a hit until that page is loaded.
+    // A hit on an older page is not a hit until that page is loaded. The
+    // needle-N rows that are loaded only fuzzy-match "needle-5)" (#1948) —
+    // the summary must say approximate, never claim a literal hit.
     await page.getByTestId("search-input").fill("needle-5)");
     await expect(page.getByTestId("search-summary")).toContainText(
-      "No matches in loaded history",
+      "approximate",
     );
     await clickLoadOlder(page);
     await clickLoadOlder(page);
@@ -452,10 +454,15 @@ test.describe("session reader", () => {
     const query = "needle-8 and";
     await openSearch(page);
     await page.getByTestId("search-input").fill(query);
+    // No literal hit on the loaded page — the needle-18x rows only
+    // fuzzy-match (#1948), which the summary must declare approximate and no
+    // mark may read the literal query.
     await expect(page.getByTestId("search-summary")).toContainText(
-      "No matches in loaded history",
+      "approximate",
     );
-    await expect(page.locator("mark.passage-search")).toHaveCount(0);
+    await expect(
+      page.locator("mark.passage-search", { hasText: /^needle-8 and$/ }),
+    ).toHaveCount(0);
 
     await page.getByTestId("search-whole").click();
     const whole = page.getByTestId("search-whole-summary");
@@ -464,7 +471,9 @@ test.describe("session reader", () => {
       "1 matching message in the whole session · 1 in older history",
     );
     // Still nothing on screen: a server hit is not a highlight until loaded.
-    await expect(page.locator("mark.passage-search")).toHaveCount(0);
+    await expect(
+      page.locator("mark.passage-search", { hasText: /^needle-8 and$/ }),
+    ).toHaveCount(0);
 
     await page.getByTestId("search-whole-next").click();
     await expect(page.getByTestId("search-summary")).toContainText(

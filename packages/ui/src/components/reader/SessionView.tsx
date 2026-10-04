@@ -1280,14 +1280,19 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       if (generation !== scanGeneration) return;
       const started = performance.now();
       while (from !== null && performance.now() - started < SEARCH_SLICE_MS) {
-        const slice = searchRows(current, matcher, from, SEARCH_STEP_ROWS);
+        const slice = searchRows(current, matcher, from, SEARCH_STEP_ROWS, q);
         for (const hit of slice.hits) hits.push(hit);
         from = slice.next;
       }
       const done = from === null;
+      // Fuzzy hits are a rescue tail (#1948): one exact hit anywhere in the
+      // loaded history suppresses every approximate span, otherwise a
+      // near-duplicate corpus floods the hit list.
+      const shown = () =>
+        hits.some((h) => h.exact) ? hits.filter((h) => h.exact) : [...hits];
       setSearch({
         query: q,
-        hits: done || !kept ? [...hits] : kept,
+        hits: done || !kept ? shown() : kept,
         scanned: done ? current.length : (from ?? current.length),
         total: current.length,
         done,
@@ -1549,9 +1554,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       return `${matches} so far · scanning ${state.scanned.toLocaleString()} of ${state.total.toLocaleString()} blocks`;
     }
     const position = hitIndex() >= 0 ? `${hitIndex() + 1} of ${n}` : matches;
+    const approximate =
+      state.done && n > 0 && state.hits.every((hit) => !hit.exact)
+        ? " · approximate"
+        : "";
     return n === 0
       ? "No matches in loaded history"
-      : `${position} in loaded history`;
+      : `${position} in loaded history${approximate}`;
   };
 
   // -- coverage ------------------------------------------------------------
