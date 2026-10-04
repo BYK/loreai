@@ -84,10 +84,7 @@ export function decodeKnowledgeCursor(
     typeof cursor.sort !== "string" ||
     typeof cursor.id !== "string" ||
     cursor.id.length === 0 ||
-    !Array.isArray(cursor.keys) ||
-    !cursor.keys.every(
-      (key: unknown) => typeof key === "number" || typeof key === "string",
-    )
+    !Array.isArray(cursor.keys)
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }

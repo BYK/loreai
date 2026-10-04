@@ -19,11 +19,12 @@
  * -------------
  * A cursor is opaque to clients: base64url(JSON) of the keyset of the last row
  * of the page (ordered sort keys + id tiebreaker), the list kind, the sort, and the
- * project id it was minted for. It is NOT an offset. Decoding validates every
- * field; a token that fails to decode, was minted for another list/sort, or
- * for another project is rejected with 400 (`invalid_cursor`). Filters (`q`,
- * `category`, `scope`) are not embedded — the caller re-sends them with each
- * page, so a cursor never leaks the query it was minted under.
+ * project id it was minted for. The shared codec and knowledge cursor checks
+ * live in `cursor.ts`. It is NOT an offset. Decoding validates every field; a
+ * token that fails to decode, was minted for another list/sort, or for another
+ * project is rejected with 400 (`invalid_cursor`). Filters (`q`, `category`,
+ * `scope`) are not embedded — the caller re-sends them with each page, so a
+ * cursor never leaks the query it was minted under.
  *
  * Session messages
  * ----------------
