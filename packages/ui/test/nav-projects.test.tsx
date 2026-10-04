@@ -318,6 +318,54 @@ describe("sectionProjects / byRecency", () => {
     ).toEqual(["alpha", "beta"]);
   });
 
+  it("fuzzy match: typo finds the project and flags approximate", () => {
+    const list = [
+      project("loreai", { last_activity: 2 }),
+      project("other-thing", { last_activity: 1 }),
+    ];
+    const sections = sectionProjects(list, [], "loreia");
+    expect(sections.matches?.map((p) => p.id)).toEqual(["loreai"]);
+    expect(sections.approximate).toBe(true);
+  });
+
+  it("exact substring ranks above a fuzzy hit; approximate stays false", () => {
+    const list = [
+      // More recent but only a fuzzy hit for "loreai".
+      project("loreia", { last_activity: 5 }),
+      project("loreai", { last_activity: 1 }),
+    ];
+    const sections = sectionProjects(list, [], "loreai");
+    expect(sections.matches?.map((p) => p.id)).toEqual(["loreai", "loreia"]);
+    expect(sections.approximate).toBe(false);
+  });
+
+  it("approximate hint renders only when no hit is exact", async () => {
+    const list = [
+      project("loreai", { last_activity: 6 }),
+      project("alpha", { last_activity: 5 }),
+      project("bravo", { last_activity: 4 }),
+      project("charlie", { last_activity: 3 }),
+      project("delta", { last_activity: 2 }),
+      project("echo", { last_activity: 1 }),
+    ];
+    renderNav(list);
+    const input = await screen.findByTestId("nav-project-filter");
+
+    fireEvent.input(input, { target: { value: "loreia" } });
+    expect(sectionLabels("matches")).toEqual(["loreai0"]);
+    expect(
+      screen.getByTestId("nav-project-filter-approximate"),
+    ).toBeInTheDocument();
+
+    fireEvent.input(input, { target: { value: "loreai" } });
+    expect(sectionLabels("matches")).toEqual(["loreai0"]);
+    expect(screen.queryByTestId("nav-project-filter-approximate")).toBeNull();
+
+    fireEvent.input(input, { target: { value: "zzzzz" } });
+    expect(screen.getByText("No projects match")).toBeInTheDocument();
+    expect(screen.queryByTestId("nav-project-filter-approximate")).toBeNull();
+  });
+
   it("keeps the active project in filtered matches without duplicating it", () => {
     const list = [
       project("active", { name: "Pinned project", last_activity: 3 }),

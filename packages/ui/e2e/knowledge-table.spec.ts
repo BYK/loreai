@@ -46,6 +46,43 @@ test.describe("knowledge table routes", () => {
     await expect(page.getByText(/Recall Results/)).toHaveCount(0);
   });
 
+  test("typo filter shows a fuzzy row with the approximate badge", async ({
+    page,
+  }) => {
+    const projectId = await loreProjectId(page);
+    await page.goto(`/ui/projects/${projectId}/knowledge`);
+    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    // Typo of the seeded "Use cursor pagination" title.
+    await search.fill("curosr pagin");
+    await search.press("Enter");
+    const row = page
+      .getByTestId("knowledge-row")
+      .filter({ hasText: "Use cursor pagination" });
+    await expect(row).toBeVisible();
+    await expect(row.getByTestId("knowledge-match-fuzzy")).toBeVisible();
+    await expect(row.getByTestId("knowledge-match-fuzzy")).toContainText(
+      "approximate",
+    );
+    await expect(page.locator("caption")).toContainText(
+      "approximate matches shown below exact hits",
+    );
+  });
+
+  test("exact filter shows rows without the approximate badge", async ({
+    page,
+  }) => {
+    const projectId = await loreProjectId(page);
+    await page.goto(`/ui/projects/${projectId}/knowledge`);
+    const search = page.getByRole("textbox", { name: "Knowledge search" });
+    await search.fill("cursor pagination");
+    await search.press("Enter");
+    const row = page
+      .getByTestId("knowledge-row")
+      .filter({ hasText: "Use cursor pagination" });
+    await expect(row).toBeVisible();
+    await expect(page.getByTestId("knowledge-match-fuzzy")).toHaveCount(0);
+  });
+
   test("mobile row navigation preserves the table query", async ({ page }) => {
     await page.setViewportSize({ width: 393, height: 852 });
     const projectId = await loreProjectId(page);

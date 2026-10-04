@@ -27,7 +27,8 @@
       "worker_provider_id": null,
       "worker_model_id": null,
       "last_reinforced_at": 1700000002000,
-      "logical_id": "<uuid-0>"
+      "logical_id": "<uuid-0>",
+      "match": "exact"
     }
   ],
   "next_cursor": null

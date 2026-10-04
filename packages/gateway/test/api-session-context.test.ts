@@ -367,9 +367,12 @@ describe("GET /api/v1/sessions/:id/context", () => {
       distillations: unknown[];
     };
     const { data, temporal } = await import("@loreai/core");
+    const title = data.sessionTitle(projectPath, sid);
     expect(body).toEqual({
       messages: temporal.bySession(projectPath, sid),
       distillations: data.listDistillations(projectPath, { sessionId: sid }),
+      title: title.title,
+      title_source: title.title_source,
     });
   });
 

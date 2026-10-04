@@ -28,7 +28,8 @@
       "worker_model_id": null,
       "last_reinforced_at": 1700000002000,
       "logical_id": "<uuid-0>",
-      "project_name": "ui-contracts"
+      "project_name": "ui-contracts",
+      "match": "exact"
     }
   ],
   "next_cursor": "<cursor>"

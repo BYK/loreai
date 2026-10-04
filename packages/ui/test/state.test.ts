@@ -1005,6 +1005,43 @@ describe("paged sessions and recall state", () => {
     expect(recall).toHaveBeenCalledTimes(2);
   });
 
+  it("strips per-query match flags before caching a paged result", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const repo = createKnowledgeRepo(db);
+    const fuzzyItem: KnowledgeEntry = {
+      ...ENTRIES[0]!,
+      match: "fuzzy",
+    };
+    const client = {
+      listProjectKnowledgePage: async () => ({
+        items: [fuzzyItem],
+        next_cursor: null,
+      }),
+    } as unknown as ApiClient;
+    const state = createKnowledgeState({ client, repo, tracked });
+    const page = state.page(() => ({
+      projectId: "p1",
+      query: {
+        q: "kwledge",
+        category: null,
+        scope: null,
+        sort: [{ field: "updated_at", dir: "desc" }],
+        cursor: null,
+      },
+    }));
+    await flush();
+    // The loader value keeps the flag — the table needs it for the badge.
+    expect(page.loader.data()?.items[0]?.match).toBe("fuzzy");
+    // …but the cache and entity store must not carry a per-query flag.
+    const row = await repo.get("k1");
+    expect(row).toBeDefined();
+    expect("match" in row!).toBe(false);
+    expect(state.store.select("k1")).not.toHaveProperty("match");
+    await closeLoreDb();
+  });
+
   it("non-default paged queries do not read the knowledge list cache", async () => {
     const read = vi.fn();
     const repo = createKnowledgeRepo(null);
