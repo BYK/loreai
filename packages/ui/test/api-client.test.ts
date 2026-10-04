@@ -947,6 +947,29 @@ describe("FOLK-03 API client", () => {
 });
 
 describe("api client: error envelopes", () => {
+  it("preserves the gateway error type in ApiError.code", async () => {
+    const { client } = clientFor(() =>
+      json(
+        {
+          type: "error",
+          error: {
+            type: "stale_version",
+            message: "Knowledge entry changed",
+          },
+        },
+        409,
+      ),
+    );
+    const error = await failure(
+      client.promoteKnowledge("knowledge-1", "version-1"),
+    );
+    expect(error).toMatchObject({
+      kind: "http",
+      status: 409,
+      code: "stale_version",
+    });
+  });
+
   it.each([
     {
       errorType: "stale_member",
@@ -985,6 +1008,7 @@ describe("api client: error envelopes", () => {
       );
       const error = await failure(mutate(client));
       expect(error).toBeInstanceOf(ApiError);
+      expect(error.kind).toBe("http");
       expect(error.code).toBe(errorType);
       expect(error.status).toBe(409);
       expect(error.message).toBe(message);
