@@ -1496,6 +1496,88 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     expect(scroll.scrollTop).toBe(200 + 3 * 120);
   });
 
+  it("keeps refreshing the prepend pin across live appends", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    let apply: (() => void) | null = null;
+    let settle: (() => void) | null = null;
+    const onLoadOlder = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          apply = () =>
+            setMsgs((prev) => [
+              ...older(3).map((m, i) => ({ ...m, id: `page-${i}` })),
+              ...prev,
+            ]);
+          settle = resolve;
+        }),
+    );
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      hasOlder: true,
+      messageCount: 46,
+      onLoadOlder,
+    });
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 0);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    scroll.dispatchEvent(new Event("wheel"));
+    fireScroll(scroll, 200);
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 2; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    // Live rows arrive at the end while the page is in flight — the pin
+    // loop must keep refreshing (a plain row-count bail would kill it
+    // here and freeze the pin behind any further user scroll).
+    setMsgs((prev) => [
+      ...prev,
+      ...older(3).map((m, i) => ({ ...m, id: `live-${i}` })),
+    ]);
+    await tick();
+    scroll.dispatchEvent(new Event("wheel"));
+    fireScroll(scroll, 400);
+    const counts: number[] = [];
+    let current = 0;
+    const origQuery = scroll.querySelector.bind(scroll);
+    scroll.querySelector = (sel: string) => {
+      current += 1;
+      return origQuery(sel);
+    };
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      counts.push(current);
+      current = 0;
+    }
+    scroll.querySelector = origQuery;
+    expect(Math.max(...counts)).toBeGreaterThan(0);
+    // The prepend lands: compensation anchors where the user left the
+    // view, and the fresh pin adds no drift on top. The total-size delta
+    // covers all six rows that arrived in flight — the 3 prepended and
+    // the 3 live-appended.
+    apply!();
+    await tick();
+    settle!();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(scroll.scrollTop).toBe(400 + 6 * 120);
+  });
+
   it("counts wheel, touch, pointer and navigation keys as user scroll input", () => {
     const el = document.createElement("div");
     const watch = watchUserScroll(el);

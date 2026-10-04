@@ -689,11 +689,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     // user scroll mid-load moves the fold too — the refresh deliberately
     // does not stop on gestures, so the pin that lands is at most a frame
     // behind what the user is looking at.
-    const countAtCall = rows().length;
+    const firstKeyAtCall = rows()[0]?.key;
     if (enablePin && typeof requestAnimationFrame === "function") {
       let frames = 0;
       const capturePin = () => {
-        if (gen !== loadGen || !prepend || rows().length !== countAtCall)
+        // A prepend changed the top row — the request is spent. A live
+        // append at the end leaves the fold untouched, so keep refreshing.
+        if (gen !== loadGen || !prepend || rows()[0]?.key !== firstKeyAtCall)
           return;
         if (++frames > 300) return;
         const mounted = virtualizer.getVirtualItems();
