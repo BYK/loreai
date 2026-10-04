@@ -26,6 +26,7 @@ import {
 } from "~/db";
 import { DuplicateReview } from "~/components/lore/DuplicateReview";
 import { ApiError, type ApiClient } from "~/lib/api";
+import { markFrom } from "~/lib/dedup-review";
 import { globalKnowledgeHref, knowledgeHref, sessionHref } from "~/lib/href";
 import { WorkspaceProvider } from "~/routes/workspace";
 import { IDBFactory } from "./idb-globals";
@@ -548,6 +549,79 @@ describe("DuplicateReview", () => {
     expect(getSyncStatus).toHaveBeenCalledTimes(1);
   });
 
+  it("applies only fresh accepted marks and retains the stale mark", async () => {
+    const staleSnapshot = group("project:stale", [
+      candidate("stale-keep"),
+      candidate("stale-merge"),
+    ]);
+    const staleFresh = group("project:stale", [
+      candidate("stale-keep", { revision: 2 }),
+      candidate("stale-merge"),
+    ]);
+    const fresh = group("project:fresh", [
+      candidate("fresh-keep"),
+      candidate("fresh-merge"),
+    ]);
+    const currentGroups = [staleFresh, fresh];
+    const allCandidates = currentGroups.flatMap((item) => item.candidates);
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    const decisions = createReviewDecisionsStore(db);
+    const staleMark = markFrom(
+      staleSnapshot,
+      "accept",
+      "stale-keep",
+      projectId,
+    );
+    const freshMark = markFrom(fresh, "accept", "fresh-keep", projectId);
+    await decisions.put(staleMark);
+    await decisions.put(freshMark);
+
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    const client = makeClient({
+      previewDedup: async () => response(currentGroups),
+      listKnowledgeVersions: async (id) => {
+        const item = allCandidates.find(
+          (candidateItem) => candidateItem.logical_id === id,
+        );
+        if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+        return history(item);
+      },
+      applyDedup,
+    });
+    mount(client, Promise.resolve(db));
+    await screen.findByText("Full content for stale-keep");
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    expect(screen.getByTestId("apply-accepted")).toHaveTextContent(
+      "Apply 1 accepted…",
+    );
+
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+
+    await screen.findByTestId("dedup-apply-receipt");
+    expect(applyDedup).toHaveBeenCalledTimes(1);
+    expect(applyDedup.mock.calls[0]?.[1].decisions).toEqual([
+      {
+        keepId: "fresh-keep",
+        mergeIds: ["fresh-merge"],
+        expectedRevisions: { "fresh-keep": 1, "fresh-merge": 1 },
+      },
+    ]);
+    await waitFor(async () =>
+      expect(await decisions.list(projectId)).toEqual([staleMark]),
+    );
+  });
+
   it("shows the project export consequence and device-only sync state", async () => {
     mount(
       makeClient({
@@ -997,6 +1071,37 @@ describe("DuplicateReview", () => {
     expect(
       await screen.findByTestId("review-storage-notice"),
     ).toHaveTextContent("not saved on this device");
+  });
+
+  it("does not send an apply when IndexedDB is unavailable", async () => {
+    const applyDedup = vi.fn<ApiClient["applyDedup"]>(async (id, body) =>
+      receiptFor(id, body),
+    );
+    mount(makeClient({ applyDedup }), Promise.resolve(null));
+    await screen.findByText("Full content for knowledge-a");
+
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 accepted",
+      ),
+    );
+    expect(screen.getByTestId("duplicate-group")).toHaveTextContent("Accepted");
+
+    fireEvent.click(screen.getByTestId("apply-accepted"));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      await within(dialog).findByRole("button", { name: "Apply 1 accepted" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not save the apply operation on this device — no changes were sent.",
+    );
+    expect(applyDedup).not.toHaveBeenCalled();
+    expect(screen.getByTestId("review-summary")).toHaveTextContent(
+      "1 accepted",
+    );
+    expect(screen.getByTestId("duplicate-group")).toHaveTextContent("Accepted");
   });
 
   it("reports failed mark writes and deletes", async () => {
