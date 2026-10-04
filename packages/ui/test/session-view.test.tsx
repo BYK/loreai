@@ -1563,9 +1563,9 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     scroll.querySelector = origQuery;
     expect(Math.max(...counts)).toBeGreaterThan(0);
     // The prepend lands: compensation anchors where the user left the
-    // view, and the fresh pin adds no drift on top. The total-size delta
-    // covers all six rows that arrived in flight — the 3 prepended and
-    // the 3 live-appended.
+    // view by how far the prepend displaced the anchor — the three
+    // live-appended rows add height below the fold and must not move it,
+    // and the fresh pin adds no drift on top.
     apply!();
     await tick();
     settle!();
@@ -1575,7 +1575,7 @@ describe("SessionView: newest-first landing and lazy older history", () => {
       }
     }
     await tick();
-    expect(scroll.scrollTop).toBe(400 + 6 * 120);
+    expect(scroll.scrollTop).toBe(400 + 3 * 120);
   });
 
   it("counts wheel, touch, pointer and navigation keys as user scroll input", () => {

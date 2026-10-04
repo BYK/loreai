@@ -593,7 +593,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    */
   let prepend: {
     top: number;
-    total: number;
+    /** The anchor row's start offset at request time — the delta is how
+     * far the prepend displaced it, not how much the list grew (live
+     * appends add height below the fold that must not move the view). */
+    anchorStart: number;
     anchor: { key: string; index: number } | null;
     /** The first row at the fold and its screen top, refreshed every
      * frame until the page lands — the mount window and the first
@@ -676,7 +679,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const enablePin = el.scrollTop - listOffset() < el.clientHeight;
     prepend = {
       top: el.scrollTop,
-      total: virtualizer.getTotalSize(),
+      anchorStart:
+        virtualizer.getOffsetForIndex(last?.index ?? 0, "start")?.[0] ?? 0,
       anchor: last ? { key: String(last.key), index: last.index } : null,
       ...(enablePin ? pinNow(items) : { pin: null, foldPin: null }),
       serialAtStart: userSerial() ?? -1,
@@ -749,7 +753,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // The prepended rows are unmeasured, so they enter at the estimate; the
         // first-measure compensation in the virtualizer corrects the rest as
         // they are measured.
-        const delta = virtualizer.getTotalSize() - before.total;
+        const anchorIndex = rowIndexOf(before.anchor.key);
+        const anchorStart = virtualizer.getOffsetForIndex(
+          anchorIndex,
+          "start",
+        )?.[0];
+        if (anchorStart === undefined) return;
+        const delta = anchorStart - before.anchorStart;
         if (delta <= 0) return;
         // A user gesture during the load owns the position: re-anchor to
         // where they left it (prepended height still compensates on top).
