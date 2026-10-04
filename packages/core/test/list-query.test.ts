@@ -5,17 +5,20 @@ import * as ltm from "../src/ltm";
 import * as temporal from "../src/temporal";
 import { listSessions } from "../src/data";
 import {
-  KNOWLEDGE_SORTS,
-  knowledgeSortKey,
+  DEFAULT_KNOWLEDGE_SORT,
+  formatKnowledgeSort,
+  knowledgeKeysetMatchesSort,
   knowledgeVersionHistory,
   listAllKnowledgePage,
   listKnowledgePage,
+  parseKnowledgeSort,
   listSessionsPage,
   searchKnowledgeRanked,
   searchSessionMessagesPage,
   sessionSearchTerms,
   type KnowledgeKeyset,
   type KnowledgeSort,
+  type KnowledgeSortField,
 } from "../src/list-query";
 import type { KnowledgeEntry, KnowledgeVersion } from "../src/ltm";
 import type { LoreMessage, LorePart } from "../src/types";
@@ -83,43 +86,150 @@ function seedKnowledge(projectPath: string): string[] {
   return ids;
 }
 
-/** Reference ordering computed in JS: (key, id) with the sort's direction. */
+const SORT_FIELDS: KnowledgeSortField[] = [
+  "updated_at",
+  "created_at",
+  "confidence",
+  "title",
+];
+
+function allSorts(): KnowledgeSort[] {
+  const sorts: KnowledgeSort[] = [];
+  function visit(fields: KnowledgeSortField[]) {
+    if (fields.length) {
+      for (let mask = 0; mask < 2 ** fields.length; mask++) {
+        sorts.push(
+          fields.map((field, index) => ({
+            field,
+            dir: mask & (1 << index) ? "asc" : "desc",
+          })),
+        );
+      }
+    }
+    if (fields.length === 3) return;
+    for (const field of SORT_FIELDS) {
+      if (!fields.includes(field)) visit([...fields, field]);
+    }
+  }
+  visit([]);
+  return sorts;
+}
+
+const KNOWLEDGE_SORTS = allSorts();
+const REPRESENTATIVE_SORTS: KnowledgeSort[] = [
+  [{ field: "updated_at", dir: "desc" }],
+  [{ field: "created_at", dir: "asc" }],
+  [{ field: "confidence", dir: "desc" }],
+  [{ field: "title", dir: "asc" }],
+  [
+    { field: "updated_at", dir: "desc" },
+    { field: "confidence", dir: "asc" },
+  ],
+  [
+    { field: "title", dir: "asc" },
+    { field: "created_at", dir: "desc" },
+    { field: "updated_at", dir: "asc" },
+  ],
+];
+
+/** Reference ordering computed in JS with the same ordered key stack. */
 function expectedOrder(
   entries: KnowledgeEntry[],
   sort: KnowledgeSort,
 ): string[] {
-  const dir = sort === "title_asc" ? 1 : -1;
   return [...entries]
     .sort((a, b) => {
-      const ka = knowledgeSortKey(a, sort);
-      const kb = knowledgeSortKey(b, sort);
-      if (ka < kb) return -1 * dir;
-      if (ka > kb) return 1 * dir;
-      if (a.id < b.id) return -1 * dir;
-      if (a.id > b.id) return 1 * dir;
+      for (const { field, dir } of sort) {
+        const sign = dir === "asc" ? 1 : -1;
+        const ka = a[field];
+        const kb = b[field];
+        const comparison =
+          typeof ka === "number" && typeof kb === "number"
+            ? ka < kb
+              ? -1
+              : ka > kb
+                ? 1
+                : 0
+            : typeof ka === "string" && typeof kb === "string"
+              ? ka < kb
+                ? -1
+                : ka > kb
+                  ? 1
+                  : 0
+              : 0;
+        if (comparison !== 0) return comparison * sign;
+      }
+      const sign = sort[0].dir === "asc" ? 1 : -1;
+      if (a.id < b.id) return -sign;
+      if (a.id > b.id) return sign;
       return 0;
     })
     .map((e) => e.id);
 }
 
+function seedAdversarialSortRows(projectPath: string, marker: string): void {
+  const rows = [
+    { title: "Charlie", created: 2000, updated: 3000, confidence: 0.7 },
+    { title: "Alpha", created: 1000, updated: 1000, confidence: 0.4 },
+    { title: "Bravo", created: 3000, updated: 2000, confidence: 0.9 },
+    { title: "Alpha", created: 2000, updated: 1000, confidence: 0.7 },
+    { title: "Charlie", created: 3000, updated: 3000, confidence: 0.4 },
+    { title: "Bravo", created: 1000, updated: 2000, confidence: 0.7 },
+    { title: "Alpha", created: 3000, updated: 1000, confidence: 0.9 },
+    { title: "Charlie", created: 1000, updated: 2000, confidence: 0.7 },
+    { title: "Bravo", created: 2000, updated: 3000, confidence: 0.4 },
+    { title: "Alpha", created: 1000, updated: 3000, confidence: 0.7 },
+    { title: "Charlie", created: 2000, updated: 1000, confidence: 0.9 },
+    { title: "Bravo", created: 3000, updated: 2000, confidence: 0.4 },
+  ];
+  for (const [index, row] of rows.entries()) {
+    const id = ltm.create({
+      id: uuidv7(),
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: row.title,
+      content: `adversarial ${marker} sort row ${index}`,
+      confidence: row.confidence,
+    });
+    pin(id, {
+      created: row.created,
+      updated: row.updated,
+      confidence: row.confidence,
+    });
+  }
+}
+
 function pageAll(
   projectPath: string,
+  marker: string,
   sort: KnowledgeSort,
   limit: number,
-  between?: (pageNo: number) => void,
+  listKind: "project" | "all",
 ): string[] {
   const out: string[] = [];
   let after: KnowledgeKeyset | undefined;
-  let pages = 0;
   for (;;) {
-    const page = listKnowledgePage(projectPath, { sort, limit, after });
+    const page =
+      listKind === "project"
+        ? listKnowledgePage(projectPath, {
+            scope: "project",
+            q: marker,
+            sort,
+            limit,
+            after,
+          })
+        : listAllKnowledgePage({
+            q: marker,
+            scope: "project",
+            sort,
+            limit,
+            after,
+          });
     expect(page.items.length).toBeLessThanOrEqual(limit);
     out.push(...page.items.map((e) => e.id));
-    pages++;
     if (!page.next) break;
     after = page.next;
-    between?.(pages);
-    expect(pages).toBeLessThan(100);
   }
   return out;
 }
@@ -129,29 +239,94 @@ function pageAll(
 // ---------------------------------------------------------------------------
 
 describe("listKnowledgePage — deterministic keyset pagination", () => {
-  test.each([...KNOWLEDGE_SORTS])(
-    "sort=%s pages across ≥3 pages with equal sort keys and no gaps/dupes",
-    (sort) => {
-      const project = freshProject("sort");
-      seedKnowledge(project);
-      const all = listKnowledgePage(project, { sort, limit: 100 }).items;
-      expect(all).toHaveLength(7);
-      const expected = expectedOrder(all, sort);
-      expect(all.map((e) => e.id)).toEqual(expected);
+  test("pages every ordered 1–3-key sort stack without gaps or duplicates", () => {
+    const project = freshProject("stacked-sort");
+    const marker = `sortstack${++seq}`;
+    seedAdversarialSortRows(project, marker);
+    const entries = listKnowledgePage(project, {
+      scope: "project",
+      q: marker,
+      limit: 100,
+    }).items;
+    expect(entries).toHaveLength(12);
 
-      // limit=2 over 7 rows → 4 pages, boundaries land inside equal-key runs.
-      const paged = pageAll(project, sort, 2);
-      expect(paged).toEqual(expected);
-      expect(new Set(paged).size).toBe(7);
-    },
-  );
+    for (const sort of KNOWLEDGE_SORTS) {
+      const expected = expectedOrder(entries, sort);
+      const all = listKnowledgePage(project, {
+        scope: "project",
+        q: marker,
+        sort,
+        limit: 100,
+      }).items.map((entry) => entry.id);
+      expect(all, formatKnowledgeSort(sort)).toEqual(expected);
+      for (const limit of [1, 2, 3]) {
+        for (const listKind of ["project", "all"] as const) {
+          const paged = pageAll(project, marker, sort, limit, listKind);
+          expect(
+            paged,
+            `${listKind} ${formatKnowledgeSort(sort)} limit=${limit}`,
+          ).toEqual(expected);
+          expect(new Set(paged).size).toBe(entries.length);
+          expect([...paged].sort()).toEqual([...expected].sort());
+        }
+      }
+    }
+  });
 
-  test("default sort is updated_desc", () => {
+  test("parses and formats only canonical, distinct sort stacks", () => {
+    for (const sort of KNOWLEDGE_SORTS) {
+      expect(parseKnowledgeSort(formatKnowledgeSort(sort))).toEqual(sort);
+    }
+    for (const raw of [
+      "",
+      "updated_at",
+      "updated_at:up",
+      "updated_at:desc,updated_at:asc",
+      "updated_at:desc,created_at:desc,confidence:desc,title:asc",
+      " updated_at:desc",
+      "updated_at:desc ",
+      "updated_at:desc,,title:asc",
+      "unknown:asc",
+      "updated_desc",
+    ]) {
+      expect(parseKnowledgeSort(raw), raw).toBeNull();
+    }
+  });
+
+  test("validates keyset length and value types against the full sort stack", () => {
+    const sort: KnowledgeSort = [
+      { field: "updated_at", dir: "desc" },
+      { field: "title", dir: "asc" },
+      { field: "confidence", dir: "desc" },
+    ];
+    const keyset = { keys: [1000, "Alpha", 0.8], id: "entry-1" };
+    expect(knowledgeKeysetMatchesSort(keyset, sort)).toBe(true);
+    expect(
+      knowledgeKeysetMatchesSort(
+        { keys: [1000, "Alpha"], id: "entry-1" },
+        sort,
+      ),
+    ).toBe(false);
+    expect(
+      knowledgeKeysetMatchesSort(
+        { keys: [1000, 42, 0.8], id: "entry-1" },
+        sort,
+      ),
+    ).toBe(false);
+    expect(
+      knowledgeKeysetMatchesSort(
+        { keys: [Number.POSITIVE_INFINITY, "Alpha", 0.8], id: "entry-1" },
+        sort,
+      ),
+    ).toBe(false);
+  });
+
+  test("default sort is updated_at descending", () => {
     const project = freshProject("default-sort");
     seedKnowledge(project);
     const a = listKnowledgePage(project, { limit: 10 }).items.map((e) => e.id);
     const b = listKnowledgePage(project, {
-      sort: "updated_desc",
+      sort: DEFAULT_KNOWLEDGE_SORT,
       limit: 10,
     }).items.map((e) => e.id);
     expect(a).toEqual(b);
@@ -170,7 +345,7 @@ describe("listKnowledgePage — deterministic keyset pagination", () => {
   test("a row inserted between pages that sorts BEFORE the cursor is not surfaced; one AFTER is", () => {
     const project = freshProject("mutate-insert");
     seedKnowledge(project);
-    const sort = "updated_desc";
+    const sort: KnowledgeSort = [{ field: "updated_at", dir: "desc" }];
     const p1 = listKnowledgePage(project, { sort, limit: 3 });
     expect(p1.next).not.toBeNull();
     // Newest row (updated_at way in the future) lands before the cursor.
@@ -210,7 +385,7 @@ describe("listKnowledgePage — deterministic keyset pagination", () => {
   test("a row deleted between pages disappears without shifting the others (no offset drift)", () => {
     const project = freshProject("mutate-delete");
     const ids = seedKnowledge(project);
-    const sort = "title_asc";
+    const sort: KnowledgeSort = [{ field: "title", dir: "asc" }];
     const p1 = listKnowledgePage(project, { sort, limit: 2 });
     const remaining = new Set(ids);
     // Delete one row from page 1 (already served) and one row not yet served.
@@ -238,7 +413,7 @@ describe("listKnowledgePage — deterministic keyset pagination", () => {
   test("an update between pages moves the row to its new sort position (may be re-served)", () => {
     const project = freshProject("mutate-update");
     seedKnowledge(project);
-    const sort = "updated_desc";
+    const sort: KnowledgeSort = [{ field: "updated_at", dir: "desc" }];
     const p1 = listKnowledgePage(project, { sort, limit: 2 });
     const victim = p1.items[1];
     // Bump updated_at far into the past: the (now superseded) entry's new
@@ -324,6 +499,9 @@ describe("listAllKnowledgePage — cross-project keyset pagination", () => {
       pin(id, { created: 4000, updated: 7000, confidence: 0.8 });
       return id;
     });
+    db()
+      .query("UPDATE knowledge SET cross_project = NULL WHERE id = ?")
+      .run(ids[1]);
     const lowConfidenceId = ltm.create({
       id: uuidv7(),
       projectPath: projectA,
@@ -369,7 +547,7 @@ describe("listAllKnowledgePage — cross-project keyset pagination", () => {
       }),
     );
 
-    for (const sort of KNOWLEDGE_SORTS) {
+    for (const sort of REPRESENTATIVE_SORTS) {
       const all = listAllKnowledgePage({
         q: marker,
         sort,
@@ -414,25 +592,78 @@ describe("listAllKnowledgePage — cross-project keyset pagination", () => {
     expect(all.map((entry) => entry.logical_id)).toEqual(
       expect.arrayContaining([...ids, updatedId]),
     );
+    expect(
+      listAllKnowledgePage({ q: marker, limit: 100 }).items.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual(all.map((entry) => entry.id));
 
-    const global = listAllKnowledgePage({
+    const shared = listAllKnowledgePage({
       q: marker,
-      scope: "global",
+      scope: "shared",
       limit: 100,
     }).items;
-    expect(global.length).toBeGreaterThan(0);
-    expect(global.every((entry) => entry.project_id === null)).toBe(true);
+    expect(shared.length).toBeGreaterThan(0);
+    expect(
+      shared.every(
+        (entry) => entry.project_id === null || entry.cross_project === 1,
+      ),
+    ).toBe(true);
     const project = listAllKnowledgePage({
       q: marker,
       scope: "project",
       limit: 100,
     }).items;
     expect(project.length).toBeGreaterThan(0);
-    expect(project.every((entry) => entry.project_id !== null)).toBe(true);
+    expect(
+      project.every(
+        (entry) =>
+          entry.project_id !== null &&
+          (entry.cross_project === null || entry.cross_project === 0),
+      ),
+    ).toBe(true);
+    const allIds = new Set(all.map((entry) => entry.id));
+    const projectIds = new Set(project.map((entry) => entry.id));
+    const sharedIds = new Set(shared.map((entry) => entry.id));
+    expect(new Set([...projectIds, ...sharedIds])).toEqual(allIds);
+    expect([...projectIds].some((id) => sharedIds.has(id))).toBe(false);
     expect(all.length).toBeGreaterThan(project.length);
 
-    for (const scope of ["project", "global", "all"] as const) {
-      for (const sort of KNOWLEDGE_SORTS) {
+    const filteredAll = new Set(
+      listAllKnowledgePage({
+        projectId: projectAId,
+        q: marker,
+        scope: "all",
+        limit: 100,
+      }).items.map((entry) => entry.id),
+    );
+    const filteredProject = new Set(
+      listAllKnowledgePage({
+        projectId: projectAId,
+        q: marker,
+        scope: "project",
+        limit: 100,
+      }).items.map((entry) => entry.id),
+    );
+    const filteredShared = new Set(
+      listAllKnowledgePage({
+        projectId: projectAId,
+        q: marker,
+        scope: "shared",
+        limit: 100,
+      }).items.map((entry) => entry.id),
+    );
+    expect(new Set([...filteredProject, ...filteredShared])).toEqual(
+      filteredAll,
+    );
+    expect([...filteredProject].some((id) => filteredShared.has(id))).toBe(
+      false,
+    );
+    expect(filteredShared).toContain(ids[0]);
+    expect(filteredShared).not.toContain(ids[2]);
+
+    for (const scope of ["project", "shared", "all"] as const) {
+      for (const sort of REPRESENTATIVE_SORTS) {
         const crossProjectIds = listAllKnowledgePage({
           projectId: projectAId,
           q: marker,
@@ -488,12 +719,21 @@ describe("searchKnowledgeRanked — cross-project search", () => {
       title: "Plain note",
       content: `Only the body contains ${marker}.`,
     });
-    ltm.create({
+    const globalHit = ltm.create({
       id: uuidv7(),
       scope: "global",
       category: "preference",
       title: "Another title match",
       content: `${marker} also appears in this body.`,
+    });
+    const crossProjectHit = ltm.create({
+      id: uuidv7(),
+      projectPath: projectB,
+      scope: "project",
+      crossProject: true,
+      category: "pattern",
+      title: "Shared title match",
+      content: `shared ${marker} entry`,
     });
     const updatedId = ltm.create({
       id: uuidv7(),
@@ -531,6 +771,28 @@ describe("searchKnowledgeRanked — cross-project search", () => {
     expect(all.items.map((entry) => entry.logical_id)).not.toContain(removedId);
     expect(all.total).toBe(all.items.length);
 
+    const projectScope = searchKnowledgeRanked({
+      q: marker,
+      limit: 100,
+      scope: "project",
+    });
+    const sharedScope = searchKnowledgeRanked({
+      q: marker,
+      limit: 100,
+      scope: "shared",
+    });
+    const allIds = new Set(all.items.map((entry) => entry.logical_id));
+    const projectIds = new Set(
+      projectScope.items.map((entry) => entry.logical_id),
+    );
+    const sharedIds = new Set(
+      sharedScope.items.map((entry) => entry.logical_id),
+    );
+    expect(projectIds).toContain(contentHit);
+    expect(sharedIds).toEqual(new Set([globalHit, crossProjectHit]));
+    expect(new Set([...projectIds, ...sharedIds])).toEqual(allIds);
+    expect([...projectIds].some((id) => sharedIds.has(id))).toBe(false);
+
     const projectFiltered = searchKnowledgeRanked({
       q: marker,
       limit: 100,
@@ -543,10 +805,42 @@ describe("searchKnowledgeRanked — cross-project search", () => {
     expect(
       projectFiltered.items.map((entry) => entry.logical_id),
     ).not.toContain(contentHit);
+    expect(
+      projectFiltered.items.map((entry) => entry.logical_id),
+    ).not.toContain(crossProjectHit);
+    const sharedFiltered = searchKnowledgeRanked({
+      q: marker,
+      limit: 100,
+      projectId: ensureProject(projectA),
+      scope: "shared",
+    });
+    expect(
+      new Set(sharedFiltered.items.map((entry) => entry.logical_id)),
+    ).toEqual(new Set([globalHit, crossProjectHit]));
+    const allFiltered = searchKnowledgeRanked({
+      q: marker,
+      limit: 100,
+      projectId: ensureProject(projectA),
+      scope: "all",
+    });
+    expect(
+      new Set([
+        ...projectFiltered.items.map((entry) => entry.logical_id),
+        ...sharedFiltered.items.map((entry) => entry.logical_id),
+      ]),
+    ).toEqual(new Set(allFiltered.items.map((entry) => entry.logical_id)));
+    expect(
+      projectFiltered.items.some((entry) =>
+        sharedFiltered.items.some(
+          (sharedEntry) => sharedEntry.logical_id === entry.logical_id,
+        ),
+      ),
+    ).toBe(false);
     const categoryFiltered = searchKnowledgeRanked({
       q: marker,
       limit: 100,
       category: "pattern",
+      scope: "project",
     });
     expect(categoryFiltered.items.map((entry) => entry.logical_id)).toEqual([
       contentHit,
@@ -579,30 +873,31 @@ describe("searchKnowledgeRanked — cross-project search", () => {
 // ---------------------------------------------------------------------------
 
 describe("listKnowledgePage — filters", () => {
-  function seedFilters(project: string) {
+  function seedFilters(project: string, marker?: string) {
     const other = `${project}-other`;
+    const tagged = (value: string) => (marker ? `${value} ${marker}` : value);
     const own = ltm.create({
       id: uuidv7(),
       projectPath: project,
       scope: "project",
       category: "decision",
-      title: "Use PostgreSQL for billing",
-      content: "billing database choice",
+      title: tagged("Use PostgreSQL for billing"),
+      content: tagged("billing database choice"),
     });
     const gotcha = ltm.create({
       id: uuidv7(),
       projectPath: project,
       scope: "project",
       category: "gotcha",
-      title: "SQLite WAL needs checkpoint",
-      content: "wal checkpoints for postgresql migration parity",
+      title: tagged("SQLite WAL needs checkpoint"),
+      content: tagged("wal checkpoints for postgresql migration parity"),
     });
     const global = ltm.create({
       id: uuidv7(),
       scope: "global",
       category: "preference",
-      title: "Prefer tabs",
-      content: "global preference",
+      title: tagged("Prefer tabs"),
+      content: tagged("global preference"),
     });
     const cross = ltm.create({
       id: uuidv7(),
@@ -610,16 +905,16 @@ describe("listKnowledgePage — filters", () => {
       scope: "project",
       crossProject: true,
       category: "pattern",
-      title: "Shared retry pattern",
-      content: "cross project pattern",
+      title: tagged("Shared retry pattern"),
+      content: tagged("cross project pattern"),
     });
     const foreign = ltm.create({
       id: uuidv7(),
       projectPath: other,
       scope: "project",
       category: "decision",
-      title: "Foreign decision",
-      content: "belongs to another project",
+      title: tagged("Foreign decision"),
+      content: tagged("belongs to another project"),
     });
     return { own, gotcha, global, cross, foreign };
   }
@@ -629,39 +924,57 @@ describe("listKnowledgePage — filters", () => {
     const s = seedFilters(project);
     const ids = listKnowledgePage(project, {
       category: "gotcha",
+      scope: "project",
       limit: 10,
     }).items.map((e) => e.id);
     expect(ids).toEqual([s.gotcha]);
     expect(
-      listKnowledgePage(project, { category: "architecture", limit: 10 }).items,
+      listKnowledgePage(project, {
+        category: "architecture",
+        scope: "project",
+        limit: 10,
+      }).items,
     ).toHaveLength(0);
   });
 
-  test("scope=project (default) excludes global/cross/foreign; global and all widen", () => {
+  test("shared and project scopes partition the all-scope project list", () => {
     const project = freshProject("scope");
-    const s = seedFilters(project);
-    const project_ = new Set(
-      listKnowledgePage(project, { limit: 10 }).items.map((e) => e.id),
-    );
-    expect(project_).toEqual(new Set([s.own, s.gotcha]));
-
-    const global = listKnowledgePage(project, {
-      scope: "global",
-      limit: 100,
-    }).items.map((e) => e.id);
-    expect(global).toContain(s.global);
-    expect(global).not.toContain(s.own);
-    expect(global).not.toContain(s.cross);
-
-    const all = new Set(
-      listKnowledgePage(project, { scope: "all", limit: 1000 }).items.map(
+    const marker = `scopepartition${++seq}`;
+    const s = seedFilters(project, marker);
+    db()
+      .query("UPDATE knowledge SET cross_project = NULL WHERE id = ?")
+      .run(s.own);
+    const defaultAll = new Set(
+      listKnowledgePage(project, { q: marker, limit: 100 }).items.map(
         (e) => e.id,
       ),
     );
-    expect(all.has(s.own)).toBe(true);
-    expect(all.has(s.gotcha)).toBe(true);
-    expect(all.has(s.global)).toBe(true);
-    expect(all.has(s.cross)).toBe(true);
+    const projectOnly = new Set(
+      listKnowledgePage(project, {
+        scope: "project",
+        q: marker,
+        limit: 100,
+      }).items.map((e) => e.id),
+    );
+    const shared = new Set(
+      listKnowledgePage(project, {
+        scope: "shared",
+        q: marker,
+        limit: 100,
+      }).items.map((e) => e.id),
+    );
+    const all = new Set(
+      listKnowledgePage(project, {
+        scope: "all",
+        q: marker,
+        limit: 100,
+      }).items.map((e) => e.id),
+    );
+    expect(projectOnly).toEqual(new Set([s.own, s.gotcha]));
+    expect(shared).toEqual(new Set([s.global, s.cross]));
+    expect(new Set([...projectOnly, ...shared])).toEqual(all);
+    expect([...projectOnly].some((id) => shared.has(id))).toBe(false);
+    expect(defaultAll).toEqual(all);
     expect(all.has(s.foreign)).toBe(false);
   });
 
@@ -691,8 +1004,10 @@ describe("listKnowledgePage — filters", () => {
     ).toHaveLength(0);
     // Blank / whitespace q is a no-op filter.
     expect(
-      listKnowledgePage(project, { q: "  ", limit: 10 }).items,
-    ).toHaveLength(2);
+      listKnowledgePage(project, { q: "  ", limit: 10 }).items.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual(expect.arrayContaining([s.own, s.gotcha, s.global, s.cross]));
   });
 
   test("q with only short tokens matches nothing, like ltm.search()'s LIKE fallback", () => {
@@ -756,7 +1071,7 @@ describe("listKnowledgePage — filters", () => {
     for (;;) {
       const p = listKnowledgePage(project, {
         q: "needle",
-        sort: "updated_desc",
+        sort: [{ field: "updated_at", dir: "desc" }],
         limit: 2,
         after,
       });
@@ -1273,7 +1588,7 @@ describe("knowledgeVersionHistory", () => {
     expect(raw.map((r) => r.id)).toEqual([v1, v2, v3, v4]);
   });
 
-  test("unknown id → null; global entry reports scope=global", () => {
+  test("unknown id → null; shared entries report scope=shared", () => {
     expect(
       knowledgeVersionHistory("00000000-0000-0000-0000-000000000000"),
     ).toBeNull();
@@ -1286,9 +1601,19 @@ describe("knowledgeVersionHistory", () => {
     });
     const h = knowledgeVersionHistory(g)!;
     expect(h.versions).toHaveLength(1);
-    expect(h.versions[0].scope).toBe("global");
+    expect(h.versions[0].scope).toBe("shared");
     expect(h.versions[0].superseded_at).toBeNull();
     expect(h.versions[0].is_current).toBe(true);
+    const cross = ltm.create({
+      id: uuidv7(),
+      projectPath: freshProject("version-shared"),
+      scope: "project",
+      crossProject: true,
+      category: "pattern",
+      title: "cross-project",
+      content: "c",
+    });
+    expect(knowledgeVersionHistory(cross)?.versions[0]?.scope).toBe("shared");
   });
 
   test("lookup by a version id returns only that logical entry's history", () => {

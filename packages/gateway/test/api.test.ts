@@ -1232,15 +1232,15 @@ async function pageThrough<T>(
 describe("GET /api/v1/projects/:id/knowledge — legacy shape is unchanged", () => {
   it("returns the exact legacy array shape with logical ids and legacy ordering", async () => {
     const { projectId, projectPath } = await seedPagedProject("legacy");
-    const { ltm } = await import("@loreai/core");
+    const { listQuery } = await import("@loreai/core");
     const res = await api(`/api/v1/projects/${projectId}/knowledge`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/json");
     const body = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(body)).toBe(true);
-    const expected = ltm
-      .forProject(projectPath, false)
-      .map((e) => ({ ...e, id: e.logical_id }));
+    const expected = listQuery
+      .listKnowledgePage(projectPath, { limit: 1000 })
+      .items.map((e) => ({ ...e, id: e.logical_id }));
     expect(body).toEqual(JSON.parse(JSON.stringify(expected)));
     // Snapshot of the per-entry key set so a field rename/removal is caught.
     expect(Object.keys(body[0]).sort()).toEqual(
@@ -1278,7 +1278,7 @@ describe("GET /api/v1/projects/:id/knowledge — legacy shape is unchanged", () 
     const limited = await apiJSON<unknown[]>(
       `/api/v1/projects/${projectId}/knowledge?limit=2`,
     );
-    expect(limited).toHaveLength(7);
+    expect(limited).toEqual(body);
   });
 });
 
@@ -1288,7 +1288,7 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
     const { items, pages } = await pageThrough<{
       id: string;
       updated_at: number;
-    }>(`/api/v1/projects/${projectId}/knowledge`, "&limit=2");
+    }>(`/api/v1/projects/${projectId}/knowledge`, "&limit=2&scope=project");
     expect(pages).toBe(4);
     expect(items).toHaveLength(7);
     expect(new Set(items.map((i) => i.id)).size).toBe(7);
@@ -1304,7 +1304,7 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
     }
     // Same order as an unpaginated cursor-mode request.
     const whole = await apiJSON<CursorPage<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=100`,
+      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=100&scope=project`,
     );
     expect(whole.next_cursor).toBeNull();
     expect(whole.items.map((i) => i.id)).toEqual(items.map((i) => i.id));
@@ -1313,13 +1313,13 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
   it("paging twice with the same cursor yields the same page (cursor is not an offset)", async () => {
     const { projectId } = await seedPagedProject("idempotent");
     const p1 = await apiJSON<CursorPage<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=3`,
+      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=3&scope=project`,
     );
     const a = await apiJSON<CursorPage<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?cursor=${p1.next_cursor}&limit=3`,
+      `/api/v1/projects/${projectId}/knowledge?cursor=${p1.next_cursor}&limit=3&scope=project`,
     );
     const b = await apiJSON<CursorPage<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?cursor=${p1.next_cursor}&limit=3`,
+      `/api/v1/projects/${projectId}/knowledge?cursor=${p1.next_cursor}&limit=3&scope=project`,
     );
     expect(a).toEqual(b);
     expect(a.items.some((i) => p1.items.some((j) => j.id === i.id))).toBe(
@@ -1334,7 +1334,7 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
     const inserted: string[] = [];
     const { items } = await pageThrough<{ id: string }>(
       `/api/v1/projects/${projectId}/knowledge`,
-      "&limit=2&sort=title_asc",
+      "&limit=2&sort=title:asc&scope=project",
       async (pageNo) => {
         if (pageNo === 1) {
           // Delete an entry that has NOT been served yet (title "Foxtrot").
@@ -1379,11 +1379,11 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
     const a = await seedPagedProject("scope-a");
     const b = await seedPagedProject("scope-b");
     const p1 = await apiJSON<CursorPage<unknown>>(
-      `/api/v1/projects/${a.projectId}/knowledge?page=cursor&limit=2`,
+      `/api/v1/projects/${a.projectId}/knowledge?page=cursor&limit=2&scope=project`,
     );
     expect(p1.next_cursor).not.toBeNull();
     const res = await api(
-      `/api/v1/projects/${b.projectId}/knowledge?cursor=${p1.next_cursor}`,
+      `/api/v1/projects/${b.projectId}/knowledge?cursor=${p1.next_cursor}&scope=project`,
     );
     expect(res.status).toBe(400);
     const err = (await res.json()) as ApiError;
@@ -1391,7 +1391,7 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
     expect(err.error.type).toBe("invalid_cursor");
     // The same cursor is still valid for its own project.
     const ok = await api(
-      `/api/v1/projects/${a.projectId}/knowledge?cursor=${p1.next_cursor}`,
+      `/api/v1/projects/${a.projectId}/knowledge?cursor=${p1.next_cursor}&scope=project`,
     );
     expect(ok.status).toBe(200);
   });
@@ -1399,7 +1399,7 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
   it("rejects a knowledge cursor used on the sessions list and vice versa", async () => {
     const { projectId } = await seedPagedProject("kind");
     const p1 = await apiJSON<CursorPage<unknown>>(
-      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=2`,
+      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=2&scope=project`,
     );
     const res = await api(
       `/api/v1/projects/${projectId}/sessions?cursor=${p1.next_cursor}`,
@@ -1410,14 +1410,24 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
 
   it("rejects a cursor when the sort differs from the one it was minted under", async () => {
     const { projectId } = await seedPagedProject("sort-mismatch");
+    const cursorSort = "updated_at:desc,title:asc";
     const p1 = await apiJSON<CursorPage<unknown>>(
-      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=2&sort=title_asc`,
+      `/api/v1/projects/${projectId}/knowledge?page=cursor&limit=2&scope=project&sort=${encodeURIComponent(cursorSort)}`,
     );
-    const res = await api(
-      `/api/v1/projects/${projectId}/knowledge?cursor=${p1.next_cursor}&sort=created_desc`,
-    );
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as ApiError).error.type).toBe("invalid_cursor");
+    for (const requestSort of [
+      "title:asc,updated_at:desc",
+      "updated_at:asc,title:asc",
+    ]) {
+      const res = await api(
+        `/api/v1/projects/${projectId}/knowledge?scope=project&cursor=${p1.next_cursor}&sort=${encodeURIComponent(requestSort)}`,
+      );
+      expect(res.status).toBe(400);
+      const err = (await res.json()) as ApiError;
+      expect(err.error.type).toBe("invalid_cursor");
+      expect(err.error.message).toBe(
+        `Cursor was issued for sort=${cursorSort}; request uses sort=${requestSort}`,
+      );
+    }
   });
 
   it("returns 400 for malformed cursors", async () => {
@@ -1434,40 +1444,56 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
         v: 99,
         kind: "knowledge",
         project: projectId,
-        sort: "updated_desc",
-        key: 1,
+        sort: "updated_at:desc",
+        keys: [1],
         id: "x",
       }),
       forged({
         v: 1,
         kind: "knowledge",
         project: projectId,
-        sort: "updated_desc",
-        key: "str",
+        sort: "updated_at:desc",
+        keys: ["str"],
         id: "x",
       }),
       forged({
         v: 1,
         kind: "knowledge",
         project: projectId,
-        sort: "updated_desc",
-        key: 1,
+        sort: "updated_at:desc",
+        keys: [1],
       }),
       forged({
         v: 1,
         kind: "knowledge",
         project: projectId,
         sort: "bogus",
-        key: 1,
+        keys: [1],
         id: "x",
       }),
       forged({
         v: 1,
         kind: "knowledge_all",
         project: null,
-        sort: "updated_desc",
-        key: 1,
+        sort: "updated_at:desc",
+        keys: [1],
         id: "x",
+      }),
+      forged({
+        v: 1,
+        kind: "knowledge",
+        project: projectId,
+        sort: "updated_at:desc",
+        keys: [1, 2],
+        id: "x",
+      }),
+      forged({
+        v: 1,
+        kind: "knowledge",
+        project: projectId,
+        sort: "updated_at:desc",
+        keys: [1],
+        id: "",
       }),
       "a".repeat(5000),
     ];
@@ -1483,9 +1509,42 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
     // A forged but well-formed cursor pointing at a non-existent key still works
     // (it simply positions the keyset) and never errors.
     const ok = await api(
-      `/api/v1/projects/${projectId}/knowledge?cursor=${forged({ v: 1, kind: "knowledge", project: projectId, sort: "updated_desc", key: 999_999, id: "zzz" })}`,
+      `/api/v1/projects/${projectId}/knowledge?cursor=${forged({ v: 1, kind: "knowledge", project: projectId, sort: "updated_at:desc", keys: [999_999], id: "zzz" })}`,
     );
     expect(ok.status).toBe(200);
+
+    const otherProject = await api(
+      `/api/v1/projects/${projectId}/knowledge?cursor=${forged({ v: 1, kind: "knowledge", project: "another-project", sort: "updated_at:desc,title:asc", keys: [], id: "x" })}`,
+    );
+    expect(otherProject.status).toBe(400);
+    expect(((await otherProject.json()) as ApiError).error.message).toBe(
+      "Cursor was issued for a different project",
+    );
+  });
+
+  it("validates stacked cursor key arrays against their sort", async () => {
+    const { projectId } = await seedPagedProject("stacked-cursor-shape");
+    const sort = "updated_at:desc,title:asc";
+    const forged = (keys: unknown[]) =>
+      Buffer.from(
+        JSON.stringify({
+          v: 1,
+          kind: "knowledge",
+          project: projectId,
+          sort,
+          keys,
+          id: "entry",
+        }),
+      ).toString("base64url");
+    for (const keys of [[1], [1, 2]]) {
+      const response = await api(
+        `/api/v1/projects/${projectId}/knowledge?scope=project&sort=${encodeURIComponent(sort)}&cursor=${encodeURIComponent(forged(keys))}`,
+      );
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as ApiError).error.message).toBe(
+        "Malformed cursor",
+      );
+    }
   });
 
   it("validates limit and page", async () => {
@@ -1525,10 +1584,10 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
 
 describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
   const sorts = [
-    "updated_desc",
-    "created_desc",
-    "confidence_desc",
-    "title_asc",
+    "updated_at:desc",
+    "created_at:desc",
+    "confidence:desc",
+    "title:asc",
   ] as const;
 
   it.each(sorts)(
@@ -1543,24 +1602,28 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
         title: string;
       };
       const legacy = await apiJSON<E[]>(
-        `/api/v1/projects/${projectId}/knowledge?sort=${sort}`,
+        `/api/v1/projects/${projectId}/knowledge?sort=${sort}&scope=project`,
       );
       expect(Array.isArray(legacy)).toBe(true);
       expect(legacy).toHaveLength(7);
       const { items } = await pageThrough<E>(
         `/api/v1/projects/${projectId}/knowledge`,
-        `&limit=3&sort=${sort}`,
+        `&limit=3&sort=${sort}&scope=project`,
       );
       expect(items.map((e) => e.id)).toEqual(legacy.map((e) => e.id));
-      const key = (e: E) =>
-        sort === "updated_desc"
-          ? e.updated_at
-          : sort === "created_desc"
-            ? e.created_at
-            : sort === "confidence_desc"
-              ? e.confidence
-              : e.title;
-      const asc = sort === "title_asc";
+      const key = (e: E) => {
+        switch (sort) {
+          case "updated_at:desc":
+            return e.updated_at;
+          case "created_at:desc":
+            return e.created_at;
+          case "confidence:desc":
+            return e.confidence;
+          case "title:asc":
+            return e.title;
+        }
+      };
+      const asc = sort.endsWith(":asc");
       for (let i = 1; i < items.length; i++) {
         const ka = key(items[i - 1]);
         const kb = key(items[i]);
@@ -1576,6 +1639,40 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
       }
     },
   );
+
+  it("traverses two stacked sort keys without gaps or duplicates", async () => {
+    const { projectId } = await seedPagedProject("stacked-sort");
+    const sort = "updated_at:desc,title:asc";
+    const params = `scope=project&sort=${encodeURIComponent(sort)}&limit=2`;
+    const paged: Array<{ id: string }> = [];
+    let cursor: string | null = null;
+    do {
+      const page: CursorPage<{ id: string }> = await apiJSON<
+        CursorPage<{ id: string }>
+      >(
+        `/api/v1/projects/${projectId}/knowledge?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : "page=cursor&"}${params}`,
+      );
+      if (cursor === null) {
+        if (!page.next_cursor) {
+          throw new Error("expected a cursor for the first stacked-sort page");
+        }
+        const payload = JSON.parse(
+          Buffer.from(page.next_cursor, "base64url").toString("utf8"),
+        ) as { sort: string; keys: unknown[] };
+        expect(payload.sort).toBe(sort);
+        expect(payload.keys).toHaveLength(2);
+      }
+      paged.push(...page.items);
+      cursor = page.next_cursor;
+    } while (cursor);
+    const single = await apiJSON<Array<{ id: string }>>(
+      `/api/v1/projects/${projectId}/knowledge?scope=project&sort=${encodeURIComponent(sort)}`,
+    );
+    expect(paged.map((entry) => entry.id)).toEqual(
+      single.map((entry) => entry.id),
+    );
+    expect(new Set(paged.map((entry) => entry.id)).size).toBe(paged.length);
+  });
 
   it("category filters server-side in both modes", async () => {
     const { projectId } = await seedPagedProject("category");
@@ -1598,7 +1695,7 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
     );
     expect(byTitle.map((e) => e.title)).toEqual(["Charlie"]);
     const byContent = await apiJSON<Array<{ title: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?q=widgets&sort=title_asc`,
+      `/api/v1/projects/${projectId}/knowledge?q=widgets&sort=title:asc&scope=project`,
     );
     expect(byContent).toHaveLength(7);
     expect(byContent[0].title).toBe("Alpha");
@@ -1612,8 +1709,8 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
     expect(none).toEqual([]);
   });
 
-  it("scope widens to global/all and defaults to project", async () => {
-    const { projectId, projectPath } = await seedPagedProject("scope");
+  it("shared and all include shared rows; omitted scope defaults to all", async () => {
+    const { projectId, projectPath, ids } = await seedPagedProject("scope");
     const { ltm } = await import("@loreai/core");
     const globalId = ltm.create({
       id: randomUUID(),
@@ -1638,14 +1735,17 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
     const dflt = await apiJSON<Array<{ id: string }>>(
       `/api/v1/projects/${projectId}/knowledge`,
     );
-    expect(dflt).toHaveLength(7);
-    const global = await apiJSON<Array<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?scope=global`,
+    expect(dflt.map((e) => e.id)).toEqual(
+      expect.arrayContaining([...ids, globalId, crossId]),
     );
-    expect(global.map((e) => e.id)).toContain(globalId);
-    expect(global.map((e) => e.id)).not.toContain(crossId);
+    const shared = await apiJSON<Array<{ id: string }>>(
+      `/api/v1/projects/${projectId}/knowledge?scope=shared`,
+    );
+    expect(shared.map((e) => e.id)).toContain(globalId);
+    expect(shared.map((e) => e.id)).toContain(crossId);
+    expect(shared.map((e) => e.id)).not.toContain(ids[0]);
     const all = await apiJSON<CursorPage<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge?page=cursor&scope=all&limit=1000`,
+      `/api/v1/projects/${projectId}/knowledge?page=cursor&scope=all&limit=1000&sort=updated_at:desc`,
     );
     const allIds = all.items.map((e) => e.id);
     expect(allIds).toContain(globalId);
@@ -1658,6 +1758,14 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
     const bad = [
       "category=bogus",
       "scope=everything",
+      "scope=global",
+      "sort=",
+      "sort=updated_at",
+      "sort=updated_at:up",
+      "sort=updated_at:desc,updated_at:asc",
+      "sort=updated_at:desc,created_at:desc,confidence:desc,title:asc",
+      "sort=%20updated_at:desc",
+      "sort=updated_desc",
       "sort=title_desc",
       "sort=updated_asc",
       `q=${"x".repeat(501)}`,

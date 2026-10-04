@@ -41,6 +41,8 @@ export type {
   KnowledgeListOptions,
   CrossProjectKnowledgeEntry,
   KnowledgeSort,
+  KnowledgeSortField,
+  KnowledgeSortKey,
   KnowledgeScope,
   KnowledgeCategory,
   KnowledgePage,
