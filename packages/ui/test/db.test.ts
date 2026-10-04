@@ -11,6 +11,7 @@ import {
   createKnowledgeRepo,
   createMessageBlocksRepo,
   createPendingChangesStore,
+  createReviewDecisionsStore,
   createProjectsRepo,
   createSessionsRepo,
   getMeta,
@@ -63,7 +64,7 @@ async function open(f: IDBFactory) {
 }
 
 describe("openLoreDb", () => {
-  it("creates a v3 database with every store", async () => {
+  it("creates a v4 database with every store", async () => {
     const f = factory();
     const db = await open(f);
     expect(db).not.toBeNull();
@@ -78,9 +79,95 @@ describe("openLoreDb", () => {
       "collections",
       "drafts",
       "pendingChanges",
+      "reviewDecisions",
     ] as const) {
       expect(db!.objectStoreNames.contains(name)).toBe(true);
     }
+  });
+
+  it("upgrades v3 to v4 without dropping local data", async () => {
+    const f = factory();
+    const v3 = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = f.open(LORE_DB_NAME, 3);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        db.createObjectStore("meta", { keyPath: "key" });
+        for (const name of [
+          "projects",
+          "knowledge",
+          "sessions",
+          "messageBlocks",
+          "entities",
+        ]) {
+          const store = db.createObjectStore(name, { keyPath: "key" });
+          store.createIndex("by-scope", "scope");
+          store.createIndex("by-accessed", "accessedAt");
+          store.createIndex("by-stored", "storedAt");
+        }
+        db.createObjectStore("collections", { keyPath: "key" });
+        const drafts = db.createObjectStore("drafts", { keyPath: "key" });
+        drafts.createIndex("by-updated", "updatedAt");
+        const pending = db.createObjectStore("pendingChanges", {
+          keyPath: "key",
+        });
+        pending.createIndex("by-created", "createdAt");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = v3.transaction(
+        ["meta", "drafts", "pendingChanges"],
+        "readwrite",
+      );
+      tx.objectStore("meta").put({
+        key: "theme",
+        value: "dark",
+        updatedAt: 1,
+      });
+      tx.objectStore("drafts").put({
+        key: "p1/k1",
+        kind: "knowledge",
+        target: "k1",
+        body: { title: "Draft", content: "", category: "gotcha" },
+        updatedAt: 1,
+      });
+      tx.objectStore("pendingChanges").put({
+        key: "change-1",
+        op: "update",
+        entity: "knowledge",
+        target: "k1",
+        payload: {},
+        createdAt: 1,
+        attempts: 0,
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    v3.close();
+
+    const db = await open(f);
+    expect(db?.version).toBe(4);
+    expect(await getMeta(db, "theme")).toBe("dark");
+    expect(await createDraftsStore(db).get("p1/k1")).toMatchObject({
+      body: { title: "Draft" },
+    });
+    expect(await createPendingChangesStore(db).get("change-1")).toMatchObject({
+      attempts: 0,
+    });
+    const marks = createReviewDecisionsStore(db);
+    await marks.put({
+      key: "p1/group-1",
+      kind: "dedup",
+      projectId: "p1",
+      groupId: "group-1",
+      decision: "accept",
+      keepId: "k1",
+      mergeIds: ["k2"],
+      expectedRevisions: { k1: 1, k2: 2 },
+      markedAt: 1,
+    });
+    expect(await marks.list("p1")).toHaveLength(1);
   });
 
   it("upgrades a v1 database without touching meta rows", async () => {
@@ -107,7 +194,7 @@ describe("openLoreDb", () => {
 
     const db = await open(f);
     expect(db).not.toBeNull();
-    expect(db!.version).toBe(3);
+    expect(db!.version).toBe(4);
     expect(await getMeta(db, "pref")).toEqual({ theme: "dark" });
     expect(db!.objectStoreNames.contains("knowledge")).toBe(true);
     expect(db!.objectStoreNames.contains("entities")).toBe(true);
@@ -132,10 +219,10 @@ describe("openLoreDb", () => {
     expect(db!.objectStoreNames.contains("collections")).toBe(true);
   });
 
-  it("resets when a higher version exists (VersionError) and reopens at v3", async () => {
+  it("resets when a higher version exists (VersionError) and reopens at v4", async () => {
     const f = factory();
     const v4 = await new Promise<IDBDatabase>((resolve, reject) => {
-      const req = f.open(LORE_DB_NAME, 4);
+      const req = f.open(LORE_DB_NAME, 5);
       req.onupgradeneeded = () => {
         req.result.createObjectStore("meta", { keyPath: "key" });
       };
@@ -146,7 +233,7 @@ describe("openLoreDb", () => {
 
     const db = await open(f);
     expect(db).not.toBeNull();
-    expect(db!.version).toBe(3);
+    expect(db!.version).toBe(4);
   });
 
   it("resolves null when open keeps failing", async () => {
@@ -434,6 +521,27 @@ describe("local working-state stores", () => {
     expect(await drafts.get("d1")).toBeUndefined();
     await pending.clear();
     expect(await pending.list()).toEqual([]);
+  });
+
+  it("keeps unavailable review decisions in memory for the session", async () => {
+    const marks = createReviewDecisionsStore(null);
+    const mark = {
+      key: "p1/group-1",
+      kind: "dedup" as const,
+      projectId: "p1",
+      groupId: "group-1",
+      decision: "skip" as const,
+      keepId: "k1",
+      mergeIds: ["k2"],
+      expectedRevisions: { k1: 1, k2: 1 },
+      markedAt: 1,
+    };
+    await marks.put(mark);
+    expect(await marks.get(mark.key)).toEqual(mark);
+    expect(await marks.list("p1")).toEqual([mark]);
+    expect(await marks.list("other")).toEqual([]);
+    await marks.delete(mark.key);
+    expect(await marks.get(mark.key)).toBeUndefined();
   });
 
   it("does not evict the newly written oldest draft", async () => {

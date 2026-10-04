@@ -4,7 +4,7 @@ import { fuzzyRank } from "../src/lib/fuzzy";
 /**
  * #1918 sidebar: pinned projects survive reloads (localStorage), the filter
  * narrows the list, and "All projects" expands beyond the Recent limit.
- * The seed gives 7 projects — lore and scratch with activity plus five
+ * The seed gives 8 core projects — lore, scratch, dedup-review and five
  * empty archive-* projects — so `rest` is non-empty.
  */
 

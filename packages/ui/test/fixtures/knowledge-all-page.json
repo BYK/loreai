@@ -4,10 +4,10 @@
       "id": "<uuid-0>",
       "tenant_id": "",
       "project_id": "<uuid-1>",
-      "category": "pattern",
-      "title": "Cursor pages are opaque tokens",
-      "content": "Cursor values are server-issued tokens and should be passed back unchanged.",
-      "source_session": "ui-contracts-session",
+      "category": "gotcha",
+      "title": "Cache warming threshold configuration",
+      "content": "Duplicate threshold configuration.",
+      "source_session": "ui-contracts-dedup-session",
       "cross_project": 0,
       "confidence": 1,
       "created_at": 1700000000000,
@@ -28,7 +28,7 @@
       "worker_model_id": null,
       "last_reinforced_at": 1700000002000,
       "logical_id": "<uuid-0>",
-      "project_name": "ui-contracts",
+      "project_name": "ui-contracts-dedup",
       "match": "exact"
     }
   ],

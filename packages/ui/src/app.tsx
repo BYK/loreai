@@ -119,6 +119,10 @@ export const routes: RouteDefinition[] = [
     component: () => <Browse view="knowledge-table" />,
   },
   {
+    path: "/projects/:projectId/duplicates",
+    component: () => <Browse view="duplicates" />,
+  },
+  {
     path: "/projects/:projectId/sessions/:sessionId",
     component: lazy(() =>
       import("./routes/Session").then((m) => ({ default: m.Session })),

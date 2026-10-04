@@ -15,6 +15,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui` | Workspace: project navigation, all-knowledge link + "choose a project" document |
 | `/ui/projects/:projectId` | Project identity, health, recent sessions and knowledge list |
 | `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
+| `/ui/projects/:projectId/duplicates` | Read-only duplicate candidate review with browser-local marks |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/knowledge` (`?q=&category=&scope=&project=&sort=&cursor=`) | Cross-project, server-filtered and sorted knowledge table with a project column |
 | `/ui/search` (`?q=`) | Ranked cross-project knowledge search, top 50 of an exact total |
@@ -64,6 +65,29 @@ Tests:
 - pnpm --filter @loreai/gateway exec vitest run test/dashboard-api.test.ts test/route-registry.test.ts
 - pnpm --filter @loreai/ui exec vitest run test/contradictions-page.test.tsx test/contracts.test.ts test/api-client.test.ts
 - pnpm --filter @loreai/ui test:e2e
+
+### Duplicate review (#1803)
+
+The project page's **Review duplicates** link opens a read-only evidence
+comparison backed by `POST /api/v1/projects/:id/dedup`. The preview retains the
+legacy `project` and `global` result payloads; a `global` group is labelled
+"Shared (no project)" in the UI, and candidate scope is shown independently as
+Project or Shared. No apply request or server mutation is available in this
+screen.
+
+Accept and Skip create marks in the local `reviewDecisions` IndexedDB store.
+They remain in this browser and are not applied to Lore; if IndexedDB is
+unavailable, marks last only for the current session. A mark is stale when the
+fresh preview changes its candidate membership or any candidate revision.
+Stale marks do not count as accepted. Marks for groups absent from a preview
+are shown as orphaned and require an explicit discard action; they are never
+removed automatically. Keyboard shortcuts are `j`/`k` for next/previous group,
+`a` accept, `s` skip, `u` clear, and `1`–`9` to choose a keeper.
+
+Tests:
+- `pnpm --filter @loreai/ui exec vitest run test/duplicate-review.test.tsx test/dedup-review.test.ts test/db.test.ts`
+- `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts packages/gateway/test/api.test.ts`
+- `pnpm --filter @loreai/ui test:e2e` (`e2e/dedup-review.spec.ts`)
 
 ### Sidebar projects (#1918)
 
@@ -483,12 +507,12 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/state.test.ts`, `test/shell.test.tsx`, `test/folk-status.test.ts`, `test/folk-shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/session-route.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, `test/entities-list.test.tsx`, `test/entity-page.test.tsx`, `test/entities-rebuild.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/dedup-review.test.ts`, `test/duplicate-review.test.tsx`, `test/state.test.ts`, `test/shell.test.tsx`, `test/folk-status.test.ts`, `test/folk-shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/session-route.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, `test/entities-list.test.tsx`, `test/entity-page.test.tsx`, `test/entities-rebuild.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
 
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/sessions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`, `e2e/folk-status.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/dedup-review.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/sessions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`, `e2e/folk-status.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -1268,7 +1292,7 @@ The owner signs this gate off; the implementation agent does not. Each row names
 | Management security boundary | `packages/gateway/test/management-access.test.ts`, `hono-routing.test.ts`, `gateway-auth-config.test.ts` (socket-peer + Origin/Host checks, `LORE_ALLOW_REMOTE_MANAGEMENT`, `LORE_GATEWAY_AUTH_TOKEN`, hosted-mode write refusals); `e2e/browse.spec.ts` (dev-only routes absent in production). |
 | CSP | `packages/gateway/test/ui-static.test.ts` asserts the `Content-Security-Policy` header on `/ui` responses (see "How the gateway serves the SPA"). |
 | Inert content | `packages/ui/test/safe-html.test.ts` (unit) and `e2e/hostile-content.spec.ts` (every production screen, desktop + mobile, `window.__pwned` stays 0, no `script`/`iframe`/handler attributes/`javascript:` links). |
-| IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v3 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
+| IndexedDB migration + reset | `e2e/db-migration.spec.ts` (v1→v4 upgrade keeps `meta`, stale cache never authoritative, corrupted/future-version DB reset, cleared site data). |
 | Keyboard / focus | `e2e/keyboard.spec.ts`, `e2e/reader.spec.ts` ("keyboard: rows are focusable"). |
 | Deep links + themes | `e2e/routes.spec.ts` (every README route, including `/ui/entities`, `/ui/entities/:entityId`, `/ui/contradictions`, `/ui/warming` and `/ui/costs`, survives reload; light/dark on every screen), `scripts/ui-deep-link-smoke.mjs` (always-on CI). |
 | Playwright green in CI | `ui-e2e` workflow run on the release PR (desktop + mobile projects) — link the run here when signing off. |
@@ -1280,8 +1304,10 @@ The owner signs this gate off; the implementation agent does not. Each row names
   authoritative for projects, knowledge, sessions and distillations.
 - The browser holds **derived, disposable** state only: route, theme, pane
   layout, an IndexedDB cache of API responses (`src/db/`, database
-  `lore-ui` v3) and local working state (`drafts`, `pendingChanges` —
-  per-device, never merged into entity stores). Anything in IndexedDB can
+  `lore-ui` v4) and local working state (`drafts`, `pendingChanges`,
+  `reviewDecisions` — per-device, never merged into entity stores). Duplicate
+  review marks are browser-local decisions only, not commands to merge
+  knowledge. Anything in IndexedDB can
   be deleted without loss of Lore data; a reset never touches the server.
 - The SPA calls the **read** routes (`GET /api/v1/projects`,
   `GET /api/v1/projects/:id/knowledge` (+ `?page=` cursor variant),

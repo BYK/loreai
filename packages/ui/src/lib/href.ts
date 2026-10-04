@@ -33,6 +33,9 @@ export function buildHref(
 export const projectHref = (projectId: string) =>
   buildHref(["projects", projectId]);
 
+export const duplicatesHref = (projectId: string) =>
+  buildHref(["projects", projectId, "duplicates"]);
+
 export const knowledgeListHref = (
   projectId: string,
   query: KnowledgeQuery = DEFAULT_KNOWLEDGE_QUERY,
