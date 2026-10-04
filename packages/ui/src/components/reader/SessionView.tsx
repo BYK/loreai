@@ -614,6 +614,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    * so a failed-then-retried load never has two `capturePin`/`repin` loops
    * fighting over the same `prepend`. */
   let loadGen = 0;
+  /** Set when the in-flight (or last-settled) older page actually prepended
+   * rows — the busy→idle chain check only continues real deliveries, so a
+   * no-progress owner cannot loop the loader at the top. */
+  let prependLanded = false;
 
   async function loadOlder() {
     if (
@@ -716,7 +720,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     try {
       await props.onLoadOlder();
     } catch {
-      // the owner reports the failure through `olderError`
+      // the owner reports the failure through `olderError` — drop the
+      // request state now so the pin loop stops next frame instead of
+      // polling a page that will never land.
+      loadGen += 1;
+      prepend = null;
     } finally {
       // `prepend` is cleared by the rows effect once it has consumed it —
       // clearing it here would race a rows update that lands after this
@@ -827,6 +835,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       () => {
         setLanded(false);
         cancelLanding?.();
+        // The old session's prepend bookkeeping is stale too: dropping it
+        // and bumping the generation stops its capture/repin loops and
+        // keeps a late-resolving page from compensating the new view.
+        prependLanded = false;
+        prepend = null;
+        loadGen += 1;
       },
     ),
   );
@@ -935,11 +949,6 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       maybeChainOlder();
     }
   });
-
-  /** Set when the in-flight (or last-settled) older page actually prepended
-   * rows — the busy→idle chain check only continues real deliveries, so a
-   * no-progress owner cannot loop the loader at the top. */
-  let prependLanded = false;
 
   const olderGate = () => ({
     hasOlder: props.hasOlder,

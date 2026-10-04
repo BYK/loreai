@@ -2170,4 +2170,120 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     // the button must not look clickable while the page is in flight.
     expect(button).toBeDisabled();
   });
+
+  it("drops a pending older page's scroll state on session switch", async () => {
+    const [sid, setSid] = createSignal("session-a");
+    const [msgs, setMsgs] = createSignal(older(40));
+    let resolveLoad: (() => void) | null = null;
+    const onLoadOlder = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveLoad = resolve;
+        }),
+    );
+    mount({
+      get sessionId() {
+        return sid();
+      },
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      messageCount: 60,
+      hasOlder: true,
+      onLoadOlder,
+    });
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    // Start session A's load near the top, then switch sessions while the
+    // page is still in flight.
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 0);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    setSid("session-b");
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    // B's landing has settled; the position from here on is B's own.
+    const settledTop = scroll.scrollTop;
+    // A's late page lands: no prepend state survives the switch, so the
+    // compensation scroll never runs and the busy→idle chain does not
+    // start another page for B.
+    setMsgs((prev) => [
+      ...older(3).map((m, i) => ({ ...m, id: `late-${i}` })),
+      ...prev,
+    ]);
+    resolveLoad!();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(scroll.scrollTop).toBe(settledTop);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the pin-capture loop the frame after a load fails", async () => {
+    const [err, setErr] = createSignal<unknown>(null);
+    const onLoadOlder = vi.fn(() => {
+      setErr(new Error("page failed"));
+      return Promise.reject(new Error("page failed"));
+    });
+    mount({
+      messages: older(40),
+      distillations: [],
+      get hasOlder() {
+        return err() ? true : true;
+      },
+      get olderError() {
+        return err();
+      },
+      messageCount: 60,
+      onLoadOlder,
+    });
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 0);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // Let the failure settle, then count pin reads per frame: a live
+    // capturePin loop would keep querying the fold/pin rows every frame
+    // for up to 300 frames; the generation bump must stop it immediately.
+    for (let i = 0; i < 2; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    const counts: number[] = [];
+    let current = 0;
+    const origQuery = scroll.querySelector.bind(scroll);
+    scroll.querySelector = (sel: string) => {
+      current += 1;
+      return origQuery(sel);
+    };
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      counts.push(current);
+      current = 0;
+    }
+    scroll.querySelector = origQuery;
+    expect(Math.max(...counts)).toBe(0);
+  });
 });
