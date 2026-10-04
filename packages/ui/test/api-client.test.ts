@@ -947,28 +947,49 @@ describe("FOLK-03 API client", () => {
 });
 
 describe("api client: error envelopes", () => {
-  it("preserves the gateway error type in ApiError.code", async () => {
-    const { client } = clientFor(() =>
-      json(
-        {
-          type: "error",
-          error: {
-            type: "stale_version",
-            message: "Knowledge entry changed",
+  it.each([
+    {
+      errorType: "stale_member",
+      extra: { current_role: "editor" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.setTeamMemberRole("team-1", "user-1", "editor", "viewer"),
+    },
+    {
+      errorType: "stale_version",
+      extra: { current_version_id: "version-3" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.keepSyncConflictLocal(17, "version-2"),
+    },
+    {
+      errorType: "stale_policy",
+      extra: { current_override: "manual" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.requireProjectSharingReview("project-1", null),
+    },
+  ])(
+    "preserves $errorType and the message when error envelopes include extra fields",
+    async ({ errorType, extra, mutate }) => {
+      const message = "The server state changed; reload and try again.";
+      const { client } = clientFor(() =>
+        json(
+          {
+            type: "error",
+            error: {
+              type: errorType,
+              message,
+              ...extra,
+            },
           },
-        },
-        409,
-      ),
-    );
-    const error = await failure(
-      client.promoteKnowledge("knowledge-1", "version-1"),
-    );
-    expect(error).toMatchObject({
-      kind: "http",
-      status: 409,
-      code: "stale_version",
-    });
-  });
+          409,
+        ),
+      );
+      const error = await failure(mutate(client));
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.code).toBe(errorType);
+      expect(error.status).toBe(409);
+      expect(error.message).toBe(message);
+    },
+  );
 });
 
 describe("connection store", () => {
