@@ -2423,6 +2423,22 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
       WHERE failures != 0 OR retry_at != 0;
     UPDATE temporal_embedding_parked SET failures = 0, retry_at = 0;
   `,
+  `
+  -- Version 98: per-provider cost ledger + latest quota snapshots (#1926)
+  CREATE TABLE IF NOT EXISTS provider_costs (
+    day TEXT NOT NULL, provider TEXT NOT NULL, auth_kind TEXT NOT NULL, account TEXT NOT NULL, bucket TEXT NOT NULL,
+    cost REAL NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+    PRIMARY KEY (day, provider, auth_kind, account, bucket));
+  CREATE INDEX IF NOT EXISTS idx_provider_costs_group ON provider_costs(provider, auth_kind, account, day);
+  CREATE TABLE IF NOT EXISTS provider_quotas (
+    provider TEXT NOT NULL, auth_kind TEXT NOT NULL, account TEXT NOT NULL, window TEXT NOT NULL,
+    label TEXT, window_minutes INTEGER, used_percent REAL, remaining REAL, "limit" REAL, resets_at INTEGER,
+    source TEXT NOT NULL, observed_at INTEGER NOT NULL,
+    PRIMARY KEY (provider, auth_kind, account, window));
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4334,6 +4350,20 @@ function recoverMissingObjects(database: Database) {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (day, bucket)
     );
+    CREATE TABLE IF NOT EXISTS provider_costs (
+      day TEXT NOT NULL, provider TEXT NOT NULL, auth_kind TEXT NOT NULL, account TEXT NOT NULL, bucket TEXT NOT NULL,
+      cost REAL NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      requests INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (day, provider, auth_kind, account, bucket));
+    CREATE INDEX IF NOT EXISTS idx_provider_costs_group
+      ON provider_costs (provider, auth_kind, account, day);
+    CREATE TABLE IF NOT EXISTS provider_quotas (
+      provider TEXT NOT NULL, auth_kind TEXT NOT NULL, account TEXT NOT NULL, window TEXT NOT NULL,
+      label TEXT, window_minutes INTEGER, used_percent REAL, remaining REAL, "limit" REAL, resets_at INTEGER,
+      source TEXT NOT NULL, observed_at INTEGER NOT NULL,
+      PRIMARY KEY (provider, auth_kind, account, window));
     CREATE TABLE IF NOT EXISTS tool_calls (
       call_id       TEXT NOT NULL,
       message_id    TEXT NOT NULL,
@@ -6618,6 +6648,296 @@ export function getDailyCostForDay(day: string): number {
     )
     .get(day) as { total: number } | null;
   return row?.total ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Per-provider cost ledger + quota snapshots (provider_costs / provider_quotas,
+// v94, issue #1926)
+// ---------------------------------------------------------------------------
+
+/** How the upstream credential authenticates: raw API key vs subscription. */
+export type ProviderAuthKind = "api_key" | "subscription";
+
+/** One per-(day, provider, auth kind, account, bucket) cost contribution. */
+export type ProviderCostRow = {
+  day: string;
+  provider: string;
+  authKind: ProviderAuthKind;
+  account: string;
+  bucket: DailyCostBucket;
+  cost: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  requests: number;
+};
+
+function clampNum(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Accumulate a cost contribution into the per-provider ledger. All numeric
+ * fields are added on conflict; negatives and non-finite values clamp to 0.
+ * A row where every numeric field is 0/non-finite is skipped entirely.
+ */
+export function addProviderCost(row: ProviderCostRow): void {
+  const cost = clampNum(row.cost);
+  const inputTokens = clampNum(row.inputTokens);
+  const outputTokens = clampNum(row.outputTokens);
+  const cacheReadTokens = clampNum(row.cacheReadTokens);
+  const cacheWriteTokens = clampNum(row.cacheWriteTokens);
+  const requests = clampNum(row.requests);
+  if (
+    cost === 0 &&
+    inputTokens === 0 &&
+    outputTokens === 0 &&
+    cacheReadTokens === 0 &&
+    cacheWriteTokens === 0 &&
+    requests === 0
+  ) {
+    return;
+  }
+  db()
+    .query(
+      `INSERT INTO provider_costs (
+         day, provider, auth_kind, account, bucket, cost,
+         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+         requests, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(day, provider, auth_kind, account, bucket) DO UPDATE SET
+         cost = cost + excluded.cost,
+         input_tokens = input_tokens + excluded.input_tokens,
+         output_tokens = output_tokens + excluded.output_tokens,
+         cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+         cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+         requests = requests + excluded.requests,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      row.day,
+      row.provider,
+      row.authKind,
+      row.account,
+      row.bucket,
+      cost,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      requests,
+      Date.now(),
+    );
+}
+
+/** Aggregated cost totals for one (provider, auth kind, account) tuple. */
+export type ProviderCostTotals = {
+  provider: string;
+  authKind: ProviderAuthKind;
+  account: string;
+  cost: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  requests: number;
+  todayCost: number;
+  lastDay: string | null;
+};
+
+/** Aggregate the provider ledger across all days, with today's cost split out. */
+export function getProviderCostTotals(today: string): ProviderCostTotals[] {
+  const rows = db()
+    .query(
+      `SELECT provider, auth_kind, account,
+              SUM(cost) AS cost,
+              SUM(input_tokens) AS input_tokens,
+              SUM(output_tokens) AS output_tokens,
+              SUM(cache_read_tokens) AS cache_read_tokens,
+              SUM(cache_write_tokens) AS cache_write_tokens,
+              SUM(requests) AS requests,
+              SUM(CASE WHEN day = ? THEN cost ELSE 0 END) AS today_cost,
+              MAX(day) AS last_day
+       FROM provider_costs
+       GROUP BY provider, auth_kind, account
+       ORDER BY cost DESC, provider, auth_kind, account`,
+    )
+    .all(today) as Array<{
+    provider: string;
+    auth_kind: ProviderAuthKind;
+    account: string;
+    cost: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    requests: number;
+    today_cost: number;
+    last_day: string | null;
+  }>;
+  return rows.map((row) => ({
+    provider: row.provider,
+    authKind: row.auth_kind,
+    account: row.account,
+    cost: row.cost,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    requests: row.requests,
+    todayCost: row.today_cost,
+    lastDay: row.last_day,
+  }));
+}
+
+/** Usage sums for one provider day, optionally filtered by auth kind/account. */
+export function getProviderDayUsage(
+  day: string,
+  provider: string,
+  authKind: ProviderAuthKind | null,
+  account: string | null,
+): { cost: number; tokens: number; requests: number } {
+  const row = db()
+    .query(
+      `SELECT COALESCE(SUM(cost), 0) AS cost,
+              COALESCE(SUM(input_tokens + output_tokens +
+                          cache_read_tokens + cache_write_tokens), 0) AS tokens,
+              COALESCE(SUM(requests), 0) AS requests
+       FROM provider_costs
+       WHERE day = ? AND provider = ?
+         AND (? IS NULL OR auth_kind = ?)
+         AND (? IS NULL OR account = ?)`,
+    )
+    .get(day, provider, authKind, authKind, account, account) as {
+    cost: number;
+    tokens: number;
+    requests: number;
+  } | null;
+  return {
+    cost: row?.cost ?? 0,
+    tokens: row?.tokens ?? 0,
+    requests: row?.requests ?? 0,
+  };
+}
+
+/** One latest-observed quota window for a (provider, auth kind, account). */
+export type ProviderQuotaRow = {
+  provider: string;
+  authKind: ProviderAuthKind;
+  account: string;
+  window: string;
+  label: string | null;
+  windowMinutes: number | null;
+  usedPercent: number | null;
+  remaining: number | null;
+  limit: number | null;
+  resetsAt: number | null;
+  source: string;
+  observedAt: number;
+};
+
+/** Fallback staleness bound when the window length itself is unknown. */
+export const QUOTA_STALE_FALLBACK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a persisted quota snapshot may no longer reflect the live window:
+ * once its observed reset boundary has passed, or once it is older than the
+ * window it describes (24h when the window length is unknown).
+ */
+export function isProviderQuotaStale(
+  row: Pick<ProviderQuotaRow, "resetsAt" | "observedAt" | "windowMinutes">,
+  now: number,
+): boolean {
+  if (row.resetsAt !== null && now >= row.resetsAt) return true;
+  const age = now - row.observedAt;
+  return row.windowMinutes !== null
+    ? age > row.windowMinutes * 60_000
+    : age > QUOTA_STALE_FALLBACK_MS;
+}
+
+/**
+ * Store the latest quota snapshot for a window. Out-of-order writes lose:
+ * a snapshot only replaces the stored row when its observed_at is >= the
+ * existing row's, so stale headers can never rewind newer observations.
+ */
+export function upsertProviderQuota(row: ProviderQuotaRow): void {
+  db()
+    .query(
+      `INSERT INTO provider_quotas (
+         provider, auth_kind, account, window, label, window_minutes,
+         used_percent, remaining, "limit", resets_at, source, observed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(provider, auth_kind, account, window) DO UPDATE SET
+         label = excluded.label,
+         window_minutes = excluded.window_minutes,
+         used_percent = excluded.used_percent,
+         remaining = excluded.remaining,
+         "limit" = excluded."limit",
+         resets_at = excluded.resets_at,
+         source = excluded.source,
+         observed_at = excluded.observed_at
+       WHERE excluded.observed_at >= provider_quotas.observed_at`,
+    )
+    .run(
+      row.provider,
+      row.authKind,
+      row.account,
+      row.window,
+      row.label,
+      row.windowMinutes,
+      row.usedPercent,
+      row.remaining,
+      row.limit,
+      row.resetsAt,
+      row.source,
+      row.observedAt,
+    );
+}
+
+type ProviderQuotaDbRow = {
+  provider: string;
+  auth_kind: ProviderAuthKind;
+  account: string;
+  window: string;
+  label: string | null;
+  window_minutes: number | null;
+  used_percent: number | null;
+  remaining: number | null;
+  limit: number | null;
+  resets_at: number | null;
+  source: string;
+  observed_at: number;
+};
+
+function mapQuotaRow(row: ProviderQuotaDbRow): ProviderQuotaRow {
+  return {
+    provider: row.provider,
+    authKind: row.auth_kind,
+    account: row.account,
+    window: row.window,
+    label: row.label,
+    windowMinutes: row.window_minutes,
+    usedPercent: row.used_percent,
+    remaining: row.remaining,
+    limit: row.limit,
+    resetsAt: row.resets_at,
+    source: row.source,
+    observedAt: row.observed_at,
+  };
+}
+
+/** List the latest quota snapshot per window, in a stable order. */
+export function listProviderQuotas(): ProviderQuotaRow[] {
+  const rows = db()
+    .query(
+      `SELECT provider, auth_kind, account, window, label, window_minutes,
+              used_percent, remaining, "limit", resets_at, source, observed_at
+       FROM provider_quotas
+       ORDER BY provider, auth_kind, account, window`,
+    )
+    .all() as ProviderQuotaDbRow[];
+  return rows.map(mapQuotaRow);
 }
 
 // ---------------------------------------------------------------------------

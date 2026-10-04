@@ -1128,6 +1128,32 @@ export function providerForUpstreamOrigin(url: string): string | undefined {
 }
 
 /**
+ * Derive the provider id for a full upstream REQUEST URL (not just a base):
+ * the route whose normalized base is the longest `/`-bounded prefix of the
+ * normalized URL wins. Nested bases like OpenCode's
+ * `https://opencode.ai/zen` vs `https://opencode.ai/zen/go` resolve to the
+ * more specific route (`opencode-go` for `…/zen/go/v1/chat/completions`,
+ * `opencode` for `…/zen/…`). Returns `undefined` when the URL is malformed
+ * or matches no static route.
+ */
+export function providerForUpstreamURL(url: string): string | undefined {
+  const base = extractUpstreamUrlHeader({ "x-lore-upstream-url": url });
+  if (!base) return undefined;
+  let best: string | undefined;
+  let bestLength = 0;
+  for (const [key, id] of UPSTREAM_URL_TO_PROVIDER) {
+    if (
+      (base === key || base.startsWith(`${key}/`)) &&
+      key.length > bestLength
+    ) {
+      best = id;
+      bestLength = key.length;
+    }
+  }
+  return best;
+}
+
+/**
  * Resolve the provider id used to tag the global fallback credential
  * (`setLastSeenAuth`). The explicit `x-lore-provider` header is authoritative
  * (the plugin set it deliberately for this turn); only when it is absent or
