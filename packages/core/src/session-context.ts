@@ -93,7 +93,11 @@ export function knowledgeTitlesFor(ids: string[]): Map<string, string> {
       .query(
         `SELECT logical_id, id, title FROM knowledge
            WHERE is_current = 1 AND is_deleted = 0
-             AND (logical_id IN (${placeholders}) OR id IN (${placeholders}))`,
+             AND logical_id IN (${placeholders})
+          UNION ALL
+          SELECT logical_id, id, title FROM knowledge
+           WHERE is_current = 1 AND is_deleted = 0
+             AND id IN (${placeholders})`,
       )
       .all(...chunk, ...chunk) as Array<{
       logical_id: string;
