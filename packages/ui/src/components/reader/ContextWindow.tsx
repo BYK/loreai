@@ -39,9 +39,12 @@ function tokens(value: number | null | undefined): string {
 }
 
 function ratio(turn: SessionContextTurn): string {
-  return turn.total_tokens > 0
-    ? `×${(turn.raw_tokens / turn.total_tokens).toFixed(1)}`
-    : "—";
+  if (turn.total_tokens <= 0 || turn.raw_tokens <= 0) return "—";
+  // The transform can send more than the raw capture (e.g. injected
+  // knowledge) — a sub-1.0 raw/total is expansion, not compression.
+  return turn.raw_tokens >= turn.total_tokens
+    ? `×${(turn.raw_tokens / turn.total_tokens).toFixed(1)} compression`
+    : `×${(turn.total_tokens / turn.raw_tokens).toFixed(1)} expansion`;
 }
 
 const Card: Component<{ title: string; children: JSX.Element }> = (props) => (
@@ -94,7 +97,7 @@ const SummarySection: Component<{ context: SessionContext }> = (props) => {
               <span class="text-muted">
                 Raw history: {tokens(t().raw_tokens)}
               </span>
-              <span class="text-muted">{ratio(t())} compression</span>
+              <span class="text-muted">{ratio(t())}</span>
             </div>
             <Badge variant="gold">{layerLabel(t().layer)}</Badge>
           </div>
