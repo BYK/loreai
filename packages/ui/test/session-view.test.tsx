@@ -793,6 +793,7 @@ describe("SessionView: in-session search", () => {
     const messages = longHistory();
     mount({ messages, messageCount: messages.length });
     await tick();
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     fireEvent.input(input, { target: { value: "nedle" } });
     await settleSearch();
@@ -817,6 +818,7 @@ describe("SessionView: in-session search", () => {
     }));
     mount({ messages, messageCount: messages.length });
     await tick();
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     // Every needle-N block fuzzy-matches "needle-9 and"; the one literal hit
     // must suppress all 19 approximate spans from the hit list.

@@ -271,8 +271,8 @@ describe("in-session search: rows", () => {
     for (const h of hits.hits) {
       expect(h.exact).toBe(false);
       const row = rows[h.rowIndex]!;
-      expect(row.block.kind).toBe("message");
-      if (row.block.kind !== "message") continue;
+      expect(row.block?.kind).toBe("message");
+      if (row.block?.kind !== "message") continue;
       const text = displayedText(row.block, row.block.parts[h.partIndex]!);
       // Every span must be non-empty and inside its displayed text…
       expect(h.end).toBeGreaterThan(h.start);
