@@ -84,6 +84,7 @@ import {
   type SessionSearchMode,
 } from "@loreai/core";
 import {
+  assertCursorBinding,
   BadRequest,
   CURSOR_VERSION,
   decodeCursorObject,
@@ -136,12 +137,7 @@ function decodeSessionCursor(token: string, projectId: string): SessionKeyset {
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
   return { last_message_at: c.last_message_at, session_id: c.session_id };
 }
 
@@ -161,18 +157,8 @@ function decodeMessageCursor(
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.session !== sessionId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different session",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
+  assertCursorBinding(c.session, sessionId, "session");
   return { created_at: c.created_at, id: c.id };
 }
 
@@ -193,18 +179,8 @@ function decodeSearchCursor(
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.session !== sessionId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different session",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
+  assertCursorBinding(c.session, sessionId, "session");
   return { before: { created_at: c.created_at, id: c.id }, mode: c.mode };
 }
 
