@@ -914,6 +914,7 @@ export type ProviderCostSummary = {
 };
 
 export function getProviderCostSummary(): ProviderCostSummary[] {
+  maybeResetDay();
   return getProviderCostTotals(dailySpendDate).map((row) => ({
     provider: row.provider,
     auth_kind: row.authKind,

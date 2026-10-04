@@ -29,7 +29,7 @@ import {
   DEFAULT_PORT,
   type GatewayConfig,
 } from "./config";
-import { bootstrapDailySpend, getDailyBudget } from "./cost-tracker";
+import { bootstrapDailySpend } from "./cost-tracker";
 import {
   setupEmbeddingFailureCapture,
   setupBustSpiralCapture,
@@ -113,9 +113,7 @@ export async function startServer(
   }
 
   // Bootstrap the daily spend counter from DB (recovers today's spend after restart)
-  if (getDailyBudget() > 0) {
-    bootstrapDailySpend();
-  }
+  bootstrapDailySpend();
 
   // Wire embedding-worker OOM backoff/latch events to Sentry. Idempotent: the
   // hook is assigned (not stacked), so a repeat startServer() is harmless.

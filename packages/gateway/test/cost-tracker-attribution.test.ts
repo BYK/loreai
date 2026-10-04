@@ -1,10 +1,12 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { db, getProviderCostTotals } from "@loreai/core";
+import { db, addProviderCost, getProviderCostTotals } from "@loreai/core";
 import {
   recordConversationCost,
   recordWorkerCost,
   recordWarmupCost,
   deleteSessionCosts,
+  getProviderCostSummary,
+  resetDailyBudgetState,
 } from "../src/cost-tracker";
 import type { CostAttribution } from "../src/cost-attribution";
 
@@ -87,5 +89,30 @@ describe("provider cost attribution", () => {
   test("recordWorkerCost with no sessionID writes nothing", () => {
     recordWorkerCost(undefined, MODEL, USAGE, "direct", "x", "5m", ATTR);
     expect(getProviderCostTotals("2099-01-01")).toEqual([]);
+  });
+
+  test("getProviderCostSummary reports today without bootstrapDailySpend", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    addProviderCost({
+      day: today,
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct123",
+      bucket: "conversation",
+      cost: 1.25,
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      requests: 1,
+    });
+    // Simulate a cold tracker: no bootstrap ran, so the date is unset —
+    // the summary must roll the day itself rather than read "" as today.
+    resetDailyBudgetState();
+    const summary = getProviderCostSummary();
+    const row = summary.find(
+      (r) => r.provider === "anthropic" && r.account === "acct123",
+    );
+    expect(row?.today_spend).toBeCloseTo(1.25, 6);
   });
 });
