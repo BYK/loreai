@@ -129,6 +129,30 @@ describe("KnowledgeTable", () => {
     expect(screen.queryByRole("combobox", { name: /sort/i })).toBeNull();
   });
 
+  it("clears scope to the omitted default and resets the cursor", async () => {
+    mountRoutedTable({ ...defaultQuery, cursor: "next" });
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /^scope\b/ }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("option", { name: /^project$/ }));
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search")).toHaveTextContent(
+        "?scope=project",
+      ),
+    );
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /^scope\b/ }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("option", { name: /^Any scope$/ }));
+    await waitFor(() =>
+      expect(screen.getByTestId("route-search").textContent).toBe(""),
+    );
+  });
+
   it("renders stacked sort labels, accessible state, and server sort values", () => {
     mount([entry], {
       ...defaultQuery,

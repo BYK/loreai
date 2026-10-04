@@ -1232,15 +1232,22 @@ async function pageThrough<T>(
 describe("GET /api/v1/projects/:id/knowledge — legacy shape is unchanged", () => {
   it("returns the exact legacy array shape with logical ids and legacy ordering", async () => {
     const { projectId, projectPath } = await seedPagedProject("legacy");
-    const { listQuery } = await import("@loreai/core");
+    const { ltm } = await import("@loreai/core");
+    ltm.create({
+      id: randomUUID(),
+      scope: "global",
+      category: "preference",
+      title: "Projectless legacy entry",
+      content: "legacy project-less row",
+    });
     const res = await api(`/api/v1/projects/${projectId}/knowledge`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/json");
     const body = (await res.json()) as Array<Record<string, unknown>>;
     expect(Array.isArray(body)).toBe(true);
-    const expected = listQuery
-      .listKnowledgePage(projectPath, { limit: 1000 })
-      .items.map((e) => ({ ...e, id: e.logical_id }));
+    const expected = ltm
+      .forProject(projectPath, false)
+      .map((e) => ({ ...e, id: e.logical_id }));
     expect(body).toEqual(JSON.parse(JSON.stringify(expected)));
     // Snapshot of the per-entry key set so a field rename/removal is caught.
     expect(Object.keys(body[0]).sort()).toEqual(
@@ -1709,7 +1716,7 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
     expect(none).toEqual([]);
   });
 
-  it("shared and all include shared rows; omitted scope defaults to all", async () => {
+  it("shared and all include shared rows; omitted scope defaults to the project", async () => {
     const { projectId, projectPath, ids } = await seedPagedProject("scope");
     const { ltm } = await import("@loreai/core");
     const globalId = ltm.create({
@@ -1733,11 +1740,9 @@ describe("GET /api/v1/projects/:id/knowledge — q/category/scope/sort", () => {
     );
     expect(own).toHaveLength(7);
     const dflt = await apiJSON<Array<{ id: string }>>(
-      `/api/v1/projects/${projectId}/knowledge`,
+      `/api/v1/projects/${projectId}/knowledge?sort=updated_at:desc`,
     );
-    expect(dflt.map((e) => e.id)).toEqual(
-      expect.arrayContaining([...ids, globalId, crossId]),
-    );
+    expect(new Set(dflt.map((e) => e.id))).toEqual(new Set(ids));
     const shared = await apiJSON<Array<{ id: string }>>(
       `/api/v1/projects/${projectId}/knowledge?scope=shared`,
     );

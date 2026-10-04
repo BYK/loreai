@@ -216,7 +216,7 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
           cursor: null,
         })
       }
-      options={name === "category" ? ["", ...options] : [...options]}
+      options={["", ...options]}
       placeholder={placeholder}
       itemComponent={(item) => (
         <SelectItem item={item.item}>

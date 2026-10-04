@@ -280,9 +280,12 @@ function buildKnowledgePage<T extends KnowledgeEntry>(
 }
 
 function knowledgeScopePredicate(
-  scope: KnowledgeScope,
+  scope: KnowledgeScope | undefined,
   projectId?: string,
 ): SqlFragment | null {
+  if (scope === undefined) {
+    return projectId !== undefined ? sql`(project_id = ${projectId})` : null;
+  }
   if (projectId !== undefined) {
     switch (scope) {
       case "project":
@@ -306,8 +309,9 @@ function knowledgeScopePredicate(
 /**
  * Filtered, sorted, keyset-paginated read over `knowledge_current` for one
  * project. `limit` rows are returned at most; `next` is set only when a
- * further row exists (probed with `limit + 1`). An omitted scope means `all`;
- * confidence gating matches `ltm.forProject()` (`confidence > 0.2`).
+ * further row exists (probed with `limit + 1`). An omitted scope means rows
+ * owned by this project, including its cross-project rows; confidence gating
+ * matches `ltm.forProject()` (`confidence > 0.2`).
  *
  * Indexes used: `idx_knowledge_project_current` (project_id WHERE current+live)
  * narrows to the project's live rows; the sort is over that bounded set, so no
@@ -320,14 +324,15 @@ export function listKnowledgePage(
   const pid = ensureProject(projectPath);
   return buildKnowledgePage(
     options,
-    knowledgeScopePredicate(options.scope ?? "all", pid),
+    knowledgeScopePredicate(options.scope, pid),
   );
 }
 
 /**
  * Read a cross-project keyset page from the tenant's current live knowledge.
- * Omitted scope means `all`, with or without a project filter. With a project
- * filter, scope semantics match `listKnowledgePage` for that project ID.
+ * With no scope or project filter, no scope predicate is applied. With a
+ * project filter and omitted scope, only entries owned by that project are
+ * returned, including its cross-project rows.
  */
 export function listAllKnowledgePage(
   options: KnowledgeListOptions & {
@@ -337,7 +342,7 @@ export function listAllKnowledgePage(
   },
 ): { items: CrossProjectKnowledgeEntry[]; next: KnowledgeKeyset | null } {
   const scopePredicate = knowledgeScopePredicate(
-    options.scope ?? "all",
+    options.scope,
     options.projectId,
   );
   return buildKnowledgePage<CrossProjectKnowledgeEntry>(
@@ -348,8 +353,9 @@ export function listAllKnowledgePage(
 }
 
 /**
- * BM25-ranked cross-project knowledge search. Omitted scope means `all`,
- * regardless of whether a project filter is supplied. The total is exact and
+ * BM25-ranked cross-project knowledge search. With an omitted scope, a
+ * project-filtered search returns rows owned by that project; without a
+ * project filter, no scope predicate is applied. The total is exact and
  * results are intentionally top-N rather than paginated.
  */
 export function searchKnowledgeRanked(options: {
@@ -364,7 +370,7 @@ export function searchKnowledgeRanked(options: {
   mode: "fts" | "like" | "none";
 } {
   const scopePredicate = knowledgeScopePredicate(
-    options.scope ?? "all",
+    options.scope,
     options.projectId,
   );
   const where = knowledgePredicates(options, scopePredicate, false);

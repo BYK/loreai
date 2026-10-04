@@ -944,7 +944,7 @@ describe("listKnowledgePage — filters", () => {
     db()
       .query("UPDATE knowledge SET cross_project = NULL WHERE id = ?")
       .run(s.own);
-    const defaultAll = new Set(
+    const defaultScope = new Set(
       listKnowledgePage(project, { q: marker, limit: 100 }).items.map(
         (e) => e.id,
       ),
@@ -974,8 +974,61 @@ describe("listKnowledgePage — filters", () => {
     expect(shared).toEqual(new Set([s.global, s.cross]));
     expect(new Set([...projectOnly, ...shared])).toEqual(all);
     expect([...projectOnly].some((id) => shared.has(id))).toBe(false);
-    expect(defaultAll).toEqual(all);
+    expect(defaultScope).toEqual(projectOnly);
     expect(all.has(s.foreign)).toBe(false);
+  });
+
+  test("omitted scope with a project stays project-local across list and search", () => {
+    const project = freshProject("default-scope");
+    const otherProject = freshProject("default-scope-other");
+    const marker = `defaultscope${++seq}`;
+    const ownCross = ltm.create({
+      id: uuidv7(),
+      projectPath: project,
+      scope: "project",
+      crossProject: true,
+      category: "pattern",
+      title: `Own shared entry ${marker}`,
+      content: marker,
+    });
+    const otherCross = ltm.create({
+      id: uuidv7(),
+      projectPath: otherProject,
+      scope: "project",
+      crossProject: true,
+      category: "pattern",
+      title: `Other shared entry ${marker}`,
+      content: marker,
+    });
+    const projectless = ltm.create({
+      id: uuidv7(),
+      scope: "global",
+      category: "preference",
+      title: `Projectless entry ${marker}`,
+      content: marker,
+    });
+
+    const projectId = ensureProject(project);
+    const resultSets = [
+      listKnowledgePage(project, { q: marker, limit: 100 }).items.map(
+        (entry) => entry.logical_id,
+      ),
+      listAllKnowledgePage({
+        q: marker,
+        limit: 100,
+        projectId,
+      }).items.map((entry) => entry.logical_id),
+      searchKnowledgeRanked({
+        q: marker,
+        limit: 100,
+        projectId,
+      }).items.map((entry) => entry.logical_id),
+    ];
+    for (const ids of resultSets) {
+      expect(ids).toContain(ownCross);
+      expect(ids).not.toContain(otherCross);
+      expect(ids).not.toContain(projectless);
+    }
   });
 
   test("q matches title and content via FTS (prefix, AND) and never leaks other projects", () => {
@@ -1003,11 +1056,21 @@ describe("listKnowledgePage — filters", () => {
       listKnowledgePage(project, { q: "foreign", limit: 10 }).items,
     ).toHaveLength(0);
     // Blank / whitespace q is a no-op filter.
-    expect(
-      listKnowledgePage(project, { q: "  ", limit: 10 }).items.map(
-        (entry) => entry.id,
-      ),
-    ).toEqual(expect.arrayContaining([s.own, s.gotcha, s.global, s.cross]));
+    const defaultScope = listKnowledgePage(project, {
+      q: "  ",
+      limit: 10,
+    }).items.map((entry) => entry.id);
+    expect(defaultScope).toEqual(expect.arrayContaining([s.own, s.gotcha]));
+    expect(defaultScope).not.toContain(s.global);
+    expect(defaultScope).not.toContain(s.cross);
+    const allScope = listKnowledgePage(project, {
+      q: "  ",
+      scope: "all",
+      limit: 10,
+    }).items.map((entry) => entry.id);
+    expect(allScope).toEqual(
+      expect.arrayContaining([s.own, s.gotcha, s.global, s.cross]),
+    );
   });
 
   test("q with only short tokens matches nothing, like ltm.search()'s LIKE fallback", () => {

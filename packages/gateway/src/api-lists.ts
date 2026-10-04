@@ -295,14 +295,19 @@ export function handleListKnowledgeCursor(
 }
 
 /**
- * Legacy-shape `GET /api/v1/projects/:id/knowledge`: same bare array and
- * external-id mapping, filtered and sorted server-side. The default scope and
- * sort are applied when their query parameters are omitted.
+ * Filtered legacy-shape `GET /api/v1/projects/:id/knowledge`. Returns null
+ * when no filter or sort option is present so the original ltm.forProject()
+ * handler preserves the bare legacy response.
  */
 export function handleListKnowledgeFiltered(
   url: URL,
   project: { id: string; path: string },
 ): Response | null {
+  const hasOption = ["q", "category", "scope", "sort"].some((key) =>
+    url.searchParams.has(key),
+  );
+  if (!hasOption) return null;
+
   try {
     const options = parseKnowledgeListOptions(url);
     // No limit in legacy mode (the legacy list is unbounded); page through

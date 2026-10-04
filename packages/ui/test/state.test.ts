@@ -445,6 +445,10 @@ describe("knowledge state", () => {
     expect(page.loader.loading()).toBe(true);
     expect(getScope).not.toHaveBeenCalled();
     expect(collection).not.toHaveBeenCalled();
+    expect(listKnowledgePage).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: undefined }),
+      expect.anything(),
+    );
 
     result.resolve({
       items: [{ ...entry, project_name: "lore" }],

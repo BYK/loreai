@@ -160,6 +160,17 @@ test.describe("cross-project knowledge", () => {
       .click();
     await expect(page).toHaveURL("/ui/knowledge");
     await expect(page.getByTestId("knowledge-row")).not.toHaveCount(0);
+
+    await page.getByRole("button", { name: /^scope\b/ }).click();
+    await page.getByRole("option", { name: "project", exact: true }).click();
+    await expect(page).toHaveURL("/ui/knowledge?scope=project");
+
+    await page.getByRole("button", { name: /^scope\b/ }).click();
+    await page.getByRole("option", { name: "Any scope", exact: true }).click();
+    await expect(page).toHaveURL("/ui/knowledge");
+    await expect(page.getByTestId("knowledge-row")).not.toHaveCount(0);
+    await page.reload();
+    await expect(page).toHaveURL("/ui/knowledge");
   });
 
   test("all-knowledge and search deep links preserve their server order on reload", async ({

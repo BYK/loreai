@@ -32,7 +32,9 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/_compat` | **Dev/test only** — #1796 compatibility smoke page |
 
 The knowledge list and workspace search accept `scope=project`, `scope=shared`,
-or `scope=all`; omitting `scope` shows all knowledge. `shared` includes entries
+or `scope=all`. With a project filter, omitted scope shows the project's own
+entries (default), including its cross-project entries; without a project
+filter, omitted scope applies no scope predicate. `shared` includes entries
 without a project and entries shared across projects. Knowledge list routes
 also accept `sort=field:direction` terms for `updated_at`, `created_at`,
 `confidence`, and `title`, joined with commas for a stacked sort of up to three
