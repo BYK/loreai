@@ -7,6 +7,9 @@
  * older than every loaded message summarises history the loaded window does
  * not show and leads the document; one with no known time cannot be placed
  * and leads it too, rather than being slotted somewhere plausible.
+ * Markers (#1924) sit above the first message at-or-after their stamp; above
+ * an untimed message they are placed by the next timed message's stamp, so
+ * they cannot get trapped behind a message with no known time.
  */
 import type { DistillationBlock, ReaderBlock, SessionBlocks } from "./blocks";
 import type { MarkerBlock } from "./markers";
@@ -42,9 +45,19 @@ export function buildRows(
   const timedMarkers = [...markers].sort(
     (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1),
   );
+  // An untimed message was written no later than its timed successor, so it
+  // inherits that successor's stamp for marker placement (or +Infinity when
+  // none follows).
+  const effective = blocks.messages.map(() => Infinity);
+  let stamp = Infinity;
+  for (let i = blocks.messages.length - 1; i >= 0; i--) {
+    const message = blocks.messages[i]!;
+    if (isTimed(message)) stamp = message.createdAt;
+    effective[i] = stamp;
+  }
   let next = 0;
   let markerNext = 0;
-  for (const message of blocks.messages) {
+  blocks.messages.forEach((message, i) => {
     if (isTimed(message)) {
       // Summaries produced before this message was written sit above it.
       for (
@@ -54,18 +67,18 @@ export function buildRows(
       ) {
         rows.push({ key: d.id, block: d });
       }
-      // A marker lands above the first message at-or-after its own stamp, so
-      // a compaction keyed to a turn's message sits right above that turn.
-      for (
-        let m = timedMarkers[markerNext];
-        m && m.createdAt <= message.createdAt;
-        m = timedMarkers[++markerNext]
-      ) {
-        rows.push({ key: m.id, marker: m });
-      }
+    }
+    // A marker lands above the first message at-or-after its own stamp, so
+    // a compaction keyed to a turn's message sits right above that turn.
+    for (
+      let m = timedMarkers[markerNext];
+      m && m.createdAt <= effective[i]!;
+      m = timedMarkers[++markerNext]
+    ) {
+      rows.push({ key: m.id, marker: m });
     }
     rows.push({ key: message.id, block: message });
-  }
+  });
   for (const d of timed.slice(next)) rows.push({ key: d.id, block: d });
   for (const m of timedMarkers.slice(markerNext)) {
     rows.push({ key: m.id, marker: m });
