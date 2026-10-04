@@ -305,6 +305,25 @@ describe("contract violations", () => {
     ).toBe(false);
   });
 
+  it("knowledgeSearchResponse accepts a fuzzy-flagged hit", () => {
+    const input = readFixture("knowledge-search.json") as Record<
+      string,
+      unknown
+    >;
+    const hit = {
+      ...(readFixture("knowledge-entry.json") as Record<string, unknown>),
+      project_name: "Lore",
+      rank: null,
+      match: "fuzzy",
+    };
+    const parsed = safeParseContract("/x", knowledgeSearchResponse, {
+      ...input,
+      items: [hit],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.items[0]?.match).toBe("fuzzy");
+  });
+
   it("apiErrorBody accepts the gateway error envelope", () => {
     const parsed = safeParseContract("/x", apiErrorBody, {
       type: "error",

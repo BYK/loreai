@@ -24,6 +24,8 @@ export const WorkspaceSearch: Component<{
 }> = (props) => {
   const navigate = useNavigate();
   const response = () => props.page.loader.data();
+  const fuzzyCount = () =>
+    response()?.items.filter((hit) => hit.match === "fuzzy").length ?? 0;
   return (
     <div class="mx-auto max-w-[940px] px-5 py-8 sm:px-7.5">
       <h1 class="mb-3 text-[25px] font-semibold">Search all knowledge</h1>
@@ -83,6 +85,7 @@ export const WorkspaceSearch: Component<{
                 {result().total > result().items.length
                   ? `Top ${result().items.length} of ${pluralize(result().total, "match", "matches")}`
                   : pluralize(result().total, "match", "matches")}
+                {fuzzyCount() > 0 ? ` · ${fuzzyCount()} approximate` : ""}
               </p>
               <Show when={result().mode === "like"}>
                 <p class="mb-3 text-xs text-muted">
@@ -90,7 +93,9 @@ export const WorkspaceSearch: Component<{
                   newest first.
                 </p>
               </Show>
-              <Show when={result().mode === "none"}>
+              <Show
+                when={result().mode === "none" && result().items.length === 0}
+              >
                 <StateCard
                   kind="empty"
                   title="Nothing in this query is searchable"
@@ -115,9 +120,7 @@ export const WorkspaceSearch: Component<{
                   </A>
                 </StateCard>
               </Show>
-              <Show
-                when={result().mode !== "none" && result().items.length > 0}
-              >
+              <Show when={result().items.length > 0}>
                 <A
                   class="mb-4 inline-block text-sm text-accent underline"
                   href={props.allHref({
@@ -138,6 +141,9 @@ export const WorkspaceSearch: Component<{
                       <li>
                         <ListRow
                           href={props.entryHref(hit.id)}
+                          badge={
+                            hit.match === "fuzzy" ? "≈ approximate" : undefined
+                          }
                           title={hit.title}
                           preview={previewOf(hit.content)}
                           footLeft={`${hit.category} · ${hit.project_name ?? (hit.project_id ? "Unknown project" : "No project")}`}

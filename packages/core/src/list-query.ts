@@ -371,10 +371,7 @@ function buildKnowledgePage<T extends KnowledgeEntry>(
 
   return {
     items: items.map((item) => ({ ...item, match: "exact" as const })),
-    next:
-      hasMore && last
-        ? { keys: knowledgeSortKeys(last, sort), id: last.id }
-        : null,
+    next,
   };
 }
 

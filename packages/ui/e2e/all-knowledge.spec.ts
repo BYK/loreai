@@ -328,12 +328,14 @@ test.describe("cross-project knowledge", () => {
     );
     const results = (await response.json()) as {
       total: number;
-      items: unknown[];
+      items: Array<{ match?: string }>;
     };
+    const fuzzy = results.items.filter((hit) => hit.match === "fuzzy").length;
     await expect(summary).toHaveText(
-      results.total > results.items.length
+      (results.total > results.items.length
         ? `Top ${results.items.length} of ${results.total} matches`
-        : `${results.total} ${results.total === 1 ? "match" : "matches"}`,
+        : `${results.total} ${results.total === 1 ? "match" : "matches"}`) +
+        (fuzzy > 0 ? ` · ${fuzzy} approximate` : ""),
     );
     const hit = page.getByTestId("search-hit").first();
     await expect(hit).toHaveAttribute("href", /\/ui\/knowledge\/[^/]+$/);
@@ -346,6 +348,29 @@ test.describe("cross-project knowledge", () => {
     await expect(page).toHaveURL("/ui/knowledge?q=SQLite");
     await expect(page.getByRole("table")).toBeVisible();
     await expect(page.getByTestId("knowledge-row")).not.toHaveCount(0);
+  });
+
+  test("workspace search flags fuzzy hits for a typo query", async ({
+    page,
+  }) => {
+    await page.goto("/ui");
+    await page
+      .locator('form:has([data-testid="search-entry"])')
+      .evaluate((form) => {
+        const input = form.querySelector<HTMLInputElement>('[name="q"]');
+        if (!input) throw new Error("workspace search input missing");
+        input.value = "curosr pagin";
+        (form as HTMLFormElement).requestSubmit();
+      });
+    await expect(page).toHaveURL("/ui/search?q=curosr%20pagin");
+    const hit = page.getByTestId("search-hit").first();
+    await expect(hit.getByTestId("search-match-fuzzy")).toHaveText(
+      "≈ approximate",
+    );
+    await expect(hit).toContainText("Use cursor pagination");
+    await expect(page.getByTestId("search-summary")).toContainText(
+      "approximate",
+    );
   });
 
   test("hostile titles remain literal and inert in list and search", async ({
