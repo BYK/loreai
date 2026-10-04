@@ -73,6 +73,7 @@ type Item = {
   title: string;
   title_source: string;
   last_message_at: number;
+  match?: "exact" | "fuzzy";
 };
 
 async function seed(tag: string) {
@@ -180,6 +181,27 @@ describe("GET /api/v1/projects/:id/sessions?q= — title search", () => {
     const body = (await res.json()) as { items: Item[]; next_cursor: null };
     expect(body.items.map((i) => i.session_id)).toEqual(["s-alpha"]);
     expect(body.next_cursor).toBeNull();
+  });
+
+  it("flags approximate tail hits with match on exact and fuzzy items (#1948)", async () => {
+    const { listBase } = await seed("search-fuzzy");
+    // "Deploy the payment service" contains "deploy"; nothing else does.
+    const res = await api(`${listBase}?q=deploy`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: Item[]; next_cursor: null };
+    const byId = new Map(body.items.map((i) => [i.session_id, i]));
+    expect(byId.get("s-alpha")?.match).toBe("exact");
+    for (const item of body.items) {
+      expect(item.match === "exact" || item.match === "fuzzy").toBe(true);
+    }
+    // A pure typo query: no literal hit at all — only fuzzy items come back.
+    const typo = await api(`${listBase}?q=deplpy`);
+    const typoBody = (await typo.json()) as { items: Item[] };
+    expect(typoBody.items).toHaveLength(1);
+    expect(typoBody.items[0]).toMatchObject({
+      session_id: "s-alpha",
+      match: "fuzzy",
+    });
   });
 
   it("matches a session-id prefix", async () => {

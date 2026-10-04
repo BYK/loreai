@@ -1222,7 +1222,9 @@ describe("listSessionsPage", () => {
     // compare order-insensitively).
     const bySid = (rows: { session_id: string }[]) =>
       [...rows].sort((a, b) => a.session_id.localeCompare(b.session_id));
-    expect(bySid(all.items)).toEqual(bySid(listSessions(project, 100)));
+    // `match` is a per-query flag (#1948) the legacy reader does not carry.
+    const stripped = all.items.map(({ match: _match, ...rest }) => rest);
+    expect(bySid(stripped)).toEqual(bySid(listSessions(project, 100)));
   });
 
   test("a message appended to an already-served session between pages does not duplicate it", () => {
@@ -1302,7 +1304,112 @@ describe("listSessionsPage", () => {
     expect(page.items.map((s) => s.session_id)).toEqual(["s-n2", "s-n1"]);
     expect(page.next).toBeNull();
     const byPrefix = listSessionsPage(project, { limit: 10, q: "s-x" });
-    expect(byPrefix.items.map((s) => s.session_id)).toEqual(["s-x"]);
+    // The exact prefix hit leads; s-n1/s-n2 are legitimate fuzzy tail hits on
+    // the session-id key (#1948).
+    expect(byPrefix.items.map((s) => [s.session_id, s.match])).toEqual([
+      ["s-x", "exact"],
+      ["s-n1", "fuzzy"],
+      ["s-n2", "fuzzy"],
+    ]);
+  });
+
+  function titledSession(
+    project: string,
+    sid: string,
+    created: number,
+    title: string,
+  ) {
+    temporal.store({
+      projectPath: project,
+      info: msg(sid, `${sid}-m`, created),
+      parts: [
+        {
+          id: `part-${sid}`,
+          sessionID: sid,
+          messageID: `${sid}-m`,
+          type: "text",
+          text: title,
+          time: { start: 0, end: 0 },
+        },
+      ],
+    });
+  }
+
+  test("a typo q returns the fuzzy tail flagged fuzzy, after exact hits (#1948)", () => {
+    const project = freshProject("sessions-fuzzy");
+    titledSession(project, "s-st", 3000, "Session title search");
+    titledSession(project, "s-kt", 2000, "Knowledge table sorting");
+    titledSession(project, "s-uq", 1000, "Unrelated zqq");
+
+    // No exact hit: the whole page is the fuzzy tail, next stays null.
+    const page = listSessionsPage(project, { limit: 10, q: "sesion titl" });
+    expect(page.next).toBeNull();
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toMatchObject({
+      session_id: "s-st",
+      match: "fuzzy",
+    });
+    expect(page.items[0]?.title).toBe("Session title search");
+  });
+
+  test("exact hits rank first flagged exact, then fuzzy rows, no duplicates", () => {
+    const project = freshProject("sessions-fuzzy-mix");
+    titledSession(project, "s-na", 1000, "needle alpha");
+    titledSession(project, "s-nb", 2000, "needle beta");
+    titledSession(project, "s-fz", 3000, "nedle report");
+
+    const page = listSessionsPage(project, { limit: 10, q: "needle" });
+    expect(page.next).toBeNull();
+    expect(page.items.map((s) => [s.session_id, s.match])).toEqual([
+      ["s-nb", "exact"],
+      ["s-na", "exact"],
+      ["s-fz", "fuzzy"],
+    ]);
+    expect(new Set(page.items.map((s) => s.session_id)).size).toBe(3);
+  });
+
+  test("the fuzzy tail lands only on the final page", () => {
+    const project = freshProject("sessions-fuzzy-paged");
+    titledSession(project, "s-e1", 1000, "needle one");
+    titledSession(project, "s-e2", 2000, "needle two");
+    titledSession(project, "s-e3", 3000, "needle three");
+    titledSession(project, "s-fz", 4000, "nedle four");
+
+    const p1 = listSessionsPage(project, { limit: 2, q: "needle" });
+    expect(p1.items.map((s) => s.match)).toEqual(["exact", "exact"]);
+    expect(p1.next).not.toBeNull();
+
+    const p2 = listSessionsPage(project, {
+      limit: 2,
+      q: "needle",
+      after: p1.next!,
+    });
+    expect(p2.next).toBeNull();
+    expect(p2.items.map((s) => [s.session_id, s.match])).toEqual([
+      ["s-e1", "exact"],
+      ["s-fz", "fuzzy"],
+    ]);
+  });
+
+  test("another project's sessions never appear in the fuzzy tail", () => {
+    const project = freshProject("sessions-fuzzy-a");
+    const other = freshProject("sessions-fuzzy-b");
+    titledSession(project, "s-own", 1000, "haystack entry");
+    titledSession(other, "s-other", 2000, "Session title search");
+
+    const page = listSessionsPage(project, { limit: 10, q: "sesion titl" });
+    expect(page.items.map((s) => s.session_id)).toEqual([]);
+  });
+
+  test("a ≤2-char q gets no fuzzy tail, and no q flags everything exact", () => {
+    const project = freshProject("sessions-fuzzy-short");
+    titledSession(project, "s-st", 3000, "Session title search");
+
+    const short = listSessionsPage(project, { limit: 10, q: "kn" });
+    expect(short.items.every((s) => s.match === "exact")).toBe(true);
+
+    const plain = listSessionsPage(project, { limit: 10 });
+    expect(plain.items.map((s) => s.match)).toEqual(["exact"]);
   });
 });
 

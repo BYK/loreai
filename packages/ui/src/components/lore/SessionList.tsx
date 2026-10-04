@@ -61,6 +61,14 @@ export const SessionList: Component<{
           </StateCard>
         </Match>
         <Match when={data()}>
+          <Show when={data()!.items.some((s) => s.match === "fuzzy")}>
+            <div
+              data-testid="session-list-approximate"
+              class="mb-2 text-[11px] text-muted"
+            >
+              Approximate matches shown below exact hits
+            </div>
+          </Show>
           <div class="divide-y divide-line">
             {(data()?.items ?? []).map((session) => (
               <A
@@ -71,11 +79,22 @@ export const SessionList: Component<{
                   when={session.title_source !== "id"}
                   fallback={<SessionIdChip id={session.session_id} />}
                 >
-                  <div
-                    class="truncate font-medium text-sm"
-                    title={session.title}
-                  >
-                    {session.title}
+                  <div class="flex items-center gap-1.5">
+                    <div
+                      class="truncate font-medium text-sm"
+                      title={session.title}
+                    >
+                      {session.title}
+                    </div>
+                    <Show when={session.match === "fuzzy"}>
+                      <span
+                        data-testid="session-match-fuzzy"
+                        title="Approximate match"
+                        class="shrink-0 rounded-sm bg-soft px-1 py-px text-[10px] font-normal text-muted"
+                      >
+                        ≈ approximate
+                      </span>
+                    </Show>
                   </div>
                   <div class="mt-1 flex items-center gap-2">
                     <SessionIdChip id={session.session_id} />

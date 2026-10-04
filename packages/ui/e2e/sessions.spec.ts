@@ -88,6 +88,24 @@ test.describe("session titles and search", () => {
     void projectId;
   });
 
+  test("a typo query flags approximate session hits (#1948)", async ({
+    page,
+  }) => {
+    // "outbxo" fuzzy-scores 0.833 against "…sync outbox pruning" — no literal
+    // hit exists, so the row is a rescue hit and must say so.
+    await openSessions(page, "?q=outbxo");
+    await expect(page.getByTestId("session-list-approximate")).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: /Refactor the sync outbox pruning/ }),
+    ).toBeVisible();
+    await expect(page.getByTestId("session-match-fuzzy")).toHaveCount(1);
+
+    // The literal query yields an exact hit only — no approximate badge.
+    await openSessions(page, "?q=outbox");
+    await expect(page.getByTestId("session-match-fuzzy")).toHaveCount(0);
+    await expect(page.getByTestId("session-list-approximate")).toBeHidden();
+  });
+
   test("the reader header shows the title and id chip", async ({ page }) => {
     const projectId = await loreProjectId(page);
     await page.goto(`/ui/projects/${projectId}/sessions/e2e-session-sqlite`);

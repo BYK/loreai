@@ -933,6 +933,52 @@ describe("paged sessions and recall state", () => {
     expect(page.loader.data()?.items).toEqual([]);
   });
 
+  it("sessions.page strips per-query match flags before caching items (#1948)", async () => {
+    const factory = new IDBFactory();
+    await closeLoreDb();
+    const db = (await openLoreDb({ factory }))!;
+    const sessions = createSessionsRepo(db);
+    const fuzzyItem = {
+      session_id: "s-fz",
+      message_count: 2,
+      first_message_at: 1,
+      last_message_at: 2,
+      distilled_count: 1,
+      undistilled_count: 1,
+      distillation_count: 0,
+      title: "Session tittle search",
+      title_source: "first_message" as const,
+      match: "fuzzy" as const,
+    };
+    const client = {
+      listProjectSessionsPage: async () => ({
+        items: [fuzzyItem],
+        next_cursor: null,
+      }),
+    } as unknown as ApiClient;
+    const state = createSessionsState({
+      client,
+      repos: {
+        sessions,
+        messageBlocks: createMessageBlocksRepo(null),
+      },
+      tracked,
+    });
+    const page = state.page(() => ({
+      projectId: "p1",
+      cursor: null,
+      q: "sesion titl",
+    }));
+    await flush();
+    // The loader value keeps the flag — the list needs it for the badge.
+    expect(page.loader.data()?.items[0]?.match).toBe("fuzzy");
+    // …but the cache must not carry a per-query flag.
+    const row = await sessions.get("p1/s-fz");
+    expect(row).toBeDefined();
+    expect("match" in row!).toBe(false);
+    await closeLoreDb();
+  });
+
   it("recall.search forwards the project query and scope", async () => {
     const seen: unknown[] = [];
     const client = {

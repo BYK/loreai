@@ -22,6 +22,8 @@ export const sessionSummary = type({
   distillation_count: nonNegInt,
   title: nonEmptyString,
   title_source: sessionTitleSource,
+  /** Set by the paged list's `q` filter (#1948): literal or approximate hit. */
+  "match?": "'exact' | 'fuzzy'",
 });
 
 export type SessionSummary = typeof sessionSummary.infer;

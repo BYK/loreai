@@ -54,6 +54,35 @@ const renderList = (
 };
 
 describe("SessionList", () => {
+  it("renders the fuzzy badge only for approximate rows and the caption only when one exists (#1948)", () => {
+    renderList(() => ({
+      items: [
+        summary({ session_id: "s-ex", title: "Session title search" }),
+        summary({
+          session_id: "s-fz",
+          title: "Session tittle search",
+          match: "fuzzy",
+        }),
+      ],
+      next_cursor: null,
+    }));
+    const badges = screen.getAllByTestId("session-match-fuzzy");
+    expect(badges).toHaveLength(1);
+    expect(screen.getByTestId("session-list-approximate")).toBeInTheDocument();
+  });
+
+  it("renders no badge or caption when every row is an exact hit", () => {
+    renderList(() => ({
+      items: [
+        summary({ session_id: "s-ex", title: "Session title search" }),
+        summary({ session_id: "s-e2", title: "Session two", match: "exact" }),
+      ],
+      next_cursor: null,
+    }));
+    expect(screen.queryByTestId("session-match-fuzzy")).toBeNull();
+    expect(screen.queryByTestId("session-list-approximate")).toBeNull();
+  });
+
   it("renders an empty project session state", () => {
     render(() => (
       <MemoryRouter>
