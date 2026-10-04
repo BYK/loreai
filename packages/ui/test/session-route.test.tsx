@@ -7,9 +7,9 @@ import { render, screen, waitFor } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 
 import { Session } from "~/routes/Session";
-import { WorkspaceProvider } from "~/routes/workspace";
+import { WorkspaceProvider, useWorkspace } from "~/routes/workspace";
 import type { ApiClient } from "~/lib/api";
-import type { ProjectSummary, SessionPage } from "~/contracts";
+import type { ProjectSummary, SessionPage, SessionSummary } from "~/contracts";
 
 const project: ProjectSummary = {
   id: "p-1",
@@ -80,6 +80,49 @@ describe("Session route header", () => {
 
   it("falls back to the id-based title when the answer carries no title", async () => {
     renderSession(pageWith({}));
+    await waitFor(() =>
+      expect(screen.getByText("Session s-1")).toBeInTheDocument(),
+    );
+  });
+
+  it("ignores a cached list summary that predates titles", async () => {
+    // A `SessionSummary` cached before #1921 has no `title`/`title_source`;
+    // when the page answer itself is id-sourced the header must fall back to
+    // the id rather than render the summary's missing title as blank.
+    const legacySummary = {
+      session_id: "s-1",
+      message_count: 1,
+      first_message_at: 1,
+      last_message_at: 1,
+      distilled_count: 0,
+      undistilled_count: 1,
+      distillation_count: 0,
+    } as unknown as SessionSummary;
+    const client = {
+      listProjects: async () => [project],
+      listProjectSessions: async () => [legacySummary],
+      getSessionPage: async () => pageWith({}),
+    } as unknown as ApiClient;
+    const WarmStore = () => {
+      const ws = useWorkspace();
+      ws.state.sessions.list(() => "p-1").loader.data();
+      return null;
+    };
+    const history = createMemoryHistory();
+    history.set({ value: "/projects/p-1/sessions/s-1" });
+    render(() => (
+      <MemoryRouter history={history}>
+        <Route
+          path="/projects/:projectId/sessions/:sessionId"
+          component={() => (
+            <WorkspaceProvider client={client} db={Promise.resolve(null)}>
+              <WarmStore />
+              <Session />
+            </WorkspaceProvider>
+          )}
+        />
+      </MemoryRouter>
+    ));
     await waitFor(() =>
       expect(screen.getByText("Session s-1")).toBeInTheDocument(),
     );

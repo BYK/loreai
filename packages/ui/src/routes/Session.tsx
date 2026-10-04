@@ -95,13 +95,14 @@ export const Session: Component = () => {
 
   // Header title (#1921): the server's derived title once the page answer
   // carries one (title_source !== "id"), otherwise a cached list summary's
-  // title, otherwise the raw id.
+  // title, otherwise the raw id. Summaries cached before titles existed have
+  // no `title` at all — treat them like an id-sourced title.
   const headerTitle = createMemo(() => {
     const page = reader.loader.data();
-    if (page && page.title_source !== "id") return page.title;
+    if (page?.title && page.title_source !== "id") return page.title;
     const sid = sessionId();
     const summary = sid ? ws.state.sessions.store.select(sid) : undefined;
-    if (summary && summary.title_source !== "id") return summary.title;
+    if (summary?.title && summary.title_source !== "id") return summary.title;
     return `Session ${sid ?? ""}`;
   });
 
