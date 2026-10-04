@@ -1688,7 +1688,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                         type="button"
                         class="text-xs text-accent underline"
                         data-testid="search-load-older"
-                        onClick={() => void loadOlder()}
+                        disabled={!olderButtonsReady()}
+                        onClick={() => {
+                          if (!olderButtonsReady()) return;
+                          void loadOlder();
+                        }}
                       >
                         Load older history
                       </button>

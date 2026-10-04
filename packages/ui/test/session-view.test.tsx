@@ -1109,6 +1109,12 @@ describe("SessionView: in-session search", () => {
     });
     await settleSearch();
     const before = screen.getByTestId("search-summary").textContent ?? "";
+    // The manual control stays disabled until the landing loop settles.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
     fireEvent.click(screen.getByTestId("search-load-older"));
     await settleSearch();
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
@@ -1840,6 +1846,37 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     const button = screen.getByTestId<HTMLButtonElement>("load-older");
     // The landing loop may still re-issue scrolls: the button is disabled
     // and its guard swallows even a forced click.
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the quick-search load-older button disabled until the landing settles", async () => {
+    const onLoadOlder = vi.fn(async () => {});
+    mount({
+      messages: older(40),
+      distillations: [],
+      hasOlder: true,
+      messageCount: 60,
+      onLoadOlder,
+    });
+    await tick();
+    // The coverage row appears once a search has scanned the loaded
+    // window — the landing loop (24 frames) is still running by then.
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "older message" } });
+    await settleSearch();
+    const button = screen.getByTestId<HTMLButtonElement>("search-load-older");
     expect(button).toBeDisabled();
     fireEvent.click(button);
     expect(onLoadOlder).not.toHaveBeenCalled();
