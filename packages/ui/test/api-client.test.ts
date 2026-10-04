@@ -462,6 +462,30 @@ describe("api client: error classification", () => {
     expect(got.messages).toHaveLength(1);
   });
 
+  it("fetches the session context via /sessions/:id/context?path=", async () => {
+    const ctx = {
+      session_id: "s 1",
+      layer: 1,
+      history: { message_count: 2, token_estimate: 500 },
+      distilled_prefix: { token_count: 0, distillations: [] },
+      knowledge: {
+        cache_text: null,
+        cache_tokens: null,
+        pin_tokens: null,
+        stable_tokens: null,
+        injections: [],
+      },
+      prompt_deltas: [],
+      turns: [],
+    };
+    const { client, calls } = clientFor(() => json(ctx));
+    const got = await client.getSessionContext("/home/me/lore", "s 1");
+    expect(calls[0]).toBe(
+      "/api/v1/sessions/s%201/context?path=%2Fhome%2Fme%2Flore",
+    );
+    expect(got).toEqual(ctx);
+  });
+
   it("reads the folk status routes", async () => {
     const { client, calls } = clientFor((url) => {
       if (url.endsWith("/account")) {

@@ -60,6 +60,17 @@ export type LoreAssistantMessage = {
     reasoning: number;
     cache: { read: number; write: number };
   };
+  /**
+   * Per-turn gradient transform stats recorded by the gateway: the accepted
+   * layer and the turn's token accounting (raw / distilled / total). Absent
+   * for non-proxied messages (hosts without a gradient pipeline).
+   */
+  gradient?: {
+    layer: number;
+    rawTokens: number;
+    totalTokens: number;
+    distilledTokens: number;
+  };
 };
 
 /** Discriminated union on `.role`. */

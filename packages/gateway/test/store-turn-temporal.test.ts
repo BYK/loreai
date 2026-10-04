@@ -189,6 +189,67 @@ describe("storeTurnTemporal (#1084)", () => {
     );
   });
 
+  it("persists gradient stats into the assistant metadata when temporalInput carries them (#1924)", () => {
+    const SESSION = freshSession();
+    const temporalInput = Object.freeze({
+      ...captureTurnTemporalInput(userMessages(SESSION, "with gradient")),
+      gradient: {
+        layer: 2,
+        rawTokens: 100,
+        totalTokens: 160,
+        distilledTokens: 40,
+      },
+    });
+    storeTurnTemporal({
+      temporalInput,
+      assistantContentBlocks: [{ type: "text", text: "reply" }],
+      usage: USAGE,
+      model: "m",
+      projectPath: PROJECT,
+      sessionID: SESSION,
+      noStore: false,
+    });
+    const meta = db()
+      .query(
+        "SELECT metadata FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
+      )
+      .get(SESSION) as { metadata: string };
+    const parsed = JSON.parse(meta.metadata);
+    expect(parsed.gradient).toEqual({
+      layer: 2,
+      raw_tokens: 100,
+      total_tokens: 160,
+      distilled_tokens: 40,
+    });
+    expect(parsed.usage).toEqual({
+      input: 10,
+      output: 5,
+      cache_read: 0,
+      cache_write: 0,
+    });
+  });
+
+  it("leaves assistant metadata untouched when temporalInput has no gradient", () => {
+    const SESSION = freshSession();
+    storeTurnTemporal({
+      temporalInput: captureTurnTemporalInput(userMessages(SESSION, "plain")),
+      assistantContentBlocks: [{ type: "text", text: "reply" }],
+      usage: USAGE,
+      model: "m",
+      projectPath: PROJECT,
+      sessionID: SESSION,
+      noStore: false,
+    });
+    const meta = db()
+      .query(
+        "SELECT metadata FROM temporal_messages WHERE session_id = ? AND role = 'assistant'",
+      )
+      .get(SESSION) as { metadata: string };
+    const parsed = JSON.parse(meta.metadata);
+    expect("gradient" in parsed).toBe(false);
+    expect("usage" in parsed).toBe(false);
+  });
+
   it("writes NOTHING and leaves its snapshot untouched in no-store mode", () => {
     const SESSION = freshSession();
     // A tool_result-bearing user message so resolveToolResults has an observable

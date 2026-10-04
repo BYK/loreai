@@ -6,7 +6,7 @@
  * exactly like `GET /api/v1/sessions/:id` so it goes through the same block
  * model as real data.
  */
-import type { SessionDetail } from "~/contracts";
+import type { SessionContext, SessionDetail } from "~/contracts";
 import { CHUNK_SEPARATOR } from "./blocks";
 
 const T0 = Date.UTC(2026, 2, 14, 12, 4, 0);
@@ -133,3 +133,114 @@ export const READER_SPECIMEN: SessionDetail = {
 
 export const READER_SPECIMEN_DISTILLATION =
   "User asked whether to replace SQLite with a remote service; agent read db.ts and recommended keeping SQLite for portability and FTS5.";
+
+/**
+ * Mock `GET /sessions/:id/context` answer for the same specimen session:
+ * one injection batch of three entries (one whose entry was removed), two
+ * prompt deltas (one with its application time unrecorded) and three turns
+ * at layers 0 → 1 → 2 so two compaction markers appear.
+ */
+export const READER_SPECIMEN_CONTEXT: SessionContext = {
+  session_id: "specimen",
+  layer: 2,
+  history: { message_count: 7, token_estimate: 286 },
+  distilled_prefix: {
+    token_count: 812,
+    distillations: [
+      {
+        id: "spec-d0",
+        generation: 0,
+        token_count: 812,
+        created_at: T0 + 300_000,
+        observations: READER_SPECIMEN_DISTILLATION,
+      },
+    ],
+  },
+  knowledge: {
+    cache_text: null,
+    cache_tokens: 1_240,
+    pin_tokens: 96,
+    stable_tokens: null,
+    injections: [
+      {
+        logical_id: "spec-k1",
+        title: "Keep SQLite as the only store",
+        category: "decision",
+        confidence: 0.92,
+        created_at: T0 + 500,
+        credited: true,
+        verdict: "pass",
+      },
+      {
+        logical_id: "spec-k2",
+        title: "FTS5 triggers must be recreated after schema changes",
+        category: "gotcha",
+        confidence: 0.8,
+        created_at: T0 + 500,
+        credited: false,
+        verdict: null,
+      },
+      {
+        logical_id: "spec-k3",
+        title: null,
+        category: null,
+        confidence: null,
+        created_at: T0 + 500,
+        credited: false,
+        verdict: null,
+      },
+    ],
+  },
+  prompt_deltas: [
+    {
+      seq: 0,
+      insert_at: 3,
+      applied_at: T0 + 70_000,
+      changed: [
+        { id: "spec-k1", title: "Keep SQLite as the only store" },
+        { id: "spec-k9", title: null },
+      ],
+      removed: ["spec-k7"],
+      text: [
+        "[memory refreshed] The knowledge set changed: SQLite decision updated.",
+      ],
+    },
+    {
+      seq: 1,
+      insert_at: null,
+      applied_at: null,
+      changed: [],
+      removed: [],
+      text: [],
+    },
+  ],
+  turns: [
+    {
+      message_id: "spec-a1",
+      created_at: T0 + 95_000,
+      layer: 0,
+      raw_tokens: 4_200,
+      total_tokens: 4_200,
+      distilled_tokens: 0,
+      usage: { input: 4_200, output: 320, cache_read: 0, cache_write: 0 },
+    },
+    {
+      message_id: "spec-a2",
+      created_at: T0 + 190_000,
+      layer: 1,
+      raw_tokens: 18_400,
+      total_tokens: 6_100,
+      distilled_tokens: 812,
+      usage: { input: 6_100, output: 410, cache_read: 3_000, cache_write: 0 },
+    },
+    {
+      message_id: "spec-a3",
+      created_at: T0 + 250_000,
+      layer: 2,
+      raw_tokens: 31_000,
+      total_tokens: 9_800,
+      distilled_tokens: 1_600,
+      usage: null,
+    },
+  ],
+};

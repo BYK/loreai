@@ -66,6 +66,12 @@ export {
   type SessionTitleSource,
 } from "./session-title";
 export * as distillation from "./distillation";
+export {
+  sessionContext,
+  knowledgeTitlesFor,
+  type SessionContext,
+  type SessionContextTurn,
+} from "./session-context";
 export * as contradiction from "./contradiction";
 export * as semanticLint from "./semantic-lint";
 /** @deprecated Use semanticLint; retained for host compatibility. */

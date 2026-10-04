@@ -57,6 +57,11 @@ export interface HighlightController {
   highlight: Accessor<PassageHighlight | null>;
   /** The current in-session search hit; marked independently of the passage. */
   searchHit?: Accessor<PassageHighlight | null>;
+  /** Every in-session search hit for a block part (all-match highlight). */
+  searchHits?: (
+    blockId: string,
+    partIndex: number,
+  ) => readonly PassageHighlight[];
   /** Called with the first `<mark>` each time a highlight is (re)applied. */
   onApplied?: (mark: HTMLElement, highlight: PassageHighlight) => void;
 }
@@ -119,7 +124,8 @@ export const RichText: Component<{
     const hit = controller.searchHit?.();
     const h = controller.highlight();
     if (!el) return;
-    const wanted: { span: HighlightSpan; source: PassageHighlight }[] = [];
+    const wanted: { span: HighlightSpan; source: PassageHighlight | null }[] =
+      [];
     if (addresses(h, props.block, props.part))
       wanted.push({
         span: { start: h.start, end: h.end, className: "passage-target" },
@@ -130,6 +136,20 @@ export const RichText: Component<{
         span: { start: hit.start, end: hit.end, className: "passage-search" },
         source: hit,
       });
+    // Every other hit in this part is marked too — quieter, and never a
+    // scroll target, so it gets no `source` for `onApplied`.
+    for (const other of controller.searchHits?.(props.block, props.part) ??
+      []) {
+      if (hit && samePassage(hit, other)) continue;
+      wanted.push({
+        span: {
+          start: other.start,
+          end: other.end,
+          className: "passage-search-all",
+        },
+        source: null,
+      });
+    }
     if (wanted.length === 0) {
       clearHighlight(el);
       return;
@@ -139,7 +159,8 @@ export const RichText: Component<{
       wanted.map((w) => w.span),
     );
     marks.forEach((mark, i) => {
-      if (mark) controller.onApplied?.(mark, wanted[i]!.source);
+      const source = wanted[i]!.source;
+      if (mark && source !== null) controller.onApplied?.(mark, source);
     });
   });
   return (

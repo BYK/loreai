@@ -31,8 +31,37 @@ function rowWith(page: Page, text: string) {
   return page.locator("[data-row-key]").filter({ hasText: text });
 }
 
+/**
+ * Click load-older without scrolling: a real `.click()` scrolls the button
+ * into view, and that scroll to the top pages a second older page in by
+ * itself (#1923). dispatchEvent drives the handler in place.
+ */
+async function clickLoadOlder(page: Page) {
+  const button = page.getByTestId("load-older");
+  // The button stays disabled while the landing frame loop may still issue
+  // scrolls; a click dispatched in that window is dropped.
+  await expect(button).toBeEnabled();
+  await button.dispatchEvent("click");
+}
+
+/** `aria-setsize` is the logical row count — same on every mounted row. */
+async function setsize(page: Page) {
+  const value = await page
+    .locator("[data-row-key]")
+    .first()
+    .getAttribute("aria-setsize");
+  return Number(value);
+}
+
+/** The quick-search bar is collapsed until Ctrl/Cmd+F or the Find button opens it. */
+async function openSearch(page: Page) {
+  await page.getByTestId("search-open").click();
+  await expect(page.getByTestId("search-input")).toBeFocused();
+}
+
 /** Bring the (possibly unmounted) row mentioning `marker` into view via search. */
 async function revealRow(page: Page, marker: string) {
+  await openSearch(page);
   await page.getByTestId("search-input").fill(marker);
   await expect(page.getByTestId("search-summary")).toContainText("1 match");
   await page.getByTestId("search-next").click();
@@ -68,6 +97,38 @@ async function selectInRow(page: Page, marker: string, needle: string) {
 }
 
 test.describe("session reader", () => {
+  test("lands at the newest message and pages older history in on an upward scroll", async ({
+    page,
+  }) => {
+    await openReader(page);
+    // The reader opens on the newest row, not the top of the loaded window.
+    await expect(rowWith(page, "needle-229")).toBeInViewport();
+    await expect(rowWith(page, "needle-130 ")).toHaveCount(0);
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "100 of 230",
+    );
+    const scroll = page.getByTestId("session-scroll");
+    const initial = await setsize(page);
+
+    // Scrolling to the top pages older history in by itself — no button.
+    await scroll.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect.poll(() => setsize(page)).toBe(initial + 100);
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "200 of 230",
+    );
+
+    await scroll.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect(page.getByTestId("history-start")).toBeVisible();
+    await expect.poll(() => setsize(page)).toBe(initial + 130);
+    await expect(page.getByTestId("reader-coverage-line")).toContainText(
+      "230 messages, complete as captured",
+    );
+  });
+
   test("UX-01: select a passage → stable link → reload → same passage highlighted", async ({
     page,
     context,
@@ -84,11 +145,11 @@ test.describe("session reader", () => {
     );
     // The first page is the newest 100 messages; message 5 is older history.
     await expect(rowWith(page, "needle-5)")).toHaveCount(0);
-    await page.getByTestId("load-older").click();
+    await clickLoadOlder(page);
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "200 of 230",
     );
-    await page.getByTestId("load-older").click();
+    await clickLoadOlder(page);
     await expect(page.getByTestId("history-start")).toBeVisible();
     await expect(page.getByTestId("reader-coverage")).toHaveAttribute(
       "data-coverage",
@@ -157,9 +218,9 @@ test.describe("session reader", () => {
     // offset the virtualiser holds at that moment. Measured from the sticky
     // toolbar's edge, which the row is read against.
     await openReader(page);
-    await revealRow(page, "needle-140 ");
+    await revealRow(page, "needle-180 ");
     const rowTop = () =>
-      rowWith(page, "needle-140 ").evaluate(
+      rowWith(page, "needle-180 ").evaluate(
         (row) =>
           row.getBoundingClientRect().top -
           document
@@ -167,26 +228,31 @@ test.describe("session reader", () => {
             .getBoundingClientRect().bottom,
       );
     const before = await rowTop();
-    await page.getByTestId("load-older").click();
+    await clickLoadOlder(page);
     await expect(page.getByTestId("reader-coverage-line")).toContainText(
       "200 of 230",
     );
-    await page.waitForTimeout(250);
-    expect(Math.abs((await rowTop()) - before)).toBeLessThan(2);
-    await page.getByTestId("load-older").click();
+    // The unmeasured prepended rows settle once the virtualiser measures
+    // them; the row's position converges to where it was, never a fixed wait.
+    await expect
+      .poll(async () => Math.abs((await rowTop()) - before))
+      .toBeLessThan(2);
+    await clickLoadOlder(page);
     await expect(page.getByTestId("history-start")).toBeVisible();
-    await page.waitForTimeout(250);
-    expect(Math.abs((await rowTop()) - before)).toBeLessThan(2);
+    await expect
+      .poll(async () => Math.abs((await rowTop()) - before))
+      .toBeLessThan(2);
   });
 
   test("a distillation is labelled compressed context, placed after its sources and never a search hit", async ({
     page,
   }) => {
     await openReader(page);
-    await page.getByTestId("load-older").click();
-    await page.getByTestId("load-older").click();
+    await clickLoadOlder(page);
+    await clickLoadOlder(page);
     await expect(page.getByTestId("history-start")).toBeVisible();
     // Its text mentions needle-0 … needle-9, yet only the message counts.
+    await openSearch(page);
     await page.getByTestId("search-input").fill("needle-9");
     await expect(page.getByTestId("search-summary")).toContainText("1 match");
     await page.getByTestId("search-next").click();
@@ -224,8 +290,8 @@ test.describe("session reader", () => {
     page,
   }) => {
     await openReader(page);
-    await page.getByTestId("load-older").click();
-    await page.getByTestId("load-older").click();
+    await clickLoadOlder(page);
+    await clickLoadOlder(page);
     await expect(page.getByTestId("history-start")).toBeVisible();
     await selectInRow(page, "needle-5)", PASSAGE);
     await expect(page).toHaveURL(/[?&]a=/);
@@ -255,6 +321,78 @@ test.describe("session reader", () => {
     await expect(page.getByTestId("history-start")).toBeVisible();
   });
 
+  test("quick search opens on Ctrl+F, counts n/m, highlights all matches and returns focus on Escape", async ({
+    page,
+  }, testInfo) => {
+    await openReader(page);
+    const input = page.getByTestId("search-input");
+    if (testInfo.project.name.includes("mobile")) {
+      // Touch devices have no Ctrl+F: the toolbar Find button is the entry.
+      await openSearch(page);
+    } else {
+      // Ctrl+F while a row has focus opens the bar and focuses the input.
+      const row = page.locator("[data-row-key]").last();
+      await row.focus();
+      await page.keyboard.press("Control+f");
+      await expect(input).toBeFocused();
+    }
+
+    await input.fill("needle-1");
+    await expect(page.getByTestId("search-summary")).toContainText(
+      /in loaded history/,
+    );
+    const count = page.getByTestId("search-count");
+    await expect(count).toHaveText(/^\d+\/\d+$/);
+    const total = Number(((await count.textContent()) ?? "0/0").split("/")[1]);
+    expect(total).toBeGreaterThan(1);
+
+    // Enter steps forward: the current-hit row changes and every mounted
+    // match carries a mark.
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("1/" + total);
+    const currentRow = page.locator("[data-search-current]");
+    await expect(currentRow).toHaveCount(1);
+    const firstKey = await currentRow.getAttribute("data-row-key");
+    await expect(page.locator("mark.passage-search")).toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("2/" + total);
+    const secondKey = await page
+      .locator("[data-search-current]")
+      .getAttribute("data-row-key");
+    expect(secondKey).not.toBe(firstKey);
+    await expect
+      .poll(() => page.locator("mark.passage-search-all").count())
+      .toBeGreaterThan(0);
+    await page.keyboard.press("Shift+Enter");
+    await expect(count).toHaveText("1/" + total);
+
+    // Cycling is a programmatic scroll: it never pages older history, so
+    // the match total stays constant across further steps.
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("2/" + total);
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("3/" + total);
+
+    // A second Ctrl+F inside the input falls through (no bar toggle).
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("quick-search")).toBeVisible();
+
+    // Escape closes and focus returns inside the reader (the row, or the
+    // scroller if stepping unmounted it).
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("quick-search")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const scroll = document.querySelector(
+            '[data-testid="session-scroll"]',
+          );
+          return scroll !== null && scroll.contains(document.activeElement);
+        }),
+      )
+      .toBe(true);
+  });
+
   test("in-session search covers unmounted rows and can select a hit as a source anchor", async ({
     page,
   }) => {
@@ -262,10 +400,11 @@ test.describe("session reader", () => {
     const rows = page.locator("[data-row-key]");
     const mounted = await rows.count();
     expect(mounted).toBeLessThan(100);
-    // needle-225 lives on the first page but far below the viewport.
-    await expect(rowWith(page, "needle-225")).toHaveCount(0);
+    // needle-150 lives on the first page, far above the landed viewport.
+    await expect(rowWith(page, "needle-150")).toHaveCount(0);
 
-    await page.getByTestId("search-input").fill("needle-225");
+    await openSearch(page);
+    await page.getByTestId("search-input").fill("needle-150");
     await expect(page.getByTestId("search-summary")).toContainText(
       "1 match in loaded history",
     );
@@ -275,30 +414,30 @@ test.describe("session reader", () => {
     await page.getByTestId("search-next").click();
     await expect(page.getByTestId("search-summary")).toContainText("1 of 1");
     const hit = page.locator("mark.passage-search");
-    await expect(hit).toHaveText("needle-225");
-    await expect(rowWith(page, "needle-225")).toBeVisible();
+    await expect(hit).toHaveText("needle-150");
+    await expect(rowWith(page, "needle-150")).toBeVisible();
 
     await page.getByTestId("search-select").click();
     await expect(page.getByTestId("selection-quote")).toContainText(
-      "needle-225",
+      "needle-150",
     );
     await expect(page).toHaveURL(/[?&]a=1(~|%7E)m\.lore_tm_v1_/);
-    await expect(page.locator("mark.passage-target")).toHaveText("needle-225");
+    await expect(page.locator("mark.passage-target")).toHaveText("needle-150");
 
     // A hit on an older page is not a hit until that page is loaded.
     await page.getByTestId("search-input").fill("needle-5)");
     await expect(page.getByTestId("search-summary")).toContainText(
       "No matches in loaded history",
     );
-    await page.getByTestId("load-older").click();
-    await page.getByTestId("load-older").click();
+    await clickLoadOlder(page);
+    await clickLoadOlder(page);
     await expect(page.getByTestId("search-summary")).toContainText(
       "1 match in loaded history",
     );
     await expect(page.getByTestId("search-coverage")).toHaveCount(0);
     // The selection made from the earlier hit is untouched by the new search.
     await expect(page.getByTestId("selection-quote")).toContainText(
-      "needle-225",
+      "needle-150",
     );
   });
 
@@ -311,6 +450,7 @@ test.describe("session reader", () => {
     // Message 8 is on the oldest page; "needle-8 and" is a literal nothing on
     // the loaded page contains (needle-18x carries a different digit run).
     const query = "needle-8 and";
+    await openSearch(page);
     await page.getByTestId("search-input").fill(query);
     await expect(page.getByTestId("search-summary")).toContainText(
       "No matches in loaded history",
@@ -369,7 +509,11 @@ test.describe("session reader", () => {
     page,
   }) => {
     await openReader(page);
-    const first = page.locator("[data-row-key]").first();
+    // The landed reader mounts overscan rows beyond the viewport edge and
+    // marker rows among the messages — focus a real message row or Enter
+    // has no block to select.
+    await revealRow(page, "needle-200");
+    const first = rowWith(page, "needle-200");
     await first.focus();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");

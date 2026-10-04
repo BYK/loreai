@@ -38,6 +38,14 @@ export interface TurnTemporalInput {
   /** Absolute request length, even when only one message is retained. */
   readonly assistantIndex: number;
   readonly checkpoint?: { claim(): boolean; publish(): void };
+  /** Accepted transform stats for this turn, persisted into the assistant
+   *  message's metadata for the session-context API. */
+  readonly gradient?: {
+    layer: number;
+    rawTokens: number;
+    totalTokens: number;
+    distilledTokens: number;
+  };
 }
 
 export function captureTurnTemporalInput(
@@ -102,6 +110,9 @@ export function storeTurnTemporal(input: {
       temporalInput.assistantIndex,
     )[0];
     updateAssistantMessageTokens(assistant, input.usage, input.model);
+    if (temporalInput.gradient && assistant.info.role === "assistant") {
+      assistant.info.gradient = temporalInput.gradient;
+    }
     const message = {
       projectPath,
       info: assistant.info,

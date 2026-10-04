@@ -67,6 +67,26 @@
  * (`invalid_request`); `q` is re-sent by the caller with each page, never
  * embedded in the cursor token.
  *
+ * Session context
+ * ---------------
+ * `GET /sessions/:id/context` (new route, #1924, handler in
+ * `session-context-api.ts`) reports the session's real context window as Lore
+ * assembled it — read-only, never paged, no cursor mode:
+ *
+ *     { session_id, layer, history: { message_count, token_estimate },
+ *       distilled_prefix: { token_count, distillations: [...] },
+ *       knowledge: { cache_text, cache_tokens, pin_tokens, stable_tokens,
+ *                    injections: [...] },
+ *       prompt_deltas: [{ seq, insert_at, applied_at, changed, removed,
+ *                         text }],  // applied_at = persisted write time
+ *                                   // (created_at, v100); null on old rows
+ *       turns: [{ message_id, created_at, layer, raw_tokens, total_tokens,
+ *                 distilled_tokens, usage }] }
+ *
+ * `layer` is the last accepted gradient layer (null when none). `turns`
+ * carries the per-turn transform stats the proxy stamps into assistant
+ * message metadata. A session unknown to the resolved project is a 404.
+ *
  * Version history
  * ---------------
  * `GET /knowledge/:id/versions` follows the visibility of `GET /knowledge/:id`:

@@ -310,6 +310,46 @@ describe("db", () => {
     expect(row.version).toBe(MIGRATIONS.length);
   });
 
+  test("v100: session_prompt_deltas.created_at exists on a fresh DB", () => {
+    const cols = db()
+      .query("PRAGMA table_info(session_prompt_deltas)")
+      .all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === "created_at")).toBe(true);
+  });
+
+  test("v100 upgrade: recovering a pre-v100 DB adds created_at as NULLs", () => {
+    const connection = db();
+    // Simulate a pre-v100 table: drop the column, pretend the user_version
+    // predates it, and leave a row behind to prove it is not backfilled.
+    connection.exec(`
+      ALTER TABLE session_prompt_deltas DROP COLUMN created_at;
+      INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content)
+        VALUES ('s-old', 0, 'p1', '{}', '[]');
+      UPDATE schema_version SET version = 99;
+    `);
+    close();
+
+    const recovered = db();
+    const cols = recovered
+      .query("PRAGMA table_info(session_prompt_deltas)")
+      .all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === "created_at")).toBe(true);
+    expect(
+      recovered
+        .query(
+          "SELECT created_at FROM session_prompt_deltas WHERE session_id = 's-old'",
+        )
+        .get(),
+    ).toEqual({ created_at: null });
+    expect(
+      (
+        recovered.query("SELECT version FROM schema_version").get() as {
+          version: number;
+        }
+      ).version,
+    ).toBe(MIGRATIONS.length);
+  });
+
   test("upgrades legacy pending embeddings in place without dropping their work", () => {
     const connection = db();
     const project = ensureProject("/test/legacy-temporal-queue-upgrade");

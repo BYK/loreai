@@ -83,6 +83,20 @@ function messageMetadata(info: LoreMessage, parts: LorePart[]): string {
     meta.modelID = info.modelID;
     meta.providerID = info.providerID;
     meta.mode = info.mode;
+    if (info.gradient) {
+      meta.gradient = {
+        layer: info.gradient.layer,
+        raw_tokens: info.gradient.rawTokens,
+        total_tokens: info.gradient.totalTokens,
+        distilled_tokens: info.gradient.distilledTokens,
+      };
+      meta.usage = {
+        input: info.tokens.input,
+        output: info.tokens.output,
+        cache_read: info.tokens.cache.read,
+        cache_write: info.tokens.cache.write,
+      };
+    }
   }
   const tools = parts.filter(isToolPart).map((p) => p.tool);
   if (tools.length) meta.tools = tools;
