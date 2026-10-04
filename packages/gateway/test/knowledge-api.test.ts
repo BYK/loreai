@@ -102,7 +102,9 @@ interface KnowledgeItem {
   project_id: string | null;
   project_name: string | null;
   category: string;
+  title: string;
   rank?: number | null;
+  match?: "exact" | "fuzzy";
 }
 
 interface ListResponse {
@@ -325,6 +327,46 @@ describe("GET /api/v1/knowledge", () => {
     });
   });
 
+  it("flags fuzzy-tail items with match on cursor and legacy filtered routes", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/knowledge-api/fuzzy-list/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const projectId = ensureProject(projectPath);
+    ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Pager one",
+      content: "pager body",
+    });
+    const fuzzyLogicalId = ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Pagre tail",
+      content: "no searchable term",
+    });
+
+    // Cursor route: items carry `match`, fuzzy tail lands last.
+    const cursor = await apiJSON<ListResponse>(
+      `/api/v1/projects/${projectId}/knowledge?page=cursor&q=pager&scope=project&limit=50`,
+    );
+    expect(cursor.next_cursor).toBeNull();
+    expect(cursor.items).toHaveLength(2);
+    expect(cursor.items[0].match).toBe("exact");
+    expect(cursor.items[1].match).toBe("fuzzy");
+    expect(cursor.items[1].id).toBe(fuzzyLogicalId);
+
+    // Legacy filtered route (bare array): the same fuzzy row ends the list.
+    const legacy = await apiJSON<KnowledgeItem[]>(
+      `/api/v1/projects/${projectId}/knowledge?q=pager&scope=project`,
+    );
+    expect(legacy).toHaveLength(2);
+    expect(legacy[legacy.length - 1].match).toBe("fuzzy");
+    expect(legacy[legacy.length - 1].id).toBe(fuzzyLogicalId);
+  });
+
   it("preserves existing detail and version routes and non-GET behavior", async () => {
     const seeded = await seedEntries("legacy-routes", 1);
     const detail = await api(`/api/v1/knowledge/${seeded.ids[0]}`);
@@ -381,6 +423,55 @@ describe("GET /api/v1/knowledge/search", () => {
       `/api/v1/knowledge/search?q=${own.marker}&limit=200`,
     );
     expect(unfiltered.total).toBeGreaterThan(response.total);
+  });
+
+  it("returns fuzzy-flagged rows for typo queries", async () => {
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const projectPath = `/test/knowledge-api/fuzzy-search/${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const projectId = ensureProject(projectPath);
+    const exactLogicalId = ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Deploy runbook",
+      content: "deploy the thing",
+    });
+    const fuzzyLogicalId = ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Deplpy checklist",
+      content: "no searchable term",
+    });
+    const typoOnlyLogicalId = ltm.create({
+      id: randomUUID(),
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Knowledge table sorting",
+      content: "no searchable term",
+    });
+    const response = await apiJSON<SearchResponse>(
+      `/api/v1/knowledge/search?q=deploy&project=${projectId}&scope=project&limit=20`,
+    );
+    expect(response.items).toHaveLength(2);
+    expect(response.items[0].match).toBe("exact");
+    expect(response.items[0].id).toBe(exactLogicalId);
+    expect(response.items[1].match).toBe("fuzzy");
+    expect(response.items[1].id).toBe(fuzzyLogicalId);
+    expect(response.items[1].rank).toBeNull();
+    expect(response.total).toBe(2);
+
+    // Pure typo query: the exact leg finds nothing, fuzzy still answers.
+    const typo = await apiJSON<SearchResponse>(
+      `/api/v1/knowledge/search?q=knwoledge&project=${projectId}&scope=project`,
+    );
+    expect(typo.items).toHaveLength(1);
+    expect(typo.items[0].match).toBe("fuzzy");
+    expect(typo.items[0].id).toBe(typoOnlyLogicalId);
+    expect(typo.items[0].id).toBe(typo.items[0].logical_id);
   });
 
   it("requires a searchable query and rejects pagination or sort parameters", async () => {

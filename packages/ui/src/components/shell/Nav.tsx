@@ -264,6 +264,14 @@ export const Nav: Component<NavProps> = (props) => {
                   }}
                 />
               </Show>
+              <Show when={sections().approximate}>
+                <div
+                  data-testid="nav-project-filter-approximate"
+                  class="mx-2.5 mt-1 text-[11px] text-muted"
+                >
+                  Approximate matches
+                </div>
+              </Show>
               <Show
                 when={sections().matches}
                 fallback={

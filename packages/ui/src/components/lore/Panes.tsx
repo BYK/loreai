@@ -29,6 +29,8 @@ export interface ListRowProps {
   footLeft?: JSX.Element;
   footRight?: JSX.Element;
   selected?: boolean;
+  /** Optional badge rendered next to the title (e.g. "≈ approximate"). */
+  badge?: string;
   /** Passed to the anchor so tests and e2e can find rows without text matching. */
   testId?: string;
 }
@@ -44,7 +46,18 @@ export const ListRow: Component<ListRowProps> = (props) => (
       props.selected && "border-l-[3px] border-l-accent bg-soft pl-[13px]",
     )}
   >
-    <div class="mb-1 truncate font-semibold">{props.title}</div>
+    <div class="mb-1 flex min-w-0 items-center gap-1.5 font-semibold">
+      <span class="truncate">{props.title}</span>
+      <Show when={props.badge}>
+        <span
+          class="shrink-0 rounded-sm bg-soft px-1 py-px text-[10px] font-normal text-muted"
+          title="Approximate match"
+          data-testid="search-match-fuzzy"
+        >
+          {props.badge}
+        </span>
+      </Show>
+    </div>
     <Show when={props.preview}>
       <div class="mb-2 line-clamp-2 text-[13px] text-muted">
         {props.preview}

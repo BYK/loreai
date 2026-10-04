@@ -311,6 +311,9 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
           >
             <caption class="mb-2 text-left text-[11px] text-muted">
               Sorted by {sortCaption()} · page of up to 50
+              {rows().some((row) => row.match === "fuzzy")
+                ? " · approximate matches shown below exact hits"
+                : ""}
             </caption>
             <thead>
               <For each={table.getHeaderGroups()}>
@@ -409,8 +412,19 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                         >
                           {cell.column.id === "title" ? (
                             <>
-                              <span class="block truncate font-semibold">
-                                {row.original.title}
+                              <span class="flex min-w-0 items-center gap-1.5 font-semibold">
+                                <span class="truncate">
+                                  {row.original.title}
+                                </span>
+                                <Show when={row.original.match === "fuzzy"}>
+                                  <span
+                                    data-testid="knowledge-match-fuzzy"
+                                    title="Approximate match"
+                                    class="shrink-0 rounded-sm bg-soft px-1 py-px text-[10px] font-normal text-muted"
+                                  >
+                                    ≈ approximate
+                                  </span>
+                                </Show>
                               </span>
                               <div class="block truncate font-normal text-muted">
                                 {previewOf(row.original.content)}

@@ -12,6 +12,12 @@
  * so every page boundary resumes exactly where it left off.
  */
 import { db, ensureProject } from "./db";
+import {
+  fuzzyRank,
+  normalizeFuzzy,
+  FUZZY_MIN_QUERY,
+  FUZZY_CANDIDATE_CAP,
+} from "./fuzzy";
 import { hydrateKnowledgeEntry, type KnowledgeEntry, logicalIdOf } from "./ltm";
 import { ftsQuery, EMPTY_QUERY } from "./search";
 import { config } from "./config";
@@ -110,8 +116,12 @@ export type KnowledgeListOptions = {
   sort?: KnowledgeSort;
 };
 
+/** How a knowledge row matched the query (#1948): the FTS5/LIKE exact leg,
+ *  or the fuzzy tail appended once the exact set is exhausted. */
+export type KnowledgeMatch = "exact" | "fuzzy";
+
 export type KnowledgePage = {
-  items: KnowledgeEntry[];
+  items: Array<KnowledgeEntry & { match: KnowledgeMatch }>;
   /** Keyset of the last item, or null when this is the final page. */
   next: KnowledgeKeyset | null;
 };
@@ -203,6 +213,50 @@ const KNOWLEDGE_LIST_COLS =
 const KNOWLEDGE_PROJECT_NAME =
   "(SELECT COALESCE(NULLIF(p.name, ''), p.path) FROM projects p WHERE p.id = knowledge_current.project_id) AS project_name";
 
+/**
+ * Fuzzy tail for knowledge reads (#1948): rank the titles of a bounded
+ * candidate set (`where` = the caller's predicates WITHOUT the `q` filter)
+ * against `q` with `fuzzyRank`, then hydrate the top `limit` full rows by id
+ * in fuzzy score order (a SQL `IN` would lose the ranking, so the order is
+ * reapplied in JS). Rows already returned by the exact leg are excluded via
+ * `excludeIds`.
+ */
+function fuzzyKnowledgeTail<T extends KnowledgeEntry>(
+  q: string,
+  where: SqlFragment[],
+  excludeIds: Set<string>,
+  limit: number,
+  columns = KNOWLEDGE_LIST_COLS,
+): Array<T & { match: "fuzzy" }> {
+  if (limit <= 0) return [];
+  if (normalizeFuzzy(q).length < FUZZY_MIN_QUERY) return [];
+  const candidates = sql
+    .all<{ id: string; title: string }>(
+      db(),
+      sql`SELECT id, title FROM knowledge_current
+        WHERE ${sql.and(where)}
+        ORDER BY updated_at DESC
+        LIMIT ${FUZZY_CANDIDATE_CAP}`,
+    )
+    .filter((row) => !excludeIds.has(row.id));
+  const hits = fuzzyRank(q, candidates, (row) => [row.title], { limit });
+  if (hits.length === 0) return [];
+  const rows = sql.all<T>(
+    db(),
+    sql`SELECT ${sql.raw(columns)} FROM knowledge_current
+      WHERE tenant_id = ${currentTenantId()} AND id ${sql.inList(
+        hits.map((hit) => hit.item.id),
+      )}`,
+  );
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const out: Array<T & { match: "fuzzy" }> = [];
+  for (const hit of hits) {
+    const row = byId.get(hit.item.id);
+    if (row) out.push({ ...hydrateKnowledgeEntry(row), match: "fuzzy" });
+  }
+  return out;
+}
+
 function knowledgePredicates(
   options: KnowledgeListOptions,
   scopePredicate: SqlFragment | null,
@@ -228,7 +282,10 @@ function buildKnowledgePage<T extends KnowledgeEntry>(
   },
   scopePredicate: SqlFragment | null,
   columns = KNOWLEDGE_LIST_COLS,
-): { items: T[]; next: KnowledgeKeyset | null } {
+): {
+  items: Array<T & { match: KnowledgeMatch }>;
+  next: KnowledgeKeyset | null;
+} {
   const sort = options.sort ?? DEFAULT_KNOWLEDGE_SORT;
   const where = knowledgePredicates(options, scopePredicate);
 
@@ -276,12 +333,51 @@ function buildKnowledgePage<T extends KnowledgeEntry>(
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
   const last = items[items.length - 1];
+  const next =
+    hasMore && last
+      ? { keys: knowledgeSortKeys(last, sort), id: last.id }
+      : null;
+
+  // Fuzzy tail (#1948): only on the final page of an exact-filtered scan —
+  // `next === null` proves the exact set is exhausted whether or not `after`
+  // was set. Exclusions cover every id matching the `q` filter (not just this
+  // page's), so an exact hit from an earlier page never reappears as fuzzy.
+  if (
+    next === null &&
+    items.length < limit &&
+    options.q !== undefined &&
+    options.q.trim() !== "" &&
+    normalizeFuzzy(options.q).length >= FUZZY_MIN_QUERY
+  ) {
+    const exactIds = new Set(
+      sql
+        .all<{ id: string }>(
+          db(),
+          sql`SELECT id FROM knowledge_current WHERE ${sql.and(
+            knowledgePredicates(options, scopePredicate),
+          )}`,
+        )
+        .map((row) => row.id),
+    );
+    const tail = fuzzyKnowledgeTail<T>(
+      options.q,
+      knowledgePredicates(options, scopePredicate, false),
+      exactIds,
+      limit - items.length,
+      columns,
+    );
+    return {
+      items: [
+        ...items.map((item) => ({ ...item, match: "exact" as const })),
+        ...tail,
+      ],
+      next: null,
+    };
+  }
+
   return {
-    items,
-    next:
-      hasMore && last
-        ? { keys: knowledgeSortKeys(last, sort), id: last.id }
-        : null,
+    items: items.map((item) => ({ ...item, match: "exact" as const })),
+    next,
   };
 }
 
@@ -346,7 +442,10 @@ export function listAllKnowledgePage(
     after?: KnowledgeKeyset;
     projectId?: string;
   },
-): { items: CrossProjectKnowledgeEntry[]; next: KnowledgeKeyset | null } {
+): {
+  items: Array<CrossProjectKnowledgeEntry & { match: KnowledgeMatch }>;
+  next: KnowledgeKeyset | null;
+} {
   const scopePredicate = knowledgeScopePredicate(
     options.scope,
     options.projectId,
@@ -363,6 +462,13 @@ export function listAllKnowledgePage(
  * project-filtered search returns rows owned by that project; without a
  * project filter, no scope predicate is applied. The total is exact and
  * results are intentionally top-N rather than paginated.
+ *
+ * When the exact leg (FTS, then LIKE for unindexable queries) fills fewer than
+ * `limit` rows, a fuzzy leg ranks the titles of the remaining candidates under
+ * the same non-query predicates and appends them flagged `match: "fuzzy"` with
+ * `rank: null` (#1948). Fuzzy rows are always fully included once appended, so
+ * `total` (exact total + appended fuzzy count) stays exact. `mode` describes
+ * the exact leg only — it stays `"none"` when only fuzzy rows matched.
  */
 export function searchKnowledgeRanked(options: {
   q: string;
@@ -371,7 +477,9 @@ export function searchKnowledgeRanked(options: {
   category?: KnowledgeCategory;
   scope?: KnowledgeScope;
 }): {
-  items: Array<CrossProjectKnowledgeEntry & { rank: number | null }>;
+  items: Array<
+    CrossProjectKnowledgeEntry & { rank: number | null; match: KnowledgeMatch }
+  >;
   total: number;
   mode: "fts" | "like" | "none";
 } {
@@ -382,6 +490,13 @@ export function searchKnowledgeRanked(options: {
   const where = knowledgePredicates(options, scopePredicate, false);
   const limit = Math.max(1, Math.floor(options.limit));
   const match = ftsQuery(options.q.trim());
+  const columns = `${KNOWLEDGE_LIST_COLS}, ${KNOWLEDGE_PROJECT_NAME}`;
+
+  let items: Array<
+    CrossProjectKnowledgeEntry & { rank: number | null; match: KnowledgeMatch }
+  >;
+  let total: number;
+  let mode: "fts" | "like" | "none";
 
   if (match !== EMPTY_QUERY) {
     const { title, content, category } = config().search.ftsWeights;
@@ -403,41 +518,62 @@ export function searchKnowledgeRanked(options: {
         ORDER BY r.rank ASC, knowledge_current.id ASC
         LIMIT ${limit}`,
     );
-    return {
-      items: rows.map(hydrateKnowledgeEntry),
-      total: totalRow?.total ?? 0,
-      mode: "fts",
-    };
+    items = rows.map((row) => ({
+      ...hydrateKnowledgeEntry(row),
+      match: "exact" as const,
+    }));
+    total = totalRow?.total ?? 0;
+    mode = "fts";
+  } else {
+    const terms = likeTerms(options.q.trim());
+    if (terms.length === 0) {
+      items = [];
+      total = 0;
+      mode = "none";
+    } else {
+      const like = sql.and(
+        terms.map(
+          (term) =>
+            sql`LOWER(title) LIKE ${`%${term}%`} OR LOWER(content) LIKE ${`%${term}%`}`,
+        ),
+      );
+      const whereClause = sql.and([...where, like]);
+      const totalRow = sql.get<{ total: number }>(
+        db(),
+        sql`SELECT COUNT(*) AS total FROM knowledge_current WHERE ${whereClause}`,
+      );
+      const rows = sql.all<CrossProjectKnowledgeEntry & { rank: null }>(
+        db(),
+        sql`SELECT ${sql.raw(KNOWLEDGE_LIST_COLS)}, ${sql.raw(KNOWLEDGE_PROJECT_NAME)}, NULL AS rank
+          FROM knowledge_current
+          WHERE ${whereClause}
+          ORDER BY updated_at DESC, id DESC
+          LIMIT ${limit}`,
+      );
+      items = rows.map((row) => ({
+        ...hydrateKnowledgeEntry(row),
+        match: "exact" as const,
+      }));
+      total = totalRow?.total ?? 0;
+      mode = "like";
+    }
   }
 
-  const terms = likeTerms(options.q.trim());
-  if (terms.length === 0) return { items: [], total: 0, mode: "none" };
+  if (items.length < limit) {
+    const tail = fuzzyKnowledgeTail<CrossProjectKnowledgeEntry>(
+      options.q,
+      where,
+      new Set(items.map((item) => item.id)),
+      limit - items.length,
+      columns,
+    );
+    if (tail.length > 0) {
+      items = [...items, ...tail.map((row) => ({ ...row, rank: null }))];
+      total += tail.length;
+    }
+  }
 
-  const like = sql.and(
-    terms.map(
-      (term) =>
-        sql`LOWER(title) LIKE ${`%${term}%`} OR LOWER(content) LIKE ${`%${term}%`}`,
-    ),
-  );
-  where.push(like);
-  const whereClause = sql.and(where);
-  const totalRow = sql.get<{ total: number }>(
-    db(),
-    sql`SELECT COUNT(*) AS total FROM knowledge_current WHERE ${whereClause}`,
-  );
-  const rows = sql.all<CrossProjectKnowledgeEntry & { rank: null }>(
-    db(),
-    sql`SELECT ${sql.raw(KNOWLEDGE_LIST_COLS)}, ${sql.raw(KNOWLEDGE_PROJECT_NAME)}, NULL AS rank
-      FROM knowledge_current
-      WHERE ${whereClause}
-      ORDER BY updated_at DESC, id DESC
-      LIMIT ${limit}`,
-  );
-  return {
-    items: rows.map(hydrateKnowledgeEntry),
-    total: totalRow?.total ?? 0,
-    mode: "like",
-  };
+  return { items, total, mode };
 }
 
 // ---------------------------------------------------------------------------

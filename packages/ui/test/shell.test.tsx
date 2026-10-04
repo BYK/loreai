@@ -840,6 +840,55 @@ describe("shell: workspace knowledge and search", () => {
     await waitFor(() => expect(history.get()).toBe("/knowledge?q=SQLite"));
   });
 
+  it("flags approximate hits and counts them in the summary", async () => {
+    const client = fakeClient({
+      async searchKnowledge({ q }) {
+        return {
+          query: q,
+          mode: "fts",
+          total: 2,
+          items: [
+            { ...allEntryAt(0), rank: -0.5, match: "exact" },
+            { ...allEntryAt(3), rank: null, match: "fuzzy" },
+          ],
+        };
+      },
+    });
+    mount("/search?q=SQLite", client);
+    const hits = await screen.findAllByTestId("search-hit");
+    expect(hits).toHaveLength(2);
+    expect(
+      hits[0]!.querySelector("[data-testid='search-match-fuzzy']"),
+    ).toBeNull();
+    expect(
+      hits[1]!.querySelector("[data-testid='search-match-fuzzy']"),
+    ).not.toBeNull();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "2 matches · 1 approximate",
+    );
+  });
+
+  it("renders fuzzy hits even when the exact leg reports mode none", async () => {
+    const client = fakeClient({
+      async searchKnowledge({ q }) {
+        return {
+          query: q,
+          mode: "none",
+          total: 1,
+          items: [{ ...allEntryAt(3), rank: null, match: "fuzzy" }],
+        };
+      },
+    });
+    mount("/search?q=SQLite", client);
+    expect(await screen.findByTestId("search-hit")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Nothing in this query is searchable"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "1 match · 1 approximate",
+    );
+  });
+
   it("shows substring fallback, no-searchable-term, and error states", async () => {
     const like = fakeClient({
       async searchKnowledge({ q }) {
