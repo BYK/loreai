@@ -362,6 +362,13 @@ test.describe("session reader", () => {
     await page.keyboard.press("Shift+Enter");
     await expect(count).toHaveText("1/" + total);
 
+    // Cycling is a programmatic scroll: it never pages older history, so
+    // the match total stays constant across further steps.
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("2/" + total);
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("3/" + total);
+
     // A second Ctrl+F inside the input falls through (no bar toggle).
     await page.keyboard.press("Control+f");
     await expect(page.getByTestId("quick-search")).toBeVisible();

@@ -977,7 +977,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const top = el.scrollTop;
     const prev = prevScrollTop;
     prevScrollTop = top;
-    if (top < prev && top === repinIssued) {
+    if (top < prev && Math.abs(top - repinIssued) < 1) {
       repinIssued = -1;
       return;
     }
@@ -1765,64 +1765,66 @@ export const SessionView: Component<SessionViewProps> = (props) => {
               )}
             </Show>
           </div>
-          <div
-            class="flex h-9 items-center gap-2 border-b border-line px-5 text-xs text-muted sm:px-7.5"
-            data-testid="older-status"
-          >
-            <Switch>
-              <Match
-                when={
-                  props.hasOlder === true &&
-                  (props.loadingOlder || olderInFlight())
-                }
-              >
-                <span role="status" data-testid="older-loading">
-                  Loading older history…
-                </span>
-              </Match>
-              <Match when={props.hasOlder === true && props.olderError}>
-                {(err) => (
-                  <>
-                    <span role="alert" class="text-danger">
-                      Older history unavailable: {errorMessage(err())}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      data-testid="older-retry"
-                      disabled={!olderButtonsReady()}
-                      onClick={() => {
-                        if (!olderButtonsReady()) return;
-                        void loadOlder();
-                      }}
-                    >
-                      Retry
-                    </Button>
-                  </>
-                )}
-              </Match>
-              <Match when={props.hasOlder === true}>
-                <span>Scroll up to load older history</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  data-testid="load-older"
-                  disabled={!olderButtonsReady()}
-                  onClick={() => {
-                    if (!olderButtonsReady()) return;
-                    void loadOlder();
-                  }}
+          <Show when={props.hasOlder !== null}>
+            <div
+              class="flex h-9 items-center gap-2 border-b border-line px-5 text-xs text-muted sm:px-7.5"
+              data-testid="older-status"
+            >
+              <Switch>
+                <Match
+                  when={
+                    props.hasOlder === true &&
+                    (props.loadingOlder || olderInFlight())
+                  }
                 >
-                  Load older history
-                </Button>
-              </Match>
-              <Match when={props.hasOlder === false && loaded() > 0}>
-                <span data-testid="history-start">
-                  Start of captured history
-                </span>
-              </Match>
-            </Switch>
-          </div>
+                  <span role="status" data-testid="older-loading">
+                    Loading older history…
+                  </span>
+                </Match>
+                <Match when={props.hasOlder === true && props.olderError}>
+                  {(err) => (
+                    <>
+                      <span role="alert" class="text-danger">
+                        Older history unavailable: {errorMessage(err())}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid="older-retry"
+                        disabled={!olderButtonsReady()}
+                        onClick={() => {
+                          if (!olderButtonsReady()) return;
+                          void loadOlder();
+                        }}
+                      >
+                        Retry
+                      </Button>
+                    </>
+                  )}
+                </Match>
+                <Match when={props.hasOlder === true}>
+                  <span>Scroll up to load older history</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="load-older"
+                    disabled={!olderButtonsReady()}
+                    onClick={() => {
+                      if (!olderButtonsReady()) return;
+                      void loadOlder();
+                    }}
+                  >
+                    Load older history
+                  </Button>
+                </Match>
+                <Match when={props.hasOlder === false && loaded() > 0}>
+                  <span data-testid="history-start">
+                    Start of captured history
+                  </span>
+                </Match>
+              </Switch>
+            </div>
+          </Show>
           <Show when={rows().length === 0}>
             <p class="px-5 py-8 text-sm text-muted sm:px-7.5" role="status">
               No captured messages in this session.

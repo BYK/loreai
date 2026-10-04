@@ -97,7 +97,7 @@ beforeAll(() => {
       if (typeof top !== "number") return;
       // A browser clamps the offset at 0; jsdom's setter would store a
       // negative offset and read it back as an upward scroll.
-      this.scrollTop = Math.max(0, top);
+      this.scrollTop = Math.max(0, Math.floor(top));
       this.dispatchEvent(new Event("scroll"));
     },
   });
@@ -1613,9 +1613,9 @@ describe("SessionView: newest-first landing and lazy older history", () => {
       "Start of captured history",
     );
 
-    // hasOlder unknown: the slot claims nothing at all.
+    // hasOlder unknown: the slot renders nothing at all — no empty strip.
     setHasOlder(null);
-    expect(slot).toBeEmptyDOMElement();
+    expect(screen.queryByTestId("older-status")).toBeNull();
   });
 
   it("offers jump-to-latest away from the tail and jump-to-start only for complete history", async () => {
@@ -1875,10 +1875,11 @@ describe("SessionView: newest-first landing and lazy older history", () => {
       }
     }
     await tick();
+    openQuickSearch();
     const input = screen.getByTestId<HTMLInputElement>("search-input");
     fireEvent.input(input, { target: { value: "needle" } });
     await settleSearch();
-    fireEvent.click(screen.getByTestId("search-next"));
+    fireEvent.submit(input.closest("form")!); // Enter: next hit
     await tick();
     // The hit row is near the top of a 40-row list: without suppression
     // its upward scroll would have started a page load.
@@ -1921,13 +1922,7 @@ describe("SessionView: newest-first landing and lazy older history", () => {
 
   it("eagerly loads the next page when the first page is shorter than the viewport", async () => {
     const [msgs, setMsgs] = createSignal<TemporalMessage[]>([]);
-    const { appendFileSync } = await import("node:fs");
-    const onLoadOlder = vi.fn(async () => {
-      appendFileSync(
-        "/tmp/land2.log",
-        `call top=${scrollEl().scrollTop} err=${new Error().stack}\n`,
-      );
-    });
+    const onLoadOlder = vi.fn(async () => {});
     mount({
       get messages() {
         return msgs();
@@ -1955,6 +1950,79 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     await tick();
     // Three 120px rows in an 800px viewport: the chain fill kicked in on
     // arrival — no scroll event was ever dispatched.
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a subpixel repin offset as its own correction, not a user scroll", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    let apply: (() => void) | null = null;
+    let settle: (() => void) | null = null;
+    const onLoadOlder = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          apply = () =>
+            setMsgs((prev) => [
+              ...older(3).map((m, i) => ({ ...m, id: `page-${i}` })),
+              ...prev,
+            ]);
+          settle = resolve;
+        }),
+    );
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      hasOlder: true,
+      messageCount: 43,
+      onLoadOlder,
+    });
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    // Start at 556: the +360 prepend lands the view at 916, just outside
+    // the chain-fill margin (916-116 = 800 ≮ 800), so no eager second page
+    // runs. A repin-suppressed event at ~915 still sits inside the
+    // near-top load gate (799 < 800) — without the subpixel match it would
+    // count as a user scroll and start another page.
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 556);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // Give the fold row a fractional drift: the repin then issues
+    // `scrollTop - 0.6`, which the scroll stub floors — the same mismatch
+    // a real scrollTop snap produces. Exact equality would read the
+    // resulting scroll event as a user move up and start another page.
+    const foldRow = document.querySelector<HTMLElement>(
+      '[data-row-key="m.old-5"]',
+    )!;
+    Object.defineProperty(foldRow, "getBoundingClientRect", {
+      configurable: true,
+      value: (): DOMRect => ({
+        x: 0,
+        y: 0,
+        left: 0,
+        right: 800,
+        top: -0.6,
+        bottom: 119.4,
+        width: 800,
+        height: 120,
+        toJSON: () => ({}),
+      }),
+    });
+    apply!();
+    await tick();
+    settle!();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 });
