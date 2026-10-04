@@ -21,14 +21,18 @@ test.describe("knowledge table routes", () => {
     await page.getByRole("link", { name: /Browse knowledge/ }).click();
     await page.getByRole("button", { name: "category" }).click();
     await page.getByRole("option", { name: "gotcha" }).click();
-    await page.getByRole("button", { name: /Sort/ }).click();
-    await page.getByRole("option", { name: "Title A–Z" }).click();
+    await page.getByRole("button", { name: "Sort by Title" }).click();
     await expect(page).toHaveURL(
-      /category=gotcha.*sort=title_asc|sort=title_asc.*category=gotcha/,
+      /category=gotcha.*sort=title%3Aasc%2Cupdated_at%3Adesc|sort=title%3Aasc%2Cupdated_at%3Adesc.*category=gotcha/,
     );
     const url = page.url();
     await page.reload();
     await expect(page).toHaveURL(url);
+    await expect(
+      page.getByRole("button", {
+        name: "Sort by Title, level 1, ascending",
+      }),
+    ).toBeVisible();
   });
 
   test("knowledge q filters stay on the table view", async ({ page }) => {
@@ -46,13 +50,13 @@ test.describe("knowledge table routes", () => {
     await page.setViewportSize({ width: 393, height: 852 });
     const projectId = await loreProjectId(page);
     await page.goto(
-      `/ui/projects/${projectId}/knowledge?category=gotcha&sort=title_asc`,
+      `/ui/projects/${projectId}/knowledge?category=gotcha&sort=title:asc`,
     );
     await page.getByTestId("knowledge-row").first().click();
     await expect(page.getByTestId("knowledge-document")).toBeVisible();
     await page.getByTestId("mobile-back").click();
     await expect(page).toHaveURL(
-      /category=gotcha.*sort=title_asc|sort=title_asc.*category=gotcha/,
+      /category=gotcha.*sort=title%3Aasc|sort=title%3Aasc.*category=gotcha/,
     );
   });
 

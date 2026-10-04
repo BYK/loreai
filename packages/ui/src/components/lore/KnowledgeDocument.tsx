@@ -70,8 +70,10 @@ export const KnowledgeDocument: Component<{
   evidence?: Loader<EvidenceResult>;
   loadDistillation?: (id: string) => Promise<DistillationDetail>;
 }> = (props) => {
-  const isCrossProject = () =>
-    props.entry.cross_project === true || props.entry.cross_project === 1;
+  const isShared = () =>
+    props.entry.project_id == null ||
+    props.entry.cross_project === true ||
+    props.entry.cross_project === 1;
   const sourceSession = () => props.entry.source_session;
   const currentVersion = () =>
     props.versions?.data()?.versions.find((version) => version.is_current);
@@ -97,9 +99,7 @@ export const KnowledgeDocument: Component<{
         ]}
         title={props.entry.title}
         participants={[authorOf(props.entry)]}
-        scope={
-          <ScopeLabel scope={isCrossProject() ? "cross-project" : "project"} />
-        }
+        scope={<ScopeLabel scope={isShared() ? "shared" : "project"} />}
         trailing={`Updated ${formatWhen(props.entry.updated_at ?? props.entry.created_at)}`}
       >
         <div class="mt-3 flex flex-wrap items-center gap-2">
@@ -284,7 +284,7 @@ export const KnowledgeDocument: Component<{
             <div class="space-y-2">
               <div>
                 <span class="font-semibold">Sharing</span>{" "}
-                {isCrossProject() ? "global" : "project"}
+                {isShared() ? "shared" : "project"}
               </div>
               <div>
                 <span class="font-semibold">Last change</span>{" "}
@@ -326,7 +326,12 @@ export const KnowledgeDocument: Component<{
             <Meta label="Category" value={props.entry.category} />
             <Meta
               label="Cross project"
-              value={isCrossProject() ? "true" : "false"}
+              value={
+                props.entry.cross_project === true ||
+                props.entry.cross_project === 1
+                  ? "true"
+                  : "false"
+              }
             />
             <Meta label="Created by" value={props.entry.created_by} />
             <Meta label="Updated by" value={props.entry.updated_by} />

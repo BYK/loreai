@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildHref, entitiesHref, importsHref, searchHref } from "~/lib/href";
+import { DEFAULT_ALL_KNOWLEDGE_QUERY } from "~/contracts";
+import {
+  allKnowledgeHref,
+  buildHref,
+  entitiesHref,
+  globalKnowledgeHref,
+  importsHref,
+  searchHref,
+  workspaceSearchHref,
+} from "~/lib/href";
 
 describe("buildHref", () => {
   it("encodes every segment", () => {
@@ -20,6 +29,21 @@ describe("buildHref", () => {
 });
 
 describe("route hrefs", () => {
+  it("allKnowledgeHref serializes workspace filters", () => {
+    expect(allKnowledgeHref()).toBe("/knowledge");
+    expect(
+      allKnowledgeHref({
+        ...DEFAULT_ALL_KNOWLEDGE_QUERY,
+        q: "SQLite",
+        project: "p/1",
+      }),
+    ).toBe("/knowledge?q=SQLite&project=p%2F1");
+  });
+
+  it("globalKnowledgeHref encodes the id as one path segment", () => {
+    expect(globalKnowledgeHref("a/b c")).toBe("/knowledge/a%2Fb%20c");
+  });
+
   it("searchHref orders q then scope", () => {
     expect(searchHref("p1", "hello world", "session")).toBe(
       "/projects/p1/search?q=hello+world&scope=session",
@@ -42,5 +66,11 @@ describe("route hrefs", () => {
     expect(importsHref("p1", "tok==")).toBe(
       "/projects/p1/imports?cursor=tok%3D%3D",
     );
+  });
+
+  it("workspaceSearchHref preserves its established query encoding", () => {
+    expect(workspaceSearchHref("a b")).toBe("/search?q=a%20b");
+    expect(workspaceSearchHref("a b+!'()*~")).toBe("/search?q=a%20b%2B!'()*~");
+    expect(workspaceSearchHref("")).toBe("/search?q=");
   });
 });

@@ -1,4 +1,4 @@
-import { MemoryRouter, createMemoryHistory } from "@solidjs/router";
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import {
   fireEvent,
   render,
@@ -17,9 +17,15 @@ import {
 } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
+import { Nav } from "~/components/shell/Nav";
 import { knowledgeHref } from "~/lib/href";
 import { ApiError, type ApiClient } from "~/lib/api";
-import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
+import { ConnectionContext, createConnectionStore } from "~/lib/connection";
+import type {
+  KnowledgeEntry,
+  KnowledgeSearchResponse,
+  ProjectSummary,
+} from "~/contracts";
 import {
   closeLoreDb,
   createKnowledgeRepo,
@@ -85,17 +91,65 @@ const ENTRIES: KnowledgeEntry[] = [
   },
 ];
 
+function entryAt(index: number): KnowledgeEntry {
+  const entry = ENTRIES[index];
+  if (!entry) throw new Error(`Missing test knowledge entry ${index}`);
+  return entry;
+}
+
+const ALL_ENTRIES = [
+  { ...entryAt(0), project_name: "Lore workspace" },
+  { ...entryAt(1), project_name: "Lore workspace" },
+  {
+    ...entryAt(0),
+    id: "k-scratch",
+    logical_id: "k-scratch",
+    project_id: "p-empty",
+    category: "pattern",
+    title: "Scratch setting",
+    project_name: "/home/me/empty",
+  },
+  {
+    ...entryAt(1),
+    id: "k-global",
+    logical_id: "k-global",
+    project_id: null,
+    category: "preference",
+    title: "Shared setting",
+    cross_project: 1,
+    project_name: null,
+  },
+];
+
+function allEntryAt(index: number) {
+  const entry = ALL_ENTRIES[index];
+  if (!entry) throw new Error(`Missing cross-project test entry ${index}`);
+  return entry;
+}
+
 type Overrides = Partial<{ [K in keyof ApiClient]: ApiClient[K] }>;
 
 function fakeClient(overrides: Overrides = {}): ApiClient & {
   calls: string[];
   pageOpts: Array<{ projectId: string; opts: { cursor?: string | null } }>;
+  allPageOpts: Array<{
+    cursor?: string | null;
+    project?: string;
+    q?: string;
+  }>;
+  searchOpts: Array<{ q: string; limit?: number; project?: string }>;
 } {
   const calls: string[] = [];
   const pageOpts: Array<{
     projectId: string;
     opts: { cursor?: string | null };
   }> = [];
+  const allPageOpts: Array<{
+    cursor?: string | null;
+    project?: string;
+    q?: string;
+  }> = [];
+  const searchOpts: Array<{ q: string; limit?: number; project?: string }> = [];
   let client!: ApiClient;
   const base = {
     async listProjects() {
@@ -121,6 +175,35 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
       const items = await client.listProjectKnowledge(projectId);
       return { items, next_cursor: null };
     },
+    async listKnowledgePage(opts: {
+      cursor?: string | null;
+      project?: string;
+      q?: string;
+    }) {
+      allPageOpts.push(opts);
+      return {
+        items: ALL_ENTRIES.filter(
+          (entry) => !opts.project || entry.project_id === opts.project,
+        ),
+        next_cursor: null,
+      };
+    },
+    async searchKnowledge(opts: {
+      q: string;
+      limit?: number;
+      project?: string;
+    }) {
+      searchOpts.push(opts);
+      const items = ALL_ENTRIES.filter(
+        (entry) => !opts.project || entry.project_id === opts.project,
+      ).map((entry) => ({ ...entry, rank: -0.5 }));
+      return {
+        query: opts.q,
+        mode: "fts" as const,
+        total: items.length,
+        items,
+      };
+    },
     async listProjectSessionsPage() {
       return { items: [], next_cursor: null };
     },
@@ -134,7 +217,7 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
     },
     async getKnowledge(id: string) {
       calls.push(`entry:${id}`);
-      const entry = ENTRIES.find((e) => e.id === id);
+      const entry = [...ENTRIES, ...ALL_ENTRIES].find((e) => e.id === id);
       if (!entry) {
         throw new ApiError(
           "not_found",
@@ -182,15 +265,48 @@ function fakeClient(overrides: Overrides = {}): ApiClient & {
     },
   };
   client = Object.assign(base, overrides) as ApiClient;
-  return Object.assign(client, { calls, pageOpts });
+  return Object.assign(client, { calls, pageOpts, allPageOpts, searchOpts });
 }
 
-function mount(path: string, client: ApiClient, db?: Promise<LoreUiDb | null>) {
+function mount(
+  path: string,
+  client: ApiClient,
+  db?: Promise<LoreUiDb | null>,
+  base?: string,
+) {
   const history = createMemoryHistory();
   history.set({ value: path });
   const utils = render(() => (
-    <MemoryRouter history={history} root={createAppRoot(client, db)}>
+    <MemoryRouter
+      base={base}
+      history={history}
+      root={createAppRoot(client, db)}
+    >
       {routes}
+    </MemoryRouter>
+  ));
+  return { ...utils, history };
+}
+
+function mountBaseNav(path: string) {
+  const history = createMemoryHistory();
+  history.set({ value: path });
+  const utils = render(() => (
+    <MemoryRouter base="/ui" history={history}>
+      <Route
+        path="*"
+        component={() => (
+          <ConnectionContext.Provider value={createConnectionStore()}>
+            <Nav
+              projects={PROJECTS}
+              loading={false}
+              error={null}
+              activeProjectId={null}
+              totalKnowledge={4}
+            />
+          </ConnectionContext.Provider>
+        )}
+      />
     </MemoryRouter>
   ));
   return { ...utils, history };
@@ -254,6 +370,57 @@ afterEach(() => {
 });
 
 describe("shell: project navigation and real-data path", () => {
+  it("highlights workspace links relative to the router base", async () => {
+    const { history } = mount("/ui", fakeClient(), undefined, "/ui");
+    await screen.findByTestId("nav-projects");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("nav-projects")).toHaveClass("bg-accent-soft"),
+    );
+    expect(screen.getByTestId("nav-all-knowledge")).not.toHaveClass(
+      "bg-accent-soft",
+    );
+
+    history.set({ value: "/ui/knowledge" });
+    await waitFor(() => {
+      expect(screen.getByTestId("nav-all-knowledge")).toHaveClass(
+        "bg-accent-soft",
+      );
+      expect(screen.getByTestId("nav-projects")).not.toHaveClass(
+        "bg-accent-soft",
+      );
+    });
+  });
+
+  it("matches nav descendants under the /ui router base", async () => {
+    const { history } = mountBaseNav("/ui");
+    const navIds = [
+      "nav-entities",
+      "nav-contradictions",
+      "nav-warming",
+      "nav-costs",
+    ] as const;
+    const activeRoutes = [
+      ["/ui/entities", "nav-entities"],
+      ["/ui/entities/entity-1", "nav-entities"],
+      ["/ui/contradictions", "nav-contradictions"],
+      ["/ui/warming", "nav-warming"],
+      ["/ui/costs", "nav-costs"],
+    ] as const;
+
+    for (const [path, activeId] of activeRoutes) {
+      history.set({ value: path });
+      await waitFor(() =>
+        expect(screen.getByTestId(activeId)).toHaveClass("bg-accent-soft"),
+      );
+      for (const id of navIds) {
+        if (id !== activeId) {
+          expect(screen.getByTestId(id)).not.toHaveClass("bg-accent-soft");
+        }
+      }
+    }
+  });
+
   it("loads projects into the nav and shows the welcome document", async () => {
     const client = fakeClient();
     mount("/", client);
@@ -345,7 +512,7 @@ describe("shell: project navigation and real-data path", () => {
       "WAL recovery",
     );
     expect(within(doc).getByTestId("category")).toHaveTextContent("gotcha");
-    expect(within(doc).getByText("Cross-project")).toBeInTheDocument();
+    expect(within(doc).getByText("shared")).toBeInTheDocument();
     expect(within(doc).getByText("Confidence 60%")).toBeInTheDocument();
     expect(
       within(doc).getByText("No source session recorded."),
@@ -420,7 +587,7 @@ describe("shell: project navigation and real-data path", () => {
         q: undefined,
         category: undefined,
         scope: undefined,
-        sort: "updated_desc",
+        sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
   });
@@ -471,7 +638,7 @@ describe("shell: project navigation and real-data path", () => {
         q: undefined,
         category: undefined,
         scope: undefined,
-        sort: "updated_desc",
+        sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
     expect(pane("list")).toHaveTextContent("Knowledge · lore");
@@ -504,8 +671,9 @@ describe("shell: project navigation and real-data path", () => {
     const client = fakeClient({
       async getKnowledge() {
         return {
-          ...ENTRIES[0]!,
+          ...entryAt(0),
           title: "<img src=x onerror=alert(1)>",
+          project_name: "Lore workspace",
           content: "<script>alert(1)</script>",
         };
       },
@@ -516,6 +684,249 @@ describe("shell: project navigation and real-data path", () => {
     expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
       "<img src=x onerror=alert(1)>",
     );
+  });
+});
+
+describe("shell: workspace knowledge and search", () => {
+  it("browses all knowledge with project labels and query-free entry navigation", async () => {
+    const client = fakeClient();
+    const { history } = mount("/knowledge?q=SQLite&cursor=old-cursor", client);
+    expect(
+      await screen.findByRole("heading", { name: "All knowledge" }),
+    ).toBeInTheDocument();
+    await screen.findAllByTestId("knowledge-row");
+    const table = screen.getByRole("table");
+    expect(within(table).getAllByText("Lore workspace")).toHaveLength(2);
+    expect(within(table).getByText("/home/me/empty")).toBeInTheDocument();
+    expect(within(table).getByText("No project")).toBeInTheDocument();
+
+    const nav = screen.getByRole("navigation", { name: "Workspace" });
+    const allKnowledge = within(nav).getByTestId("nav-all-knowledge");
+    const projects = within(nav).getByTestId("nav-projects");
+    expect(allKnowledge).toHaveAttribute("aria-current", "page");
+    expect(projects).not.toHaveAttribute("aria-current");
+    const navLinks = [...nav.querySelectorAll("a[data-testid]")];
+    expect(navLinks.indexOf(allKnowledge)).toBeLessThan(
+      navLinks.findIndex(
+        (link) => link.getAttribute("data-testid") === "nav-project",
+      ),
+    );
+
+    const firstRow = (await screen.findAllByTestId("knowledge-row"))[0];
+    if (!firstRow) throw new Error("Missing all-knowledge table row");
+    fireEvent.click(firstRow);
+    await waitFor(() => expect(history.get()).toBe("/knowledge/k-sqlite"));
+  });
+
+  it("activates Projects only on the workspace home", async () => {
+    const { history } = mount("/", fakeClient());
+    const nav = screen.getByRole("navigation", { name: "Workspace" });
+    const projects = within(nav).getByTestId("nav-projects");
+    const allKnowledge = within(nav).getByTestId("nav-all-knowledge");
+    expect(projects).toHaveAttribute("aria-current", "page");
+    fireEvent.click(allKnowledge);
+    await waitFor(() => expect(history.get()).toBe("/knowledge"));
+    await waitFor(() => {
+      expect(screen.getByTestId("nav-projects")).not.toHaveAttribute(
+        "aria-current",
+      );
+      expect(screen.getByTestId("nav-all-knowledge")).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+    });
+  });
+
+  it("changes the all-knowledge project filter and removes the cursor", async () => {
+    const client = fakeClient();
+    const { history } = mount("/knowledge?cursor=next", client);
+    await screen.findAllByTestId("knowledge-row");
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /^project\b/ }), {
+      button: 0,
+    });
+    fireEvent.click(
+      await screen.findByRole("option", { name: "/home/me/empty" }),
+    );
+
+    await waitFor(() =>
+      expect(history.get()).toBe("/knowledge?project=p-empty"),
+    );
+    expect(client.allPageOpts.at(-1)).toEqual(
+      expect.objectContaining({ project: "p-empty", cursor: null }),
+    );
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /^project\b/ }), {
+      button: 0,
+    });
+    fireEvent.click(
+      await screen.findByRole("option", { name: "All projects" }),
+    );
+
+    await waitFor(() => expect(history.get()).toBe("/knowledge"));
+  });
+
+  it("keeps an unknown project filter visible while projects load", async () => {
+    let releaseProjects: (projects: ProjectSummary[]) => void = () => {};
+    const client = fakeClient({
+      async listProjects() {
+        return new Promise<ProjectSummary[]>((resolve) => {
+          releaseProjects = resolve;
+        });
+      },
+    });
+    mount("/knowledge?project=p-unknown", client);
+    const project = await screen.findByRole("button", { name: /^project\b/ });
+    expect(project).toHaveTextContent("p-unknown");
+    releaseProjects(PROJECTS);
+    await waitFor(() => expect(project).toHaveTextContent("p-unknown"));
+  });
+
+  it("returns entry-only deep links to All knowledge", async () => {
+    mount("/knowledge/k-global", fakeClient());
+    await screen.findByTestId("knowledge-document");
+    expect(screen.getByTestId("mobile-back")).toHaveAttribute(
+      "href",
+      "/knowledge",
+    );
+    expect(screen.getByTestId("mobile-back")).toHaveTextContent(
+      "All knowledge",
+    );
+  });
+
+  it("shows ranked search results and links to the complete table", async () => {
+    const searchOpts: Array<{ q: string; limit?: number; project?: string }> =
+      [];
+    const client = fakeClient({
+      async searchKnowledge(opts) {
+        searchOpts.push(opts);
+        const hit = allEntryAt(3);
+        return {
+          query: opts.q,
+          mode: "fts",
+          total: 100,
+          items: [{ ...hit, rank: -0.5 }],
+        };
+      },
+    });
+    const { history } = mount("/search?q=SQLite", client);
+    expect(screen.getByRole("search")).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Search all knowledge" }),
+    ).toHaveValue("SQLite");
+    expect(await screen.findByTestId("search-hit")).toHaveAttribute(
+      "href",
+      "/knowledge/k-global",
+    );
+    expect(screen.getByTestId("search-hit")).toHaveTextContent(
+      "preference · No project",
+    );
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "Top 1 of 100 matches",
+    );
+    expect(
+      screen.getByText(
+        "Knowledge only — sessions and distillations are searched per project.",
+      ),
+    ).toBeInTheDocument();
+    expect(searchOpts[0]).toEqual(
+      expect.objectContaining({ q: "SQLite", limit: 50 }),
+    );
+    const browse = screen.getByRole("link", {
+      name: "Browse all 100 matches in the table",
+    });
+    expect(browse).toHaveAttribute("href", "/knowledge?q=SQLite");
+    fireEvent.click(browse);
+    await waitFor(() => expect(history.get()).toBe("/knowledge?q=SQLite"));
+  });
+
+  it("shows substring fallback, no-searchable-term, and error states", async () => {
+    const like = fakeClient({
+      async searchKnowledge({ q }) {
+        return { query: q, mode: "like", total: 0, items: [] };
+      },
+    });
+    mount("/search?q=!!!", like);
+    expect(
+      await screen.findByText(
+        "No indexed terms in this query; showing substring matches, newest first.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Browse all knowledge" }),
+    ).toHaveAttribute("href", "/knowledge");
+
+    const none = fakeClient({
+      async searchKnowledge({ q }) {
+        return { query: q, mode: "none", total: 0, items: [] };
+      },
+    });
+    mount("/search?q=the", none);
+    expect(
+      await screen.findByText("Nothing in this query is searchable"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders workspace search errors through the shared error state", async () => {
+    const client = fakeClient({
+      async searchKnowledge() {
+        throw new ApiError("unreachable", "/knowledge/search", "offline");
+      },
+    });
+    mount("/search?q=SQLite", client);
+    expect(await screen.findByText("Gateway unreachable")).toBeInTheDocument();
+  });
+
+  it("shows an honest loading state for workspace search", async () => {
+    let release: (response: KnowledgeSearchResponse) => void = () => {};
+    const client = fakeClient({
+      searchKnowledge() {
+        return new Promise<KnowledgeSearchResponse>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    mount("/search?q=SQLite", client);
+    expect(await screen.findByText("Searching knowledge")).toBeInTheDocument();
+    release({
+      query: "SQLite",
+      mode: "fts",
+      total: 1,
+      items: [{ ...allEntryAt(0), rank: -0.5 }],
+    });
+    expect(await screen.findByTestId("search-hit")).toBeInTheDocument();
+  });
+
+  it("shows the empty-query prompt without starting a search", async () => {
+    const client = fakeClient();
+    mount("/search?q=", client);
+    expect(
+      await screen.findByText(
+        "Type a query to search knowledge across every project",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Browse all knowledge" }),
+    ).toHaveAttribute("href", "/knowledge");
+    expect(client.searchOpts).toEqual([]);
+  });
+
+  it("renders hostile search titles as literal text", async () => {
+    const title = '<img src=x onerror="window.__pwned=1">';
+    const client = fakeClient({
+      async searchKnowledge({ q }) {
+        return {
+          query: q,
+          mode: "fts",
+          total: 1,
+          items: [{ ...allEntryAt(0), title, rank: -0.5 }],
+        };
+      },
+    });
+    mount("/search?q=Hostile", client);
+    expect(await screen.findByText(title)).toBeInTheDocument();
+    expect(pane("detail").querySelector("img")).toBeNull();
+    expect((window as Window & { __pwned?: number }).__pwned).toBeUndefined();
   });
 });
 
@@ -747,13 +1158,18 @@ describe("shell: search entry, theme and fixture", () => {
     await component.preload();
   });
 
-  it("asks for a project before accepting a search query", async () => {
-    mount("/", fakeClient());
-    fireEvent.click(screen.getByTestId("search-entry"));
-    expect(await screen.findByRole("dialog")).toHaveTextContent(
-      "Pick a project first — recall is scoped to a project",
+  it("submits a workspace search from the header", async () => {
+    const { history } = mount("/", fakeClient());
+    const input = screen.getByRole("textbox", { name: "Search" });
+    expect(input).toHaveAttribute("placeholder", "Search all knowledge…");
+    fireEvent.input(input, { target: { value: "SQLite" } });
+    const form = input.closest("form");
+    if (!form) throw new Error("workspace search form missing");
+    fireEvent.submit(form);
+    await waitFor(() => expect(history.get()).toBe("/search?q=SQLite"));
+    expect((await screen.findAllByTestId("search-hit")).length).toBeGreaterThan(
+      0,
     );
-    expect(screen.queryByRole("searchbox")).toBeNull();
   });
 
   it("defaults to the system theme and lets the user force light or dark", async () => {
@@ -961,24 +1377,20 @@ describe("shell: search entry, theme and fixture", () => {
   });
 });
 
-describe("shell: cached-first rendering (IndexedDB)", () => {
-  it("renders cached rows with 'Cached · refreshing…' while the server is silent", async () => {
+describe("shell: IndexedDB cache behavior", () => {
+  it("does not show cached knowledge rows while a project page is loading", async () => {
     const db = await seededDb();
     const client = fakeClient({
-      listProjects: () => new Promise<ProjectSummary[]>(() => {}),
       listProjectKnowledgePage: () =>
         new Promise<{ items: KnowledgeEntry[]; next_cursor: null }>(() => {}),
-      getKnowledge: () => new Promise<KnowledgeEntry>(() => {}),
     });
     mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
-    const rows = await screen.findAllByTestId("knowledge-row");
-    expect(rows[0]).toHaveTextContent("Keep SQLite");
-    const badges = await screen.findAllByTestId("stale-indicator");
-    expect(badges.map((b) => b.textContent)).toContain("Cached · refreshing…");
-    expect(screen.queryByText("Knowledge unavailable")).toBeNull();
+    await screen.findByText("Loading knowledge");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    expect(screen.queryByText("Keep SQLite")).toBeNull();
   });
 
-  it("replaces the cached value and drops the badge when the server answers", async () => {
+  it("renders the server page without consulting cached knowledge rows", async () => {
     const db = await seededDb();
     let release: (page: {
       items: KnowledgeEntry[];
@@ -993,21 +1405,22 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
       listProjectKnowledgePage: () => server,
     });
     mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
-    await screen.findAllByTestId("stale-indicator");
+    await screen.findByText("Loading knowledge");
     release({
       items: [{ ...ENTRIES[0]!, title: "Keep SQLite (v2)" }],
       next_cursor: null,
     });
     await screen.findByText("Keep SQLite (v2)");
+    expect(screen.getAllByTestId("knowledge-row")).toHaveLength(1);
     await waitFor(() =>
       expect(screen.queryByTestId("stale-indicator")).toBeNull(),
     );
   });
 
-  it("keeps cached rows and shows 'Cached · gateway unavailable' when the server rejects", async () => {
+  it("shows the page error instead of cached knowledge rows when the server rejects", async () => {
     const db = await seededDb();
     const client = fakeClient({
-      listProjectKnowledgePage: () => {
+      listProjectKnowledgePage: async () => {
         throw new ApiError("unreachable", "/projects/p-lore/knowledge", "down");
       },
       getKnowledge: () => {
@@ -1015,17 +1428,11 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
       },
     });
     mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
-    // The title appears in the list row and the open document.
-    await screen.findAllByText("Keep SQLite");
-    const badges = await screen.findAllByTestId("stale-indicator");
-    expect(badges.map((b) => b.textContent)).toContain(
-      "Cached · gateway unavailable",
-    );
-    // Cached rows stay; no error card replaces them. The list's cached read
-    // settles a few tasks after the document's, so wait the transient out.
+    await screen.findByText("Gateway unreachable");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    expect(screen.queryByText("Keep SQLite")).toBeNull();
     await waitFor(() => {
-      expect(screen.queryByText("Knowledge unavailable")).toBeNull();
-      expect(screen.queryByText("Knowledge entry unavailable")).toBeNull();
+      expect(screen.queryByTestId("stale-indicator")).toBeNull();
     });
   });
 

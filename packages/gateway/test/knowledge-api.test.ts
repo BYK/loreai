@@ -121,7 +121,7 @@ describe("GET /api/v1/knowledge", () => {
   it("returns externalized project fields and round-trips cursor pages", async () => {
     const seeded = await seedEntries("list-shape", 5);
     const first = await apiJSON<ListResponse>(
-      `/api/v1/knowledge?q=${seeded.marker}&sort=title_asc&limit=2&page=ignored`,
+      `/api/v1/knowledge?q=${seeded.marker}&sort=title:asc&limit=2&page=ignored`,
     );
     expect(first.items).toHaveLength(2);
     expect(first.items[0].id).toBe(first.items[0].logical_id);
@@ -133,13 +133,13 @@ describe("GET /api/v1/knowledge", () => {
     let cursor = first.next_cursor;
     while (cursor) {
       const page = await apiJSON<ListResponse>(
-        `/api/v1/knowledge?q=${seeded.marker}&sort=title_asc&limit=2&cursor=${encodeURIComponent(cursor)}`,
+        `/api/v1/knowledge?q=${seeded.marker}&sort=title:asc&limit=2&cursor=${encodeURIComponent(cursor)}`,
       );
       paged.push(...page.items);
       cursor = page.next_cursor;
     }
     const single = await apiJSON<ListResponse>(
-      `/api/v1/knowledge?q=${seeded.marker}&sort=title_asc&limit=100`,
+      `/api/v1/knowledge?q=${seeded.marker}&sort=title:asc&limit=100`,
     );
     expect(paged.map((item) => item.id)).toEqual(
       single.items.map((item) => item.id),
@@ -148,9 +148,44 @@ describe("GET /api/v1/knowledge", () => {
     expect(single.next_cursor).toBeNull();
   });
 
+  it("traverses a two-key sort with a typed key array", async () => {
+    const seeded = await seedEntries("list-stacked-sort", 5);
+    const sort = "updated_at:desc,title:asc";
+    const params = `project=${seeded.projectId}&q=${seeded.marker}&sort=${encodeURIComponent(sort)}&limit=2`;
+    const paged: KnowledgeItem[] = [];
+    let cursor: string | null = null;
+    do {
+      const page: ListResponse = await apiJSON<ListResponse>(
+        `/api/v1/knowledge?${cursor ? `cursor=${encodeURIComponent(cursor)}&` : ""}${params}`,
+      );
+      if (cursor === null) {
+        if (!page.next_cursor) {
+          throw new Error("expected a cursor for the first stacked-sort page");
+        }
+        const payload = JSON.parse(
+          Buffer.from(page.next_cursor, "base64url").toString("utf8"),
+        ) as { kind: string; sort: string; keys: unknown[] };
+        expect(payload.kind).toBe("knowledge_all");
+        expect(payload.sort).toBe(sort);
+        expect(payload.keys).toHaveLength(2);
+        expect(typeof payload.keys[0]).toBe("number");
+        expect(typeof payload.keys[1]).toBe("string");
+      }
+      paged.push(...page.items);
+      cursor = page.next_cursor;
+    } while (cursor);
+    const single = await apiJSON<ListResponse>(
+      `/api/v1/knowledge?project=${seeded.projectId}&q=${seeded.marker}&sort=${encodeURIComponent(sort)}&limit=100`,
+    );
+    expect(paged.map((item) => item.id)).toEqual(
+      single.items.map((item) => item.id),
+    );
+    expect(new Set(paged.map((item) => item.id)).size).toBe(paged.length);
+  });
+
   it("matches the project list for the same exact project filter and options", async () => {
     const seeded = await seedEntries("list-parity", 5);
-    const options = `q=${seeded.marker}&category=decision&scope=project&sort=created_desc&limit=2`;
+    const options = `q=${seeded.marker}&category=decision&scope=project&sort=created_at:desc&limit=2`;
     const allProjects = await apiJSON<ListResponse>(
       `/api/v1/knowledge?project=${seeded.projectId}&${options}`,
     );
@@ -180,8 +215,8 @@ describe("GET /api/v1/knowledge", () => {
         v: 1,
         kind: "knowledge",
         project: a.projectId,
-        sort: "updated_desc",
-        key: 1,
+        sort: "updated_at:desc",
+        keys: [1],
         id: "entry",
       }),
       encodeCursor({
@@ -195,8 +230,8 @@ describe("GET /api/v1/knowledge", () => {
         v: 1,
         kind: "knowledge_all",
         project: a.projectId,
-        sort: "updated_desc",
-        key: "not-a-number",
+        sort: "updated_at:desc,title:asc",
+        keys: [1, "not-a-number"],
         id: "entry",
       }),
     ];
@@ -213,7 +248,7 @@ describe("GET /api/v1/knowledge", () => {
       `/api/v1/knowledge?project=${b.projectId}&cursor=${encodeURIComponent(projectCursor.next_cursor!)}`,
       `/api/v1/knowledge?cursor=${encodeURIComponent(projectCursor.next_cursor!)}`,
       `/api/v1/knowledge?project=${a.projectId}&cursor=${encodeURIComponent(unboundCursor.next_cursor!)}`,
-      `/api/v1/knowledge?project=${a.projectId}&sort=title_asc&cursor=${encodeURIComponent(projectCursor.next_cursor!)}`,
+      `/api/v1/knowledge?project=${a.projectId}&sort=title:asc&cursor=${encodeURIComponent(projectCursor.next_cursor!)}`,
     ]) {
       const response = await api(path);
       expect(response.status, path).toBe(400);
@@ -221,13 +256,53 @@ describe("GET /api/v1/knowledge", () => {
         error: { type: "invalid_cursor" },
       });
     }
+    const sortMismatch = await api(
+      `/api/v1/knowledge?project=${a.projectId}&sort=title:asc&cursor=${encodeURIComponent(projectCursor.next_cursor!)}`,
+    );
+    expect(sortMismatch.status).toBe(400);
+    expect(
+      ((await sortMismatch.json()) as { error: { message: string } }).error
+        .message,
+    ).toBe(
+      "Cursor was issued for sort=updated_at:desc; request uses sort=title:asc",
+    );
+  });
+
+  it("rejects knowledge-all keysets with the wrong length or value type", async () => {
+    const seeded = await seedEntries("cursor-key-shape", 3);
+    const sort = "updated_at:desc,title:asc";
+    for (const keys of [[1], [1, 2]]) {
+      const cursor = encodeCursor({
+        v: 1,
+        kind: "knowledge_all",
+        project: seeded.projectId,
+        sort,
+        keys,
+        id: "entry",
+      });
+      const response = await api(
+        `/api/v1/knowledge?project=${seeded.projectId}&sort=${encodeURIComponent(sort)}&cursor=${encodeURIComponent(cursor)}`,
+      );
+      expect(response.status).toBe(400);
+      expect(
+        ((await response.json()) as { error: { message: string } }).error
+          .message,
+      ).toBe("Malformed cursor");
+    }
   });
 
   it("validates filters, limits, and exact project IDs", async () => {
     for (const query of [
       "category=bogus",
       "scope=invalid",
-      "sort=updated_asc",
+      "sort=",
+      "sort=updated_at",
+      "sort=updated_at:up",
+      "sort=updated_at:desc,updated_at:asc",
+      "sort=updated_at:desc,created_at:desc,confidence:desc,title:asc",
+      "sort=%20updated_at:desc",
+      "sort=updated_desc",
+      "scope=global",
       "limit=0",
       "limit=abc",
       `q=${"x".repeat(501)}`,
@@ -314,10 +389,11 @@ describe("GET /api/v1/knowledge/search", () => {
       "/api/v1/knowledge/search?q=",
       "/api/v1/knowledge/search?q=%20%20",
       `/api/v1/knowledge/search?q=abc&cursor=${encodeCursor({ v: 1 })}`,
-      "/api/v1/knowledge/search?q=abc&sort=title_asc",
+      "/api/v1/knowledge/search?q=abc&sort=title:asc",
       `/api/v1/knowledge/search?q=${"x".repeat(501)}`,
       "/api/v1/knowledge/search?q=abc&category=invalid",
       "/api/v1/knowledge/search?q=abc&scope=invalid",
+      "/api/v1/knowledge/search?q=abc&scope=global",
       "/api/v1/knowledge/search?q=abc&project=",
       "/api/v1/knowledge/search?q=abc&limit=0",
     ]) {

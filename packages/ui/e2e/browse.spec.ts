@@ -94,16 +94,23 @@ test.describe("real data browsing", () => {
     );
   });
 
-  test("search entry asks for a project on the workspace home", async ({
+  test("search entry opens workspace-wide knowledge search", async ({
     page,
   }) => {
     await page.goto("/ui");
     await page
       .locator('form:has([data-testid="search-entry"])')
-      .evaluate((form) => (form as HTMLFormElement).requestSubmit());
-    await expect(page.getByRole("dialog")).toContainText(
-      "Pick a project first — recall is scoped to a project",
-    );
+      .evaluate((form) => {
+        const input = form.querySelector<HTMLInputElement>('[name="q"]');
+        if (!input) throw new Error("workspace search input missing");
+        input.value = "SQLite";
+        (form as HTMLFormElement).requestSubmit();
+      });
+    await expect(page).toHaveURL("/ui/search?q=SQLite");
+    await expect(
+      page.getByRole("textbox", { name: "Search all knowledge" }),
+    ).toHaveValue("SQLite");
+    await expect(page.getByTestId("search-hit").first()).toBeVisible();
   });
 
   test("theme defaults to system; forcing dark persists across reload", async ({

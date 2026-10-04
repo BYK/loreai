@@ -140,6 +140,13 @@ for (const entry of entries) {
   const id = core.ltm.create({ ...entry, projectPath: lore, scope: "project" });
   if (!firstKnowledgeId) firstKnowledgeId = id;
 }
+core.ltm.create({
+  scope: "global",
+  category: "decision",
+  title: "Shared: prefer inert rendering",
+  content: "Knowledge titles and content are untrusted text in every project.",
+  confidence: 0.91,
+});
 core.ltm.appendVersion(firstKnowledgeId, {
   content:
     "SQLite remains the authoritative local store, with WAL mode and FTS5 for deterministic recall.",
@@ -184,6 +191,14 @@ core.ltm.create({
   title: "Prefer terse commit messages",
   content: "Conventional commits, one line, no trailing period.",
   confidence: 0.6,
+});
+core.ltm.create({
+  projectPath: scratch,
+  scope: "project",
+  crossProject: true,
+  category: "gotcha",
+  title: "Shared: cross-project filter fixture",
+  content: "This project-owned entry is shared across projects.",
 });
 
 // Hostile strings exercise every browser-rendered text surface.  Keep this

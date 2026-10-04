@@ -58,7 +58,7 @@ export const knowledgeVersion = type({
   content: "string",
   category: "string",
   confidence: "0 <= number <= 1",
-  scope: "'project' | 'global'",
+  scope: "'project' | 'shared'",
   cross_project: "boolean",
   source_refs: {
     session_id: "string | null",

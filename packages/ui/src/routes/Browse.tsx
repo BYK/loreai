@@ -2,15 +2,32 @@ import type { Component } from "solid-js";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
-import type { ProjectSummary, RecallScope } from "~/contracts";
-import { DEFAULT_KNOWLEDGE_QUERY, parseKnowledgeQuery } from "~/contracts";
-import { knowledgeHref, knowledgeListHref, projectHref } from "~/lib/href";
+import type {
+  AllKnowledgeQuery,
+  ProjectSummary,
+  RecallScope,
+} from "~/contracts";
+import {
+  DEFAULT_ALL_KNOWLEDGE_QUERY,
+  DEFAULT_KNOWLEDGE_QUERY,
+  parseAllKnowledgeQuery,
+  parseKnowledgeQuery,
+} from "~/contracts";
+import {
+  allKnowledgeHref,
+  globalKnowledgeHref,
+  knowledgeHref,
+  knowledgeListHref,
+  projectHref,
+  workspaceSearchHref,
+} from "~/lib/href";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
 import { SearchResults } from "~/components/lore/SearchResults";
+import { WorkspaceSearch } from "~/components/lore/WorkspaceSearch";
 import { SessionList } from "~/components/lore/SessionList";
 import { ImportHistoryPage } from "~/components/lore/ImportHistoryPage";
 import { errorStateFor } from "~/components/lore/ErrorState";
@@ -19,6 +36,13 @@ import { StateCard } from "~/components/lore/StateCard";
 import { Nav } from "~/components/shell/Nav";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 
 function decodeParam(segment: string | undefined) {
   if (segment === undefined) return undefined;
@@ -83,10 +107,12 @@ export const Browse: Component<{
     | "welcome"
     | "project"
     | "knowledge-table"
+    | "all-knowledge"
     | "entry"
     | "sessions"
     | "imports"
-    | "search";
+    | "search"
+    | "workspace-search";
 }> = (props) => {
   const raw = useParams<{
     projectId?: string;
@@ -101,6 +127,9 @@ export const Browse: Component<{
   const query = createMemo(() =>
     parseKnowledgeQuery(searchParams as Record<string, string | undefined>),
   );
+  const allQuery = createMemo(() =>
+    parseAllKnowledgeQuery(searchParams as Record<string, string | undefined>),
+  );
   const entry = ws.state.knowledge.entry(() => knowledgeId() ?? null);
   const activeProjectId = createMemo(
     () => projectId() ?? entry.loader.data()?.project_id ?? null,
@@ -112,10 +141,21 @@ export const Browse: Component<{
       : null,
   );
   const knowledgePage = ws.state.knowledge.page(pageSource);
+  const allKnowledgePage = ws.state.knowledge.allPage(() =>
+    props.view === "all-knowledge" ? allQuery() : null,
+  );
   const cursor = () =>
     typeof searchParams.cursor === "string" ? searchParams.cursor : null;
   const searchQ = () =>
     typeof searchParams.q === "string" ? searchParams.q : undefined;
+  const workspaceQ = () =>
+    (typeof searchParams.q === "string" ? searchParams.q : "")
+      .trim()
+      .slice(0, 500);
+  const workspaceSearchPage = ws.state.knowledgeSearch.search(() => {
+    const q = workspaceQ();
+    return props.view === "workspace-search" && q ? { q, project: null } : null;
+  });
   const searchScope = () =>
     typeof searchParams.scope === "string" ? searchParams.scope : "all";
   const sessionsPage = ws.state.sessions.page(() =>
@@ -237,6 +277,48 @@ export const Browse: Component<{
       </div>
     );
   };
+  const projectFilter = () => {
+    const current = allQuery().project;
+    const options = ["", ...(ws.projects.data() ?? []).map((p) => p.id)];
+    if (current && !options.includes(current)) options.push(current);
+    const projectName = (id: string) => {
+      const project = ws.projectById(id);
+      return project?.name || project?.path || id;
+    };
+    return (
+      <Select
+        value={current}
+        onChange={(project) =>
+          navigate(
+            allKnowledgeHref({
+              ...allQuery(),
+              project: project || null,
+              cursor: null,
+            }),
+          )
+        }
+        options={options}
+        placeholder="All projects"
+        itemComponent={(item) => (
+          <SelectItem item={item.item}>
+            {item.item.rawValue
+              ? projectName(item.item.rawValue)
+              : "All projects"}
+          </SelectItem>
+        )}
+      >
+        <SelectTrigger aria-label="project" class="h-9 min-w-32 text-xs">
+          <SelectValue<string>>
+            {(state) => {
+              const selected = state.selectedOption();
+              return selected ? projectName(selected) : "All projects";
+            }}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent />
+      </Select>
+    );
+  };
   const detail = () => {
     const id = projectId();
     switch (props.view) {
@@ -258,6 +340,26 @@ export const Browse: Component<{
             selectedId={knowledgeId()}
             page={knowledgePage}
           />
+        );
+      case "all-knowledge":
+        return (
+          <div>
+            <h1 class="px-4 pt-6 text-[25px] font-semibold sm:px-6">
+              All knowledge
+            </h1>
+            <KnowledgeTable<AllKnowledgeQuery>
+              routes={{
+                list: allKnowledgeHref,
+                entry: (id) => globalKnowledgeHref(id),
+                defaultQuery: DEFAULT_ALL_KNOWLEDGE_QUERY,
+              }}
+              query={allQuery()}
+              page={allKnowledgePage}
+              showProject
+              extraFilters={projectFilter()}
+              extraFiltersActive={allQuery().project !== null}
+            />
+          </div>
         );
       case "entry":
         if (!knowledgeId()) {
@@ -313,12 +415,25 @@ export const Browse: Component<{
             )}
           </Show>
         );
+      case "workspace-search":
+        return (
+          <WorkspaceSearch
+            q={workspaceQ()}
+            page={workspaceSearchPage}
+            allHref={allKnowledgeHref}
+            entryHref={globalKnowledgeHref}
+            searchHref={workspaceSearchHref}
+          />
+        );
     }
   };
   const listView = createMemo(list);
   const detailView = createMemo(detail);
   const back = () => {
     const id = projectId();
+    if (props.view === "all-knowledge") return { href: "/", label: "Projects" };
+    if (props.view === "entry" && !id)
+      return { href: allKnowledgeHref(), label: "All knowledge" };
     if (!id) return undefined;
     switch (props.view) {
       case "entry":
