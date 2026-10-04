@@ -7,6 +7,11 @@
  * different version is rejected with 400 `invalid_cursor`. A malformed `limit`
  * is rejected with 400 `invalid_request`.
  */
+import {
+  listQuery,
+  type KnowledgeKeyset,
+  type KnowledgeSort,
+} from "@loreai/core";
 
 export class BadRequest extends Error {
   constructor(
@@ -44,6 +49,73 @@ export function decodeCursorObject(token: string): Record<string, unknown> {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
   return parsed;
+}
+
+export function encodeKnowledgeCursor(
+  kind: "knowledge" | "knowledge_all",
+  project: string | null,
+  sort: KnowledgeSort,
+  keyset: KnowledgeKeyset,
+): string {
+  return encodeCursor({
+    v: CURSOR_VERSION,
+    kind,
+    project,
+    sort: listQuery.formatKnowledgeSort(sort),
+    keys: keyset.keys,
+    id: keyset.id,
+  });
+}
+
+export function decodeKnowledgeCursor(
+  token: string,
+  kind: "knowledge" | "knowledge_all",
+  project: string | null,
+  sort: KnowledgeSort,
+): KnowledgeKeyset {
+  const cursor = decodeCursorObject(token);
+  const validProject =
+    kind === "knowledge"
+      ? typeof cursor.project === "string"
+      : cursor.project === null || typeof cursor.project === "string";
+  if (
+    cursor.kind !== kind ||
+    !validProject ||
+    typeof cursor.sort !== "string" ||
+    typeof cursor.id !== "string" ||
+    cursor.id.length === 0 ||
+    !Array.isArray(cursor.keys)
+  ) {
+    throw new BadRequest("invalid_cursor", "Malformed cursor");
+  }
+  if (cursor.project !== project) {
+    throw new BadRequest(
+      "invalid_cursor",
+      "Cursor was issued for a different project",
+    );
+  }
+  const cursorSort = listQuery.parseKnowledgeSort(cursor.sort);
+  if (
+    !cursorSort ||
+    listQuery.formatKnowledgeSort(cursorSort) !== cursor.sort
+  ) {
+    throw new BadRequest("invalid_cursor", "Malformed cursor");
+  }
+  const requestSort = listQuery.formatKnowledgeSort(sort);
+  if (cursor.sort !== requestSort) {
+    throw new BadRequest(
+      "invalid_cursor",
+      `Cursor was issued for sort=${cursor.sort}; request uses sort=${requestSort}`,
+    );
+  }
+  const keyset: KnowledgeKeyset = {
+    keys: cursor.keys as Array<number | string>,
+    id: cursor.id,
+  };
+  if (!listQuery.knowledgeKeysetMatchesSort(keyset, sort)) {
+    throw new BadRequest("invalid_cursor", "Malformed cursor");
+  }
+  return keyset;
 }
 
 /** `limit` query param: absent → `defaultLimit`, else 1..`maxLimit`. */

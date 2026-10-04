@@ -274,7 +274,7 @@ export const Draft: Component<{
 );
 
 export const ScopeLabel: Component<{
-  scope: "private" | "project" | "team" | "cross-project";
+  scope: "private" | "project" | "team" | "shared" | "cross-project";
 }> = (props) => (
   <Badge variant="outline" data-scope={props.scope}>
     {props.scope === "private"
@@ -283,6 +283,8 @@ export const ScopeLabel: Component<{
         ? "Project scope"
         : props.scope === "team"
           ? "Team"
-          : "Cross-project"}
+          : props.scope === "shared"
+            ? "Shared scope"
+            : "Cross-project"}
   </Badge>
 );

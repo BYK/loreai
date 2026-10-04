@@ -14,6 +14,13 @@
 import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
+import { resolveCostAttribution } from "./cost-attribution";
+import {
+  computeProviderBudgetPressure,
+  evaluateProviderBudgets,
+  getProviderBudgets,
+} from "./provider-budgets";
+import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { boundFallbackHistory } from "./fallback-history";
 import {
   formatUpstreamRequestShape,
@@ -7475,6 +7482,7 @@ async function forwardToUpstream(
   cache?: AnthropicCacheOptions,
   signal?: AbortSignal,
   resolvedRoute?: ResolvedRequestUpstreamRoute,
+  sessionID?: string,
 ): Promise<UpstreamResult> {
   let url: string;
   let headers: Record<string, string>;
@@ -7799,7 +7807,7 @@ async function forwardToUpstream(
     }, dispatchSignal);
 
   const dispatch = async (dispatchSignal?: AbortSignal): Promise<Response> => {
-    return effectiveInterceptor
+    const response = await (effectiveInterceptor
       ? responseAgainstAbort(
           () =>
             effectiveInterceptor(body, req.model, req.stream, () =>
@@ -7807,7 +7815,24 @@ async function forwardToUpstream(
             ),
           dispatchSignal,
         )
-      : dispatchUpstream(dispatchSignal);
+      : dispatchUpstream(dispatchSignal));
+    // Capture provider quota headers for the cost ledger (#1926). Header
+    // reads only — the response object is returned untouched.
+    try {
+      observeProviderQuotaHeaders(
+        response.headers,
+        resolveCostAttribution({
+          sessionID,
+          providerID,
+          upstreamURL: effectiveUpstreamBase,
+          credential: routingAuth,
+          responseHeaders: response.headers,
+        }),
+      );
+    } catch {
+      // Quota capture must never affect the proxied response.
+    }
+    return response;
   };
 
   const response = await dispatch(signal);
@@ -8575,6 +8600,7 @@ export function buildStreamingResponse(
                     },
                     signal,
                     recallContext.upstreamRoute,
+                    recallContext.sessionState.sessionID,
                   ),
                 // JSON parsing is unused on the streaming path (assertSSEResponse
                 // guarantees an SSE body); provide a guard that throws if reached.
@@ -16129,11 +16155,25 @@ export function recordCacheTurnUsage(
   return bustCause;
 }
 
+type CostAttributionUpstream = { providerID?: string; url?: string };
+
+/**
+ * Attribution source captured at request time. The resolved route is always
+ * known when usage is accounted, while `state.lastUpstream` may already be
+ * cleared by idle eviction before a deferred finalizer runs.
+ */
+function routeAttributionUpstream(
+  route: ResolvedRequestUpstreamRoute,
+): CostAttributionUpstream {
+  return { providerID: route.providerID, url: route.effectiveUpstreamBase };
+}
+
 function accountConversationUsage(
   usage: GatewayUsage,
   model: string,
   sessionID: string,
   resolvedConversationTTL: "5m" | "1h" | undefined,
+  upstream?: CostAttributionUpstream,
 ): AnthropicUsage {
   const usageForSentry: AnthropicUsage = {
     input_tokens: usage.inputTokens,
@@ -16148,11 +16188,20 @@ function accountConversationUsage(
     "conversation",
     resolvedConversationTTL,
   );
+  const state = sessions.get(sessionID);
+  const source = upstream ?? state?.lastUpstream;
+  const attribution = resolveCostAttribution({
+    sessionID,
+    providerID: source?.providerID,
+    upstreamURL: source?.url,
+    credential: resolveAuth(sessionID, source?.providerID),
+  });
   recordConversationCost(
     sessionID,
     model,
     usageForSentry,
     resolvedConversationTTL,
+    attribution,
   );
   return usageForSentry;
 }
@@ -16174,6 +16223,7 @@ function postResponseForTenant(
   /** Storage policy captured when this turn resolved its session. */
   suppressTemporalStorage = false,
   endSpan?: () => void,
+  upstream?: CostAttributionUpstream,
 ): boolean {
   postResponseStartObserver?.();
   const { sessionID, projectPath } = sessionState;
@@ -16197,6 +16247,7 @@ function postResponseForTenant(
       resp.model,
       sessionID,
       sessionState.resolvedConversationTTL,
+      upstream,
     );
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -16481,6 +16532,7 @@ function accountUnsuccessfulResponse(
   genAiSpan: Sentry.Span | undefined,
   endSpan: () => void,
   markDirty?: () => void,
+  upstream?: CostAttributionUpstream,
 ): void {
   const usage = resp.usage ?? ZERO_USAGE;
   const hasUsage = Object.values(usage).some(
@@ -16494,6 +16546,7 @@ function accountUnsuccessfulResponse(
         resp.model,
         sessionID,
         resolvedConversationTTL,
+        upstream,
       );
       if (genAiSpan) {
         setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -16529,6 +16582,7 @@ function postResponse(
   genAiSpan?: Sentry.Span,
   suppressTemporalStorage = false,
   endSpan?: () => void,
+  upstream?: CostAttributionUpstream,
 ): boolean {
   return withTenant(sessionState.storageTenantId ?? "", () =>
     postResponseForTenant(
@@ -16541,6 +16595,7 @@ function postResponse(
       genAiSpan,
       suppressTemporalStorage,
       endSpan,
+      upstream,
     ),
   );
 }
@@ -17126,6 +17181,8 @@ async function handleCompactionInner(
     return await handlePassthrough(
       { ...req, rawHeaders: fallbackHeaders },
       config,
+      undefined,
+      sessionState.sessionID,
     );
   }
   const resp = buildCompactionResponse(sessionID, summary, req.model);
@@ -18726,6 +18783,7 @@ async function handlePassthrough(
   req: GatewayRequest,
   config: GatewayConfig,
   resolvedRoute?: ResolvedRequestUpstreamRoute,
+  sessionID?: string,
 ): Promise<Response> {
   if (requestSourcePrefix(req)) {
     throw new SourceDeltaUnavailableError(
@@ -18744,6 +18802,7 @@ async function handlePassthrough(
       undefined,
       abortScope.signal,
       resolvedRoute,
+      sessionID,
     );
   } catch (error) {
     abortScope.dispose();
@@ -19002,6 +19061,7 @@ async function handleProvisionalConversationTurn(
       undefined,
       abortScope.signal,
       requestUpstream.route,
+      identified.sessionID,
     );
   } catch (error) {
     abortScope.dispose();
@@ -19094,6 +19154,7 @@ async function handleProvisionalConversationTurn(
             const state = sessions.get(identified.sessionID);
             if (state) state._dirty = true;
           },
+          routeAttributionUpstream(requestUpstream.route),
         );
       },
       () => {},
@@ -19360,6 +19421,8 @@ async function handleProvisionalConversationTurn(
           conversationTTLForAccounting(identified.sessionID),
           undefined,
           () => {},
+          undefined,
+          routeAttributionUpstream(requestUpstream.route),
         );
         return;
       }
@@ -19379,6 +19442,7 @@ async function handleProvisionalConversationTurn(
         accumulated.model,
         identified.sessionID,
         conversationTTLForAccounting(identified.sessionID),
+        routeAttributionUpstream(requestUpstream.route),
       );
       const state = sessions.get(identified.sessionID);
       if (state) state._dirty = true;
@@ -21933,7 +21997,35 @@ async function handleConversationTurnPrepared(
   // Gated to Anthropic-OAuth accounts; 0 for everything else.
   const quotaSnapshot = getQuotaForCredential(resolveAuth(sessionID));
   const quotaPressure = computeQuotaPressure(quotaSnapshot);
-  if (dailyBudget > 0 || quotaPressure > 0) {
+  // Per-provider budgets (#1927): evaluated only when any are configured,
+  // using whatever attribution is known pre-upstream. A DB failure must
+  // never break the request.
+  let providerPressure = 0;
+  try {
+    if (getProviderBudgets().length > 0) {
+      const attribution = resolveCostAttribution({
+        sessionID,
+        providerID: sessionState.lastUpstream?.providerID,
+        upstreamURL: sessionState.lastUpstream?.url,
+        credential: resolveAuth(
+          sessionID,
+          sessionState.lastUpstream?.providerID,
+        ),
+      });
+      providerPressure =
+        attribution.provider === "unknown"
+          ? 0
+          : computeProviderBudgetPressure(evaluateProviderBudgets(), {
+              provider: attribution.provider,
+              auth_kind: attribution.authKind,
+              account: attribution.account,
+            });
+    }
+  } catch (err) {
+    log.info(`provider-budget: evaluation failed: ${String(err)}`);
+  }
+  const combinedQuotaPressure = Math.max(quotaPressure, providerPressure);
+  if (dailyBudget > 0 || combinedQuotaPressure > 0) {
     const inputTokens =
       getLastTransformEstimate(sessionID) ||
       coreEstimateTokens(JSON.stringify(modifiedReq.messages));
@@ -21941,7 +22033,7 @@ async function handleConversationTurnPrepared(
     const delay = getDailyThrottleDelay(
       dailyBudget,
       estimatedCost,
-      quotaPressure,
+      combinedQuotaPressure,
     );
 
     if (delay > 0) {
@@ -21961,7 +22053,10 @@ async function handleConversationTurnPrepared(
           `budget-throttle: sleeping ${actualDelay.toFixed(1)}s ` +
             `session=${sessionID.slice(0, 16)} ` +
             `spend=$${getDailySpend().spend.toFixed(2)} ` +
-            `rate=$${getCostRate().toFixed(2)}/hr`,
+            `rate=$${getCostRate().toFixed(2)}/hr` +
+            (providerPressure >= quotaPressure && providerPressure > 0
+              ? " (provider-budget)"
+              : ""),
         );
         try {
           await completeBudgetThrottleDelay(
@@ -22046,6 +22141,7 @@ async function handleConversationTurnPrepared(
       cacheOptions,
       foregroundAbort.signal,
       requestUpstreamRoute,
+      sessionID,
     );
   } catch (error) {
     releaseForeground();
@@ -22260,6 +22356,7 @@ async function handleConversationTurnPrepared(
           genAiSpan,
           suppressTemporalStorage,
           endGenAiSpan,
+          routeAttributionUpstream(requestUpstreamRoute),
         );
         if (persisted) {
           persistAcceptedProvenanceLayer();
@@ -22452,6 +22549,7 @@ async function handleConversationTurnPrepared(
             },
             signal,
             requestUpstreamRoute,
+            sessionState.sessionID,
           ),
         parseJSON: (response, protocol, signal) =>
           accumulateNonStreamResponse(
@@ -22783,6 +22881,7 @@ async function handleConversationTurnPrepared(
             () => {
               sessionState._dirty = true;
             },
+            routeAttributionUpstream(requestUpstreamRoute),
           );
           return;
         }
@@ -22803,6 +22902,7 @@ async function handleConversationTurnPrepared(
                   genAiSpan,
                   suppressTemporalStorage,
                   endGenAiSpan,
+                  routeAttributionUpstream(requestUpstreamRoute),
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
@@ -22853,6 +22953,7 @@ async function handleConversationTurnPrepared(
           () => {
             sessionState._dirty = true;
           },
+          routeAttributionUpstream(requestUpstreamRoute),
         );
       },
       dropStreamingFinalizer,
@@ -23088,6 +23189,7 @@ async function handleConversationTurnPrepared(
                       },
                       followUpSignal,
                       requestUpstreamRoute,
+                      sessionState.sessionID,
                     ),
                   parseJSON: () => {
                     throw new Error(
@@ -23146,6 +23248,7 @@ async function handleConversationTurnPrepared(
                       },
                       recoverySignal,
                       requestUpstreamRoute,
+                      sessionState.sessionID,
                     ),
                   parseJSON: () => {
                     throw new Error(

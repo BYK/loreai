@@ -14,6 +14,7 @@ import {
   contradictionListResponse,
   ContractError,
   cursorPage,
+  crossProjectKnowledgeEntry,
   distillationDetail,
   distillationList,
   entityDetail,
@@ -24,6 +25,7 @@ import {
   isContractError,
   knowledgeEntry,
   knowledgeList,
+  knowledgeSearchResponse,
   knowledgeVersionHistory,
   parseContract,
   projectClearResult,
@@ -57,6 +59,18 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "knowledge-list.json": {
     route: "/projects/p/knowledge",
     schema: knowledgeList,
+  },
+  "knowledge-all-page.json": {
+    route: "/knowledge",
+    schema: cursorPage(crossProjectKnowledgeEntry),
+  },
+  "knowledge-all-project.json": {
+    route: "/knowledge",
+    schema: cursorPage(crossProjectKnowledgeEntry),
+  },
+  "knowledge-search.json": {
+    route: "/knowledge/search?q=SQLite",
+    schema: knowledgeSearchResponse,
   },
   "knowledge-entry.json": { route: "/knowledge/k", schema: knowledgeEntry },
   "recall.json": { route: "/recall", schema: recallResponse },

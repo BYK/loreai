@@ -959,6 +959,8 @@ describe("GET/PATCH /api/v1/costs", () => {
         budget: { amount: number };
       };
       sessions: unknown[];
+      providers: unknown[];
+      quotas: unknown[];
     }>("/api/v1/costs");
     expect(data.live).toMatchObject({
       session_count: 0,
@@ -973,6 +975,98 @@ describe("GET/PATCH /api/v1/costs", () => {
     expect(data.daily.entries).toHaveLength(14);
     expect(data.daily.budget.amount).toBe(0);
     expect(data.sessions).toEqual([]);
+    expect(data.providers).toEqual([]);
+    expect(data.quotas).toEqual([]);
+  });
+
+  it("exposes provider cost and quota snapshots", async () => {
+    const { addProviderCost, upsertProviderQuota } =
+      await import("@loreai/core");
+    const today = new Date().toISOString().slice(0, 10);
+    addProviderCost({
+      day: today,
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct1",
+      bucket: "conversation",
+      cost: 1.5,
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 5,
+      requests: 2,
+    });
+    upsertProviderQuota({
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct1",
+      window: "5h",
+      label: "allowed",
+      windowMinutes: 300,
+      usedPercent: 23,
+      remaining: null,
+      limit: null,
+      resetsAt: 1_999_999_999_000,
+      source: "anthropic-unified",
+      observedAt: Date.now(),
+    });
+    upsertProviderQuota({
+      provider: "anthropic",
+      authKind: "subscription",
+      account: "acct1",
+      window: "7d",
+      label: "allowed",
+      windowMinutes: 10080,
+      usedPercent: 41,
+      remaining: null,
+      limit: null,
+      // Reset boundary already passed — must surface as stale, not live.
+      resetsAt: Date.now() - 60_000,
+      source: "anthropic-unified",
+      observedAt: Date.now() - 120_000,
+    });
+    const data = await body<{
+      providers: Array<{
+        provider: string;
+        auth_kind: string;
+        account: string;
+        spend: number;
+        today_spend: number;
+        requests: number;
+        last_day: string | null;
+      }>;
+      quotas: Array<{
+        provider: string;
+        window: string;
+        used_percent: number | null;
+        source: string;
+        observed_at: number;
+        stale: boolean;
+      }>;
+    }>("/api/v1/costs");
+    const provider = data.providers.find(
+      (p) => p.provider === "anthropic" && p.account === "acct1",
+    );
+    expect(provider).toMatchObject({
+      auth_kind: "subscription",
+      spend: 1.5,
+      today_spend: 1.5,
+      requests: 2,
+      last_day: today,
+    });
+    const quota = data.quotas.find(
+      (q) => q.provider === "anthropic" && q.window === "5h",
+    );
+    expect(quota?.stale).toBe(false);
+    const staleQuota = data.quotas.find(
+      (q) => q.provider === "anthropic" && q.window === "7d",
+    );
+    expect(staleQuota?.stale).toBe(true);
+    expect(quota).toMatchObject({
+      auth_kind: "subscription",
+      used_percent: 23,
+      source: "anthropic-unified",
+    });
   });
 
   it("sets and disables the daily budget, and rejects invalid values", async () => {
@@ -1049,6 +1143,188 @@ describe("GET/PATCH /api/v1/costs", () => {
       if (previous === null)
         db().query("DELETE FROM kv_meta WHERE key = ?").run("daily_budget");
       else setKV("daily_budget", previous);
+    }
+  });
+
+  it("accepts provider budgets, echoes statuses, and validates malformed input", async () => {
+    const { db, getKV, setKV } = await import("@loreai/core");
+    const previous = getKV("provider_budgets");
+    const restore = () => {
+      if (previous === null)
+        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
+      else setKV("provider_budgets", previous);
+    };
+    const patch = (payload: unknown) =>
+      api("/api/v1/costs/budget", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    try {
+      const ok = await patch({
+        provider_budgets: [
+          {
+            provider: "anthropic",
+            auth_kind: "subscription",
+            account: null,
+            unit: "percent",
+            window: "7d",
+            amount: 80,
+          },
+          { provider: "openai", unit: "usd", window: "daily", amount: 5 },
+        ],
+      });
+      expect(ok.status).toBe(200);
+      const saved = (await ok.json()) as {
+        provider_budgets: Array<{
+          provider: string;
+          unit: string;
+          window: string;
+          used: number | null;
+          stale: boolean;
+        }>;
+      };
+      expect(saved.provider_budgets).toHaveLength(2);
+      expect(saved.provider_budgets[0]).toMatchObject({
+        provider: "anthropic",
+        unit: "percent",
+        window: "7d",
+      });
+      expect(getKV("provider_budgets")).toContain('"percent"');
+
+      const get = (await (await api("/api/v1/costs")).json()) as {
+        provider_budgets: unknown[];
+      };
+      expect(get.provider_budgets).toHaveLength(2);
+
+      for (const bad of [
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "usd",
+              window: "daily",
+              amount: 1,
+              extra: 1,
+            },
+          ],
+        },
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "widgets",
+              window: "daily",
+              amount: 1,
+            },
+          ],
+        },
+        {
+          provider_budgets: [
+            { provider: "anthropic", unit: "usd", window: "5h", amount: 1 },
+          ],
+        },
+        {
+          provider_budgets: Array.from({ length: 51 }, () => ({
+            provider: "anthropic",
+            unit: "usd",
+            window: "daily",
+            amount: 1,
+          })),
+        },
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "5h",
+              amount: 80,
+            },
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "5h",
+              amount: 90,
+            },
+          ],
+        },
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "daily",
+              amount: 101,
+            },
+          ],
+        },
+        // daily + percent is rejected even when the amount is in range
+        {
+          provider_budgets: [
+            {
+              provider: "anthropic",
+              unit: "percent",
+              window: "daily",
+              amount: 50,
+            },
+          ],
+        },
+      ]) {
+        const res = await patch(bad);
+        expect(res.status).toBe(400);
+        expect(
+          ((await res.json()) as { error: { type: string } }).error.type,
+        ).toBe("invalid_request");
+      }
+
+      // Legacy body still returns exactly { amount, disabled }.
+      const legacy = (await (await patch({ amount: 3 })).json()) as Record<
+        string,
+        unknown
+      >;
+      expect(Object.keys(legacy).sort()).toEqual(["amount", "disabled"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("LORE_DAILY_BUDGET blocks amount but not provider budgets", async () => {
+    const { db, getKV, setKV } = await import("@loreai/core");
+    const previous = getKV("provider_budgets");
+    const envBefore = process.env.LORE_DAILY_BUDGET;
+    const patch = (payload: unknown) =>
+      api("/api/v1/costs/budget", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    try {
+      process.env.LORE_DAILY_BUDGET = "42";
+      expect((await patch({ amount: 5 })).status).toBe(409);
+      expect((await patch({ amount: 5, provider_budgets: [] })).status).toBe(
+        409,
+      );
+      expect(
+        (
+          await patch({
+            provider_budgets: [
+              {
+                provider: "anthropic",
+                unit: "usd",
+                window: "daily",
+                amount: 2,
+              },
+            ],
+          })
+        ).status,
+      ).toBe(200);
+      expect(getKV("provider_budgets")).toContain('"usd"');
+    } finally {
+      if (envBefore === undefined) delete process.env.LORE_DAILY_BUDGET;
+      else process.env.LORE_DAILY_BUDGET = envBefore;
+      if (previous === null)
+        db().query("DELETE FROM kv_meta WHERE key = ?").run("provider_budgets");
+      else setKV("provider_budgets", previous);
     }
   });
 

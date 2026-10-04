@@ -1,8 +1,9 @@
 import type { Component, JSX } from "solid-js";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
-import { A, useLocation } from "@solidjs/router";
+import { A, useMatch, useResolvedPath } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
+import { allKnowledgeHref } from "~/lib/href";
 import { pins } from "~/state/pins";
 import type { ProjectSummary } from "~/contracts";
 import {
@@ -23,9 +24,11 @@ const NavItem: Component<{
   children: JSX.Element;
   testId?: string;
   section?: string;
+  end?: boolean;
 }> = (props) => (
   <A
     href={props.href}
+    end={props.end}
     data-testid={props.testId}
     data-section={props.section}
     aria-current={props.active ? "page" : undefined}
@@ -138,7 +141,6 @@ export interface NavProps {
 
 export const Nav: Component<NavProps> = (props) => {
   const conn = useConnection();
-  const location = useLocation();
   const [filter, setFilter] = createSignal("");
   const [showAll, setShowAll] = createSignal(false);
   const sections = createMemo(() =>
@@ -149,6 +151,18 @@ export const Nav: Component<NavProps> = (props) => {
       props.activeProjectId,
     ),
   );
+  const homePath = useResolvedPath(() => "/");
+  const allKnowledgePath = useResolvedPath(() => "/knowledge");
+  const entitiesPath = useResolvedPath(() => "/entities/*");
+  const contradictionsPath = useResolvedPath(() => "/contradictions/*");
+  const warmingPath = useResolvedPath(() => "/warming/*");
+  const costsPath = useResolvedPath(() => "/costs/*");
+  const atHome = useMatch(() => homePath() ?? "");
+  const atAllKnowledge = useMatch(() => allKnowledgePath() ?? "");
+  const atEntities = useMatch(() => entitiesPath() ?? "");
+  const atContradictions = useMatch(() => contradictionsPath() ?? "");
+  const atWarming = useMatch(() => warmingPath() ?? "");
+  const atCosts = useMatch(() => costsPath() ?? "");
   return (
     <nav
       aria-label="Workspace"
@@ -160,9 +174,10 @@ export const Nav: Component<NavProps> = (props) => {
       <div class="eyebrow px-3">Workspace</div>
       <NavItem
         href="/"
-        active={props.activeProjectId === null}
+        active={props.activeProjectId === null && !!atHome()}
         count={props.projects?.length}
         testId="nav-projects"
+        end
       >
         Projects
       </NavItem>
@@ -175,8 +190,13 @@ export const Nav: Component<NavProps> = (props) => {
           </Show>
         )}
       </Show>
-      <NavItem href="/" count={props.totalKnowledge ?? undefined}>
-        Knowledge
+      <NavItem
+        href={allKnowledgeHref()}
+        active={!!atAllKnowledge()}
+        testId="nav-all-knowledge"
+        end
+      >
+        All knowledge
       </NavItem>
 
       <Show when={!props.projects?.length}>
@@ -315,16 +335,12 @@ export const Nav: Component<NavProps> = (props) => {
       </Switch>
 
       <NavHeading>Memory</NavHeading>
-      <NavItem
-        href="/entities"
-        active={location.pathname.startsWith("/entities")}
-        testId="nav-entities"
-      >
+      <NavItem href="/entities" active={!!atEntities()} testId="nav-entities">
         Entities
       </NavItem>
       <NavItem
         href="/contradictions"
-        active={location.pathname.startsWith("/contradictions")}
+        active={!!atContradictions()}
         testId="nav-contradictions"
       >
         Contradictions
@@ -339,18 +355,10 @@ export const Nav: Component<NavProps> = (props) => {
       </div>
 
       <NavHeading>Operations</NavHeading>
-      <NavItem
-        href="/warming"
-        active={location.pathname.startsWith("/warming")}
-        testId="nav-warming"
-      >
+      <NavItem href="/warming" active={!!atWarming()} testId="nav-warming">
         Cache warming
       </NavItem>
-      <NavItem
-        href="/costs"
-        active={location.pathname.startsWith("/costs")}
-        testId="nav-costs"
-      >
+      <NavItem href="/costs" active={!!atCosts()} testId="nav-costs">
         Cost intelligence
       </NavItem>
 

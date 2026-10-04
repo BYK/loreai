@@ -440,13 +440,27 @@ describe("KnowledgeDocument", () => {
       entry: { ...entry("Ada"), cross_project: 1, source_session: "s-1" },
       evidence: loader({ state: "available" }),
     });
-    expect(screen.getByText("global")).toBeInTheDocument();
+    expect(screen.getByText("shared")).toBeInTheDocument();
+    expect(screen.getByText("Shared scope")).toBeInTheDocument();
     expect(screen.getByText(/Last change/)).toBeInTheDocument();
     expect(
       screen.getByText(/recorded value, not a probability of correctness/),
     ).toBeInTheDocument();
     expect(screen.getByText("Technical details")).toBeInTheDocument();
     expect(screen.getByText("worker-model")).toBeInTheDocument();
+  });
+
+  it("treats a projectless entry as shared", () => {
+    renderDocument({
+      entry: {
+        ...entry("Ada"),
+        project_id: null,
+        cross_project: 0,
+        source_session: "s-1",
+      },
+    });
+    expect(screen.getByText("shared")).toBeInTheDocument();
+    expect(screen.getByText("Shared scope")).toBeInTheDocument();
   });
 
   it("renders newest history first with current, superseded, and deleted labels", () => {

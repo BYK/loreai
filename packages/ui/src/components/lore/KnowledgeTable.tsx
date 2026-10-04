@@ -1,4 +1,4 @@
-import type { Component } from "solid-js";
+import type { JSX } from "solid-js";
 import { For, Match, Show, Switch, createEffect, createSignal } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import {
@@ -8,7 +8,12 @@ import {
   tableFeatures,
 } from "@tanstack/solid-table";
 
-import type { KnowledgeEntry, KnowledgeQuery } from "~/contracts";
+import type {
+  KnowledgeEntry,
+  KnowledgeQuery,
+  KnowledgeSortField,
+  KnowledgeSortKey,
+} from "~/contracts";
 import {
   DEFAULT_KNOWLEDGE_QUERY,
   KNOWLEDGE_CATEGORIES,
@@ -30,24 +35,45 @@ import {
 } from "../ui/select";
 import { TextField, TextFieldInput } from "../ui/text-field";
 
-export const prevCursorOf = new Map<string, string | null>();
-const features = tableFeatures({});
-const helper = createColumnHelper<typeof features, KnowledgeEntry>();
-const SORT_LABELS: Record<KnowledgeQuery["sort"], string> = {
-  updated_desc: "Updated",
-  created_desc: "Created",
-  confidence_desc: "Confidence",
-  title_asc: "Title A–Z",
+type KnowledgeTableRow = KnowledgeEntry & {
+  project_name?: string | null;
 };
 
-export const KnowledgeTable: Component<{
-  projectId: string;
-  query: KnowledgeQuery;
+export const prevCursorOf = new Map<string, string | null>();
+const features = tableFeatures({});
+const helper = createColumnHelper<typeof features, KnowledgeTableRow>();
+const SORT_LABELS: Record<KnowledgeSortField, string> = {
+  updated_at: "Updated",
+  created_at: "Created",
+  confidence: "Confidence",
+  title: "Title",
+};
+const DEFAULT_SORT_DIRECTION: Record<
+  KnowledgeSortField,
+  KnowledgeSortKey["dir"]
+> = {
+  updated_at: "desc",
+  created_at: "desc",
+  confidence: "desc",
+  title: "asc",
+};
+
+export type KnowledgeTableRoutes<Q extends KnowledgeQuery> = {
+  list(query: Q): string;
+  entry(knowledgeId: string, query: Q): string;
+  defaultQuery: Q;
+};
+
+export type KnowledgeTableProps<Q extends KnowledgeQuery> = (
+  | { projectId: string; routes?: never }
+  | { routes: KnowledgeTableRoutes<Q>; projectId?: never }
+) & {
+  query: Q;
   selectedId?: string;
   page: {
     loader: {
       data: () =>
-        | { items: KnowledgeEntry[]; next_cursor: string | null }
+        | { items: KnowledgeTableRow[]; next_cursor: string | null }
         | undefined;
       loading: () => boolean;
       error: () => unknown;
@@ -56,7 +82,14 @@ export const KnowledgeTable: Component<{
     };
     status: () => { stale: boolean; partial: boolean };
   };
-}> = (props) => {
+  showProject?: boolean;
+  extraFilters?: JSX.Element;
+  extraFiltersActive?: boolean;
+};
+
+export function KnowledgeTable<Q extends KnowledgeQuery>(
+  props: KnowledgeTableProps<Q>,
+) {
   const navigate = useNavigate();
   const [active, setActive] = createSignal(0);
   let tableRef: HTMLTableElement | undefined;
@@ -72,13 +105,34 @@ export const KnowledgeTable: Component<{
     if (!table || !table.contains(document.activeElement)) return;
     table.querySelector<HTMLTableRowElement>("tr[data-active]")?.focus();
   });
-  const go = (query: KnowledgeQuery) =>
-    navigate(knowledgeListHref(props.projectId, query));
-  const clear = () => go({ ...DEFAULT_KNOWLEDGE_QUERY });
+  const go = (query: Q) =>
+    navigate(
+      props.routes
+        ? props.routes.list(query)
+        : knowledgeListHref(props.projectId, query),
+    );
+  const entryHref = (id: string) =>
+    props.routes
+      ? props.routes.entry(id, props.query)
+      : knowledgeHref(props.projectId, id, props.query);
+  const clear = () =>
+    go(
+      props.routes ? props.routes.defaultQuery : (DEFAULT_KNOWLEDGE_QUERY as Q),
+    );
+  const filtersActive = () =>
+    !!(
+      props.query.q ||
+      props.query.category ||
+      props.query.scope ||
+      props.extraFiltersActive
+    );
   const columns = helper.columns([
     helper.accessor("title", { header: "title" }),
     helper.accessor("category", { header: "category" }),
     helper.display({ id: "scope", header: "scope" }),
+    ...(props.showProject
+      ? [helper.display({ id: "project", header: "project" })]
+      : []),
     helper.accessor("confidence", { header: "confidence" }),
     helper.display({ id: "updated", header: "updated" }),
   ]);
@@ -90,20 +144,64 @@ export const KnowledgeTable: Component<{
     },
     getRowId: (row) => row.id,
   });
-  const sortOf = (id: string): KnowledgeQuery["sort"] =>
+  const sortFieldOf = (id: string): KnowledgeSortField | null =>
     id === "title"
-      ? "title_asc"
+      ? "title"
       : id === "confidence"
-        ? "confidence_desc"
+        ? "confidence"
         : id === "updated"
-          ? "updated_desc"
-          : props.query.sort;
-  const ariaSort = (id: string) =>
-    props.query.sort === sortOf(id)
-      ? id === "title"
-        ? "ascending"
-        : "descending"
-      : "none";
+          ? "updated_at"
+          : null;
+  const sortPosition = (field: KnowledgeSortField) =>
+    props.query.sort.findIndex((key) => key.field === field);
+  const ariaSort = (id: string) => {
+    const field = sortFieldOf(id);
+    const primary = props.query.sort[0];
+    if (!field || primary?.field !== field) return "none";
+    return primary.dir === "asc" ? "ascending" : "descending";
+  };
+  const sortButtonLabel = (id: string) => {
+    const field = sortFieldOf(id);
+    if (!field) return "";
+    const position = sortPosition(field);
+    if (position < 0) return `Sort by ${SORT_LABELS[field]}`;
+    const key = props.query.sort[position]!;
+    return `Sort by ${SORT_LABELS[field]}, level ${position + 1}, ${
+      key.dir === "asc" ? "ascending" : "descending"
+    }`;
+  };
+  const sortIndicator = (field: KnowledgeSortField) => {
+    const position = sortPosition(field);
+    if (position < 0) return null;
+    const key = props.query.sort[position]!;
+    return (
+      <span class="ml-1 text-muted" aria-hidden="true">
+        {props.query.sort.length > 1 ? `${position + 1} ` : ""}
+        {key.dir === "asc" ? "↑" : "↓"}
+      </span>
+    );
+  };
+  const sortCaption = () =>
+    props.query.sort
+      .map(
+        (key) => `${SORT_LABELS[key.field]} ${key.dir === "asc" ? "↑" : "↓"}`,
+      )
+      .join(", then ");
+  const clickSort = (field: KnowledgeSortField) => {
+    const [primary, ...remaining] = props.query.sort;
+    const next: KnowledgeSortKey[] =
+      primary?.field === field
+        ? [{ field, dir: primary.dir === "asc" ? "desc" : "asc" }, ...remaining]
+        : [
+            { field, dir: DEFAULT_SORT_DIRECTION[field] },
+            ...props.query.sort.filter((key) => key.field !== field),
+          ];
+    go({
+      ...props.query,
+      sort: next.slice(0, 3),
+      cursor: null,
+    });
+  };
   const filter = (
     name: "category" | "scope",
     options: readonly string[],
@@ -112,17 +210,23 @@ export const KnowledgeTable: Component<{
     <Select
       value={props.query[name] ?? null}
       onChange={(value) =>
-        go({ ...props.query, [name]: value as never, cursor: null })
+        go({
+          ...props.query,
+          [name]: (value || null) as never,
+          cursor: null,
+        })
       }
-      options={[...options]}
+      options={["", ...options]}
       placeholder={placeholder}
       itemComponent={(item) => (
-        <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
+        <SelectItem item={item.item}>
+          {item.item.rawValue || placeholder}
+        </SelectItem>
       )}
     >
       <SelectTrigger aria-label={name} class="h-9 min-w-32 text-xs">
         <SelectValue<string>>
-          {(state) => state.selectedOption() ?? placeholder}
+          {(state) => state.selectedOption() || placeholder}
         </SelectValue>
       </SelectTrigger>
       <SelectContent />
@@ -146,6 +250,7 @@ export const KnowledgeTable: Component<{
               value={props.query.q}
               aria-label="Knowledge search"
               placeholder="Filter knowledge"
+              class="h-9 text-xs"
             />
           </TextField>
           <Button type="submit" size="sm">
@@ -154,36 +259,7 @@ export const KnowledgeTable: Component<{
         </form>
         {filter("category", KNOWLEDGE_CATEGORIES, "All categories")}
         {filter("scope", KNOWLEDGE_SCOPES, "Any scope")}
-        <Select
-          value={props.query.sort}
-          onChange={(value) =>
-            go({
-              ...props.query,
-              sort: value as KnowledgeQuery["sort"],
-              cursor: null,
-            })
-          }
-          options={[
-            "updated_desc",
-            "created_desc",
-            "confidence_desc",
-            "title_asc",
-          ]}
-          itemComponent={(item) => (
-            <SelectItem item={item.item}>
-              {SORT_LABELS[item.item.rawValue]}
-            </SelectItem>
-          )}
-        >
-          <SelectTrigger aria-label="Sort" class="h-9 min-w-32 text-xs">
-            <SelectValue<string>>
-              {(state) =>
-                SORT_LABELS[state.selectedOption() as KnowledgeQuery["sort"]]
-              }
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent />
-        </Select>
+        {props.extraFilters}
       </div>
       <Show when={props.page.loader.stale()}>
         <StaleBadge
@@ -213,12 +289,12 @@ export const KnowledgeTable: Component<{
           <StateCard
             kind="empty"
             title={
-              props.query.q || props.query.category || props.query.scope
+              filtersActive()
                 ? "No knowledge matches these filters"
                 : "No knowledge extracted yet"
             }
             action={
-              props.query.q || props.query.category || props.query.scope ? (
+              filtersActive() ? (
                 <Button variant="link" size="sm" onClick={clear}>
                   Clear filters
                 </Button>
@@ -234,7 +310,7 @@ export const KnowledgeTable: Component<{
             class="w-full table-fixed text-left text-xs"
           >
             <caption class="mb-2 text-left text-[11px] text-muted">
-              Sorted on the server · page of up to 50
+              Sorted by {sortCaption()} · page of up to 50
             </caption>
             <thead>
               <For each={table.getHeaderGroups()}>
@@ -252,6 +328,7 @@ export const KnowledgeTable: Component<{
                           <th
                             class={`px-2 py-2 font-semibold ${
                               id === "scope" ||
+                              id === "project" ||
                               id === "confidence" ||
                               id === "updated"
                                 ? "hidden sm:table-cell"
@@ -262,18 +339,19 @@ export const KnowledgeTable: Component<{
                             {sortable ? (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  go({
-                                    ...props.query,
-                                    sort: sortOf(id),
-                                    cursor: null,
-                                  })
-                                }
+                                aria-label={sortButtonLabel(id)}
+                                onClick={() => {
+                                  const field = sortFieldOf(id);
+                                  if (field) clickSort(field);
+                                }}
                               >
                                 {flexRender(
                                   header.column.columnDef.header,
                                   header.getContext(),
                                 )}
+                                <Show when={sortFieldOf(id)}>
+                                  {(field) => sortIndicator(field())}
+                                </Show>
                               </button>
                             ) : (
                               flexRender(
@@ -301,25 +379,11 @@ export const KnowledgeTable: Component<{
                       row.original.id === props.selectedId ? "true" : undefined
                     }
                     class="h-11 cursor-pointer border-b border-line hover:bg-soft"
-                    onClick={() =>
-                      navigate(
-                        knowledgeHref(
-                          props.projectId,
-                          row.original.id,
-                          props.query,
-                        ),
-                      )
-                    }
+                    onClick={() => navigate(entryHref(row.original.id))}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        navigate(
-                          knowledgeHref(
-                            props.projectId,
-                            row.original.id,
-                            props.query,
-                          ),
-                        );
+                        navigate(entryHref(row.original.id));
                       } else if (event.key === "ArrowDown") {
                         event.preventDefault();
                         setActive(Math.min(rows().length - 1, index() + 1));
@@ -336,6 +400,7 @@ export const KnowledgeTable: Component<{
                             cell.column.id === "title" ? "max-w-0" : ""
                           } ${
                             cell.column.id === "scope" ||
+                            cell.column.id === "project" ||
                             cell.column.id === "confidence" ||
                             cell.column.id === "updated"
                               ? "hidden sm:table-cell"
@@ -354,10 +419,18 @@ export const KnowledgeTable: Component<{
                           ) : cell.column.id === "category" ? (
                             <Badge>{row.original.category}</Badge>
                           ) : cell.column.id === "scope" ? (
-                            row.original.cross_project ? (
-                              "global"
+                            row.original.project_id == null ||
+                            row.original.cross_project === true ||
+                            row.original.cross_project === 1 ? (
+                              "shared"
                             ) : (
                               "project"
+                            )
+                          ) : cell.column.id === "project" ? (
+                            row.original.project_id == null ? (
+                              "No project"
+                            ) : (
+                              (row.original.project_name ?? "Unknown project")
                             )
                           ) : cell.column.id === "confidence" ? (
                             <>
@@ -419,4 +492,4 @@ export const KnowledgeTable: Component<{
       {/* Virtualization is intentionally absent because each page contains at most 50 rows. */}
     </div>
   );
-};
+}

@@ -10,6 +10,7 @@
 
 import { workerModel, config as loreConfig, log } from "@loreai/core";
 import type { ProviderRoute } from "./config";
+import { isChatGPTBackend } from "./chatgpt-backend";
 import { upstreamFetch } from "./fetch";
 import {
   isWorkerIncapable,
@@ -723,15 +724,6 @@ function lineageKey(family: string): string {
  * `api.openai.com` API-key session. The `/backend-api` path is preserved by
  * compatible proxies, unlike the host.
  */
-function isChatGPTBackend(url: string | undefined): boolean {
-  if (!url) return false;
-  try {
-    const u = new URL(url);
-    return /(?:^|\/)backend-api(?:\/|$)/.test(u.pathname);
-  } catch {
-    return false;
-  }
-}
 
 /**
  * True when a candidate worker model id is currently usable for selection:

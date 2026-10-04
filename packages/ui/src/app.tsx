@@ -112,6 +112,7 @@ export const routes: RouteDefinition[] = [
     path: "/projects/:projectId/knowledge/:knowledgeId",
     component: () => <Browse view="entry" />,
   },
+  { path: "/knowledge", component: () => <Browse view="all-knowledge" /> },
   { path: "/knowledge/:knowledgeId", component: () => <Browse view="entry" /> },
   {
     path: "/projects/:projectId/knowledge",
@@ -130,6 +131,10 @@ export const routes: RouteDefinition[] = [
   {
     path: "/projects/:projectId/imports",
     component: () => <Browse view="imports" />,
+  },
+  {
+    path: "/search",
+    component: () => <Browse view="workspace-search" />,
   },
   {
     path: "/projects/:projectId/search",

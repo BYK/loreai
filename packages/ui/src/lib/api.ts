@@ -19,6 +19,7 @@ import { type Type } from "arktype";
 
 import {
   accountStatus,
+  crossProjectKnowledgeEntry,
   ApiError,
   apiErrorBody,
   apiPath,
@@ -39,6 +40,8 @@ import {
   importListPage,
   knowledgeEntry,
   knowledgeList,
+  formatKnowledgeSort,
+  knowledgeSearchResponse,
   knowledgeVersionHistory,
   sessionWarmingModeResult,
   parseContract,
@@ -63,6 +66,7 @@ import {
   warmingSettingsResult,
   warmingSnapshot,
   type AccountStatus,
+  type CrossProjectKnowledgeEntry,
   type CursorPage,
   type CostsSnapshot,
   type ContradictionDecision,
@@ -76,6 +80,7 @@ import {
   type EntityRebuildStatus,
   type ImportListPage,
   type KnowledgeEntry,
+  type KnowledgeSearchResponse,
   type KnowledgeVersionHistory,
   type ProjectClearResult,
   type ProjectDeleteResult,
@@ -340,9 +345,57 @@ export function createApiClient(options: ApiClientOptions = {}) {
           q: opts.q,
           category: opts.category,
           scope: opts.scope,
-          sort: opts.sort,
+          sort: opts.sort ? formatKnowledgeSort(opts.sort) : undefined,
         }),
         cursorPage(knowledgeEntry),
+        signal,
+      );
+    },
+    listKnowledgePage(
+      opts: {
+        cursor?: string | null;
+        limit?: number;
+        q?: string;
+        category?: KnowledgeCategory;
+        scope?: KnowledgeScope;
+        sort?: KnowledgeSort;
+        project?: string;
+      } = {},
+      signal?: AbortSignal,
+    ): Promise<CursorPage<CrossProjectKnowledgeEntry>> {
+      return getJson(
+        apiPath(["knowledge"], {
+          cursor: opts.cursor,
+          limit: opts.limit,
+          q: opts.q,
+          category: opts.category,
+          scope: opts.scope,
+          sort: opts.sort ? formatKnowledgeSort(opts.sort) : undefined,
+          project: opts.project,
+        }),
+        cursorPage(crossProjectKnowledgeEntry),
+        signal,
+      );
+    },
+    searchKnowledge(
+      opts: {
+        q: string;
+        limit?: number;
+        project?: string;
+        category?: KnowledgeCategory;
+        scope?: KnowledgeScope;
+      },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeSearchResponse> {
+      return getJson(
+        apiPath(["knowledge", "search"], {
+          q: opts.q,
+          limit: opts.limit,
+          project: opts.project,
+          category: opts.category,
+          scope: opts.scope,
+        }),
+        knowledgeSearchResponse,
         signal,
       );
     },

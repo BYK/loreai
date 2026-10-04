@@ -8,10 +8,8 @@
  * owns the opaque token format); core only speaks in typed keysets so the
  * ordering contract lives next to the SQL that implements it.
  *
- * Ordering is always `<sort key> <dir>, id <dir>` so equal sort keys still
- * produce a total order — a page boundary inside a run of equal keys resumes
- * exactly where it left off, and rows inserted/mutated between pages never
- * cause a row to be skipped or repeated unless its own sort key moved.
+ * Ordering is a stack of sort keys followed by `id` in the primary direction,
+ * so every page boundary resumes exactly where it left off.
  */
 import { db, ensureProject } from "./db";
 import { hydrateKnowledgeEntry, type KnowledgeEntry, logicalIdOf } from "./ltm";
@@ -26,25 +24,32 @@ import type { TemporalMessage } from "./temporal";
 // Knowledge
 // ---------------------------------------------------------------------------
 
-export type KnowledgeSort =
-  | "updated_desc"
-  | "created_desc"
-  | "confidence_desc"
-  | "title_asc";
-export const KNOWLEDGE_SORTS: ReadonlySet<KnowledgeSort> =
-  new Set<KnowledgeSort>([
-    "updated_desc",
-    "created_desc",
-    "confidence_desc",
-    "title_asc",
-  ]);
+export type KnowledgeSortField =
+  | "updated_at"
+  | "created_at"
+  | "confidence"
+  | "title";
+export type KnowledgeSortKey = {
+  field: KnowledgeSortField;
+  dir: "asc" | "desc";
+};
+export type KnowledgeSort = readonly KnowledgeSortKey[];
+export const DEFAULT_KNOWLEDGE_SORT: KnowledgeSort = [
+  { field: "updated_at", dir: "desc" },
+];
+export const KNOWLEDGE_SORT_FIELDS: readonly KnowledgeSortField[] = [
+  "updated_at",
+  "created_at",
+  "confidence",
+  "title",
+];
 
-/** `project`: entries owned by the project (legacy list behaviour).
- *  `global`: project-less entries visible to every project.
- *  `all`: everything the project can see (own + global + cross_project). */
-export type KnowledgeScope = "project" | "global" | "all";
+/** `project`: project-owned entries not shared across projects.
+ *  `shared`: project-less or cross-project entries.
+ *  `all`: everything visible in the selected workspace. */
+export type KnowledgeScope = "project" | "shared" | "all";
 export const KNOWLEDGE_SCOPES: ReadonlySet<KnowledgeScope> =
-  new Set<KnowledgeScope>(["project", "global", "all"]);
+  new Set<KnowledgeScope>(["project", "shared", "all"]);
 
 export type KnowledgeCategory =
   | "decision"
@@ -61,8 +66,26 @@ export const KNOWLEDGE_CATEGORIES: ReadonlySet<KnowledgeCategory> =
     "gotcha",
   ]);
 
-export function isKnowledgeSort(v: string): v is KnowledgeSort {
-  return (KNOWLEDGE_SORTS as ReadonlySet<string>).has(v);
+export function parseKnowledgeSort(raw: string): KnowledgeSort | null {
+  const terms = raw.split(",");
+  if (terms.length < 1 || terms.length > 3) return null;
+  const fields = new Set<KnowledgeSortField>();
+  const sort: KnowledgeSortKey[] = [];
+  for (const term of terms) {
+    const match = /^(updated_at|created_at|confidence|title):(asc|desc)$/.exec(
+      term,
+    );
+    if (!match) return null;
+    const field = match[1] as KnowledgeSortField;
+    if (fields.has(field)) return null;
+    fields.add(field);
+    sort.push({ field, dir: match[2] as KnowledgeSortKey["dir"] });
+  }
+  return sort;
+}
+
+export function formatKnowledgeSort(sort: KnowledgeSort): string {
+  return sort.map(({ field, dir }) => `${field}:${dir}`).join(",");
 }
 export function isKnowledgeScope(v: string): v is KnowledgeScope {
   return (KNOWLEDGE_SCOPES as ReadonlySet<string>).has(v);
@@ -71,10 +94,8 @@ export function isKnowledgeCategory(v: string): v is KnowledgeCategory {
   return (KNOWLEDGE_CATEGORIES as ReadonlySet<string>).has(v);
 }
 
-/** Position of the last row of the previous page. `key` is the sort column's
- *  value for that row (number for timestamps/confidence, string for title);
- *  `id` is the per-version knowledge id used as the tiebreaker. */
-export type KnowledgeKeyset = { key: number | string; id: string };
+/** Position of the last row of the previous page; keys follow sort order. */
+export type KnowledgeKeyset = { keys: Array<number | string>; id: string };
 
 export type KnowledgeListOptions = {
   q?: string;
@@ -94,42 +115,42 @@ export type CrossProjectKnowledgeEntry = KnowledgeEntry & {
 };
 
 const SORT_SPEC: Record<
-  KnowledgeSort,
-  { column: string; dir: "ASC" | "DESC"; kind: "number" | "string" }
+  KnowledgeSortField,
+  { column: string; kind: "number" | "string" }
 > = {
-  updated_desc: { column: "updated_at", dir: "DESC", kind: "number" },
-  created_desc: { column: "created_at", dir: "DESC", kind: "number" },
-  confidence_desc: { column: "confidence", dir: "DESC", kind: "number" },
-  title_asc: { column: "title", dir: "ASC", kind: "string" },
+  updated_at: { column: "updated_at", kind: "number" },
+  created_at: { column: "created_at", kind: "number" },
+  confidence: { column: "COALESCE(confidence, 1.0)", kind: "number" },
+  title: { column: "title", kind: "string" },
 };
 
-/** Sort key of an entry under `sort`, i.e. what `KnowledgeKeyset.key` holds. */
-export function knowledgeSortKey(
+function knowledgeSortKeys(
   entry: KnowledgeEntry,
   sort: KnowledgeSort,
-): number | string {
-  switch (sort) {
-    case "updated_desc":
-      return entry.updated_at;
-    case "created_desc":
-      return entry.created_at;
-    case "confidence_desc":
-      return entry.confidence;
-    case "title_asc":
-      return entry.title;
-  }
+): Array<number | string> {
+  return sort.map(({ field }) => entry[field]);
 }
 
-/** True when `key` has the JS type the sort's column produces — a decoded
- *  cursor carrying a string key for a numeric sort is malformed. */
+/** Validate that each key has the type produced by its corresponding column. */
 export function knowledgeKeysetMatchesSort(
   key: KnowledgeKeyset,
   sort: KnowledgeSort,
 ): boolean {
-  const kind = SORT_SPEC[sort].kind;
-  if (kind === "number")
-    return typeof key.key === "number" && Number.isFinite(key.key);
-  return typeof key.key === "string";
+  if (
+    !Array.isArray(key.keys) ||
+    key.keys.length !== sort.length ||
+    sort.length < 1 ||
+    sort.length > 3 ||
+    new Set(sort.map(({ field }) => field)).size !== sort.length
+  ) {
+    return false;
+  }
+  return sort.every(({ field }, index) => {
+    const value = key.keys[index];
+    return SORT_SPEC[field].kind === "number"
+      ? typeof value === "number" && Number.isFinite(value)
+      : typeof value === "string";
+  });
 }
 
 /** Same LIKE term filter as `ltm.searchLike()` — the fallback used when the
@@ -202,27 +223,46 @@ function buildKnowledgePage<T extends KnowledgeEntry>(
   scopePredicate: SqlFragment | null,
   columns = KNOWLEDGE_LIST_COLS,
 ): { items: T[]; next: KnowledgeKeyset | null } {
-  const sort = options.sort ?? "updated_desc";
-  const spec = SORT_SPEC[sort];
+  const sort = options.sort ?? DEFAULT_KNOWLEDGE_SORT;
   const where = knowledgePredicates(options, scopePredicate);
 
-  if (options.after) {
-    // Keyset predicate: rows strictly after (key, id) in sort order. DESC sorts
-    // continue with smaller keys; ties on the key continue with the id in the
-    // same direction.
-    const cmp = spec.dir === "DESC" ? "<" : ">";
-    where.push(
-      sql`(${sql.raw(spec.column)} ${sql.raw(cmp)} ${options.after.key} OR (${sql.raw(spec.column)} = ${options.after.key} AND id ${sql.raw(cmp)} ${options.after.id}))`,
+  const after = options.after;
+  if (after) {
+    const branches: SqlFragment[] = [];
+    for (let index = 0; index < sort.length; index++) {
+      const key = sort[index];
+      const terms = sort.slice(0, index).map((prior, priorIndex) => {
+        const column = SORT_SPEC[prior.field].column;
+        return sql`${sql.raw(column)} = ${after.keys[priorIndex]}`;
+      });
+      const column = SORT_SPEC[key.field].column;
+      const cmp = key.dir === "desc" ? "<" : ">";
+      terms.push(sql`${sql.raw(column)} ${sql.raw(cmp)} ${after.keys[index]}`);
+      branches.push(sql.and(terms));
+    }
+    const idTerms = sort.map(
+      ({ field }, index) =>
+        sql`${sql.raw(SORT_SPEC[field].column)} = ${after.keys[index]}`,
     );
+    const primaryCmp = sort[0].dir === "desc" ? "<" : ">";
+    idTerms.push(sql`id ${sql.raw(primaryCmp)} ${after.id}`);
+    branches.push(sql.and(idTerms));
+    where.push(sql.or(branches));
   }
 
   const limit = Math.max(1, Math.floor(options.limit));
+  const order = [
+    ...sort.map(
+      ({ field, dir }) => `${SORT_SPEC[field].column} ${dir.toUpperCase()}`,
+    ),
+    `id ${sort[0].dir.toUpperCase()}`,
+  ].join(", ");
   const rows = sql
     .all<T>(
       db(),
       sql`SELECT ${sql.raw(columns)} FROM knowledge_current
         WHERE ${sql.and(where)}
-        ORDER BY ${sql.raw(spec.column)} ${sql.raw(spec.dir)}, id ${sql.raw(spec.dir)}
+        ORDER BY ${sql.raw(order)}
         LIMIT ${limit + 1}`,
     )
     .map(hydrateKnowledgeEntry) as T[];
@@ -234,30 +274,33 @@ function buildKnowledgePage<T extends KnowledgeEntry>(
     items,
     next:
       hasMore && last
-        ? { key: knowledgeSortKey(last, sort), id: last.id }
+        ? { keys: knowledgeSortKeys(last, sort), id: last.id }
         : null,
   };
 }
 
 function knowledgeScopePredicate(
-  scope: KnowledgeScope,
+  scope: KnowledgeScope | undefined,
   projectId?: string,
 ): SqlFragment | null {
+  if (scope === undefined) {
+    return projectId !== undefined ? sql`(project_id = ${projectId})` : null;
+  }
   if (projectId !== undefined) {
     switch (scope) {
       case "project":
-        return sql`project_id = ${projectId}`;
-      case "global":
-        return sql`project_id IS NULL`;
+        return sql`(project_id = ${projectId} AND COALESCE(cross_project, 0) = 0)`;
+      case "shared":
+        return sql`(project_id IS NULL OR COALESCE(cross_project, 0) = 1)`;
       case "all":
-        return sql`project_id = ${projectId} OR project_id IS NULL OR cross_project = 1`;
+        return sql`(project_id = ${projectId} OR project_id IS NULL OR COALESCE(cross_project, 0) = 1)`;
     }
   }
   switch (scope) {
     case "project":
-      return sql`project_id IS NOT NULL`;
-    case "global":
-      return sql`project_id IS NULL`;
+      return sql`(project_id IS NOT NULL AND COALESCE(cross_project, 0) = 0)`;
+    case "shared":
+      return sql`(project_id IS NULL OR COALESCE(cross_project, 0) = 1)`;
     case "all":
       return null;
   }
@@ -266,9 +309,9 @@ function knowledgeScopePredicate(
 /**
  * Filtered, sorted, keyset-paginated read over `knowledge_current` for one
  * project. `limit` rows are returned at most; `next` is set only when a
- * further row exists (probed with `limit + 1`). Confidence gating matches
- * `ltm.forProject()` (`confidence > 0.2`) so cursor mode never surfaces an
- * entry the legacy list would hide.
+ * further row exists (probed with `limit + 1`). An omitted scope means rows
+ * owned by this project, including its cross-project rows; confidence gating
+ * matches `ltm.forProject()` (`confidence > 0.2`).
  *
  * Indexes used: `idx_knowledge_project_current` (project_id WHERE current+live)
  * narrows to the project's live rows; the sort is over that bounded set, so no
@@ -281,14 +324,15 @@ export function listKnowledgePage(
   const pid = ensureProject(projectPath);
   return buildKnowledgePage(
     options,
-    knowledgeScopePredicate(options.scope ?? "project", pid),
+    knowledgeScopePredicate(options.scope, pid),
   );
 }
 
 /**
  * Read a cross-project keyset page from the tenant's current live knowledge.
- * Without a project filter, `all` covers every project; with one, scope
- * semantics match `listKnowledgePage` for that exact project ID.
+ * With no scope or project filter, no scope predicate is applied. With a
+ * project filter and omitted scope, only entries owned by that project are
+ * returned, including its cross-project rows.
  */
 export function listAllKnowledgePage(
   options: KnowledgeListOptions & {
@@ -298,7 +342,7 @@ export function listAllKnowledgePage(
   },
 ): { items: CrossProjectKnowledgeEntry[]; next: KnowledgeKeyset | null } {
   const scopePredicate = knowledgeScopePredicate(
-    options.scope ?? (options.projectId === undefined ? "all" : "project"),
+    options.scope,
     options.projectId,
   );
   return buildKnowledgePage<CrossProjectKnowledgeEntry>(
@@ -309,8 +353,10 @@ export function listAllKnowledgePage(
 }
 
 /**
- * BM25-ranked cross-project knowledge search. The total is exact and results
- * are intentionally top-N rather than paginated.
+ * BM25-ranked cross-project knowledge search. With an omitted scope, a
+ * project-filtered search returns rows owned by that project; without a
+ * project filter, no scope predicate is applied. The total is exact and
+ * results are intentionally top-N rather than paginated.
  */
 export function searchKnowledgeRanked(options: {
   q: string;
@@ -324,7 +370,7 @@ export function searchKnowledgeRanked(options: {
   mode: "fts" | "like" | "none";
 } {
   const scopePredicate = knowledgeScopePredicate(
-    options.scope ?? (options.projectId === undefined ? "all" : "project"),
+    options.scope,
     options.projectId,
   );
   const where = knowledgePredicates(options, scopePredicate, false);
@@ -680,7 +726,7 @@ export type KnowledgeVersionDetail = {
   /** Confidence lives on the per-logical-id register, so it is the same on
    *  every version — reported per version for a self-contained row. */
   confidence: number;
-  scope: "project" | "global";
+  scope: "project" | "shared";
   cross_project: boolean;
   source_refs: {
     session_id: string | null;
@@ -710,7 +756,7 @@ type VersionRow = {
   category: string;
   confidence: number;
   project_id: string | null;
-  cross_project: number;
+  cross_project: number | null;
   updated_at: number;
   source_session: string | null;
   source_entry_id: string | null;
@@ -767,7 +813,10 @@ export function knowledgeVersionHistory(
       content: r.content,
       category: r.category,
       confidence: r.confidence,
-      scope: r.project_id === null ? ("global" as const) : ("project" as const),
+      scope:
+        r.project_id === null || r.cross_project === 1
+          ? ("shared" as const)
+          : ("project" as const),
       cross_project: r.cross_project === 1,
       source_refs: {
         session_id: r.source_session,

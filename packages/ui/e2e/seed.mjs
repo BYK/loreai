@@ -142,6 +142,13 @@ for (const entry of entries) {
   if (!firstKnowledgeId) firstKnowledgeId = id;
   knowledgeIds.push(id);
 }
+core.ltm.create({
+  scope: "global",
+  category: "decision",
+  title: "Shared: prefer inert rendering",
+  content: "Knowledge titles and content are untrusted text in every project.",
+  confidence: 0.91,
+});
 core.ltm.appendVersion(firstKnowledgeId, {
   content:
     "SQLite remains the authoritative local store, with WAL mode and FTS5 for deterministic recall.",
@@ -186,6 +193,14 @@ core.ltm.create({
   title: "Prefer terse commit messages",
   content: "Conventional commits, one line, no trailing period.",
   confidence: 0.6,
+});
+core.ltm.create({
+  projectPath: scratch,
+  scope: "project",
+  crossProject: true,
+  category: "gotcha",
+  title: "Shared: cross-project filter fixture",
+  content: "This project-owned entry is shared across projects.",
 });
 
 // Hostile strings exercise every browser-rendered text surface.  Keep this
@@ -530,6 +545,71 @@ for (const viewport of ["Desktop", "Mobile"]) {
     });
   }
 }
+
+// Provider cost + quota snapshot fixtures (#1926): one subscription and one
+// API-key account so /ui/costs renders both card shapes.
+const todayUTC = new Date().toISOString().slice(0, 10);
+core.addProviderCost({
+  day: todayUTC,
+  provider: "anthropic",
+  authKind: "subscription",
+  account: "e2e-anth",
+  bucket: "conversation",
+  cost: 2.5,
+  inputTokens: 12_000,
+  outputTokens: 3_000,
+  cacheReadTokens: 8_000,
+  cacheWriteTokens: 400,
+  requests: 7,
+});
+core.addProviderCost({
+  day: todayUTC,
+  provider: "openai",
+  authKind: "api_key",
+  account: "e2e-oai",
+  bucket: "conversation",
+  cost: 0.5,
+  inputTokens: 4_000,
+  outputTokens: 1_500,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  requests: 3,
+});
+const nowMs = Date.now();
+for (const [window, minutes, used, resetMs] of [
+  ["5h", 300, 23, nowMs + 2 * 3600_000],
+  ["7d", 10080, 41, nowMs + 3 * 24 * 3600_000],
+]) {
+  core.upsertProviderQuota({
+    provider: "anthropic",
+    authKind: "subscription",
+    account: "e2e-anth",
+    window,
+    label: "allowed",
+    windowMinutes: minutes,
+    usedPercent: used,
+    remaining: null,
+    limit: null,
+    resetsAt: resetMs,
+    source: "anthropic-unified",
+    observedAt: nowMs,
+  });
+}
+
+// Per-provider budget (#1927): an 80% cap on Anthropic's weekly quota window.
+core.setKV(
+  "provider_budgets",
+  JSON.stringify([
+    {
+      provider: "anthropic",
+      auth_kind: "subscription",
+      account: "e2e-anth",
+      unit: "percent",
+      window: "7d",
+      amount: 80,
+    },
+  ]),
+);
 
 core.close();
 

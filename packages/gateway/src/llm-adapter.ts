@@ -28,6 +28,7 @@ import type { ReasoningEffort } from "@loreai/core";
 import * as Sentry from "@sentry/bun";
 import type { AuthCredential } from "./auth";
 import { authHeaders, markAuthStale, markGlobalAuthStale } from "./auth";
+import { isChatGPTBackend } from "./chatgpt-backend";
 import { tripCircuitBreaker } from "./background-limiter";
 import { resolveProviderRoute } from "./config";
 import {
@@ -43,6 +44,8 @@ import {
   type AnthropicUsage,
 } from "./sentry";
 import { recordWorkerCost } from "./cost-tracker";
+import { resolveCostAttribution } from "./cost-attribution";
+import { observeProviderQuotaHeaders } from "./provider-quota-headers";
 import { upstreamFetch } from "./fetch";
 import { responseAgainstAbort } from "./abort-race";
 import {
@@ -1588,15 +1591,6 @@ function isResponsesOnlyModel(modelID: string): boolean {
  * resolution time lets `resolveWorkerProtocol` route the worker to
  * `openai-codex-responses`, which builds the correct URL (`${url}/codex/responses`).
  */
-function isChatGPTBackend(url: string | URL | undefined): boolean {
-  if (!url) return false;
-  try {
-    const target = typeof url === "string" ? new URL(url) : url;
-    return /(?:^|\/)backend-api(?:\/|$)/.test(target.pathname);
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Resolve upstream target URL and protocol for a worker model.
@@ -4352,13 +4346,23 @@ export function createGatewayLLMClient(
                     parsed.model ?? undefined,
                   );
                   emitCostMetric(model.modelID, parsed.usage, "direct");
+                  const attribution = resolveCostAttribution({
+                    sessionID: opts?.sessionID,
+                    providerID: credentialProviderID ?? model.providerID,
+                    upstreamURL: target.url,
+                    credential: cred,
+                    responseHeaders: response.headers,
+                  });
                   recordWorkerCost(
                     opts?.sessionID,
                     model.modelID,
                     parsed.usage,
                     "direct",
                     opts?.workerID,
+                    undefined,
+                    attribution,
                   );
+                  observeProviderQuotaHeaders(response.headers, attribution);
                 }
 
                 // Enrich span with retry metadata on eventual success

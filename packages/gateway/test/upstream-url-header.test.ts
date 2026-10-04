@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import {
   extractUpstreamUrlHeader,
   providerForUpstreamOrigin,
+  providerForUpstreamURL,
 } from "../src/config";
 
 // ---------------------------------------------------------------------------
@@ -219,5 +220,39 @@ describe("providerForUpstreamOrigin", () => {
 
   test("returns undefined for an unparseable value", () => {
     expect(providerForUpstreamOrigin("not a url")).toBeUndefined();
+  });
+});
+
+describe("providerForUpstreamURL", () => {
+  test("matches full request URLs by longest /-bounded prefix", () => {
+    expect(
+      providerForUpstreamURL("https://api.deepseek.com/chat/completions"),
+    ).toBe("deepseek");
+    expect(
+      providerForUpstreamURL("https://api.groq.com/openai/v1/chat/completions"),
+    ).toBe("groq");
+  });
+
+  test("nested route bases resolve to the more specific provider", () => {
+    expect(
+      providerForUpstreamURL("https://opencode.ai/zen/go/v1/chat/completions"),
+    ).toBe("opencode-go");
+    expect(
+      providerForUpstreamURL("https://opencode.ai/zen/v1/chat/completions"),
+    ).toBe("opencode");
+  });
+
+  test("a prefix must end at a / boundary", () => {
+    // https://openrouter.ai/apis would wrongly match /api without the boundary rule
+    expect(
+      providerForUpstreamURL("https://openrouter.ai/apis/v1"),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined for unlisted hosts and bad URLs", () => {
+    expect(
+      providerForUpstreamURL("https://self-hosted.internal/v1"),
+    ).toBeUndefined();
+    expect(providerForUpstreamURL("not a url")).toBeUndefined();
   });
 });

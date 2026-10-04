@@ -84,6 +84,7 @@ import {
   getWorkerModel,
 } from "./worker-model";
 import { recordWarmupCost } from "./cost-tracker";
+import { resolveCostAttribution } from "./cost-attribution";
 import { upstreamFetch } from "./fetch";
 import { emitWarmupCircuitBreakerMetric } from "./sentry";
 
@@ -2546,6 +2547,15 @@ export async function executeWarmup(
       cacheReadTokens,
       cacheCreationTokens,
       ttl,
+      resolveCostAttribution({
+        sessionID: state.sessionID,
+        providerID: state.lastUpstream?.providerID,
+        upstreamURL: state.lastUpstream?.url,
+        credential: resolveAuth(
+          state.sessionID,
+          state.lastUpstream?.providerID,
+        ),
+      }),
     );
 
     // Update session warmup state

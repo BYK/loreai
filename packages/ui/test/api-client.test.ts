@@ -58,6 +58,18 @@ const ENTRY = {
   tenant_id: "local",
 };
 
+const CROSS_PROJECT_ENTRY = {
+  ...ENTRY,
+  project_name: "lore",
+};
+
+const SEARCH_RESPONSE = {
+  query: "SQLite",
+  mode: "fts",
+  total: 1,
+  items: [{ ...CROSS_PROJECT_ENTRY, rank: -0.5 }],
+};
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -130,6 +142,68 @@ describe("api client: happy path", () => {
     const { client, calls } = clientFor(() => json([ENTRY]));
     await client.listProjectKnowledge("p 1");
     expect(calls).toEqual(["/api/v1/projects/p%201/knowledge"]);
+  });
+
+  it("lists cross-project knowledge with filters and validates project labels", async () => {
+    const { client, calls } = clientFor(() =>
+      json({ items: [CROSS_PROJECT_ENTRY], next_cursor: "next" }),
+    );
+    const page = await client.listKnowledgePage({
+      cursor: "next page",
+      limit: 25,
+      q: "SQLite",
+      category: "gotcha",
+      scope: "project",
+      sort: [{ field: "title", dir: "asc" }],
+      project: "p/1",
+    });
+    expect(calls).toEqual([
+      "/api/v1/knowledge?cursor=next+page&limit=25&q=SQLite&category=gotcha&scope=project&sort=title%3Aasc&project=p%2F1",
+    ]);
+    expect(page.items[0]?.project_name).toBe("lore");
+    expect(page.next_cursor).toBe("next");
+  });
+
+  it("rejects a cross-project row missing its project label", async () => {
+    const { client } = clientFor(() =>
+      json({ items: [ENTRY], next_cursor: null }),
+    );
+    const error = await failure(client.listKnowledgePage());
+    expect(error.kind).toBe("invalid");
+    expect(isContractError(error)).toBe(true);
+    if (isContractError(error)) {
+      expect(error.issues[0]?.path).toContain("project_name");
+      expect(error.route).toBe("/knowledge");
+    }
+  });
+
+  it("searches cross-project knowledge with bounded result filters", async () => {
+    const { client, calls } = clientFor(() => json(SEARCH_RESPONSE));
+    const result = await client.searchKnowledge({
+      q: "SQLite",
+      limit: 50,
+      project: "p/1",
+      category: "gotcha",
+      scope: "project",
+    });
+    expect(calls).toEqual([
+      "/api/v1/knowledge/search?q=SQLite&limit=50&project=p%2F1&category=gotcha&scope=project",
+    ]);
+    expect(result.items[0]?.rank).toBe(-0.5);
+    expect(result.total).toBe(1);
+  });
+
+  it("rejects malformed cross-project search responses", async () => {
+    const { client } = clientFor(() =>
+      json({ ...SEARCH_RESPONSE, mode: "unknown" }),
+    );
+    const error = await failure(client.searchKnowledge({ q: "SQLite" }));
+    expect(error.kind).toBe("invalid");
+    expect(isContractError(error)).toBe(true);
+    if (isContractError(error)) {
+      expect(error.issues[0]?.path).toContain("mode");
+      expect(error.route).toBe("/knowledge/search?q=SQLite");
+    }
   });
 
   // Spec change (UI-03): mistyped fields are contract violations, not
