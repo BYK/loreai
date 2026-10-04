@@ -221,6 +221,30 @@ describe("KnowledgeTable", () => {
     expect(updated.closest("th")).toHaveAttribute("aria-sort", "descending");
   });
 
+  it("flags fuzzy rows with an approximate badge and extends the caption", () => {
+    const fuzzy: KnowledgeEntry = {
+      ...entry,
+      id: "k-2",
+      title: "Fuzzy hit",
+      match: "fuzzy",
+    };
+    mount([{ ...entry, match: "exact" }, fuzzy]);
+    const badge = screen.getByTestId("knowledge-match-fuzzy");
+    expect(badge).toHaveTextContent("≈ approximate");
+    expect(badge).toHaveAttribute("title", "Approximate match");
+    expect(document.querySelector("caption")?.textContent).toContain(
+      "approximate matches shown below exact hits",
+    );
+  });
+
+  it("shows no fuzzy badge or caption suffix when every row is exact", () => {
+    mount([{ ...entry, match: "exact" }]);
+    expect(screen.queryByTestId("knowledge-match-fuzzy")).toBeNull();
+    expect(document.querySelector("caption")?.textContent).not.toContain(
+      "approximate",
+    );
+  });
+
   it("describes server sorting in the table caption, including Created", () => {
     const view = mount();
     expect(

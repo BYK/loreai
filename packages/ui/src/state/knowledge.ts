@@ -98,8 +98,11 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
       {
         async onServer(_, value) {
           for (const item of value.items) {
-            store.reconcileOne(item);
-            await repo.put(item, item.project_id ?? "global", {
+            // `match` is a per-query flag (#1948): the cache must not carry it
+            // into the default list, so strip it before persisting.
+            const { match: _match, ...entry } = item;
+            store.reconcileOne(entry);
+            await repo.put(entry, entry.project_id ?? "global", {
               keepScope: true,
             });
           }
@@ -142,8 +145,11 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
       {
         async onServer(_, value) {
           for (const item of value.items) {
-            store.reconcileOne(item);
-            await repo.put(item, item.project_id ?? "global", {
+            // `match` is a per-query flag (#1948): the cache must not carry it
+            // into the default list, so strip it before persisting.
+            const { match: _match, ...entry } = item;
+            store.reconcileOne(entry);
+            await repo.put(entry, entry.project_id ?? "global", {
               keepScope: true,
             });
           }

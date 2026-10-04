@@ -290,6 +290,21 @@ describe("contract violations", () => {
     }
   });
 
+  it("knowledgeEntry accepts the optional match flag and rejects bad values", () => {
+    const input = readFixture("knowledge-entry.json") as Record<
+      string,
+      unknown
+    >;
+    for (const match of ["exact", "fuzzy"] as const) {
+      expect(
+        safeParseContract("/x", knowledgeEntry, { ...input, match }).ok,
+      ).toBe(true);
+    }
+    expect(
+      safeParseContract("/x", knowledgeEntry, { ...input, match: "bogus" }).ok,
+    ).toBe(false);
+  });
+
   it("apiErrorBody accepts the gateway error envelope", () => {
     const parsed = safeParseContract("/x", apiErrorBody, {
       type: "error",

@@ -44,6 +44,12 @@ import {
 import type { ReadParam } from "./read-job";
 import { ReadPathTimer } from "./read-telemetry";
 import { sql } from "./sql";
+import {
+  fuzzyRank,
+  normalizeFuzzy,
+  FUZZY_MIN_QUERY,
+  FUZZY_CANDIDATE_CAP,
+} from "./fuzzy";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import {
@@ -3809,7 +3815,7 @@ export async function searchScored(input: {
        ORDER BY rank LIMIT ?`;
 
   try {
-    return await runRelaxedSearchAsync(
+    const results = await runRelaxedSearchAsync(
       input.query,
       async (matchExpr) => {
         const params = pid
@@ -3828,6 +3834,56 @@ export async function searchScored(input: {
       },
       input.termWeights,
     );
+
+    // Fuzzy tail (#1948): when the FTS cascade underfills the result set, rank
+    // a bounded candidate set (titles only) under the SAME scope predicates as
+    // the FTS SQL — tenant, project scope, and the confidence gate
+    // (knowledge_current already applies the COALESCE(confidence,1.0) view
+    // semantics). Rows sort after every exact hit; recall fuses by list
+    // position, so the synthetic rank just keeps them ordered and distinct.
+    if (
+      results.length < limit &&
+      normalizeFuzzy(input.query).length >= FUZZY_MIN_QUERY
+    ) {
+      const scope = pid
+        ? sql`(project_id = ${pid} OR project_id IS NULL OR cross_project = 1)`
+        : null;
+      const candidates = sql
+        .all<{ id: string; title: string }>(
+          db(),
+          sql`SELECT id, title FROM knowledge_current
+            WHERE ${sql.and([
+              sql`tenant_id = ${currentTenantId()}`,
+              scope,
+              sql`confidence > 0.2`,
+            ])}
+            ORDER BY updated_at DESC
+            LIMIT ${FUZZY_CANDIDATE_CAP}`,
+        )
+        .filter((row) => !results.some((hit) => hit.id === row.id));
+      const hits = fuzzyRank(input.query, candidates, (row) => [row.title], {
+        limit: limit - results.length,
+      });
+      if (hits.length > 0) {
+        const rows = sql.all<ScoredKnowledgeEntry>(
+          db(),
+          sql`SELECT ${sql.raw(KNOWLEDGE_COLS_K)} FROM knowledge k
+            LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
+            WHERE k.id ${sql.inList(hits.map((hit) => hit.item.id))}`,
+        );
+        const byId = new Map(rows.map((row) => [row.id, row]));
+        const base = results.reduce((max, row) => Math.max(max, row.rank), 0);
+        hits.forEach((hit, index) => {
+          const row = byId.get(hit.item.id);
+          if (row)
+            results.push({
+              ...hydrateKnowledgeEntry(row),
+              rank: base + 1 + index,
+            });
+        });
+      }
+    }
+    return results;
   } catch {
     return [];
   }

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { fuzzyRank } from "../src/lib/fuzzy";
 
 /**
  * #1918 sidebar: pinned projects survive reloads (localStorage), the filter
@@ -39,11 +40,12 @@ test.describe("sidebar pinned / recent / filter", () => {
     ).json();
     const recent = Math.min(projects.length, 5);
     const rest = projects.length - recent;
-    const matches = projects.filter(
-      (p) =>
-        (p.name ?? "").toLowerCase().includes("arch") ||
-        p.path.toLowerCase().includes("arch"),
-    ).length;
+    // #1948: the filter ranks fuzzy hits too — "arch" also catches "scratch"
+    // — so derive the expected count with the same helper the UI uses.
+    const matches = fuzzyRank("arch", projects, (p) => [
+      p.name ?? "",
+      p.path,
+    ]).length;
 
     await page.goto("/ui");
     const nav = page.getByRole("navigation", NAV);
@@ -61,5 +63,26 @@ test.describe("sidebar pinned / recent / filter", () => {
     await expect(all).toHaveText(`All projects (${rest})`);
     await all.click();
     await expect(nav.locator('[data-section="all"]')).toHaveCount(rest);
+  });
+
+  test("filter typo finds projects and shows the approximate hint", async ({
+    page,
+  }) => {
+    await page.goto("/ui");
+    const nav = page.getByRole("navigation", NAV);
+
+    const filter = nav.getByTestId("nav-project-filter");
+    await filter.fill("archve");
+    await expect(nav.getByRole("link", { name: "archive-0" })).toBeVisible();
+    await expect(
+      nav.getByTestId("nav-project-filter-approximate"),
+    ).toBeVisible();
+
+    // An exact query still matches without the hint.
+    await filter.fill("archive-0");
+    await expect(nav.getByRole("link", { name: "archive-0" })).toBeVisible();
+    await expect(nav.getByTestId("nav-project-filter-approximate")).toHaveCount(
+      0,
+    );
   });
 });

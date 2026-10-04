@@ -3,6 +3,7 @@
  * Pure logic — `Nav` renders what this returns.
  */
 import type { ProjectSummary } from "~/contracts";
+import { fuzzyRank, normalizeFuzzy, FUZZY_MIN_QUERY } from "~/lib/fuzzy";
 
 export const RECENT_LIMIT = 5;
 
@@ -15,6 +16,10 @@ export interface ProjectSections {
   rest: ProjectSummary[];
   /** Filter hits (pinned included), or null when the filter is empty. */
   matches: ProjectSummary[] | null;
+  /** True when the filter produced hits but none is an exact substring
+   *  match (#1948) — the UI shows an "approximate matches" hint. The
+   *  active-project prepend does not count. */
+  approximate: boolean;
 }
 
 /**
@@ -61,15 +66,27 @@ export function sectionProjects(
     rest = rest.filter((project) => project.id !== active.id);
   }
 
-  const query = filter.trim().toLowerCase();
+  const query = filter.trim();
   const activeProject = activeId ? byId.get(activeId) : undefined;
-  let matches = query
-    ? sorted.filter(
+  let matches: ProjectSummary[] | null = null;
+  let approximate = false;
+  if (query) {
+    if (normalizeFuzzy(query).length >= FUZZY_MIN_QUERY) {
+      // `sorted` is recency-ordered, so fuzzyRank's stable score-desc sort
+      // keeps recency order among equal scores; exact hits rank first (#1948).
+      const hits = fuzzyRank(query, sorted, (p) => [p.name ?? "", p.path]);
+      matches = hits.map((hit) => hit.item);
+      approximate = hits.length > 0 && hits.every((hit) => !hit.exact);
+    } else {
+      // Below FUZZY_MIN_QUERY fuzzy matching is too noisy — plain substring.
+      const lowered = query.toLowerCase();
+      matches = sorted.filter(
         (p) =>
-          p.name?.toLowerCase().includes(query) ||
-          p.path.toLowerCase().includes(query),
-      )
-    : null;
+          p.name?.toLowerCase().includes(lowered) ||
+          p.path.toLowerCase().includes(lowered),
+      );
+    }
+  }
   if (
     matches &&
     activeProject &&
@@ -78,5 +95,5 @@ export function sectionProjects(
     matches = [activeProject, ...matches];
   }
 
-  return { pinned, recent, rest, matches };
+  return { pinned, recent, rest, matches, approximate };
 }

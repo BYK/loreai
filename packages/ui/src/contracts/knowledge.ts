@@ -35,6 +35,9 @@ export const knowledgeEntry = type({
   "approval_status?": "string | null",
   "last_accessed_at?": epochMs.or("null"),
   "last_reinforced_at?": epochMs.or("null"),
+  /** How the row matched a `q` filter (#1948): server flags fuzzy-tail rows
+   *  `fuzzy`; exact-leg rows are `exact`. Absent on non-filtered reads. */
+  "match?": "'exact' | 'fuzzy'",
 });
 
 export type KnowledgeEntry = typeof knowledgeEntry.infer;
