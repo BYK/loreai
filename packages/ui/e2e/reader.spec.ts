@@ -37,7 +37,11 @@ function rowWith(page: Page, text: string) {
  * itself (#1923). dispatchEvent drives the handler in place.
  */
 async function clickLoadOlder(page: Page) {
-  await page.getByTestId("load-older").dispatchEvent("click");
+  const button = page.getByTestId("load-older");
+  // The button stays disabled while the landing frame loop may still issue
+  // scrolls; a click dispatched in that window is dropped.
+  await expect(button).toBeEnabled();
+  await button.dispatchEvent("click");
 }
 
 /** `aria-setsize` is the logical row count — same on every mounted row. */
