@@ -841,8 +841,14 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     // drift off the end. Re-issue the landing each frame until the last row
     // is actually in view, the user scrolls away, or the cap hits.
     if (typeof requestAnimationFrame === "function") {
+      // Each end re-target gets its own frame budget, but a session that
+      // keeps streaming forever still has to settle — `totalFrames` is the
+      // hard stop across all restarts.
+      const LANDING_FRAME_CAP = 24;
+      const LANDING_TOTAL_CAP = 120;
       cancelLanding?.();
       let frames = 0;
+      let totalFrames = 0;
       let reachedEnd = false;
       /** The last index the loop already reached once — a snapshot, not a
        * live read, so rows streaming in mid-landing do not make the settled
@@ -864,7 +870,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       cancelLanding = cancel;
       const land = () => {
         const el = scrollEl;
-        if (!el || ++frames > 24) {
+        if (
+          !el ||
+          ++frames > LANDING_FRAME_CAP ||
+          ++totalFrames > LANDING_TOTAL_CAP
+        ) {
           finish();
           return;
         }
@@ -1791,7 +1801,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
               )}
             </Show>
           </div>
-          <Show when={props.hasOlder !== null}>
+          <Show
+            when={
+              props.hasOlder === true ||
+              (props.hasOlder === false && loaded() > 0)
+            }
+          >
             <div
               class="flex h-9 items-center gap-2 border-b border-line px-5 text-xs text-muted sm:px-7.5"
               data-testid="older-status"

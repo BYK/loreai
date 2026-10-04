@@ -689,13 +689,15 @@ no-progress owner cannot loop the loader.
 
 The older-history affordance is a fixed-height status slot
 (`data-testid="older-status"`) between the sticky toolbar and the row
-list, inside the scroll element — always present, so its content changing
-never shifts rows. It renders exactly what the server reported: a
+list, inside the scroll element — fixed height, so its content changing
+never shifts rows, and not rendered at all when there is nothing to say
+(`hasOlder` unknown, or complete history with an empty session). It
+renders exactly what the server reported: a
 loading line (`older-loading`) while a page is in flight, an `role=alert`
 line plus Retry (`older-retry`) after a failed page, a "Scroll up to load
 older history" hint plus the explicit **Load older history** button
-(`load-older`) while older pages remain, `history-start` once the start
-of captured history is loaded, and nothing while `hasOlder` is unknown.
+(`load-older`) while older pages remain, and `history-start` once the
+start of captured history is loaded.
 Both manual buttons stay disabled until the landing loop settles, so a
 click can never interleave a prepend with its re-issued scrolls.
 Two jump controls sit at the toolbar's right edge: **Jump to latest**

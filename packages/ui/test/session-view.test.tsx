@@ -1624,6 +1624,17 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     expect(screen.queryByTestId("older-status")).toBeNull();
   });
 
+  it("renders no older-status strip for an empty complete session", async () => {
+    mount({
+      messages: [],
+      distillations: [],
+      messageCount: 0,
+      hasOlder: false,
+    });
+    await tick();
+    expect(screen.queryByTestId("older-status")).toBeNull();
+  });
+
   it("offers jump-to-latest away from the tail and jump-to-start only for complete history", async () => {
     mount({
       messages: older(40),
@@ -2101,6 +2112,31 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     }
     await tick();
     expect(btn).toBeEnabled();
+  });
+
+  it("settles the landing loop even while rows keep streaming in", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      messageCount: 300,
+      hasOlder: true,
+      onLoadOlder: () => new Promise<void>(() => {}),
+    });
+    await tick();
+    // Every frame grows the store by one: the end re-target resets the
+    // per-restart frame budget each time, so without the hard total cap
+    // the loop — and the disabled buttons — would never settle.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 140; i++) {
+        setMsgs((prev) => [...prev, { ...older(1)[0]!, id: `m.stream-${i}` }]);
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(screen.getByTestId("load-older")).toBeEnabled();
   });
 
   it("disables the older-history buttons the moment a load starts", async () => {
