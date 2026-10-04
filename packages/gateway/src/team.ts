@@ -33,6 +33,15 @@ export interface TeamMemberProfile {
   email: string | null;
 }
 
+export class TeamRpcError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null,
+  ) {
+    super(message);
+  }
+}
+
 /** A repo's contributor roster with a Lore-membership flag per contributor (E-5-d, #630). */
 export interface DiscoveredContributor {
   login: string;
@@ -324,7 +333,8 @@ export async function setTeamRole(
     p_user: userId,
     p_role: role,
   });
-  if (error) throw new Error(`set_scope_role: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`set_scope_role: ${error.message}`, error.code);
 }
 
 /**
@@ -349,12 +359,14 @@ export async function removeTeamMember(
     p_scope: scopeId,
     p_user: userId,
   });
-  if (rmErr) throw new Error(`remove_scope_member: ${rmErr.message}`);
+  if (rmErr)
+    throw new TeamRpcError(`remove_scope_member: ${rmErr.message}`, rmErr.code);
 
   const { data: ep, error: rotErr } = await client.rpc("rotate_scope_key", {
     p_scope: scopeId,
   });
-  if (rotErr) throw new Error(`rotate_scope_key: ${rotErr.message}`);
+  if (rotErr)
+    throw new TeamRpcError(`rotate_scope_key: ${rotErr.message}`, rotErr.code);
   const newEpoch = ep as number;
 
   // Re-wrap the fresh DEK to the REMAINING members (the removed member is already gone from the
@@ -414,7 +426,8 @@ export async function createTeamInvite(
     p_hint: hint ?? null,
     p_eph_pub: ephPubB64,
   });
-  if (error) throw new Error(`create_scope_invite: ${error.message}`);
+  if (error)
+    throw new TeamRpcError(`create_scope_invite: ${error.message}`, error.code);
   // Only AFTER the invite token exists: wrap the DEK to the ephemeral pubkey, store the eph row, and
   // push it. An RPC failure above short-circuits before any eph row is created/pushed — no orphan.
   if (ephKeypair) {

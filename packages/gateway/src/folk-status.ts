@@ -29,6 +29,7 @@ import {
   LOCAL_TENANT_ID,
 } from "@loreai/core";
 import type { GatewayConfig } from "./config";
+import { requestIsHosted } from "./folk-access";
 import { loadPersistedSession } from "./supabase";
 
 // ---------------------------------------------------------------------------
@@ -169,9 +170,13 @@ export function accountStatus(
   };
 }
 
-export function teamsStatus(config: GatewayConfig): { teams: TeamStatus[] } {
-  const s = safeSession(config);
-  if (!s) return { teams: [] };
+export function teamsStatus(config: GatewayConfig): {
+  hosted: boolean;
+  teams: TeamStatus[];
+} {
+  const hosted = requestIsHosted(config);
+  const s = hosted ? null : safeSession(config);
+  if (!s) return { hosted, teams: [] };
   const rows = db()
     .query(
       `SELECT sm.scope_id AS id, sc.name AS name, sm.role AS role,
@@ -188,6 +193,7 @@ export function teamsStatus(config: GatewayConfig): { teams: TeamStatus[] } {
     member_count: number;
   }>;
   return {
+    hosted,
     teams: rows.map((r) => ({
       id: r.id,
       name: r.name ?? null,

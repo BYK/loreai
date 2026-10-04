@@ -896,6 +896,27 @@ const linkResult = db
 if (linkResult.changes !== 1) {
   throw new Error("expected to link exactly the seeded scratch project");
 }
+const conflictLogicalId = core.ltm.logicalIdOf(firstKnowledgeId);
+const conflictEntry = db
+  .prepare(
+    `SELECT title, content, category FROM knowledge_current
+      WHERE COALESCE(logical_id, id) = ? LIMIT 1`,
+  )
+  .get(conflictLogicalId);
+if (!conflictEntry) throw new Error("expected seeded knowledge conflict entry");
+db.prepare(
+  `INSERT INTO sync_conflicts
+    (table_name, row_id, detected_at, resolution, local_content)
+   VALUES ('knowledge', ?, ?, 'remote_upsert_wins', ?)`,
+).run(
+  conflictLogicalId,
+  Date.UTC(2026, 8, 20, 12),
+  JSON.stringify({
+    title: "Local discarded version",
+    content: "Keep the local-first database.",
+    category: conflictEntry.category,
+  }),
+);
 db.prepare(
   "UPDATE knowledge SET title = ? WHERE logical_id = ? AND is_current = 1",
 ).run("Shared title conflict legacy duplicate E2E", legacySharedTitleB);

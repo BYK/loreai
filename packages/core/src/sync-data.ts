@@ -2518,6 +2518,53 @@ export function recordConflict(
     );
 }
 
+export interface SyncConflict {
+  id: number;
+  table_name: string;
+  row_id: string;
+  detected_at: number;
+  resolution: string | null;
+  local_content: string | null;
+}
+
+/** List the most recently detected local sync conflicts first. */
+export function listSyncConflicts(limit: number): SyncConflict[] {
+  assertLocalSyncContext("listSyncConflicts");
+  const boundedLimit = Number.isFinite(limit)
+    ? Math.max(0, Math.floor(limit))
+    : 0;
+  return db()
+    .query(
+      `SELECT id, table_name, row_id, detected_at, resolution, local_content
+         FROM sync_conflicts
+        ORDER BY detected_at DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(boundedLimit) as unknown as SyncConflict[];
+}
+
+/** Read one local conflict snapshot by its integer identity. */
+export function getSyncConflict(id: number): SyncConflict | null {
+  assertLocalSyncContext("getSyncConflict");
+  return (
+    (db()
+      .query(
+        `SELECT id, table_name, row_id, detected_at, resolution, local_content
+           FROM sync_conflicts
+          WHERE id = ?`,
+      )
+      .get(id) as unknown as SyncConflict | undefined) ?? null
+  );
+}
+
+/** Delete one local conflict snapshot, returning whether a row was removed. */
+export function deleteSyncConflict(id: number): boolean {
+  assertLocalSyncContext("deleteSyncConflict");
+  return (
+    db().query("DELETE FROM sync_conflicts WHERE id = ?").run(id).changes > 0
+  );
+}
+
 /**
  * Deterministic convergence for a pulled `entity_aliases` row that violates the local
  * `UNIQUE(alias_type, alias_value)` the FK-less remote doesn't enforce (#1217). Two

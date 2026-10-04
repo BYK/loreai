@@ -33,8 +33,9 @@ export const teamStatus = type({
 
 export type TeamStatus = typeof teamStatus.infer;
 
-/** `GET /api/v1/teams` wraps the rows in `{ teams: [...] }`. */
+/** `GET /api/v1/teams` reports the gateway mode and locally mirrored teams. */
 export const teamList = type({
+  hosted: "boolean",
   teams: teamStatus.array(),
 });
 

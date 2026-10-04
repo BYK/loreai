@@ -26,6 +26,7 @@ const account: AccountStatus = {
 };
 
 const teams: TeamList = {
+  hosted: false,
   teams: [{ id: "team-1", name: "Acme", role: "admin", member_count: 3 }],
 };
 
