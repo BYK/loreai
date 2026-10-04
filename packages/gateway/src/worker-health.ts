@@ -30,7 +30,8 @@
  *  - Usable worker output: clear that worker's state, optionally log recovery
  *
  * All public functions are safe to call concurrently (single-threaded event
- * loop). State is per session and worker kind, and TTL-evicted.
+ * loop). Health state is per session and worker kind; response-alert cooldowns
+ * are process-wide per Sentry fingerprint. Both are TTL-evicted.
  */
 
 import * as Sentry from "@sentry/bun";
@@ -40,16 +41,22 @@ import { log } from "@loreai/core";
 // Types
 // ---------------------------------------------------------------------------
 
-/** Stable IDs for the worker kinds. Used in metrics tags and Sentry scope. */
-export type WorkerID =
-  | "lore-distill"
-  | "lore-curator"
-  | "lore-pattern-echo"
-  | "lore-query-expand"
-  | "lore-compact"
-  | "lore-import"
-  | "cache-warmer"
-  | "lore-batch";
+/** Stable IDs for worker kinds. Also controls which IDs enter response alerts. */
+const WORKER_IDS = [
+  "lore-distill",
+  "lore-curator",
+  "lore-pattern-echo",
+  "lore-query-expand",
+  "lore-compact",
+  "lore-import",
+  "cache-warmer",
+  "lore-batch",
+  "lore-semantic-lint",
+  "lore-contradiction",
+  "lore-entity-rebuild",
+] as const;
+export type WorkerID = (typeof WORKER_IDS)[number];
+const RESPONSE_ALERT_WORKER_IDS: ReadonlySet<string> = new Set(WORKER_IDS);
 
 /** Categorical reason for a failure. Drives metric tags and dashboards. */
 export type FailureReason =
@@ -80,6 +87,152 @@ export type FailureReason =
   // it must not drive the degraded/critical Sentry ladder or the circuit
   // breaker. Recorded (warn) for visibility.
   | "data-policy";
+
+const SENTRY_HEALTH_REASONS: ReadonlySet<string> = new Set<FailureReason>([
+  "no-auth",
+  "auth-rejected",
+  "protocol-mismatch",
+  "cross-provider",
+  "upstream-error",
+  "no-response",
+  "transport-error",
+  "timeout",
+  "parse-error",
+  "rate-limit",
+  "circuit-breaker",
+]);
+
+export function sentryWorkerID(workerID: string): string {
+  return RESPONSE_ALERT_WORKER_IDS.has(workerID) ? workerID : "unknown";
+}
+
+export function sentryHealthReason(reason: string): string {
+  return SENTRY_HEALTH_REASONS.has(reason) ? reason : "unknown";
+}
+
+/** Worker alerts contain only reviewed fields, never the active request scope. */
+function captureWorkerAlert<T>(capture: () => T): T {
+  const client = Sentry.getClient();
+  const isolationScope = new Sentry.Scope();
+  const scope = new Sentry.Scope();
+  if (client) {
+    isolationScope.setClient(client);
+    scope.setClient(client);
+  }
+  return Sentry.withIsolationScope(isolationScope, () =>
+    Sentry.withScope(scope, capture),
+  );
+}
+
+/** Only structural, bounded metadata from a rejected 2xx worker response. */
+export type WorkerResponseDiagnostic = Readonly<{
+  protocol: string;
+  stage: string;
+  content: string;
+  category: string;
+  finishReason: string;
+  httpStatus: number;
+}>;
+
+const RESPONSE_PROTOCOLS = new Set([
+  "anthropic",
+  "openai",
+  "openai-responses",
+  "openai-codex-responses",
+  "vertex",
+  "gemini",
+]);
+const RESPONSE_STAGES = new Set([
+  "read",
+  "decode",
+  "stream",
+  "parse",
+  "completion",
+]);
+const RESPONSE_CONTENT = new Set(["missing", "sse", "json", "other"]);
+const RESPONSE_FINISH_REASONS = new Set([
+  "n/a",
+  "unknown",
+  "stop",
+  "end_turn",
+  "length",
+  "max_tokens",
+  "max_output_tokens",
+  "content_filter",
+  "tool_calls",
+  "tool_use",
+]);
+const RESPONSE_CATEGORIES = new Set([
+  "invalid response body",
+  "malformed JSON body",
+  "worker response incomplete",
+  "worker response exceeded # byte limit",
+  "SSE stream exceeded # frame limit",
+  "SSE event exceeded # byte limit",
+  "unterminated SSE event at EOF",
+  "missing Anthropic message_stop terminal",
+  "missing OpenAI finish_reason terminal",
+  "missing OpenAI [DONE] terminal",
+  "missing Gemini finishReason terminal",
+  "missing terminal response status",
+  "missing Responses compatibility terminal status",
+  "malformed Anthropic stream event",
+  "malformed Anthropic response body",
+  "malformed Anthropic usage",
+  "malformed Anthropic terminal event",
+  "malformed OpenAI stream event",
+  "malformed OpenAI response body",
+  "malformed OpenAI usage",
+  "malformed OpenAI terminal event",
+  "malformed Responses stream event",
+  "malformed Responses response body",
+  "malformed Responses usage",
+  "malformed Responses terminal event",
+  "malformed Gemini stream event",
+  "malformed Gemini response body",
+  "malformed Gemini usage",
+  "malformed Gemini terminal event",
+  "OpenAI stream emitted a non-empty frame after finish_reason terminal",
+  "worker JSON response root must be an object",
+  "non-success Responses response status",
+  "response.failed terminal",
+  "Responses terminal reported failure",
+  "Responses terminal event/status mismatch",
+  "incomplete Responses output lifecycle",
+  "Anthropic stream error event",
+  "malformed worker response UTF-8",
+  "malformed SSE UTF-8",
+  "Response has no body",
+  "Upstream response has no body",
+  "Anthropic response has no body",
+]);
+
+export function safeResponseDiagnostic(
+  diagnostic: WorkerResponseDiagnostic | undefined,
+): WorkerResponseDiagnostic | undefined {
+  if (!diagnostic || typeof diagnostic !== "object") return undefined;
+  try {
+    const { protocol, stage, content, category, finishReason, httpStatus } =
+      diagnostic;
+    if (
+      !RESPONSE_PROTOCOLS.has(protocol) ||
+      !RESPONSE_STAGES.has(stage) ||
+      !RESPONSE_CONTENT.has(content) ||
+      !RESPONSE_CATEGORIES.has(category) ||
+      !RESPONSE_FINISH_REASONS.has(finishReason) ||
+      !Number.isInteger(httpStatus) ||
+      httpStatus < 200 ||
+      httpStatus > 299
+    ) {
+      return undefined;
+    }
+    // Copy only validated primitives: never pass caller-owned fields to Sentry.
+    return { protocol, stage, content, category, finishReason, httpStatus };
+  } catch {
+    // A hostile accessor must not affect the worker's failure handling.
+    return undefined;
+  }
+}
 
 /**
  * Failure reasons that are credential/config conditions rather than upstream
@@ -137,6 +290,7 @@ const DEGRADED_THRESHOLD = 3;
 
 /** Minimum time between Sentry message events for the same session and worker. */
 const ALERT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+const ALERT_RETRY_MS = 60 * 1000; // 1 minute after a failed capture
 
 /** Sustained failure duration that triggers response-message injection. */
 const RESPONSE_MESSAGE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
@@ -176,6 +330,105 @@ const CIRCUIT_PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 // ---------------------------------------------------------------------------
 
 const state = new Map<string, Map<string, SessionHealth>>();
+
+type HealthAlertKind = "degraded" | "critical";
+/** Failed Sentry attempts outlive worker recovery, but expire after the retry interval. */
+const failedAlertCaptures = new Map<
+  string,
+  Map<string, Map<HealthAlertKind, number>>
+>();
+
+function lastFailedAlertCapture(
+  sessionID: string,
+  workerID: string,
+  kind: HealthAlertKind,
+): number | undefined {
+  return failedAlertCaptures.get(sessionID)?.get(workerID)?.get(kind);
+}
+
+function recordFailedAlertCapture(
+  sessionID: string,
+  workerID: string,
+  kind: HealthAlertKind,
+  t: number,
+): void {
+  const workers = failedAlertCaptures.get(sessionID) ?? new Map();
+  const attempts = workers.get(workerID) ?? new Map();
+  attempts.set(kind, t);
+  workers.set(workerID, attempts);
+  failedAlertCaptures.set(sessionID, workers);
+}
+
+function clearFailedAlertCapture(
+  sessionID: string,
+  workerID: string,
+  kind: HealthAlertKind,
+): void {
+  const workers = failedAlertCaptures.get(sessionID);
+  if (!workers) return;
+  const attempts = workers.get(workerID);
+  if (!attempts) return;
+  attempts.delete(kind);
+  if (!attempts.size) workers.delete(workerID);
+  if (!workers.size) failedAlertCaptures.delete(sessionID);
+}
+
+function expireFailedAlertCaptures(t: number): void {
+  for (const [sessionID, workers] of failedAlertCaptures) {
+    for (const [workerID, attempts] of workers) {
+      for (const [kind, failedAt] of attempts) {
+        if (t - failedAt >= ALERT_RETRY_MS) attempts.delete(kind);
+      }
+      if (!attempts.size) workers.delete(workerID);
+    }
+    if (!workers.size) failedAlertCaptures.delete(sessionID);
+  }
+}
+
+/** One cooldown per Sentry fingerprint across sessions and worker recovery.
+ * Each component is a fixed allowlisted value, bounding this map by
+ * (WORKER_IDS.length + 1) * RESPONSE_PROTOCOLS.size * RESPONSE_CATEGORIES.size.
+ */
+const responseAlerts = new Map<
+  string,
+  { attemptedAt: number; delivered: boolean }
+>();
+/** Retain unsettled SDK event IDs across retries and response-alert expiry. */
+const PENDING_RESPONSE_ALERT_TTL_MS = 60 * 60 * 1000;
+const MAX_PENDING_RESPONSE_ALERTS = 4_096;
+const pendingResponseAlerts = new Map<
+  string,
+  { key: string; attemptedAt: number }
+>();
+
+/** Called after the Sentry transport settles, never from the worker result path. */
+export function recordWorkerResponseAlertDelivery(
+  eventID: string,
+  delivered: boolean,
+): void {
+  const pending = pendingResponseAlerts.get(eventID);
+  if (!pending) return;
+  pendingResponseAlerts.delete(eventID);
+  if (
+    delivered &&
+    now() - pending.attemptedAt <= PENDING_RESPONSE_ALERT_TTL_MS
+  ) {
+    responseAlerts.set(pending.key, { attemptedAt: now(), delivered: true });
+  }
+}
+
+function expireResponseAlerts(t: number): void {
+  for (const [eventID, pending] of pendingResponseAlerts) {
+    if (t - pending.attemptedAt > PENDING_RESPONSE_ALERT_TTL_MS) {
+      pendingResponseAlerts.delete(eventID);
+    }
+  }
+  for (const [key, alert] of responseAlerts) {
+    if (t - alert.attemptedAt > ALERT_COOLDOWN_MS) {
+      responseAlerts.delete(key);
+    }
+  }
+}
 
 /** Expire each worker independently, including reads between periodic sweeps. */
 function workerFailures(
@@ -356,6 +609,9 @@ export function _setNowForTest(fn: () => number): void {
 /** Internal accessor for tests. Resets the global state. */
 export function _resetForTest(): void {
   state.clear();
+  failedAlertCaptures.clear();
+  responseAlerts.clear();
+  pendingResponseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
   incapableModels.clear();
@@ -592,6 +848,7 @@ export function recordWorkerFailure(
   sessionID: string,
   workerID: WorkerID | (string & {}),
   reason: FailureReason,
+  responseDiagnostic?: WorkerResponseDiagnostic,
 ): void {
   const t = now();
 
@@ -655,6 +912,61 @@ export function recordWorkerFailure(
     entry.sawGenuineReason = true;
   }
 
+  const safeResponse =
+    reason === "upstream-error"
+      ? safeResponseDiagnostic(responseDiagnostic)
+      : undefined;
+  if (safeResponse) {
+    // Match the Sentry fingerprint so one outage has one response event per
+    // worker/protocol/category, regardless of how many sessions it affects.
+    expireResponseAlerts(t);
+    const alertWorkerID = sentryWorkerID(workerID);
+    const responseKey = `${alertWorkerID}/${safeResponse.protocol}/${safeResponse.category}`;
+    const previousAlert = responseAlerts.get(responseKey);
+    const shouldCapture =
+      previousAlert === undefined ||
+      (previousAlert.delivered
+        ? t - previousAlert.attemptedAt > ALERT_COOLDOWN_MS
+        : t - previousAlert.attemptedAt >= ALERT_RETRY_MS);
+    if (shouldCapture) {
+      // Enqueueing is not delivery: only a confirmed 2xx transport send starts
+      // the long cooldown. Failed or unconfirmed sends retry at most once/min.
+      try {
+        const eventID = captureWorkerAlert(() =>
+          Sentry.captureMessage("Worker response rejected", {
+            level: "error",
+            fingerprint: [
+              "worker-response-rejected",
+              alertWorkerID,
+              safeResponse.protocol,
+              safeResponse.category,
+            ],
+            tags: {
+              response_protocol: safeResponse.protocol,
+              response_stage: safeResponse.stage,
+              response_content: safeResponse.content,
+              response_category: safeResponse.category,
+            },
+            contexts: { worker_response: safeResponse },
+          }),
+        );
+        responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
+        if (typeof eventID === "string" && /^[0-9a-f]{32}$/.test(eventID)) {
+          if (pendingResponseAlerts.size >= MAX_PENDING_RESPONSE_ALERTS) {
+            const oldestID = pendingResponseAlerts.keys().next().value;
+            if (oldestID !== undefined) pendingResponseAlerts.delete(oldestID);
+          }
+          pendingResponseAlerts.set(eventID, {
+            key: responseKey,
+            attemptedAt: t,
+          });
+        }
+      } catch {
+        responseAlerts.set(responseKey, { attemptedAt: t, delivered: false });
+      }
+    }
+  }
+
   // First 1-2 failures: silent at the warn level. This preserves the
   // existing behavior for transient errors (OAuth refresh, momentary 429).
   if (entry.failureCount < DEGRADED_THRESHOLD) {
@@ -684,71 +996,101 @@ export function recordWorkerFailure(
   // Debounce: don't re-alert within ALERT_COOLDOWN_MS. Skipping the alert when
   // allCredentialClass ALSO leaves `alertSentAt` unset, so a later genuine
   // outage reason in the same window can still fire the first real alert.
+  const degradedFailedAt = lastFailedAlertCapture(
+    sessionID,
+    workerID,
+    "degraded",
+  );
   const shouldAlert =
     !allCredentialClass &&
-    (!entry.alertSentAt || t - entry.alertSentAt > ALERT_COOLDOWN_MS);
+    (entry.alertSentAt === undefined ||
+      t - entry.alertSentAt > ALERT_COOLDOWN_MS) &&
+    (degradedFailedAt === undefined || t - degradedFailedAt >= ALERT_RETRY_MS);
   if (shouldAlert) {
-    entry.alertSentAt = t;
     // Stable message + fingerprint so Sentry groups all degradations of a
-    // given worker into ONE issue. The session ID / counts vary per event and
-    // MUST live in tags+contexts only — embedding them in the message text
-    // spawns a new Sentry issue per session (LOREAI-GATEWAY worker-health noise).
-    Sentry.captureMessage("Worker health degraded", {
-      level: "error",
-      fingerprint: ["worker-health-degraded", workerID],
-      tags: {
-        worker_id: workerID,
-        reason,
-        session_id: sessionID,
-        failure_count: String(entry.failureCount),
-      },
-      contexts: {
-        worker_health: {
-          sessionID,
-          workerIDs: [...entry.workerIDs],
-          reasons: [...entry.reasons],
-          failureCount: entry.failureCount,
-          firstFailureAt: entry.firstFailureAt,
-          lastFailureAt: entry.lastFailureAt,
-        },
-      },
-    });
+    // given worker into ONE issue. Keep session identity in local health state;
+    // only allowlisted categories and generated counts enter Sentry.
+    const alertWorkerID = sentryWorkerID(workerID);
+    const alertReason = SENTRY_HEALTH_REASONS.has(reason) ? reason : "unknown";
+    try {
+      captureWorkerAlert(() =>
+        Sentry.captureMessage("Worker health degraded", {
+          level: "error",
+          fingerprint: ["worker-health-degraded", alertWorkerID],
+          tags: {
+            worker_id: alertWorkerID,
+            reason: alertReason,
+            failure_count: String(entry.failureCount),
+          },
+          contexts: {
+            worker_health: {
+              failureCount: entry.failureCount,
+              firstFailureAt: entry.firstFailureAt,
+              lastFailureAt: entry.lastFailureAt,
+            },
+            ...(safeResponse ? { worker_response: safeResponse } : {}),
+          },
+        }),
+      );
+      entry.alertSentAt = t;
+      clearFailedAlertCapture(sessionID, workerID, "degraded");
+    } catch {
+      recordFailedAlertCapture(sessionID, workerID, "degraded", t);
+      // Telemetry cannot interrupt worker health or delivery.
+    }
   }
 
   // Critical escalation: sustained 1h+ of failure → Sentry exception.
   // Throttled to once per hour per session and worker to avoid alert fatigue.
   const sustainedMs = t - entry.firstFailureAt;
   if (sustainedMs >= CRITICAL_THRESHOLD_MS) {
+    const criticalFailedAt = lastFailedAlertCapture(
+      sessionID,
+      workerID,
+      "critical",
+    );
     const shouldException =
       !allCredentialClass &&
-      (!entry.exceptionSentAt || t - entry.exceptionSentAt > 60 * 60 * 1000);
+      (entry.exceptionSentAt === undefined ||
+        t - entry.exceptionSentAt > 60 * 60 * 1000) &&
+      (criticalFailedAt === undefined ||
+        t - criticalFailedAt >= ALERT_RETRY_MS);
     if (shouldException) {
-      entry.exceptionSentAt = t;
       // Stable Error message + fingerprint so Sentry groups all critical
       // outages of a given worker into ONE issue. The previous message
       // embedded the failure count, duration, AND session ID, so EVERY event
       // was a unique issue (dozens of one-off LOREAI-GATEWAY issues). The
-      // varying detail lives in tags+contexts below.
+      // bounded, generated detail lives in tags+contexts below.
       const err = new Error("Worker health critical: sustained worker failure");
-      Sentry.captureException(err, {
-        fingerprint: ["worker-health-critical", workerID],
-        tags: {
-          worker_id: workerID,
-          reason,
-          session_id: sessionID,
-          failure_count: String(entry.failureCount),
-          sustained: formatDuration(sustainedMs),
-        },
-        contexts: {
-          worker_health: {
-            sessionID,
-            workerIDs: [...entry.workerIDs],
-            reasons: [...entry.reasons],
-            failureCount: entry.failureCount,
-            sustainedMs,
-          },
-        },
-      });
+      const alertWorkerID = sentryWorkerID(workerID);
+      const alertReason = SENTRY_HEALTH_REASONS.has(reason)
+        ? reason
+        : "unknown";
+      try {
+        captureWorkerAlert(() =>
+          Sentry.captureException(err, {
+            fingerprint: ["worker-health-critical", alertWorkerID],
+            tags: {
+              worker_id: alertWorkerID,
+              reason: alertReason,
+              failure_count: String(entry.failureCount),
+              sustained: formatDuration(sustainedMs),
+            },
+            contexts: {
+              worker_health: {
+                failureCount: entry.failureCount,
+                sustainedMs,
+              },
+              ...(safeResponse ? { worker_response: safeResponse } : {}),
+            },
+          }),
+        );
+        entry.exceptionSentAt = t;
+        clearFailedAlertCapture(sessionID, workerID, "critical");
+      } catch {
+        recordFailedAlertCapture(sessionID, workerID, "critical", t);
+        // A failing telemetry sink must not alter worker health.
+      }
     }
   }
 
@@ -779,12 +1121,16 @@ export function recordWorkerSuccess(sessionID: string, workerID: string): void {
     `[worker-health] ${workerID} recovered for session=${sessionID.slice(0, 16)}`,
   );
   if (entry.alertSentAt !== undefined) {
-    Sentry.addBreadcrumb({
-      category: "worker-health",
-      level: "info",
-      message: "Worker health recovered",
-      data: { session_id: sessionID, worker_id: workerID },
-    });
+    try {
+      Sentry.addBreadcrumb({
+        category: "worker-health",
+        level: "info",
+        message: "Worker health recovered",
+        data: { worker_id: sentryWorkerID(workerID) },
+      });
+    } catch {
+      // A failing telemetry sink cannot alter worker recovery.
+    }
   }
 }
 
@@ -1023,6 +1369,9 @@ export function makeWorkerHealth(
  */
 export function clearAll(): void {
   state.clear();
+  failedAlertCaptures.clear();
+  responseAlerts.clear();
+  pendingResponseAlerts.clear();
   creditPaused.clear();
   succeededSessions.clear();
   if (sweepTimer) {
@@ -1059,6 +1408,8 @@ function ensureSweepTimer(): void {
   if (typeof setInterval !== "function") return; // edge case: tests with no timers
   sweepTimer = setInterval(() => {
     const t = now();
+    expireResponseAlerts(t);
+    expireFailedAlertCaptures(t);
     for (const sessionID of state.keys()) workerFailures(sessionID);
     // Preserve the session-level authenticated-history predicate while any
     // worker still has unresolved failures; recovery ownership remains per worker.

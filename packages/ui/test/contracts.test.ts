@@ -19,6 +19,7 @@ import {
   entityDetail,
   entityListPage,
   entityRebuildStatus,
+  importListPage,
   isApiError,
   isContractError,
   knowledgeEntry,
@@ -82,6 +83,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "folk-sharing.json": {
     route: "/projects/p/sharing",
     schema: sharingStatus,
+  },
+  "project-imports.json": {
+    route: "/projects/p/imports",
+    schema: importListPage,
   },
   "entities-list.json": { route: "/entities", schema: entityListPage },
   "entity-detail.json": { route: "/entities/e", schema: entityDetail },

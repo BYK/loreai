@@ -369,10 +369,61 @@ describe("routing log credential redaction", () => {
     expect(diagnostic).toContain("host=api.githubcopilot.com");
     expect(diagnostic).toContain("category=INVALID_ARGUMENT");
     expect(diagnostic).toContain("requestId=GHREQ-1234567890");
+    expect(diagnostic).toMatch(/bodyBytes=\d+ inputItems=\d+ tools=\d+/);
+    expect(diagnostic).toContain("inputItems=2");
+    expect(diagnostic).not.toContain("instructionsBytes=");
     expect(diagnostic).not.toContain("/chat/completions");
     expect(messages.join("\n")).not.toContain(privateBodyMarker);
     expect(messages.join("\n")).not.toContain(credential);
     expect(await response.text()).not.toContain(privateBodyMarker);
+  });
+
+  it("logs a Responses meta 400 without exposing the provider body", async () => {
+    const privateMarker = "PRIVATE_META_400_RESPONSE_MARKER";
+    const messages: string[] = [];
+    log.registerSink({
+      info: (message) => messages.push(message),
+      warn: (message) => messages.push(message),
+      error: (message) => messages.push(message),
+      captureException: vi.fn(),
+    });
+    setUpstreamInterceptor(
+      async () =>
+        new Response(JSON.stringify({ detail: privateMarker }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const response = await handleRequest(
+      {
+        protocol: "openai-responses",
+        model: "gpt-5.6-luna",
+        system: "Generate a short title.",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "PRIVATE_META_PROMPT" }],
+          },
+        ],
+        tools: [],
+        stream: false,
+        maxTokens: 64,
+        metadata: {},
+        rawHeaders: {},
+      },
+      loadConfig(),
+    );
+
+    expect(response.status).toBe(400);
+    const diagnostic = messages.find((message) =>
+      message.startsWith("upstream error: 400"),
+    );
+    expect(diagnostic).toContain("protocol=openai-responses");
+    expect(diagnostic).toContain("inputItems=1");
+    expect(diagnostic).toMatch(/bodyBytes=\d+/);
+    expect(messages.join("\n")).not.toContain(privateMarker);
+    expect(messages.join("\n")).not.toContain("PRIVATE_META_PROMPT");
+    expect(await response.text()).toContain(privateMarker);
   });
 
   it("sanitizes the configured worker initialization URL", async () => {

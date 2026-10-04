@@ -157,8 +157,10 @@ export class SemanticTokenCache {
           // this request obsolete; dropping disposable counts is always safe.
           const result =
             this.connection!.query(`INSERT INTO semantic_token_cache (project_id, session_id, payload, updated_at)
-          SELECT p.id, s.session_id, ?, ? FROM projects p, session_state s
-          WHERE p.id = ? AND p.tenant_id = ? AND s.session_id = ?
+           SELECT p.id, s.session_id, ?, ? FROM projects p, session_state s
+           JOIN session_state_owners o ON o.session_id = s.session_id
+           WHERE p.id = ? AND p.tenant_id = ? AND s.session_id = ?
+             AND o.tenant_id = p.tenant_id
             AND total_changes() = ? AND (SELECT data_version FROM pragma_data_version) = ?
           ON CONFLICT(project_id, session_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`).run(
               payload,

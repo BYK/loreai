@@ -293,16 +293,54 @@ describe.each([
         inputTokens:
           TEST_RECALL_EXECUTION_CAP * 3 +
           (outcome === "invalid" ? 1000 : 0) +
-          (codex ? 0 : 3),
+          3,
         outputTokens:
-          TEST_RECALL_EXECUTION_CAP * 2 +
-          (outcome === "invalid" ? 100 : 0) +
-          (codex ? 0 : 2),
+          TEST_RECALL_EXECUTION_CAP * 2 + (outcome === "invalid" ? 100 : 0) + 2,
         turns: 1,
       });
     },
   );
 });
+
+test.each([
+  ["anthropic", false],
+  ["openai", false],
+  ["anthropic", true],
+] as const)(
+  "fails closed without persisting malformed recall input for %s stream=%s",
+  async (protocol, stream) => {
+    const alias = crypto.randomUUID();
+    let calls = 0;
+    setUpstreamInterceptor(async (body) => {
+      calls++;
+      return providerResponse(
+        protocol,
+        calls,
+        calls === 1 ? "recall" : "answer",
+        (body as Record<string, unknown>).stream === true,
+        calls === 1 ? { query: "", unknown: "not-allowed" } : undefined,
+      );
+    });
+
+    const req = request(protocol, alias);
+    req.stream = stream;
+    const response = await handleRequest(req, config());
+    expect(response.status).toBe(stream ? 200 : 502);
+    try {
+      await response.text();
+    } catch {
+      // Streaming errors are delivered after the HTTP headers are committed.
+    }
+    await settled();
+
+    const state = stateFor(alias);
+    expect(calls).toBe(1);
+    expect(state.recallStore.size).toBe(0);
+    expect(
+      loadSessionTracking(state.sessionID)?.recallStore ?? null,
+    ).toBeNull();
+  },
+);
 
 test.each(["success", "cancel", "late-recall"] as const)(
   "standalone native recall delivery: %s",

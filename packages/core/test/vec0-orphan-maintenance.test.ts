@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { close, db, dbPath, ensureProject } from "../src/db";
+import { checkConfigChange } from "../src/embedding/backfill";
 import { isVecAvailable } from "../src/db/vec";
 import { ensureVec0Store, setStorageMode } from "../src/db/vec-store";
 import { toBlob } from "../src/vector-query";
@@ -25,6 +26,9 @@ const blob = toBlob(new Float32Array([1, 0, 0, 0]));
 beforeEach(() => {
   vi.useFakeTimers();
   pid = ensureProject("/test/orphan-maintenance");
+  // Directly seeded vec0 rows must have a known embedding generation before
+  // this fixture closes and reopens its database connection.
+  checkConfigChange();
   db().query("DELETE FROM temporal_messages WHERE project_id = ?").run(pid);
   for (const table of [
     "knowledge_vec",

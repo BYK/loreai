@@ -11,6 +11,7 @@ import { describe, test, expect } from "vitest";
 import {
   buildAnthropicRequest,
   type AnthropicCacheOptions,
+  type AnthropicRequestOptions,
 } from "../src/translate/anthropic";
 import type { GatewayRequest } from "../src/translate/types";
 
@@ -41,8 +42,15 @@ function makeRequest(overrides: Partial<GatewayRequest> = {}): GatewayRequest {
   };
 }
 
-function getBody(req: GatewayRequest, cache?: AnthropicCacheOptions) {
-  return buildAnthropicRequest(req, cache).body as Record<string, unknown>;
+function getBody(
+  req: GatewayRequest,
+  cache?: AnthropicCacheOptions,
+  options?: AnthropicRequestOptions,
+) {
+  return buildAnthropicRequest(req, cache, options).body as Record<
+    string,
+    unknown
+  >;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +95,112 @@ describe("buildAnthropicRequest — no caching", () => {
         expect(block.cache_control).toBeUndefined();
       }
     }
+  });
+});
+
+describe("buildAnthropicRequest — tool schema compatibility", () => {
+  test("omits recall root combinators without mutating nested schemas", () => {
+    const schema: Record<string, unknown> = {
+      type: "object",
+      properties: {
+        value: {
+          oneOf: [{ type: "string" }, { type: "number" }],
+        },
+      },
+      oneOf: [{ required: ["value"] }],
+      allOf: [{ additionalProperties: false }],
+      anyOf: [{ required: ["value"] }],
+    };
+    const originalSchema = structuredClone(schema);
+    const req = makeRequest({
+      tools: [
+        {
+          name: "recall",
+          description: "recall",
+          gatewayOwned: true,
+          inputSchema: schema,
+        },
+      ],
+    });
+
+    const body = getBody(req);
+    const tool = (body.tools as Array<Record<string, unknown>>)[0];
+    const inputSchema = tool?.input_schema as Record<string, unknown>;
+
+    expect(inputSchema).toEqual({
+      type: "object",
+      properties: originalSchema.properties,
+    });
+    expect(inputSchema.oneOf).toBeUndefined();
+    expect(inputSchema.allOf).toBeUndefined();
+    expect(inputSchema.anyOf).toBeUndefined();
+    expect(schema).toEqual(originalSchema);
+  });
+
+  test.each(["oneOf", "allOf", "anyOf", "not", "if", "then", "else"] as const)(
+    "rejects a root %s schema instead of weakening tool validation",
+    (keyword) => {
+      const req = makeRequest({
+        tools: [
+          {
+            name: "union",
+            description: "union",
+            inputSchema: {
+              type: "object",
+              properties: { value: { type: "string" } },
+              [keyword]:
+                keyword === "not"
+                  ? { type: "null" }
+                  : keyword === "if"
+                    ? { required: ["value"] }
+                    : keyword === "then" || keyword === "else"
+                      ? { required: ["value"] }
+                      : [{ required: ["value"] }],
+            },
+          },
+        ],
+      });
+
+      expect(() => getBody(req)).toThrow(
+        "Anthropic tool schema root combinators cannot be removed without changing validation",
+      );
+    },
+  );
+
+  test("rejects a combinator without an explicit object root for recall", () => {
+    const req = makeRequest({
+      tools: [
+        {
+          name: "recall",
+          description: "recall",
+          gatewayOwned: true,
+          inputSchema: { anyOf: [{ type: "object" }] },
+        },
+      ],
+    });
+
+    expect(() => getBody(req)).toThrow(
+      "Anthropic tool schema must retain an object root",
+    );
+  });
+
+  test("preserves root combinators when the upstream capability allows them", () => {
+    const schema: Record<string, unknown> = {
+      oneOf: [{ type: "object" }, { type: "string" }],
+    };
+    const originalSchema = structuredClone(schema);
+    const body = getBody(
+      makeRequest({
+        tools: [{ name: "union", description: "union", inputSchema: schema }],
+      }),
+      undefined,
+      { sanitizeRootToolSchemas: false },
+    );
+
+    expect(
+      (body.tools as Array<Record<string, unknown>>)[0]?.input_schema,
+    ).toEqual(schema);
+    expect(schema).toEqual(originalSchema);
   });
 });
 

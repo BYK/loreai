@@ -1026,11 +1026,9 @@ export function createBatchLLMClient(
               Sentry.startSpan(
                 {
                   op: "gen_ai.chat",
-                  name: `chat ${pending.params.model}`,
+                  name: "AI worker call",
                   attributes: {
                     "gen_ai.operation.name": "chat",
-                    "gen_ai.request.model": pending.params.model,
-                    "gen_ai.provider.name": batch.provider.name,
                     "lore.call_type": "batch",
                     "lore.batch_queue_ms": Date.now() - pending.enqueuedAt,
                   },

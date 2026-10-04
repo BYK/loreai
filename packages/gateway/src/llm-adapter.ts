@@ -57,6 +57,7 @@ import {
   buildOpenAIChatCompletionsUrl,
   buildOpenAIResponsesUrl,
   copilotHeaders,
+  isGitHubCopilotHost,
 } from "./translate/openai";
 import { accumulateOpenAISSEStream } from "./stream/openai";
 import { accumulateResponsesSSEStream } from "./stream/openai-responses";
@@ -619,6 +620,8 @@ function diagnosticContentKind(contentType: string): string {
 
 function diagnosticFinishReason(reason: string | undefined): string {
   if (!reason) return "n/a";
+  if (reason.length > 32) return "unknown";
+  const normalized = reason.toLowerCase();
   return new Set([
     "stop",
     "end_turn",
@@ -628,8 +631,8 @@ function diagnosticFinishReason(reason: string | undefined): string {
     "content_filter",
     "tool_calls",
     "tool_use",
-  ]).has(reason)
-    ? reason
+  ]).has(normalized)
+    ? normalized
     : "unknown";
 }
 
@@ -656,6 +659,9 @@ function transportErrorKind(error: unknown): string {
  */
 function safeWorkerBodyErrorDetail(error: unknown): string {
   if (error instanceof WorkerResponseTooLargeError) return error.message;
+  if (error instanceof IncompleteWorkerResponseError) {
+    return `worker response incomplete (${diagnosticFinishReason(error.reason)})`;
+  }
   if (error instanceof SyntaxError) return "malformed JSON body";
   const message = error instanceof Error ? error.message : "";
   const safePatterns = [
@@ -664,6 +670,7 @@ function safeWorkerBodyErrorDetail(error: unknown): string {
     /^worker response exceeded \d+ byte limit$/,
     /^unterminated SSE event at EOF$/,
     /^missing (?:Anthropic message_stop|OpenAI finish_reason|Gemini finishReason) terminal$/,
+    /^missing OpenAI \[DONE\] terminal$/,
     /^missing terminal response status$/,
     /^missing Responses compatibility terminal status$/,
     /^malformed (?:Anthropic|OpenAI|Responses|Gemini) (?:stream event|response body|usage|terminal event)$/,
@@ -675,6 +682,7 @@ function safeWorkerBodyErrorDetail(error: unknown): string {
     /^Responses terminal event\/status mismatch$/,
     /^incomplete Responses output lifecycle$/,
     /^Anthropic stream error event$/,
+    /^malformed (?:worker response|SSE) UTF-8$/,
     /^(?:Response|Upstream response|Anthropic response) has no body$/,
   ];
   return safePatterns.some((pattern) => pattern.test(message))
@@ -2994,6 +3002,7 @@ function accumulateWorkerSSE(
   response: Response,
   signal?: AbortSignal,
   onSemanticContent?: () => void,
+  pinResponseId = false,
 ): Promise<GatewayResponse> {
   switch (protocol) {
     case "openai-codex-responses":
@@ -3009,6 +3018,7 @@ function accumulateWorkerSSE(
       // accumulator.
       return accumulateResponsesSSEStream(response, {
         validation: "public",
+        pinResponseId,
         stopAtTerminal: true,
         ...workerSSEStreamOptions(signal),
         onSemanticContent,
@@ -3038,6 +3048,30 @@ function accumulateWorkerSSE(
       });
   }
 }
+
+function shouldPinGithubCopilotWorkerResponseId(
+  target: Pick<ProviderTarget, "providerName" | "url">,
+): boolean {
+  if (target.providerName !== "github-copilot") return false;
+  try {
+    const url = new URL(target.url);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === "/" &&
+      url.hash === "" &&
+      isGitHubCopilotHost(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only access to the worker destination compatibility check. */
+export const shouldPinGithubCopilotWorkerResponseIdForTest =
+  shouldPinGithubCopilotWorkerResponseId;
 
 /**
  * Project an accumulated GatewayResponse down to the worker result shape
@@ -3820,12 +3854,9 @@ export function createGatewayLLMClient(
         return await Sentry.startSpan(
           {
             op: "gen_ai.chat",
-            name: `chat ${diagnosticToken(model.modelID)}`,
+            name: "AI worker call",
             attributes: {
               "gen_ai.operation.name": "chat",
-              "gen_ai.request.model": diagnosticToken(model.modelID),
-              "gen_ai.provider.name": diagnosticToken(target.providerName),
-              "lore.worker_id": diagnosticToken(opts?.workerID),
               "lore.call_type": "direct",
               "lore.urgent": urgent,
             },
@@ -3970,8 +4001,22 @@ export function createGatewayLLMClient(
                 // to it (bodyErrCode stays null → the block is skipped).
                 const upstreamOrigin = sanitizedWorkerOrigin(req.url);
                 const contentType = response.headers.get("content-type") ?? "";
-                const rejectInvalidWorkerBody = (error: unknown): null => {
-                  const detail = safeWorkerBodyErrorDetail(error);
+                const rejectInvalidWorkerBody = (
+                  error: unknown,
+                  stage: "read" | "decode" | "stream" | "parse" | "completion",
+                  observedSSE = false,
+                ): null => {
+                  const content = observedSSE
+                    ? "sse"
+                    : diagnosticContentKind(contentType);
+                  const detail = `${safeWorkerBodyErrorDetail(error)} (stage=${stage}, content=${content})`;
+                  const category =
+                    error instanceof IncompleteWorkerResponseError
+                      ? "worker response incomplete"
+                      : safeWorkerBodyErrorDetail(error).replace(
+                          /exceeded \d+ (byte|frame) limit$/,
+                          "exceeded # $1 limit",
+                        );
                   log.error(
                     `worker upstream returned invalid ${target.protocol} response — ${detail}` +
                       ` — upstream=${upstreamOrigin}` +
@@ -3987,6 +4032,17 @@ export function createGatewayLLMClient(
                     opts?.sessionID ?? "_unknown",
                     opts?.workerID ?? "unknown",
                     "upstream-error",
+                    {
+                      protocol: target.protocol,
+                      stage,
+                      content,
+                      category,
+                      finishReason:
+                        error instanceof IncompleteWorkerResponseError
+                          ? diagnosticFinishReason(error.reason)
+                          : "n/a",
+                      httpStatus: response.status,
+                    },
                   );
                   recordPromptFailure(
                     error instanceof WorkerResponseTooLargeError
@@ -4031,7 +4087,7 @@ export function createGatewayLLMClient(
                     );
                     continue;
                   }
-                  return rejectInvalidWorkerBody(error);
+                  return rejectInvalidWorkerBody(error, "read");
                 }
                 const isSSE = successBody.isSSE;
                 const bodyText = successBody.isSSE ? "" : successBody.text;
@@ -4050,7 +4106,7 @@ export function createGatewayLLMClient(
                     }
                     rawData = parsedBody as Record<string, unknown>;
                   } catch (error) {
-                    return rejectInvalidWorkerBody(error);
+                    return rejectInvalidWorkerBody(error, "decode");
                   }
                 }
 
@@ -4239,6 +4295,7 @@ export function createGatewayLLMClient(
                       () => {
                         semanticContentConsumed = true;
                       },
+                      shouldPinGithubCopilotWorkerResponseId(target),
                     );
                   } catch (error) {
                     if (opts?.signal?.aborted) throw opts.signal.reason;
@@ -4254,7 +4311,7 @@ export function createGatewayLLMClient(
                       );
                       continue;
                     }
-                    return rejectInvalidWorkerBody(error);
+                    return rejectInvalidWorkerBody(error, "stream", true);
                   }
                   sseStopReason = gwResp.stopReason;
                   parsed = gatewayResponseToWorkerResult(gwResp);
@@ -4262,7 +4319,7 @@ export function createGatewayLLMClient(
                   try {
                     parsed = parseWorkerResponse(target.protocol, rawData);
                   } catch (error) {
-                    return rejectInvalidWorkerBody(error);
+                    return rejectInvalidWorkerBody(error, "parse");
                   }
                 }
 
@@ -4276,6 +4333,8 @@ export function createGatewayLLMClient(
                 if (parsed.text && isLengthTruncation(finishReason)) {
                   return rejectInvalidWorkerBody(
                     new IncompleteWorkerResponseError(finishReason),
+                    "completion",
+                    isSSE,
                   );
                 }
 

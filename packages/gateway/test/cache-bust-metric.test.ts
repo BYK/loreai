@@ -11,9 +11,21 @@ vi.mock("@sentry/bun", () => ({
     count: vi.fn(),
   },
 }));
+vi.mock("../src/worker-model", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/worker-model")>()),
+  getModelEntry: vi.fn(async () => ({
+    cost: { input: 1, output: 2, cache_read: 0.1, cache_write: 1.25 },
+  })),
+}));
 
 import * as Sentry from "@sentry/bun";
-import { emitCacheBustMetric } from "../src/sentry";
+import {
+  emitCacheBustMetric,
+  emitCostMetric,
+  emitWarmupHitMetric,
+  emitWarmupMetric,
+  setGenAiUsageAttributes,
+} from "../src/sentry";
 
 type Attrs = Record<string, unknown>;
 
@@ -82,5 +94,53 @@ describe("emitCacheBustMetric idle_resume dimension", () => {
 
     expect(Sentry.metrics.distribution).not.toHaveBeenCalled();
     expect(Sentry.metrics.count).not.toHaveBeenCalled();
+  });
+
+  it("never sends a caller-selected model in metric attributes", () => {
+    const privateModel = "private-model-sentinel";
+    emitCacheBustMetric("prefix-rewrite", 500, privateModel);
+    emitWarmupHitMetric(privateModel, "5m");
+    emitWarmupMetric(
+      {
+        lastUpstream: { model: privateModel },
+        resolvedConversationTTL: "5m",
+      } as Parameters<typeof emitWarmupMetric>[0],
+      { ok: false } as Parameters<typeof emitWarmupMetric>[1],
+    );
+    expect(Sentry.metrics.count).toHaveBeenCalled();
+    expect(
+      JSON.stringify(vi.mocked(Sentry.metrics.count).mock.calls),
+    ).not.toContain(privateModel);
+    expect(
+      JSON.stringify(vi.mocked(Sentry.metrics.distribution).mock.calls),
+    ).not.toContain(privateModel);
+  });
+
+  it("uses a caller-selected model for pricing without sending its name to Sentry", async () => {
+    const privateModel = "private-model-sentinel";
+    emitCostMetric(privateModel, { input_tokens: 100 }, "direct");
+    await vi.waitFor(() =>
+      expect(Sentry.metrics.distribution).toHaveBeenCalledWith(
+        "lore.llm_cost_usd",
+        expect.any(Number),
+        expect.anything(),
+      ),
+    );
+    expect(
+      JSON.stringify(vi.mocked(Sentry.metrics.distribution).mock.calls),
+    ).not.toContain(privateModel);
+  });
+
+  it("records usage without passing a provider response model to Sentry", () => {
+    const setAttribute = vi.fn();
+    setGenAiUsageAttributes(
+      { setAttribute } as unknown as Sentry.Span,
+      { input_tokens: 10, output_tokens: 1 },
+      "private-response-model-sentinel",
+    );
+    expect(setAttribute).toHaveBeenCalledWith("gen_ai.usage.input_tokens", 10);
+    expect(JSON.stringify(setAttribute.mock.calls)).not.toContain(
+      "private-response-model-sentinel",
+    );
   });
 });

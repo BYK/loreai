@@ -18,6 +18,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/projects/:projectId/sessions` | Cursor-paged sessions for a project |
 | `/ui/projects/:projectId/sessions/:sessionId` | #1801 session reader |
+| `/ui/projects/:projectId/imports` (`?cursor=`) | Conversation-import history for the project (agent, source, created/updated counts, imported time), keyset paged |
 | `/ui/projects/:projectId/search` | Scoped recall results with expansion disabled |
 | `/ui/knowledge/:knowledgeId` | Entry-only deep link; the project is derived from the entry |
 | `/ui/entities` (`?type=`, `?cursor=`) | Entity list with type filter, keyset paging and the rebuild card |
@@ -462,7 +463,7 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 
@@ -1316,6 +1317,7 @@ and the smoke page; the fixture and shell rows land in #1797.
 | Cost intelligence + daily budget | `CostsPage` | live/historical totals, workers, budget | UI-08 |
 | Destructive / expensive action confirmation | `ConfirmDialog` (`components/ui`) | Kobalte `Dialog`, `role="alertdialog"` | UI-08 |
 | Project actions (rename / move sessions / clear / delete / merge) | `ProjectActions`, `MergeProjectsAction` | `ConfirmDialog`, `Dialog`, `Select`, `TextField`, inline notices | UI-08 |
+| Import history table | `ImportHistoryPage` | plain table, `?cursor=` keyset paging, `formatWhen` | UI-08 |
 
 ## Legacy dashboard parity (UI-08, #1823)
 
@@ -1342,8 +1344,14 @@ top of `/api/v1`. Status:
   budget set/disable, worker breakdown. — **PR3 (this change)**
 - [x] Warming — global enable/disable, circuit-breaker reset, per-session
   keep/stop/auto, project histograms. — **PR3 (this change)**
-- [ ] Import history — no legacy page existed (API only,
-  `GET /api/v1/import/history`); #1823 adds a screen for it
+- [x] Import history — no legacy page existed (API only); the legacy
+  unpaged `GET /api/v1/import/history` route is removed — the paged
+  `GET /api/v1/projects/:id/imports` is the only route, and the new
+  screen reads it. — **PR5 (this change)**
+
+All #1823 parity items are now covered by the screens above or by the
+earlier UI-04/05/06 slices; the exclusions listed below remain
+out-of-scope follow-ups.
 
 Already covered by earlier slices: project overview (UI-04), knowledge
 list/document (UI-04/05), session reader (UI-06), search (UI-04). The

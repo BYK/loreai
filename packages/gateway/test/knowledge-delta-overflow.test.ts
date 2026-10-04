@@ -126,6 +126,48 @@ describe("buildKnowledgeDeltaMessage — overflow ToC (#917)", () => {
     );
     expect(text(msg)).not.toContain(HEADING);
   });
+
+  test("oversized recalled context is referenced by its full ID without partial content", () => {
+    const content = `${"x".repeat(899)}😀${"tail ".repeat(1_000)}`;
+    const msg = buildKnowledgeDeltaMessage(
+      [
+        {
+          id: "d:019aaaaa-1111-7111-8111-111111111111",
+          category: "recalled",
+          title: "Relevant earlier context",
+          content,
+        },
+      ],
+      [],
+      "7a3f9b2c",
+    );
+    const t = text(msg);
+    expect(t).toContain(HEADING);
+    expect(t).toContain("[d:019aaaaa-1111-7111-8111-111111111111]");
+    expect(t).not.toContain("x".repeat(899));
+    expect(t).not.toContain("tail ".repeat(3));
+    expect(t).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+  });
+
+  test("includes recall IDs for every oversized change even beyond the optional index cap", () => {
+    const changes = Array.from({ length: 13 }, (_, index) =>
+      changed(`019e${String(index).padStart(4, "0")}`, `Changed ${index}`),
+    ).map((entry) => ({
+      ...entry,
+      content: "complete context ".repeat(1_000),
+    }));
+    const t = text(
+      buildKnowledgeDeltaMessage(changes, [], "7a3f9b2c", [
+        toc("019fffff", "Optional overflow"),
+      ]),
+    );
+    for (const entry of changes) {
+      expect(t).toContain(`[k:${entry.id}]`);
+    }
+    expect(t).not.toContain("Optional overflow");
+    expect(t).toContain("1 more");
+    expect(t).not.toContain("complete context");
+  });
 });
 
 describe("buildKnowledgeCatalogText — frozen system[1] catalog (#917 A)", () => {

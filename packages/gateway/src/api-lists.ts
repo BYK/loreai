@@ -73,6 +73,13 @@ import {
   type SessionKeyset,
   type SessionSearchMode,
 } from "@loreai/core";
+import {
+  BadRequest,
+  CURSOR_VERSION,
+  decodeCursorObject,
+  encodeCursor,
+  parseLimit,
+} from "./cursor";
 
 // ---------------------------------------------------------------------------
 // Response helpers (mirrors api.ts; kept local so this module has no cycle)
@@ -93,14 +100,12 @@ export function errorResponse(
   return jsonResponse({ type: "error", error: { type, message } }, status);
 }
 
-export class BadRequest extends Error {
-  constructor(
-    readonly errorType: string,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+export {
+  BadRequest,
+  CURSOR_VERSION,
+  decodeCursorObject,
+  parseLimit,
+} from "./cursor";
 
 export function toResponse(err: unknown): Response {
   if (err instanceof BadRequest)
@@ -111,73 +116,6 @@ export function toResponse(err: unknown): Response {
 // ---------------------------------------------------------------------------
 // Cursor codec
 // ---------------------------------------------------------------------------
-
-export const CURSOR_VERSION = 1;
-
-type KnowledgeCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "knowledge";
-  project: string;
-  sort: KnowledgeSort;
-  key: number | string;
-  id: string;
-};
-
-type SessionCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "sessions";
-  project: string;
-  last_message_at: number;
-  session_id: string;
-};
-
-type MessageCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "messages";
-  project: string;
-  session: string;
-  created_at: number;
-  id: string;
-};
-
-type SearchCursor = {
-  v: typeof CURSOR_VERSION;
-  kind: "search";
-  project: string;
-  session: string;
-  mode: SessionSearchMode;
-  created_at: number;
-  id: string;
-};
-
-function encodeCursor(
-  payload: KnowledgeCursor | SessionCursor | MessageCursor | SearchCursor,
-): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** Decode a token into a plain object, or throw `invalid_cursor`. */
-export function decodeCursorObject(token: string): Record<string, unknown> {
-  // base64url alphabet only — anything else is rejected before decoding so a
-  // sloppy token can't decode to something unexpected.
-  if (!/^[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
-  } catch {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  if (!isRecord(parsed) || parsed.v !== CURSOR_VERSION) {
-    throw new BadRequest("invalid_cursor", "Malformed cursor");
-  }
-  return parsed;
-}
 
 function decodeKnowledgeCursor(
   token: string,
@@ -306,20 +244,6 @@ export function wantsCursorMode(url: URL): boolean {
   return (
     url.searchParams.get("page") === "cursor" || url.searchParams.has("cursor")
   );
-}
-
-export function parseLimit(
-  url: URL,
-  defaultLimit: number,
-  maxLimit: number,
-): number {
-  const raw = url.searchParams.get("limit");
-  if (raw === null || raw === "") return defaultLimit;
-  if (!/^\d+$/.test(raw))
-    throw new BadRequest("invalid_request", `Invalid limit: ${raw}`);
-  const n = parseInt(raw, 10);
-  if (n < 1) throw new BadRequest("invalid_request", `Invalid limit: ${raw}`);
-  return Math.min(n, maxLimit);
 }
 
 /** Parse and validate `q` / `category` / `scope` / `sort`. Throws 400 on an

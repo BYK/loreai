@@ -3,6 +3,7 @@
 import { db } from "../db";
 import { storeEmbedding } from "../db/vec-store";
 import { config } from "../config";
+import { currentTenantId } from "../tenant";
 import * as log from "../log";
 import { nextEmbeddingBatch } from "./batching";
 import {
@@ -138,10 +139,21 @@ export function embedDistillation(id: string, observations: string): void {
 export function warmupEmbedding(): void {
   if (!isAvailable()) return;
   if (config().search.embeddings.provider !== "local") return;
-  void embed(["warmup"], "document").catch((err) => {
-    if (isExpectedBestEffortEmbeddingError(err)) return;
-    log.error("embedding warmup failed:", err);
-  });
+  const provider = getProvider();
+  if (!provider) return;
+  if (provider instanceof EmbeddingPool && !provider.beginForegroundWarmup())
+    return;
+  void embedWithProvider(provider, ["warmup"], "document")
+    .then(() =>
+      provider instanceof EmbeddingPool
+        ? provider.warmForegroundCapacity()
+        : undefined,
+    )
+    .catch((err) => {
+      if (provider instanceof EmbeddingPool) provider.finishForegroundWarmup();
+      if (isExpectedBestEffortEmbeddingError(err)) return;
+      log.error("embedding warmup failed");
+    });
 }
 
 /** Hard cap on how many vec0 chunks a single temporal message may fan out to. */
@@ -155,13 +167,21 @@ export async function embedInTokenBatches(
   texts: string[],
   inputType: "document" | "query",
   signal?: AbortSignal,
+  options: { background?: boolean; beforeBatch?: () => void } = {},
 ): Promise<Float32Array[]> {
   const provider = getProvider();
   if (!provider) throw new Error("No embedding provider available");
+  // The checkpoint key contains text, not source ownership. Guarded calls
+  // never resume a partial result; other calls isolate checkpoints by tenant.
   const localPool =
-    provider instanceof EmbeddingPool && signal ? provider : undefined;
+    provider instanceof EmbeddingPool && signal && !options.beforeBatch
+      ? provider
+      : undefined;
   const checkpointKey = localPool
-    ? embeddingOperationKey(texts, inputType)
+    ? JSON.stringify([
+        currentTenantId(),
+        embeddingOperationKey(texts, inputType),
+      ])
     : undefined;
   const checkpoint =
     localPool && checkpointKey
@@ -173,11 +193,15 @@ export async function embedInTokenBatches(
   try {
     while (nextIndex < items.length) {
       const batch = nextEmbeddingBatch(items, nextIndex);
+      // A caller holding source-owned text must recheck its authority after
+      // every prior provider await, before the next sub-batch leaves the host.
+      options.beforeBatch?.();
       const vecs = await embedWithProvider(
         provider,
         batch.map((b) => b.text),
         inputType,
         signal,
+        options.background === true,
       );
       if (vecs.length !== batch.length) {
         throw new Error(

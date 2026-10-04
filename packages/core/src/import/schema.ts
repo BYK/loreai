@@ -15,8 +15,7 @@ export const LORE_IMPORT_VERSION = 1;
 
 /**
  * Hard ceiling on entry `content` length at the schema trust boundary
- * (defense-in-depth). The importer truncates to 1200 chars downstream; this
- * larger ceiling only bounds the in-memory parsed doc so a pathological input
+ * (defense-in-depth). This ceiling bounds the in-memory parsed doc so a pathological input
  * can't blow up memory. Source adapters should clamp to this BEFORE building a
  * doc so a single oversized record is truncated rather than aborting the whole
  * import with a validation error.
@@ -45,12 +44,11 @@ export const LoreImportEntry = z
       .string()
       .trim()
       .min(1)
-      // Hard ceiling at the trust boundary (defense-in-depth): the importer
-      // truncates to 1200 chars, but bounding here caps the in-memory parsed
+      // Hard ceiling at the trust boundary (defense-in-depth): bounding here caps the in-memory parsed
       // doc so a 100k-entry doc of huge strings can't blow up memory before the
       // importer ever runs. 64K per entry is far above any real curated memory.
       .max(MAX_IMPORT_CONTENT_LENGTH)
-      .describe("Entry body. Truncated to 1200 chars by the importer."),
+      .describe("Entry body, preserved in full within the schema ceiling."),
     category: z
       .enum(IMPORT_CATEGORIES)
       .optional()

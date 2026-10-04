@@ -4,7 +4,28 @@ import {
   withSavepoint,
   type LoreMessageWithParts,
 } from "@loreai/core";
-import { isRecallMarker } from "./recall";
+import {
+  isRecallMarker,
+  parseRecallAnchorFromText,
+  recallAnchorContinuation,
+  recallMarkerContinuation,
+} from "./recall";
+
+const MAX_RECALL_CONTINUATION_CHARS = 64 * 1024;
+
+function safeRecallContinuation(text: string): string {
+  const chars: string[] = [];
+  for (const char of text) {
+    if (chars.length >= MAX_RECALL_CONTINUATION_CHARS) break;
+    chars.push(char);
+  }
+  return chars
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 || code === 127 ? " " : char;
+    })
+    .join("");
+}
 import {
   gatewayMessagesToLore,
   updateAssistantMessageTokens,
@@ -66,9 +87,15 @@ export function storeTurnTemporal(input: {
       // directly in SQLite, without retaining/re-resolving its historical graph.
       temporal.recordToolCalls(message);
     }
-    const assistantContent = input.assistantContentBlocks.filter(
-      (b) => !(b.type === "text" && isRecallMarker(b.text)),
-    );
+    const assistantContent = input.assistantContentBlocks.flatMap((b) => {
+      if (b.type !== "text" || !isRecallMarker(b.text)) return [b];
+      const anchorId = parseRecallAnchorFromText(b.text);
+      const continuation = anchorId
+        ? recallAnchorContinuation(b.text, anchorId)
+        : recallMarkerContinuation(b.text);
+      const safeContinuation = safeRecallContinuation(continuation);
+      return safeContinuation ? [{ ...b, text: safeContinuation }] : [];
+    });
     const assistant = gatewayMessagesToLore(
       [{ role: "assistant", content: assistantContent }],
       sessionID,

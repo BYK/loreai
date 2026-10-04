@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadSessionTracking, setForceMinLayer } from "@loreai/core";
+import {
+  loadSessionTracking,
+  setForceMinLayer,
+  withTenant,
+} from "@loreai/core";
 import type { GatewayRequest, GatewayResponse } from "../src/translate/types";
 import { loadConfig } from "../src/config";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
@@ -148,7 +152,10 @@ describe("Responses upstream error relay", () => {
     expect(
       loadSessionTracking(internalSessionID)?.lastAcceptedProvenanceLayer,
     ).toBe(0);
-    setForceMinLayer(1, internalSessionID);
+    const owner = getActiveSessions().get(internalSessionID)?.storageTenantId;
+    if (owner === undefined)
+      throw new Error("test session has no storage owner");
+    withTenant(owner, () => setForceMinLayer(1, internalSessionID));
     const transition = requestWithMessages(messages);
     transition.rawHeaders["x-lore-session-id"] = sessionID;
     const failed = await handleRequest(transition, localConfig());
@@ -315,7 +322,11 @@ describe("Responses upstream error relay", () => {
     // The accepted baseline deliberately uses a non-probe tool. Re-arm the
     // normal synthetic branch so the next real request exercises its short-circuit.
     session.syntheticResolveState = "none";
-    setForceMinLayer(1, internalSessionID);
+    if (session.storageTenantId === undefined)
+      throw new Error("synthetic test session has no storage owner");
+    withTenant(session.storageTenantId, () =>
+      setForceMinLayer(1, internalSessionID),
+    );
 
     const synthetic = requestWithTools([
       {

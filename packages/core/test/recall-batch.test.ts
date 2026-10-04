@@ -5,9 +5,11 @@ import * as ltm from "../src/ltm";
 import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
+  MAX_RECALL_QUERY_CHARS,
   recallById,
   runRecall,
   runRecallWithMetadata,
+  searchRecall,
 } from "../src/recall";
 
 const PROJECT = "/test/recall-batch/project";
@@ -178,6 +180,39 @@ describe("recall detail batches", () => {
       runRecall({ query: "", ids: [oversized], projectPath: PROJECT }),
     ).rejects.toThrow(`no longer than ${MAX_RECALL_ID_CHARS}`);
     expect(recallById(oversized)).toBe("Invalid recall id.");
+  });
+
+  test("rejects oversized search queries before search work", async () => {
+    await expect(
+      runRecall({
+        query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1),
+        projectPath: PROJECT,
+      }),
+    ).rejects.toThrow(`no longer than ${MAX_RECALL_QUERY_CHARS}`);
+    await expect(
+      searchRecall({
+        query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1),
+        projectPath: PROJECT,
+      }),
+    ).rejects.toThrow(`no longer than ${MAX_RECALL_QUERY_CHARS}`);
+  });
+
+  test("rejects recall IDs containing control characters", async () => {
+    const invalid = "k:source\nforged";
+
+    await expect(
+      runRecall({ query: "", id: invalid, projectPath: PROJECT }),
+    ).rejects.toThrow("Recall id must be a non-empty string");
+    expect(recallById(invalid)).toBe("Invalid recall id.");
+  });
+
+  test("rejects recall IDs containing marker delimiters", async () => {
+    const invalid = "k:source…forged";
+
+    await expect(
+      runRecall({ query: "", id: invalid, projectPath: PROJECT }),
+    ).rejects.toThrow("Recall id must be a non-empty string");
+    expect(recallById(invalid)).toBe("Invalid recall id.");
   });
 
   test("distinguishes a search preview from a subsequent full detail", async () => {

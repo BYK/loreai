@@ -218,6 +218,8 @@ export type GatewayTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** True only for tools injected and owned by the gateway. */
+  gatewayOwned?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -389,6 +391,8 @@ export type GatewayResponse = {
    * accumulators always try to populate it.
    */
   usage?: GatewayUsage;
+  /** Both provider input and output token totals were present, not synthesized. */
+  usageComplete?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -613,6 +617,11 @@ export type SessionState = {
   messageCount: number;
   /** Turns since last curation run — triggers background curation. */
   turnsSinceCuration: number;
+  /** True while incremental or idle distillation is waiting in the global
+   *  background queue or running. `distillLimiter.isBusy` only changes after a
+   *  queued task starts, so this closes the cross-path admission window where
+   *  one session could submit duplicate jobs. Cleared by the owner chain. */
+  distillationScheduled?: boolean;
   /** True while a background curation has been scheduled for this session but
    *  has not yet entered curatorLimiter (i.e. still waiting in the global
    *  background queue). `curatorLimiter.isBusy` only flips once the task

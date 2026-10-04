@@ -26,7 +26,11 @@ describe("captureEmptyCompletion", () => {
   });
 
   it("captures a warning grouped by protocol with the diagnostic context", () => {
-    captureEmptyCompletion({ ...INFO, protocol: "openai-responses" });
+    captureEmptyCompletion({
+      ...INFO,
+      protocol: "openai-responses",
+      model: "private-model-sentinel",
+    });
     expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     const [message, opts] = vi.mocked(Sentry.captureMessage).mock.calls[0];
     expect(message).toMatch(/empty completion/i);
@@ -40,8 +44,10 @@ describe("captureEmptyCompletion", () => {
     ).contexts.empty_completion;
     expect(context).toMatchObject({
       protocol: "openai-responses",
-      model: "gpt-4o-mini",
     });
+    expect(
+      JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
+    ).not.toContain("private-model-sentinel");
     expect(context.sessionID).toBeUndefined();
   });
 

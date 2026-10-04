@@ -16,6 +16,7 @@ import { useNavigate, useSearchParams } from "@solidjs/router";
 
 import type { EntityRebuildResult } from "~/contracts";
 import { formatWhen, pluralize } from "~/lib/format";
+import { entitiesHref, entityHref } from "~/lib/href";
 import { useWorkspace } from "~/routes/workspace";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -40,15 +41,6 @@ export const ENTITY_TYPES = [
   "repo",
   "infra",
 ] as const;
-
-export const entityHref = (id: string) => `/entities/${encodeURIComponent(id)}`;
-export const entitiesHref = (type?: string | null, cursor?: string | null) => {
-  const params = new URLSearchParams();
-  if (type) params.set("type", type);
-  if (cursor) params.set("cursor", cursor);
-  const qs = params.toString();
-  return `/entities${qs ? `?${qs}` : ""}`;
-};
 
 /** The rebuild card: preview / rebuild-all / cancel + the result summary. */
 const RebuildCard: Component = () => {

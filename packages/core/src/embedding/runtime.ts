@@ -421,6 +421,7 @@ export async function embedWithProvider(
   texts: string[],
   inputType: "document" | "query",
   signal?: AbortSignal,
+  background = false,
 ): Promise<Float32Array[]> {
   // A single-text query embed is a recall lookup (see isRecallEmbed — the same
   // predicate the worker uses for high priority). Track it in flight so the
@@ -431,7 +432,9 @@ export async function embedWithProvider(
   const isRecall = isRecallEmbed(texts, inputType);
   if (isRecall) _recallEmbedsInFlight++;
   try {
-    const vecs = await provider.embed(texts, inputType, signal);
+    const vecs = await (background && provider instanceof EmbeddingPool
+      ? provider.embedBackground(texts, inputType, signal)
+      : provider.embed(texts, inputType, signal));
     // Enforce the L2-normalization invariant at the single chokepoint so the JS
     // dot-product path and sqlite-vec's vec_distance_cosine() always agree. See
     // l2Normalize() for the full rationale.

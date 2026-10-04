@@ -3,7 +3,7 @@ import { Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import type { SessionSummary } from "~/contracts";
 import { formatWhen } from "~/lib/format";
-import { sessionHref, sessionsHref } from "~/routes/Browse";
+import { sessionHref, sessionsHref } from "~/lib/href";
 import { StateCard } from "./StateCard";
 import { errorStateFor } from "./ErrorState";
 

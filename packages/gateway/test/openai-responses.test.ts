@@ -15,6 +15,7 @@ import {
   installFetchInterceptor,
   log,
   MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_QUERY_CHARS,
 } from "@loreai/core";
 import {
   parseOpenAIResponsesRequest,
@@ -1675,7 +1676,10 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
       required: ["query", "scope", "id", "ids", "detailOffset", "detailLimit"],
       additionalProperties: false,
       properties: {
-        query: { type: ["string", "null"] },
+        query: {
+          type: ["string", "null"],
+          maxLength: MAX_RECALL_QUERY_CHARS,
+        },
         scope: {
           type: ["string", "null"],
           enum: ["all", "session", "project", "knowledge", null],
@@ -1707,6 +1711,7 @@ describe("buildOpenAIResponsesUpstreamRequest", () => {
     req.tools.push({
       name: "recall",
       description: "Recall memory",
+      gatewayOwned: true,
       inputSchema: {
         type: "object",
         properties: { query: { anyOf: [{ type: "string" }] } },

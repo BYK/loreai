@@ -25,6 +25,12 @@ async function navColor(page: Page): Promise<string> {
  * scrolled container belongs to the nav (not the page background).
  */
 async function assertNavCoversScroll(page: Page, scroller: Locator) {
+  // The sidebar shows only pinned+recent until "All projects" expands (#1929);
+  // don't click again when a previous call already expanded it.
+  const allProjects = scroller.getByTestId("nav-all-projects");
+  if ((await allProjects.getAttribute("aria-expanded")) !== "true") {
+    await allProjects.click();
+  }
   await expect
     .poll(() => scroller.getByTestId("nav-project").count())
     .toBeGreaterThanOrEqual(60);

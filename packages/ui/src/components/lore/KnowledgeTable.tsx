@@ -14,7 +14,7 @@ import {
   KNOWLEDGE_CATEGORIES,
   KNOWLEDGE_SCOPES,
 } from "~/contracts";
-import { knowledgeListHref, knowledgeHref } from "~/routes/Browse";
+import { knowledgeListHref, knowledgeHref } from "~/lib/href";
 import { formatConfidence, formatWhen, previewOf } from "~/lib/format";
 import { StaleBadge } from "./StaleBadge";
 import { StateCard } from "./StateCard";

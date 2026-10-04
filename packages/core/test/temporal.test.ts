@@ -202,6 +202,11 @@ describe("temporal", () => {
       "content_hash",
       "fingerprint",
       "enqueued_at",
+      "priority",
+      "retry_at",
+      "failures",
+      "project_id",
+      "fair_ahead",
     ]);
 
     const rows = db()
@@ -211,13 +216,23 @@ describe("temporal", () => {
       content_hash: string;
       fingerprint: string;
       enqueued_at: number;
+      priority: number;
+      retry_at: number;
+      failures: number;
+      project_id: string;
+      fair_ahead: number;
     }>;
     expect(rows).toHaveLength(1);
+    expect(rows[0].project_id).toBe(ensureProject(project));
     expect(rows[0].content_hash).toBe(
       createHash("sha256").update(content).digest("hex"),
     );
     expect(rows[0].fingerprint).toMatch(/temporal-embedding-policy-v\d+$/);
     expect(rows[0].enqueued_at).toBeGreaterThan(0);
+    expect(rows[0].priority).toBe(1);
+    expect(rows[0].retry_at).toBe(0);
+    expect(rows[0].failures).toBe(0);
+    expect(rows[0].fair_ahead).toBe(0);
     expect(JSON.stringify(rows[0])).not.toContain(content);
   });
 
@@ -256,6 +271,49 @@ describe("temporal", () => {
       },
     ]);
     expect(rows[0].enqueued_at).toBeGreaterThan(1);
+  });
+
+  test("re-storing a source above the embedding cap clears its old vector and job", () => {
+    const project = "/test/temporal/oversized-restored-source";
+    const info = makeMessage("msg-oversized-restore", "user", "sess-oversized");
+    const storedId = temporal.store({
+      projectPath: project,
+      info,
+      parts: makeParts(
+        info.id,
+        "the old source is short enough to have a valid embedding",
+      ),
+    });
+    if (!storedId) throw new Error("expected stored message id");
+    db()
+      .query("UPDATE temporal_messages SET embedding = ? WHERE id = ?")
+      .run(new Uint8Array([1, 2, 3, 4]), storedId);
+
+    expect(
+      temporal.store({
+        projectPath: project,
+        info,
+        parts: makeParts(
+          info.id,
+          `${"source ".repeat(75_000)} oversizedrestoreftsmarker`,
+        ),
+      }),
+    ).toBe(storedId);
+    expect(
+      db()
+        .query("SELECT embedding FROM temporal_messages WHERE id = ?")
+        .get(storedId),
+    ).toEqual({ embedding: null });
+    expect(
+      db()
+        .query("SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?")
+        .get(storedId),
+    ).toBeNull();
+    expect(
+      db()
+        .query("SELECT rowid FROM temporal_fts WHERE temporal_fts MATCH ?")
+        .get("oversizedrestoreftsmarker"),
+    ).not.toBeNull();
   });
 
   test("idempotent re-store preserves queue age and an existing blob vector", () => {

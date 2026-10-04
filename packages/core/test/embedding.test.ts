@@ -453,6 +453,36 @@ describe("local provider unavailable fallback", () => {
       temporalRechunked: 0,
     });
   });
+
+  test("reconciles stale vectors before provider-independent temporal admission", async () => {
+    const pid = ensureProject("/test/embedding/unavailable-generation");
+    const id = "unavailable-generation-stale-knowledge";
+    const now = Date.now();
+    db()
+      .query(
+        `INSERT INTO knowledge
+          (id, project_id, category, title, content, created_at, updated_at, embedding, logical_id)
+         VALUES (?, ?, 'test', 'Old model', 'Stale vector', ?, ?, ?, ?)`,
+      )
+      .run(id, pid, now, now, toBlob(new Float32Array([1, 0, 0])), id);
+    db()
+      .query(
+        "INSERT INTO kv_meta (key, value) VALUES ('lore:embedding_config', 'old-model:512') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run();
+    _markLocalProviderUnavailable();
+
+    await runStartupBackfill();
+
+    expect(
+      db().query("SELECT embedding FROM knowledge WHERE id = ?").get(id),
+    ).toEqual({ embedding: null });
+    expect(
+      db()
+        .query("SELECT value FROM kv_meta WHERE key = 'lore:embedding_config'")
+        .get(),
+    ).not.toEqual({ value: "old-model:512" });
+  });
 });
 
 describe("local provider unavailable — no auto-fallback (remote is opt-in)", () => {

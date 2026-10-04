@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { db, ensureProject } from "../src/db";
+import { close, db, ensureProject } from "../src/db";
 import {
   _restoreProvider,
   _saveAndClearProvider,
@@ -18,7 +21,7 @@ import {
 } from "../src/embedding";
 import * as ltm from "../src/ltm";
 import { storeEmbedding } from "../src/db/vec-store";
-import { currentTenantId } from "../src/tenant";
+import { currentTenantId, withTenant } from "../src/tenant";
 import * as log from "../src/log";
 
 const PROJECT = "/test/embedding-backfill";
@@ -88,6 +91,56 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
     const blob = embeddingOf("knowledge", "bk");
     expect(blob).not.toBeNull();
     expect(Array.from(fromBlob(blob as Buffer))).toEqual(Array.from(VEC));
+  });
+
+  test("an in-flight document backfill never opens a successor database after close", async () => {
+    const originalPath = process.env.LORE_DB_PATH!;
+    const successorPath = join(
+      process.env.LORE_TEST_DB_ROOT!,
+      `${randomUUID()}.db`,
+    );
+    const now = Date.now();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES ('closed-backfill', ?, 'test', 'T', 'C', ?, ?, 'closed-backfill')",
+      )
+      .run(pid, now, now);
+
+    let release: (() => void) | undefined;
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        embed(texts: string[]) {
+          return new Promise<Float32Array[]>((resolve) => {
+            release = () => resolve(texts.map(() => VEC));
+            notifyStarted!();
+          });
+        },
+      },
+    });
+
+    const backfill = backfillEmbeddings();
+    try {
+      await started;
+      close();
+      process.env.LORE_DB_PATH = successorPath;
+      release!();
+      const failure = await backfill.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(existsSync(successorPath)).toBe(false);
+      expect(failure).toBeNull();
+    } finally {
+      release?.();
+      await backfill.catch(() => {});
+      close();
+      process.env.LORE_DB_PATH = originalPath;
+    }
   });
 
   test("coalesces index-only selection refreshes during a document backfill", async () => {
@@ -243,6 +296,344 @@ describe("backfill writes embeddings through storeEmbedding (blob layout)", () =
     const blob = embeddingOf("entities", "be");
     expect(blob).not.toBeNull();
     expect(Array.from(fromBlob(blob as Buffer))).toEqual(Array.from(VEC));
+  });
+
+  test("never batches different tenants' knowledge, distillations or entities together", async () => {
+    checkConfigChange();
+    const calls: Array<{ tenant: string; texts: string[] }> = [];
+    const sourceReadScopes: string[] = [];
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          calls.push({ tenant: currentTenantId(), texts });
+          return texts.map(() => VEC);
+        },
+      },
+    });
+    const now = Date.now();
+    for (const tenant of ["tenant-a", "tenant-b"]) {
+      const project = withTenant(tenant, () =>
+        ensureProject(`/test/backfill-${tenant}`),
+      );
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, tenant_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, ?, 'test', ?, 'content', ?, ?, ?)",
+        )
+        .run(
+          `k-${tenant}`,
+          project,
+          tenant,
+          `private-${tenant}-knowledge`,
+          now,
+          now,
+          `k-${tenant}`,
+        );
+      db()
+        .query(
+          "INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, archived) VALUES (?, ?, 's', '', '', ?, '', 0, 0, ?, 0)",
+        )
+        .run(`d-${tenant}`, project, `private-${tenant}-distillation`, now);
+      db()
+        .query(
+          "INSERT INTO entities (id, project_id, tenant_id, entity_type, canonical_name, cross_project, created_at, updated_at) VALUES (?, ?, ?, 'tool', ?, 0, ?, ?)",
+        )
+        .run(
+          `e-${tenant}`,
+          project,
+          tenant,
+          `private-${tenant}-entity`,
+          now,
+          now,
+        );
+    }
+
+    log.registerSink({
+      info() {},
+      warn() {},
+      error() {},
+      captureException() {},
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        if (
+          /SELECT k\.id, k\.title, k\.content|SELECT d\.id, d\.observations|SELECT e\.id, e\.canonical_name|SELECT k\.title, k\.content|SELECT d\.observations|SELECT e\.canonical_name/s.test(
+            sql,
+          )
+        )
+          sourceReadScopes.push(currentTenantId());
+        return fn();
+      },
+    });
+    try {
+      expect(await backfillEmbeddings()).toBe(2);
+      expect(await backfillDistillationEmbeddings()).toBe(2);
+      expect(await backfillEntityEmbeddings()).toBe(2);
+    } finally {
+      log.registerSink({
+        info() {},
+        warn() {},
+        error() {},
+        captureException() {},
+      });
+    }
+    expect(sourceReadScopes.length).toBeGreaterThanOrEqual(6);
+    expect(sourceReadScopes.every((tenant) => tenant !== "")).toBe(true);
+    expect(calls).toHaveLength(6);
+    for (const { tenant, texts } of calls) {
+      expect(["tenant-a", "tenant-b"]).toContain(tenant);
+      expect(texts).toHaveLength(1);
+      expect(texts[0]).toContain(`private-${tenant}-`);
+    }
+    for (const tenant of ["tenant-a", "tenant-b"]) {
+      for (const [table, id] of [
+        ["knowledge", `k-${tenant}`],
+        ["distillations", `d-${tenant}`],
+        ["entities", `e-${tenant}`],
+      ]) {
+        expect(embeddingOf(table, id)).not.toBeNull();
+      }
+    }
+  });
+
+  test("does not write a vector after its source moves to another tenant during inference", async () => {
+    checkConfigChange();
+    const ownerA = withTenant("tenant-a", () =>
+      ensureProject("/test/backfill-owner-a"),
+    );
+    const ownerB = withTenant("tenant-b", () =>
+      ensureProject("/test/backfill-owner-b"),
+    );
+    const now = Date.now();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, tenant_id, category, title, content, created_at, updated_at, logical_id) VALUES ('moved-during-inference', ?, 'tenant-a', 'test', 'private-a', 'content', ?, ?, 'moved-during-inference')",
+      )
+      .run(ownerA, now, now);
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          expect(currentTenantId()).toBe("tenant-a");
+          expect(texts).toEqual(["private-a\ncontent"]);
+          withTenant("tenant-b", () =>
+            db()
+              .query(
+                "UPDATE knowledge SET project_id = ?, tenant_id = 'tenant-b' WHERE id = 'moved-during-inference'",
+              )
+              .run(ownerB),
+          );
+          return [VEC];
+        },
+      },
+    });
+
+    expect(await backfillEmbeddings()).toBe(0);
+    expect(embeddingOf("knowledge", "moved-during-inference")).toBeNull();
+  });
+
+  test("does not submit a later page item after it changes tenants during an earlier batch", async () => {
+    checkConfigChange();
+    const ownerA = withTenant("tenant-a", () =>
+      ensureProject("/test/backfill-submission-owner-a"),
+    );
+    const ownerB = withTenant("tenant-b", () =>
+      ensureProject("/test/backfill-submission-owner-b"),
+    );
+    const now = Date.now();
+    const insert = db().query(
+      "INSERT INTO knowledge (id, project_id, tenant_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'tenant-a', 'test', ?, 'content', ?, ?, ?)",
+    );
+    for (let i = 0; i < 9; i++) {
+      const id = `queued-tenant-${String(i).padStart(2, "0")}`;
+      insert.run(id, ownerA, `private-a-${id}`, now, now, id);
+    }
+    const calls: Array<{ tenant: string; texts: string[] }> = [];
+    _restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          calls.push({ tenant: currentTenantId(), texts });
+          if (calls.length === 1) {
+            withTenant("tenant-b", () =>
+              db()
+                .query(
+                  "UPDATE knowledge SET project_id = ?, tenant_id = 'tenant-b' WHERE id = 'queued-tenant-08'",
+                )
+                .run(ownerB),
+            );
+          }
+          return texts.map(() => VEC);
+        },
+      },
+    });
+
+    expect(await backfillEmbeddings()).toBe(8);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].tenant).toBe("tenant-a");
+    expect(calls[0].texts).toHaveLength(8);
+    expect(embeddingOf("knowledge", "queued-tenant-08")).toBeNull();
+  });
+
+  test.each([false, true])(
+    "does not replace a live vector after source content changes (moved=%s)",
+    async (moved) => {
+      checkConfigChange();
+      const id = `changed-while-embedding-${moved}`;
+      const now = Date.now();
+      const destination = ensureProject("/test/backfill-changed-destination");
+      db()
+        .query(
+          "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'test', 'old', 'content', ?, ?, ?)",
+        )
+        .run(id, pid, now, now, id);
+      const live = unit([0, 1, 0]);
+      _restoreProvider({
+        provider: {
+          maxBatchSize: 8,
+          async embed(texts: string[]) {
+            expect(texts).toEqual(["old\ncontent"]);
+            db()
+              .query(
+                "UPDATE knowledge SET title = 'new', project_id = ? WHERE id = ?",
+              )
+              .run(moved ? destination : pid, id);
+            storeEmbedding(db(), "knowledge", id, live);
+            return [VEC];
+          },
+        },
+      });
+
+      expect(await backfillEmbeddings()).toBe(0);
+      expect(
+        Array.from(fromBlob(embeddingOf("knowledge", id) as Buffer)),
+      ).toEqual(Array.from(live));
+    },
+  );
+
+  test("keeps private storage failures out of logs and ignores a throwing diagnostic sink", async () => {
+    const now = Date.now();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES ('private-failure', ?, 'test', 'Private title', 'Private content', ?, ?, 'private-failure')",
+      )
+      .run(pid, now, now);
+    const privateText = "PRIVATE_BACKFILL_FAILURE_BODY";
+    const seen: string[] = [];
+    log.registerSink({
+      info() {},
+      warn() {},
+      error(message) {
+        seen.push(message);
+        throw new Error("diagnostic sink failed");
+      },
+      captureException() {},
+      withDbSpan(sql, fn) {
+        if (sql.startsWith("UPDATE knowledge SET embedding"))
+          throw new Error(privateText);
+        return fn();
+      },
+    });
+    try {
+      await expect(backfillEmbeddings()).resolves.toBe(0);
+      expect(seen.join(" ")).not.toContain(privateText);
+      expect(embeddingOf("knowledge", "private-failure")).toBeNull();
+    } finally {
+      log.registerSink({
+        info() {},
+        warn() {},
+        error() {},
+        captureException() {},
+      });
+    }
+  });
+
+  test("does not fail completed document backfill when information logging throws", async () => {
+    const now = Date.now();
+    db()
+      .query(
+        "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES ('info-sink', ?, 'test', 'info', 'content', ?, ?, 'info-sink')",
+      )
+      .run(pid, now, now);
+    log.registerSink({
+      info() {
+        throw new Error("information sink failed");
+      },
+      warn() {},
+      error() {},
+      captureException() {},
+    });
+    try {
+      expect(await backfillEmbeddings()).toBe(1);
+      expect(embeddingOf("knowledge", "info-sink")).not.toBeNull();
+    } finally {
+      log.registerSink({
+        info() {},
+        warn() {},
+        error() {},
+        captureException() {},
+      });
+    }
+  });
+
+  test("fetches large startup corpora in bounded source pages", async () => {
+    checkConfigChange();
+    const now = Date.now();
+    const insert = db().query(
+      "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'test', 'page', 'content', ?, ?, ?)",
+    );
+    for (let i = 0; i < 129; i++) {
+      const id = `page-${String(i).padStart(3, "0")}`;
+      insert.run(id, pid, now, now, id);
+    }
+    const pageReads: string[] = [];
+    log.registerSink({
+      info() {},
+      warn() {},
+      error() {},
+      captureException() {},
+      withDbSpan(sql, fn) {
+        if (sql.includes("ORDER BY k.id LIMIT ?")) pageReads.push(sql);
+        return fn();
+      },
+    });
+    try {
+      expect(await backfillEmbeddings()).toBe(129);
+      expect(pageReads).toHaveLength(3);
+      expect(embeddingOf("knowledge", "page-128")).not.toBeNull();
+    } finally {
+      log.registerSink({
+        info() {},
+        warn() {},
+        error() {},
+        captureException() {},
+      });
+    }
+  });
+
+  test("skips an oversized startup source and continues to the next owned row", async () => {
+    const now = Date.now();
+    const insert = db().query(
+      "INSERT INTO knowledge (id, project_id, category, title, content, created_at, updated_at, logical_id) VALUES (?, ?, 'test', 'title', ?, ?, ?, ?)",
+    );
+    insert.run(
+      "a-oversized-source",
+      pid,
+      "x".repeat(256 * 1024 + 1),
+      now,
+      now,
+      "a-oversized-source",
+    );
+    insert.run(
+      "b-small-source",
+      pid,
+      "bounded source content",
+      now,
+      now,
+      "b-small-source",
+    );
+
+    expect(await backfillEmbeddings()).toBe(1);
+    expect(embeddingOf("knowledge", "a-oversized-source")).toBeNull();
+    expect(embeddingOf("knowledge", "b-small-source")).not.toBeNull();
   });
 
   test("fire-and-forget writes suppress expected queue backpressure", async () => {

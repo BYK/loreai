@@ -25,6 +25,7 @@ import {
   entityDetail,
   entityListPage,
   entityRebuildStatus,
+  importListPage,
   knowledgeEntry,
   knowledgeList,
   knowledgeVersionHistory,
@@ -150,6 +151,40 @@ beforeAll(async () => {
     metadata: { role: "engineer", notes: "Writes the contract fixtures." },
   }).id;
   entities.linkKnowledge(SEEDED.knowledgeId, SEEDED.entityId);
+
+  // Two conversation-import rows for the project imports contract fixture.
+  db()
+    .query(
+      `INSERT INTO import_history
+       (id, project_id, agent_name, source_id, source_hash, entries_created, entries_updated, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "imp-ui-contracts-1",
+      SEEDED.projectId,
+      "claude",
+      "claude-session-2026-04",
+      "hash-1",
+      12,
+      3,
+      1_700_000_000_000,
+    );
+  db()
+    .query(
+      `INSERT INTO import_history
+       (id, project_id, agent_name, source_id, source_hash, entries_created, entries_updated, imported_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "imp-ui-contracts-2",
+      SEEDED.projectId,
+      "codex",
+      "codex-thread-77",
+      "hash-2",
+      4,
+      0,
+      1_700_000_500_000,
+    );
 
   const config = loadConfig();
   config.remoteGateway = false;
@@ -432,6 +467,15 @@ describe("ui contracts against the real gateway", () => {
         limit: 1,
       }),
       sessionSearchPage,
+    );
+  });
+
+  it("GET /projects/:id/imports", async () => {
+    await contractRoute(
+      "project-imports.json",
+      `/projects/${SEEDED.projectId}/imports`,
+      v1(["projects", SEEDED.projectId, "imports"]),
+      importListPage,
     );
   });
 

@@ -229,7 +229,7 @@ describe("ProjectPage", () => {
     fireEvent.click(await screen.findByRole("option", { name: "knowledge" }));
     fireEvent.submit(screen.getByRole("search"));
     await waitFor(() =>
-      expect(history.get()).toBe("/projects/p-1/search?q=&scope=knowledge"),
+      expect(history.get()).toBe("/projects/p-1/search?scope=knowledge"),
     );
   });
 
