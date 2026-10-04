@@ -75,6 +75,13 @@ import {
   originLabel,
 } from "~/reader/blocks";
 import { CAPTURE_HELP, coverageDeclaration } from "~/reader/coverage";
+import {
+  shouldChainOlder,
+  shouldLoadOlder,
+  watchUserScroll,
+} from "~/reader/lazy-older";
+import { QuickSearchBar } from "~/components/reader/QuickSearch";
+import { isFindShortcut } from "~/reader/quick-search";
 import { buildMarkers } from "~/reader/markers";
 import { displayedText } from "~/reader/render";
 import { buildRows, indexRows, type ReaderRow } from "~/reader/rows";
@@ -442,7 +449,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   const scrollToBlock = (blockId: string) => {
     const index = rowIndexOf(blockId);
     if (index < 0) return;
-    virtualizer.scrollToIndex(index, { align: "center" });
+    programmaticScroll(() =>
+      virtualizer.scrollToIndex(index, { align: "center" }),
+    );
   };
 
   const resolveLink = (decoded: DecodedAnchor) => {
@@ -584,10 +593,34 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    */
   let prepend: {
     top: number;
-    total: number;
+    /** The anchor row's start offset at request time — the delta is how
+     * far the prepend displaced it, not how much the list grew (live
+     * appends add height below the fold that must not move the view). */
+    anchorStart: number;
     anchor: { key: string; index: number } | null;
+    /** The first row at the fold and its screen top, refreshed every
+     * frame until the page lands — the mount window and the first
+     * measures of the rows at the top keep shifting the fold for a few
+     * frames, so only the freshest capture reflects the settled view. */
+    pin: { key: string; top: number } | null;
+    /** The fold row itself — the row actually under the eye. It sits at
+     * the viewport edge and slips in and out of the overscan range, so
+     * the repin prefers it when mounted and falls back to `pin`. */
+    foldPin: { key: string; top: number } | null;
+    /** The user-scroll serial when the page was requested — a gesture
+     * between request and landing re-anchors the estimate-delta
+     * compensation to where the user left the view. */
+    serialAtStart: number;
     forLink: string | null;
   } | null = null;
+  /** Bumped per `loadOlder` call: frame loops from an earlier request bail
+   * so a failed-then-retried load never has two `capturePin`/`repin` loops
+   * fighting over the same `prepend`. */
+  let loadGen = 0;
+  /** Set when the in-flight (or last-settled) older page actually prepended
+   * rows — the busy→idle chain check only continues real deliveries, so a
+   * no-progress owner cannot loop the loader at the top. */
+  let prependLanded = false;
 
   async function loadOlder() {
     if (
@@ -598,20 +631,119 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     ) {
       return;
     }
-    const last = virtualizer.getVirtualItems().at(-1);
+    const gen = ++loadGen;
+    const el = scrollEl;
+    const items = virtualizer.getVirtualItems();
+    const last = items.at(-1);
+    const pinNow = (items: ReturnType<typeof virtualizer.getVirtualItems>) => {
+      const foldIdx = items.findIndex((item) => item.end > el.scrollTop);
+      // A few rows under the fold: the fold row itself sits at the
+      // viewport edge and keeps dropping out of the overscan range — an
+      // unmounted row cannot witness the prepend.
+      const pinItem =
+        foldIdx >= 0
+          ? items[Math.min(foldIdx + 3, items.length - 1)]
+          : undefined;
+      const rowEl = pinItem
+        ? el.querySelector<HTMLElement>(
+            `[data-row-key="${CSS.escape(String(pinItem.key))}"]`,
+          )
+        : null;
+      const foldItem = foldIdx >= 0 ? items[foldIdx] : undefined;
+      const foldEl = foldItem
+        ? el.querySelector<HTMLElement>(
+            `[data-row-key="${CSS.escape(String(foldItem.key))}"]`,
+          )
+        : null;
+      return {
+        pin:
+          pinItem && rowEl
+            ? {
+                key: String(pinItem.key),
+                top: rowEl.getBoundingClientRect().top,
+              }
+            : null,
+        foldPin:
+          foldItem && foldEl
+            ? {
+                key: String(foldItem.key),
+                top: foldEl.getBoundingClientRect().top,
+              }
+            : null,
+      };
+    };
+    // The repin only guards loads that started near the top — the scroll-up
+    // auto-load path, where a whole fresh page of unmeasured rows lands
+    // between the fold and the top. Mid-scroll loads have their neighbours
+    // measured already and the estimate delta alone holds the view.
+    const enablePin = el.scrollTop - listOffset() < el.clientHeight;
     prepend = {
-      top: scrollEl.scrollTop,
-      total: virtualizer.getTotalSize(),
+      top: el.scrollTop,
+      anchorStart:
+        virtualizer.getOffsetForIndex(last?.index ?? 0, "start")?.[0] ?? 0,
       anchor: last ? { key: String(last.key), index: last.index } : null,
+      ...(enablePin ? pinNow(items) : { pin: null, foldPin: null }),
+      serialAtStart: userSerial() ?? -1,
       forLink: scrollTarget,
     };
+    // Refresh the pin every frame until the page lands: `getVirtualItems`
+    // can still return the pre-scroll mount window right now, an unmounted
+    // row cannot witness the prepend, the first measures of the rows
+    // already at the top keep shifting the fold for a few frames, and a
+    // user scroll mid-load moves the fold too — the refresh deliberately
+    // does not stop on gestures, so the pin that lands is at most a frame
+    // behind what the user is looking at.
+    const firstKeyAtCall = rows()[0]?.key;
+    if (enablePin && typeof requestAnimationFrame === "function") {
+      let frames = 0;
+      const capturePin = () => {
+        // A prepend changed the top row — the request is spent. A live
+        // append at the end leaves the fold untouched, so keep refreshing.
+        if (gen !== loadGen || !prepend || rows()[0]?.key !== firstKeyAtCall)
+          return;
+        if (++frames > 300) return;
+        const mounted = virtualizer.getVirtualItems();
+        const nearTop = el.scrollTop - listOffset() < el.clientHeight;
+        // The mount window lags the issued scroll for a frame or two after
+        // the request — a mid-load user scroll legitimately keeps the
+        // window away from the top, so the stale check only applies while
+        // the request-time scroll could still be settling.
+        const staleMount =
+          frames < 5 && nearTop && (mounted[0]?.index ?? 0) > mounted.length;
+        if (!staleMount) {
+          const { pin, foldPin } = pinNow(mounted);
+          if (prepend) {
+            if (pin) prepend.pin = pin;
+            if (foldPin) prepend.foldPin = foldPin;
+          }
+        }
+        requestAnimationFrame(capturePin);
+      };
+      requestAnimationFrame(capturePin);
+    }
+    prependLanded = false;
     setOlderInFlight(true);
+    // Dropping the request state bumps the generation so the pin loop
+    // stops next frame instead of polling a page that will never land.
+    const dropRequest = () => {
+      loadGen += 1;
+      prepend = null;
+    };
     try {
       await props.onLoadOlder();
+      // Owners that report a failure through `olderError` and resolve
+      // (sessions.ts does) land here — with no prepend landed, the pin
+      // loop is still polling, so drop the request just like a rejection.
+      if (props.olderError && rows()[0]?.key === firstKeyAtCall) {
+        dropRequest();
+      }
     } catch {
       // the owner reports the failure through `olderError`
+      dropRequest();
     } finally {
-      prepend = null;
+      // `prepend` is cleared by the rows effect once it has consumed it —
+      // clearing it here would race a rows update that lands after this
+      // promise resolves and skip the scroll compensation entirely.
       setOlderInFlight(false);
     }
   }
@@ -630,19 +762,333 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // The prepended rows are unmeasured, so they enter at the estimate; the
         // first-measure compensation in the virtualizer corrects the rest as
         // they are measured.
-        const delta = virtualizer.getTotalSize() - before.total;
+        const anchorIndex = rowIndexOf(before.anchor.key);
+        const anchorStart = virtualizer.getOffsetForIndex(
+          anchorIndex,
+          "start",
+        )?.[0];
+        if (anchorStart === undefined) return;
+        const delta = anchorStart - before.anchorStart;
         if (delta <= 0) return;
-        const target = before.top + delta;
+        // A user gesture during the load owns the position: re-anchor to
+        // where they left it (prepended height still compensates on top).
+        const userTook =
+          before.serialAtStart >= 0 && userSerial() !== before.serialAtStart;
+        const target = (userTook ? scrollEl.scrollTop : before.top) + delta;
         virtualizer.scrollToOffset(target);
         // The virtualizer learns the offset from the scroll event, a frame
         // away. Until then it keeps the rows that sat at the old offset
         // mounted, and their first measures would compensate against that
         // offset and drag the viewport back; hand it the new one now.
         virtualizer.scrollOffset = target;
+        // Re-pin the row under the eye: prepended overscan rows measure at
+        // their real heights over the next frames, and each first-measure
+        // adjustment drags the viewport. Keep correcting for a couple dozen
+        // frames — a correction that finds no drift costs nothing, and late
+        // measures must not get the last word. The pin was refreshed every
+        // frame while the page was in flight, gestures included, so it is
+        // at most a frame behind the screen the user last saw — capturing
+        // one here would read the pre-relayout DOM instead.
+        const pin = before.pin;
+        const foldPin = before.foldPin;
+        if ((pin || foldPin) && typeof requestAnimationFrame === "function") {
+          let frames = 0;
+          const serial0 = userSerial() ?? -1;
+          const genAtLand = loadGen;
+          const repin = () => {
+            const el = scrollEl;
+            if (!el || ++frames > 24) return;
+            if (loadGen !== genAtLand) return;
+            if (serial0 >= 0 && userSerial() !== serial0) return;
+            // The fold row is the row under the eye; the deeper pin only
+            // stands in while the fold row is out of the mount window.
+            const primary = foldPin ?? pin;
+            const backup = foldPin !== null ? pin : null;
+            const readDrift = (p: { key: string; top: number }) => {
+              const rowEl = el.querySelector<HTMLElement>(
+                `[data-row-key="${CSS.escape(p.key)}"]`,
+              );
+              return rowEl ? rowEl.getBoundingClientRect().top - p.top : null;
+            };
+            const drift =
+              (primary ? readDrift(primary) : null) ??
+              (backup ? readDrift(backup) : null);
+            if (drift !== null && drift !== 0) {
+              const next = el.scrollTop + drift;
+              if (drift < 0) repinIssued = next;
+              // Go through the virtualizer's own scroll so a reconcile
+              // cannot drag the offset back to a stale target.
+              virtualizer.scrollToOffset(next);
+              virtualizer.scrollOffset = next;
+            }
+            // An unmounted pin row retries next frame — it can slip out of
+            // the mounted window while the measures settle.
+            requestAnimationFrame(repin);
+          };
+          requestAnimationFrame(repin);
+        }
+        // A page shorter than a viewport leaves the reader at the top; the
+        // chain rule keeps loading until older history fills it.
+        prependLanded = true;
+        maybeChainOlder();
       },
       { defer: true },
     ),
   );
+
+  // -- landing & lazy older history -----------------------------------------
+  // The reader lands at the newest message once the session's rows first
+  // exist (#1923); a pending deep link owns the scroll instead and only
+  // marks the reader as landed. Scrolling back up near the top pages older
+  // history in (see `reader/lazy-older` for the rules).
+  const [landed, setLanded] = createSignal(false);
+  /** True while the landing rAF loop may still issue scrolls — the manual
+   * older-history buttons stay disabled until it settles so a click cannot
+   * interleave with its re-issued `scrollToIndex` calls. */
+  const [landingActive, setLandingActive] = createSignal(false);
+  /** Cancels the in-flight landing loop; a new session must not inherit a
+   * stale loop that could still issue scrolls or flip `landingActive` off
+   * early and re-arm the older-history buttons. */
+  let cancelLanding: (() => void) | null = null;
+  createEffect(
+    on(
+      () => props.sessionId,
+      () => {
+        setLanded(false);
+        cancelLanding?.();
+        // The old session's prepend bookkeeping is stale too: dropping it
+        // and bumping the generation stops its capture/repin loops and
+        // keeps a late-resolving page from compensating the new view.
+        prependLanded = false;
+        prepend = null;
+        loadGen += 1;
+      },
+    ),
+  );
+
+  createEffect(() => {
+    if (landed() || rows().length === 0 || !scrollEl) return;
+    setLanded(true);
+    if (scrollTarget !== null || props.anchorParam !== null) return;
+    const last = () => untrack(rows).length - 1;
+    virtualizer.scrollToIndex(last(), { align: "end" });
+    // Rows enter at ROW_ESTIMATE; as they measure, the landed position can
+    // drift off the end. Re-issue the landing each frame until the last row
+    // is actually in view, the user scrolls away, or the cap hits.
+    if (typeof requestAnimationFrame === "function") {
+      // Each end re-target gets its own frame budget, but a session that
+      // keeps streaming forever still has to settle — `totalFrames` is the
+      // hard stop across all restarts.
+      const LANDING_FRAME_CAP = 24;
+      const LANDING_TOTAL_CAP = 120;
+      cancelLanding?.();
+      let frames = 0;
+      let totalFrames = 0;
+      let reachedEnd = false;
+      /** The last index the loop already reached once — a snapshot, not a
+       * live read, so rows streaming in mid-landing do not make the settled
+       * window look like the user scrolled away. */
+      let endAt = -1;
+      let prevLast = last();
+      let chained = false;
+      setLandingActive(true);
+      const serial0 = userSerial() ?? -1;
+      let frameId = 0;
+      const finish = () => {
+        setLandingActive(false);
+        if (cancelLanding === cancel) cancelLanding = null;
+      };
+      const cancel = () => {
+        cancelAnimationFrame(frameId);
+        finish();
+      };
+      cancelLanding = cancel;
+      const land = () => {
+        const el = scrollEl;
+        if (!el || ++totalFrames > LANDING_TOTAL_CAP) {
+          finish();
+          return;
+        }
+        if (serial0 >= 0 && userSerial() !== serial0) {
+          finish();
+          return;
+        }
+        if (last() !== prevLast) {
+          // Rows streamed in mid-landing: land at the new end instead, and
+          // restart the frame budget so a busy stream cannot starve it.
+          // Checked before the per-restart cap so a row arriving exactly
+          // on the cap frame still gets its landing.
+          prevLast = last();
+          reachedEnd = false;
+          frames = 0;
+          virtualizer.scrollToIndex(last(), { align: "end" });
+        }
+        if (++frames > LANDING_FRAME_CAP) {
+          finish();
+          return;
+        }
+        const items = virtualizer.getVirtualItems();
+        const lastItem = items.at(-1);
+        if (lastItem && lastItem.index === last() && !reachedEnd) {
+          reachedEnd = true;
+          endAt = last();
+        }
+        const arrived =
+          lastItem !== undefined &&
+          lastItem.index === last() &&
+          lastItem.end <= el.scrollTop + el.clientHeight + 1;
+        // Once the mount window has reached the end, it moving far above it
+        // again means the user took the scroll — measurement shrinkage also
+        // lowers scrollTop but the window stays at the bottom, so it never
+        // looks like this. Before reaching the end the window legitimately
+        // lags behind the issued scroll, so the check does not apply yet.
+        const userAway =
+          reachedEnd &&
+          !arrived &&
+          items.length > 0 &&
+          items.at(-1)!.index < endAt - 10;
+        if (userAway) {
+          finish();
+          return;
+        }
+        // Keep watching past the first arrival: rows that measure shorter
+        // than the estimate pull the offset back up afterwards, and only a
+        // re-issue puts the end back under the eye.
+        if (!arrived) {
+          virtualizer.scrollToIndex(last(), { align: "end" });
+        } else if (!chained) {
+          // A first page shorter than the viewport gets its next page
+          // eagerly — the chain effect keeps going until it fills.
+          chained = true;
+          maybeChainOlder();
+        }
+        frameId = requestAnimationFrame(land);
+      };
+      frameId = requestAnimationFrame(land);
+    } else {
+      // No frame loop: settle on the issued scroll and still fill a short
+      // first page.
+      setLandingActive(false);
+      maybeChainOlder();
+    }
+  });
+
+  const olderGate = () => ({
+    hasOlder: props.hasOlder,
+    busy: props.loadingOlder === true || olderInFlight(),
+    error: props.olderError,
+    landed: landed(),
+    linkPending: scrollTarget !== null,
+  });
+
+  /** The manual load buttons stay disabled while the landing loop may
+   * still issue scrolls — a click mid-landing would interleave a prepend
+   * with its re-issued `scrollToIndex` calls — and while a load is already
+   * in flight, so a second click cannot look like a dead button. */
+  const olderButtonsReady = () =>
+    landed() &&
+    !landingActive() &&
+    !(props.loadingOlder === true || olderInFlight());
+
+  function maybeChainOlder() {
+    const el = scrollEl;
+    if (!el) return;
+    if (
+      shouldChainOlder({
+        ...olderGate(),
+        scrollTop: el.scrollTop,
+        listOffset: listOffset(),
+        clientHeight: el.clientHeight,
+      })
+    ) {
+      void loadOlder();
+    }
+  }
+
+  // The busy→idle transition runs the chain check too: the store may apply
+  // the page before its promise settles, so the rows effect alone cannot
+  // rely on `olderInFlight` still being true when it runs.
+  createEffect(
+    on(
+      () => props.loadingOlder === true || olderInFlight(),
+      (busy) => {
+        if (!busy && prependLanded) maybeChainOlder();
+      },
+      { defer: true },
+    ),
+  );
+
+  // Upward moves near the top page older history in; downward moves (the
+  // landing, prepend compensation, search scrolls) never do.
+  let prevScrollTop = -1;
+  // Programmatic scrolls (deep links, search hits, jump buttons, mark
+  // reveals) are not the user either: `programmaticScroll` snapshots the
+  // gesture serial and `onScroll` skips load checks until it next moves.
+  // An unwatchable serial (-1) just means no suppression.
+  let suppressLoadSerial = -1;
+  function programmaticScroll(fn: () => void) {
+    suppressLoadSerial = userSerial() ?? -1;
+    fn();
+  }
+  // The repin loop's own upward corrections are not user scrolls; an
+  // upward move that lands exactly on a repin-issued offset never
+  // triggers the next load. A user scroll only coincides if it reaches the
+  // same pixel, and the marker clears on the next event either way.
+  let repinIssued = -1;
+  function onScroll() {
+    const el = scrollEl;
+    if (!el) return;
+    const top = el.scrollTop;
+    const prev = prevScrollTop;
+    prevScrollTop = top;
+    if (top < prev && Math.abs(top - repinIssued) < 1) {
+      repinIssued = -1;
+      return;
+    }
+    if (suppressLoadSerial >= 0) {
+      if ((userSerial() ?? -1) === suppressLoadSerial) return;
+      suppressLoadSerial = -1;
+    }
+    if (
+      shouldLoadOlder({
+        ...olderGate(),
+        scrollTop: top,
+        prevScrollTop: prev,
+        listOffset: listOffset(),
+        clientHeight: el.clientHeight,
+      })
+    ) {
+      void loadOlder();
+    }
+  }
+
+  /** Serial that changes when the user gestures at the scroller — the rAF
+   * loops below snapshot it at start and stop (without scrolling) as soon
+   * as it moves, so user input is never folded into their corrections.
+   * Created lazily: a loop that starts before `onMount` runs still gets a
+   * live watcher instead of silently running ungated. */
+  let userScroll: { serial(): number; dispose(): void } | null = null;
+  function userSerial() {
+    // A pending rAF can outlive the component; a detached scroller gets
+    // no watcher — listeners on it would just leak.
+    if (!userScroll && scrollEl?.isConnected) {
+      userScroll = watchUserScroll(scrollEl);
+    }
+    return userScroll?.serial();
+  }
+
+  onMount(() => {
+    const scroll = scrollEl;
+    if (!scroll) return;
+    prevScrollTop = scroll.scrollTop;
+    scroll.addEventListener("scroll", onScroll);
+    userScroll ??= watchUserScroll(scroll);
+    onCleanup(() => {
+      scroll.removeEventListener("scroll", onScroll);
+      userScroll?.dispose();
+      userScroll = null;
+    });
+  });
 
   // -- focus ---------------------------------------------------------------
   const [focusKey, setFocusKey] = createSignal<string | null>(null);
@@ -678,6 +1124,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
 
   function onKeyDown(event: KeyboardEvent) {
     const target = event.target as HTMLElement;
+    // Ctrl/Cmd+F opens the quick-search bar from anywhere in the reader —
+    // except the search input itself, where it falls through to the
+    // browser's own find on a second press.
+    if (isFindShortcut(event)) {
+      if (target !== searchInputEl) {
+        event.preventDefault();
+        openQuickSearch();
+      }
+      return;
+    }
     if (
       event.key === "Escape" &&
       (selection() || selectionHint() || linkState().kind !== "none")
@@ -741,6 +1197,45 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   // -- in-session search ---------------------------------------------------
   const [query, setQuery] = createSignal("");
   const [search, setSearch] = createSignal<SearchState>(SEARCH_IDLE);
+  // The quick-search bar (#1922) collapses behind Ctrl/Cmd+F, Escape, the
+  // toolbar Find button or its own close control; `returnFocus` is the
+  // reader element that had focus when it opened.
+  const [quickSearchOpen, setQuickSearchOpen] = createSignal(false);
+  let searchInputEl: HTMLInputElement | undefined;
+  let returnFocus: HTMLElement | null = null;
+
+  function openQuickSearch() {
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== searchInputEl &&
+      scrollEl?.contains(active)
+    ) {
+      returnFocus = active;
+    }
+    setQuickSearchOpen(true);
+    // Solid renders the bar synchronously; the input is already mounted.
+    searchInputEl?.focus();
+    searchInputEl?.select();
+  }
+
+  function closeQuickSearch() {
+    clearSearch();
+    setQuickSearchOpen(false);
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+      returnFocus = null;
+      return;
+    }
+    const key = focusKey();
+    const row = key
+      ? scrollEl?.querySelector<HTMLElement>(
+          `[data-row-key="${CSS.escape(key)}"]`,
+        )
+      : undefined;
+    if (row) row.focus();
+    else scrollEl?.focus();
+  }
   const [hitIndex, setHitIndex] = createSignal(-1);
   const [searchHit, setSearchHit] = createSignal<PassageHighlight | null>(null);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -825,6 +1320,29 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       { defer: true },
     ),
   );
+
+  /** Every hit, grouped by `${blockId}\0${partIndex}` — mounted rows mark
+   * them all with `passage-search-all`; the current hit keeps
+   * `passage-search`. Capped per part to bound the wrap work. */
+  const allHits = createMemo(() => {
+    const map = new Map<string, PassageHighlight[]>();
+    for (const hit of search().hits) {
+      const key = `${hit.blockId} ${hit.partIndex}`;
+      const list = map.get(key);
+      if (list && list.length >= 200) continue;
+      const span = {
+        blockId: hit.blockId,
+        partIndex: hit.partIndex,
+        start: hit.start,
+        end: hit.end,
+      };
+      if (list) list.push(span);
+      else map.set(key, [span]);
+    }
+    return map;
+  });
+  const hitsFor = (blockId: string, partIndex: number) =>
+    allHits().get(`${blockId} ${partIndex}`) ?? [];
 
   /** Keep the current hit pointing at the same passage across re-scans. */
   createEffect(
@@ -1084,12 +1602,15 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       value={{
         highlight,
         searchHit,
+        searchHits: hitsFor,
         onApplied: (mark, h) => {
           // A deep link or search hit scrolls to its passage once its own mark
           // exists; a selection mark on the same block must not consume it.
           if (pendingMark && samePassage(h, pendingMark)) {
             pendingMark = null;
-            mark.scrollIntoView?.({ block: "center" });
+            programmaticScroll(() =>
+              mark.scrollIntoView?.({ block: "center" }),
+            );
           }
         },
       }}
@@ -1103,6 +1624,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           ref={(el) => (scrollEl = el)}
           class="relative min-h-0 flex-1 overflow-y-auto"
           data-testid="session-scroll"
+          tabIndex={-1}
           onPointerUp={() => queueMicrotask(selectFromDom)}
           onKeyUp={(e) => {
             if (e.shiftKey || e.key === "Shift") queueMicrotask(selectFromDom);
@@ -1147,180 +1669,152 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                 </span>
               </Show>
               <span class="ml-auto flex items-center gap-2">
-                <Show when={props.hasOlder === true}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="search-open"
+                  aria-label="Find in session"
+                  onClick={openQuickSearch}
+                >
+                  Find
+                </Button>
+                <Show
+                  when={
+                    (virtualizer.getVirtualItems().at(-1)?.index ?? -1) <
+                    rows().length - 1
+                  }
+                >
                   <Button
                     variant="outline"
                     size="sm"
-                    data-testid="load-older"
-                    disabled={props.loadingOlder}
-                    onClick={() => void loadOlder()}
+                    data-testid="jump-to-latest"
+                    onClick={() =>
+                      programmaticScroll(() =>
+                        virtualizer.scrollToIndex(rows().length - 1, {
+                          align: "end",
+                        }),
+                      )
+                    }
                   >
-                    {props.loadingOlder ? "Loading…" : "Load older history"}
+                    Jump to latest
                   </Button>
                 </Show>
-                <Show when={props.hasOlder === false && loaded() > 0}>
-                  <span data-testid="history-start">
-                    Start of captured history
-                  </span>
+                <Show
+                  when={
+                    props.hasOlder === false &&
+                    (virtualizer.getVirtualItems()[0]?.index ?? 0) > 0
+                  }
+                >
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="jump-to-start"
+                    onClick={() =>
+                      programmaticScroll(() =>
+                        virtualizer.scrollToIndex(0, { align: "start" }),
+                      )
+                    }
+                  >
+                    Jump to start
+                  </Button>
                 </Show>
               </span>
-              <Show when={props.olderError}>
-                {(err) => (
-                  <span class="basis-full text-danger" role="alert">
-                    Older history unavailable: {errorMessage(err())}
-                  </span>
-                )}
-              </Show>
             </div>
-            <form
-              role="search"
-              aria-label="Search this session"
-              class="flex flex-wrap items-center gap-2 border-b border-line px-5 py-2 text-xs sm:px-7.5"
-              onSubmit={(e) => {
-                e.preventDefault();
-                stepHit(1);
-              }}
-            >
-              <input
-                type="search"
-                data-testid="search-input"
-                aria-label="Find in session"
-                placeholder="Find in session…"
-                autocomplete="off"
-                class="h-8 min-w-0 flex-1 rounded-md border border-line bg-bg px-2.5 text-[13px] text-text outline-none focus-visible:ring-2 focus-visible:ring-ring sm:max-w-xs"
-                value={query()}
-                onInput={(e) => setQuery(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.stopPropagation();
-                    if (query()) clearSearch();
-                    else e.currentTarget.blur();
-                  } else if (e.key === "Enter" && e.shiftKey) {
-                    e.preventDefault();
-                    stepHit(-1);
-                  }
-                }}
-              />
-              <Show when={searchSummary()}>
-                {(summary) => (
-                  <>
-                    <span
-                      data-testid="search-summary"
-                      role="status"
-                      aria-live="polite"
-                      class="text-muted"
-                    >
-                      {summary()}
+            <Show when={quickSearchOpen()}>
+              <QuickSearchBar
+                query={query()}
+                onQuery={setQuery}
+                count={
+                  queryMatcher(query()) !== null
+                    ? { index: hitIndex(), total: search().hits.length }
+                    : null
+                }
+                scanning={!search().done}
+                summary={searchSummary()}
+                canStep={search().hits.length > 0}
+                canSelect={hitIndex() >= 0}
+                onStep={stepHit}
+                onSelect={selectHit}
+                onClear={clearSearch}
+                onClose={closeQuickSearch}
+                inputRef={(el) => (searchInputEl = el)}
+              >
+                <Show when={search().done && coverage().kind === "partial"}>
+                  <span
+                    class="flex basis-full flex-wrap items-center gap-2 text-muted"
+                    data-testid="search-coverage"
+                  >
+                    <span>
+                      Searched the loaded history only · {coverage().detail}
                     </span>
-                    <span class="flex items-center gap-1">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        data-testid="search-prev"
-                        aria-label="Previous match"
-                        disabled={search().hits.length === 0}
-                        onClick={() => stepHit(-1)}
-                      >
-                        ↑
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        data-testid="search-next"
-                        aria-label="Next match"
-                        disabled={search().hits.length === 0}
-                        onClick={() => stepHit(1)}
-                      >
-                        ↓
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        data-testid="search-select"
-                        disabled={hitIndex() < 0}
-                        onClick={selectHit}
-                      >
-                        Select match
-                      </Button>
+                    <Show when={props.hasOlder === true && !props.loadingOlder}>
                       <button
                         type="button"
                         class="text-xs text-accent underline"
-                        data-testid="search-clear"
-                        onClick={clearSearch}
+                        data-testid="search-load-older"
+                        disabled={!olderButtonsReady()}
+                        onClick={() => {
+                          if (!olderButtonsReady()) return;
+                          void loadOlder();
+                        }}
                       >
-                        Clear
+                        Load older history
                       </button>
-                    </span>
-                    <Show when={search().done && coverage().kind === "partial"}>
-                      <span
-                        class="flex basis-full flex-wrap items-center gap-2 text-muted"
-                        data-testid="search-coverage"
+                    </Show>
+                    <Show
+                      when={
+                        wholeAvailable() &&
+                        (whole().kind === "idle" || whole().kind === "error")
+                      }
+                    >
+                      <button
+                        type="button"
+                        class="text-xs text-accent underline"
+                        data-testid="search-whole"
+                        onClick={() => void searchWhole()}
                       >
-                        <span>
-                          Searched the loaded history only · {coverage().detail}
-                        </span>
-                        <Show
-                          when={
-                            wholeAvailable() &&
-                            (whole().kind === "idle" ||
-                              whole().kind === "error")
-                          }
-                        >
-                          <button
-                            type="button"
-                            class="text-xs text-accent underline"
-                            data-testid="search-whole"
-                            onClick={() => void searchWhole()}
-                          >
-                            {whole().kind === "error"
-                              ? "Retry whole-session search"
-                              : "Search the whole session"}
-                          </button>
-                        </Show>
-                      </span>
+                        {whole().kind === "error"
+                          ? "Retry whole-session search"
+                          : "Search the whole session"}
+                      </button>
                     </Show>
-                    <Show when={wholeLine()}>
-                      {(line) => (
-                        <span
-                          class="flex basis-full flex-wrap items-center gap-2 text-muted"
-                          data-testid="search-whole-summary"
-                          data-whole-state={whole().kind}
-                          role="status"
-                          aria-live="polite"
+                  </span>
+                </Show>
+                <Show when={wholeLine()}>
+                  {(line) => (
+                    <span
+                      class="flex basis-full flex-wrap items-center gap-2 text-muted"
+                      data-testid="search-whole-summary"
+                      data-whole-state={whole().kind}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <span>{line()}</span>
+                      <Show when={olderHit() && reach()?.kind !== "loading"}>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          data-testid="search-whole-next"
+                          onClick={reachOlderHit}
                         >
-                          <span>{line()}</span>
-                          <Show
-                            when={olderHit() && reach()?.kind !== "loading"}
-                          >
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              data-testid="search-whole-next"
-                              onClick={reachOlderHit}
-                            >
-                              {reach()?.kind === "exhausted"
-                                ? "Keep loading"
-                                : "Go to the newest older match"}
-                            </Button>
-                          </Show>
-                          <Show when={reach()}>
-                            {(state) => (
-                              <span data-testid="search-reach">
-                                {reachLabel(state())}
-                              </span>
-                            )}
-                          </Show>
-                        </span>
-                      )}
-                    </Show>
-                  </>
-                )}
-              </Show>
-            </form>
+                          {reach()?.kind === "exhausted"
+                            ? "Keep loading"
+                            : "Go to the newest older match"}
+                        </Button>
+                      </Show>
+                      <Show when={reach()}>
+                        {(state) => (
+                          <span data-testid="search-reach">
+                            {reachLabel(state())}
+                          </span>
+                        )}
+                      </Show>
+                    </span>
+                  )}
+                </Show>
+              </QuickSearchBar>
+            </Show>
             <Show when={linkBanner()}>
               {(banner) => (
                 <div
@@ -1339,6 +1833,71 @@ export const SessionView: Component<SessionViewProps> = (props) => {
               )}
             </Show>
           </div>
+          <Show
+            when={
+              props.hasOlder === true ||
+              (props.hasOlder === false && loaded() > 0)
+            }
+          >
+            <div
+              class="flex h-9 items-center gap-2 border-b border-line px-5 text-xs text-muted sm:px-7.5"
+              data-testid="older-status"
+            >
+              <Switch>
+                <Match
+                  when={
+                    props.hasOlder === true &&
+                    (props.loadingOlder || olderInFlight())
+                  }
+                >
+                  <span role="status" data-testid="older-loading">
+                    Loading older history…
+                  </span>
+                </Match>
+                <Match when={props.hasOlder === true && props.olderError}>
+                  {(err) => (
+                    <>
+                      <span role="alert" class="text-danger">
+                        Older history unavailable: {errorMessage(err())}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid="older-retry"
+                        disabled={!olderButtonsReady()}
+                        onClick={() => {
+                          if (!olderButtonsReady()) return;
+                          void loadOlder();
+                        }}
+                      >
+                        Retry
+                      </Button>
+                    </>
+                  )}
+                </Match>
+                <Match when={props.hasOlder === true}>
+                  <span>Scroll up to load older history</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="load-older"
+                    disabled={!olderButtonsReady()}
+                    onClick={() => {
+                      if (!olderButtonsReady()) return;
+                      void loadOlder();
+                    }}
+                  >
+                    Load older history
+                  </Button>
+                </Match>
+                <Match when={props.hasOlder === false && loaded() > 0}>
+                  <span data-testid="history-start">
+                    Start of captured history
+                  </span>
+                </Match>
+              </Switch>
+            </div>
+          </Show>
           <Show when={rows().length === 0}>
             <p class="px-5 py-8 text-sm text-muted sm:px-7.5" role="status">
               No captured messages in this session.
