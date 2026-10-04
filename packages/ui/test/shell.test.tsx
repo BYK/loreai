@@ -24,6 +24,7 @@ import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import type {
   KnowledgeEntry,
   KnowledgeSearchResponse,
+  KnowledgeVersionHistory,
   ProjectSummary,
 } from "~/contracts";
 import {
@@ -1064,14 +1065,170 @@ describe("shell: empty, error, not-found and locked states", () => {
   });
 
   it("shows not-found for an unknown entry without breaking the connection status", async () => {
-    mount("/projects/p-lore/knowledge/nope", fakeClient());
+    const listKnowledgeVersions = vi
+      .fn<ApiClient["listKnowledgeVersions"]>()
+      .mockRejectedValue(
+        new ApiError(
+          "not_found",
+          "/knowledge/nope/versions",
+          "Knowledge entry not found",
+          404,
+        ),
+      );
+    mount(
+      "/projects/p-lore/knowledge/nope",
+      fakeClient({ listKnowledgeVersions }),
+    );
     expect(
       await screen.findByText("Knowledge entry not found"),
     ).toBeInTheDocument();
+    expect(listKnowledgeVersions).toHaveBeenCalledWith(
+      "nope",
+      expect.objectContaining({ includeDeleted: true }),
+    );
     expect(screen.getByTestId("connection-status")).toHaveAttribute(
       "data-connection",
       "reachable",
     );
+  });
+
+  it("shows deleted-entry recovery when history has a deleted head", async () => {
+    const deletedAt = Date.UTC(2026, 8, 3, 12);
+    const deletedHistory: KnowledgeVersionHistory = {
+      id: "k-merged",
+      current_version_id: "k-merged-v2",
+      versions: [
+        {
+          version_id: "k-merged-v2",
+          version: 2,
+          created_at: deletedAt,
+          superseded_at: null,
+          is_current: true,
+          is_deleted: true,
+          title: "Last live title",
+          content: "Last live content",
+          category: "decision",
+          confidence: 0.9,
+          scope: "project",
+          cross_project: false,
+          source_refs: {
+            session_id: null,
+            entry_id: "k-merged",
+            user_id: null,
+            created_by: null,
+            updated_by: null,
+            worker_provider_id: null,
+            worker_model_id: null,
+          },
+        },
+        {
+          version_id: "k-merged-v1",
+          version: 1,
+          created_at: deletedAt - 10_000,
+          superseded_at: deletedAt,
+          is_current: false,
+          is_deleted: false,
+          title: "Last live title",
+          content: "Last live content",
+          category: "decision",
+          confidence: 0.9,
+          scope: "project",
+          cross_project: false,
+          source_refs: {
+            session_id: null,
+            entry_id: "k-merged",
+            user_id: null,
+            created_by: null,
+            updated_by: null,
+            worker_provider_id: null,
+            worker_model_id: null,
+          },
+        },
+      ],
+    };
+    const listKnowledgeVersions = vi
+      .fn<ApiClient["listKnowledgeVersions"]>()
+      .mockResolvedValue(deletedHistory);
+    mount(
+      "/projects/p-lore/knowledge/k-merged",
+      fakeClient({ listKnowledgeVersions }),
+    );
+
+    expect(
+      await screen.findByTestId("deleted-knowledge-document"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("deleted-entry-last-live")).toHaveTextContent(
+      "Last live title",
+    );
+    expect(screen.getByTestId("deleted-entry-last-live")).toHaveTextContent(
+      "Last live content",
+    );
+    expect(screen.getByTestId("deleted-entry-last-live")).toHaveTextContent(
+      new Date(deletedAt).toLocaleString(),
+    );
+    expect(screen.getByTestId("knowledge-version-2")).toHaveTextContent(
+      "Deleted",
+    );
+    expect(
+      screen.getByText("Restoring arrives with knowledge editing (#1805)"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Restoring arrives with knowledge editing (#1805)",
+      }),
+    ).not.toBeInTheDocument();
+    expect(listKnowledgeVersions).toHaveBeenCalledWith(
+      "k-merged",
+      expect.objectContaining({ includeDeleted: true }),
+    );
+  });
+
+  it("keeps a not-found entry out of recovery when history has no tombstone", async () => {
+    const historyWithoutTombstone: KnowledgeVersionHistory = {
+      id: "missing-but-live",
+      current_version_id: "missing-but-live-v1",
+      versions: [
+        {
+          version_id: "missing-but-live-v1",
+          version: 1,
+          created_at: 1_700_000_000_000,
+          superseded_at: null,
+          is_current: true,
+          is_deleted: false,
+          title: "Not a tombstone",
+          content: "No recovery should appear.",
+          category: "decision",
+          confidence: 0.8,
+          scope: "project",
+          cross_project: false,
+          source_refs: {
+            session_id: null,
+            entry_id: "missing-but-live",
+            user_id: null,
+            created_by: null,
+            updated_by: null,
+            worker_provider_id: null,
+            worker_model_id: null,
+          },
+        },
+      ],
+    };
+    mount(
+      "/projects/p-lore/knowledge/missing-but-live",
+      fakeClient({
+        listKnowledgeVersions: async () => historyWithoutTombstone,
+      }),
+    );
+
+    expect(
+      await screen.findByText("Knowledge entry not found"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("deleted-knowledge-document"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Restoring arrives with knowledge editing (#1805)"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows an empty project list when the gateway has nothing yet", async () => {

@@ -88,6 +88,16 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(review).toBeVisible();
     await expect(review.getByTestId("duplicate-group")).toHaveCount(3);
     await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Duplicate review evidence sample candidate alpha",
+      }),
+    ).toHaveCount(1);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Shared-only evidence review seed alpha",
+      }),
+    ).toHaveCount(1);
+    await expect(
       review
         .getByText("Duplicate review evidence sample candidate alpha")
         .first(),
@@ -118,7 +128,7 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(review.getByText(/Updated /).first()).toBeVisible();
 
     const sharedGroup = review.getByTestId("duplicate-group").filter({
-      hasText: "Shared duplicate review evidence sample candidate alpha",
+      hasText: "Shared-only evidence review seed alpha",
     });
     await sharedGroup.click();
     await expect(review.getByText("Shared").first()).toBeVisible();

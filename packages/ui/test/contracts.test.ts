@@ -15,6 +15,7 @@ import {
   ContractError,
   cursorPage,
   crossProjectKnowledgeEntry,
+  dedupApplyReceipt,
   dedupPreviewResponse,
   distillationDetail,
   distillationList,
@@ -131,6 +132,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "dedup-preview.json": {
     route: "/projects/p/dedup",
     schema: dedupPreviewResponse,
+  },
+  "dedup-apply.json": {
+    route: "/projects/p/dedup/apply",
+    schema: dedupApplyReceipt,
   },
   "api-error.json": { route: "/knowledge/x", schema: apiErrorBody },
   "cursor/knowledge-page.json": {
