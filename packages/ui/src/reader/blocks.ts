@@ -269,7 +269,9 @@ export interface SessionBlocks {
  * that arrived on two pages) keep the first occurrence; order is the
  * server's, which is `created_at ASC` with the message id as tiebreaker.
  */
-export function buildBlocks(detail: SessionDetail): SessionBlocks {
+export function buildBlocks(
+  detail: Pick<SessionDetail, "messages" | "distillations">,
+): SessionBlocks {
   const byId = new Map<string, ReaderBlock>();
   const messages: MessageBlock[] = [];
   for (const m of detail.messages) {

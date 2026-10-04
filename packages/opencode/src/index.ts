@@ -180,14 +180,25 @@ function reapStaleProjectState(): void {
   }
 }
 
-/** session.id → { parentID (null = primary session), lastSeenAt }.
+/** session.id → { parentID (null = primary session), title, lastSeenAt }.
  *  A session's parent never changes, so the result is cached for the process
  *  lifetime (reaped by the same TTL as projectState) to avoid an SDK round-trip
  *  on every turn. */
 const sessionParent = new Map<
   string,
-  { parentID: string | null; lastSeenAt: number }
+  {
+    parentID: string | null;
+    title: string | null;
+    titleFetchedAt: number;
+    lastSeenAt: number;
+  }
 >();
+
+/** OpenCode's default title before it generates a real one. */
+const PLACEHOLDER_TITLE_RE = /^new session\b/i;
+/** Re-check a real (non-placeholder) title at most this often — a session
+ *  can be renamed mid-flight, but titles are not worth polling per turn. */
+const TITLE_REFETCH_MS = 5 * 60 * 1000;
 
 function reapStaleSessionParent(): void {
   const cutoff = Date.now() - SESSION_STATE_TTL_MS;
@@ -196,14 +207,30 @@ function reapStaleSessionParent(): void {
   }
 }
 
+function applySessionInfo(
+  entry: {
+    parentID: string | null;
+    title: string | null;
+    titleFetchedAt: number;
+  },
+  data: { parentID?: string; title?: string } | undefined,
+): void {
+  entry.parentID = data?.parentID ?? null;
+  const title = typeof data?.title === "string" ? data.title.trim() : "";
+  entry.title = title === "" ? null : title;
+  entry.titleFetchedAt = Date.now();
+}
+
 /**
- * Resolve a session's parent session ID via the OpenCode SDK.
+ * Resolve a session's parent session ID and harness title via the OpenCode SDK.
  *
  * OpenCode Task sub-agents run in a child session whose `parentID` points at
  * the session that spawned them; primary sessions have no parent. We forward a
  * non-null parent as the `x-parent-session-id` header so the gateway flags the
  * session as a sub-agent and sizes its LTM injection accordingly (#1300) — the
- * same signal Claude Code emits natively for its Task sub-agents.
+ * same signal Claude Code emits natively for its Task sub-agents. The harness's
+ * own `title` is forwarded percent-encoded as `x-lore-session-title` so the
+ * gateway can persist it as the session's explicit title (#1921).
  *
  * Cached per session (parentID is immutable). A successful lookup — including
  * the common `null` for a primary session — is cached so we never re-query.
@@ -211,24 +238,51 @@ function reapStaleSessionParent(): void {
  * cached and never throw, so a transient error is retried on the next turn
  * rather than permanently latching a real sub-agent as "not a sub-agent".
  */
-async function resolveParentSession(
+async function resolveSessionInfo(
   client: PluginInput["client"],
   sessionID: string,
-): Promise<string | null> {
+): Promise<{ parentID: string | null; title: string | null }> {
   const cached = sessionParent.get(sessionID);
   if (cached) {
     cached.lastSeenAt = Date.now();
-    return cached.parentID;
+    // Title refresh policy (#1921): a harness that reports no title at all
+    // never gets polled again (treat as final); OpenCode's auto "New session"
+    // placeholder IS polled every turn because the real title is generated
+    // shortly after the first turn; a real title refreshes lazily every
+    // TITLE_REFETCH_MS so a manual rename eventually propagates.
+    const needsRefetch =
+      cached.title === null
+        ? false
+        : PLACEHOLDER_TITLE_RE.test(cached.title)
+          ? true
+          : Date.now() - cached.titleFetchedAt > TITLE_REFETCH_MS;
+    if (!needsRefetch) {
+      return { parentID: cached.parentID, title: cached.title };
+    }
+    try {
+      const res = await client.session.get({ path: { id: sessionID } });
+      applySessionInfo(cached, res.data);
+    } catch {
+      // Keep the cached values — a transient failure is not a reason to
+      // drop a title we already know.
+    }
+    return { parentID: cached.parentID, title: cached.title };
   }
   try {
     const res = await client.session.get({ path: { id: sessionID } });
-    const parentID = res.data?.parentID ?? null;
-    sessionParent.set(sessionID, { parentID, lastSeenAt: Date.now() });
+    const entry = {
+      parentID: null,
+      title: null,
+      titleFetchedAt: 0,
+      lastSeenAt: Date.now(),
+    };
+    applySessionInfo(entry, res.data);
+    sessionParent.set(sessionID, entry);
     reapStaleSessionParent();
-    return parentID;
+    return { parentID: entry.parentID, title: entry.title };
   } catch {
     // Best-effort: never break or slow the request path on a lookup failure.
-    return null;
+    return { parentID: null, title: null };
   }
 }
 
@@ -406,12 +460,24 @@ export const LorePlugin: Plugin = async (ctx) => {
         // parentID; forward it as the `x-parent-session-id` signal the gateway
         // already understands (Claude Code sends this natively). Resolution is
         // cached and never blocks or throws on failure.
-        const parentSessionID = await resolveParentSession(
+        const sessionInfo = await resolveSessionInfo(
           ctx.client,
           input.sessionID,
         );
-        if (parentSessionID) {
-          output.headers["x-parent-session-id"] = parentSessionID;
+        if (sessionInfo.parentID) {
+          output.headers["x-parent-session-id"] = sessionInfo.parentID;
+        }
+        // Forward the harness's own session title so the gateway can persist
+        // it as the session's explicit title (#1921). Percent-encoded — header
+        // values must be ASCII. Placeholder titles are suppressed here too
+        // (the gateway would drop them anyway).
+        if (
+          sessionInfo.title &&
+          !PLACEHOLDER_TITLE_RE.test(sessionInfo.title)
+        ) {
+          output.headers["x-lore-session-title"] = encodeURIComponent(
+            sessionInfo.title,
+          );
         }
         // Inject project path + git remote for THIS request based on the
         // current plugin's project. Setting it here (rather than relying on

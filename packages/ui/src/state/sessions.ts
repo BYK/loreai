@@ -245,6 +245,10 @@ export function createSessionsState({
             value: {
               messages: hit.value.messages,
               distillations: [],
+              // Cached messages carry no stored title — report the id,
+              // which is exactly what the reader would show anyway.
+              title: splitKey(key).sid,
+              title_source: "id" as const,
             } satisfies SessionDetail,
             partial: hit.partial,
           };
@@ -263,6 +267,7 @@ export function createSessionsState({
     source: Accessor<{
       projectId: string;
       cursor: string | null;
+      q?: string | null;
     } | null>,
   ): {
     loader: Loader<CursorPage<SessionSummary>>;
@@ -275,6 +280,7 @@ export function createSessionsState({
           ? new URLSearchParams({
               projectId: value.projectId,
               cursor: value.cursor ?? "",
+              q: value.q ?? "",
             }).toString()
           : null;
       },
@@ -284,7 +290,11 @@ export function createSessionsState({
         return tracked(async () => {
           return client.listProjectSessionsPage(
             value.projectId,
-            { cursor: value.cursor, limit: 50 },
+            {
+              cursor: value.cursor,
+              limit: 50,
+              q: value.q ?? undefined,
+            },
             signal,
           );
         });
@@ -387,6 +397,8 @@ export function createSessionsState({
               distillations: [],
               next_cursor: hit.value.nextCursor,
               message_count: hit.value.count,
+              title: splitKey(key).sid,
+              title_source: "id" as const,
             } satisfies SessionPage,
             partial: hit.partial,
           };

@@ -424,7 +424,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
     },
     listProjectSessionsPage(
       projectId: string,
-      opts: { cursor?: string | null; limit?: number } = {},
+      opts: { cursor?: string | null; limit?: number; q?: string } = {},
       signal?: AbortSignal,
     ): Promise<CursorPage<SessionSummary>> {
       return getJson(
@@ -432,6 +432,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           page: "cursor",
           cursor: opts.cursor,
           limit: opts.limit,
+          q: opts.q?.trim() || null,
         }),
         cursorPage(sessionSummary),
         signal,

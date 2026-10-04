@@ -511,6 +511,15 @@ export function store(input: {
       if (existing.content !== content) {
         invalidateTemporalEmbedding(storageId);
         enqueueTemporalEmbedding(storageId, content);
+        // A user-message edit can change the session's derived title — drop
+        // its cached session_meta row so the next list re-derives (#1921).
+        if (input.info.role === "user") {
+          db()
+            .query(
+              "DELETE FROM session_meta WHERE project_id = ? AND session_id = ?",
+            )
+            .run(pid, input.info.sessionID);
+        }
       } else if (
         !hasTemporalEmbedding(storageId) ||
         hasPendingHistoricalTemporalEmbedding(storageId, pid)
@@ -1357,6 +1366,23 @@ export function prune(input: {
       "temporal.prune Pass 3 (archived distillations) skipped — object missing during db maintenance window (transient):",
       e,
     );
+  }
+
+  // session_meta holds the derived-title cache (#1921): a first_message row is
+  // treated as fresh forever, so after deletions it could keep serving a title
+  // whose source message is gone. The cache is disposable — drop the project's
+  // rows wholesale and let the next list re-derive.
+  if (ttlDeleted + capDeleted > 0) {
+    try {
+      database.query("DELETE FROM session_meta WHERE project_id = ?").run(pid);
+    } catch (e) {
+      if (!isMissingObjectError(e)) throw e;
+      sawMissingObject = true;
+      log.info(
+        "temporal.prune session_meta cache drop skipped — object missing during db maintenance window (transient):",
+        e,
+      );
+    }
   }
 
   // A clean tick (no missing-object skip) clears the consecutive-skip streak so

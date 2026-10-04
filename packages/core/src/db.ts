@@ -2439,6 +2439,27 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     source TEXT NOT NULL, observed_at INTEGER NOT NULL,
     PRIMARY KEY (provider, auth_kind, account, window));
   `,
+  `
+  -- Version 99: human-readable session titles (#1921).
+  -- session_state.title stores an explicit harness-provided title (set via
+  -- data.setSessionTitle). session_meta is a DISPOSABLE derived cache (NOT in
+  -- SYNCED_TABLES): one row per session holds the derived title, its
+  -- normalized form for substring search, the source that produced it, and
+  -- the aggregate counts the derivation was computed against so the sessions
+  -- list can invalidate stale 'distillation'/'id' rows.
+  ALTER TABLE session_state ADD COLUMN title TEXT;
+  CREATE TABLE IF NOT EXISTS session_meta (
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    title_norm TEXT NOT NULL,
+    title_source TEXT NOT NULL,
+    message_count INTEGER NOT NULL,
+    distillation_count INTEGER NOT NULL,
+    computed_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, session_id)
+  );
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4477,6 +4498,19 @@ function recoverMissingObjects(database: Database) {
       resolution    TEXT,
       local_content TEXT
     );
+    -- Derived session-title cache (v99, #1921). Recreated here because the
+    -- migration pairs it with an ALTER that a partial apply can skip past.
+    CREATE TABLE IF NOT EXISTS session_meta (
+      project_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      title_norm TEXT NOT NULL,
+      title_source TEXT NOT NULL,
+      message_count INTEGER NOT NULL,
+      distillation_count INTEGER NOT NULL,
+      computed_at INTEGER NOT NULL,
+      PRIMARY KEY (project_id, session_id)
+    );
   `);
 
   // Recover missing columns from partial migration runs.
@@ -5200,6 +5234,10 @@ export function mergeProjectInternal(sourceId: string, targetId: string): void {
     d.query(
       "UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ?",
     ).run(targetId, sourceId);
+    // session_meta is a derived cache keyed (project_id, session_id): the
+    // moved sessions' rows would orphan under the source project, so drop
+    // them — the next list recomputes them under the target.
+    d.query("DELETE FROM session_meta WHERE project_id = ?").run(sourceId);
     // Import identity is (project, agent, source). Preserve the newest record
     // when both projects imported the same source, then re-key the remainder.
     d.query(

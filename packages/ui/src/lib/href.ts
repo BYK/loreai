@@ -55,8 +55,11 @@ export const allKnowledgeHref = (
 export const globalKnowledgeHref = (knowledgeId: string) =>
   buildHref(["knowledge", knowledgeId]);
 
-export const sessionsHref = (projectId: string, cursor?: string | null) =>
-  buildHref(["projects", projectId, "sessions"], { cursor });
+export const sessionsHref = (
+  projectId: string,
+  cursor?: string | null,
+  q?: string | null,
+) => buildHref(["projects", projectId, "sessions"], { cursor, q });
 
 export const importsHref = (projectId: string, cursor?: string | null) =>
   buildHref(["projects", projectId, "imports"], { cursor });
