@@ -429,6 +429,43 @@ describe("team action routes", () => {
     });
   });
 
+  it("rejects non-admin role changes and removals before cloud calls", async () => {
+    enableWrites();
+    db()
+      .query("UPDATE scope_members SET role = 'editor' WHERE scope_id = ?")
+      .run(TEAM);
+
+    const roleChange = await request(
+      `/api/v1/teams/${TEAM}/members/${OTHER}/role`,
+      "POST",
+      JSON.stringify({ role: "viewer", expected_role: "editor" }),
+    );
+    expect(roleChange.status).toBe(403);
+    expect(await roleChange.json()).toMatchObject({
+      error: {
+        type: "not_admin",
+        message: "Only team admins can change or remove members.",
+      },
+    });
+
+    const removal = await request(
+      `/api/v1/teams/${TEAM}/members/${OTHER}/remove`,
+      "POST",
+      JSON.stringify({ expected_role: "editor" }),
+    );
+    expect(removal.status).toBe(403);
+    expect(await removal.json()).toMatchObject({
+      error: {
+        type: "not_admin",
+        message: "Only team admins can change or remove members.",
+      },
+    });
+
+    expect(teamMocks.teamMembers).not.toHaveBeenCalled();
+    expect(teamMocks.setTeamRole).not.toHaveBeenCalled();
+    expect(teamMocks.removeTeamMember).not.toHaveBeenCalled();
+  });
+
   it("maps role RPC codes and preserves last-admin protection", async () => {
     enableWrites();
     const cases = [
