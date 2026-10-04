@@ -217,6 +217,76 @@ describe("TeamPage", () => {
     );
   });
 
+  it("restores the server-known role after a failed role change", async () => {
+    const setTeamMemberRole = vi.fn<ApiClient["setTeamMemberRole"]>(
+      async () => {
+        throw new ApiError(
+          "forbidden",
+          "/teams/team-1/members/user-12345678-90ab-cdef/role",
+          "Only team admins can change or remove members.",
+          403,
+          "not_admin",
+        );
+      },
+    );
+    mount(() => <TeamPage />, clientWith({ setTeamMemberRole }));
+
+    const role = await screen.findByRole("combobox", {
+      name: "Role for Teammate user-123",
+    });
+    expect(role).toHaveValue("viewer");
+    fireEvent.change(role, { target: { value: "editor" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Only team admins can change or remove members.",
+    );
+    expect(role).toHaveValue("viewer");
+  });
+
+  it("keeps a stale-member role notice after reloading the team", async () => {
+    const userId = "user-12345678-90ab-cdef";
+    const updatedMembers: TeamMembersResponse = {
+      ...memberResponse,
+      members: memberResponse.members.map((member) =>
+        member.user_id === userId ? { ...member, role: "editor" } : member,
+      ),
+    };
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockResolvedValueOnce(memberResponse)
+      .mockResolvedValueOnce(updatedMembers);
+    const setTeamMemberRole = vi.fn<ApiClient["setTeamMemberRole"]>(
+      async () => {
+        throw new ApiError(
+          "http",
+          "/teams/team-1/members/user-12345678-90ab-cdef/role",
+          "Team member role changed; reload the team.",
+          409,
+          "stale_member",
+        );
+      },
+    );
+    mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers, setTeamMemberRole }),
+    );
+
+    const role = await screen.findByRole("combobox", {
+      name: "Role for Teammate user-123",
+    });
+    fireEvent.change(role, { target: { value: "editor" } });
+    const notice = await screen.findByTestId("team-stale-member-notice");
+    expect(notice).toHaveTextContent(
+      "Teammate user-123's role changed to Editor since you loaded the team.",
+    );
+    expect(notice).toHaveTextContent("The list has been reloaded.");
+    expect(
+      screen.getByRole("combobox", {
+        name: "Role for Teammate user-123",
+      }),
+    ).toHaveValue("editor");
+    expect(getTeamMembers).toHaveBeenCalledTimes(2);
+  });
+
   it("confirms removal and keeps the invite token only inside its receipt dialog", async () => {
     const inviteTeamMember = vi.fn<ApiClient["inviteTeamMember"]>(async () => ({
       invite: {
@@ -275,6 +345,90 @@ describe("TeamPage", () => {
     await waitFor(() =>
       expect(screen.queryByText("invite-secret-token")).not.toBeInTheDocument(),
     );
+  });
+
+  it("keeps retryable removal errors inside the open dialog", async () => {
+    const removeTeamMember = vi.fn<ApiClient["removeTeamMember"]>(async () => {
+      throw new ApiError(
+        "http",
+        "/teams/team-1/members/user-12345678-90ab-cdef/remove",
+        "The last team admin cannot be removed.",
+        409,
+        "last_admin",
+      );
+    });
+    mount(() => <TeamPage />, clientWith({ removeTeamMember }));
+
+    await screen.findByTestId("team-members");
+    const row = screen
+      .getAllByTestId("team-member-row")
+      .find(
+        (item) =>
+          item.getAttribute("data-user-id") === "user-12345678-90ab-cdef",
+      );
+    if (!row) throw new Error("teammate row missing");
+    fireEvent.click(within(row).getByRole("button", { name: "Remove" }));
+    const dialog = await screen.findByTestId("team-remove-confirmation");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Remove member" }),
+    );
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("last team admin");
+    expect(alert).toHaveFocus();
+    expect(
+      within(dialog).getByRole("button", { name: "Remove member" }),
+    ).toBeEnabled();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("reloads stale removal errors from the dialog and preserves the role notice", async () => {
+    const userId = "user-12345678-90ab-cdef";
+    const updatedMembers: TeamMembersResponse = {
+      ...memberResponse,
+      members: memberResponse.members.map((member) =>
+        member.user_id === userId ? { ...member, role: "editor" } : member,
+      ),
+    };
+    const getTeamMembers = vi
+      .fn<ApiClient["getTeamMembers"]>()
+      .mockResolvedValueOnce(memberResponse)
+      .mockResolvedValueOnce(updatedMembers);
+    const removeTeamMember = vi.fn<ApiClient["removeTeamMember"]>(async () => {
+      throw new ApiError(
+        "http",
+        "/teams/team-1/members/user-12345678-90ab-cdef/remove",
+        "Team member role changed; reload the team.",
+        409,
+        "stale_member",
+      );
+    });
+    mount(() => <TeamPage />, clientWith({ getTeamMembers, removeTeamMember }));
+
+    await screen.findByTestId("team-members");
+    const row = screen
+      .getAllByTestId("team-member-row")
+      .find((item) => item.getAttribute("data-user-id") === userId);
+    if (!row) throw new Error("teammate row missing");
+    fireEvent.click(within(row).getByRole("button", { name: "Remove" }));
+    const dialog = await screen.findByTestId("team-remove-confirmation");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Remove member" }),
+    );
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveFocus();
+    expect(
+      within(dialog).getByRole("button", { name: "Remove member" }),
+    ).toBeDisabled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Reload team" }),
+    );
+    expect(
+      await screen.findByTestId("team-stale-member-notice"),
+    ).toHaveTextContent("Teammate user-123's role changed to Editor");
+    expect(screen.queryByTestId("team-remove-confirmation")).toBeNull();
+    expect(getTeamMembers).toHaveBeenCalledTimes(2);
   });
 
   it("shows sync-disabled messaging and the action error", async () => {
@@ -336,10 +490,14 @@ describe("ConflictsPage", () => {
     expect(keepSyncConflictLocal).toHaveBeenCalledWith(17, "version-2");
   });
 
-  it("offers reload after a stale current version", async () => {
+  it("keeps stale keep errors in the dialog and reloads from there", async () => {
+    const listSyncConflicts = vi
+      .fn<ApiClient["listSyncConflicts"]>()
+      .mockResolvedValue(conflicts);
     mount(
       () => <ConflictsPage />,
       clientWith({
+        listSyncConflicts,
         keepSyncConflictLocal: async () => {
           throw new ApiError(
             "http",
@@ -355,15 +513,23 @@ describe("ConflictsPage", () => {
     fireEvent.click(within(card).getByRole("button", { name: "Keep mine" }));
     const dialog = await screen.findByTestId("conflict-action-confirmation");
     fireEvent.click(within(dialog).getByRole("button", { name: "Keep mine" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("Knowledge entry changed");
+    expect(alert).toHaveFocus();
     expect(
-      await screen.findByTestId("conflicts-reload-after-action"),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Knowledge entry changed",
+      within(dialog).getByRole("button", { name: "Keep mine" }),
+    ).toBeDisabled();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Reload conflicts" }),
     );
+    expect(
+      screen.queryByTestId("conflict-action-confirmation"),
+    ).not.toBeInTheDocument();
+    await waitFor(() => expect(listSyncConflicts).toHaveBeenCalledTimes(2));
   });
 
-  it("marks a 404 conflict as already resolved and reloads the list", async () => {
+  it("keeps a missing discarded conflict in the dialog and reloads the list", async () => {
     const listSyncConflicts = vi
       .fn<ApiClient["listSyncConflicts"]>()
       .mockResolvedValueOnce(conflicts)
@@ -376,10 +542,10 @@ describe("ConflictsPage", () => {
       () => <ConflictsPage />,
       clientWith({
         listSyncConflicts,
-        keepSyncConflictLocal: async () => {
+        discardSyncConflict: async () => {
           throw new ApiError(
             "not_found",
-            "/sync/conflicts/17/keep-local",
+            "/sync/conflicts/17/discard",
             "Sync conflict 17 not found",
             404,
             "not_found",
@@ -388,13 +554,21 @@ describe("ConflictsPage", () => {
       }),
     );
     const card = await screen.findByTestId("conflict-card");
-    fireEvent.click(within(card).getByRole("button", { name: "Keep mine" }));
+    fireEvent.click(within(card).getByRole("button", { name: "Discard mine" }));
     const dialog = await screen.findByTestId("conflict-action-confirmation");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Keep mine" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("already resolved elsewhere");
+    expect(alert).toHaveFocus();
     expect(
-      await screen.findByTestId("conflict-already-resolved"),
-    ).toBeVisible();
-    fireEvent.click(await screen.findByTestId("conflicts-reload-after-action"));
+      within(dialog).getByRole("button", { name: "Discard" }),
+    ).toBeDisabled();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Reload conflicts" }),
+    );
+    expect(
+      screen.queryByTestId("conflict-action-confirmation"),
+    ).not.toBeInTheDocument();
     expect(await screen.findByText("No sync conflicts")).toBeVisible();
     expect(listSyncConflicts).toHaveBeenCalledTimes(2);
   });
@@ -473,22 +647,25 @@ describe("SharingPanel review action", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("offers a reload when the policy changed before confirmation", async () => {
+  it("keeps stale policy errors in the dialog and reloads from there", async () => {
     const getProjectSharing = vi
       .fn<ApiClient["getProjectSharing"]>()
       .mockResolvedValueOnce(automaticSharing)
       .mockResolvedValueOnce(manualSharing);
+    const requireProjectSharingReview = vi.fn<
+      ApiClient["requireProjectSharingReview"]
+    >(async () => {
+      throw new ApiError(
+        "http",
+        "/projects/project-1/sharing/policy",
+        "Project sharing policy changed; reload the project.",
+        409,
+        "stale_policy",
+      );
+    });
     const client = clientWith({
       getProjectSharing,
-      requireProjectSharingReview: async () => {
-        throw new ApiError(
-          "http",
-          "/projects/project-1/sharing/policy",
-          "Project sharing policy changed; reload the project.",
-          409,
-          "stale_policy",
-        );
-      },
+      requireProjectSharingReview,
     });
     mount(() => <SharingPanel projectId="project-1" />, client);
 
@@ -501,13 +678,26 @@ describe("SharingPanel review action", () => {
         { name: "Require review" },
       ),
     );
+    const dialog = screen.getByTestId("sharing-policy-confirmation");
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("Project sharing policy changed");
+    expect(alert).toHaveFocus();
+    expect(
+      within(dialog).getByRole("button", { name: "Require review" }),
+    ).toBeDisabled();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
     fireEvent.click(
-      await screen.findByRole("button", { name: "Reload status" }),
+      within(dialog).getByRole("button", { name: "Reload status" }),
     );
+    expect(
+      screen.queryByTestId("sharing-policy-confirmation"),
+    ).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByTestId("sharing-summary")).toHaveTextContent(
         "policy: manual",
       ),
     );
+    expect(getProjectSharing).toHaveBeenCalledTimes(2);
+    expect(requireProjectSharingReview).toHaveBeenCalledTimes(1);
   });
 });

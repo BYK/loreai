@@ -7,6 +7,7 @@ import { createLoader } from "~/lib/loader";
 import { useWorkspace } from "~/routes/workspace";
 
 import { Button } from "../ui/button";
+import { requiresMutationReload } from "./mutation-errors";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +24,8 @@ const STATE_LABEL: Record<SharingStatus["state"], string> = {
   locked: "Locked",
   degraded: "Degraded",
 };
+
+type PolicyMutationFailure = { cause: unknown; message: string };
 
 function teamLabel(status: SharingStatus): string {
   if (!status.team) return "No team";
@@ -54,25 +57,27 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
   const [receipt, setReceipt] = createSignal<SharingStatus>();
   const [confirmReview, setConfirmReview] = createSignal(false);
   const [savingPolicy, setSavingPolicy] = createSignal(false);
-  const [policyError, setPolicyError] = createSignal<unknown>();
+  const [policyError, setPolicyError] =
+    createSignal<PolicyMutationFailure | null>(null);
   const shownStatus = () => receipt() ?? sharing.data();
-  const stalePolicy = () => {
-    const error = policyError();
-    return isApiError(error) && error.code === "stale_policy";
-  };
   createEffect(
     on(
       () => props.projectId,
       () => {
         setReceipt(undefined);
-        setPolicyError(undefined);
+        setPolicyError(null);
+        setConfirmReview(false);
       },
     ),
   );
   const reload = () => {
     setReceipt(undefined);
-    setPolicyError(undefined);
+    setPolicyError(null);
     sharing.reload();
+  };
+  const reloadAfterPolicyError = () => {
+    setConfirmReview(false);
+    reload();
   };
   const requireReview = async () => {
     const current = shownStatus();
@@ -84,7 +89,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     )
       return;
     setSavingPolicy(true);
-    setPolicyError(undefined);
+    setPolicyError(null);
     try {
       const updated = await ws.tracked(() =>
         ws.client.requireProjectSharingReview(
@@ -95,16 +100,19 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
       setReceipt(updated);
       setConfirmReview(false);
     } catch (error) {
-      setPolicyError(error);
+      setPolicyError({
+        cause: error,
+        message:
+          error instanceof Error
+            ? error.message
+            : "The sharing policy could not be updated.",
+      });
     } finally {
       setSavingPolicy(false);
     }
   };
   const errorText = () => {
-    const error = policyError();
-    return error instanceof Error
-      ? error.message
-      : "The sharing policy could not be updated.";
+    return policyError()?.message ?? "The sharing policy could not be updated.";
   };
   const hidden = () => {
     const error = sharing.error();
@@ -155,19 +163,25 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
                   data-testid="sharing-require-review"
                   disabled={savingPolicy()}
                   onClick={() => {
-                    setPolicyError(undefined);
+                    setPolicyError(null);
                     setConfirmReview(true);
                   }}
                 >
                   Require review
                 </Button>
               </Show>
-              <Show when={policyError()}>
+              <Show when={policyError() && !confirmReview()}>
                 <p class="mt-2 text-sm text-danger" role="alert">
                   {errorText()}
                 </p>
               </Show>
-              <Show when={stalePolicy()}>
+              <Show
+                when={
+                  !confirmReview() &&
+                  policyError() &&
+                  requiresMutationReload(policyError()?.cause)
+                }
+              >
                 <Button
                   class="mt-2"
                   size="sm"
@@ -213,6 +227,33 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
               is shared. Automatic sharing can only be enabled from the CLI.
             </DialogDescription>
           </DialogHeader>
+          <Show when={confirmReview() && policyError()}>
+            <p
+              class="text-sm text-danger"
+              role="alert"
+              tabIndex={-1}
+              data-testid="sharing-policy-error"
+              ref={(element) => queueMicrotask(() => element.focus())}
+            >
+              {errorText()}
+            </p>
+          </Show>
+          <Show
+            when={
+              confirmReview() &&
+              policyError() &&
+              requiresMutationReload(policyError()?.cause)
+            }
+          >
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="sharing-reload-policy"
+              onClick={reloadAfterPolicyError}
+            >
+              Reload status
+            </Button>
+          </Show>
           <DialogFooter>
             <Button
               size="sm"
@@ -224,7 +265,11 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
             </Button>
             <Button
               size="sm"
-              disabled={savingPolicy()}
+              disabled={
+                savingPolicy() ||
+                (policyError() !== null &&
+                  requiresMutationReload(policyError()?.cause))
+              }
               onClick={() => void requireReview()}
             >
               {savingPolicy() ? "Saving…" : "Require review"}
