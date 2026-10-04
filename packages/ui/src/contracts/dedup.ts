@@ -1,7 +1,7 @@
 import "./config";
 import { type } from "arktype";
 
-import { nonEmptyString, nonNegInt } from "./primitives";
+import { epochMs, nonEmptyString, nonNegInt } from "./primitives";
 
 export const dedupPreviewCandidate = type({
   id: nonEmptyString,
@@ -44,3 +44,62 @@ export const dedupPreviewResponse = type({
 });
 
 export type DedupPreviewResponse = typeof dedupPreviewResponse.infer;
+
+export interface DedupApplyDecision {
+  keepId: string;
+  mergeIds: string[];
+  expectedRevisions: Record<string, number>;
+}
+
+export interface DedupApplyBody {
+  operationId: string;
+  projectId?: string | null;
+  reviewedAt: number;
+  decisions: DedupApplyDecision[];
+  actor: string;
+}
+
+const dedupApplyDetail = type({
+  id: nonEmptyString,
+  reason:
+    "'not_found' | 'scope_mismatch' | 'stale_revision' | 'conflicting_groups'",
+  "expectedRevision?": nonNegInt,
+  "actualRevision?": nonNegInt,
+});
+
+const dedupGroupRefused = type({
+  groupIndex: nonNegInt,
+  keepId: nonEmptyString,
+  mergeIds: nonEmptyString.array(),
+  error: {
+    code: "'not_found' | 'scope_mismatch' | 'stale_revision' | 'conflicting_groups'",
+    message: "string",
+    details: dedupApplyDetail.array(),
+  },
+});
+
+const dedupMergedEntry = type({
+  id: nonEmptyString,
+  revision: nonNegInt,
+  tombstoneVersionId: nonEmptyString,
+});
+
+const dedupGroupApplied = type({
+  groupIndex: nonNegInt,
+  keepId: nonEmptyString,
+  keepRevision: nonNegInt,
+  merged: dedupMergedEntry.array(),
+  appliedAt: epochMs,
+});
+
+export const dedupApplyReceipt = type({
+  operationId: nonEmptyString,
+  projectId: "string | null",
+  applied: dedupGroupApplied.array(),
+  refused: dedupGroupRefused.array(),
+  startedAt: epochMs,
+  finishedAt: epochMs,
+  replayed: "boolean",
+});
+
+export type DedupApplyReceipt = typeof dedupApplyReceipt.infer;

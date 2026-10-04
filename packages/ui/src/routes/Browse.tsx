@@ -21,8 +21,10 @@ import {
   projectHref,
   workspaceSearchHref,
 } from "~/lib/href";
+import { isApiError } from "~/lib/api";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
+import { DeletedKnowledgeDocument } from "~/components/lore/DeletedKnowledgeDocument";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
@@ -37,6 +39,7 @@ import { StateCard } from "~/components/lore/StateCard";
 import { Nav } from "~/components/shell/Nav";
 import { Shell, type MobilePane } from "~/components/shell/Shell";
 import { useWorkspace } from "./workspace";
+import { createLoader } from "~/lib/loader";
 import {
   Select,
   SelectContent,
@@ -133,6 +136,22 @@ export const Browse: Component<{
     parseAllKnowledgeQuery(searchParams as Record<string, string | undefined>),
   );
   const entry = ws.state.knowledge.entry(() => knowledgeId() ?? null);
+  const deletedHistoryId = createMemo(() => {
+    const error = entry.loader.error();
+    return props.view === "entry" &&
+      isApiError(error) &&
+      error.kind === "not_found"
+      ? knowledgeId()
+      : null;
+  });
+  const deletedHistory = createLoader(deletedHistoryId, (id, signal) =>
+    ws.tracked(() =>
+      ws.client.listKnowledgeVersions(id, {
+        includeDeleted: true,
+        signal,
+      }),
+    ),
+  );
   const activeProjectId = createMemo(
     () => projectId() ?? entry.loader.data()?.project_id ?? null,
   );
@@ -376,6 +395,12 @@ export const Browse: Component<{
         }
         return (
           <Switch>
+            <Match when={deletedHistoryId()}>
+              <DeletedKnowledgeDocument
+                history={deletedHistory}
+                projectId={projectId()}
+              />
+            </Match>
             <Match when={entry.loader.error() && !entry.loader.data()}>
               <div class="p-5">
                 {errorStateFor(

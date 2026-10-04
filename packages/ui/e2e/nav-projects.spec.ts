@@ -4,8 +4,9 @@ import { fuzzyRank } from "../src/lib/fuzzy";
 /**
  * #1918 sidebar: pinned projects survive reloads (localStorage), the filter
  * narrows the list, and "All projects" expands beyond the Recent limit.
- * The seed gives 8 core projects — lore, scratch, dedup-review and five
- * empty archive-* projects — so `rest` is non-empty.
+ * The seed gives 14 core projects — lore, scratch, dedup-review, six
+ * disposable apply projects and five empty archive-* projects — so `rest`
+ * is non-empty.
  */
 
 const NAV = { name: "Workspace" } as const;

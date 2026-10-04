@@ -45,6 +45,7 @@ import {
   syncStatus,
   teamList,
   costsSnapshot,
+  dedupApplyReceipt,
   dedupPreviewResponse,
   projectClearResult,
   projectRenameResult,
@@ -404,6 +405,53 @@ describe("ui contracts against the real gateway", () => {
       v1(["projects", SEEDED.dedupProjectId, "dedup"]),
       dedupPreviewResponse,
       { method: "POST", ...JSON_BODY({}) },
+    );
+  });
+
+  it("POST /projects/:id/dedup/apply", async () => {
+    const previewResponse = await api(
+      v1(["projects", SEEDED.dedupProjectId, "dedup"]),
+      { method: "POST", ...JSON_BODY({}) },
+    );
+    const previewBody: unknown = await previewResponse.json();
+    const preview = safeParseContract(
+      "dedup preview",
+      dedupPreviewResponse,
+      previewBody,
+    );
+    expect(preview.ok).toBe(true);
+    if (!preview.ok) return;
+    const group = preview.value.groups.find(
+      (candidate) => candidate.scope === "project",
+    );
+    expect(group).toBeDefined();
+    if (!group) return;
+
+    const body = {
+      operationId: "ui-contracts-dedup-apply",
+      reviewedAt: 1_700_000_000_000,
+      actor: "lore-ui",
+      decisions: [
+        {
+          keepId: group.candidates[0].logical_id,
+          mergeIds: group.candidates
+            .slice(1)
+            .map((candidate) => candidate.logical_id),
+          expectedRevisions: Object.fromEntries(
+            group.candidates.map((candidate) => [
+              candidate.logical_id,
+              candidate.revision,
+            ]),
+          ),
+        },
+      ],
+    };
+    await contractRoute(
+      "dedup-apply.json",
+      `/projects/${SEEDED.dedupProjectId}/dedup/apply`,
+      v1(["projects", SEEDED.dedupProjectId, "dedup", "apply"]),
+      dedupApplyReceipt,
+      { method: "POST", ...JSON_BODY(body) },
     );
   });
 

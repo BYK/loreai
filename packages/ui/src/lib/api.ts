@@ -27,6 +27,7 @@ import {
   circuitBreakerResetResult,
   costsSnapshot,
   dailyBudgetResult,
+  dedupApplyReceipt,
   dedupPreviewResponse,
   contradictionDecisionResult,
   contradictionListResponse,
@@ -75,6 +76,8 @@ import {
   type ContradictionListResponse,
   type DistillationDetail,
   type DistillationSummary,
+  type DedupApplyBody,
+  type DedupApplyReceipt,
   type DedupPreviewResponse,
   type EntityDetail,
   type EntityListPage,
@@ -332,6 +335,19 @@ export function createApiClient(options: ApiClientOptions = {}) {
         apiPath(["projects", projectId, "dedup"]),
         {},
         dedupPreviewResponse,
+        signal,
+      );
+    },
+    applyDedup(
+      projectId: string,
+      body: DedupApplyBody,
+      signal?: AbortSignal,
+    ): Promise<DedupApplyReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "dedup", "apply"]),
+        body,
+        dedupApplyReceipt,
         signal,
       );
     },

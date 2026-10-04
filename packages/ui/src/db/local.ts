@@ -4,11 +4,13 @@
  *
  * `drafts` holds in-progress edits the user has not saved; `pendingChanges`
  * holds mutations queued for a write API that does not exist yet; and
- * `reviewDecisions` holds duplicate-review marks. These are local working
- * state, structurally distinct from every contract type, and never merged
- * into entity stores.
+ * `reviewDecisions` holds duplicate-review marks and idempotent apply
+ * operations. These are local working state, structurally distinct from
+ * every entity contract, and never merged into entity stores.
  */
 import type { IndexNames } from "idb";
+
+import type { DedupApplyBody } from "~/contracts";
 
 import type { LoreUiDb, LoreUiSchema } from "./schema";
 
@@ -44,11 +46,24 @@ export interface DedupReviewMark {
   markedAt: number;
 }
 
+export interface DedupApplyRecord {
+  key: string;
+  kind: "dedup-apply";
+  projectId: string;
+  operationId: string;
+  body: DedupApplyBody;
+  groupIds: string[];
+  candidateTitles: Record<string, string>;
+  createdAt: number;
+}
+
+export type DedupReviewRecord = DedupReviewMark | DedupApplyRecord;
+
 export interface ReviewDecisionsStore {
-  get(key: string): Promise<DedupReviewMark | undefined>;
-  put(value: DedupReviewMark): Promise<void>;
+  get(key: string): Promise<DedupReviewRecord | undefined>;
+  put(value: DedupReviewRecord): Promise<void>;
   delete(key: string): Promise<void>;
-  list(projectId: string): Promise<DedupReviewMark[]>;
+  list(projectId: string): Promise<DedupReviewRecord[]>;
 }
 
 /**
@@ -130,7 +145,7 @@ export function createPendingChangesStore(
 export function createReviewDecisionsStore(
   db: LoreUiDb | null,
 ): ReviewDecisionsStore {
-  const memory = new Map<string, DedupReviewMark>();
+  const memory = new Map<string, DedupReviewRecord>();
   return {
     async get(key) {
       if (!db) return memory.get(key);

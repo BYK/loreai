@@ -127,6 +127,52 @@ describe("api client: happy path", () => {
     });
   });
 
+  it("applies dedup decisions with a validated receipt", async () => {
+    let request:
+      | { url: string; method: string | undefined; body: unknown }
+      | undefined;
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        request = {
+          url,
+          method: init?.method,
+          body: init?.body,
+        };
+        return json({
+          operationId: "op-1",
+          projectId: null,
+          applied: [],
+          refused: [],
+          startedAt: 1_700_000_000_000,
+          finishedAt: 1_700_000_000_001,
+          replayed: false,
+        });
+      },
+    });
+    const body = {
+      operationId: "op-1",
+      projectId: null,
+      reviewedAt: 1_700_000_000_000,
+      actor: "lore-ui",
+      decisions: [
+        {
+          keepId: "keep",
+          mergeIds: ["merged"],
+          expectedRevisions: { keep: 1, merged: 2 },
+        },
+      ],
+    };
+
+    const response = await client.applyDedup("p/1", body);
+
+    expect(response.operationId).toBe("op-1");
+    expect(request).toEqual({
+      url: "/api/v1/projects/p%2F1/dedup/apply",
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  });
+
   it("recalls with expansion disabled and project identity", async () => {
     const { client, calls } = clientFor(() =>
       json({
