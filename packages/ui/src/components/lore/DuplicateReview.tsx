@@ -25,7 +25,7 @@ import { StateCard } from "~/components/lore/StateCard";
 import { formatConfidence, formatWhen } from "~/lib/format";
 import { markFrom, markStatus } from "~/lib/dedup-review";
 import { isApiError } from "~/lib/api";
-import { knowledgeHref, sessionHref } from "~/lib/href";
+import { globalKnowledgeHref, knowledgeHref, sessionHref } from "~/lib/href";
 import { createLoader } from "~/lib/loader";
 import { useWorkspace } from "~/routes/workspace";
 
@@ -72,7 +72,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return (
     target.isContentEditable ||
     target.closest(
-      'input, textarea, select, [contenteditable="true"], [role="textbox"]',
+      'input, textarea, select, [contenteditable="true"], [role="textbox"], [role="combobox"], [role="listbox"]',
     ) !== null
   );
 }
@@ -87,6 +87,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   const rescan = preview.reload;
 
   const [marks, setMarks] = createSignal<DedupReviewMark[]>([]);
+  const [persistenceError, setPersistenceError] = createSignal(false);
   const refreshMarks = async (projectId = props.projectId) => {
     setMarks(await ws.state.dedupReview.list(projectId));
   };
@@ -125,6 +126,19 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
   const [versionLoads, setVersionLoads] = createSignal<
     Record<string, VersionLoad>
   >({});
+  const candidateChanged = (
+    candidate: DedupPreviewGroup["candidates"][number],
+  ) => {
+    const load = versionLoads()[candidate.logical_id];
+    if (load?.kind === "removed") return true;
+    const version = currentVersion(load);
+    return (
+      version !== undefined &&
+      (version.version !== candidate.revision || version.is_deleted)
+    );
+  };
+  const focusedGroupChanged = () =>
+    focusedGroup()?.candidates.some(candidateChanged) ?? false;
 
   createEffect(() => {
     const group = focusedGroup();
@@ -172,22 +186,29 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
 
   const saveDecision = async (decision: "accept" | "skip") => {
     const group = focusedGroup();
-    if (!group) return;
+    if (!group || (decision === "accept" && focusedGroupChanged())) return;
     const mark = markFrom(group, decision, keeperFor(group), props.projectId);
-    await ws.state.dedupReview.put(mark);
-    await refreshMarks();
+    const saved = await ws.state.dedupReview.put(mark);
+    setPersistenceError(!saved);
+    if (saved) await refreshMarks();
   };
   const clearMark = async (group = focusedGroup()) => {
     if (!group) return;
-    await ws.state.dedupReview.delete(props.projectId, group.group_id);
-    await refreshMarks();
+    const deleted = await ws.state.dedupReview.delete(
+      props.projectId,
+      group.group_id,
+    );
+    setPersistenceError(!deleted);
+    if (deleted) await refreshMarks();
   };
   const discardOrphans = async () => {
-    await Promise.all(
+    const results = await Promise.all(
       orphaned().map((mark) =>
         ws.state.dedupReview.delete(props.projectId, mark.groupId),
       ),
     );
+    const deleted = results.every(Boolean);
+    setPersistenceError(!deleted);
     await refreshMarks();
   };
   const chooseKeeper = (group: DedupPreviewGroup, id: string) => {
@@ -196,7 +217,10 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     if (existing && markStatus(group, existing) !== "stale") {
       void ws.state.dedupReview
         .put(markFrom(group, existing.decision, id, props.projectId))
-        .then(() => refreshMarks());
+        .then(async (saved) => {
+          setPersistenceError(!saved);
+          if (saved) await refreshMarks();
+        });
     }
   };
   const move = (delta: number) => {
@@ -206,6 +230,13 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     );
   };
   const onKeyDown = (event: KeyboardEvent) => {
+    const target = event.target;
+    const review = document.querySelector('[data-testid="duplicate-review"]');
+    if (
+      !(target instanceof Node) ||
+      (target !== document.body && !review?.contains(target))
+    )
+      return;
     if (
       event.ctrlKey ||
       event.metaKey ||
@@ -223,7 +254,7 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     } else if (key === "k" && focusedIndex() > 0) {
       event.preventDefault();
       move(-1);
-    } else if (key === "a") {
+    } else if (key === "a" && !focusedGroupChanged()) {
       event.preventDefault();
       void saveDecision("accept");
     } else if (key === "s") {
@@ -288,6 +319,15 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
           <p class="mt-2 text-xs text-gold" data-testid="review-storage-notice">
             IndexedDB is unavailable; marks are kept in memory for this session
             and are not saved on this device.
+          </p>
+        </Show>
+        <Show when={persistenceError()}>
+          <p
+            class="mt-2 text-xs text-danger"
+            role="status"
+            data-testid="review-persistence-error"
+          >
+            Could not save this mark on this device
           </p>
         </Show>
       </section>
@@ -391,7 +431,13 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                             )}
                           </For>
                         </div>
-                        <Badge variant="teal">{score()}%</Badge>
+                        <Badge
+                          variant="teal"
+                          aria-label={`Best match score ${score()}%`}
+                          title={`Best match score ${score()}%`}
+                        >
+                          {score()}% match
+                        </Badge>
                       </div>
                       <div class="mt-2 flex flex-wrap gap-1">
                         <Badge variant="outline">{scopeLabel(group)}</Badge>
@@ -486,7 +532,19 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                             </div>
                             <div class="mb-3 flex flex-wrap gap-1.5">
                               <Badge variant="teal">{candidate.category}</Badge>
+                              <Badge variant="teal">
+                                Match {Math.round(candidate.score * 100)}%
+                              </Badge>
+                              <For each={candidate.reasons}>
+                                {(reason) => (
+                                  <Badge variant="outline">
+                                    {REASON_LABELS[reason] ??
+                                      reason.replaceAll("_", " ")}
+                                  </Badge>
+                                )}
+                              </For>
                               <Badge variant="outline">
+                                Confidence{" "}
                                 {formatConfidence(candidate.confidence)}
                               </Badge>
                               <ScopeLabel scope={candidate.scope} />
@@ -531,17 +589,21 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                                   when={candidate.source_session}
                                   fallback="not recorded"
                                 >
-                                  {(sessionId) => (
-                                    <A
-                                      class="text-accent underline"
-                                      href={sessionHref(
-                                        props.projectId,
-                                        sessionId(),
-                                      )}
-                                    >
-                                      {sessionId()}
-                                    </A>
-                                  )}
+                                  {(sessionId) =>
+                                    candidate.project_id !== null ? (
+                                      <A
+                                        class="text-accent underline"
+                                        href={sessionHref(
+                                          candidate.project_id,
+                                          sessionId(),
+                                        )}
+                                      >
+                                        {sessionId()}
+                                      </A>
+                                    ) : (
+                                      <span>{sessionId()}</span>
+                                    )
+                                  }
                                 </Show>
                               </p>
                               <p>Updated {formatWhen(candidate.updated_at)}</p>
@@ -550,10 +612,14 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                               </p>
                               <A
                                 class="inline-block text-accent underline"
-                                href={knowledgeHref(
-                                  props.projectId,
-                                  candidate.logical_id,
-                                )}
+                                href={
+                                  candidate.project_id
+                                    ? knowledgeHref(
+                                        candidate.project_id,
+                                        candidate.logical_id,
+                                      )
+                                    : globalKnowledgeHref(candidate.logical_id)
+                                }
                               >
                                 Open knowledge document
                               </A>
@@ -585,9 +651,20 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                   </div>
 
                   <div class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+                    <Show when={focusedGroupChanged()}>
+                      <p
+                        class="basis-full text-xs text-gold"
+                        role="status"
+                        data-testid="changed-group-notice"
+                      >
+                        Rescan before marking — this group changed since the
+                        scan
+                      </p>
+                    </Show>
                     <Button
                       size="sm"
                       data-testid="accept-merge"
+                      disabled={focusedGroupChanged()}
                       onClick={() => void saveDecision("accept")}
                     >
                       Accept merge

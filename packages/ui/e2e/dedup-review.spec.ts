@@ -30,6 +30,27 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     });
 
     await page.goto(`/ui/projects/${projectId}`);
+    const navOpener = page.getByTestId("open-nav");
+    const navDuplicates = page.getByTestId("nav-duplicates");
+    if (await navOpener.isVisible()) {
+      await navOpener.click();
+      const drawerLink = page
+        .getByTestId("nav-drawer")
+        .getByTestId("nav-duplicates");
+      await expect(drawerLink).toHaveAttribute(
+        "href",
+        `/ui/projects/${projectId}/duplicates`,
+      );
+      await drawerLink.click();
+    } else {
+      await expect(navDuplicates).toHaveAttribute(
+        "href",
+        `/ui/projects/${projectId}/duplicates`,
+      );
+      await navDuplicates.click();
+    }
+    await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
+    await page.goto(`/ui/projects/${projectId}`);
     await page.getByTestId("review-duplicates-link").click();
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     const review = page.getByTestId("duplicate-review");
@@ -43,6 +64,9 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(review.getByText("Project scope").first()).toBeVisible();
     await expect(review.getByText("Title overlap").first()).toBeVisible();
     await expect(review.getByText(/\d+%/).first()).toBeVisible();
+    await expect(review.getByTestId("duplicate-group").first()).toContainText(
+      /\d+% match/,
+    );
     await expect(review.getByText("v1").first()).toBeVisible();
     await expect(
       review.getByText(
@@ -83,6 +107,8 @@ test.describe("read-only duplicate review (MEM-01)", () => {
       .toBe(0);
     const columns = review.getByTestId("duplicate-candidate");
     await expect(columns).toHaveCount(2);
+    await expect(columns.first()).toContainText(/Match \d+%/);
+    await expect(columns.first()).toContainText(/Confidence \d+%/);
     const firstBox = await columns.nth(0).boundingBox();
     const secondBox = await columns.nth(1).boundingBox();
     expect(firstBox).not.toBeNull();
@@ -146,6 +172,6 @@ test.describe("read-only duplicate review (MEM-01)", () => {
           method === "POST" &&
           pathname === `/api/v1/projects/${projectId}/dedup`,
       ),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
   });
 });

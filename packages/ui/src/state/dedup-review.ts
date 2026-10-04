@@ -37,13 +37,16 @@ export function createDedupReviewState(db: () => Promise<LoreUiDb | null>) {
       return withStore((store) => store.list(projectId), []);
     },
     put(mark: DedupReviewMark) {
-      return withStore((store) => store.put(mark), undefined);
+      return withStore(async (store) => {
+        await store.put(mark);
+        return true;
+      }, false);
     },
     delete(projectId: string, groupId: string) {
-      return withStore(
-        (store) => store.delete(reviewMarkKey(projectId, groupId)),
-        undefined,
-      );
+      return withStore(async (store) => {
+        await store.delete(reviewMarkKey(projectId, groupId));
+        return true;
+      }, false);
     },
   };
 }

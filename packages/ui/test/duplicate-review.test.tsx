@@ -1,5 +1,11 @@
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -17,6 +23,7 @@ import {
 } from "~/db";
 import { DuplicateReview } from "~/components/lore/DuplicateReview";
 import { ApiError, type ApiClient } from "~/lib/api";
+import { globalKnowledgeHref, knowledgeHref, sessionHref } from "~/lib/href";
 import { WorkspaceProvider } from "~/routes/workspace";
 import { IDBFactory } from "./idb-globals";
 
@@ -121,6 +128,7 @@ function mount(
   client: ApiClient = makeClient(),
   db: Promise<LoreUiDb | null> = Promise.resolve(null),
   withInput = false,
+  withNavLink = false,
 ) {
   const historyRouter = createMemoryHistory();
   historyRouter.set({ value: `/ui/projects/${projectId}/duplicates` });
@@ -131,6 +139,13 @@ function mount(
         component={() => (
           <WorkspaceProvider client={client} db={db}>
             <>
+              {withNavLink && (
+                <nav>
+                  <a href="/ui/projects/project-1" data-testid="keyboard-nav">
+                    Project navigation
+                  </a>
+                </nav>
+              )}
               <DuplicateReview projectId={projectId} />
               {withInput && <input aria-label="Keyboard test input" />}
             </>
@@ -149,7 +164,12 @@ describe("DuplicateReview", () => {
   it("shows the initial scanning state, then full inert evidence and metadata", async () => {
     let resolvePreview: ((value: DedupPreviewResponse) => void) | undefined;
     const hostile = "<img src=x onerror=alert(1)>";
-    const first = candidate("knowledge-a", { title: hostile });
+    const first = candidate("knowledge-a", {
+      title: hostile,
+      score: 0.83,
+      reasons: ["title_overlap"],
+      confidence: 0.86,
+    });
     const previewDedup = vi.fn(
       () =>
         new Promise<DedupPreviewResponse>((resolve) => {
@@ -175,6 +195,9 @@ describe("DuplicateReview", () => {
               scope: "shared",
               project_id: "project-2",
               source_session: "session-1",
+              score: 0.86,
+              reasons: ["embedding_similarity"],
+              confidence: 0.71,
             }),
           ]),
           scope: "global",
@@ -192,6 +215,24 @@ describe("DuplicateReview", () => {
     );
     expect(screen.getByText("session-1")).toBeInTheDocument();
     const candidates = screen.getAllByTestId("duplicate-candidate");
+    expect(screen.getByText("86% match")).toHaveAttribute(
+      "aria-label",
+      "Best match score 86%",
+    );
+    expect(within(candidates[0]!).getByText("Match 83%")).toBeInTheDocument();
+    expect(
+      within(candidates[0]!).getByText("Title overlap"),
+    ).toBeInTheDocument();
+    expect(
+      within(candidates[0]!).getByText("Confidence 86%"),
+    ).toBeInTheDocument();
+    expect(within(candidates[1]!).getByText("Match 86%")).toBeInTheDocument();
+    expect(
+      within(candidates[1]!).getByText("Embedding similarity"),
+    ).toBeInTheDocument();
+    expect(
+      within(candidates[1]!).getByText("Confidence 71%"),
+    ).toBeInTheDocument();
     expect(candidates[0]).toHaveTextContent(hostile);
     expect(candidates[0]?.querySelector("img")).toBeNull();
     expect(screen.getAllByText("v1")).toHaveLength(2);
@@ -201,6 +242,58 @@ describe("DuplicateReview", () => {
     );
     expect(previewDedup).toHaveBeenCalledTimes(1);
     expect(listKnowledgeVersions).toHaveBeenCalledTimes(2);
+  });
+
+  it("links to each candidate's owning project or global document", async () => {
+    const otherProject = candidate("knowledge-other-project", {
+      project_id: "project-2",
+      source_session: "session-other-project",
+    });
+    const projectless = candidate("knowledge-projectless", {
+      project_id: null,
+      scope: "shared",
+      source_session: "session-projectless",
+    });
+    mount(
+      makeClient({
+        previewDedup: async () =>
+          response([group("global:link-targets", [otherProject, projectless])]),
+        listKnowledgeVersions: async (id) => {
+          const item = [otherProject, projectless].find(
+            (value) => value.logical_id === id,
+          );
+          if (!item) throw new Error(`Unknown knowledge id: ${id}`);
+          return history(item);
+        },
+      }),
+    );
+    await screen.findByText("Full content for knowledge-other-project");
+
+    const cards = screen.getAllByTestId("duplicate-candidate");
+    expect(
+      within(cards[0]!).getByRole("link", { name: "Open knowledge document" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${knowledgeHref("project-2", "knowledge-other-project")}`,
+    );
+    expect(
+      within(cards[0]!).getByRole("link", { name: "session-other-project" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${sessionHref("project-2", "session-other-project")}`,
+    );
+    expect(
+      within(cards[1]!).getByRole("link", { name: "Open knowledge document" }),
+    ).toHaveAttribute(
+      "href",
+      `/ui${globalKnowledgeHref("knowledge-projectless")}`,
+    );
+    expect(
+      within(cards[1]!).queryByRole("link", { name: "session-projectless" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(cards[1]!).getByText("session-projectless"),
+    ).toBeInTheDocument();
   });
 
   it("renders empty and retryable error states", async () => {
@@ -340,13 +433,27 @@ describe("DuplicateReview", () => {
       await screen.findByText("Removed since this scan"),
     ).toBeInTheDocument();
     expect(await screen.findByText("v2")).toBeInTheDocument();
+    expect(screen.getByTestId("accept-merge")).toBeDisabled();
+    expect(screen.getByTestId("changed-group-notice")).toHaveTextContent(
+      "Rescan before marking — this group changed since the scan",
+    );
+    fireEvent.keyDown(screen.getByTestId("duplicate-review"), { key: "a" });
+    expect(screen.getByTestId("review-summary")).toHaveTextContent(
+      "0 accepted · 0 skipped · 1 pending",
+    );
+    fireEvent.click(screen.getByTestId("skip-group"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "0 accepted · 1 skipped · 0 pending",
+      ),
+    );
   });
 
   it("handles review shortcuts but ignores key events from typing fields", async () => {
-    mount(makeClient(), Promise.resolve(null), true);
+    mount(makeClient(), Promise.resolve(null), true, true);
     await screen.findByText("Full content for knowledge-a");
 
-    fireEvent.keyDown(window, { key: "s" });
+    fireEvent.keyDown(document.body, { key: "s" });
     await waitFor(() =>
       expect(screen.getByTestId("review-summary")).toHaveTextContent(
         "1 skipped",
@@ -356,14 +463,34 @@ describe("DuplicateReview", () => {
       key: "a",
     });
     expect(screen.getByTestId("review-summary")).toHaveTextContent("1 skipped");
-    fireEvent.keyDown(window, { key: "a", ctrlKey: true });
+    const navLink = screen.getByTestId("keyboard-nav");
+    navLink.focus();
+    expect(navLink).toHaveFocus();
+    fireEvent.keyDown(navLink, { key: "a" });
+    expect(screen.getByTestId("review-summary")).toHaveTextContent("1 skipped");
+    const review = screen.getByTestId("duplicate-review");
+    const combobox = document.createElement("div");
+    combobox.setAttribute("role", "combobox");
+    combobox.tabIndex = 0;
+    review.append(combobox);
+    combobox.focus();
+    fireEvent.keyDown(combobox, { key: "a" });
+    expect(screen.getByTestId("review-summary")).toHaveTextContent("1 skipped");
+    const listbox = document.createElement("div");
+    listbox.setAttribute("role", "listbox");
+    listbox.tabIndex = 0;
+    review.append(listbox);
+    listbox.focus();
+    fireEvent.keyDown(listbox, { key: "a" });
+    expect(screen.getByTestId("review-summary")).toHaveTextContent("1 skipped");
+    fireEvent.keyDown(document.body, { key: "a", ctrlKey: true });
     const dialog = document.createElement("div");
     dialog.setAttribute("role", "dialog");
     document.body.append(dialog);
-    fireEvent.keyDown(window, { key: "a" });
+    fireEvent.keyDown(document.body, { key: "a" });
     dialog.remove();
     expect(screen.getByTestId("review-summary")).toHaveTextContent("1 skipped");
-    fireEvent.keyDown(window, { key: "u" });
+    fireEvent.keyDown(document.body, { key: "u" });
     await waitFor(() =>
       expect(screen.getByTestId("review-summary")).toHaveTextContent(
         "1 pending",
@@ -388,13 +515,13 @@ describe("DuplicateReview", () => {
       }),
     );
     await screen.findByText("Full content for knowledge-a");
-    fireEvent.keyDown(window, { key: "j" });
+    fireEvent.keyDown(document.body, { key: "j" });
     expect(screen.getByTestId("focused-duplicate-group")).toHaveTextContent(
       "Group 2 of 2",
     );
-    fireEvent.keyDown(window, { key: "2" });
+    fireEvent.keyDown(document.body, { key: "2" });
     expect(screen.getByLabelText("Keep this one (2)")).toBeChecked();
-    fireEvent.keyDown(window, { key: "k" });
+    fireEvent.keyDown(document.body, { key: "k" });
     expect(screen.getByTestId("focused-duplicate-group")).toHaveTextContent(
       "Group 1 of 2",
     );
@@ -405,5 +532,65 @@ describe("DuplicateReview", () => {
     expect(
       await screen.findByTestId("review-storage-notice"),
     ).toHaveTextContent("not saved on this device");
+  });
+
+  it("reports failed mark writes and deletes", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("IndexedDB fixture did not open");
+    let failNextReviewPut = true;
+    let failNextReviewDelete = true;
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "put") {
+          return async (...args: Parameters<typeof target.put>) => {
+            const [store] = args;
+            if (store === "reviewDecisions" && failNextReviewPut) {
+              failNextReviewPut = false;
+              throw new Error("simulated storage failure");
+            }
+            return Reflect.apply(target.put, target, args);
+          };
+        }
+        if (property === "delete") {
+          return async (...args: Parameters<typeof target.delete>) => {
+            const [store] = args;
+            if (store === "reviewDecisions" && failNextReviewDelete) {
+              failNextReviewDelete = false;
+              throw new Error("simulated delete failure");
+            }
+            return Reflect.apply(target.delete, target, args);
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    mount(makeClient(), Promise.resolve(failingDb));
+    await screen.findByText("Full content for knowledge-a");
+
+    fireEvent.click(screen.getByTestId("accept-merge"));
+    expect(
+      await screen.findByTestId("review-persistence-error"),
+    ).toHaveTextContent("Could not save this mark on this device");
+    expect(screen.getByTestId("review-summary")).toHaveTextContent(
+      "0 accepted",
+    );
+
+    fireEvent.click(screen.getByTestId("skip-group"));
+    await waitFor(() =>
+      expect(screen.getByTestId("review-summary")).toHaveTextContent(
+        "1 skipped",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("review-persistence-error"),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Clear mark" }));
+    expect(
+      await screen.findByTestId("review-persistence-error"),
+    ).toHaveTextContent("Could not save this mark on this device");
+    expect(screen.getByTestId("review-summary")).toHaveTextContent("1 skipped");
   });
 });

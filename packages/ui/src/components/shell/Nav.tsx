@@ -3,7 +3,7 @@ import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { A, useMatch, useResolvedPath } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
-import { allKnowledgeHref } from "~/lib/href";
+import { allKnowledgeHref, duplicatesHref } from "~/lib/href";
 import { pins } from "~/state/pins";
 import type { ProjectSummary } from "~/contracts";
 import {
@@ -153,12 +153,18 @@ export const Nav: Component<NavProps> = (props) => {
   );
   const homePath = useResolvedPath(() => "/");
   const allKnowledgePath = useResolvedPath(() => "/knowledge");
+  const duplicatesPath = useResolvedPath(() =>
+    props.activeProjectId
+      ? duplicatesHref(props.activeProjectId)
+      : "/__no-active-project__",
+  );
   const entitiesPath = useResolvedPath(() => "/entities/*");
   const contradictionsPath = useResolvedPath(() => "/contradictions/*");
   const warmingPath = useResolvedPath(() => "/warming/*");
   const costsPath = useResolvedPath(() => "/costs/*");
   const atHome = useMatch(() => homePath() ?? "");
   const atAllKnowledge = useMatch(() => allKnowledgePath() ?? "");
+  const atDuplicates = useMatch(() => duplicatesPath() ?? "");
   const atEntities = useMatch(() => entitiesPath() ?? "");
   const atContradictions = useMatch(() => contradictionsPath() ?? "");
   const atWarming = useMatch(() => warmingPath() ?? "");
@@ -357,10 +363,25 @@ export const Nav: Component<NavProps> = (props) => {
         <span>Sessions</span>
         <span class="text-[10px] uppercase tracking-wider">UI-05</span>
       </div>
-      <div class="my-0.5 flex items-center justify-between gap-2 px-3 py-2.25 text-sm text-muted">
-        <span>Find duplicates</span>
-        <span class="text-[10px] uppercase tracking-wider">UI-08</span>
-      </div>
+      <Show
+        when={props.activeProjectId}
+        fallback={
+          <div class="my-0.5 flex items-center justify-between gap-2 px-3 py-2.25 text-sm text-muted">
+            <span>Find duplicates</span>
+            <span class="text-[10px]">choose a project</span>
+          </div>
+        }
+      >
+        {(projectId) => (
+          <NavItem
+            href={duplicatesHref(projectId())}
+            active={!!atDuplicates()}
+            testId="nav-duplicates"
+          >
+            Find duplicates
+          </NavItem>
+        )}
+      </Show>
 
       <NavHeading>Operations</NavHeading>
       <NavItem href="/warming" active={!!atWarming()} testId="nav-warming">

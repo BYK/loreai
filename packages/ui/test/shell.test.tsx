@@ -288,7 +288,7 @@ function mount(
   return { ...utils, history };
 }
 
-function mountBaseNav(path: string) {
+function mountBaseNav(path: string, activeProjectId: string | null = null) {
   const history = createMemoryHistory();
   history.set({ value: path });
   const utils = render(() => (
@@ -301,7 +301,7 @@ function mountBaseNav(path: string) {
               projects={PROJECTS}
               loading={false}
               error={null}
-              activeProjectId={null}
+              activeProjectId={activeProjectId}
               totalKnowledge={4}
             />
           </ConnectionContext.Provider>
@@ -419,6 +419,31 @@ describe("shell: project navigation and real-data path", () => {
         }
       }
     }
+  });
+
+  it("routes to project duplicates under the /ui base and keeps the entry muted without a project", async () => {
+    const project = PROJECTS[0];
+    if (!project) throw new Error("A navigation project fixture is required");
+    const duplicatesPath = `/ui/projects/${project.id}/duplicates`;
+    const { history, unmount } = mountBaseNav(duplicatesPath, project.id);
+    const duplicates = screen.getByTestId("nav-duplicates");
+
+    expect(duplicates).toHaveAttribute("href", duplicatesPath);
+    await waitFor(() => {
+      expect(duplicates).toHaveAttribute("aria-current", "page");
+      expect(duplicates).toHaveClass("bg-accent-soft");
+    });
+
+    history.set({ value: `/ui/projects/${project.id}` });
+    await waitFor(() => {
+      expect(duplicates).not.toHaveAttribute("aria-current", "page");
+      expect(duplicates).not.toHaveClass("bg-accent-soft");
+    });
+    unmount();
+
+    mountBaseNav("/ui");
+    expect(screen.getByText("choose a project")).toBeInTheDocument();
+    expect(screen.queryByTestId("nav-duplicates")).not.toBeInTheDocument();
   });
 
   it("loads projects into the nav and shows the welcome document", async () => {
