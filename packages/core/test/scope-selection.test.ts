@@ -12,6 +12,8 @@ import {
   create,
   listPendingTeamPromotions,
   rejectForTeam,
+  remove,
+  teamPromotionCandidate,
   update,
 } from "../src/ltm";
 import { teamScopeForContent } from "../src/sync-data";
@@ -136,6 +138,64 @@ describe("E-5-F3 scope selection & promotion policy", () => {
 });
 
 describe("E-5-F3-2 team-promotion review gate", () => {
+  it("returns the current candidate with its linked scope and previous approved version", () => {
+    const pid = ensureProject("/test/f3gate/candidate");
+    seedScope("sCandidate", "Candidate", "manual");
+    setProjectScope(pid, "sCandidate");
+    const id = create({
+      projectPath: "/test/f3gate/candidate",
+      category: "gotcha",
+      title: "Current",
+      content: "Current content",
+      scope: "project",
+    });
+
+    expect(teamPromotionCandidate("missing")).toBeNull();
+    expect(teamPromotionCandidate(id)).toMatchObject({
+      logicalId: id,
+      versionId: id,
+      version: 1,
+      title: "Current",
+      content: "Current content",
+      category: "gotcha",
+      projectId: pid,
+      scopeId: "sCandidate",
+      approvalStatus: "pending",
+      sensitivity: "normal",
+      previousTeamVersion: null,
+    });
+
+    expect(approveForTeam(id, "admin")).toBe(true);
+    update(id, {
+      title: "Current after edit",
+      content: "Current content after edit",
+    });
+    expect(rejectForTeam(id)).toBe(true);
+    expect(teamPromotionCandidate(id)).toMatchObject({
+      version: 2,
+      approvalStatus: "rejected",
+      previousTeamVersion: {
+        versionId: id,
+        version: 1,
+        title: "Current",
+        content: "Current content",
+      },
+    });
+  });
+
+  it("returns null for a deleted current version", () => {
+    const id = create({
+      projectPath: "/test/f3gate/deleted-candidate",
+      category: "pattern",
+      title: "Deleted",
+      content: "Deleted content",
+      scope: "project",
+    });
+    remove(id);
+
+    expect(teamPromotionCandidate(id)).toBeNull();
+  });
+
   it("create() gates approval_status by the effective policy", () => {
     // Unbound project → 'auto' (legacy/neutral; never team-synced).
     const id1 = create({

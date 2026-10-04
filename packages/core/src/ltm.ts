@@ -774,6 +774,94 @@ export function listPendingTeamPromotions(
   }));
 }
 
+export type TeamPromotionPreviousVersion = {
+  versionId: string;
+  version: number;
+  title: string;
+  content: string;
+};
+
+export type TeamPromotionEntryCandidate = TeamPromotionPreviousVersion & {
+  logicalId: string;
+  category: string;
+  projectId: string | null;
+  scopeId: string | null;
+  approvalStatus: ApprovalStatus;
+  sensitivity: Sensitivity;
+  previousTeamVersion: TeamPromotionPreviousVersion | null;
+};
+
+/** Current local content and its latest previously-approved team version, if any. */
+export function teamPromotionCandidate(
+  logicalId: string,
+): TeamPromotionEntryCandidate | null {
+  const tenantId = currentTenantId();
+  const current = db()
+    .query(
+      `SELECT k.logical_id, k.id AS version_id, k.version, k.title, k.content,
+              k.category, k.project_id, p.scope_id, k.approval_status, k.sensitivity
+         FROM knowledge k
+         LEFT JOIN projects p ON p.id = k.project_id AND p.tenant_id = k.tenant_id
+        WHERE k.tenant_id = ? AND k.logical_id = ?
+          AND k.is_current = 1 AND k.is_deleted = 0
+        LIMIT 1`,
+    )
+    .get(tenantId, logicalId) as
+    | {
+        logical_id: string;
+        version_id: string;
+        version: number;
+        title: string;
+        content: string;
+        category: string;
+        project_id: string | null;
+        scope_id: string | null;
+        approval_status: ApprovalStatus;
+        sensitivity: Sensitivity;
+      }
+    | undefined;
+  if (!current) return null;
+
+  const previous = db()
+    .query(
+      `SELECT id AS version_id, version, title, content
+         FROM knowledge
+        WHERE tenant_id = ? AND logical_id = ? AND is_current = 0
+          AND approval_status = 'approved'
+        ORDER BY version DESC
+        LIMIT 1`,
+    )
+    .get(tenantId, logicalId) as
+    | {
+        version_id: string;
+        version: number;
+        title: string;
+        content: string;
+      }
+    | undefined;
+
+  return {
+    logicalId: current.logical_id,
+    versionId: current.version_id,
+    version: current.version,
+    title: current.title,
+    content: current.content,
+    category: current.category,
+    projectId: current.project_id,
+    scopeId: current.scope_id,
+    approvalStatus: current.approval_status,
+    sensitivity: current.sensitivity,
+    previousTeamVersion: previous
+      ? {
+          versionId: previous.version_id,
+          version: previous.version,
+          title: previous.title,
+          content: previous.content,
+        }
+      : null,
+  };
+}
+
 // E-5-F3 (#1307): notified with a knowledge logical_id whenever its team-promotion status CHANGES
 // (approve OR reject), so the sync layer can re-enqueue the entry's linked entity graph and let the
 // push re-resolve each row's scope — migrating it INTO the team on approve and BACK to personal on

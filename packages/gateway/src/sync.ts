@@ -197,7 +197,7 @@ const fromUtf8 = new TextDecoder();
  * `{scope, dek}` once (scope = auth.uid() = the v1 encryption scope; dek from the
  * keystore). Only meaningful when `mode() === "on"`.
  */
-function makeEncryptionResolver() {
+export function makeEncryptionResolver() {
   // E-5-F3-3: DEKs are resolved PER SCOPE (personal + any team scope in play this cycle) and
   // cached. A team-scoped row seals with its team DEK; a personal row with the personal DEK.
   const byScope = new Map<string, EncCtx>();
@@ -258,6 +258,38 @@ function makeEncryptionResolver() {
   };
 }
 
+export function sealString(
+  ctx: NonNullable<EncCtx>,
+  aad: Uint8Array,
+  value: string,
+): string {
+  const dek = ctx.deks.get(ctx.currentEpoch);
+  if (!dek)
+    throw new Error(
+      `encrypt: no DEK for ${ctx.scope} epoch ${ctx.currentEpoch}`,
+    );
+  return Buffer.from(
+    crypto.seal(dek, utf8.encode(value), aad, {
+      keyEpoch: ctx.currentEpoch,
+    }),
+  ).toString("base64");
+}
+
+export function openString(
+  ctx: NonNullable<EncCtx>,
+  aad: Uint8Array,
+  value: string,
+): string {
+  const bytes = Buffer.from(value, "base64");
+  if (!crypto.isEnvelope(bytes) || bytes.toString("base64") !== value) {
+    throw new Error("encrypted value is not a canonical envelope");
+  }
+  const epoch = crypto.parseHeader(bytes).keyEpoch;
+  const dek = ctx.deks.get(epoch);
+  if (!dek) throw new Error(`no key for epoch ${epoch}`);
+  return fromUtf8.decode(crypto.open(dek, bytes, aad));
+}
+
 /**
  * Encrypt a push payload's encryptedColumns IN PLACE (seal → base64). Only non-empty
  * strings are sealed (a tombstone scrub "" stays plaintext). AAD binds each ciphertext
@@ -270,21 +302,11 @@ function encryptColumns(
   payload: Record<string, unknown>,
   ctx: NonNullable<EncCtx>,
 ): void {
-  // Seal new content at the scope's CURRENT epoch (the envelope pins it, so decrypt dispatches
-  // to the right DEK). ctx() guarantees the current-epoch DEK; its absence is a logic error —
-  // fail CLOSED (throw) rather than push plaintext.
-  const dek = ctx.deks.get(ctx.currentEpoch);
-  if (!dek)
-    throw new Error(
-      `encrypt: no DEK for ${ctx.scope} epoch ${ctx.currentEpoch}`,
-    );
   for (const col of tableMeta(table).encryptedColumns ?? []) {
     const v = payload[col];
     if (typeof v !== "string" || v.length === 0) continue;
     const aad = crypto.buildAad(ctx.scope, table, col, logicalId);
-    payload[col] = Buffer.from(
-      crypto.seal(dek, utf8.encode(v), aad, { keyEpoch: ctx.currentEpoch }),
-    ).toString("base64");
+    payload[col] = sealString(ctx, aad, v);
   }
 }
 
@@ -326,7 +348,7 @@ function decryptColumns(
     }
     const aad = crypto.buildAad(enc.ctx.scope, table, col, logicalId);
     try {
-      row[col] = fromUtf8.decode(crypto.open(dek, bytes, aad));
+      row[col] = openString(enc.ctx, aad, v);
     } catch (e) {
       // A valid envelope we hold a key for but still can't open (wrong key / tampered /
       // AAD mismatch) is an integrity failure. NEVER store the ciphertext and NEVER let
@@ -1505,6 +1527,14 @@ export async function syncOnce(
   } catch (e) {
     log.notice(
       `sync: scope-wrap reconcile deferred — ${(e as Error).message ?? e}`,
+    );
+  }
+  try {
+    const { applyPromotionDecisions } = await import("./promotions");
+    await applyPromotionDecisions(client);
+  } catch (e) {
+    log.notice(
+      `sync: promotion decisions deferred — ${(e as Error).message ?? e}`,
     );
   }
   return {

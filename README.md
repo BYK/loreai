@@ -84,7 +84,36 @@ Lore's long-term knowledge is local-first, but project knowledge is most valuabl
 - **Reviewable**: `git diff` shows what the agent learned; a reviewer can reject a wrong fact before it becomes shared truth. Knowledge history is your git history.
 - **Hand-editable**: fix, delete, or add facts by hand; they're imported on the next run.
 
-This is the team path that works today with your existing git workflow. **Folk Lore** (coming soon) adds live, continuous team sync on top. See [withlore.ai/different/#waitlist](https://withlore.ai/different/#waitlist). Full review workflow and configuration at [withlore.ai/docs/team-memory](https://withlore.ai/docs/team-memory/).
+This is the team path that works today with your existing git workflow. **Folk Lore** (coming soon) adds live, continuous team sync on top; see [the promotion and review workflow below](#knowledge-promotion-1807), [team memory configuration](https://withlore.ai/docs/team-memory/), and [product updates](https://withlore.ai/different/#waitlist).
+
+### Knowledge promotion (#1807)
+
+Knowledge stays local until it is proposed from a project linked to a team.
+Team editors and admins can propose eligible entries; a different team admin
+must approve or reject each proposal. Approval becomes visible to team members
+after the proposer syncs. The request records a specific knowledge version, so
+if the local entry changes before the decision is applied it is marked stale
+and can be proposed again. Restricted entries cannot be promoted, and pending
+proposals are encrypted with the team key.
+
+The server review path does not allow a proposer to approve their own request.
+The existing local CLI flow (`lore team review`, `lore team approve <id>`, and
+`lore team reject <id>`) is unchanged and remains a local, self-approval path.
+There is no branch-scoped knowledge field: `metadata.gitHead` is provenance,
+not a promotion gate.
+
+Link a project, sign in, unlock team encryption, and sync with:
+
+```bash
+lore team link <team> --project /path/to/project
+lore login
+lore sync enable
+lore sync now
+```
+
+Use `lore team review` for the unchanged local review workflow. The browser
+workflow is available at `/ui/promotions`; propose from a knowledge entry's
+detail page.
 
 ## CLI
 

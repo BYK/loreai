@@ -51,6 +51,9 @@ import {
   projectList,
   projectRenameResult,
   projectsMergeResult,
+  promotionListResponse,
+  promotionPreview,
+  promotionReceipt,
   query,
   sessionsMoveResult,
   recallResponse,
@@ -87,6 +90,9 @@ import {
   type ProjectClearResult,
   type ProjectDeleteResult,
   type ProjectRenameResult,
+  type PromotionListResponse,
+  type PromotionPreview,
+  type PromotionReceipt,
   type ProjectSummary,
   type ProjectsMergeResult,
   type RecallResponse,
@@ -597,6 +603,70 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["projects", projectId, "sharing"]),
         sharingStatus,
+        signal,
+      );
+    },
+    getPromotionPreview(
+      knowledgeId: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionPreview> {
+      return getJson(
+        apiPath(["knowledge", knowledgeId, "promotion"]),
+        promotionPreview,
+        signal,
+      );
+    },
+    promoteKnowledge(
+      knowledgeId: string,
+      versionId: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["knowledge", knowledgeId, "promote"]),
+        { version_id: versionId },
+        promotionReceipt,
+        signal,
+      );
+    },
+    listPromotions(
+      teamId: string,
+      status: "pending" | "decided" | "all" = "pending",
+      signal?: AbortSignal,
+    ): Promise<PromotionListResponse> {
+      return getJson(
+        `/promotions${query({ team: teamId, status })}`,
+        promotionListResponse,
+        signal,
+      );
+    },
+    decidePromotion(
+      id: string,
+      decision: "approved" | "rejected",
+      note?: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath([
+          "promotions",
+          id,
+          decision === "approved" ? "approve" : "reject",
+        ]),
+        note === undefined ? {} : { note },
+        promotionReceipt,
+        signal,
+      );
+    },
+    withdrawPromotion(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<PromotionReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["promotions", id, "withdraw"]),
+        {},
+        promotionReceipt,
         signal,
       );
     },
