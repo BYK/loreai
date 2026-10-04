@@ -117,7 +117,7 @@ async function decide(
   note: string | null = null,
 ) {
   return h.asUser(uid, (client) =>
-    client.query("select (public.decide_promotion($1,$2,$3)).*", [
+    client.query("select * from public.decide_promotion($1,$2,$3)", [
       id,
       decision,
       note,
@@ -127,7 +127,7 @@ async function decide(
 
 async function withdraw(uid: string, id: string) {
   return h.asUser(uid, (client) =>
-    client.query("select (public.withdraw_promotion($1)).*", [id]),
+    client.query("select * from public.withdraw_promotion($1)", [id]),
   );
 }
 
@@ -137,7 +137,7 @@ async function markApplied(
   outcome: "applied" | "stale",
 ) {
   return h.asUser(uid, (client) =>
-    client.query("select (public.mark_promotion_applied($1,$2)).*", [
+    client.query("select * from public.mark_promotion_applied($1,$2)", [
       id,
       outcome,
     ]),

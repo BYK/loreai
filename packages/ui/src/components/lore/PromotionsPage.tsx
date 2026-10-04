@@ -21,6 +21,7 @@ import {
 } from "~/components/ui/dialog";
 import { TextField, TextFieldTextArea } from "~/components/ui/text-field";
 import { StateCard } from "./StateCard";
+import { PromotionIdentity } from "./PromotionIdentity";
 
 type PromotionFilter = "pending" | "decided" | "all";
 type PageState =
@@ -28,6 +29,7 @@ type PageState =
   | "anonymous"
   | "hosted"
   | "unreachable"
+  | "error"
   | "no_team"
   | "ready";
 type Decision = "approved" | "rejected";
@@ -127,11 +129,21 @@ export const PromotionsPage: Component = () => {
     getRowId: (row) => row.id,
   });
 
+  const setLoadError = (error: unknown) => {
+    setListError(error);
+    if (error instanceof ApiError && error.kind === "unreachable") {
+      setPageState("unreachable");
+    } else if (error instanceof ApiError && error.kind === "forbidden") {
+      setPageState("hosted");
+    } else {
+      setPageState("error");
+    }
+  };
+
   const loadList = async (
-    selectedTeam = teamId(),
+    selectedTeam: string | null = teamId() || null,
     selectedFilter = filter(),
   ) => {
-    if (!selectedTeam) return;
     setLoadingList(true);
     setListError(undefined);
     try {
@@ -144,84 +156,51 @@ export const PromotionsPage: Component = () => {
       else if (response.remote === "unreachable") setPageState("unreachable");
       else setPageState("ready");
     } catch (error) {
-      setListError(error);
-      if (
-        error instanceof ApiError &&
-        (error.kind === "unreachable" || error.kind === "http")
-      ) {
-        setPageState("unreachable");
-      } else if (error instanceof ApiError && error.kind === "forbidden") {
-        setPageState("hosted");
-      } else {
-        setPageState("anonymous");
-      }
+      setLoadError(error);
     } finally {
       setLoadingList(false);
     }
   };
 
-  const showAnonymousOrHosted = async () => {
+  const initialize = async () => {
+    setPageState("loading");
+    setListError(undefined);
     try {
-      const projects =
-        ws.projects.data() ??
-        (await ws.tracked(() => ws.client.listProjects()));
-      const project = projects[0];
-      if (project) {
-        const sharing = await ws.tracked(() =>
-          ws.client.getProjectSharing(project.id),
-        );
-        if (sharing.detail?.includes("hosted/remote gateway mode")) {
-          setPageState("hosted");
-          return;
-        }
+      const account = await ws.tracked(() => ws.client.getAccount());
+      if (!account.signed_in) {
+        await loadList(null, filter());
+        return;
       }
-      setPageState("anonymous");
+      const result = await ws.tracked(() => ws.client.getTeams());
+      setTeams(result.teams);
+      const first = result.teams[0];
+      if (!first) {
+        setPageState("no_team");
+        return;
+      }
+      setTeamId(first.id);
+      await loadList(first.id, filter());
     } catch (error) {
-      setPageState(
-        error instanceof ApiError && error.kind === "unreachable"
-          ? "unreachable"
-          : "anonymous",
-      );
+      setLoadError(error);
     }
   };
 
-  onMount(() => {
-    void (async () => {
-      try {
-        const account = await ws.tracked(() => ws.client.getAccount());
-        if (!account.signed_in) {
-          await showAnonymousOrHosted();
-          return;
-        }
-        const result = await ws.tracked(() => ws.client.getTeams());
-        setTeams(result.teams);
-        const first = result.teams[0];
-        if (!first) {
-          setPageState("no_team");
-          return;
-        }
-        setTeamId(first.id);
-        await loadList(first.id, filter());
-      } catch (error) {
-        if (
-          error instanceof ApiError &&
-          (error.kind === "unreachable" || error.kind === "http")
-        ) {
-          setPageState("unreachable");
-        } else if (error instanceof ApiError && error.kind === "forbidden") {
-          setPageState("hosted");
-        } else {
-          setPageState("anonymous");
-        }
-      }
-    })();
-  });
+  onMount(() => void initialize());
+
+  const retryLoad = () => {
+    if (teamId()) {
+      setPageState("loading");
+      void loadList(teamId(), filter());
+    } else {
+      void initialize();
+    }
+  };
 
   const selectFilter = (event: Event) => {
     const value = (event.currentTarget as HTMLSelectElement)
       .value as PromotionFilter;
     setFilter(value);
-    void loadList(teamId(), value);
+    void loadList(teamId() || null, value);
   };
 
   const selectTeam = (event: Event) => {
@@ -345,17 +324,26 @@ export const PromotionsPage: Component = () => {
             The gateway or promotion service could not be reached.
           </StateCard>
         </Match>
+        <Match when={pageState() === "error"}>
+          <StateCard kind="error" title="Promotions unavailable">
+            {errorMessage(listError())}
+            <Button
+              class="mt-3"
+              size="sm"
+              variant="outline"
+              data-testid="promotions-retry"
+              onClick={retryLoad}
+            >
+              Retry
+            </Button>
+          </StateCard>
+        </Match>
         <Match when={pageState() === "no_team"}>
           <StateCard kind="empty" title="No team memberships">
             Join a team before reviewing promotion requests.
           </StateCard>
         </Match>
         <Match when={pageState() === "ready"}>
-          <Show when={listError()}>
-            <StateCard kind="error" title="Promotions unavailable">
-              {errorMessage(listError())}
-            </StateCard>
-          </Show>
           <Show when={loadingList() && !data()}>
             <StateCard kind="loading" title="Loading promotions" />
           </Show>
@@ -439,8 +427,10 @@ export const PromotionsPage: Component = () => {
                                       <Match
                                         when={cell.column.id === "proposer"}
                                       >
-                                        {row.original.proposer.label ??
-                                          row.original.proposer.id}
+                                        <PromotionIdentity
+                                          id={row.original.proposer.id}
+                                          label={row.original.proposer.label}
+                                        />
                                       </Match>
                                       <Match
                                         when={cell.column.id === "proposed"}

@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { crypto, isHostedMode, keystore, ltm, syncData } from "@loreai/core";
+import {
+  crypto,
+  isHostedMode,
+  keystore,
+  log,
+  ltm,
+  syncData,
+} from "@loreai/core";
 import type { GatewayConfig } from "./config";
 import { sharingStatus, type SharingPolicy } from "./folk-status";
 import {
@@ -48,7 +55,7 @@ export interface PromotionRequest {
   proposer: { id: string; label: string | null };
   mine: boolean;
   status: RequestStatus;
-  decided_by: { id: string; label: string } | null;
+  decided_by: { id: string; label: string | null } | null;
   decided_at: string | null;
   decision_note: string | null;
   applied: AppliedStatus | null;
@@ -172,7 +179,9 @@ function eligibility(
     | "not_linked"
     | "already_shared"
     | "restricted"
+    | "hosted"
     | "account_required"
+    | "remote_unavailable"
     | "encryption_locked";
 } {
   if (candidate.projectId === null)
@@ -183,7 +192,11 @@ function eligibility(
     return { promotable: false, reason: "already_shared" };
   if (candidate.sensitivity === "restricted")
     return { promotable: false, reason: "restricted" };
-  if (remote !== "ok") return { promotable: false, reason: "account_required" };
+  if (remote === "hosted") return { promotable: false, reason: "hosted" };
+  if (remote === "anonymous")
+    return { promotable: false, reason: "account_required" };
+  if (remote === "unreachable")
+    return { promotable: false, reason: "remote_unavailable" };
   if (keystore.encryptionState() !== "on" || !hasTeamContext)
     return { promotable: false, reason: "encryption_locked" };
   return { promotable: true, reason: null };
@@ -327,8 +340,7 @@ async function shapeRequest(
           id: row.decided_by,
           label:
             presentation.labels.get(row.decided_by) ??
-            (row.decided_by === me ? localIdentityLabel(me) : null) ??
-            row.decided_by,
+            (row.decided_by === me ? localIdentityLabel(me) : null),
         }
       : null,
     decided_at: row.decided_at,
@@ -361,7 +373,6 @@ async function getPreview(
       ? await resolver.ctxForScope(candidate.scopeId)
       : null;
   const policy = sharingPolicy(config, candidate.projectId);
-  const eligibilityResult = eligibility(candidate, access.remote, ctx !== null);
 
   // Knowledge has no branch-scoped field; metadata.gitHead is not a promotion gate.
   const entry = {
@@ -417,7 +428,7 @@ async function getPreview(
     entry,
     team: policy.team,
     policy: policy.policy,
-    eligibility: eligibilityResult,
+    eligibility: eligibility(candidate, remote, ctx !== null),
     previous_team_version: previous,
     pending_request: pendingRequest,
     remote,
@@ -452,6 +463,14 @@ async function promote(
   const eligibilityResult = eligibility(candidate, access.remote, ctx !== null);
   if (!eligibilityResult.promotable) {
     const reason = eligibilityResult.reason!;
+    if (reason === "remote_unavailable") {
+      return errorResponse(
+        503,
+        "remote_unreachable",
+        "Lore cloud could not be reached. Try again later.",
+        { reason },
+      );
+    }
     const status =
       reason === "account_required" || reason === "encryption_locked"
         ? 409
@@ -552,8 +571,16 @@ async function listPromotions(
 ): Promise<Response> {
   const teamId = url.searchParams.get("team");
   const status = url.searchParams.get("status") ?? "pending";
-  if (!teamId || !UUID.test(teamId)) {
+  if (teamId !== null && !UUID.test(teamId)) {
     return errorResponse(400, "invalid_request", "team must be a UUID");
+  }
+  const access = await accessFor(config);
+  if (teamId === null && access.remote !== "ok") {
+    return json({
+      remote: access.remote,
+      requests: [],
+      complete: true,
+    });
   }
   if (status !== "pending" && status !== "decided" && status !== "all") {
     return errorResponse(
@@ -562,7 +589,9 @@ async function listPromotions(
       "status must be pending, decided, or all",
     );
   }
-  const access = await accessFor(config);
+  if (teamId === null) {
+    return errorResponse(400, "invalid_request", "team is required");
+  }
   if (!access.client || !access.me) {
     return json({
       remote: access.remote,
@@ -753,7 +782,11 @@ export async function applyPromotionDecisions(
       .eq("proposer_id", user.user_id)
       .in("status", ["approved", "rejected"])
       .is("applied", null);
-    if (error || !data) return;
+    if (error) {
+      log.notice("sync: promotion decision lookup failed");
+      return;
+    }
+    if (!data) return;
     for (const value of data) {
       const row = value as PromotionRow;
       try {
@@ -764,21 +797,33 @@ export async function applyPromotionDecisions(
           } else {
             ltm.rejectForTeam(row.logical_id);
           }
-          await client.rpc("mark_promotion_applied", {
-            p_id: row.id,
-            p_outcome: "applied",
-          });
+          const { error: applyError } = await client.rpc(
+            "mark_promotion_applied",
+            {
+              p_id: row.id,
+              p_outcome: "applied",
+            },
+          );
+          if (applyError) {
+            log.notice("sync: promotion outcome recording failed");
+          }
         } else {
-          await client.rpc("mark_promotion_applied", {
-            p_id: row.id,
-            p_outcome: "stale",
-          });
+          const { error: staleError } = await client.rpc(
+            "mark_promotion_applied",
+            {
+              p_id: row.id,
+              p_outcome: "stale",
+            },
+          );
+          if (staleError) {
+            log.notice("sync: stale promotion outcome recording failed");
+          }
         }
       } catch {
-        continue;
+        log.notice("sync: promotion decision application failed");
       }
     }
   } catch {
-    return;
+    log.notice("sync: promotion decision lookup failed");
   }
 }

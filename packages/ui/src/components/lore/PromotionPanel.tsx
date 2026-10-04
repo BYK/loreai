@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "~/components/ui/dialog";
 import { StateCard } from "./StateCard";
+import { PromotionIdentity } from "./PromotionIdentity";
 
 const ELIGIBILITY: Record<
   NonNullable<PromotionPreview["eligibility"]["reason"]>,
@@ -22,7 +23,9 @@ const ELIGIBILITY: Record<
   not_linked: "Link this project to a team before proposing.",
   already_shared: "This entry is already shared with the team.",
   restricted: "Restricted knowledge cannot be proposed to a team.",
+  hosted: "Team promotion is not available on a hosted gateway.",
   account_required: "Sign in with `lore login` to propose.",
+  remote_unavailable: "Lore cloud could not be reached. Try again later.",
   encryption_locked: "Unlock team encryption with `lore sync enable`.",
 };
 
@@ -74,11 +77,7 @@ export const PromotionPanel: Component<{
     error instanceof Error ? error.message : "The gateway refused the request.";
   const isStaleError = () => {
     const error = actionError();
-    return (
-      error instanceof ApiError &&
-      error.status === 409 &&
-      /reload the preview/i.test(error.message)
-    );
+    return error instanceof ApiError && error.code === "stale_version";
   };
 
   const reloadPreview = async () => {
@@ -170,6 +169,24 @@ export const PromotionPanel: Component<{
                   data-testid="promotion-request-status"
                 >
                   <div class="font-medium">{requestStatus(current())}</div>
+                  <p class="mt-2 text-sm">
+                    Proposed by{" "}
+                    <PromotionIdentity
+                      id={current().proposer.id}
+                      label={current().proposer.label}
+                    />
+                  </p>
+                  <Show when={current().decided_by}>
+                    {(reviewer) => (
+                      <p class="mt-1 text-sm">
+                        Reviewed by{" "}
+                        <PromotionIdentity
+                          id={reviewer().id}
+                          label={reviewer().label}
+                        />
+                      </p>
+                    )}
+                  </Show>
                   <div class="mt-1 break-all font-mono text-[11px] text-muted">
                     {timestamp(current().created_at)} · {current().id}
                   </div>
@@ -194,6 +211,16 @@ export const PromotionPanel: Component<{
               >
                 {eligibilityMessage(value().eligibility.reason)}
               </p>
+              <Show when={value().eligibility.reason === "remote_unavailable"}>
+                <Button
+                  class="mt-3"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void reloadPreview()}
+                >
+                  Reload preview
+                </Button>
+              </Show>
               <Button
                 class="mt-3"
                 size="sm"

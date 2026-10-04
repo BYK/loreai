@@ -170,8 +170,9 @@ describe("PromotionPanel", () => {
         throw new ApiError(
           "http",
           "/knowledge/knowledge-1/promote",
-          "Knowledge entry changed; reload the preview",
+          "Knowledge entry changed",
           409,
+          "stale_version",
         );
       },
     });
@@ -182,7 +183,7 @@ describe("PromotionPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Propose" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Knowledge entry changed; reload the preview",
+      "Knowledge entry changed",
     );
     expect(
       screen.getAllByRole("button", { name: "Reload preview" }).length,
@@ -220,6 +221,47 @@ describe("PromotionPanel", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByTestId("promotion-propose")).toBeDisabled();
+  });
+
+  it("shows and reloads a preview that cannot reach Lore cloud", async () => {
+    const getPromotionPreview = vi
+      .fn<ApiClient["getPromotionPreview"]>()
+      .mockResolvedValueOnce(
+        preview({
+          eligibility: { promotable: false, reason: "remote_unavailable" },
+        }),
+      )
+      .mockResolvedValue(preview());
+    renderPanel(clientWith({ getPromotionPreview }));
+
+    expect(
+      await screen.findByText(
+        "Lore cloud could not be reached. Try again later.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reload preview" }));
+    await screen.findByRole("button", { name: "Preview team share" });
+    expect(getPromotionPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses teammate identity fallbacks in the request status", async () => {
+    renderPanel(
+      clientWith({
+        getPromotionPreview: async () =>
+          preview({
+            pending_request: request({
+              proposer: { id: "user-editor", label: null },
+              status: "approved",
+              decided_by: { id: "user-admin", label: null },
+            }),
+          }),
+      }),
+    );
+
+    const proposer = await screen.findByText("Teammate user-edi");
+    expect(proposer).toHaveAttribute("title", "user-editor");
+    const reviewer = screen.getByText("Teammate user-adm");
+    expect(reviewer).toHaveAttribute("title", "user-admin");
   });
 
   it("shows the previous approved team version beside the new preview", async () => {
@@ -313,8 +355,13 @@ describe("PromotionsPage", () => {
     );
   });
 
-  it("shows the sign-in unavailable state without trying to list requests", async () => {
-    const listPromotions = vi.fn<ApiClient["listPromotions"]>();
+  it("requests the signed-out remote state without a team filter", async () => {
+    const listPromotions = vi
+      .fn<ApiClient["listPromotions"]>()
+      .mockResolvedValue({
+        ...listResponse([]),
+        remote: "anonymous",
+      });
     renderPage(
       clientWith({
         getAccount: async () => ({
@@ -330,26 +377,12 @@ describe("PromotionsPage", () => {
     expect(
       await screen.findByTestId("promotions-unavailable"),
     ).toHaveTextContent("Sign in with `lore login`");
-    expect(listPromotions).not.toHaveBeenCalled();
+    expect(listPromotions).toHaveBeenCalledWith(null, "pending");
   });
 
-  it("distinguishes hosted mode for signed-out users", async () => {
+  it("shows hosted state from the signed-out promotions response", async () => {
     renderPage(
       clientWith({
-        listProjects: async () => [
-          {
-            id: "project-1",
-            path: "/scratch",
-            name: "scratch",
-            git_remote: null,
-            created_at: 1,
-            knowledge_count: 0,
-            session_count: 0,
-            message_count: 0,
-            distillation_count: 0,
-            last_activity: null,
-          },
-        ],
         getAccount: async () => ({
           signed_in: false,
           user: null,
@@ -357,16 +390,9 @@ describe("PromotionsPage", () => {
           expires_at: null,
           state: "anonymous",
         }),
-        getProjectSharing: async () => ({
-          linked: false,
-          team: null,
-          policy: {
-            effective: "manual",
-            project_override: null,
-            team_default: null,
-          },
-          state: "not_linked",
-          detail: "Folk Lore is unavailable in hosted/remote gateway mode",
+        listPromotions: async () => ({
+          ...listResponse([]),
+          remote: "hosted",
         }),
       }),
     );
@@ -376,6 +402,84 @@ describe("PromotionsPage", () => {
         "Team promotion review is not available in hosted mode.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("maps unreachable list errors to the unreachable state", async () => {
+    const unreachable = clientWith({
+      listPromotions: async () => {
+        throw new ApiError("unreachable", "/promotions", "service unavailable");
+      },
+    });
+    renderPage(unreachable);
+    expect(
+      await screen.findByText(
+        "The gateway or promotion service could not be reached.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("maps forbidden list errors to the hosted state", async () => {
+    const forbidden = clientWith({
+      listPromotions: async () => {
+        throw new ApiError("forbidden", "/promotions", "hosted gateway");
+      },
+    });
+    renderPage(forbidden);
+    expect(
+      await screen.findByText(
+        "Team promotion review is not available in hosted mode.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a retryable error instead of anonymous when startup fails", async () => {
+    let retry = false;
+    const getAccount = vi.fn<ApiClient["getAccount"]>(async () => {
+      if (!retry) throw new Error("Account lookup failed");
+      return account;
+    });
+    renderPage(clientWith({ getAccount }));
+
+    expect(await screen.findByTestId("promotions-retry")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Account lookup failed",
+    );
+    retry = true;
+    fireEvent.click(screen.getByTestId("promotions-retry"));
+    expect(await screen.findByTestId("promotion-row")).toBeInTheDocument();
+    expect(getAccount).toHaveBeenCalled();
+  });
+
+  it("shows a retryable error for HTTP failures loading the list", async () => {
+    const listPromotions = vi
+      .fn<ApiClient["listPromotions"]>()
+      .mockRejectedValueOnce(
+        new ApiError("http", "/promotions", "Request failed", 500),
+      )
+      .mockResolvedValue(listResponse());
+    renderPage(clientWith({ listPromotions }));
+
+    expect(await screen.findByTestId("promotions-retry")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Request failed");
+    fireEvent.click(screen.getByTestId("promotions-retry"));
+    expect(await screen.findByTestId("promotion-row")).toBeInTheDocument();
+    expect(listPromotions).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses teammate identity fallbacks in the review table", async () => {
+    renderPage(
+      clientWith({
+        listPromotions: async () =>
+          listResponse([
+            request({
+              proposer: { id: "user-editor", label: null },
+            }),
+          ]),
+      }),
+    );
+
+    const proposer = await screen.findByText("Teammate user-edi");
+    expect(proposer).toHaveAttribute("title", "user-editor");
   });
 
   it("confirms team impact and updates a row only from the server receipt", async () => {

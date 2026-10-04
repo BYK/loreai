@@ -61,7 +61,9 @@ type Row = Record<string, unknown> & {
 
 let rows: Row[] = [];
 let insertError: { code?: string; message: string } | null = null;
+let selectError: { code?: string; message: string } | null = null;
 let rpcError: { code?: string; message: string } | null = null;
+let rpcThrow: Error | null = null;
 let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 let fakeClient: Record<string, unknown>;
 
@@ -119,6 +121,7 @@ function queryResult(
     rows.push(row);
     return { data: row, error: null };
   }
+  if (selectError) return { data: null, error: selectError };
   let result = [...rows];
   for (const filter of filters) {
     result = result.filter((row) => {
@@ -196,6 +199,7 @@ function makeClient() {
     from: (table: string) => makeQuery(table),
     rpc: async (name: string, args: Record<string, unknown>) => {
       rpcCalls.push({ name, args });
+      if (rpcThrow) throw rpcThrow;
       if (rpcError) return { data: null, error: rpcError };
       if (name === "mark_promotion_applied") {
         const row = rows.find((item) => item.id === args.p_id);
@@ -356,7 +360,9 @@ beforeEach(() => {
   );
   rows = [];
   insertError = null;
+  selectError = null;
   rpcError = null;
+  rpcThrow = null;
   rpcCalls = [];
   fakeClient = makeClient();
   supabase.createClient.mockImplementation(() => fakeClient);
@@ -482,14 +488,61 @@ describe("promotion request routes", () => {
     }
   });
 
-  it("rejects missing or malformed list filters", async () => {
-    for (const path of [
+  it("rejects malformed list filters, including in hosted mode", async () => {
+    expect(
+      (
+        await request(
+          "/api/v1/promotions?team=not-a-uuid",
+          "GET",
+          undefined,
+          makeConfig({ hostedMode: true, remoteGateway: true }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (await request(`/api/v1/promotions?team=${TEAM}&status=unknown`)).status,
+    ).toBe(400);
+  });
+
+  it("reports remote status before requiring a team for signed-out access", async () => {
+    const anonymous = await request("/api/v1/promotions");
+    expect(await anonymous.json()).toEqual({
+      remote: "anonymous",
+      requests: [],
+      complete: true,
+    });
+
+    const hosted = await request(
       "/api/v1/promotions",
-      "/api/v1/promotions?team=not-a-uuid",
-      `/api/v1/promotions?team=${TEAM}&status=unknown`,
-    ]) {
-      expect((await request(path)).status).toBe(400);
-    }
+      "GET",
+      undefined,
+      makeConfig({ hostedMode: true, remoteGateway: true }),
+    );
+    expect(await hosted.json()).toEqual({
+      remote: "hosted",
+      requests: [],
+      complete: true,
+    });
+
+    signIn();
+    const required = await request("/api/v1/promotions");
+    expect(required.status).toBe(400);
+    expect(await required.json()).toMatchObject({
+      error: { message: "team is required" },
+    });
+  });
+
+  it("reports remote unavailability when the team filter is omitted", async () => {
+    signIn();
+    supabase.createClient.mockImplementationOnce(() => {
+      throw new Error("offline");
+    });
+    const response = await request("/api/v1/promotions");
+    expect(await response.json()).toEqual({
+      remote: "unreachable",
+      requests: [],
+      complete: true,
+    });
   });
 
   it("returns 404 for an unknown knowledge id", async () => {
@@ -524,11 +577,32 @@ describe("promotion request routes", () => {
     ).json();
     expect(body.eligibility.reason).toBe("restricted");
 
+    const hosted = makeEntry();
+    body = await (
+      await request(
+        `/api/v1/knowledge/${hosted}/promotion`,
+        "GET",
+        undefined,
+        makeConfig({ hostedMode: true, remoteGateway: true }),
+      )
+    ).json();
+    expect(body.eligibility.reason).toBe("hosted");
+
     const accountRequired = makeEntry();
     body = await (
       await request(`/api/v1/knowledge/${accountRequired}/promotion`)
     ).json();
     expect(body.eligibility.reason).toBe("account_required");
+
+    const unavailable = makeEntry();
+    signIn();
+    supabase.createClient.mockImplementationOnce(() => {
+      throw new Error("offline");
+    });
+    body = await (
+      await request(`/api/v1/knowledge/${unavailable}/promotion`)
+    ).json();
+    expect(body.eligibility.reason).toBe("remote_unavailable");
 
     const locked = makeEntry();
     signIn();
@@ -536,6 +610,39 @@ describe("promotion request routes", () => {
       await request(`/api/v1/knowledge/${locked}/promotion`)
     ).json();
     expect(body.eligibility.reason).toBe("encryption_locked");
+  });
+
+  it("recomputes preview eligibility when the pending-request lookup fails", async () => {
+    const id = makeEntry();
+    signIn();
+    await unlockTeam();
+    selectError = { code: "PGRST000", message: "offline" };
+
+    const body = await (
+      await request(`/api/v1/knowledge/${id}/promotion`)
+    ).json();
+    expect(body).toMatchObject({
+      remote: "unreachable",
+      eligibility: { promotable: false, reason: "remote_unavailable" },
+    });
+  });
+
+  it("returns 503 when the promotion remote is unavailable", async () => {
+    const id = makeEntry();
+    signIn();
+    supabase.createClient.mockImplementationOnce(() => {
+      throw new Error("offline");
+    });
+
+    const response = await request(
+      `/api/v1/knowledge/${id}/promote`,
+      "POST",
+      JSON.stringify({ version_id: id }),
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: { type: "remote_unreachable", reason: "remote_unavailable" },
+    });
   });
 
   it("rejects a stale version and returns the current version id", async () => {
@@ -672,6 +779,19 @@ describe("promotion request routes", () => {
       title: null,
       content: null,
       sealed: true,
+    });
+  });
+
+  it("leaves unknown reviewer labels null instead of exposing raw ids", async () => {
+    signIn();
+    rows = [rowFor("logical-1", { decided_by: OTHER })];
+
+    const body = await (
+      await request(`/api/v1/promotions?team=${TEAM}&status=all`)
+    ).json();
+    expect(body.requests[0].decided_by).toEqual({
+      id: OTHER,
+      label: null,
     });
   });
 
@@ -845,6 +965,7 @@ describe("applyPromotionDecisions", () => {
   });
 
   it("does not throw when recording an applied outcome fails", async () => {
+    signIn();
     const id = makeEntry();
     rows = [
       rowFor(id, {
@@ -854,6 +975,23 @@ describe("applyPromotionDecisions", () => {
       }),
     ];
     rpcError = { code: "PGRST000", message: "offline" };
+    await expect(applyPromotionDecisions(fakeClient as never)).resolves.toBe(
+      undefined,
+    );
+    expect(rpcCalls).toContainEqual({
+      name: "mark_promotion_applied",
+      args: { p_id: REQUEST, p_outcome: "applied" },
+    });
+    rpcError = null;
+    rpcThrow = new Error("offline");
+    await expect(applyPromotionDecisions(fakeClient as never)).resolves.toBe(
+      undefined,
+    );
+  });
+
+  it("does not throw when selecting promotion decisions fails", async () => {
+    signIn();
+    selectError = { code: "PGRST000", message: "offline" };
     await expect(applyPromotionDecisions(fakeClient as never)).resolves.toBe(
       undefined,
     );

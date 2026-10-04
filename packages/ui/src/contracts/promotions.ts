@@ -8,7 +8,7 @@ export const promotionRemote = type(
 export type PromotionRemote = typeof promotionRemote.infer;
 
 export const promotionEligibilityReason = type(
-  "'no_project' | 'not_linked' | 'already_shared' | 'restricted' | 'account_required' | 'encryption_locked'",
+  "'no_project' | 'not_linked' | 'already_shared' | 'restricted' | 'hosted' | 'account_required' | 'remote_unavailable' | 'encryption_locked'",
 );
 
 export const promotionRequestStatus = type(
@@ -28,7 +28,7 @@ export const promotionRequest = type({
   proposer: { id: "string", label: "string | null" },
   mine: "boolean",
   status: promotionRequestStatus,
-  decided_by: type({ id: "string", label: "string" }).or("null"),
+  decided_by: type({ id: "string", label: "string | null" }).or("null"),
   decided_at: "string | null",
   decision_note: "string | null",
   applied: "'applied' | 'stale' | null",
