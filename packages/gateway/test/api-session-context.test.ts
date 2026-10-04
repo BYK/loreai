@@ -202,7 +202,7 @@ async function seed(tag: string) {
     )
     .run(sid, logical, projectId, 111, 1, "pass");
 
-  // One well-formed delta + one malformed-selector delta.
+  // One well-formed delta + one pre-v100 row (raw INSERT, no created_at).
   appendSessionPromptDelta({
     sessionID: sid,
     projectID: projectId,
@@ -222,13 +222,14 @@ async function seed(tag: string) {
         ],
       },
     ]),
+    createdAt: 1000,
   });
-  appendSessionPromptDelta({
-    sessionID: sid,
-    projectID: projectId,
-    selector: "{not json",
-    content: "not json either",
-  });
+  db()
+    .query(
+      `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(sid, 1, projectId, "{not json", "not json either");
 
   saveSessionTracking(sid, {
     ltmCacheText: "cached ltm text",

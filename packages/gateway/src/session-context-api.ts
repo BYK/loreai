@@ -27,15 +27,15 @@
  *                 usage: { input, output, cache_read, cache_write } | null }] }
  *
  * Prompt-delta reshape: the persisted `selector` JSON carries the block's
- * `insertAt`, its `mut` signature (`changed` ids + `removed` ids) and the
- * `debounceAt` watermark; `applied_at` is derived as `debounceAt -
- * KNOWLEDGE_DELTA_DEBOUNCE_MS`. `changed` ids are resolved to titles via
- * `knowledge_current` (null when the entry no longer exists). The persisted
- * `content` is a `GatewayMessage[]`; `text` collects every text block's text
- * in order. Any malformed JSON degrades to nulls/empties — never a 500.
+ * `insertAt` and its `mut` signature (`changed` ids + `removed` ids);
+ * `applied_at` is the persisted write time (`created_at`, v100) — null for
+ * rows written before the migration. `changed` ids are resolved to titles
+ * via `knowledge_current` (null when the entry no longer exists). The
+ * persisted `content` is a `GatewayMessage[]`; `text` collects every text
+ * block's text in order. Any malformed JSON degrades to nulls/empties —
+ * never a 500.
  */
 import { knowledgeTitlesFor, sessionContext } from "@loreai/core";
-import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { isRecord } from "./cursor";
 import { errorResponse, jsonResponse } from "./management-access";
 
@@ -68,31 +68,14 @@ function selectorRemovedIds(selector: unknown): string[] {
   return removed.filter((x): x is string => typeof x === "string");
 }
 
-/**
- * `insert_at` / `applied_at` derived from the block's selector JSON. Both are
- * null when the selector doesn't parse or the field isn't a finite number.
- */
-function selectorPlacement(selector: unknown): {
-  insert_at: number | null;
-  applied_at: number | null;
-} {
-  const insertAt =
-    isRecord(selector) &&
+/** `insert_at` derived from the block's selector JSON. Null when the
+ *  selector doesn't parse or `insertAt` isn't a finite number. */
+function selectorInsertAt(selector: unknown): number | null {
+  return isRecord(selector) &&
     typeof selector.insertAt === "number" &&
     Number.isFinite(selector.insertAt)
-      ? selector.insertAt
-      : null;
-  const debounceAt =
-    isRecord(selector) &&
-    typeof selector.debounceAt === "number" &&
-    Number.isFinite(selector.debounceAt)
-      ? selector.debounceAt
-      : null;
-  return {
-    insert_at: insertAt,
-    applied_at:
-      debounceAt !== null ? debounceAt - KNOWLEDGE_DELTA_DEBOUNCE_MS : null,
-  };
+    ? selector.insertAt
+    : null;
 }
 
 /** Every text block's `text` from the persisted GatewayMessage[] content. */
@@ -138,11 +121,11 @@ export function handleSessionContext(
 
   const prompt_deltas = context.prompt_deltas.map((delta) => {
     const selector = parseJson(delta.selector);
-    const placement = selectorPlacement(selector);
     return {
       seq: delta.seq,
-      insert_at: placement.insert_at,
-      applied_at: placement.applied_at,
+      insert_at: selectorInsertAt(selector),
+      // The persisted write time (v100); null for pre-migration rows.
+      applied_at: delta.created_at,
       changed: selectorChangedIds(selector).map((id) => ({
         id,
         title: titles.get(id) ?? null,

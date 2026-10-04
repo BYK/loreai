@@ -328,8 +328,8 @@ for (let k = 0; k < MESSAGES; k++) {
 
 // Context-window seeding (#1924): an injection batch, one durable prompt
 // delta, and per-turn gradient metadata so the pane and the transcript
-// markers have real rows to read. The prompt delta's debounceAt sits 60s
-// after a late message, so its applied_at lands inside the first page.
+// markers have real rows to read. The prompt delta's createdAt sits inside
+// the first page of loaded messages so its applied_at marker renders there.
 core.ltm.recordSessionInjections(SESSION, lore, [
   { logical_id: core.ltm.logicalIdOf(knowledgeIds[0]) },
   { logical_id: core.ltm.logicalIdOf(knowledgeIds[2]) },
@@ -337,9 +337,9 @@ core.ltm.recordSessionInjections(SESSION, lore, [
 core.appendSessionPromptDelta({
   sessionID: SESSION,
   projectID: loreProjectId,
+  createdAt: T0 + 228 * 60_000,
   selector: JSON.stringify({
     insertAt: 3,
-    debounceAt: T0 + 228 * 60_000 + 60_000,
     mut: {
       changed: [{ id: core.ltm.logicalIdOf(knowledgeIds[0]) }],
       removed: [],

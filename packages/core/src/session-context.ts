@@ -69,7 +69,12 @@ export type SessionContext = {
     }>;
   };
   /** Raw persisted deltas; the gateway reshapes selectors/content. */
-  prompt_deltas: Array<{ seq: number; selector: string; content: string }>;
+  prompt_deltas: Array<{
+    seq: number;
+    selector: string;
+    content: string;
+    created_at: number | null;
+  }>;
   /** Assistant turns that carry gradient metadata (per-turn transform stats). */
   turns: SessionContextTurn[];
 };
@@ -201,7 +206,12 @@ export function sessionContext(
 
   const promptDeltas = listSessionPromptDeltas(sessionID)
     .filter((d) => d.projectID === pid)
-    .map((d) => ({ seq: d.seq, selector: d.selector, content: d.content }));
+    .map((d) => ({
+      seq: d.seq,
+      selector: d.selector,
+      content: d.content,
+      created_at: d.createdAt,
+    }));
 
   const turnRows = sql.all<{
     id: string;

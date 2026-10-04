@@ -69,7 +69,8 @@
  *       knowledge: { cache_text, cache_tokens, pin_tokens, stable_tokens,
  *                    injections: [...] },
  *       prompt_deltas: [{ seq, insert_at, applied_at, changed, removed,
- *                         text }],
+ *                         text }],  // applied_at = persisted write time
+ *                                   // (created_at, v100); null on old rows
  *       turns: [{ message_id, created_at, layer, raw_tokens, total_tokens,
  *                 distilled_tokens, usage }] }
  *

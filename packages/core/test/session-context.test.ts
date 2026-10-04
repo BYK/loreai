@@ -207,6 +207,7 @@ describe("sessionContext", () => {
       projectID: pid,
       selector: JSON.stringify({ target: "messages", insertAt: 3 }),
       content: "[]",
+      createdAt: 1234,
     });
 
     saveSessionTracking(sid, {
@@ -266,6 +267,7 @@ describe("sessionContext", () => {
     // the foreign row was appended first so it owns seq 0, ours is seq 1).
     expect(ctx!.prompt_deltas).toHaveLength(1);
     expect(ctx!.prompt_deltas[0].selector).toContain("insertAt");
+    expect(ctx!.prompt_deltas[0].created_at).toBe(1234);
 
     expect(ctx!.turns).toHaveLength(1);
     const turn = ctx!.turns[0];
@@ -389,6 +391,21 @@ describe("sessionContext", () => {
     insertInjection("s-inj-only", "some-logical", pid, 1);
     expect(sessionContext(project, "s-delta-only")).not.toBeNull();
     expect(sessionContext(project, "s-inj-only")).not.toBeNull();
+  });
+
+  test("prompt_deltas.created_at is null for pre-v100 rows", () => {
+    const project = freshProject("delta-null");
+    const pid = ensureProject(project);
+    // A row written before the v100 migration has no created_at.
+    db()
+      .query(
+        `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content)
+         VALUES (?, 0, ?, '{}', '[]')`,
+      )
+      .run("s-old-delta", pid);
+    const ctx = sessionContext(project, "s-old-delta");
+    expect(ctx).not.toBeNull();
+    expect(ctx!.prompt_deltas[0].created_at).toBeNull();
   });
 
   test("knowledgeTitlesFor resolves by logical_id and version id", () => {

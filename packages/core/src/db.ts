@@ -2439,6 +2439,17 @@ export const MIGRATIONS: readonly string[] = Object.freeze([
     source TEXT NOT NULL, observed_at INTEGER NOT NULL,
     PRIMARY KEY (provider, auth_kind, account, window));
   `,
+  `
+  -- Version 99: reserved — taken by #1935 (session titles) on main; this slot
+  -- is intentionally a no-op here so v100 below keeps its number (see
+  -- session-context PR #1932).
+  `,
+  `
+  -- Version 100: real write time for prompt deltas (#1924). NULL for rows
+  -- written before this migration — never backfilled, the UI renders those
+  -- with no time.
+  ALTER TABLE session_prompt_deltas ADD COLUMN created_at INTEGER;
+  `,
 ]);
 
 // Index of the migration whose work is performed by a column-presence-aware JS
@@ -4855,6 +4866,17 @@ function recoverMissingObjects(database: Database) {
       );
     }
   }
+  // Version 100: session_prompt_deltas.created_at (real write time, #1924).
+  {
+    const dcols = database
+      .query("PRAGMA table_info(session_prompt_deltas)")
+      .all() as Array<{ name: string }>;
+    if (dcols.length && !dcols.some((c) => c.name === "created_at")) {
+      database.exec(
+        "ALTER TABLE session_prompt_deltas ADD COLUMN created_at INTEGER;",
+      );
+    }
+  }
   // Version 56: projects.last_refcheck_at (reference-validity rate gate, #627).
   {
     const pcols = database.query("PRAGMA table_info(projects)").all() as Array<{
@@ -7234,6 +7256,8 @@ export type SessionPromptDelta = {
   projectID: string;
   selector: string;
   content: string;
+  /** Real write time (v100); null for rows persisted before the migration. */
+  createdAt: number | null;
 };
 
 /**
@@ -7245,11 +7269,12 @@ export function appendSessionPromptDelta(input: {
   projectID: string;
   selector: string;
   content: string;
+  createdAt?: number;
 }): void {
   db()
     .query(
-      `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content)
-       SELECT ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?
+      `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content, created_at)
+       SELECT ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?
          FROM session_prompt_deltas
         WHERE session_id = ?`,
     )
@@ -7258,6 +7283,7 @@ export function appendSessionPromptDelta(input: {
       input.projectID,
       input.selector,
       input.content,
+      input.createdAt ?? Date.now(),
       input.sessionID,
     );
 }
@@ -7275,23 +7301,34 @@ export function appendSessionPromptDelta(input: {
  * later messages and busting the prompt cache. Coalescing into one row at a
  * frozen insertAt keeps the message prefix byte-stable until the delta's
  * CONTENT genuinely changes (one bust per real change, not a growing cascade).
+ *
+ * `created_at` tracks the CURRENT content's write time — because the row is
+ * coalesced in place, it is rewritten on every conflict update.
  */
 export function upsertSessionPromptDelta(input: {
   sessionID: string;
   projectID: string;
   selector: string;
   content: string;
+  createdAt?: number;
 }): void {
   db()
     .query(
-      `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content)
-       VALUES (?, 0, ?, ?, ?)
+      `INSERT INTO session_prompt_deltas (session_id, seq, project_id, selector, content, created_at)
+       VALUES (?, 0, ?, ?, ?, ?)
        ON CONFLICT(session_id, seq) DO UPDATE SET
          project_id = excluded.project_id,
          selector   = excluded.selector,
-         content    = excluded.content`,
+         content    = excluded.content,
+         created_at = excluded.created_at`,
     )
-    .run(input.sessionID, input.projectID, input.selector, input.content);
+    .run(
+      input.sessionID,
+      input.projectID,
+      input.selector,
+      input.content,
+      input.createdAt ?? Date.now(),
+    );
 }
 
 /**
@@ -7363,7 +7400,7 @@ export function listSessionPromptDeltas(
 ): SessionPromptDelta[] {
   const rows = db()
     .query(
-      `SELECT session_id, seq, project_id, selector, content
+      `SELECT session_id, seq, project_id, selector, content, created_at
          FROM session_prompt_deltas
         WHERE session_id = ?
         ORDER BY seq`,
@@ -7374,6 +7411,7 @@ export function listSessionPromptDeltas(
     project_id: string;
     selector: string;
     content: string;
+    created_at: number | null;
   }>;
 
   return rows.map((row) => ({
@@ -7382,6 +7420,7 @@ export function listSessionPromptDeltas(
     projectID: row.project_id,
     selector: row.selector,
     content: row.content,
+    createdAt: row.created_at,
   }));
 }
 
