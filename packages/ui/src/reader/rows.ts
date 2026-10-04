@@ -79,10 +79,10 @@ export function buildRows(
     }
     rows.push({ key: message.id, block: message });
   });
-  for (const d of timed.slice(next)) rows.push({ key: d.id, block: d });
-  for (const m of timedMarkers.slice(markerNext)) {
-    rows.push({ key: m.id, marker: m });
-  }
+  rows.push(...timed.slice(next).map((d) => ({ key: d.id, block: d })));
+  rows.push(
+    ...timedMarkers.slice(markerNext).map((m) => ({ key: m.id, marker: m })),
+  );
   return rows;
 }
 

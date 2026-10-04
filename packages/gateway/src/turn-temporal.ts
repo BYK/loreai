@@ -111,7 +111,7 @@ export function storeTurnTemporal(input: {
     )[0];
     updateAssistantMessageTokens(assistant, input.usage, input.model);
     if (temporalInput.gradient && assistant.info.role === "assistant") {
-      assistant.info.gradient = { ...temporalInput.gradient };
+      assistant.info.gradient = temporalInput.gradient;
     }
     const message = {
       projectPath,

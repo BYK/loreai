@@ -133,7 +133,7 @@ export const READER_SPECIMEN_DISTILLATION =
   "User asked whether to replace SQLite with a remote service; agent read db.ts and recommended keeping SQLite for portability and FTS5.";
 
 /**
- * Invented `GET /sessions/:id/context` answer for the same specimen session:
+ * Mock `GET /sessions/:id/context` answer for the same specimen session:
  * one injection batch of three entries (one whose entry was removed), two
  * prompt deltas (one with its application time unrecorded) and three turns
  * at layers 0 → 1 → 2 so two compaction markers appear.

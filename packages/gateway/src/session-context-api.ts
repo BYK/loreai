@@ -36,33 +36,12 @@
  */
 import { knowledgeTitlesFor, sessionContext } from "@loreai/core";
 import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
-
-// ---------------------------------------------------------------------------
-// Response helpers (mirrors api-lists.ts; kept local so this module has no cycle)
-// ---------------------------------------------------------------------------
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function errorResponse(
-  status: number,
-  type: string,
-  message: string,
-): Response {
-  return jsonResponse({ type: "error", error: { type, message } }, status);
-}
+import { isRecord } from "./cursor";
+import { errorResponse, jsonResponse } from "./management-access";
 
 // ---------------------------------------------------------------------------
 // Prompt-delta reshape
 // ---------------------------------------------------------------------------
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
 
 function parseJson(raw: string): unknown {
   try {

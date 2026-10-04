@@ -11,6 +11,8 @@
  * no prompt deltas, no injections), so a caller that never proxied through
  * Lore still gets a shape, not a 404-shaped guess.
  */
+import { z } from "zod";
+
 import {
   db,
   ensureProject,
@@ -89,8 +91,9 @@ export function knowledgeTitlesFor(ids: string[]): Map<string, string> {
     const placeholders = chunk.map(() => "?").join(", ");
     const rows = db()
       .query(
-        `SELECT logical_id, id, title FROM knowledge_current
-           WHERE logical_id IN (${placeholders}) OR id IN (${placeholders})`,
+        `SELECT logical_id, id, title FROM knowledge
+           WHERE is_current = 1 AND is_deleted = 0
+             AND (logical_id IN (${placeholders}) OR id IN (${placeholders}))`,
       )
       .all(...chunk, ...chunk) as Array<{
       logical_id: string;
@@ -105,13 +108,25 @@ export function knowledgeTitlesFor(ids: string[]): Map<string, string> {
   return out;
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function numericField(v: unknown): number | null {
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
+const finite = z.number().finite();
+const GradientMeta = z.object({
+  layer: finite,
+  raw_tokens: finite,
+  total_tokens: finite,
+  distilled_tokens: finite,
+});
+const UsageMeta = z.object({
+  input: finite,
+  output: finite,
+  cache_read: finite,
+  cache_write: finite,
+});
+// A malformed/missing `usage` degrades to null; a malformed/missing
+// `gradient` fails the parse and the turn is skipped.
+const TurnMeta = z.object({
+  gradient: GradientMeta,
+  usage: UsageMeta.nullable().catch(null),
+});
 
 /**
  * Assemble the session's context-window state for `projectPath`. Returns null
@@ -159,10 +174,14 @@ export function sessionContext(
       verdict: string | null;
     }>(
       db(),
-      sql`SELECT i.logical_id, k.title, k.category, k.confidence,
+      sql`SELECT i.logical_id, k.title, k.category,
+               CASE WHEN k.logical_id IS NULL THEN NULL
+                    ELSE COALESCE(m.confidence, 1.0) END AS confidence,
                i.created_at, i.credited, i.verdict
           FROM knowledge_session_injections i
-          LEFT JOIN knowledge_current k ON k.logical_id = i.logical_id
+          LEFT JOIN knowledge k ON k.logical_id = i.logical_id
+               AND k.is_current = 1 AND k.is_deleted = 0
+          LEFT JOIN knowledge_meta m ON m.logical_id = k.logical_id
          WHERE i.session_id = ${sessionID} AND i.project_id = ${pid}
          ORDER BY i.created_at, i.logical_id`,
     )
@@ -200,43 +219,16 @@ export function sessionContext(
     } catch {
       continue; // malformed metadata JSON is skipped silently
     }
-    if (!isRecord(meta) || !isRecord(meta.gradient)) continue;
-    const g = meta.gradient;
-    const layer_ = numericField(g.layer);
-    const raw = numericField(g.raw_tokens);
-    const total = numericField(g.total_tokens);
-    const distilled = numericField(g.distilled_tokens);
-    if (layer_ === null || raw === null || total === null || distilled === null)
-      continue;
-    let usage: SessionContextTurn["usage"] = null;
-    if (isRecord(meta.usage)) {
-      const u = meta.usage;
-      const input = numericField(u.input);
-      const output = numericField(u.output);
-      const cacheRead = numericField(u.cache_read);
-      const cacheWrite = numericField(u.cache_write);
-      if (
-        input !== null &&
-        output !== null &&
-        cacheRead !== null &&
-        cacheWrite !== null
-      ) {
-        usage = {
-          input,
-          output,
-          cache_read: cacheRead,
-          cache_write: cacheWrite,
-        };
-      }
-    }
+    const parsed = TurnMeta.safeParse(meta);
+    if (!parsed.success) continue;
     turns.push({
       message_id: row.id,
       created_at: row.created_at,
-      layer: layer_,
-      raw_tokens: raw,
-      total_tokens: total,
-      distilled_tokens: distilled,
-      usage,
+      layer: parsed.data.gradient.layer,
+      raw_tokens: parsed.data.gradient.raw_tokens,
+      total_tokens: parsed.data.gradient.total_tokens,
+      distilled_tokens: parsed.data.gradient.distilled_tokens,
+      usage: parsed.data.usage,
     });
   }
 
