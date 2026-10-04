@@ -95,7 +95,9 @@ beforeAll(() => {
     value(this: HTMLElement, options?: ScrollToOptions | number) {
       const top = typeof options === "number" ? options : options?.top;
       if (typeof top !== "number") return;
-      this.scrollTop = top;
+      // A browser clamps the offset at 0; jsdom's setter would store a
+      // negative offset and read it back as an upward scroll.
+      this.scrollTop = Math.max(0, top);
       this.dispatchEvent(new Event("scroll"));
     },
   });
@@ -533,6 +535,12 @@ describe("SessionView: history and keyboard", () => {
     expect(screen.getByTestId("reader-coverage-line")).toHaveTextContent(
       `${SPECIMEN.length} of ${SPECIMEN.length + 3} captured messages loaded`,
     );
+    // The manual control stays disabled until the landing loop settles.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
     fireEvent.click(screen.getByTestId("load-older"));
     await tick();
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
@@ -935,6 +943,12 @@ describe("SessionView: in-session search", () => {
     expect(screen.getByTestId("search-coverage")).toHaveTextContent(
       "Searched the loaded history only",
     );
+    // The manual control stays disabled until the landing loop settles.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
     fireEvent.click(screen.getByTestId("load-older"));
     await settleSearch();
     expect(screen.queryByTestId("search-coverage")).toBeNull();
@@ -1678,6 +1692,12 @@ describe("SessionView: newest-first landing and lazy older history", () => {
       document.querySelector<HTMLElement>(`[data-row-key="${block.id}"]`)!;
     const posBefore = Number(row().getAttribute("aria-posinset"));
 
+    // The manual control stays disabled until the landing loop settles.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
     fireEvent.click(screen.getByTestId("load-older"));
     await tick();
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
@@ -1697,5 +1717,244 @@ describe("SessionView: newest-first landing and lazy older history", () => {
         .querySelector('[aria-posinset="1"]')
         ?.getAttribute("data-row-key"),
     ).toBe("m.old-0");
+  });
+
+  it("keeps landing at the new end when rows stream in mid-landing", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      messageCount: 55,
+      hasOlder: false,
+    });
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    // Fifteen rows arrive while the landing loop is still settling: it
+    // must re-land at the grown end, not stop at the old one or bail on a
+    // stale `last()` snapshot.
+    setMsgs((prev) => [
+      ...prev,
+      ...older(15).map((m, i) => ({ ...m, id: `grow-${i}` })),
+    ]);
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(mountedKeys()).toContain("m.grow-14");
+  });
+
+  it("keeps a single pin-capture loop when a failed page is retried quickly", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    const [err, setErr] = createSignal<unknown>(null);
+    let calls = 0;
+    const onLoadOlder = vi.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        setErr(new Error("page failed"));
+        return Promise.reject(new Error("page failed"));
+      }
+      return new Promise<void>((resolve) => {
+        setMsgs((prev) => [
+          ...older(3).map((m, i) => ({ ...m, id: `page-${i}` })),
+          ...prev,
+        ]);
+        resolve();
+      });
+    });
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      get hasOlder() {
+        return err() ? true : true;
+      },
+      get olderError() {
+        return err();
+      },
+      messageCount: 43,
+      onLoadOlder,
+    });
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    // Trigger the first (failing) load near the top so the pin loop arms.
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 0);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await tick();
+    // Count querySelector calls per frame: one live capturePin loop makes
+    // at most two (fold + pin rows); a second stale loop would double it.
+    const counts: number[] = [];
+    let current = 0;
+    const origQuery = scroll.querySelector.bind(scroll);
+    scroll.querySelector = (sel: string) => {
+      current += 1;
+      return origQuery(sel);
+    };
+    const origRaf = window.requestAnimationFrame.bind(window);
+    const rafSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((cb: FrameRequestCallback) =>
+        origRaf((t) => {
+          counts.push(current);
+          current = 0;
+          return cb(t);
+        }),
+      );
+    fireEvent.click(screen.getByTestId("older-retry"));
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    await tick();
+    rafSpy.mockRestore();
+    scroll.querySelector = origQuery;
+    expect(Math.max(...counts.slice(1), 0)).toBeLessThanOrEqual(2);
+  });
+
+  it("keeps the manual older-history buttons disabled until the landing settles", async () => {
+    const onLoadOlder = vi.fn(async () => {});
+    mount({
+      messages: older(40),
+      distillations: [],
+      hasOlder: true,
+      messageCount: 60,
+      onLoadOlder,
+    });
+    await tick();
+    const button = screen.getByTestId<HTMLButtonElement>("load-older");
+    // The landing loop may still re-issue scrolls: the button is disabled
+    // and its guard swallows even a forced click.
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not page older history on a programmatic scroll to a search hit", async () => {
+    const messages = older(40).map((m, i) => ({
+      ...m,
+      content: i === 5 ? `row ${i} carries the needle for search` : m.content,
+    }));
+    const onLoadOlder = vi.fn(async () => {});
+    mount({
+      messages,
+      distillations: [],
+      hasOlder: true,
+      messageCount: 60,
+      onLoadOlder,
+    });
+    // Wait out the landing loop — it would re-issue its end scroll over
+    // the programmatic hit scroll while still settling.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "needle" } });
+    await settleSearch();
+    fireEvent.click(screen.getByTestId("search-next"));
+    await tick();
+    // The hit row is near the top of a 40-row list: without suppression
+    // its upward scroll would have started a page load.
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    // A real gesture followed by an upward move still loads.
+    const scroll = scrollEl();
+    scroll.dispatchEvent(new Event("wheel"));
+    fireScroll(scroll, 100);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not page older history when jump-to-latest scrolls the view", async () => {
+    const onLoadOlder = vi.fn(async () => {});
+    mount({
+      messages: older(40),
+      distillations: [],
+      hasOlder: true,
+      messageCount: 60,
+      onLoadOlder,
+    });
+    // Wait out the landing loop — it would re-issue its end scroll over a
+    // plain scroll event (no gesture), hiding the button again.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    // Park mid-list: far enough up that the button appears, far enough
+    // down that the move itself cannot trigger a load.
+    fireScroll(scroll, 2_400);
+    await tick();
+    expect(screen.getByTestId("jump-to-latest")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("jump-to-latest"));
+    await tick();
+    expect(onLoadOlder).not.toHaveBeenCalled();
+  });
+
+  it("eagerly loads the next page when the first page is shorter than the viewport", async () => {
+    const [msgs, setMsgs] = createSignal<TemporalMessage[]>([]);
+    const { appendFileSync } = await import("node:fs");
+    const onLoadOlder = vi.fn(async () => {
+      appendFileSync(
+        "/tmp/land2.log",
+        `call top=${scrollEl().scrollTop} err=${new Error().stack}\n`,
+      );
+    });
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      hasOlder: true,
+      messageCount: 23,
+      onLoadOlder,
+    });
+    await tick();
+    // jsdom stubs scrollHeight to a huge constant; give the short page its
+    // real height so the landing scroll clamps to 0 like a browser would.
+    Object.defineProperty(scrollEl(), "scrollHeight", {
+      configurable: true,
+      get() {
+        return 3 * 120;
+      },
+    });
+    setMsgs(older(3));
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    // Three 120px rows in an 800px viewport: the chain fill kicked in on
+    // arrival — no scroll event was ever dispatched.
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 });

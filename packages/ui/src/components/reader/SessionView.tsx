@@ -449,7 +449,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   const scrollToBlock = (blockId: string) => {
     const index = rowIndexOf(blockId);
     if (index < 0) return;
-    virtualizer.scrollToIndex(index, { align: "center" });
+    programmaticScroll(() =>
+      virtualizer.scrollToIndex(index, { align: "center" }),
+    );
   };
 
   const resolveLink = (decoded: DecodedAnchor) => {
@@ -608,6 +610,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     serialAtStart: number;
     forLink: string | null;
   } | null = null;
+  /** Bumped per `loadOlder` call: frame loops from an earlier request bail
+   * so a failed-then-retried load never has two `capturePin`/`repin` loops
+   * fighting over the same `prepend`. */
+  let loadGen = 0;
 
   async function loadOlder() {
     if (
@@ -618,6 +624,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     ) {
       return;
     }
+    const gen = ++loadGen;
     const el = scrollEl;
     const items = virtualizer.getVirtualItems();
     const last = items.at(-1);
@@ -682,7 +689,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     if (enablePin && typeof requestAnimationFrame === "function") {
       let frames = 0;
       const capturePin = () => {
-        if (!prepend || rows().length !== countAtCall) return;
+        if (gen !== loadGen || !prepend || rows().length !== countAtCall)
+          return;
         if (++frames > 300) return;
         const mounted = virtualizer.getVirtualItems();
         const nearTop = el.scrollTop - listOffset() < el.clientHeight;
@@ -757,9 +765,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         if ((pin || foldPin) && typeof requestAnimationFrame === "function") {
           let frames = 0;
           const serial0 = userSerial() ?? -1;
+          const genAtLand = loadGen;
           const repin = () => {
             const el = scrollEl;
             if (!el || ++frames > 24) return;
+            if (loadGen !== genAtLand) return;
             if (serial0 >= 0 && userSerial() !== serial0) return;
             // The fold row is the row under the eye; the deeper pin only
             // stands in while the fold row is out of the mount window.
@@ -803,6 +813,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   // marks the reader as landed. Scrolling back up near the top pages older
   // history in (see `reader/lazy-older` for the rules).
   const [landed, setLanded] = createSignal(false);
+  /** True while the landing rAF loop may still issue scrolls — the manual
+   * older-history buttons stay disabled until it settles so a click cannot
+   * interleave with its re-issued `scrollToIndex` calls. */
+  const [landingActive, setLandingActive] = createSignal(false);
   createEffect(
     on(
       () => props.sessionId,
@@ -822,14 +836,38 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     if (typeof requestAnimationFrame === "function") {
       let frames = 0;
       let reachedEnd = false;
+      /** The last index the loop already reached once — a snapshot, not a
+       * live read, so rows streaming in mid-landing do not make the settled
+       * window look like the user scrolled away. */
+      let endAt = -1;
+      let prevLast = last();
+      let chained = false;
+      setLandingActive(true);
       const serial0 = userSerial() ?? -1;
       const land = () => {
         const el = scrollEl;
-        if (!el || ++frames > 24) return;
-        if (serial0 >= 0 && userSerial() !== serial0) return;
+        if (!el || ++frames > 24) {
+          setLandingActive(false);
+          return;
+        }
+        if (serial0 >= 0 && userSerial() !== serial0) {
+          setLandingActive(false);
+          return;
+        }
+        if (last() !== prevLast) {
+          // Rows streamed in mid-landing: land at the new end instead, and
+          // restart the frame budget so a busy stream cannot starve it.
+          prevLast = last();
+          reachedEnd = false;
+          frames = 0;
+          virtualizer.scrollToIndex(last(), { align: "end" });
+        }
         const items = virtualizer.getVirtualItems();
         const lastItem = items.at(-1);
-        if (lastItem && lastItem.index === last()) reachedEnd = true;
+        if (lastItem && lastItem.index === last() && !reachedEnd) {
+          reachedEnd = true;
+          endAt = last();
+        }
         const arrived =
           lastItem !== undefined &&
           lastItem.index === last() &&
@@ -843,17 +881,30 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           reachedEnd &&
           !arrived &&
           items.length > 0 &&
-          items.at(-1)!.index < last() - 10;
-        if (userAway) return;
+          items.at(-1)!.index < endAt - 10;
+        if (userAway) {
+          setLandingActive(false);
+          return;
+        }
         // Keep watching past the first arrival: rows that measure shorter
         // than the estimate pull the offset back up afterwards, and only a
         // re-issue puts the end back under the eye.
         if (!arrived) {
           virtualizer.scrollToIndex(last(), { align: "end" });
+        } else if (!chained) {
+          // A first page shorter than the viewport gets its next page
+          // eagerly — the chain effect keeps going until it fills.
+          chained = true;
+          maybeChainOlder();
         }
         requestAnimationFrame(land);
       };
       requestAnimationFrame(land);
+    } else {
+      // No frame loop: settle on the issued scroll and still fill a short
+      // first page.
+      setLandingActive(false);
+      maybeChainOlder();
     }
   });
 
@@ -869,6 +920,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     landed: landed(),
     linkPending: scrollTarget !== null,
   });
+
+  /** The manual load buttons stay disabled while the landing loop may
+   * still issue scrolls — a click mid-landing would interleave a prepend
+   * with its re-issued `scrollToIndex` calls. */
+  const olderButtonsReady = () => landed() && !landingActive();
 
   function maybeChainOlder() {
     const el = scrollEl;
@@ -901,6 +957,15 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   // Upward moves near the top page older history in; downward moves (the
   // landing, prepend compensation, search scrolls) never do.
   let prevScrollTop = -1;
+  // Programmatic scrolls (deep links, search hits, jump buttons, mark
+  // reveals) are not the user either: `programmaticScroll` snapshots the
+  // gesture serial and `onScroll` skips load checks until it next moves.
+  // An unwatchable serial (-1) just means no suppression.
+  let suppressLoadSerial = -1;
+  function programmaticScroll(fn: () => void) {
+    suppressLoadSerial = userSerial() ?? -1;
+    fn();
+  }
   // The repin loop's own upward corrections are not user scrolls; an
   // upward move that lands exactly on a repin-issued offset never
   // triggers the next load. A user scroll only coincides if it reaches the
@@ -915,6 +980,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     if (top < prev && top === repinIssued) {
       repinIssued = -1;
       return;
+    }
+    if (suppressLoadSerial >= 0) {
+      if ((userSerial() ?? -1) === suppressLoadSerial) return;
+      suppressLoadSerial = -1;
     }
     if (
       shouldLoadOlder({
@@ -1475,7 +1544,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           // exists; a selection mark on the same block must not consume it.
           if (pendingMark && samePassage(h, pendingMark)) {
             pendingMark = null;
-            mark.scrollIntoView?.({ block: "center" });
+            programmaticScroll(() =>
+              mark.scrollIntoView?.({ block: "center" }),
+            );
           }
         },
       }}
@@ -1554,9 +1625,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                     size="sm"
                     data-testid="jump-to-latest"
                     onClick={() =>
-                      virtualizer.scrollToIndex(rows().length - 1, {
-                        align: "end",
-                      })
+                      programmaticScroll(() =>
+                        virtualizer.scrollToIndex(rows().length - 1, {
+                          align: "end",
+                        }),
+                      )
                     }
                   >
                     Jump to latest
@@ -1573,7 +1646,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                     size="sm"
                     data-testid="jump-to-start"
                     onClick={() =>
-                      virtualizer.scrollToIndex(0, { align: "start" })
+                      programmaticScroll(() =>
+                        virtualizer.scrollToIndex(0, { align: "start" }),
+                      )
                     }
                   >
                     Jump to start
@@ -1715,7 +1790,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                       variant="outline"
                       size="sm"
                       data-testid="older-retry"
-                      onClick={() => void loadOlder()}
+                      disabled={!olderButtonsReady()}
+                      onClick={() => {
+                        if (!olderButtonsReady()) return;
+                        void loadOlder();
+                      }}
                     >
                       Retry
                     </Button>
@@ -1728,7 +1807,11 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                   variant="outline"
                   size="sm"
                   data-testid="load-older"
-                  onClick={() => void loadOlder()}
+                  disabled={!olderButtonsReady()}
+                  onClick={() => {
+                    if (!olderButtonsReady()) return;
+                    void loadOlder();
+                  }}
                 >
                   Load older history
                 </Button>

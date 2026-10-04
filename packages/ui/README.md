@@ -655,12 +655,15 @@ flight, no reported `olderError` (an error is only retried by the
 explicit Retry control), an *upward* move (`scrollTop < prevScrollTop` —
 this excludes the landing and prepend-compensation scrolls, which only
 ever move down), and `scrollTop - listOffset < clientHeight` (one
-viewport of margin). A page that lands shorter than a viewport chains
-(`shouldChainOlder`, the same gates minus the moved-up rule) until the
-window fills or the server says the start was reached; the chain only
-continues pages that actually prepended rows, so a no-progress owner
-cannot loop the loader. Older history never loads on mount — the scroll
-must move up first.
+viewport of margin). Programmatic scrolls — deep links, search hits,
+the jump buttons, mark reveals — can never page: each one snapshots the
+user-gesture serial and the scroll handler skips its load check until a
+real gesture bumps it. A first page that lands shorter than the viewport
+is filled eagerly on arrival, and any page that lands shorter than a
+viewport chains (`shouldChainOlder`, the same gates minus the moved-up
+rule) until the window fills or the server says the start was reached;
+the chain only continues pages that actually prepended rows, so a
+no-progress owner cannot loop the loader.
 
 The older-history affordance is a fixed-height status slot
 (`data-testid="older-status"`) between the sticky toolbar and the row
@@ -671,6 +674,8 @@ line plus Retry (`older-retry`) after a failed page, a "Scroll up to load
 older history" hint plus the explicit **Load older history** button
 (`load-older`) while older pages remain, `history-start` once the start
 of captured history is loaded, and nothing while `hasOlder` is unknown.
+Both manual buttons stay disabled until the landing loop settles, so a
+click can never interleave a prepend with its re-issued scrolls.
 Two jump controls sit at the toolbar's right edge: **Jump to latest**
 (`jump-to-latest`, shown while the last row is not mounted) and **Jump
 to start** (`jump-to-start`, shown only once `hasOlder === false` and the

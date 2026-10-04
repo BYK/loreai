@@ -106,6 +106,8 @@ test.describe("paged busy fixture", () => {
     await expect(page.locator(`[data-row-key="${LAST_KEY}"]`)).toHaveCount(0);
     await page.getByTestId("jump-to-latest").click();
     await expect(page.locator(`[data-row-key="${LAST_KEY}"]`)).toBeInViewport();
+    // The jump is a programmatic scroll: it must not page older history.
+    expect(await setsize(page)).toBe(2 * PAGE);
   });
 
   test("a failed older page is reported and retried", async ({ page }) => {
