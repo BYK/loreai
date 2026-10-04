@@ -18,7 +18,7 @@ import {
   allKnowledgeHref,
   globalKnowledgeHref,
   workspaceSearchHref,
-} from "~/routes/Browse";
+} from "~/lib/href";
 
 describe("knowledge query URL state", () => {
   it("normalizes unknown values and trims bounded text", () => {

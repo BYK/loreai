@@ -2,7 +2,10 @@ import type { Component } from "solid-js";
 import { For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
-import { DEFAULT_KNOWLEDGE_QUERY } from "~/contracts";
+import {
+  DEFAULT_ALL_KNOWLEDGE_QUERY,
+  DEFAULT_KNOWLEDGE_QUERY,
+} from "~/contracts";
 import type { AllKnowledgeQuery, KnowledgeSearchResponse } from "~/contracts";
 import { pluralize, previewOf, formatWhen } from "~/lib/format";
 import type { Loader } from "~/lib/loader";
@@ -55,7 +58,10 @@ export const WorkspaceSearch: Component<{
             kind="empty"
             title="Type a query to search knowledge across every project"
           >
-            <A class="text-accent underline" href="/knowledge">
+            <A
+              class="text-accent underline"
+              href={props.allHref(DEFAULT_ALL_KNOWLEDGE_QUERY)}
+            >
               Browse all knowledge
             </A>
           </StateCard>
@@ -89,7 +95,10 @@ export const WorkspaceSearch: Component<{
                   kind="empty"
                   title="Nothing in this query is searchable"
                 >
-                  <A class="text-accent underline" href="/knowledge">
+                  <A
+                    class="text-accent underline"
+                    href={props.allHref(DEFAULT_ALL_KNOWLEDGE_QUERY)}
+                  >
                     Browse all knowledge
                   </A>
                 </StateCard>
@@ -98,7 +107,10 @@ export const WorkspaceSearch: Component<{
                 when={result().mode !== "none" && result().items.length === 0}
               >
                 <StateCard kind="empty" title="No knowledge matches this query">
-                  <A class="text-accent underline" href="/knowledge">
+                  <A
+                    class="text-accent underline"
+                    href={props.allHref(DEFAULT_ALL_KNOWLEDGE_QUERY)}
+                  >
                     Browse all knowledge
                   </A>
                 </StateCard>

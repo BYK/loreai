@@ -1,14 +1,6 @@
 import type { Component } from "solid-js";
 import { useNavigate } from "@solidjs/router";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "~/components/ui/dialog";
-import { searchHref } from "~/lib/href";
-import { workspaceSearchHref } from "~/routes/Browse";
+import { searchHref, workspaceSearchHref } from "~/lib/href";
 import { cn } from "~/lib/utils";
 
 export const SearchEntry: Component<{

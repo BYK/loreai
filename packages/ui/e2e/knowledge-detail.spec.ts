@@ -92,7 +92,7 @@ test.describe("knowledge detail provenance and history", () => {
       );
       await expect(page.getByTestId("knowledge-document")).toBeVisible();
       await page.getByTestId("mobile-back").click();
-      await expect(page).toHaveURL(/\/knowledge\?q=SQLite&sort=title:asc$/);
+      await expect(page).toHaveURL(/\/knowledge\?q=SQLite&sort=title%3Aasc$/);
     });
   });
 });

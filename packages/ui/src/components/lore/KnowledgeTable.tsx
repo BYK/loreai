@@ -210,17 +210,23 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
     <Select
       value={props.query[name] ?? null}
       onChange={(value) =>
-        go({ ...props.query, [name]: value as never, cursor: null })
+        go({
+          ...props.query,
+          [name]: (value || null) as never,
+          cursor: null,
+        })
       }
-      options={[...options]}
+      options={name === "category" ? ["", ...options] : [...options]}
       placeholder={placeholder}
       itemComponent={(item) => (
-        <SelectItem item={item.item}>{item.item.rawValue}</SelectItem>
+        <SelectItem item={item.item}>
+          {item.item.rawValue || placeholder}
+        </SelectItem>
       )}
     >
       <SelectTrigger aria-label={name} class="h-9 min-w-32 text-xs">
         <SelectValue<string>>
-          {(state) => state.selectedOption() ?? placeholder}
+          {(state) => state.selectedOption() || placeholder}
         </SelectValue>
       </SelectTrigger>
       <SelectContent />

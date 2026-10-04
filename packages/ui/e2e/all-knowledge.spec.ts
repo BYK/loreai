@@ -110,6 +110,56 @@ test.describe("cross-project knowledge", () => {
       await expect(row.locator("td").nth(1)).toHaveText("gotcha");
       await expect(row.locator("td").nth(3)).toHaveText("lore");
     }
+
+    await page.getByRole("button", { name: "category" }).click();
+    await page.getByRole("option", { name: "All categories" }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/ui/knowledge\\?project=${loreId}$`),
+    );
+  });
+
+  test("clears the all-knowledge project filter", async ({ page }) => {
+    const loreId = await projectId(page, "lore");
+    await page.goto("/ui/knowledge");
+
+    await page.getByRole("button", { name: /^project\b/ }).click();
+    await page.getByRole("option", { name: "lore", exact: true }).click();
+    await expect(page).toHaveURL(`/ui/knowledge?project=${loreId}`);
+
+    const rows = page.getByTestId("knowledge-row");
+    await expect(rows).not.toHaveCount(0);
+    await page.getByRole("button", { name: /^project\b/ }).click();
+    await page
+      .getByRole("option", { name: "All projects", exact: true })
+      .click();
+    await expect(page).toHaveURL("/ui/knowledge");
+    await expect(rows).not.toHaveCount(0);
+
+    const projectNames = await rows.evaluateAll((elements) =>
+      elements
+        .map((row) => row.querySelectorAll("td")[3]?.textContent?.trim())
+        .filter((name): name is string => !!name && name !== "No project"),
+    );
+    expect(new Set(projectNames).size).toBeGreaterThan(1);
+
+    const rowCount = await rows.count();
+    await page.reload();
+    await expect(page).toHaveURL("/ui/knowledge");
+    await expect(rows).toHaveCount(rowCount);
+  });
+
+  test("clears the all-knowledge category filter", async ({ page }) => {
+    await page.goto("/ui/knowledge");
+    await page.getByRole("button", { name: "category" }).click();
+    await page.getByRole("option", { name: "gotcha", exact: true }).click();
+    await expect(page).toHaveURL("/ui/knowledge?category=gotcha");
+
+    await page.getByRole("button", { name: "category" }).click();
+    await page
+      .getByRole("option", { name: "All categories", exact: true })
+      .click();
+    await expect(page).toHaveURL("/ui/knowledge");
+    await expect(page.getByTestId("knowledge-row")).not.toHaveCount(0);
   });
 
   test("all-knowledge and search deep links preserve their server order on reload", async ({

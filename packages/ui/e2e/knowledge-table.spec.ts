@@ -56,7 +56,7 @@ test.describe("knowledge table routes", () => {
     await expect(page.getByTestId("knowledge-document")).toBeVisible();
     await page.getByTestId("mobile-back").click();
     await expect(page).toHaveURL(
-      /category=gotcha.*sort=title:asc|sort=title:asc.*category=gotcha/,
+      /category=gotcha.*sort=title%3Aasc|sort=title%3Aasc.*category=gotcha/,
     );
   });
 

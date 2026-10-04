@@ -755,6 +755,15 @@ describe("shell: workspace knowledge and search", () => {
     expect(client.allPageOpts.at(-1)).toEqual(
       expect.objectContaining({ project: "p-empty", cursor: null }),
     );
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /^project\b/ }), {
+      button: 0,
+    });
+    fireEvent.click(
+      await screen.findByRole("option", { name: "All projects" }),
+    );
+
+    await waitFor(() => expect(history.get()).toBe("/knowledge"));
   });
 
   it("keeps an unknown project filter visible while projects load", async () => {

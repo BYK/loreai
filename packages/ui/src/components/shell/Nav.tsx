@@ -3,6 +3,7 @@ import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { A, useMatch, useResolvedPath } from "@solidjs/router";
 
 import { cn } from "~/lib/utils";
+import { allKnowledgeHref } from "~/lib/href";
 import { pins } from "~/state/pins";
 import type { ProjectSummary } from "~/contracts";
 import {
@@ -190,7 +191,7 @@ export const Nav: Component<NavProps> = (props) => {
         )}
       </Show>
       <NavItem
-        href="/knowledge"
+        href={allKnowledgeHref()}
         active={!!atAllKnowledge()}
         testId="nav-all-knowledge"
         end

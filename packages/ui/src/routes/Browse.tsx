@@ -2,15 +2,25 @@ import type { Component } from "solid-js";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate, useParams, useSearchParams } from "@solidjs/router";
 
-import type { AllKnowledgeQuery, ProjectSummary } from "~/contracts";
+import type {
+  AllKnowledgeQuery,
+  ProjectSummary,
+  RecallScope,
+} from "~/contracts";
 import {
   DEFAULT_ALL_KNOWLEDGE_QUERY,
   DEFAULT_KNOWLEDGE_QUERY,
-  allKnowledgeQueryToSearch,
   parseAllKnowledgeQuery,
   parseKnowledgeQuery,
 } from "~/contracts";
-import { knowledgeHref, knowledgeListHref, projectHref } from "~/lib/href";
+import {
+  allKnowledgeHref,
+  globalKnowledgeHref,
+  knowledgeHref,
+  knowledgeListHref,
+  projectHref,
+  workspaceSearchHref,
+} from "~/lib/href";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
@@ -34,13 +44,6 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 
-export const allKnowledgeHref = (
-  query: AllKnowledgeQuery = DEFAULT_ALL_KNOWLEDGE_QUERY,
-) => `/knowledge${allKnowledgeQueryToSearch(query)}`;
-export const globalKnowledgeHref = (knowledgeId: string) =>
-  `/knowledge/${encodeURIComponent(knowledgeId)}`;
-export const workspaceSearchHref = (q: string) =>
-  `/search?q=${encodeURIComponent(q)}`;
 function decodeParam(segment: string | undefined) {
   if (segment === undefined) return undefined;
   try {
@@ -276,7 +279,7 @@ export const Browse: Component<{
   };
   const projectFilter = () => {
     const current = allQuery().project;
-    const options = (ws.projects.data() ?? []).map((p) => p.id);
+    const options = ["", ...(ws.projects.data() ?? []).map((p) => p.id)];
     if (current && !options.includes(current)) options.push(current);
     const projectName = (id: string) => {
       const project = ws.projectById(id);
@@ -289,7 +292,7 @@ export const Browse: Component<{
           navigate(
             allKnowledgeHref({
               ...allQuery(),
-              project,
+              project: project || null,
               cursor: null,
             }),
           )
@@ -298,7 +301,9 @@ export const Browse: Component<{
         placeholder="All projects"
         itemComponent={(item) => (
           <SelectItem item={item.item}>
-            {projectName(item.item.rawValue)}
+            {item.item.rawValue
+              ? projectName(item.item.rawValue)
+              : "All projects"}
           </SelectItem>
         )}
       >
@@ -428,7 +433,7 @@ export const Browse: Component<{
     const id = projectId();
     if (props.view === "all-knowledge") return { href: "/", label: "Projects" };
     if (props.view === "entry" && !id)
-      return { href: "/knowledge", label: "All knowledge" };
+      return { href: allKnowledgeHref(), label: "All knowledge" };
     if (!id) return undefined;
     switch (props.view) {
       case "entry":
