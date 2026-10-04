@@ -9,6 +9,7 @@ import type {
 import { ApiError } from "~/lib/api";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
+import { requiresMutationReload } from "./mutation-errors";
 import {
   Dialog,
   DialogContent,
@@ -98,6 +99,7 @@ export const ConflictsPage: Component = () => {
     if (!current || acting()) return;
     setActing(true);
     setActionError(null);
+    setReloadRequired(false);
     try {
       if (current.action === "keep") {
         const expectedVersion = current.conflict.current?.version_id;
@@ -145,15 +147,9 @@ export const ConflictsPage: Component = () => {
       });
       setConfirmation(null);
     } catch (error) {
-      if (error instanceof ApiError && error.code === "stale_version") {
-        setActionError({
-          id: current.conflict.id,
-          message: error.message,
-        });
-        setReloadRequired(true);
-      } else if (
+      if (
         error instanceof ApiError &&
-        (error.kind === "not_found" || error.status === 404)
+        (error.kind === "not_found" || error.code === "not_found")
       ) {
         setResolvedIds((previous) =>
           new Set(previous).add(current.conflict.id),
@@ -163,11 +159,18 @@ export const ConflictsPage: Component = () => {
           message: "This conflict was already resolved elsewhere.",
         });
         setReloadRequired(true);
+      } else if (requiresMutationReload(error)) {
+        setActionError({
+          id: current.conflict.id,
+          message: errorMessage(error),
+        });
+        setReloadRequired(true);
       } else {
         setActionError({
           id: current.conflict.id,
           message: errorMessage(error),
         });
+        setReloadRequired(false);
       }
     } finally {
       setActing(false);
@@ -179,6 +182,7 @@ export const ConflictsPage: Component = () => {
     action: "keep" | "discard",
   ) => {
     setActionError(null);
+    setReloadRequired(false);
     setConfirmation({ conflict, action });
   };
 
@@ -189,6 +193,17 @@ export const ConflictsPage: Component = () => {
 
   const closeConfirmation = (open: boolean) => {
     if (!open && !acting()) setConfirmation(null);
+  };
+
+  const dialogActionError = () => {
+    const current = confirmation();
+    const error = actionError();
+    return current && error?.id === current.conflict.id ? error : null;
+  };
+
+  const reloadAfterDialogError = () => {
+    setConfirmation(null);
+    reloadConflicts();
   };
 
   onMount(() => void load());
@@ -270,7 +285,7 @@ export const ConflictsPage: Component = () => {
               </div>
             )}
           </Show>
-          <Show when={reloadRequired()}>
+          <Show when={reloadRequired() && !confirmation()}>
             <div class="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-line bg-bg px-3 py-2 text-sm">
               <span>
                 {actionError()?.message ??
@@ -366,12 +381,18 @@ export const ConflictsPage: Component = () => {
                         {reasonMessage(conflict)}
                       </p>
                     </Show>
-                    <Show when={actionError()?.id === conflict.id}>
+                    <Show
+                      when={
+                        !confirmation() && actionError()?.id === conflict.id
+                      }
+                    >
                       <p class="mt-3 text-sm text-danger" role="alert">
                         {actionError()?.message}
                       </p>
                     </Show>
-                    <Show when={resolvedIds().has(conflict.id)}>
+                    <Show
+                      when={!confirmation() && resolvedIds().has(conflict.id)}
+                    >
                       <p
                         class="mt-3 text-sm text-muted"
                         role="status"
@@ -431,6 +452,29 @@ export const ConflictsPage: Component = () => {
                 : "This permanently removes the saved local snapshot for this conflict."}
             </DialogDescription>
           </DialogHeader>
+          <Show when={dialogActionError()}>
+            {(error) => (
+              <p
+                class="text-sm text-danger"
+                role="alert"
+                tabIndex={-1}
+                data-testid="conflict-action-error"
+                ref={(element) => queueMicrotask(() => element.focus())}
+              >
+                {error().message}
+              </p>
+            )}
+          </Show>
+          <Show when={reloadRequired() && dialogActionError()}>
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="conflicts-reload-after-action"
+              onClick={reloadAfterDialogError}
+            >
+              Reload conflicts
+            </Button>
+          </Show>
           <DialogFooter>
             <Button
               variant="outline"
@@ -440,7 +484,9 @@ export const ConflictsPage: Component = () => {
               Cancel
             </Button>
             <Button
-              disabled={acting()}
+              disabled={
+                acting() || (reloadRequired() && dialogActionError() !== null)
+              }
               variant={
                 confirmation()?.action === "discard" ? "destructive" : "default"
               }

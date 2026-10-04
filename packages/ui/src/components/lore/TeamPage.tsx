@@ -24,6 +24,7 @@ import type {
 import { ApiError } from "~/lib/api";
 import { useWorkspace } from "~/routes/workspace";
 import { Button } from "~/components/ui/button";
+import { requiresMutationReload } from "./mutation-errors";
 import {
   Dialog,
   DialogContent,
@@ -45,6 +46,7 @@ type PageState =
   | "ready";
 type TeamMember = TeamMembersResponse["members"][number];
 type Role = "admin" | "editor" | "viewer";
+type MutationFailure = { cause: unknown; message: string };
 
 const features = tableFeatures({});
 const helper = createColumnHelper<typeof features, TeamMember>();
@@ -68,8 +70,6 @@ function actionMessage(error: unknown): string {
       return "Unlock team encryption with `lore sync enable` before changing team members.";
     if (error.code === "sync_disabled")
       return "Enable sync with `lore sync enable` before changing team members.";
-    if (error.code === "stale_member")
-      return "The member role changed. The team list has been reloaded.";
   }
   return errorMessage(error);
 }
@@ -87,6 +87,7 @@ export const TeamPage: Component = () => {
   const [loadingMembers, setLoadingMembers] = createSignal(false);
   const [pageError, setPageError] = createSignal<unknown>();
   const [actionError, setActionError] = createSignal("");
+  const [staleMemberId, setStaleMemberId] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [inviteRole, setInviteRole] = createSignal<"editor" | "viewer">(
     "viewer",
@@ -97,6 +98,9 @@ export const TeamPage: Component = () => {
   const [inviteError, setInviteError] = createSignal("");
   const [copyMessage, setCopyMessage] = createSignal("");
   const [removeTarget, setRemoveTarget] = createSignal<TeamMember | null>(null);
+  const [removeError, setRemoveError] = createSignal<MutationFailure | null>(
+    null,
+  );
   const [removeReceipt, setRemoveReceipt] =
     createSignal<TeamRemovalReceipt | null>(null);
   const [roleReceipt, setRoleReceipt] = createSignal<TeamRoleReceipt | null>(
@@ -124,6 +128,7 @@ export const TeamPage: Component = () => {
 
   const loadMembers = async (selectedTeam: string) => {
     if (!selectedTeam) return;
+    if (selectedTeam !== teamId()) setStaleMemberId(null);
     setTeamId(selectedTeam);
     setPageState("loading");
     setPageError(undefined);
@@ -188,7 +193,22 @@ export const TeamPage: Component = () => {
     if (teamId()) void loadMembers(teamId());
   };
 
-  const changeRole = async (member: TeamMember, role: Role) => {
+  const staleMemberNotice = () => {
+    const id = staleMemberId();
+    if (!id) return "";
+    const member = members()?.members.find((item) => item.user_id === id);
+    const teammate = `Teammate ${id.slice(0, 8)}`;
+    if (!member)
+      return `${teammate}'s team membership changed since you loaded the team. The list has been reloaded.`;
+    const role = member.role.charAt(0).toUpperCase() + member.role.slice(1);
+    return `${teammate}'s role changed to ${role} since you loaded the team. The list has been reloaded.`;
+  };
+
+  const changeRole = async (
+    member: TeamMember,
+    role: Role,
+    select: HTMLSelectElement,
+  ) => {
     const current = members();
     if (
       !current ||
@@ -210,6 +230,7 @@ export const TeamPage: Component = () => {
           member.role as Role,
         ),
       );
+      setStaleMemberId(null);
       setRoleReceipt(receipt);
       setMembers((previous) =>
         previous
@@ -224,9 +245,14 @@ export const TeamPage: Component = () => {
           : previous,
       );
     } catch (error) {
-      setActionError(actionMessage(error));
-      if (error instanceof ApiError && error.code === "stale_member")
+      select.value = member.role;
+      if (error instanceof ApiError && error.code === "stale_member") {
+        setStaleMemberId(member.user_id);
+        setActionError("");
         void loadMembers(teamId());
+      } else {
+        setActionError(actionMessage(error));
+      }
     } finally {
       setBusy(false);
     }
@@ -246,6 +272,7 @@ export const TeamPage: Component = () => {
           ...(inviteEmail().trim() ? { email: inviteEmail().trim() } : {}),
         }),
       );
+      setStaleMemberId(null);
       setInviteReceipt(receipt);
       setInviteEmail("");
     } catch (error) {
@@ -261,7 +288,7 @@ export const TeamPage: Component = () => {
     if (!target || !current || busy()) return;
     setBusy(true);
     setRemoving(true);
-    setActionError("");
+    setRemoveError(null);
     try {
       const receipt = await ws.tracked(() =>
         ws.client.removeTeamMember(
@@ -270,6 +297,7 @@ export const TeamPage: Component = () => {
           target.role as Role,
         ),
       );
+      setStaleMemberId(null);
       setRemoveReceipt(receipt);
       setMembers((previous) =>
         previous
@@ -284,13 +312,28 @@ export const TeamPage: Component = () => {
       setRemoveTarget(null);
       folk.refresh();
     } catch (error) {
-      setActionError(actionMessage(error));
-      if (error instanceof ApiError && error.code === "stale_member")
-        void loadMembers(teamId());
+      setRemoveError({ cause: error, message: actionMessage(error) });
     } finally {
       setRemoving(false);
       setBusy(false);
     }
+  };
+
+  const closeRemove = () => {
+    if (removing()) return;
+    setRemoveTarget(null);
+    setRemoveError(null);
+  };
+
+  const reloadAfterRemoveError = () => {
+    const target = removeTarget();
+    if (!target) return;
+    const error = removeError()?.cause;
+    if (error instanceof ApiError && error.code === "stale_member")
+      setStaleMemberId(target.user_id);
+    setRemoveTarget(null);
+    setRemoveError(null);
+    void loadMembers(teamId());
   };
 
   const copyAcceptCommand = async () => {
@@ -373,7 +416,16 @@ export const TeamPage: Component = () => {
           `lore sync enable`.
         </p>
       </Show>
-      <Show when={actionError()}>
+      <Show when={staleMemberId() && pageState() === "ready"}>
+        <p
+          class="mb-4 rounded-md border border-line bg-bg px-3 py-2 text-sm"
+          role="status"
+          data-testid="team-stale-member-notice"
+        >
+          {staleMemberNotice()}
+        </p>
+      </Show>
+      <Show when={actionError() && !removeTarget()}>
         <p class="mb-4 text-sm text-danger" role="alert">
           {actionError()}
         </p>
@@ -526,6 +578,7 @@ export const TeamPage: Component = () => {
                                                 row.original,
                                                 event.currentTarget
                                                   .value as Role,
+                                                event.currentTarget,
                                               )
                                             }
                                           >
@@ -674,7 +727,7 @@ export const TeamPage: Component = () => {
       <Dialog
         open={removeTarget() !== null}
         onOpenChange={(open) => {
-          if (!open && !removing()) setRemoveTarget(null);
+          if (!open) closeRemove();
         }}
       >
         <DialogContent data-testid="team-remove-confirmation">
@@ -689,17 +742,44 @@ export const TeamPage: Component = () => {
               re-added to regain access.
             </DialogDescription>
           </DialogHeader>
+          <Show when={removeError()}>
+            <p
+              class="text-sm text-danger"
+              role="alert"
+              tabIndex={-1}
+              data-testid="team-remove-error"
+              ref={(element) => queueMicrotask(() => element.focus())}
+            >
+              {removeError()?.message}
+            </p>
+          </Show>
+          <Show
+            when={removeError() && requiresMutationReload(removeError()?.cause)}
+          >
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="team-remove-reload"
+              onClick={reloadAfterRemoveError}
+            >
+              Reload team
+            </Button>
+          </Show>
           <DialogFooter>
             <Button
               variant="outline"
               disabled={removing()}
-              onClick={() => setRemoveTarget(null)}
+              onClick={closeRemove}
             >
               Cancel
             </Button>
             <Button
               variant="destructive"
-              disabled={removing()}
+              disabled={
+                removing() ||
+                (removeError() !== null &&
+                  requiresMutationReload(removeError()?.cause))
+              }
               onClick={() => void confirmRemove()}
             >
               {removing() ? "Removing…" : "Remove member"}
