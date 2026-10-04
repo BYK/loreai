@@ -11,7 +11,7 @@ import type { EntityDetail } from "~/contracts";
 import { isApiError } from "~/lib/api";
 import { formatWhen } from "~/lib/format";
 import { useWorkspace } from "~/routes/workspace";
-import { knowledgeHref } from "~/routes/Browse";
+import { knowledgeHref } from "~/lib/href";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ConfirmDialog } from "~/components/ui/confirm-dialog";

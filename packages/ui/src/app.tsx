@@ -128,6 +128,10 @@ export const routes: RouteDefinition[] = [
     component: () => <Browse view="sessions" />,
   },
   {
+    path: "/projects/:projectId/imports",
+    component: () => <Browse view="imports" />,
+  },
+  {
     path: "/projects/:projectId/search",
     component: () => <Browse view="search" />,
   },

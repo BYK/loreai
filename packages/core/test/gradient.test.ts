@@ -6,7 +6,12 @@ import {
   beforeEach,
   afterAll,
 } from "vitest";
-import { db, ensureProject, loadForceMinLayer } from "../src/db";
+import {
+  db,
+  ensureProject,
+  loadForceMinLayer,
+  saveForceMinLayer,
+} from "../src/db";
 import {
   transform,
   setModelLimits,
@@ -877,12 +882,8 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
     resetCalibration(SID);
     calibrate(0);
 
-    // Manually write forceMinLayer to DB (simulating a prior process's setForceMinLayer)
-    db()
-      .query(
-        "INSERT OR REPLACE INTO session_state (session_id, force_min_layer, updated_at) VALUES (?, ?, ?)",
-      )
-      .run(SID, 2, Date.now());
+    // Persist through the owner-aware writer, as a prior process would.
+    saveForceMinLayer(SID, 2);
 
     // transform() should pick up forceMinLayer=2 from DB
     const result = transform({
@@ -947,14 +948,14 @@ describe("gradient — forceMinLayer persistence (restart survival)", () => {
     // lastTurnAt>0 so the atomic restore fires. force_min_layer stays 0 (the
     // proactive emergency tail does not set it), so there is no forceMinLayer
     // fallback — the ratchet reseed is the ONLY thing that can hold the floor.
+    saveForceMinLayer(SID, 0);
     db()
       .query(
-        `INSERT OR REPLACE INTO session_state
-           (session_id, force_min_layer, last_layer, last_known_input,
-            last_known_message_count, last_turn_at, updated_at)
-         VALUES (?, 0, 4, 500, 20, ?, ?)`,
+        `UPDATE session_state SET last_layer = 4, last_known_input = 500,
+           last_known_message_count = 20, last_turn_at = ?, updated_at = ?
+         WHERE session_id = ?`,
       )
-      .run(SID, Date.now(), Date.now());
+      .run(Date.now(), Date.now(), SID);
 
     // Resume with a small conversation that would trivially fit at layer 0.
     const messages = [

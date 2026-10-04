@@ -37,6 +37,7 @@ import { compressBody } from "../src/cache-analytics";
 import {
   ltm,
   temporal,
+  distillation,
   embedding,
   loadSessionCosts,
   db,
@@ -383,6 +384,86 @@ describe("shouldDeferPrefixRewriteOnCoolBust (#946 mid-flight defer)", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildIdleWorkHandler", () => {
+  test("releases distillation ownership after distillation and before later maintenance", async () => {
+    const projectPath = makeProjectDir();
+    let markDistillationEntered!: () => void;
+    const distillationEntered = new Promise<void>((resolve) => {
+      markDistillationEntered = resolve;
+    });
+    let releaseDistillation!: () => void;
+    const distillationGate = new Promise<void>((resolve) => {
+      releaseDistillation = resolve;
+    });
+    let markMetaEntered!: () => void;
+    const metaEntered = new Promise<void>((resolve) => {
+      markMetaEntered = resolve;
+    });
+    let releaseMeta!: () => void;
+    const metaGate = new Promise<void>((resolve) => {
+      releaseMeta = resolve;
+    });
+    let markPruneEntered!: () => void;
+    const pruneEntered = new Promise<void>((resolve) => {
+      markPruneEntered = resolve;
+    });
+    let releasePrune!: () => void;
+    const pruneGate = new Promise<void>((resolve) => {
+      releasePrune = resolve;
+    });
+    const prune = vi
+      .spyOn(temporal, "pruneIdle")
+      .mockImplementation(async () => {
+        markPruneEntered();
+        await pruneGate;
+        return { ttlDeleted: 0, capDeleted: 0, sizeScanComplete: true };
+      });
+    const pendingCount = vi
+      .spyOn(temporal, "undistilledCount")
+      .mockReturnValue(1);
+    const run = vi.spyOn(distillation, "run").mockImplementation(async () => {
+      markDistillationEntered();
+      await distillationGate;
+      return { rounds: 1, distilled: 1 };
+    });
+    const gen0Count = vi
+      .spyOn(distillation, "gen0Count")
+      .mockReturnValue(Number.MAX_SAFE_INTEGER);
+    const metaDistill = vi
+      .spyOn(distillation, "metaDistill")
+      .mockImplementation(async () => {
+        markMetaEntered();
+        await metaGate;
+        return null;
+      });
+    const releaseDistillationClaim = vi.fn();
+    try {
+      const pending = buildIdleWorkHandler(makeLLM())(
+        "idle-release-distillation",
+        makeSessionState({ projectPath }),
+        releaseDistillationClaim,
+      );
+      await distillationEntered;
+      expect(releaseDistillationClaim).not.toHaveBeenCalled();
+      releaseDistillation();
+      await metaEntered;
+      expect(releaseDistillationClaim).not.toHaveBeenCalled();
+      releaseMeta();
+      await pruneEntered;
+      expect(releaseDistillationClaim).toHaveBeenCalledOnce();
+      releasePrune();
+      await pending;
+    } finally {
+      releaseDistillation();
+      releaseMeta();
+      releasePrune();
+      prune.mockRestore();
+      pendingCount.mockRestore();
+      run.mockRestore();
+      gen0Count.mockRestore();
+      metaDistill.mockRestore();
+    }
+  });
+
   test("prunes a shared project once across separate idle sessions", async () => {
     const projectPath = makeProjectDir();
     const prune = vi.spyOn(temporal, "pruneIdle");

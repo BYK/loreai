@@ -90,6 +90,7 @@ type PoolOperationState = "queued" | "running" | "completed";
 
 interface PoolWaiter {
   settled: boolean;
+  priority: PoolOperation["priority"];
   signal?: AbortSignal;
   onAbort?: () => void;
   resolve: (vectors: Float32Array[]) => void;
@@ -101,7 +102,7 @@ interface PoolOperation {
   texts: string[];
   byteSize: number;
   inputType: "document" | "query";
-  priority: "high" | "normal";
+  priority: "high" | "normal" | "background";
   state: PoolOperationState;
   waiters: Set<PoolWaiter>;
   retainResult?: boolean;
@@ -178,6 +179,9 @@ export class EmbeddingPool implements EmbeddingProvider {
   private readonly slots: EmbedSlot[] = [];
   private readonly retiredWorkers = new OwnedRetirements<LocalProvider>();
   private readonly queue: PoolOperation[] = [];
+  private activeBackground = 0;
+  private normalDispatches = 0;
+  private foregroundWarmupPending = false;
   private queuedBytes = 0;
   private readonly operations = new Map<string, PoolOperation>();
   private readonly tokenBatchCheckpoints = new Map<
@@ -365,8 +369,26 @@ export class EmbeddingPool implements EmbeddingProvider {
     operation.texts = [];
   }
 
+  private refreshQueuedPriority(operation: PoolOperation): void {
+    if (operation.state !== "queued" || operation.waiters.size === 0) return;
+    const waiters = [...operation.waiters];
+    const priority = waiters.some((waiter) => waiter.priority === "high")
+      ? "high"
+      : waiters.some((waiter) => waiter.priority === "normal")
+        ? "normal"
+        : "background";
+    if (priority === operation.priority) return;
+    const index = this.queue.indexOf(operation);
+    if (index === -1) return;
+    this.removeQueuedOperation(index);
+    operation.priority = priority;
+    this.enqueueOperation(operation);
+    this.dispatch();
+  }
+
   private attachWaiter(
     operation: PoolOperation,
+    priority: PoolOperation["priority"],
     signal?: AbortSignal,
   ): Promise<Float32Array[]> {
     if (signal?.aborted) {
@@ -385,7 +407,13 @@ export class EmbeddingPool implements EmbeddingProvider {
     }
 
     return new Promise<Float32Array[]>((resolve, reject) => {
-      const waiter: PoolWaiter = { settled: false, signal, resolve, reject };
+      const waiter: PoolWaiter = {
+        settled: false,
+        priority,
+        signal,
+        resolve,
+        reject,
+      };
       const onAbort = (): void => {
         this.settleWaiter(operation, waiter, {
           error: new EmbeddingRequestAbortedError(),
@@ -394,6 +422,7 @@ export class EmbeddingPool implements EmbeddingProvider {
           operation.retainResult = true;
         }
         this.dropUnobservedQueuedOperation(operation);
+        this.refreshQueuedPriority(operation);
       };
       waiter.onAbort = onAbort;
       operation.waiters.add(waiter);
@@ -412,6 +441,16 @@ export class EmbeddingPool implements EmbeddingProvider {
       ) {
         insertAt++;
       }
+      this.queue.splice(insertAt, 0, operation);
+      return;
+    }
+    if (operation.priority === "normal") {
+      let insertAt = 0;
+      while (
+        insertAt < this.queue.length &&
+        this.queue[insertAt].priority !== "background"
+      )
+        insertAt++;
       this.queue.splice(insertAt, 0, operation);
       return;
     }
@@ -585,9 +624,13 @@ export class EmbeddingPool implements EmbeddingProvider {
       if (watchdogTimer) clearTimeout(watchdogTimer);
       watchdogTimer = setTimeout(
         () => {
-          log.error(
-            `embedding worker watchdog expired: stage=${stage} timeout_ms=${timeoutMs}`,
-          );
+          try {
+            log.error(
+              `embedding worker watchdog expired: stage=${stage} timeout_ms=${timeoutMs}`,
+            );
+          } catch {
+            // Diagnostics cannot keep a timed-out worker slot occupied.
+          }
           rejectWatchdog(new EmbeddingWorkerWatchdogError(stage));
         },
         Math.max(1, timeoutMs),
@@ -647,6 +690,7 @@ export class EmbeddingPool implements EmbeddingProvider {
     } finally {
       if (watchdogTimer) clearTimeout(watchdogTimer);
       slot.inflight--;
+      if (operation.priority === "background") this.activeBackground--;
       this.dispatch();
     }
   }
@@ -656,7 +700,21 @@ export class EmbeddingPool implements EmbeddingProvider {
     this.dispatching = true;
     try {
       while (this.queue.length > 0) {
-        const operation = this.queue[0];
+        // Recall queries always go first. After a bounded run of ordinary
+        // documents, serve one durable batch so foreground documents cannot
+        // starve recovery on a single-worker host.
+        const backgroundIndex =
+          this.queue[0].priority === "normal" &&
+          this.normalDispatches >= 3 &&
+          !this.foregroundWarmupPending &&
+          this.activeBackground < Math.max(1, this.ceiling - 1)
+            ? this.queue.findIndex(
+                (queued) =>
+                  queued.priority === "background" && queued.waiters.size > 0,
+              )
+            : -1;
+        const index = backgroundIndex === -1 ? 0 : backgroundIndex;
+        const operation = this.queue[index];
         if (operation.waiters.size === 0) {
           this.dropUnobservedQueuedOperation(operation);
           continue;
@@ -667,6 +725,19 @@ export class EmbeddingPool implements EmbeddingProvider {
         // pool growth) while that memory remains live. Retirement completion
         // re-enters dispatch above.
         if (this.slots.length === 0 && this.retiredWorkers.size > 0) break;
+        // The first durable batch must not claim the bootstrapped worker
+        // between primary warmup and loading the spare recall worker.
+        if (operation.priority === "background" && this.foregroundWarmupPending)
+          break;
+        // An executing native batch cannot be interrupted when a recall
+        // arrives. Keep one pool slot free of durable background work when
+        // the host can support more than one worker. On a one-worker host,
+        // cooperative token-area batches remain the only safe boundary.
+        if (
+          operation.priority === "background" &&
+          this.activeBackground >= Math.max(1, this.ceiling - 1)
+        )
+          break;
 
         let slot: EmbedSlot;
         try {
@@ -676,7 +747,7 @@ export class EmbeddingPool implements EmbeddingProvider {
             this.scheduleRetryDispatch(error.retryAt);
             break;
           }
-          this.removeQueuedOperation(0);
+          this.removeQueuedOperation(index);
           if (this.operations.get(operation.key) === operation) {
             this.operations.delete(operation.key);
           }
@@ -692,9 +763,13 @@ export class EmbeddingPool implements EmbeddingProvider {
         this.clearRetryDispatchTimer();
         if (slot.inflight > 0) break;
 
-        this.removeQueuedOperation(0);
+        this.removeQueuedOperation(index);
         operation.state = "running";
         slot.inflight++;
+        if (operation.priority === "background") this.activeBackground++;
+        if (operation.priority === "background") this.normalDispatches = 0;
+        else if (operation.priority === "normal")
+          this.normalDispatches = Math.min(3, this.normalDispatches + 1);
         void this.runOperation(operation, slot);
       }
     } finally {
@@ -706,6 +781,23 @@ export class EmbeddingPool implements EmbeddingProvider {
     texts: string[],
     inputType: "document" | "query",
     signal?: AbortSignal,
+  ): Promise<Float32Array[]> {
+    return this.enqueueEmbed(texts, inputType, signal, false);
+  }
+
+  embedBackground(
+    texts: string[],
+    inputType: "document" | "query",
+    signal?: AbortSignal,
+  ): Promise<Float32Array[]> {
+    return this.enqueueEmbed(texts, inputType, signal, true);
+  }
+
+  private enqueueEmbed(
+    texts: string[],
+    inputType: "document" | "query",
+    signal: AbortSignal | undefined,
+    background: boolean,
   ): Promise<Float32Array[]> {
     if (signal?.aborted) {
       return Promise.reject(new EmbeddingRequestAbortedError());
@@ -719,9 +811,18 @@ export class EmbeddingPool implements EmbeddingProvider {
     this.pruneCompletedOperations();
     const ownedTexts = texts.slice();
     const key = embeddingOperationKey(ownedTexts, inputType);
+    const priority = isRecallEmbed(ownedTexts, inputType)
+      ? "high"
+      : background
+        ? "background"
+        : "normal";
     const existing = this.operations.get(key);
-    if (existing) return this.attachWaiter(existing, signal);
-    const priority = isRecallEmbed(ownedTexts, inputType) ? "high" : "normal";
+    if (existing) {
+      const before = existing.waiters.size;
+      const result = this.attachWaiter(existing, priority, signal);
+      if (existing.waiters.size > before) this.refreshQueuedPriority(existing);
+      return result;
+    }
     const byteSize = ownedTexts.reduce(
       (total, text) => total + Buffer.byteLength(text),
       0,
@@ -740,7 +841,7 @@ export class EmbeddingPool implements EmbeddingProvider {
       waiters: new Set(),
     };
     this.operations.set(key, operation);
-    const result = this.attachWaiter(operation, signal);
+    const result = this.attachWaiter(operation, priority, signal);
     if (operation.waiters.size > 0) {
       this.enqueueOperation(operation);
       this.dispatch();
@@ -750,6 +851,46 @@ export class EmbeddingPool implements EmbeddingProvider {
 
   hasHealthySlot(): boolean {
     return this.slots.some((slot) => slot.healthy);
+  }
+
+  beginForegroundWarmup(): boolean {
+    if (this.foregroundWarmupPending) return false;
+    this.foregroundWarmupPending = this.ceiling > 1;
+    return true;
+  }
+
+  finishForegroundWarmup(): void {
+    if (!this.foregroundWarmupPending) return;
+    this.foregroundWarmupPending = false;
+    this.dispatch();
+  }
+
+  /** Load the spare model after primary bootstrap, before durable work fills it. */
+  async warmForegroundCapacity(): Promise<void> {
+    try {
+      if (
+        this.closing ||
+        this.ceiling < 2 ||
+        this.slots.length !== 1 ||
+        !this.slots[0].healthy ||
+        this.liveFreemem() < PER_WORKER_MEM_BUDGET_BYTES
+      )
+        return;
+      // Occupy the known-good worker before submitting a distinct query. Pool
+      // growth is safe only after the primary worker has loaded successfully.
+      const primary = this.embed(
+        ["warmup primary embedding worker"],
+        "document",
+      );
+      const spare = this.embed(["warmup spare embedding worker"], "query");
+      // One worker can reject while the other still owns its initialization
+      // slot. Preserve the background gate until both operations have settled.
+      const results = await Promise.allSettled([primary, spare]);
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+    } finally {
+      this.finishForegroundWarmup();
+    }
   }
 
   shutdown(timeoutMs = WORKER_SHUTDOWN_TIMEOUT_MS): Promise<void> {

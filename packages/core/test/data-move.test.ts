@@ -10,9 +10,12 @@ import {
   appendSessionPromptDelta,
   db,
   ensureProject,
+  saveSessionCosts,
   saveSessionTracking,
 } from "../src/db";
 import * as data from "../src/data";
+import { SourceWindowStore } from "../src/source-window-store";
+import { withTenant } from "../src/tenant";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -216,11 +219,11 @@ describe("moveSessions", () => {
     expect(countInProject("knowledge_session_injections", pidA)).toBe(1);
   });
 
-  test("updates session_state project_path and provisional flag", () => {
+  test("moves a confirmed session_state project binding", () => {
     insertMessage(pidA, SESSION_1, "msg-ss-1");
     saveSessionTracking(SESSION_1, {
       projectPath: PROJECT_A,
-      projectPathProvisional: true,
+      projectPathProvisional: false,
     });
 
     data.moveSessions([SESSION_1], pidA, PROJECT_B);
@@ -254,14 +257,383 @@ describe("moveSessions", () => {
     expect(countInProject("temporal_messages", pidA)).toBe(1);
   });
 
+  test("rejects a foreign source project before creating a destination", () => {
+    const foreign = withTenant("another-tenant", () =>
+      ensureProject("/test/move/foreign-project"),
+    );
+    withTenant("another-tenant", () =>
+      insertMessage(foreign, "foreign-session", "foreign-message"),
+    );
+    const destination = "/test/move/uncreated-destination";
+
+    expect(() =>
+      data.moveSessions(["foreign-session"], foreign, destination),
+    ).toThrow("source project unavailable");
+    expect(
+      db()
+        .query("SELECT project_id FROM temporal_messages WHERE id = ?")
+        .get("foreign-message"),
+    ).toEqual({ project_id: foreign });
+    expect(
+      db().query("SELECT 1 FROM projects WHERE path = ?").get(destination),
+    ).toBeNull();
+  });
+
+  test("does not rebind foreign sessions or children supplied with an owned source", () => {
+    const foreign = withTenant("another-tenant", () =>
+      ensureProject("/test/move/foreign-children"),
+    );
+    insertMessage(pidA, SESSION_1, "owned-message");
+    saveSessionTracking(SESSION_1, {
+      projectPath: PROJECT_A,
+      projectPathProvisional: false,
+    });
+    withTenant("another-tenant", () => {
+      insertMessage(foreign, "foreign-parent", "foreign-parent-message");
+      insertMessage(foreign, "foreign-child", "foreign-child-message");
+      saveSessionTracking("foreign-parent", {
+        projectPath: "/test/move/foreign-children",
+      });
+      saveSessionTracking("foreign-child", {
+        projectPath: "/test/move/foreign-children",
+        parentSessionId: SESSION_1,
+      });
+    });
+
+    const result = data.moveSessions(
+      [SESSION_1, "foreign-parent"],
+      pidA,
+      PROJECT_B,
+    );
+
+    expect(result.movedSessionIds).toEqual([SESSION_1]);
+    expect(result.sessions_moved).toBe(1);
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get("foreign-parent"),
+    ).toEqual({ project_path: "/test/move/foreign-children" });
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get("foreign-child"),
+    ).toEqual({ project_path: "/test/move/foreign-children" });
+    expect(countInProject("temporal_messages", foreign)).toBe(2);
+    expect(countInProject("temporal_messages", pidB)).toBe(1);
+  });
+
+  test("moves source rows without rebinding a colliding foreign-owned state", () => {
+    const id = "colliding-tenant-session";
+    const foreignPath = "/test/move/foreign-collision";
+    withTenant("foreign-tenant", () => {
+      ensureProject(foreignPath);
+      saveSessionTracking(id, {
+        projectPath: foreignPath,
+        credentialFingerprint: "foreign-tenant",
+      });
+    });
+    // The foreign state exists first. The authorized source then acquires a
+    // temporal row using the same global session ID.
+    insertMessage(pidA, id, "source-colliding-message");
+
+    const result = data.moveSessions([id], pidA, PROJECT_B, {
+      includeChildren: false,
+    });
+
+    expect(result.messages_moved).toBe(1);
+    expect(result.movedSessionIds).toEqual([]);
+    expect(
+      db()
+        .query("SELECT project_id FROM temporal_messages WHERE id = ?")
+        .get("source-colliding-message"),
+    ).toEqual({ project_id: pidB });
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get(id),
+    ).toEqual({ project_path: foreignPath });
+  });
+
+  test("does not rebind a credential-bound state using only a local source row", () => {
+    const id = "local-credential-collision";
+    insertMessage(pidA, id, "local-row");
+    saveSessionTracking(id, {
+      projectPath: PROJECT_A,
+      projectPathProvisional: false,
+      credentialFingerprint: "another-credential",
+    });
+
+    const result = data.moveSessions([id], pidA, PROJECT_B, {
+      includeChildren: false,
+    });
+    expect(result.messages_moved).toBe(1);
+    expect(result.movedSessionIds).toEqual([]);
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get(id),
+    ).toEqual({ project_path: PROJECT_A });
+  });
+
+  test.each([
+    { path: PROJECT_B, provisional: true },
+    { path: null, provisional: true },
+  ])(
+    "moves source rows without rebinding a same-tenant state bound to $path",
+    ({ path, provisional }) => {
+      const id = `colliding-local-${path ?? "unbound"}`;
+      // The other state predates the source row and has the same global ID.
+      saveSessionTracking(id, {
+        ...(path === null ? {} : { projectPath: path }),
+        projectPathProvisional: provisional,
+      });
+      insertMessage(pidA, id, `source-row-${id}`);
+
+      const result = data.moveSessions([id], pidA, PROJECT_B, {
+        includeChildren: false,
+      });
+
+      expect(result.messages_moved).toBe(1);
+      expect(result.movedSessionIds).toEqual([]);
+      expect(
+        db()
+          .query("SELECT project_id FROM temporal_messages WHERE id = ?")
+          .get(`source-row-${id}`),
+      ).toEqual({ project_id: pidB });
+      expect(
+        db()
+          .query("SELECT project_path FROM session_state WHERE session_id = ?")
+          .get(id),
+      ).toEqual({ project_path: path });
+    },
+  );
+
+  test("cost-first state records an owner before its source rows move", () => {
+    const id = "cost-first-source-state";
+    saveSessionCosts(id, {
+      conversationCost: 0,
+      workerCost: 0,
+      conversationTurns: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      warmupSavings: 0,
+      warmupCost: 0,
+      warmupHits: 0,
+      ttlSavings: 0,
+      ttlHits: 0,
+      batchSavings: 0,
+      avoidedCompactions: 0,
+      avoidedCompactionCost: 0,
+    });
+    expect(
+      db()
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get(id),
+    ).toEqual({ tenant_id: "" });
+    saveSessionTracking(id, {
+      projectPath: PROJECT_A,
+      projectPathProvisional: false,
+    });
+    insertMessage(pidA, id, "cost-first-temporal");
+
+    expect(data.moveSessions([id], pidA, PROJECT_B).movedSessionIds).toEqual([
+      id,
+    ]);
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get(id),
+    ).toEqual({ project_path: PROJECT_B });
+  });
+
+  test("rejects an unverifiable legacy state rather than splitting its move", () => {
+    const id = "unowned-legacy-state";
+    db()
+      .query(
+        "INSERT INTO session_state (session_id, force_min_layer, updated_at, project_path) VALUES (?, 0, ?, ?)",
+      )
+      .run(id, Date.now(), PROJECT_A);
+    insertMessage(pidA, id, "legacy-source-message");
+
+    expect(() => data.moveSessions([id], pidA, PROJECT_B)).toThrow(
+      "session state ownership unavailable",
+    );
+    expect(
+      db()
+        .query("SELECT project_id FROM temporal_messages WHERE id = ?")
+        .get("legacy-source-message"),
+    ).toEqual({ project_id: pidA });
+  });
+
+  test("does not create a destination for a rejected legacy state move", () => {
+    const id = "unowned-new-destination";
+    const destination = "/test/rejected-unowned-destination";
+    db()
+      .query(
+        "INSERT INTO session_state (session_id, force_min_layer, updated_at, project_path) VALUES (?, 0, ?, ?)",
+      )
+      .run(id, Date.now(), PROJECT_A);
+    insertMessage(pidA, id, "unowned-new-destination-message");
+
+    expect(() =>
+      data.moveSessions([id], pidA, destination, { includeChildren: false }),
+    ).toThrow("session state ownership unavailable");
+    expect(
+      db().query("SELECT id FROM projects WHERE path = ?").get(destination),
+    ).toBeNull();
+    expect(
+      db()
+        .query("SELECT path FROM project_path_aliases WHERE path = ?")
+        .get(destination),
+    ).toBeNull();
+    expect(
+      db()
+        .query("SELECT project_id FROM temporal_messages WHERE id = ?")
+        .get("unowned-new-destination-message"),
+    ).toEqual({ project_id: pidA });
+  });
+
+  test("rejects an unowned source-only lease before splitting legacy state", () => {
+    const id = "unowned-source-only-state";
+    db()
+      .query(
+        "INSERT INTO session_state (session_id, force_min_layer, updated_at, project_path) VALUES (?, 0, ?, ?)",
+      )
+      .run(id, Date.now(), PROJECT_A);
+    new SourceWindowStore({
+      projectPath: PROJECT_A,
+      sessionID: id,
+      noStore: false,
+    });
+
+    expect(() =>
+      data.moveSessions([id], pidA, PROJECT_B, { includeChildren: false }),
+    ).toThrow("session state ownership unavailable");
+    expect(
+      db()
+        .query("SELECT project_id FROM source_windows WHERE session_id = ?")
+        .get(id),
+    ).toEqual({ project_id: pidA });
+  });
+
+  test.each([
+    { bound: false, path: null, fingerprint: "foreign-tenant" },
+    { bound: true, path: PROJECT_A, fingerprint: "foreign-tenant" },
+    { bound: true, path: PROJECT_A, fingerprint: "" },
+  ])(
+    "does not rebind a foreign state through a source-only lease (bound=$bound fingerprint=$fingerprint)",
+    ({ bound, path, fingerprint }) => {
+      const foreignId = `foreign-source-only-${bound}-${fingerprint || "local-looking"}`;
+      withTenant("foreign-tenant", () =>
+        saveSessionTracking(foreignId, {
+          credentialFingerprint: fingerprint,
+          ...(path === null ? {} : { projectPath: path }),
+        }),
+      );
+      // An unbound state can acquire a lease before its first response; another
+      // tenant can also use the same project path. Neither proves ownership.
+      new SourceWindowStore({
+        projectPath: PROJECT_A,
+        sessionID: foreignId,
+        noStore: false,
+      });
+      expect(
+        db()
+          .query("SELECT project_id FROM source_windows WHERE session_id = ?")
+          .get(foreignId),
+      ).toEqual({ project_id: pidA });
+
+      const result = data.moveSessions([foreignId], pidA, PROJECT_B, {
+        includeChildren: false,
+      });
+      expect(result.movedSessionIds).toEqual([]);
+      expect(
+        db()
+          .query("SELECT project_path FROM session_state WHERE session_id = ?")
+          .get(foreignId),
+      ).toEqual({ project_path: path });
+    },
+  );
+
+  test("rebinds a confirmed source-only lease before any temporal row exists", () => {
+    const id = "owned-source-only";
+    saveSessionTracking(id, {
+      projectPath: PROJECT_A,
+      projectPathProvisional: false,
+    });
+    expect(
+      db()
+        .query(
+          "SELECT tenant_id FROM session_state_owners WHERE session_id = ?",
+        )
+        .get(id),
+    ).toEqual({ tenant_id: "" });
+    new SourceWindowStore({
+      projectPath: PROJECT_A,
+      sessionID: id,
+      noStore: false,
+    });
+    expect(countInProject("temporal_messages", pidA)).toBe(0);
+
+    const result = data.moveSessions([id], pidA, PROJECT_B, {
+      includeChildren: false,
+    });
+    expect(result.movedSessionIds).toEqual([id]);
+    expect(
+      db()
+        .query("SELECT project_path FROM session_state WHERE session_id = ?")
+        .get(id),
+    ).toEqual({ project_path: PROJECT_B });
+  });
+
+  test.each([false, true])(
+    "never rebinds a colliding provisional source state through a lease (temporal=%s)",
+    (temporal) => {
+      const id = `provisional-collision-${temporal}`;
+      // The state predates the separately sourced row or lease.
+      saveSessionTracking(id, {
+        projectPath: PROJECT_A,
+        projectPathProvisional: true,
+      });
+      if (temporal) insertMessage(pidA, id, `provisional-source-${id}`);
+      else
+        new SourceWindowStore({
+          projectPath: PROJECT_A,
+          sessionID: id,
+          noStore: false,
+        });
+
+      const result = data.moveSessions([id], pidA, PROJECT_B, {
+        includeChildren: false,
+      });
+      expect(result.movedSessionIds).toEqual([]);
+      expect(
+        db()
+          .query(
+            "SELECT project_path, project_path_provisional FROM session_state WHERE session_id = ?",
+          )
+          .get(id),
+      ).toEqual({ project_path: PROJECT_A, project_path_provisional: 1 });
+      if (temporal) expect(result.messages_moved).toBe(1);
+    },
+  );
+
   test("expands child sessions by default via parent_session_id", () => {
     insertMessage(pidA, SESSION_1, "msg-parent-1");
     insertMessage(pidA, CHILD_SESSION, "msg-child-1");
 
     // Set up parent-child relationship
-    saveSessionTracking(SESSION_1, { projectPath: PROJECT_A });
+    saveSessionTracking(SESSION_1, {
+      projectPath: PROJECT_A,
+      projectPathProvisional: false,
+    });
     saveSessionTracking(CHILD_SESSION, {
       projectPath: PROJECT_A,
+      projectPathProvisional: false,
       parentSessionId: SESSION_1,
     });
 
@@ -279,9 +651,13 @@ describe("moveSessions", () => {
     insertMessage(pidA, SESSION_1, "msg-noexp-1");
     insertMessage(pidA, CHILD_SESSION, "msg-noexp-child-1");
 
-    saveSessionTracking(SESSION_1, { projectPath: PROJECT_A });
+    saveSessionTracking(SESSION_1, {
+      projectPath: PROJECT_A,
+      projectPathProvisional: false,
+    });
     saveSessionTracking(CHILD_SESSION, {
       projectPath: PROJECT_A,
+      projectPathProvisional: false,
       parentSessionId: SESSION_1,
     });
 

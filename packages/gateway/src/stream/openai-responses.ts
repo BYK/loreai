@@ -50,8 +50,11 @@ import { appendCodexRateLimitEvent } from "../codex-rate-limits";
 export interface ResponsesAccState {
   id: string;
   model: string;
+  /** Immutable identity established by the validated response.created event. */
+  createdId?: string;
   stopReason: string;
   usage: GatewayUsage;
+  usageComplete: boolean;
   terminalEvent?:
     | "response.completed"
     | "response.incomplete"
@@ -598,6 +601,7 @@ export function makeResponsesAccState(): ResponsesAccState {
     model: "",
     stopReason: "end_turn",
     usage: { inputTokens: 0, outputTokens: 0 },
+    usageComplete: false,
     items: new Map(),
     rawItems: new Map(),
     itemIndexById: new Map(),
@@ -633,6 +637,9 @@ export function applyResponsesEvent(
       if (resp) {
         if (typeof resp.id === "string") state.id = resp.id;
         if (typeof resp.model === "string") state.model = resp.model;
+        if (event === "response.created") {
+          if (typeof resp.id === "string") state.createdId = resp.id;
+        }
       }
       break;
     }
@@ -790,6 +797,9 @@ export function applyResponsesEvent(
           "malformed Responses usage",
         );
         if (respUsage) {
+          state.usageComplete =
+            typeof respUsage.input_tokens === "number" &&
+            typeof respUsage.output_tokens === "number";
           if (typeof respUsage.output_tokens === "number") {
             state.usage.outputTokens = respUsage.output_tokens;
           }
@@ -919,6 +929,7 @@ export function finalizeResponsesAcc(
       .filter((item) => item.type !== "item_reference"),
     stopReason,
     usage: state.usage,
+    usageComplete: state.usageComplete,
     ...(state.codexRateLimits
       ? { codexRateLimits: state.codexRateLimits }
       : {}),
@@ -928,6 +939,19 @@ export function finalizeResponsesAcc(
 // ---------------------------------------------------------------------------
 // Stream accumulator (buffered)
 // ---------------------------------------------------------------------------
+
+function validateResponsesCreatedAnchor(
+  state: ResponsesAccState,
+  event: string,
+  required = true,
+): void {
+  if (!required) return;
+  if (event === "response.created") {
+    if (state.createdId) throw new Error("malformed Responses stream event");
+  } else if (event.startsWith("response.") && !state.createdId) {
+    throw new Error("malformed Responses stream event");
+  }
+}
 
 function validatePublicResponsesEvent(
   state: ResponsesAccState,
@@ -948,6 +972,7 @@ function validatePublicResponsesEvent(
   };
 
   if (parsed.type !== undefined && parsed.type !== event) malformed();
+  validateResponsesCreatedAnchor(state, event);
   if (
     parsed.sequence_number !== undefined &&
     (!Number.isSafeInteger(parsed.sequence_number) ||
@@ -965,6 +990,21 @@ function validatePublicResponsesEvent(
   ) {
     const response = parsed.response as Record<string, unknown> | undefined;
     if (!response || typeof response !== "object" || Array.isArray(response)) {
+      throw new Error("malformed Responses terminal event");
+    }
+    if (
+      typeof response.id !== "string" ||
+      response.id.length === 0 ||
+      typeof response.model !== "string" ||
+      response.model.length === 0
+    ) {
+      throw new Error("malformed Responses terminal event");
+    }
+    if (
+      (event === "response.created" || event === "response.in_progress") &&
+      response.output !== undefined &&
+      (!Array.isArray(response.output) || response.output.length !== 0)
+    ) {
       throw new Error("malformed Responses terminal event");
     }
     if (state.id && response.id !== undefined && response.id !== state.id) {
@@ -1164,6 +1204,31 @@ export type ResponsesValidationMode = "public" | "codex";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Pin provider-rotated lifecycle IDs to the identity established by created. */
+export function pinResponsesLifecycleIdentity(
+  state: ResponsesAccState,
+  event: string,
+  parsed: Record<string, unknown>,
+): boolean {
+  if (
+    !state.createdId ||
+    (event !== "response.in_progress" && event !== "response.completed")
+  ) {
+    return false;
+  }
+  const response = parsed.response;
+  if (
+    !isRecord(response) ||
+    typeof response.id !== "string" ||
+    response.id.length === 0 ||
+    response.id === state.createdId
+  ) {
+    return false;
+  }
+  parsed.response = { ...response, id: state.createdId };
+  return true;
 }
 
 function malformedResponsesEvent(): never {
@@ -1657,10 +1722,12 @@ function validateCodexResponsesEvent(
   event: string,
   parsed: Record<string, unknown>,
   maxSparseIndex: number,
+  requireCompleteLifecycle = false,
 ): void {
   if (parsed.type !== undefined && parsed.type !== event) {
     malformedResponsesEvent();
   }
+  validateResponsesCreatedAnchor(state, event, requireCompleteLifecycle);
   if (
     parsed.output_index !== undefined &&
     (!Number.isSafeInteger(parsed.output_index) ||
@@ -1700,6 +1767,22 @@ function validateCodexResponsesEvent(
       throw new Error("malformed Responses terminal event");
     }
     const response = parsed.response;
+    if (
+      (event === "response.created" || requireCompleteLifecycle) &&
+      (typeof response.id !== "string" ||
+        response.id.length === 0 ||
+        typeof response.model !== "string" ||
+        response.model.length === 0)
+    ) {
+      throw new Error("malformed Responses terminal event");
+    }
+    if (
+      (event === "response.created" || event === "response.in_progress") &&
+      response.output !== undefined &&
+      (!Array.isArray(response.output) || response.output.length !== 0)
+    ) {
+      throw new Error("malformed Responses terminal event");
+    }
     for (const field of ["id", "model", "status"] as const) {
       if (
         response[field] !== undefined &&
@@ -1782,8 +1865,15 @@ export function normalizeCodexResponsesEvent(
   event: string,
   parsed: Record<string, unknown>,
   maxSparseIndex = DEFAULT_MAX_SSE_FRAMES,
+  requireCompleteLifecycle = false,
 ): void {
-  validateCodexResponsesEvent(state, event, parsed, maxSparseIndex);
+  validateCodexResponsesEvent(
+    state,
+    event,
+    parsed,
+    maxSparseIndex,
+    requireCompleteLifecycle,
+  );
   if (
     (event === "response.function_call_arguments.delta" ||
       event === "response.function_call_arguments.done") &&
@@ -1910,6 +2000,8 @@ export async function accumulateResponsesSSEStream(
     onSemanticContent?: () => void;
     /** Called only after the event has passed strict validation and mutation. */
     onValidatedEvent?: (event: string, data: string) => void | Promise<void>;
+    /** Canonicalize a provider that rotates response.id across lifecycle events. */
+    pinResponseId?: boolean;
     /** Passthrough clients must receive a provider's valid failure terminal. */
     allowFailureTerminal?: boolean;
     /** Buffered callers that run successful-turn side effects must reject
@@ -1922,6 +2014,9 @@ export async function accumulateResponsesSSEStream(
     onReader?: (reader: ReadableStreamDefaultReader<Uint8Array>) => void;
   } = {},
 ): Promise<GatewayResponse> {
+  if (opts.pinResponseId && !opts.validation) {
+    throw new Error("Responses identity pinning requires validation");
+  }
   const state = opts.state ?? makeResponsesAccState();
   let terminalStatus: string | null = null;
   const doneItems = new Set<number>();
@@ -1978,6 +2073,11 @@ export async function accumulateResponsesSSEStream(
       if (opts.validation && !isRecord(parsed)) {
         throw new Error("malformed Responses stream event");
       }
+      const identityPinned =
+        opts.pinResponseId &&
+        pinResponsesLifecycleIdentity(state, event, parsed);
+      const publicData =
+        identityPinned && opts.onValidatedEvent ? JSON.stringify(parsed) : data;
       if (
         opts.onSemanticContent &&
         responsesEventHasSemanticContent(event, parsed)
@@ -1995,7 +2095,13 @@ export async function accumulateResponsesSSEStream(
       if (opts.validation === "public") {
         validatePublicResponsesEvent(state, event, parsed, maxSparseIndex);
       } else if (opts.validation === "codex") {
-        validateCodexResponsesEvent(state, event, parsed, maxSparseIndex);
+        validateCodexResponsesEvent(
+          state,
+          event,
+          parsed,
+          maxSparseIndex,
+          opts.pinResponseId,
+        );
       }
       if (opts.validation && event === "response.failed") {
         validateFailureTerminal(parsed);
@@ -2031,16 +2137,6 @@ export async function accumulateResponsesSSEStream(
         doneItems.has(parsed.output_index as number)
       ) {
         throw new Error("malformed Responses stream event");
-      }
-      if (
-        opts.requireSuccessfulCompletion &&
-        (event === "response.completed" || event === "response.done")
-      ) {
-        const terminal = parsed.response;
-        if (!isRecord(terminal)) {
-          throw new Error("upstream Responses request did not complete");
-        }
-        assertSuccessfulResponsesCompletion(terminal);
       }
       if (
         opts.validation &&
@@ -2196,6 +2292,24 @@ export async function accumulateResponsesSSEStream(
         throw new Error("malformed Responses stream event");
       }
       const acceptedCodexRateLimit = applyResponsesEvent(state, event, parsed);
+      if (
+        opts.requireSuccessfulCompletion &&
+        (event === "response.completed" || event === "response.done")
+      ) {
+        try {
+          if (!isRecord(parsed.response)) {
+            throw new Error("upstream Responses request did not complete");
+          }
+          assertSuccessfulResponsesCompletion(parsed.response);
+        } catch {
+          // The terminal's validated usage remains authoritative even when
+          // its content or usage completeness prevents recovery delivery.
+          throw new ResponsesTerminalError(
+            finalizeResponsesAcc(state),
+            state.terminalEvent ?? "unknown",
+          );
+        }
+      }
       if (event === "response.output_text.done") {
         state.textDoneItems.add(parsed.output_index as number);
       } else if (event === "response.refusal.done") {
@@ -2383,7 +2497,7 @@ export async function accumulateResponsesSSEStream(
         }
         // The first semantic terminal is authoritative. Any bytes already
         // delivered after it are transport tail and are discarded on cancel.
-        await opts.onValidatedEvent?.(event, data);
+        await opts.onValidatedEvent?.(event, publicData);
         if (opts.stopAtTerminal) break;
         continue;
       }
@@ -2393,11 +2507,47 @@ export async function accumulateResponsesSSEStream(
             event,
             acceptedCodexRateLimit
               ? JSON.stringify(acceptedCodexRateLimit)
-              : data,
+              : publicData,
           );
         }
       }
     }
+  } catch (error) {
+    // Terminal usage is authoritative even if a later output or lifecycle
+    // check rejects the response. Keep it available to the caller for billing
+    // and recovery admission, without accepting any of the terminal's output.
+    // An incomplete terminal must carry validated usage and a known reason;
+    // malformed provider-specific reasons retain their original parser error.
+    const terminalEvent = state.terminalEvent;
+    const validation = opts.validation;
+    const incompleteWithUsage =
+      terminalEvent === "response.incomplete" &&
+      state.terminalResponse?.usage !== undefined &&
+      state.terminalResponse.usage !== null &&
+      validation !== undefined;
+    if (incompleteWithUsage && validation !== undefined) {
+      try {
+        validatedTerminalStatus(
+          "response.incomplete",
+          { response: state.terminalResponse },
+          validation,
+          opts.requireCompletedTerminal,
+        );
+      } catch {
+        throw error;
+      }
+    }
+    if (
+      opts.requireCompletedTerminal &&
+      (terminalEvent === "response.completed" || incompleteWithUsage) &&
+      !(error instanceof ResponsesTerminalError)
+    ) {
+      throw new ResponsesTerminalError(
+        finalizeResponsesAcc(state),
+        terminalEvent ?? "unknown",
+      );
+    }
+    throw error;
   } finally {
     cancelAndReleaseReader(reader);
   }
@@ -2461,9 +2611,9 @@ export function streamResponsesPassthrough(
   onComplete: (response: GatewayResponse, successful: boolean) => void,
   sessionID?: string,
   validation: ResponsesValidationMode = "public",
-  streamOptions: SSEStreamOptions = {},
+  streamOptions: SSEStreamOptions & { pinResponseId?: boolean } = {},
 ): Response {
-  const { signal, inactivityMs } = streamOptions;
+  const { signal, inactivityMs, pinResponseId } = streamOptions;
   const state = makeResponsesAccState();
   const encoder = new TextEncoder();
 
@@ -2484,8 +2634,38 @@ export function streamResponsesPassthrough(
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
-  const MAX_PASSTHROUGH_RETAINED_BYTES = 4 * 1024 * 1024;
-  let retainedBytes = 0;
+  const MAX_PASSTHROUGH_OUTPUT_BYTES = 4 * 1024 * 1024;
+  let emittedBytes = 0;
+  let createdForwarded = false;
+  const buildFailureChunk = (id: string, model: string): Uint8Array =>
+    encoder.encode(
+      formatResponsesEvent(
+        "response.failed",
+        JSON.stringify({
+          type: "response.failed",
+          response: {
+            id,
+            object: "response",
+            created_at: Math.floor(Date.now() / 1000),
+            model,
+            status: "failed",
+            output: [],
+            usage: null,
+            error: {
+              type: "server_error",
+              message: "Upstream response stream failed",
+            },
+          },
+        }),
+      ),
+    );
+  const fallbackFailureChunk = buildFailureChunk("resp_error", "unknown");
+  let anchoredFailureChunk: Uint8Array | undefined;
+  const failureChunkForState = (): Uint8Array => {
+    if (!state.createdId) return fallbackFailureChunk;
+    anchoredFailureChunk ??= buildFailureChunk(state.createdId, state.model);
+    return anchoredFailureChunk;
+  };
 
   // --- Keepalive ---
   // The Responses API has no first-class `ping` event (unlike Anthropic), so we
@@ -2518,6 +2698,17 @@ export function streamResponsesPassthrough(
           downstreamCancelled = true;
           return false;
         }
+      };
+      const enqueueOutput = (chunk: Uint8Array): boolean => {
+        if (
+          emittedBytes + chunk.byteLength + failureChunkForState().byteLength >
+          MAX_PASSTHROUGH_OUTPUT_BYTES
+        ) {
+          throw new Error("Responses passthrough exceeded output byte limit");
+        }
+        if (!safeEnqueue(chunk)) return false;
+        emittedBytes += chunk.byteLength;
+        return true;
       };
       const waitForDemand = async (): Promise<void> => {
         while (
@@ -2558,7 +2749,16 @@ export function streamResponsesPassthrough(
           if (downstreamCancelled || externalAborted || settled) return;
           if ((controller.desiredSize ?? 1) > 0) {
             try {
-              safeEnqueue(keepaliveComment);
+              if (
+                emittedBytes +
+                  keepaliveComment.byteLength +
+                  failureChunkForState().byteLength <=
+                MAX_PASSTHROUGH_OUTPUT_BYTES
+              ) {
+                if (safeEnqueue(keepaliveComment)) {
+                  emittedBytes += keepaliveComment.byteLength;
+                }
+              }
             } catch (error) {
               safeError(error);
               return;
@@ -2591,6 +2791,7 @@ export function streamResponsesPassthrough(
             upstreamResponse,
             {
               validation,
+              pinResponseId,
               stopAtTerminal: true,
               signal: cancelController.signal,
               inactivityMs,
@@ -2601,21 +2802,12 @@ export function streamResponsesPassthrough(
               },
               onValidatedEvent: async (event, data) => {
                 resetKeepalive();
-                retainedBytes += Buffer.byteLength(data);
-                if (retainedBytes > MAX_PASSTHROUGH_RETAINED_BYTES) {
-                  throw new Error(
-                    "Responses passthrough exceeded retained byte limit",
-                  );
-                }
                 await waitForDemand();
-                if (
-                  downstreamCancelled ||
-                  !safeEnqueue(
-                    encoder.encode(formatResponsesEvent(event, data)),
-                  )
-                ) {
+                const chunk = encoder.encode(formatResponsesEvent(event, data));
+                if (downstreamCancelled || !enqueueOutput(chunk)) {
                   throw new DOMException("client disconnected", "AbortError");
                 }
+                if (event === "response.created") createdForwarded = true;
                 if (
                   event === "response.completed" ||
                   event === "response.done" ||
@@ -2667,29 +2859,16 @@ export function streamResponsesPassthrough(
             cleanup();
             return;
           }
-          safeEnqueue(
-            encoder.encode(
-              formatResponsesEvent(
-                "response.failed",
-                JSON.stringify({
-                  type: "response.failed",
-                  response: {
-                    id: state.id || "resp_error",
-                    object: "response",
-                    created_at: Math.floor(Date.now() / 1000),
-                    model: state.model,
-                    status: "failed",
-                    output: [],
-                    usage: null,
-                    error: {
-                      type: "server_error",
-                      message: "Upstream response stream failed",
-                    },
-                  },
-                }),
-              ),
-            ),
-          );
+          const failureChunk = createdForwarded
+            ? failureChunkForState()
+            : fallbackFailureChunk;
+          if (
+            emittedBytes + failureChunk.byteLength <=
+              MAX_PASSTHROUGH_OUTPUT_BYTES &&
+            safeEnqueue(failureChunk)
+          ) {
+            emittedBytes += failureChunk.byteLength;
+          }
           finish(false);
           safeClose();
         }

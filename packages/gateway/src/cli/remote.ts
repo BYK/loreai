@@ -27,12 +27,27 @@ export function getRemoteUrl(): string | undefined {
  * @returns Query string fragment like `git_remote=...` or `path=...`
  */
 export function projectQueryParams(projectPath: string): string {
+  const identity = projectIdentity(projectPath);
+  if (identity.git_remote) {
+    return `git_remote=${encodeURIComponent(identity.git_remote)}`;
+  }
+  return `path=${encodeURIComponent(identity.path ?? projectPath)}`;
+}
+
+/**
+ * The identity a local project presents to a remote gateway: the normalized
+ * `git_remote` when the path is a repo (preferred — survives path differences
+ * between the two machines), else the raw `path`.
+ */
+export function projectIdentity(projectPath: string): {
+  git_remote?: string;
+  path?: string;
+} {
   const remote = getGitRemote(projectPath);
   if (remote) {
-    const normalized = normalizeRemoteUrl(remote);
-    return `git_remote=${encodeURIComponent(normalized ?? remote)}`;
+    return { git_remote: normalizeRemoteUrl(remote) ?? remote };
   }
-  return `path=${encodeURIComponent(projectPath)}`;
+  return { path: projectPath };
 }
 
 // ---------------------------------------------------------------------------

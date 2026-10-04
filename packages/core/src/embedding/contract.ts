@@ -18,7 +18,9 @@ export type EmbeddingAbortPhase =
   | "provider-readiness"
   | "ltm-query"
   | "settle-document-embeds"
-  | "knowledge-backfill";
+  | "knowledge-backfill"
+  | "distillation-backfill"
+  | "entity-backfill";
 
 export type EmbeddingAbortCode = "aborted" | "deadline-exceeded";
 

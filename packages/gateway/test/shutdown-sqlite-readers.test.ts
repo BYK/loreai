@@ -115,7 +115,9 @@ describe("startGateway shutdown — strict order (#1599)", () => {
       "settleTemporalEmbeddingScheduler",
     ).mockImplementation(async (deadlineMs?: number) => {
       order.push("scheduler-settle");
-      expect(deadlineMs).toBeGreaterThan(0);
+      // A busy event loop can exhaust the short cooperative drain milestone.
+      // Shutdown passes the remaining bounded time, including zero.
+      expect(deadlineMs).toBeGreaterThanOrEqual(0);
       expect(Number.isFinite(deadlineMs)).toBe(true);
       return true;
     });

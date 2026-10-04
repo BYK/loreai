@@ -27,8 +27,7 @@ import { validateResponsesUsage } from "../src/usage-validation";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Build a fake SSE Response from event/data pairs. */
-function buildSSEResponse(
+function buildRawSSEResponse(
   events: Array<{ event: string; data: Record<string, unknown> }>,
 ): Response {
   const chunks = events.map(
@@ -37,6 +36,62 @@ function buildSSEResponse(
   return new Response(chunks.join(""), {
     headers: { "content-type": "text/event-stream" },
   });
+}
+
+/** Build a protocol-complete fake SSE response around focused event fixtures. */
+function buildSSEResponse(
+  events: Array<{ event: string; data: Record<string, unknown> }>,
+): Response {
+  if (events.some(({ event }) => event === "response.created")) {
+    return buildRawSSEResponse(events);
+  }
+  const snapshot = events
+    .map(({ data }) => data.response)
+    .find(
+      (response): response is Record<string, unknown> =>
+        typeof response === "object" &&
+        response !== null &&
+        !Array.isArray(response),
+    );
+  const id =
+    typeof snapshot?.id === "string" && snapshot.id
+      ? snapshot.id
+      : "resp_test_anchor";
+  const model =
+    typeof snapshot?.model === "string" && snapshot.model
+      ? snapshot.model
+      : "gpt-test";
+  return buildRawSSEResponse([
+    {
+      event: "response.created",
+      data: {
+        type: "response.created",
+        response: { id, model, status: "in_progress", output: [] },
+      },
+    },
+    ...events.map((entry) => {
+      const response = entry.data.response;
+      if (
+        !entry.event.startsWith("response.") ||
+        typeof response !== "object" ||
+        response === null ||
+        Array.isArray(response)
+      ) {
+        return entry;
+      }
+      return {
+        ...entry,
+        data: {
+          ...entry.data,
+          response: {
+            id,
+            model,
+            ...response,
+          },
+        },
+      };
+    }),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +656,354 @@ describe("accumulateResponsesSSEStream", () => {
       expect(result.stopReason).toBe(stopReason);
     },
   );
+
+  test.each([
+    ["missing ID", { model: "gpt-5.6-sol" }],
+    ["empty ID", { id: "", model: "gpt-5.6-sol" }],
+    ["non-string ID", { id: 7, model: "gpt-5.6-sol" }],
+    ["missing model", { id: "resp_created" }],
+    ["empty model", { id: "resp_created", model: "" }],
+    ["non-string model", { id: "resp_created", model: 7 }],
+  ])(
+    "strict pinned streams reject a response.created with %s before accumulation or passthrough",
+    async (_case, response) => {
+      const events = [
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: {
+              ...response,
+              status: "in_progress",
+              output: [],
+            },
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: {
+              id: "resp_terminal",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          },
+        },
+      ];
+
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(events), {
+          validation: "public",
+          pinResponseId: true,
+          stopAtTerminal: true,
+        }),
+      ).rejects.toThrow("malformed Responses terminal event");
+
+      const onComplete = vi.fn();
+      const passthrough = streamResponsesPassthrough(
+        buildSSEResponse(events),
+        onComplete,
+        undefined,
+        "public",
+        { pinResponseId: true },
+      );
+      const body = await passthrough.text();
+      expect(body.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(body).not.toContain("resp_terminal");
+      expect(onComplete).toHaveBeenCalledOnce();
+      expect(onComplete.mock.calls[0][1]).toBe(false);
+    },
+  );
+
+  test.each([
+    [
+      "terminal-only stream",
+      [
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: {
+              id: "resp_terminal",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          },
+        },
+      ],
+    ],
+    [
+      "duplicate response.created stream",
+      [
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: {
+              id: "resp_created",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          },
+        },
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: {
+              id: "resp_created_again",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          },
+        },
+      ],
+    ],
+  ])(
+    "rejects response ID pinning without validation for a %s",
+    async (_case, events) => {
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(events), {
+          pinResponseId: true,
+        }),
+      ).rejects.toThrow("Responses identity pinning requires validation");
+    },
+  );
+
+  test.each([
+    ["public", "response.created"],
+    ["public", "response.in_progress"],
+    ["codex", "response.created"],
+    ["codex", "response.in_progress"],
+  ] as const)(
+    "%s rejects hidden output in a pinned %s snapshot",
+    async (validation, snapshotEvent) => {
+      const privateValue = `private_snapshot_${validation}`;
+      const hiddenOutput = [
+        {
+          type: "function_call",
+          id: "fc_private_snapshot",
+          call_id: "call_private_snapshot",
+          name: "recall",
+          arguments: JSON.stringify({ query: privateValue }),
+          status: "completed",
+        },
+      ];
+      const events = [
+        ...(snapshotEvent === "response.created"
+          ? []
+          : [
+              {
+                event: "response.created",
+                data: {
+                  type: "response.created",
+                  response: {
+                    id: "resp_created",
+                    model: "gpt-5.6-sol",
+                    status: "in_progress",
+                    output: [],
+                  },
+                },
+              },
+            ]),
+        {
+          event: snapshotEvent,
+          data: {
+            type: snapshotEvent,
+            response: {
+              id:
+                snapshotEvent === "response.created"
+                  ? "resp_created"
+                  : "resp_rotated",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: hiddenOutput,
+            },
+          },
+        },
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: {
+              id: "resp_completed",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          },
+        },
+      ];
+
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(events), {
+          validation,
+          pinResponseId: true,
+          stopAtTerminal: true,
+        }),
+      ).rejects.toThrow("malformed Responses terminal event");
+
+      const onComplete = vi.fn();
+      const body = await streamResponsesPassthrough(
+        buildSSEResponse(events),
+        onComplete,
+        undefined,
+        validation,
+        { pinResponseId: true },
+      ).text();
+      expect(body.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(body).not.toContain(privateValue);
+      expect(body).not.toContain("fc_private_snapshot");
+      expect(body).not.toContain("resp_rotated");
+      expect(onComplete).toHaveBeenCalledOnce();
+      expect(onComplete.mock.calls[0][1]).toBe(false);
+    },
+  );
+
+  const strictCreated = {
+    event: "response.created",
+    data: {
+      type: "response.created",
+      response: {
+        id: "resp_anchor",
+        model: "gpt-5.6-sol",
+        status: "in_progress",
+        output: [],
+      },
+    },
+  };
+  const strictCompleted = {
+    event: "response.completed",
+    data: {
+      type: "response.completed",
+      response: {
+        id: "resp_terminal",
+        model: "gpt-5.6-sol",
+        status: "completed",
+        output: [],
+      },
+    },
+  };
+  const strictAnchorCases = [
+    ["terminal without created", [strictCompleted]],
+    [
+      "output before created",
+      [
+        {
+          event: "response.output_item.added",
+          data: {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "message",
+              id: "private_pre_anchor_item",
+              role: "assistant",
+              status: "in_progress",
+              content: [],
+            },
+          },
+        },
+        strictCompleted,
+      ],
+    ],
+    ["duplicate created", [strictCreated, strictCreated, strictCompleted]],
+    [
+      "in-progress without ID",
+      [
+        strictCreated,
+        {
+          event: "response.in_progress",
+          data: {
+            type: "response.in_progress",
+            response: {
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          },
+        },
+        strictCompleted,
+      ],
+    ],
+    [
+      "in-progress without model",
+      [
+        strictCreated,
+        {
+          event: "response.in_progress",
+          data: {
+            type: "response.in_progress",
+            response: {
+              id: "resp_rotated",
+              status: "in_progress",
+              output: [],
+            },
+          },
+        },
+        strictCompleted,
+      ],
+    ],
+    [
+      "terminal without ID",
+      [
+        strictCreated,
+        {
+          ...strictCompleted,
+          data: {
+            ...strictCompleted.data,
+            response: { ...strictCompleted.data.response, id: undefined },
+          },
+        },
+      ],
+    ],
+    [
+      "terminal without model",
+      [
+        strictCreated,
+        {
+          ...strictCompleted,
+          data: {
+            ...strictCompleted.data,
+            response: { ...strictCompleted.data.response, model: undefined },
+          },
+        },
+      ],
+    ],
+  ] as const;
+
+  test.each(
+    (["public", "codex"] as const).flatMap((validation) =>
+      strictAnchorCases.map(
+        ([name, events]) => [validation, name, events] as const,
+      ),
+    ),
+  )("%s rejects %s", async (validation, _name, events) => {
+    await expect(
+      accumulateResponsesSSEStream(buildRawSSEResponse([...events]), {
+        validation,
+        pinResponseId: true,
+        stopAtTerminal: true,
+      }),
+    ).rejects.toThrow("malformed Responses");
+
+    const onComplete = vi.fn();
+    const body = await streamResponsesPassthrough(
+      buildRawSSEResponse([...events]),
+      onComplete,
+      undefined,
+      validation,
+      { pinResponseId: true },
+    ).text();
+    expect(body.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(body).not.toContain("private_pre_anchor_item");
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(onComplete.mock.calls[0][1]).toBe(false);
+  });
 
   test.each([
     ["negative tokens", { input_tokens: -1, output_tokens: 0 }],
@@ -2655,7 +3058,7 @@ describe("accumulateResponsesSSEStream", () => {
 
       const result = await accumulateResponsesSSEStream(
         buildSSEResponse(events),
-        { validation, stopAtTerminal: true, maxFrames: events.length },
+        { validation, stopAtTerminal: true, maxFrames: events.length + 1 },
       );
       expect(result.rawOutputItems).toHaveLength(count);
     },
@@ -2798,17 +3201,17 @@ describe("accumulateResponsesSSEStream", () => {
         },
       ];
       await expect(
-        accumulateResponsesSSEStream(buildSSEResponse(makeEvents(3)), {
-          validation,
-          stopAtTerminal: true,
-          maxFrames: 4,
-        }),
-      ).resolves.toBeDefined();
-      await expect(
         accumulateResponsesSSEStream(buildSSEResponse(makeEvents(4)), {
           validation,
           stopAtTerminal: true,
-          maxFrames: 4,
+          maxFrames: 5,
+        }),
+      ).resolves.toBeDefined();
+      await expect(
+        accumulateResponsesSSEStream(buildSSEResponse(makeEvents(5)), {
+          validation,
+          stopAtTerminal: true,
+          maxFrames: 5,
         }),
       ).rejects.toThrow("malformed Responses stream event");
     },
@@ -3955,14 +4358,23 @@ describe("streamResponsesPassthrough", () => {
           event: "response.created",
           data: {
             type: "response.created",
-            response: { id: "delayed", status: "in_progress" },
+            response: {
+              id: "delayed",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+            },
           },
         },
         {
           event: "response.completed",
           data: {
             type: "response.completed",
-            response: { id: "delayed", status: "completed", output: [] },
+            response: {
+              id: "delayed",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
           },
         },
       ]),
@@ -4019,10 +4431,12 @@ describe("streamResponsesPassthrough", () => {
             new TextEncoder().encode(
               event("response.created", {
                 id: "waiting",
+                model: "gpt-5.6-sol",
                 status: "in_progress",
               }) +
                 event("response.completed", {
                   id: "waiting",
+                  model: "gpt-5.6-sol",
                   status: "completed",
                   output: [],
                 }),
@@ -4234,7 +4648,11 @@ describe("streamResponsesPassthrough", () => {
           event: "response.created",
           data: {
             type: "response.created",
-            response: { id: "missing-terminal", status: "in_progress" },
+            response: {
+              id: "missing-terminal",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+            },
           },
         },
       ]),
@@ -4267,6 +4685,60 @@ describe("streamResponsesPassthrough", () => {
 
     expect(output).toContain("event: response.failed");
     expect(output).toContain("Upstream response stream failed");
+  });
+
+  test("bounds aggregate bytes after expanding pinned lifecycle IDs", async () => {
+    const createdId = `resp_${"x".repeat(16_384)}`;
+    const outcomes: boolean[] = [];
+    const output = await streamResponsesPassthrough(
+      buildSSEResponse([
+        {
+          event: "response.created",
+          data: {
+            type: "response.created",
+            response: {
+              id: createdId,
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          },
+        },
+        ...Array.from({ length: 257 }, () => ({
+          event: "response.in_progress",
+          data: {
+            type: "response.in_progress",
+            response: {
+              id: "r",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          },
+        })),
+        {
+          event: "response.completed",
+          data: {
+            type: "response.completed",
+            response: {
+              id: "t",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          },
+        },
+      ]),
+      (_response, successful) => outcomes.push(successful),
+      undefined,
+      "public",
+      { pinResponseId: true },
+    ).text();
+
+    expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(output).not.toContain("event: response.completed");
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(4 * 1024 * 1024);
+    expect(outcomes).toEqual([false]);
   });
 
   test("stops pulling upstream while a downstream consumer is not reading", async () => {
@@ -4418,6 +4890,16 @@ describe("streamResponsesPassthrough", () => {
   test("forwards every upstream event verbatim, preserving non-accumulated fields", async () => {
     const upstream = controllableSSE();
     const clientResp = streamResponsesPassthrough(upstream.response, () => {});
+
+    upstream.push("response.created", {
+      type: "response.created",
+      response: {
+        id: "resp_r",
+        model: "gpt-5.6-sol",
+        status: "in_progress",
+        output: [],
+      },
+    });
 
     // reasoning_summary events are not accumulated into GatewayResponse, but
     // MUST still reach the client byte-for-byte (a re-serialize from the

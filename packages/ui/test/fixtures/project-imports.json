@@ -1,0 +1,26 @@
+{
+  "imports": [
+    {
+      "id": "imp-ui-contracts-2",
+      "project_id": "<uuid-0>",
+      "agent_name": "codex",
+      "source_id": "codex-thread-77",
+      "source_hash": "hash-2",
+      "entries_created": 4,
+      "entries_updated": 0,
+      "imported_at": 1700000000000
+    },
+    {
+      "id": "imp-ui-contracts-1",
+      "project_id": "<uuid-0>",
+      "agent_name": "claude",
+      "source_id": "claude-session-2026-04",
+      "source_hash": "hash-1",
+      "entries_created": 12,
+      "entries_updated": 3,
+      "imported_at": 1700000001000
+    }
+  ],
+  "next_cursor": null,
+  "total": 2
+}

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -14,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { installStandalone } from "../src/cli/install";
 import { commandUpgrade, standaloneUpgradeTargetDir } from "../src/cli/upgrade";
 import {
   persistStandaloneUpgradeRecoveryJournal,
@@ -162,14 +164,102 @@ describe("upgrade lifecycle lock", () => {
   test("package-managed upgrade cannot create an unmanaged standalone binary", () => {
     expect(() =>
       standaloneUpgradeTargetDir("/usr/bin/node", { hostedInstall: false }),
-    ).toThrow(/package manager.*no standalone binary/i);
+    ).toThrow(/npm install -g @loreai\/gateway@latest.*no standalone binary/i);
+    expect(() =>
+      standaloneUpgradeTargetDir("/usr/bin/node", { hostedInstall: false }),
+    ).toThrow("curl -fsSL https://withlore.ai/install | bash`");
+  });
+
+  test("explains how to repair the receipt left behind by a 0.40.0 reinstall and upgrade", async () => {
+    const fixture = upgradeFixture();
+    // The 0.40.0 curl installer and upgrade both replaced the executable but
+    // did not refresh an existing receipt from a previous nightly install.
+    const oldInstallerBinary = join(fixture.installDir, "old-installer-binary");
+    writeFileSync(oldInstallerBinary, "0.40.0 binary", { mode: 0o700 });
+    renameSync(oldInstallerBinary, fixture.executable);
+    const oldUpgradeBinary = join(fixture.installDir, "old-upgrade-binary");
+    writeFileSync(oldUpgradeBinary, "nightly binary", { mode: 0o700 });
+    renameSync(oldUpgradeBinary, fixture.executable);
+    const originalReceipt = readFileSync(fixture.receipt);
+    const provenance = standaloneInstallProvenance(fixture.executable, {
+      seaBinary: true,
+      home: fixture.home,
+    });
+    expect(provenance).toEqual({ hostedInstall: false });
+    expect(() =>
+      standaloneUpgradeTargetDir(
+        fixture.executable,
+        provenance,
+        fixture.home,
+        "nightly",
+      ),
+    ).toThrow(
+      /curl -fsSL https:\/\/withlore\.ai\/install \| bash -s -- --version nightly/,
+    );
+    expect(readFileSync(fixture.receipt)).toEqual(originalReceipt);
+    expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
+
+    const verifiedDownload = join(fixture.home, "verified-download");
+    writeFileSync(verifiedDownload, "verified nightly binary", { mode: 0o700 });
+    await installStandalone({
+      source: verifiedDownload,
+      expectedSha256: fileIdentity(verifiedDownload).sha256,
+      channel: "nightly",
+      home: fixture.home,
+      installDir: fixture.installDir,
+      env: {},
+      noModifyPath: true,
+    });
+    expect(
+      standaloneInstallProvenance(fixture.executable, {
+        seaBinary: true,
+        home: fixture.home,
+      }),
+    ).toMatchObject({ hostedInstall: true });
   });
 
   test("verified hosted custom paths remain the upgrade target", () => {
+    const fixture = upgradeFixture();
     expect(
-      standaloneUpgradeTargetDir("/opt/custom/lore", { hostedInstall: true }),
-    ).toBe("/opt/custom");
+      standaloneUpgradeTargetDir(
+        fixture.executable,
+        {
+          hostedInstall: true,
+          receiptPath: fixture.receipt,
+          pathInstallDir: fixture.installDir,
+          executableIdentity: fixture.oldExecutable,
+          receiptIdentity: fixture.oldReceipt,
+        },
+        fixture.home,
+      ),
+    ).toBe(fixture.installDir);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects an unsafe install directory before staging upgrade backups",
+    () => {
+      const fixture = upgradeFixture();
+      chmodSync(fixture.installDir, 0o775);
+      expect(() =>
+        standaloneUpgradeTargetDir(
+          fixture.executable,
+          {
+            hostedInstall: true,
+            receiptPath: fixture.receipt,
+            pathInstallDir: fixture.installDir,
+            executableIdentity: fixture.oldExecutable,
+            receiptIdentity: fixture.oldReceipt,
+          },
+          fixture.home,
+        ),
+      ).toThrow(
+        /unsafe standalone upgrade recovery directory.*group\/world-writable/,
+      );
+      expect(readdirSync(fixture.installDir)).toEqual(["lore"]);
+      expect(readFileSync(fixture.executable, "utf8")).toBe("old binary");
+      expect(standaloneUpgradeBackupTokens(fixture.executable).size).toBe(0);
+    },
+  );
 
   test("help does not acquire the lifecycle lock", async () => {
     const path = lifecycleLockPath();

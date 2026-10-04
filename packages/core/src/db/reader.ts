@@ -25,6 +25,28 @@ export interface ReaderConnection {
   db: Database;
   /** Whether sqlite-vec loaded on THIS connection (native fast path usable). */
   vecAvailable: boolean;
+  /** False until a lost model fingerprint has invalidated its old vectors. */
+  embeddingGenerationReady: boolean;
+}
+
+/** Check each search: another connection can lose or restore metadata at runtime. */
+export function isEmbeddingGenerationReady(database: Database): boolean {
+  try {
+    const rows = database
+      .query(
+        "SELECT key, value FROM kv_meta WHERE key IN ('lore:embedding_generation_unknown', 'lore:embedding_config', 'vec.storage_mode', 'vec.dimension')",
+      )
+      .all() as Array<{ key: string; value: string }>;
+    const metadata = new Map(rows.map(({ key, value }) => [key, value]));
+    return (
+      !metadata.has("lore:embedding_generation_unknown") &&
+      metadata.has("lore:embedding_config") &&
+      (metadata.get("vec.storage_mode") !== "vec0" ||
+        metadata.has("vec.dimension"))
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -41,5 +63,6 @@ export function openReaderConnection(path: string): ReaderConnection {
   // open WAL/-shm quirk (see file header).
   database.exec("PRAGMA query_only = TRUE");
   const vecAvailable = loadVecForConnection(database);
-  return { db: database, vecAvailable };
+  const embeddingGenerationReady = isEmbeddingGenerationReady(database);
+  return { db: database, vecAvailable, embeddingGenerationReady };
 }

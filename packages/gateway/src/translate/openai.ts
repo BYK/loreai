@@ -765,27 +765,51 @@ export function buildOpenAIChatCompletionsUrl(base: string): string {
  *     would duplicate the version.
  *  4. Falls back to `${base}${DEFAULT_OPENAI_RESPONSES_PATH}` (`/v1/responses`).
  */
+function appendOpenAIEndpoint(base: string, endpoint: string): string {
+  try {
+    const url = new URL(base);
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.hostname === "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.hash !== ""
+    ) {
+      throw new Error("Invalid upstream base URL");
+    }
+    url.pathname = `${url.pathname.replace(/\/$/, "")}${endpoint}`;
+    return url.href;
+  } catch {
+    throw new Error("Invalid upstream base URL");
+  }
+}
+
 export function buildOpenAIResponsesUrl(base: string): string {
   try {
-    const { hostname, pathname } = new URL(base);
+    const url = new URL(base);
+    const { hostname, pathname } = url;
     // GitHub Copilot (all hosts, incl. api.individual/business/enterprise.*)
     // serves /responses with no /v1 prefix — issue #1052.
     if (isGitHubCopilotHost(hostname)) {
-      return `${base}/responses`;
+      return appendOpenAIEndpoint(base, "/responses");
     }
     const hostPath = OPENAI_HOST_RESPONSES_PATHS.get(hostname);
     if (hostPath !== undefined) {
-      return `${base}${hostPath}`;
+      return appendOpenAIEndpoint(base, hostPath);
     }
     // Base already ends in a version segment (`/v4`, `/v1`, …) → the API path
     // is just `/responses`; a `/v1` prefix would double the version.
     if (/\/v\d+$/.test(pathname)) {
-      return `${base}/responses`;
+      return appendOpenAIEndpoint(base, "/responses");
     }
+    return appendOpenAIEndpoint(base, DEFAULT_OPENAI_RESPONSES_PATH);
   } catch {
-    // Unparseable base — keep the default `/v1/responses` path.
+    throw new Error("Invalid upstream base URL");
   }
-  return `${base}${DEFAULT_OPENAI_RESPONSES_PATH}`;
+}
+
+export function buildOpenAICodexResponsesUrl(base: string): string {
+  return appendOpenAIEndpoint(base, "/codex/responses");
 }
 
 export function buildOpenAIUpstreamRequest(

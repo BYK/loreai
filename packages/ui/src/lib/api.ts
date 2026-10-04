@@ -36,6 +36,7 @@ import {
   entityRebuildCancelResult,
   entityRebuildResult,
   entityRebuildStatus,
+  importListPage,
   knowledgeEntry,
   knowledgeList,
   knowledgeVersionHistory,
@@ -73,6 +74,7 @@ import {
   type EntityListPage,
   type EntityRebuildResult,
   type EntityRebuildStatus,
+  type ImportListPage,
   type KnowledgeEntry,
   type KnowledgeVersionHistory,
   type ProjectClearResult,
@@ -546,6 +548,25 @@ export function createApiClient(options: ApiClientOptions = {}) {
           limit: opts.limit,
         })}`,
         entityListPage,
+        signal,
+      );
+    },
+    /**
+     * Keyset-paged conversation-import history for one project
+     * (`GET /api/v1/projects/:id/imports`). `page` is the previous
+     * response's `next_cursor` token.
+     */
+    listProjectImports(
+      projectId: string,
+      opts: { page?: string | null; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<ImportListPage> {
+      return getJson(
+        `${apiPath(["projects", projectId, "imports"])}${query({
+          page: opts.page,
+          limit: opts.limit,
+        })}`,
+        importListPage,
         signal,
       );
     },

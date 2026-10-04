@@ -216,6 +216,7 @@ jobs:
       - name: Test (shard ${{ matrix.shard }}/4)
         run: >-
           xargs -a .shard-files pnpm exec vitest run
+          --maxWorkers=2
           --reporter=blob --outputFile.blob=.vitest-reports/blob-${{ matrix.shard }}-4.json
           --reporter=json --outputFile.json=.vitest-durations/shard-${{ matrix.shard }}.json
           --reporter=default

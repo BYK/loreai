@@ -597,14 +597,19 @@ export function setStorageMode(
  * or backfill — see the cutover in embedding.ts. Re-runnable: a crash between
  * the DROP and the CREATE just re-runs both next time (`IF (NOT) EXISTS`).
  */
-export function ensureVec0Store(conn: EmbeddingWriteConn, dim: number): void {
+export function ensureVec0Store(
+  conn: EmbeddingWriteConn,
+  dim: number,
+  options: { forceRecreate?: boolean } = {},
+): void {
   const storedDim = readVecDimension(conn);
   const temporalExisted = Boolean(
     conn
       .query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
       .get(VEC_TABLE.temporal),
   );
-  const recreating = storedDim !== null && storedDim !== dim;
+  const recreating =
+    options.forceRecreate === true || (storedDim !== null && storedDim !== dim);
   if (recreating) {
     for (const vt of VEC_TABLES) conn.query(`DROP TABLE IF EXISTS ${vt}`).run();
   }

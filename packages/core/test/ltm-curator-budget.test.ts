@@ -308,4 +308,23 @@ describe("ltm.forCurator", () => {
     // ...but the smaller, lower-confidence entries are still visible.
     expect(small.every((id) => out.some((e) => e.id === id))).toBe(true);
   });
+
+  test("a long global entry cannot bypass the curator budget", () => {
+    const huge = ltm.create({
+      category: "architecture",
+      title: "Large global entry",
+      content: "critical detail ".repeat(3_000),
+      scope: "global",
+    });
+    const small = ltm.create({
+      category: "preference",
+      title: "Small global entry",
+      content: "Use concise entries.",
+      scope: "global",
+    });
+
+    const out = ltm.forCurator(PROJECT, 400);
+    expect(out.map((entry) => entry.id)).not.toContain(huge);
+    expect(out.map((entry) => entry.id)).toContain(small);
+  });
 });

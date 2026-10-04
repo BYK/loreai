@@ -8,6 +8,7 @@ vi.mock("../src/recall", async (importOriginal) => {
 import { loadConfig } from "../src/config";
 import {
   buildStreamingResponse,
+  setRecallPersistenceCommitObserverForTest,
   setUpstreamInterceptor,
 } from "../src/pipeline";
 import { executeRecall, MAX_RECALL_DEPTH } from "../src/recall";
@@ -24,6 +25,7 @@ function installProductiveRecallMock(): void {
     return {
       result: "recall results",
       input: { query: "architecture" },
+      valid: true,
       coverage: [
         {
           identity: `t:source-${calls}`,
@@ -49,7 +51,7 @@ function event(type: string, data: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
 }
 
-function recallOnlyResponse(): Response {
+function recallOnlyResponse(inputTokens = 1): Response {
   return new Response(
     event("message_start", {
       message: {
@@ -60,7 +62,7 @@ function recallOnlyResponse(): Response {
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 0 },
+        usage: { input_tokens: inputTokens, output_tokens: 0 },
       },
     }) +
       event("content_block_start", {
@@ -186,6 +188,7 @@ function hostileContinuation(keepAlive = false): {
 
 afterEach(() => {
   vi.useRealTimers();
+  setRecallPersistenceCommitObserverForTest(undefined);
   setUpstreamInterceptor(undefined);
   mockedRecall.mockReset();
 });
@@ -244,6 +247,218 @@ describe("Anthropic recall continuation abort", () => {
     },
   );
 });
+
+test("an expanded Anthropic recall never forwards a switched model's text", async () => {
+  installProductiveRecallMock();
+  const untrusted = "untrusted continuation text";
+  const completed = vi.fn();
+  const failed = vi.fn();
+  const calls = { count: 0 };
+  setUpstreamInterceptor(async () => {
+    calls.count++;
+    return new Response(
+      event("message_start", {
+        message: {
+          id: "msg_wrong_model",
+          type: "message",
+          role: "assistant",
+          model: "claude-small",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 240_000, output_tokens: 0 },
+        },
+      }) +
+        event("content_block_start", {
+          index: 0,
+          content_block: { type: "text", text: "" },
+        }) +
+        event("content_block_delta", {
+          index: 0,
+          delta: { type: "text_delta", text: untrusted },
+        }) +
+        event("content_block_stop", { index: 0 }) +
+        event("message_delta", {
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 1 },
+        }) +
+        event("message_stop", {}),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  });
+  const req = request();
+  const state = sessionState();
+  const downstream = buildStreamingResponse(
+    recallOnlyResponse(240_000),
+    completed,
+    {
+      clientMessages: req.messages,
+      modifiedReq: req,
+      config: loadLocalConfig(),
+      sessionState: state,
+      cacheOptions: { cacheConversation: false },
+      clientSpeaksAnthropic: true,
+      noStore: true,
+      onFailure: failed,
+      modelContextTokens: 1_000_000,
+      allowExpandedContext: true,
+      expectedPrincipalModel: "claude-test",
+    },
+  );
+  const reader = downstream.body!.getReader();
+  const received: string[] = [];
+  await expect(async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received.push(new TextDecoder().decode(value));
+    }
+  }).rejects.toThrow();
+  expect(received.join("")).not.toContain(untrusted);
+  expect(completed).not.toHaveBeenCalled();
+  expect(failed).toHaveBeenCalledTimes(1);
+  expect(calls.count).toBe(1);
+});
+
+test.each(["fetch", "http"] as const)(
+  "an expanded Anthropic recall fails closed when its unmetered follow-up has a %s failure",
+  async (mode) => {
+    installProductiveRecallMock();
+    const completed = vi.fn();
+    const failed = vi.fn();
+    const committed = vi.fn();
+    const calls = { count: 0 };
+    setRecallPersistenceCommitObserverForTest(committed);
+    setUpstreamInterceptor(async () => {
+      calls.count++;
+      if (mode === "fetch") throw new Error("upstream unavailable");
+      return new Response("unavailable", { status: 503 });
+    });
+    const req = request();
+    const state = sessionState();
+    const downstream = buildStreamingResponse(
+      recallOnlyResponse(240_000),
+      completed,
+      {
+        clientMessages: req.messages,
+        modifiedReq: req,
+        config: loadLocalConfig(),
+        sessionState: state,
+        cacheOptions: { cacheConversation: false },
+        clientSpeaksAnthropic: true,
+        onFailure: failed,
+        modelContextTokens: 1_000_000,
+        allowExpandedContext: true,
+        expectedPrincipalModel: "claude-test",
+      },
+    );
+    const reader = downstream.body!.getReader();
+    const received: string[] = [];
+    await expect(async () => {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received.push(new TextDecoder().decode(value));
+      }
+    }).rejects.toThrow();
+    // The marker envelope was already sent before the follow-up failed; a
+    // failed turn must never produce a third, successful answer envelope.
+    expect(received.join("").match(/^event: message_start$/gm)).toHaveLength(2);
+    expect(calls.count).toBe(1);
+    expect(completed).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(failed.mock.calls[0]?.[0]?.usage).toMatchObject({
+      inputTokens: 240_000,
+      outputTokens: 1,
+    });
+    expect(committed).not.toHaveBeenCalled();
+    expect(state.recallStore.size).toBe(0);
+  },
+);
+
+test.each([
+  { inputTokens: 900_000, accepted: true },
+  { inputTokens: 970_000, accepted: false },
+])(
+  "an expanded Anthropic recall enforces its final answer ceiling at $inputTokens tokens",
+  async ({ inputTokens, accepted }) => {
+    installProductiveRecallMock();
+    const answer = "metered continuation text";
+    const completed = vi.fn();
+    const failed = vi.fn();
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          event("message_start", {
+            message: {
+              id: "msg_metered_continuation",
+              type: "message",
+              role: "assistant",
+              model: "claude-test",
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: inputTokens, output_tokens: 0 },
+            },
+          }) +
+            event("content_block_start", {
+              index: 0,
+              content_block: { type: "text", text: "" },
+            }) +
+            event("content_block_delta", {
+              index: 0,
+              delta: { type: "text_delta", text: answer },
+            }) +
+            event("content_block_stop", { index: 0 }) +
+            event("message_delta", {
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: { output_tokens: 1 },
+            }) +
+            event("message_stop", {}),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const req = request();
+    const state = sessionState();
+    const downstream = buildStreamingResponse(
+      recallOnlyResponse(240_000),
+      completed,
+      {
+        clientMessages: req.messages,
+        modifiedReq: req,
+        config: loadLocalConfig(),
+        sessionState: state,
+        cacheOptions: { cacheConversation: false },
+        clientSpeaksAnthropic: true,
+        noStore: true,
+        onFailure: failed,
+        modelContextTokens: 1_000_000,
+        allowExpandedContext: true,
+        expectedPrincipalModel: "claude-test",
+      },
+    );
+    const reader = downstream.body!.getReader();
+    const received: string[] = [];
+    const read = async () => {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received.push(new TextDecoder().decode(value));
+      }
+    };
+    if (accepted) {
+      await read();
+      expect(received.join("")).toContain(answer);
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(failed).not.toHaveBeenCalled();
+    } else {
+      await expect(read()).rejects.toThrow();
+      expect(received.join("")).not.toContain(answer);
+      expect(completed).not.toHaveBeenCalled();
+      expect(failed).toHaveBeenCalledTimes(1);
+    }
+  },
+);
 
 describe.each([true, false])(
   "Anthropic recall exhaustion recovery (native=%s)",

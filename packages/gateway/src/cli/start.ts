@@ -1179,7 +1179,7 @@ async function startGatewayLocked(
             try {
               shutdownLock.assertOwned();
               pipelineReset = io
-                .resetPipelineState({ fast: true })
+                .resetPipelineState({ fast: true, deadlineAt: finalizeBy })
                 .catch(recordFailure);
             } catch (error) {
               recordFailure(error);

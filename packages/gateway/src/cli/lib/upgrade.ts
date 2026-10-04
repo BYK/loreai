@@ -18,15 +18,16 @@
 
 import { createHash } from "node:crypto";
 import {
-  chmodSync,
   createWriteStream,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
   readFileSync,
   statSync,
-  unlinkSync,
 } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -49,6 +50,10 @@ import {
 import type { LifecycleLock } from "../../lifecycle-lock";
 import { attemptDeltaUpgrade } from "./delta-upgrade";
 import { UpgradeError } from "./errors";
+import {
+  openUpgradeDownloadFile,
+  type UpgradeDownloadDirectory,
+} from "./upgrade-download";
 import { makeByteProgress } from "./progress";
 import {
   fetchStableBinaryChecksum,
@@ -451,8 +456,33 @@ export async function downloadBinaryToTemp(
   downloadTag?: string,
   offline?: OfflineMode,
   currentExecutable: string = process.execPath,
+  downloadDir?: UpgradeDownloadDirectory,
 ): Promise<DownloadResult> {
-  const tempPath = getBinaryPaths(currentExecutable).tempPath;
+  if (downloadDir === undefined) {
+    throw new UpgradeError(
+      "execution_failed",
+      "A private standalone upgrade download directory is required",
+    );
+  }
+  const directory =
+    downloadDir.fd >= 0
+      ? fstatSync(downloadDir.fd, { bigint: true })
+      : lstatSync(downloadDir.path, { bigint: true });
+  if (
+    !directory.isDirectory() ||
+    directory.isSymbolicLink() ||
+    directory.dev !== downloadDir.device ||
+    directory.ino !== downloadDir.inode ||
+    (process.getuid !== undefined &&
+      directory.uid !== BigInt(process.getuid())) ||
+    (process.platform !== "win32" && (directory.mode & 0o077n) !== 0n)
+  ) {
+    throw new UpgradeError(
+      "execution_failed",
+      "Standalone upgrade download directory is not private",
+    );
+  }
+  const canonicalTempPath = getBinaryPaths(currentExecutable).tempPath;
   const nightly = isNightlyVersion(version);
   let expectedStableSha256: string | null = null;
 
@@ -474,13 +504,13 @@ export async function downloadBinaryToTemp(
     }
   }
 
-  // Clean up leftover temp file
-  lifecycleLock.assertOwned();
-  try {
-    unlinkSync(tempPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  // Binpatch and both full-download writers receive the file descriptor path.
+  // Even if the directory or file name changes mid-stream, writes, verification,
+  // chmod, and installation still use the original opened inode.
+  const writePath = openUpgradeDownloadFile(
+    downloadDir,
+    basename(canonicalTempPath),
+  );
 
   // Try delta upgrade first
   lifecycleLock.assertOwned();
@@ -488,7 +518,7 @@ export async function downloadBinaryToTemp(
   const deltaResult = await attemptDeltaUpgrade(
     version,
     currentExecutable,
-    tempPath,
+    writePath,
     !!offline,
   );
 
@@ -512,11 +542,11 @@ export async function downloadBinaryToTemp(
     // Full download
     const fullStart = Date.now();
     if (nightly) {
-      await downloadNightlyToPath(tempPath, lifecycleLock, version);
+      await downloadNightlyToPath(writePath, lifecycleLock, version);
     } else {
       await downloadStableToPath(
         downloadTag ?? version,
-        tempPath,
+        writePath,
         lifecycleLock,
       );
     }
@@ -524,18 +554,12 @@ export async function downloadBinaryToTemp(
     console.error(`[lore] Downloaded full binary in ${elapsed}s`);
   }
 
-  const verifiedSize = await waitForBinaryVisible(tempPath);
+  const verifiedSize = await waitForBinaryVisible(writePath);
   if (expectedStableSha256) {
     const actualSha256 = createHash("sha256")
-      .update(readFileSync(tempPath))
+      .update(readFileSync(writePath))
       .digest("hex");
     if (actualSha256 !== expectedStableSha256) {
-      lifecycleLock.assertOwned();
-      try {
-        unlinkSync(tempPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
       throw new UpgradeError(
         "execution_failed",
         `Downloaded binary checksum mismatch: got ${actualSha256}, expected ${expectedStableSha256}`,
@@ -556,10 +580,17 @@ export async function downloadBinaryToTemp(
   // Set executable permission (Unix only)
   if (process.platform !== "win32") {
     lifecycleLock.assertOwned();
-    chmodSync(tempPath, 0o755);
+    const outputFd = downloadDir.fileFd;
+    if (outputFd === undefined) {
+      throw new UpgradeError(
+        "execution_failed",
+        "Upgrade download file is unavailable",
+      );
+    }
+    fchmodSync(outputFd, 0o755);
   }
 
-  return { tempBinaryPath: tempPath, patchBytes };
+  return { tempBinaryPath: writePath, patchBytes };
 }
 
 /**
@@ -573,6 +604,7 @@ export async function executeUpgrade(
   downloadTag?: string,
   offline?: OfflineMode,
   currentExecutable?: string,
+  downloadDir?: UpgradeDownloadDirectory,
 ): Promise<DownloadResult> {
   return downloadBinaryToTemp(
     version,
@@ -580,5 +612,6 @@ export async function executeUpgrade(
     downloadTag,
     offline,
     currentExecutable,
+    downloadDir,
   );
 }

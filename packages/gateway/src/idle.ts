@@ -471,7 +471,11 @@ const TOOL_USE_EVICTION_MS = 60 * 60 * 1000;
 export function startIdleScheduler(
   config: GatewayConfig,
   sessions: Map<string, SessionState>,
-  doIdleWork: (sessionID: string, state: SessionState) => Promise<void>,
+  doIdleWork: (
+    sessionID: string,
+    state: SessionState,
+    releaseDistillationClaim?: () => void,
+  ) => Promise<void>,
   /** Optional callback to clean up pipeline-level satellite Maps when a session is evicted. */
   onEvict?: (sessionID: string) => void,
   /** Optional lifecycle gate for active work owned outside the idle module. */
@@ -698,13 +702,13 @@ export function startIdleScheduler(
       if (isQuotaPaused(resolveAuth(sessionID))) continue;
 
       // Coalesce with any distillation/curation already in-flight OR queued for
-      // this session. The per-session p-limit(1) pools (distillLimiter/
-      // curatorLimiter) are the durable dedup signal — they persist across
-      // ticks, unlike the local inProgress Set which clears the instant
-      // runBackground returns (even on an immediate queue-full skip). Without
-      // this, every idle session re-floods the global FIFO every 30s, crowding
-      // out one-shot incremental-distill/curation work.
+      // this session. The synchronous distillation claim covers the global-queue
+      // window before distillLimiter becomes busy; the limiters cover work that
+      // entered through urgent and curation paths. Without both signals, idle
+      // and incremental work can occupy separate global slots while serializing
+      // behind the same per-session limiter.
       if (
+        state.distillationScheduled ||
         distillLimiter.isBusy(sessionID) ||
         curatorLimiter.isBusy(sessionID)
       ) {
@@ -738,6 +742,13 @@ export function startIdleScheduler(
       }
 
       inProgress.add(sessionID);
+      state.distillationScheduled = true;
+      let distillationClaimReleased = false;
+      const releaseDistillationClaim = () => {
+        if (distillationClaimReleased) return;
+        distillationClaimReleased = true;
+        state.distillationScheduled = false;
+      };
       // Scope the circuit-breaker check to the provider this session's worker
       // will call — a 429 from a different provider must not pause this work.
       // (idleWorkerModel may be undefined — getWorkerModel returns undefined
@@ -745,14 +756,20 @@ export function startIdleScheduler(
       // defined but unauthed, so preserve the undefined-safe access here.)
       const idleProviderID = idleWorkerModel?.providerID;
       runBackground(
-        () => doIdleWork(sessionID, state),
+        () => doIdleWork(sessionID, state, releaseDistillationClaim),
         `idle session=${sessionID.slice(0, 16)}`,
         idleProviderID,
       )
         .catch((e) =>
           log.error(`idle work failed for session ${sessionID}:`, e),
         )
-        .finally(() => inProgress.delete(sessionID));
+        .finally(() => {
+          // Releases unstarted/discarded jobs and handlers that fail before
+          // finishing distillation. Idempotence prevents this finalizer from
+          // clearing a newer incremental owner's claim.
+          releaseDistillationClaim();
+          inProgress.delete(sessionID);
+        });
     }
 
     // --- Anthropic OAuth quota refresh ---
@@ -1102,8 +1119,16 @@ export function buildIdleWorkHandler(
     sessionID: string,
     result: { changedEntries?: ChangedEntry[] },
   ) => void,
-): (sessionID: string, state: SessionState) => Promise<void> {
-  return async (sessionID: string, state: SessionState) => {
+): (
+  sessionID: string,
+  state: SessionState,
+  releaseDistillationClaim?: () => void,
+) => Promise<void> {
+  return async (
+    sessionID: string,
+    state: SessionState,
+    releaseDistillationClaim?: () => void,
+  ) => {
     const projectPath = state.projectPath;
     // Resolve the raw worktree/session path to the canonical project ID so the
     // consolidation cooldown / in-flight guard collapse across worktrees of the
@@ -1241,6 +1266,10 @@ export function buildIdleWorkHandler(
       idlePrefixMutated,
       getLastLayer(sessionID),
     );
+    // Later idle maintenance can wait on curation, reference validation, and
+    // pruning. New turns must be able to schedule distillation during that
+    // work now that this idle pass has left the distillation phase.
+    releaseDistillationClaim?.();
 
     // 2. Curation — cost-aware frequency: on expensive worker models, curate
     //    less often (same multiplier as the inline path in pipeline.ts).

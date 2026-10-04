@@ -33,11 +33,32 @@ import {
   termIDF,
 } from "./search";
 import {
+  assertValidRecallQuery,
+  isValidRecallId,
+  isValidRecallQuery,
+  MAX_RECALL_ID_CHARS,
+} from "./recall-limits";
+import {
   offloadAll,
   offloadAllOrTimeout,
   isReadJobFailure,
 } from "./read-offload";
 import { inline } from "./markdown";
+
+export { isValidRecallId, MAX_RECALL_ID_CHARS } from "./recall-limits";
+
+function reportRecallDiagnostic(
+  message: string,
+  level: "info" | "warn" | "error" = "info",
+): void {
+  try {
+    if (level === "error") log.error(message);
+    else if (level === "warn") log.warn(message);
+    else log.info(message);
+  } catch {
+    // Diagnostics are best-effort and must never affect recall delivery.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -144,7 +165,6 @@ export type RecallRun = {
 /** Keep one tool call bounded while allowing known source details to be batched. */
 export const MAX_RECALL_BATCH_IDS = 8;
 /** Bound untrusted tool IDs before they are interpolated into a result. */
-export const MAX_RECALL_ID_CHARS = 256;
 export const DEFAULT_RECALL_DETAIL_CHARS = 12_000;
 export const MAX_RECALL_DETAIL_CHARS = 16_000;
 export const MAX_RECALL_BATCH_CHARS = 32_000;
@@ -152,6 +172,12 @@ export const MAX_RECALL_BATCH_CHARS = 32_000;
 const MAX_RECALL_ENTITY_ALIASES = 8;
 const MAX_RECALL_ENTITY_RELATIONS = 8;
 const MAX_RECALL_ENTITY_LABEL_CHARS = 256;
+
+export {
+  assertValidRecallQuery,
+  isValidRecallQuery,
+  MAX_RECALL_QUERY_CHARS,
+} from "./recall-limits";
 
 export type TaggedResult =
   | { source: "knowledge"; item: ltm.ScoredKnowledgeEntry }
@@ -725,10 +751,20 @@ function getFullContentLength(tagged: TaggedResult): number {
 function getDistillationSourceIds(distillId: string): string[] {
   try {
     const row = db()
-      .query("SELECT source_ids FROM distillations WHERE id = ?")
-      .get(distillId) as { source_ids: string } | null;
+      .query(
+        `SELECT d.source_ids
+           FROM distillations d
+           JOIN projects p ON p.id = d.project_id
+          WHERE p.tenant_id = ? AND d.id = ?`,
+      )
+      .get(currentTenantId(), distillId) as { source_ids: string } | null;
     if (!row?.source_ids) return [];
-    return JSON.parse(row.source_ids);
+    if (row.source_ids.length > MAX_RECALL_BATCH_CHARS) return [];
+    const parsed: unknown = JSON.parse(row.source_ids);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((sourceId): sourceId is string => isValidRecallId(sourceId))
+      .slice(0, MAX_RECALL_BATCH_IDS);
   } catch {
     return [];
   }
@@ -803,9 +839,20 @@ function renderResultLine(
       // Include source message IDs so the LLM can fetch full details
       // via the recall tool when the summary lacks specifics.
       const sourceIds = getDistillationSourceIds(d.id);
+      const sourceRefParts: string[] = [];
+      const sourceRefBudget = Math.max(0, charBudget - content.length);
+      let sourceRefLength = " (sources: ".length + 1;
+      for (const sourceId of sourceIds) {
+        const part = `t:${sourceId}`;
+        const nextLength =
+          sourceRefLength + part.length + (sourceRefParts.length > 0 ? 2 : 0);
+        if (nextLength > sourceRefBudget) break;
+        sourceRefParts.push(part);
+        sourceRefLength = nextLength;
+      }
       const sourceRef =
-        sourceIds.length > 0
-          ? ` (sources: ${sourceIds.map((s) => `t:${s}`).join(", ")})`
+        sourceRefParts.length > 0
+          ? ` (sources: ${sourceRefParts.join(", ")})`
           : "";
       return `- ${compressionHint}${content}${wasTruncated ? ` (${id})` : ""}${sourceRef}`;
     }
@@ -860,6 +907,7 @@ export async function searchRecall(
   input: RecallInput,
 ): Promise<ScoredTaggedResult[]> {
   input.signal?.throwIfAborted();
+  assertValidRecallQuery(input.query);
   const abortable = async <T>(promise: Promise<T>): Promise<T> => {
     const signal = input.signal;
     if (!signal) return promise;
@@ -923,15 +971,21 @@ export async function searchRecall(
     queryTermCount <= expansionMaxTerms
   ) {
     try {
-      queries = await abortable(
+      const expandedQueries = await abortable(
         timer.await(
           expandQuery(llm, query, undefined, sessionID, input.signal),
         ),
       );
+      queries = [
+        query,
+        ...expandedQueries.filter(
+          (expanded) => expanded !== query && isValidRecallQuery(expanded),
+        ),
+      ];
       input.signal?.throwIfAborted();
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: query expansion failed, using original:", err);
+      reportRecallDiagnostic("recall: query expansion failed, using original");
     }
   }
 
@@ -944,13 +998,13 @@ export async function searchRecall(
     if (entityExpansions.length > 0) {
       // Add each alias as a separate query variant (up to 4)
       for (const alias of entityExpansions.slice(0, 4)) {
-        if (!queries.includes(alias)) {
+        if (isValidRecallQuery(alias) && !queries.includes(alias)) {
           queries.push(alias);
         }
       }
     }
-  } catch (err) {
-    log.info("recall: entity query expansion failed (non-fatal):", err);
+  } catch {
+    reportRecallDiagnostic("recall: entity query expansion failed (non-fatal)");
   }
 
   // Determine vector boost weight: for queries with enough meaningful terms,
@@ -995,9 +1049,9 @@ export async function searchRecall(
             }),
           )),
         );
-      } catch (err) {
+      } catch {
         if (input.signal?.aborted) throw input.signal.reason;
-        log.error("recall: knowledge search failed:", err);
+        reportRecallDiagnostic("recall: knowledge search failed", "error");
       }
     }
 
@@ -1016,9 +1070,9 @@ export async function searchRecall(
             }),
           )),
         );
-      } catch (err) {
+      } catch {
         if (input.signal?.aborted) throw input.signal.reason;
-        log.error("recall: distillation search failed:", err);
+        reportRecallDiagnostic("recall: distillation search failed", "error");
       }
     }
 
@@ -1037,9 +1091,9 @@ export async function searchRecall(
             }),
           )),
         );
-      } catch (err) {
+      } catch {
         if (input.signal?.aborted) throw input.signal.reason;
-        log.error("recall: temporal search failed:", err);
+        reportRecallDiagnostic("recall: temporal search failed", "error");
       }
     }
 
@@ -1328,9 +1382,9 @@ export async function searchRecall(
           });
         }
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: vector search failed:", err);
+      reportRecallDiagnostic("recall: vector search failed");
     }
   }
 
@@ -1356,9 +1410,9 @@ export async function searchRecall(
             `lat:${(r as { source: "lat-section"; item: latReader.ScoredLatSection }).item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: lat.md section search failed:", err);
+      reportRecallDiagnostic("recall: lat.md section search failed");
     }
   }
 
@@ -1389,9 +1443,9 @@ export async function searchRecall(
           key: (r) => `xk:${r.item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: cross-project knowledge search failed:", err);
+      reportRecallDiagnostic("recall: cross-project knowledge search failed");
     }
   }
 
@@ -1415,9 +1469,9 @@ export async function searchRecall(
           key: (r) => `e:${r.item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: entity search failed (non-fatal):", err);
+      reportRecallDiagnostic("recall: entity search failed (non-fatal)");
     }
   }
 
@@ -1448,9 +1502,11 @@ export async function searchRecall(
           key: (r) => `e:${r.item.id}`,
         });
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: cross-project repo search failed (non-fatal):", err);
+      reportRecallDiagnostic(
+        "recall: cross-project repo search failed (non-fatal)",
+      );
     }
   }
 
@@ -1569,9 +1625,11 @@ export async function searchRecall(
           }
         }
       }
-    } catch (err) {
+    } catch {
       if (input.signal?.aborted) throw input.signal.reason;
-      log.info("recall: entity-graph expansion failed (non-fatal):", err);
+      reportRecallDiagnostic(
+        "recall: entity-graph expansion failed (non-fatal)",
+      );
     }
   }
 
@@ -1954,10 +2012,6 @@ function sourceCoverage(
   }
 }
 
-function isValidRecallId(id: string): boolean {
-  return id.length > 0 && id.length <= MAX_RECALL_ID_CHARS;
-}
-
 function detailPage(
   id: string,
   coverage: Omit<RecallCoverage, "offset" | "length" | "complete">,
@@ -2150,12 +2204,15 @@ export function recallByIdWithMetadata(
       // capped and all untrusted display fields are clipped in SQLite.
       const aliases = db()
         .query(
-          `SELECT alias_type, substr(alias_value, 1, ?) AS alias_value
-             FROM entity_aliases WHERE entity_id = ?
+          `SELECT ea.alias_type, substr(ea.alias_value, 1, ?) AS alias_value
+             FROM entity_aliases ea
+             JOIN entities e ON e.id = ea.entity_id
+            WHERE e.tenant_id = ? AND ea.entity_id = ?
              ORDER BY alias_type, alias_value LIMIT ?`,
         )
         .all(
           MAX_RECALL_ENTITY_LABEL_CHARS,
+          currentTenantId(),
           rawId,
           MAX_RECALL_ENTITY_ALIASES,
         ) as Array<{ alias_type: string; alias_value: string }>;
@@ -2225,6 +2282,7 @@ export async function runRecallWithMetadata(
   input: RecallInput,
 ): Promise<RecallRun> {
   input.signal?.throwIfAborted();
+  assertValidRecallQuery(input.query);
   if (input.id && input.ids) {
     throw new Error("Recall id and ids cannot be used together");
   }
@@ -2334,8 +2392,11 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
             recalledInProjectId: pid,
           });
         }
-      } catch (err) {
-        log.warn("recall: transfer recording failed (non-fatal):", err);
+      } catch {
+        reportRecallDiagnostic(
+          "recall: transfer recording failed (non-fatal)",
+          "warn",
+        );
       }
     };
     if (input.deferTransferRecording) {
@@ -2367,8 +2428,8 @@ async function runRecallSearch(input: RecallInput): Promise<RecallRun> {
         input.scope === "session" ? input.sessionID : undefined,
       );
       if (section) out += `\n\n${section}`;
-    } catch (err) {
-      log.warn("tool failure section failed (non-fatal):", err);
+    } catch {
+      reportRecallDiagnostic("tool failure section failed (non-fatal)", "warn");
     }
   }
 

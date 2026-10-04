@@ -9,6 +9,7 @@ import {
 } from "vitest";
 import { Database } from "#db/driver";
 import { close, db, ensureProject, withTransaction } from "../src/db";
+import { checkConfigChange } from "../src/embedding/backfill";
 import {
   isVecAvailable,
   loadVecForConnection,
@@ -249,6 +250,9 @@ describe("loadVecForConnection (worker reader path)", () => {
 // tie for the top slot; the excluded one must disappear.
 describe("vectorSearch excludeCategories", () => {
   function seedTwoCategories(pid: string): void {
+    // These rows are created directly, without the production embedding
+    // admission path. Record their generation before testing a reopen.
+    checkConfigChange();
     db().query("DELETE FROM knowledge").run();
     const now = Date.now();
     const stmt = db().query(
@@ -418,6 +422,7 @@ describe("vectorSearchTemporal", () => {
   // temporal_messages table. Guards both the vec subquery and the JS LIMIT.
   test("recency cap ages the oldest rows out of the temporal vector window", async () => {
     const pid = ensureProject(PROJECT);
+    checkConfigChange();
     db().query("DELETE FROM temporal_messages").run();
     const match = unit([1, 0, 0]);
     const noMatch = unit([0, 1, 0]);
@@ -479,6 +484,7 @@ describe("vec path vs JS fallback parity", () => {
 
   test("identical top-k from vec and JS paths on the same data", async () => {
     const pid = ensureProject(PROJECT);
+    checkConfigChange();
     db().query("DELETE FROM knowledge").run();
     // 40 deterministic pseudo-random normalized vectors in 8 dims.
     let seed = 12345;

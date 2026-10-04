@@ -10,7 +10,7 @@ import {
   formatWhen,
   recordedWriter,
 } from "~/lib/format";
-import { sessionHref } from "~/routes/Browse";
+import { sessionHref } from "~/lib/href";
 
 import { errorStateFor } from "./ErrorState";
 import { StateCard } from "./StateCard";

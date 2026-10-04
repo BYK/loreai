@@ -15,6 +15,12 @@ import { copyUsageLimitHeaders } from "./usage-limit-headers";
 import { KNOWLEDGE_DELTA_DEBOUNCE_MS } from "./prompt-delta-constants";
 import { detectHarness } from "./harness";
 import { boundFallbackHistory } from "./fallback-history";
+import {
+  formatUpstreamRequestShape,
+  sanitizeUpstreamJson,
+  upstreamRequestShape,
+  type UpstreamRequestShape,
+} from "./upstream-request-shape";
 import { storeTurnTemporal, type TurnTemporalInput } from "./turn-temporal";
 import {
   PreparationTiming,
@@ -36,13 +42,17 @@ import {
   asString,
   estimateTokens as coreEstimateTokens,
   MAX_RECALL_BATCH_IDS,
+  MAX_RECALL_QUERY_CHARS,
   MAX_RECALL_ID_CHARS,
+  isValidRecallId,
+  isValidRecallQuery,
 } from "@loreai/core";
 import {
   encodeContextBoundary,
   supportsContextBoundary,
 } from "./context-boundary";
 import {
+  SOURCE_WINDOW_MAX_MESSAGES,
   SourceDeltaUnavailableError,
   sourceCheckpointProtocol,
 } from "./source-checkpoint";
@@ -117,11 +127,13 @@ import {
   updateSessionPromptDeltaContent,
   withSavepoint,
   loadHeaderSessionIndex,
+  clearLegacyCredentialHeaderMapping,
   isHostedMode,
   enableHostedMode,
   importLoreFileAs,
   resolveWorkspaces,
   currentTenantId,
+  LOCAL_TENANT_ID,
   withTenant,
   ReadPreparationUnavailableError,
 } from "@loreai/core";
@@ -210,8 +222,11 @@ import {
 import { buildVertexUpstream, vertexHost } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
 import {
+  buildOpenAICodexResponsesUrl,
+  buildOpenAIResponsesUrl,
   buildOpenAIUpstreamRequest,
   buildOpenAIResponse,
+  isGitHubCopilotHost,
 } from "./translate/openai";
 import {
   buildOpenAIResponsesUpstreamRequest,
@@ -233,6 +248,7 @@ import {
   responsesDoneItemMatchesAdded,
   responsesTerminalItemMatches,
   normalizeCodexResponsesEvent,
+  pinResponsesLifecycleIdentity,
   assertSuccessfulResponsesCompletion,
   ResponsesTerminalError,
   type ResponsesAccState,
@@ -345,6 +361,7 @@ import {
   ensureModelDataReady,
   getModelEntrySync,
   getModelEntrySyncForProvider,
+  knownCodexContextLimit,
   knownModelContextLimit,
   isModelDataLoaded,
   lookupProviderRoute,
@@ -387,10 +404,15 @@ import {
   spanStartupBackfill,
   captureClientAbortUnderPressure,
   captureEmptyCompletion,
+  captureUpstream400,
   type AnthropicUsage,
 } from "./sentry";
-import { createRecallDiagnostics } from "./recall-diagnostics";
 import {
+  createRecallDiagnostics,
+  reportRecallDiagnostic,
+} from "./recall-diagnostics";
+import {
+  MAX_RECALL_CHAIN_TOKENS,
   MAX_RECALL_EXECUTIONS,
   MAX_RECALL_SEARCH_ITEMS,
   RecallChainBudget,
@@ -437,6 +459,8 @@ import {
   projectRecallRecoveryResponse,
   hasOtherToolUse,
   clientHasRecallTool,
+  hasGatewayRecallTool,
+  shouldEnableRecallMarkerReplay,
   runRecallFollowUpStreaming,
   runRecallFollowUpJSON,
   runRecallFollowUpStreamAccumulated,
@@ -899,6 +923,10 @@ let pipelineResetPauseForTest: Promise<void> | undefined;
 let pipelinePreUpstreamPauseForTest:
   | { pause: Promise<void>; onWait: () => void }
   | undefined;
+let passthroughBodyReadPauseForTest:
+  | { pause: Promise<void>; onWait: () => void }
+  | undefined;
+let foregroundAbortTimeoutMsForTest: number | undefined;
 let provisionalFinalizerPauseForTest:
   | { pause: Promise<void>; onWait: () => void }
   | undefined;
@@ -1082,6 +1110,19 @@ export function setPipelinePreUpstreamPauseForTest(
   pipelinePreUpstreamPauseForTest = pause ? { pause, onWait } : undefined;
 }
 
+export function setPassthroughBodyReadPauseForTest(
+  pause: Promise<void> | undefined,
+  onWait: () => void = () => {},
+): void {
+  passthroughBodyReadPauseForTest = pause ? { pause, onWait } : undefined;
+}
+
+export function setForegroundAbortTimeoutForTest(
+  timeoutMs: number | undefined,
+): void {
+  foregroundAbortTimeoutMsForTest = timeoutMs;
+}
+
 export function setProvisionalFinalizerPauseForTest(
   pause: Promise<void> | undefined,
   onWait: () => void = () => {},
@@ -1102,6 +1143,7 @@ export function setPipelineResetSettleTimeoutForTest(timeoutMs = 5000): void {
  */
 export async function resetPipelineState(opts?: {
   fast?: boolean;
+  deadlineAt?: number;
 }): Promise<void> {
   if (pipelineResetPromise) return pipelineResetPromise;
   pipelineResetInProgress = true;
@@ -1120,6 +1162,7 @@ export async function resetPipelineState(opts?: {
 
 async function resetPipelineStateInner(opts?: {
   fast?: boolean;
+  deadlineAt?: number;
 }): Promise<void> {
   streamingPostResponsesAccepting = false;
   await pipelineResetPauseForTest;
@@ -1140,9 +1183,25 @@ async function resetPipelineStateInner(opts?: {
     ]),
   ];
   for (const request of activeRequests) request.abort(resetReason);
+  const settleTimeoutMs = () =>
+    opts?.deadlineAt === undefined
+      ? pipelineResetSettleTimeoutMs
+      : Math.min(
+          pipelineResetSettleTimeoutMs,
+          Math.max(0, opts.deadlineAt - Date.now()),
+        );
+  // Cancel foreground work before a stalled writer can consume the shutdown
+  // budget. The startup walk owns the DB even during its initial delay; never
+  // report reset complete while that writer can still touch storage.
+  const startups = [...startupBackfills];
+  await boundedSettle(startups, settleTimeoutMs());
+  if (startups.some((startup) => startupBackfills.has(startup)))
+    throw new Error(
+      "startup backfill did not settle before pipeline reset deadline",
+    );
   await boundedSettle(
     activeRequests.map((request) => request.settled),
-    pipelineResetSettleTimeoutMs,
+    settleTimeoutMs(),
   );
   for (const request of activeRequests) {
     if (!activePipelineRequests.has(request)) continue;
@@ -1162,7 +1221,7 @@ async function resetPipelineStateInner(opts?: {
   // non-fast drain below will then observe.
   await boundedSettle(
     [...streamingPostResponseFinalizers.values()].map((state) => state.tail),
-    pipelineResetSettleTimeoutMs,
+    settleTimeoutMs(),
   );
   streamingPostResponseGeneration++;
   pipelineGenerationAbort = new AbortController();
@@ -1234,6 +1293,8 @@ async function resetPipelineStateInner(opts?: {
   postResponseStartObserver = undefined;
   recallPersistenceCommitObserver = undefined;
   pipelineResponseReadFailureForTest = undefined;
+  passthroughBodyReadPauseForTest = undefined;
+  foregroundAbortTimeoutMsForTest = undefined;
   provisionalFinalizerPauseForTest = undefined;
   foregroundErrorBodyTimeoutMs = FOREGROUND_ERROR_BODY_TIMEOUT_MS;
   if (stopFileWatcher) {
@@ -1280,6 +1341,7 @@ const streamingPostResponsePendingByAdmissionKey = new Map<string, number>();
 let streamingPostResponsePending = 0;
 let streamingPostResponseGeneration = 0;
 let pipelineGenerationAbort = new AbortController();
+const startupBackfills = new Set<Promise<void>>();
 let streamingPostResponsesAccepting = true;
 let maxStreamingPostResponses = DEFAULT_MAX_STREAMING_POST_RESPONSES;
 let maxStreamingPostResponsesPerSession =
@@ -2087,10 +2149,11 @@ function restoreHeaderSessionMappings(config: GatewayConfig): {
   let cleared = 0;
   for (const entry of loadHeaderSessionIndex()) {
     if (isCredentialHeaderName(entry.headerName)) {
-      saveSessionTracking(entry.sessionId, {
-        headerSessionId: null,
-        headerName: null,
-      });
+      clearLegacyCredentialHeaderMapping(
+        entry.sessionId,
+        entry.headerName,
+        entry.headerSessionId,
+      );
       cleared++;
       continue;
     }
@@ -2385,14 +2448,14 @@ const KNOWLEDGE_DELTA_TOKEN_BUDGET = 400;
  *  block count — and thus per-turn context tokens — without bound. When this
  *  many blocks have accumulated, the next append deletes them all and re-derives
  *  ONE cumulative block from the frozen pin baseline (paying one bust to reclaim
- *  budget). Each block is ≤ KNOWLEDGE_DELTA_TOKEN_BUDGET, so the worst-case
- *  durable-delta footprint is bounded at ~MAX_DELTA_BLOCKS × 400 tokens. */
+ *  budget). Full entry content in each block is packed to the delta token
+ *  budget; recall references for all changed entries sit outside that budget. */
 const MAX_DELTA_BLOCKS = 8;
 
-/** Max entries listed in the "Other relevant knowledge" overflow ToC (#917).
+/** Max optional entries listed in the "Other relevant knowledge" overflow ToC (#917).
  *  Each line is just `[id] title (category)` (~15-20 tokens), so 12 lines is a
- *  ~200-token index — small enough to ride the frozen delta without crowding
- *  out the rendered changed-entry content above it. */
+ *  ~200-token index; changed entries' IDs are always listed so durable
+ *  mutations cannot be marked surfaced without a recall reference. */
 const OVERFLOW_TOC_MAX = 12;
 
 /** Max entries listed in the frozen system[1] project-knowledge catalog (#917,
@@ -3363,7 +3426,7 @@ export function buildKnowledgeDeltaMessage(
   // the stale pin is simply left for the next session start to refresh.
   if (!entries.length) return [];
   const renderedIds: string[] = [];
-  let rendered = formatKnowledge(
+  const rendered = formatKnowledge(
     entries.map((entry) => ({
       id: entry.id,
       category: entry.category,
@@ -3373,21 +3436,13 @@ export function buildKnowledgeDeltaMessage(
     KNOWLEDGE_DELTA_TOKEN_BUDGET,
     renderedIds,
   );
-  if (!rendered && entries.length) {
-    const entry = entries[0];
-    const truncated =
-      entry.content.length > 900
-        ? `${entry.content.slice(0, 900)}…`
-        : entry.content;
-    rendered =
-      `## Long-term Knowledge\n\n### ${entry.category.charAt(0).toUpperCase()}${entry.category.slice(1)}\n\n` +
-      `* **${entry.title}**: ${truncated}`;
-    renderedIds.push(entry.id);
-  }
-  rendered ??= "";
+  // If even the first entry exceeds the delta budget, surface its recall ID
+  // below rather than injecting an arbitrary prefix of its content. The old
+  // 900-code-unit fallback could split an emoji and persist invalid UTF-16 in
+  // every future request for the session.
   // Fold two groups into ONE compact, ACTIONABLE recall-by-id index:
   //  (1) changed entries that overflowed the full-render budget above —
-  //      surfaced as `[k:id]` hints instead of the old "Additional Changed
+  //      surfaced as recall-by-id hints instead of the old "Additional Changed
   //      Knowledge (truncated)" dump (3 cut-off entries + "N more omitted",
   //      which the model couldn't act on);
   //  (2) #917 relevance-scored overflow that didn't fit system[2].
@@ -3397,20 +3452,40 @@ export function buildKnowledgeDeltaMessage(
   // any removed id (a tombstoned entry must never be suggested for recall).
   const removedSet = new Set(removedIds);
   const tocSeen = new Set<string>(renderedIds);
-  const tocEntries: Array<{ id: string; title: string; category: string }> = [];
-  for (const e of [...entries, ...(overflow ?? [])]) {
-    if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
-    tocSeen.add(e.id);
-    tocEntries.push({ id: e.id, title: e.title, category: e.category });
+  const changedToc: Array<{ id: string; title: string; category: string }> = [];
+  const overflowToc: typeof changedToc = [];
+  for (const [group, source] of [
+    [changedToc, entries],
+    [overflowToc, overflow ?? []],
+  ] as const) {
+    for (const e of source) {
+      if (tocSeen.has(e.id) || removedSet.has(e.id)) continue;
+      tocSeen.add(e.id);
+      group.push({ id: e.id, title: e.title, category: e.category });
+    }
+    group.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
-  tocEntries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // Every changed entry is marked surfaced after this block is persisted, so
+  // its recall ID must be shown. Only optional overflow suggestions are capped.
+  const shownOverflow = overflowToc.slice(
+    0,
+    Math.max(0, OVERFLOW_TOC_MAX - changedToc.length),
+  );
+  const tocEntries = [...changedToc, ...shownOverflow];
   const tocRendered = tocEntries.length
     ? `\n\n## Other relevant knowledge (recall by id for detail)\n\n${tocEntries
-        .slice(0, OVERFLOW_TOC_MAX)
-        .map((e) => `* [k:${e.id}] ${e.title} (${e.category})`)
+        .map((e) => {
+          const recallId =
+            e.category === "lat.md"
+              ? `lat:${e.id}`
+              : e.id.startsWith("d:") || e.id.startsWith("t:")
+                ? e.id
+                : `k:${e.id}`;
+          return `* [${recallId}] ${e.title} (${e.category})`;
+        })
         .join("\n")}${
-        tocEntries.length > OVERFLOW_TOC_MAX
-          ? `\n* ${tocEntries.length - OVERFLOW_TOC_MAX} more — use recall with an id for detail.`
+        overflowToc.length > shownOverflow.length
+          ? `\n* ${overflowToc.length - shownOverflow.length} more — use recall with an id for detail.`
           : ""
       }`
     : "";
@@ -4221,6 +4296,22 @@ async function precomputeStableLtmForIdleSession(
   }
 }
 
+type IdleWorkHandler = (
+  sessionID: string,
+  state: SessionState,
+  releaseDistillationClaim?: () => void,
+) => Promise<void>;
+
+export function wrapIdleHandlerWithTenant(
+  baseIdleHandler: IdleWorkHandler,
+): IdleWorkHandler {
+  return async (sessionID, state, releaseDistillationClaim) =>
+    withTenant(state.storageTenantId ?? "", async () => {
+      void precomputeStableLtmForIdleSession(sessionID, state);
+      await baseIdleHandler(sessionID, state, releaseDistillationClaim);
+    });
+}
+
 /** Cached LLM client for background workers. */
 let llmClient: LLMClient | null = null;
 /** Whether the batch queue wrapper is active (set once in getLLMClient). */
@@ -4287,8 +4378,14 @@ const DEFAULT_MODEL_SPEC: ModelSpec = { context: 200_000, output: 8_192 };
  */
 export function getModelSpec(model: string, providerID?: string): ModelSpec {
   const entry = getModelEntrySyncForProvider(providerID, model);
+  const context = entry.limit?.context;
   return {
-    context: entry.limit?.context ?? DEFAULT_MODEL_SPEC.context,
+    context:
+      typeof context === "number" &&
+      Number.isSafeInteger(context) &&
+      context > 0
+        ? context
+        : DEFAULT_MODEL_SPEC.context,
     output: entry.limit?.output ?? DEFAULT_MODEL_SPEC.output,
     cacheReadCost:
       entry.cost?.cache_read != null
@@ -4691,14 +4788,6 @@ async function initIfNeeded(
       }
     }
 
-    // Prune corrupted/oversized knowledge entries (safety net for past bugs).
-    const pruned = ltm.pruneOversized(1200);
-    if (pruned > 0) {
-      log.info(
-        `pruned ${pruned} oversized knowledge entries (confidence set to 0)`,
-      );
-    }
-
     // Watch knowledge files for live changes (git pull, manual edits, etc.)
     if (!stopFileWatcher) {
       stopFileWatcher = startKnowledgeFileWatcher(projectPath);
@@ -4721,18 +4810,37 @@ async function initIfNeeded(
     // Idle-gate the heavy temporal re-chunk walk so it yields the shared embed
     // pool to live traffic: park while the breaker is tripped or a live recall
     // embed is in flight, resume the instant the worker drains.
-    const startupBackfill = spanStartupBackfill(() => {
-      const backfill = embedding.runStartupBackfill({
-        shouldPause: () => isBackgroundPaused(),
-      });
-      // When embeddings are available, runStartupBackfill synchronously
-      // reconciles config and attempts vec0 cutover before its first await.
-      // Start durable live-message scheduling after those transitions.
-      temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
-      return backfill;
-    });
-    startupBackfill.catch((e) => {
-      log.error("embedding backfill failed:", e);
+    // The first request may belong to a remote tenant. The one process-wide
+    // scan and scheduler must not inherit that request's credential scope;
+    // each admitted row re-enters its authoritative project's tenant.
+    const startupSignal = pipelineGenerationAbort.signal;
+    const startupBackfill = withTenant(LOCAL_TENANT_ID, () =>
+      spanStartupBackfill(() => {
+        const backfill = embedding.runStartupBackfill({
+          shouldPause: () => isBackgroundPaused(),
+          signal: startupSignal,
+        });
+        // When embeddings are available, runStartupBackfill synchronously
+        // reconciles config and attempts vec0 cutover before its first await.
+        // Start durable live-message scheduling after those transitions.
+        temporalEmbeddingQueue.startTemporalEmbeddingScheduler();
+        return backfill;
+      }),
+    );
+    startupBackfills.add(startupBackfill);
+    void startupBackfill.then(
+      () => startupBackfills.delete(startupBackfill),
+      () => startupBackfills.delete(startupBackfill),
+    );
+    startupBackfill.catch(() => {
+      if (startupSignal.aborted) return;
+      // Storage, callbacks and provider failures may contain private text.
+      // Startup diagnostics must never relay arbitrary exception values.
+      try {
+        log.error("embedding backfill failed");
+      } catch {
+        // Diagnostics cannot affect foreground response delivery.
+      }
     });
   }
 
@@ -4780,11 +4888,7 @@ async function initIfNeeded(
     // session tracking) so the resume turn reads it from cache instead. The
     // compute is single-flighted per session; a concurrent turn's
     // `singleFlightStableLtm` shares the same in-flight promise.
-    const idleHandler = async (sessionID: string, state: SessionState) =>
-      withTenant(state.storageTenantId ?? "", async () => {
-        void precomputeStableLtmForIdleSession(sessionID, state);
-        await baseIdleHandler(sessionID, state);
-      });
+    const idleHandler = wrapIdleHandlerWithTenant(baseIdleHandler);
     stopIdleScheduler = startIdleScheduler(
       config,
       sessions,
@@ -6726,6 +6830,100 @@ type ResolvedRequestUpstreamRoute = {
   bedrockMantle: boolean;
 };
 
+/**
+ * Provider capability is trusted only when the effective destination is the
+ * provider's canonical destination. An explicit upstream URL can override a
+ * compatible provider route with a destination that rejects root combinators.
+ */
+function supportsEffectiveRootToolSchemaCombinators(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  const providerRoute = route.providerRoute;
+  if (
+    providerRoute?.supportsRootToolSchemaCombinators !== true ||
+    providerRoute.url === null
+  ) {
+    return false;
+  }
+  const effectiveBase = normalizeUpstreamBase(route.effectiveUpstreamBase);
+  const canonicalBase = normalizeUpstreamBase(providerRoute.url);
+  if (effectiveBase === undefined || effectiveBase !== canonicalBase) {
+    return false;
+  }
+  if (route.headerUpstreamPath === undefined) return true;
+  try {
+    const canonicalEndpoint = new URL(providerRoute.url);
+    canonicalEndpoint.pathname = `${canonicalEndpoint.pathname.replace(/\/$/, "")}/v1/messages`;
+    const effectiveOrigin = new URL(route.effectiveUpstreamBase).origin;
+    const finalEndpoint = new URL(effectiveOrigin + route.headerUpstreamPath);
+    return (
+      finalEndpoint.origin === canonicalEndpoint.origin &&
+      finalEndpoint.pathname === canonicalEndpoint.pathname
+    );
+  } catch {
+    return false;
+  }
+}
+
+function shouldPinGithubCopilotResponseId(
+  route: ResolvedRequestUpstreamRoute,
+  finalUrl: string,
+): boolean {
+  if (route.providerID !== "github-copilot" || !route.providerRoute) {
+    return false;
+  }
+  try {
+    const effectiveEndpoint = new URL(finalUrl);
+    if (
+      effectiveEndpoint.protocol !== "https:" ||
+      effectiveEndpoint.port !== "" ||
+      effectiveEndpoint.username !== "" ||
+      effectiveEndpoint.password !== "" ||
+      effectiveEndpoint.hash !== "" ||
+      !isGitHubCopilotHost(effectiveEndpoint.hostname)
+    ) {
+      return false;
+    }
+    const canonicalEndpoint = new URL(
+      buildOpenAIResponsesUrl(effectiveEndpoint.origin),
+    );
+    return (
+      effectiveEndpoint.origin === canonicalEndpoint.origin &&
+      effectiveEndpoint.pathname === canonicalEndpoint.pathname
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isGitHubCopilotUpstreamBase(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.pathname === "/" &&
+      url.hash === "" &&
+      isGitHubCopilotHost(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Test-only access to the final-destination Copilot compatibility check. */
+export const shouldPinGithubCopilotResponseIdForTest =
+  shouldPinGithubCopilotResponseId;
+
+/** Test-only access to the final-destination capability check. */
+export function supportsEffectiveRootToolSchemaCombinatorsForTest(
+  route: ResolvedRequestUpstreamRoute,
+): boolean {
+  return supportsEffectiveRootToolSchemaCombinators(route);
+}
+
 /** A headerless model route identifies a provider only when its final URL
  * matches that provider's built-in destination, without a caller override. */
 function canonicalModelRouteProviderID(
@@ -6751,6 +6949,33 @@ function canonicalModelRouteProviderID(
   return canonicalProviders.find(
     (providerID) =>
       resolveProviderRoute(providerID)?.url === route.modelRoute?.url,
+  );
+}
+
+/** The built-in ChatGPT Codex endpoint serves OpenAI models even when the
+ * fetch interceptor supplies its explicit upstream URL. A different path,
+ * protocol, or destination cannot borrow OpenAI's context window. */
+function isCanonicalCodexRecallRoute(
+  route: ResolvedRequestUpstreamRoute,
+  codex: boolean | undefined,
+): boolean {
+  const canonicalBase = resolveProviderRoute("openai-codex")?.url;
+  if (
+    codex !== true ||
+    route.effectiveProtocol !== "openai-responses" ||
+    !canonicalBase ||
+    route.effectiveUpstreamBase !== canonicalBase ||
+    (route.providerID !== undefined &&
+      route.providerID !== "openai" &&
+      route.providerID !== "openai-codex")
+  ) {
+    return false;
+  }
+  const canonicalPath = new URL(buildOpenAICodexResponsesUrl(canonicalBase))
+    .pathname;
+  return (
+    route.headerUpstreamPath === undefined ||
+    route.headerUpstreamPath === canonicalPath
   );
 }
 
@@ -7003,19 +7228,25 @@ function logUpstreamResponseFailure(
   headers: Headers,
   req: GatewayRequest,
   route: ResolvedRequestUpstreamRoute,
-  sessionID: string,
+  sessionID: string | undefined,
+  requestShape?: UpstreamRequestShape,
 ): void {
   const details = [
     `provider=${safeDiagnosticToken(route.providerID) ?? "none"}`,
     `model=${safeDiagnosticToken(req.model) ?? "redacted"}`,
     `protocol=${route.effectiveProtocol}`,
     `host=${upstreamHostForDiagnostics(route.effectiveUpstreamBase)}`,
-    `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
   ];
+  if (sessionID) {
+    details.push(
+      `session=${safeDiagnosticToken(sessionID.slice(0, 16)) ?? "redacted"}`,
+    );
+  }
   const category = safeUpstreamErrorCategory(errorBody);
   if (category) details.push(`category=${category}`);
   const requestId = safeUpstreamRequestId(headers);
   if (requestId) details.push(`requestId=${requestId}`);
+  if (requestShape) details.push(formatUpstreamRequestShape(requestShape));
   log.error(`upstream error: ${status} (${details.join(" ")})`);
 }
 
@@ -7091,8 +7322,9 @@ function resolveRequestUpstreamRoute(
   }
   if (
     !providerRoute &&
-    !headerUpstream &&
-    hasCopilotIntegrationHeader(req.rawHeaders)
+    providerHeader === undefined &&
+    hasCopilotIntegrationHeader(req.rawHeaders) &&
+    (!headerUpstream || isGitHubCopilotUpstreamBase(headerUpstream))
   ) {
     providerID = "github-copilot";
     providerRoute = resolveProviderRoute(providerID);
@@ -7207,10 +7439,16 @@ export function resolveRequestUpstreamRouteForTest(
 /** Result from forwardToUpstream — includes the serialized body for cache analytics. */
 type UpstreamResult = {
   response: Response;
+  /** Validated route used for dispatch, for content-free error diagnostics. */
+  route: ResolvedRequestUpstreamRoute;
   /** Repeat the exact prepared request bytes, headers, route, and interceptor. */
   retry: (signal?: AbortSignal) => Promise<Response>;
   /** The serialized JSON body sent to the upstream provider. */
   serializedBody: string;
+  /** Content-free request dimensions, computed only for rejected requests. */
+  requestShape?: UpstreamRequestShape;
+  /** Whether the exact dispatched endpoint permits Copilot lifecycle-ID pinning. */
+  pinResponseId: boolean;
   /** The wire protocol used for the upstream request (may differ from ingress). */
   effectiveProtocol:
     | "anthropic"
@@ -7366,7 +7604,9 @@ async function forwardToUpstream(
           conversationTTL: "5m" as const,
         }
       : cache;
-    const result = buildAnthropicRequest(req, effectiveCache);
+    const result = buildAnthropicRequest(req, effectiveCache, {
+      sanitizeRootToolSchemas: true,
+    });
 
     const project = await resolveVertexProject(config.vertexProject, signal);
     if (!project) {
@@ -7430,7 +7670,10 @@ async function forwardToUpstream(
             conversationTTL: "5m" as const,
           }
         : cache;
-    const result = buildAnthropicRequest(req, effectiveCache);
+    const result = buildAnthropicRequest(req, effectiveCache, {
+      sanitizeRootToolSchemas:
+        !supportsEffectiveRootToolSchemaCombinators(route),
+    });
     url = `${effectiveUpstreamBase}${result.url}`;
     headers = result.headers;
     body = result.body;
@@ -7469,7 +7712,10 @@ async function forwardToUpstream(
   // the gateway-reconstructed `x-api-key` / `Authorization`.
   applyUpstreamExtraHeaders(headers, extraHeadersForUpstream(config, url));
 
-  let serializedBody = JSON.stringify(body);
+  // JSON.stringify escapes lone UTF-16 surrogates as e.g. "\\ud83d", which
+  // upstream JSON parsers reject. Sanitize values and property names on the
+  // wire so persisted messages can resume without rewriting their history.
+  let serializedBody = JSON.stringify(body, sanitizeUpstreamJson);
 
   // Re-sign the billing header cch after body reconstruction.
   // buildAnthropicRequest completely rebuilds the body (different JSON key
@@ -7565,7 +7811,23 @@ async function forwardToUpstream(
   };
 
   const response = await dispatch(signal);
-  return { response, retry: dispatch, serializedBody, effectiveProtocol };
+  return {
+    response,
+    route,
+    retry: dispatch,
+    serializedBody,
+    effectiveProtocol,
+    pinResponseId: shouldPinGithubCopilotResponseId(route, url),
+    ...(response.status === 400
+      ? {
+          requestShape: upstreamRequestShape(
+            body,
+            serializedBody,
+            effectiveProtocol,
+          ),
+        }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -7667,6 +7929,19 @@ function maxReportedUsageForModelID(
   return maxReportedUsageForModel(contextWindow, maxOutput);
 }
 
+/** Client-owned tools must never enter the gateway's recall continuation policy. */
+export function shouldRejectUnusableRecallContinuation(
+  gatewayRecallEnabled: boolean,
+  stopReason: RecallStopReason | undefined,
+  response: GatewayResponse,
+): boolean {
+  return (
+    gatewayRecallEnabled &&
+    stopReason !== undefined &&
+    !isUsableRecallContinuation(response)
+  );
+}
+
 /**
  * Create a streaming SSE response from upstream with parallel accumulation.
  *
@@ -7727,6 +8002,9 @@ export function buildStreamingResponse(
     };
     /** Absolute request deadline inherited from the foreground abort scope. */
     recallDeadlineAt?: number;
+    modelContextTokens?: number;
+    allowExpandedContext?: boolean;
+    expectedPrincipalModel?: string;
   },
   /** When set, prepend a synthetic warning content block to the stream.
    *  Currently used for the worker-degradation warning (#797 removed the
@@ -7997,14 +8275,19 @@ export function buildStreamingResponse(
             const recallBudget = new RecallChainBudget({
               maxExecutions: loreConfig().search.recall.chainMaxExecutions,
               deadlineAt: recallContext.recallDeadlineAt,
+              modelContextTokens: recallContext.modelContextTokens,
+              allowExpandedContext: recallContext.allowExpandedContext,
             });
-            // This response already consumed the model's context/token budget
-            // before it asked for recall. Include it before admitting the first
-            // recall so the chain cannot repeatedly spend an untracked
-            // principal turn plus its continuations.
-            recallBudget.recordUsage(currentResp.usage);
+            recallBudget.recordPrincipalUsage(
+              currentResp.usage,
+              {
+                expectedModel: recallContext.expectedPrincipalModel,
+                actualModel: currentResp.model,
+              },
+              currentResp.usageComplete === true,
+            );
             const logRecallBudgetStop = (reason: RecallStopReason): void => {
-              log.info(
+              reportRecallDiagnostic(
                 `recall final continuation: budget exhausted reason=${reason}`,
               );
             };
@@ -8050,7 +8333,7 @@ export function buildStreamingResponse(
                 throw new RecallContinuationFailure("depth_exhausted");
               }
               recallDepth++;
-              const { result, input, coverage } = await promiseAgainstAbort(
+              const recallExecution = await promiseAgainstAbort(
                 () =>
                   withTenant(
                     recallContext.sessionState.storageTenantId ?? "",
@@ -8067,6 +8350,10 @@ export function buildStreamingResponse(
                   ),
                 streamSignal,
               );
+              if (!recallExecution.valid) {
+                throw new RecallContinuationFailure("recall_execution");
+              }
+              const { result, input, coverage } = recallExecution;
 
               recallDiagnostics.record(input, result, coverage);
               const stopReason = recallBudget.record({
@@ -8237,7 +8524,7 @@ export function buildStreamingResponse(
 
               if (currentAccum.hasOtherTools()) {
                 // Mixed tools — forward held-back events, close stream
-                log.info(
+                reportRecallDiagnostic(
                   `recall (stream, mixed, depth=${recallDepth}): stored result for session ` +
                     `${recallContext.sessionState.sessionID.slice(0, 16)}`,
                 );
@@ -8265,7 +8552,7 @@ export function buildStreamingResponse(
               }
 
               // Recall-only — send follow-up, pipe continuation
-              log.info(
+              reportRecallDiagnostic(
                 `recall (stream, depth=${recallDepth}): executing follow-up for session ` +
                   `${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
@@ -8313,10 +8600,14 @@ export function buildStreamingResponse(
                 );
               } catch (error) {
                 if (streamSignal.aborted) throw error;
-                if (finalRecallRound)
+                if (
+                  finalRecallRound ||
+                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                )
                   throw new RecallContinuationFailure("follow_up_setup");
-                log.error(
+                reportRecallDiagnostic(
                   `recall follow-up fetch failed (depth=${recallDepth}) for session ${recallContext.sessionState.sessionID.slice(0, 16)}`,
+                  "error",
                 );
                 // takeHeldBackEvents() — for Anthropic this is a no-op
                 // (already consumed before the marker envelope emission
@@ -8339,10 +8630,14 @@ export function buildStreamingResponse(
               }
 
               if (!streamingFollowUp.ok) {
-                if (finalRecallRound)
+                if (
+                  finalRecallRound ||
+                  recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS
+                )
                   throw new RecallContinuationFailure("follow_up_failed");
-                log.error(
+                reportRecallDiagnostic(
                   `recall follow-up upstream error: ${streamingFollowUp.status ?? "?"}`,
+                  "error",
                 );
                 captureToolPairing400({
                   status: streamingFollowUp.status ?? 0,
@@ -8375,7 +8670,7 @@ export function buildStreamingResponse(
               }
 
               const followUp = streamingFollowUp.followUp;
-              log.info(
+              reportRecallDiagnostic(
                 `recall follow-up response (depth=${recallDepth}): session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
 
@@ -8408,6 +8703,9 @@ export function buildStreamingResponse(
               activeReader = contReader;
 
               const finalTerminalEvents: string[] = [];
+              // Usage arrives at the terminal event. Until it is validated,
+              // expanded-budget continuation text must not reach the client.
+              const heldContinuation = { events: [] as string[], bytes: 0 };
               const continuationValidator = new AnthropicSSEValidator();
               try {
                 for await (const {
@@ -8424,6 +8722,14 @@ export function buildStreamingResponse(
                   continuationValidator.process(contEvent, contData);
                   const forwarded = contAccum.processEvent(contEvent, contData);
                   if (
+                    contEvent === "message_start" &&
+                    !recallBudget.continuationModelMatches(
+                      contAccum.getResponse().model,
+                    )
+                  ) {
+                    throw new RecallContinuationFailure("follow_up_failed");
+                  }
+                  if (
                     forwarded &&
                     finalRecallRound &&
                     (contEvent === "message_delta" ||
@@ -8434,7 +8740,18 @@ export function buildStreamingResponse(
                     // Forward non-recall, non-held-back events to client.
                     // message_delta usage scaling is handled by a separate pass
                     // below only for the final continuation's terminal events.
-                    if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
+                    if (recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS) {
+                      heldContinuation.bytes += Buffer.byteLength(forwarded);
+                      if (
+                        heldContinuation.bytes > MAX_FOREGROUND_RESPONSE_BYTES
+                      )
+                        throw new RecallContinuationFailure("follow_up_failed");
+                      heldContinuation.events.push(forwarded);
+                    } else if (
+                      !(await safeEnqueue(encoder.encode(forwarded)))
+                    ) {
+                      break;
+                    }
                   }
                   if (continuationValidator.isDone()) break;
                 }
@@ -8444,7 +8761,7 @@ export function buildStreamingResponse(
               }
               if (!cancelled) continuationValidator.assertDone();
 
-              log.info(
+              reportRecallDiagnostic(
                 `recall follow-up stream complete (depth=${recallDepth}): ` +
                   `session=${recallContext.sessionState.sessionID.slice(0, 16)}`,
               );
@@ -8454,14 +8771,31 @@ export function buildStreamingResponse(
                 continuationResp.usage ?? ZERO_USAGE,
               );
               activeContinuation = undefined;
-              const continuationStopReason = recallBudget.recordUsage(
-                continuationResp.usage,
-              );
+              const continuationStopReason =
+                recallBudget.recordContinuationUsage(
+                  continuationResp.usage,
+                  continuationResp.model,
+                  continuationResp.usageComplete === true,
+                );
+              if (
+                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                continuationResp.usageComplete !== true
+              ) {
+                throw new RecallContinuationFailure("follow_up_failed");
+              }
+              if (recallBudget.exceedsTokenCeiling())
+                throw new RecallContinuationFailure("follow_up_failed");
+              if (!recallBudget.canRecover())
+                throw new RecallContinuationFailure("follow_up_failed");
               if (finalRecallRound || continuationStopReason) {
                 if (contAccum.hasRecall())
                   throw new RecallContinuationFailure("depth_exhausted");
                 if (!isUsableRecallContinuation(continuationResp))
                   throw new RecallContinuationFailure("follow_up_failed");
+              }
+
+              for (const forwarded of heldContinuation.events) {
+                if (!(await safeEnqueue(encoder.encode(forwarded)))) break;
               }
 
               // Check if continuation contained recall — if so, loop
@@ -8503,7 +8837,7 @@ export function buildStreamingResponse(
 
               continuationResp.usage = cumulativeUsage;
               if (finalRecallRound || continuationStopReason)
-                log.info("recall final continuation: completed");
+                reportRecallDiagnostic("recall final continuation: completed");
               clearKeepalive();
               recallDiagnostics.finish("completed");
               complete(continuationResp);
@@ -8526,7 +8860,10 @@ export function buildStreamingResponse(
             try {
               recallContext?.onFailure?.(recallFailureResponse());
             } catch {
-              log.error("recall failure accounting callback failed");
+              reportRecallDiagnostic(
+                "recall failure accounting callback failed",
+                "error",
+              );
             }
           }
           streamSignal.removeEventListener("abort", onStreamAbort);
@@ -8541,7 +8878,9 @@ export function buildStreamingResponse(
           const isAbort =
             err instanceof DOMException && err.name === "AbortError";
           if (isAbort) {
-            log.info("streaming pipeline aborted (client disconnect)");
+            reportRecallDiagnostic(
+              "streaming pipeline aborted (client disconnect)",
+            );
             // Only surfaces to Sentry if the host was under pressure at abort time.
             captureClientAbortUnderPressure({
               startMs: streamStartMs,
@@ -8549,7 +8888,7 @@ export function buildStreamingResponse(
               sessionID,
             });
           } else {
-            log.error("streaming pipeline error:", err);
+            reportRecallDiagnostic("streaming pipeline error", "error");
           }
           try {
             controller.error(err);
@@ -8663,10 +9002,15 @@ export function streamResponsesRecallAware(
     maxStreamBytes?: number;
     maxSSEFrames?: number;
     validation?: "public" | "codex";
+    /** Canonicalize a provider that rotates response.id across lifecycle events. */
+    pinResponseId?: boolean;
     /** Caller abort combined with the stream's client-disconnect controller. */
     signal?: AbortSignal;
     /** Absolute request deadline inherited from the foreground abort scope. */
     recallDeadlineAt?: number;
+    modelContextTokens?: number;
+    allowExpandedContext?: boolean;
+    expectedPrincipalModel?: string;
     /**
      * Reissue the byte-stable principal request after a pre-output body-read
      * failure. The caller must retain the original transformed request, route,
@@ -8812,6 +9156,7 @@ export function streamResponsesRecallAware(
       event,
       parsed,
       maxSparseIndex,
+      opts.pinResponseId,
     );
     return normalizationState;
   };
@@ -8968,7 +9313,7 @@ export function streamResponsesRecallAware(
       try {
         rollback();
       } catch {
-        log.error("recall transaction rollback failed");
+        reportRecallDiagnostic("recall transaction rollback failed", "error");
       }
     }
   };
@@ -9006,16 +9351,14 @@ export function streamResponsesRecallAware(
   const encoder = new TextEncoder();
   const sessionID = opts.sessionID;
   const reportRecallStreamFailure = (message: string): void => {
-    try {
-      log.error(message);
-    } catch {
-      // Diagnostics must never alter the model response path.
-    }
+    reportRecallDiagnostic(message, "error");
   };
   const recallBudget = new RecallChainBudget({
     maxExecutions:
       opts.maxRecallExecutions ?? opts.maxRecallDepth ?? MAX_RECALL_EXECUTIONS,
     deadlineAt: opts.recallDeadlineAt,
+    modelContextTokens: opts.modelContextTokens,
+    allowExpandedContext: opts.allowExpandedContext,
   });
   const maxDeferredBytes = opts.maxDeferredBytes ?? 1024 * 1024;
   const maxHiddenRecallBytes = opts.maxHiddenRecallBytes ?? maxDeferredBytes;
@@ -9027,6 +9370,7 @@ export function streamResponsesRecallAware(
   const maxStreamBytes = opts.maxStreamBytes ?? 64 * 1024 * 1024;
   let retainedStateBytes = 0;
   let streamBytes = 0;
+  let emittedStreamBytes = 0;
   let hiddenRecallBytes = 0;
   const frameCounter = { count: 0 };
   const sseInactivityMs =
@@ -9034,6 +9378,62 @@ export function streamResponsesRecallAware(
     getSSEInactivityDeadlines().foregroundSseInactivityMs;
   const maxPrincipalTransportRetries = 1;
   const maxRecallContinuationTransportRetries = 1;
+  const buildClientFailureChunk = (
+    event: "response.failed" | "response.incomplete",
+    id: string,
+    model: string,
+    message: string,
+  ): Uint8Array =>
+    encoder.encode(
+      formatResponsesEvent(
+        event,
+        JSON.stringify({
+          type: event,
+          response: {
+            id,
+            object: "response",
+            created_at: Math.floor(Date.now() / 1000),
+            model,
+            status: event === "response.incomplete" ? "incomplete" : "failed",
+            output: [],
+            usage: null,
+            ...(event === "response.incomplete"
+              ? {
+                  incomplete_details: {
+                    reason: PRINCIPAL_TRANSPORT_INCOMPLETE_REASON,
+                  },
+                }
+              : {}),
+            error: {
+              type: "server_error",
+              code: "server_error",
+              message,
+            },
+          },
+        }),
+      ),
+    );
+  const fallbackFailureReserve = buildClientFailureChunk(
+    "response.incomplete",
+    "resp_error",
+    "unknown",
+    "Lore could not continue the response after recall",
+  );
+  let failureReserveState: ResponsesAccState | undefined;
+  let anchoredFailureReserve: Uint8Array | undefined;
+  const failureReserveChunkForState = (): Uint8Array => {
+    if (!state.createdId) return fallbackFailureReserve;
+    if (failureReserveState !== state) {
+      failureReserveState = state;
+      anchoredFailureReserve = buildClientFailureChunk(
+        "response.incomplete",
+        state.createdId,
+        state.model,
+        "Lore could not continue the response after recall",
+      );
+    }
+    return anchoredFailureReserve ?? fallbackFailureReserve;
+  };
 
   type RecallArguments = {
     query: string;
@@ -9108,12 +9508,13 @@ export function streamResponsesRecallAware(
     if (queryValue !== undefined && typeof queryValue !== "string") {
       throw new InvalidRecallArguments("query_type", "query must be a string");
     }
-    if (
-      idValue !== undefined &&
-      (typeof idValue !== "string" ||
-        !idValue ||
-        idValue.length > MAX_RECALL_ID_CHARS)
-    ) {
+    if (typeof queryValue === "string" && !isValidRecallQuery(queryValue)) {
+      throw new InvalidRecallArguments(
+        "query_length",
+        `query must be no longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+      );
+    }
+    if (idValue !== undefined && !isValidRecallId(idValue)) {
       throw new InvalidRecallArguments("id_type", "id must be a string");
     }
     if (
@@ -9121,10 +9522,7 @@ export function streamResponsesRecallAware(
       (!Array.isArray(idsValue) ||
         idsValue.length === 0 ||
         idsValue.length > MAX_RECALL_BATCH_IDS ||
-        idsValue.some(
-          (id) =>
-            typeof id !== "string" || !id || id.length > MAX_RECALL_ID_CHARS,
-        ))
+        idsValue.some((id) => !isValidRecallId(id)))
     ) {
       throw new InvalidRecallArguments(
         "ids_type",
@@ -10224,6 +10622,9 @@ export function streamResponsesRecallAware(
       if (!response || typeof response.id !== "string" || !response.id) {
         throw new Error("response.created missing response identity");
       }
+      if (typeof response.model !== "string" || !response.model) {
+        throw new Error("response.created missing response model");
+      }
       if (
         response.status !== undefined &&
         response.status !== "in_progress" &&
@@ -10245,10 +10646,30 @@ export function streamResponsesRecallAware(
     }
     if (event === "response.in_progress") {
       const response = parsed.response as Record<string, unknown> | undefined;
-      if (acc.id && response?.id !== undefined && response.id !== acc.id) {
+      const requireCompleteLifecycle =
+        opts.validation !== "codex" || opts.pinResponseId === true;
+      if (
+        requireCompleteLifecycle
+          ? !response ||
+            typeof response.id !== "string" ||
+            !response.id ||
+            response.id !== acc.id
+          : acc.id && response?.id !== undefined && response.id !== acc.id
+      ) {
         throw new Error(
           "Responses in-progress event changed response identity",
         );
+      }
+      if (
+        requireCompleteLifecycle
+          ? typeof response?.model !== "string" ||
+            !response.model ||
+            response.model !== acc.model
+          : acc.model &&
+            response?.model !== undefined &&
+            response.model !== acc.model
+      ) {
+        throw new Error("Responses lifecycle event changed response model");
       }
       if (response?.status !== undefined && response.status !== "in_progress") {
         throw new Error("response.in_progress has invalid status");
@@ -10267,10 +10688,30 @@ export function streamResponsesRecallAware(
       event === "response.failed"
     ) {
       const response = parsed.response as Record<string, unknown> | undefined;
-      if (acc.id && response?.id !== acc.id) {
+      const requireCompleteLifecycle =
+        opts.validation !== "codex" || opts.pinResponseId === true;
+      if (
+        !response ||
+        (requireCompleteLifecycle
+          ? typeof response.id !== "string" ||
+            !response.id ||
+            response.id !== acc.id
+          : acc.id && response.id !== undefined && response.id !== acc.id)
+      ) {
         throw new Error("Responses terminal event changed response identity");
       }
-      const status = response?.status;
+      if (
+        requireCompleteLifecycle
+          ? typeof response.model !== "string" ||
+            !response.model ||
+            response.model !== acc.model
+          : acc.model &&
+            response.model !== undefined &&
+            response.model !== acc.model
+      ) {
+        throw new Error("Responses lifecycle event changed response model");
+      }
+      const status = response.status;
       const terminalStatuses = new Set([
         "completed",
         "incomplete",
@@ -10292,7 +10733,7 @@ export function streamResponsesRecallAware(
         throw new Error("Responses terminal event contradicts response status");
       }
       if (status === "incomplete") {
-        const details = response?.incomplete_details;
+        const details = response.incomplete_details;
         if (
           details !== undefined &&
           details !== null &&
@@ -10510,7 +10951,7 @@ export function streamResponsesRecallAware(
   ): void => {
     const response = parsed.response as Record<string, unknown> | undefined;
     if (!response) throw new Error("Responses terminal event missing response");
-    if (acc.id && response.id !== acc.id) {
+    if (acc.id && response.id !== undefined && response.id !== acc.id) {
       throw new Error("Responses terminal event changed response identity");
     }
     if (response.output === undefined) {
@@ -10812,10 +11253,13 @@ export function streamResponsesRecallAware(
   let completionAttempted = false;
   let nextSequenceNumber = 0;
 
-  const sequenceChunk = (chunk: Uint8Array): Uint8Array => {
+  const sequenceChunk = (
+    chunk: Uint8Array,
+  ): { chunk: Uint8Array; sequenceCount: number } => {
     const text = new TextDecoder().decode(chunk);
-    if (!text.startsWith("event: ")) return chunk;
+    if (!text.startsWith("event: ")) return { chunk, sequenceCount: 0 };
     let output = "";
+    const sequence = { count: 0 };
     for (const frame of text.split("\n\n")) {
       if (!frame) continue;
       const lines = frame.split("\n");
@@ -10840,13 +11284,17 @@ export function streamResponsesRecallAware(
         const parsed = JSON.parse(data) as Record<string, unknown>;
         output += formatResponsesEvent(
           event,
-          JSON.stringify({ ...parsed, sequence_number: nextSequenceNumber++ }),
+          JSON.stringify({
+            ...parsed,
+            sequence_number: nextSequenceNumber + sequence.count,
+          }),
         );
+        sequence.count++;
       } catch {
         output += `${frame}\n\n`;
       }
     }
-    return encoder.encode(output);
+    return { chunk: encoder.encode(output), sequenceCount: sequence.count };
   };
 
   const finish = (resp: GatewayResponse, successful: boolean): boolean => {
@@ -10872,13 +11320,17 @@ export function streamResponsesRecallAware(
     const admission = recallBudget.admit(
       input.invalidIssue ? 1 : recallItemReservation(input),
     );
-    if (admission) throw new RecallContinuationFailure("depth_exhausted");
+    if (admission) {
+      reportRecallDiagnostic(`recall admission denied reason=${admission}`);
+      throw new RecallContinuationFailure("depth_exhausted");
+    }
     if (input.invalidIssue) {
       const resultText =
         `Invalid recall arguments (${input.invalidIssue}). ` +
         "Call recall again with a non-empty query, one valid id, or a non-empty ids list. Set unused arguments to null.";
-      log.warn(
+      reportRecallDiagnostic(
         `openai-responses recall arguments rejected issue=${input.invalidIssue}`,
+        "warn",
       );
       reportInvalidRecallArguments(input.invalidIssue);
       recallBudget.record({
@@ -10924,7 +11376,7 @@ export function streamResponsesRecallAware(
       try {
         result.rollback?.();
       } catch {
-        log.error("late recall rollback failed");
+        reportRecallDiagnostic("late recall rollback failed");
       }
       throw signal.reason;
     }
@@ -10934,7 +11386,7 @@ export function streamResponsesRecallAware(
       coverage: result.coverage,
     });
     if (stopReason)
-      log.info(
+      reportRecallDiagnostic(
         `recall final continuation: budget exhausted reason=${stopReason}`,
       );
     return result;
@@ -11143,20 +11595,33 @@ export function streamResponsesRecallAware(
     }
     const terminalEvent = state.terminalEvent ?? "response.completed";
     const terminalResponse = state.terminalResponse;
+    const createdAt = terminalResponse?.created_at;
+    const incompleteDetails = terminalResponse?.incomplete_details;
+    const incompleteReason = isPlainRecord(incompleteDetails)
+      ? incompleteDetails.reason
+      : undefined;
     return formatResponsesEvent(
       terminalEvent,
       JSON.stringify({
         type: terminalEvent,
         response: {
-          ...terminalResponse,
           id: state.id,
           object: "response",
           created_at:
-            terminalResponse?.created_at ?? Math.floor(Date.now() / 1000),
+            typeof createdAt === "number" &&
+            Number.isSafeInteger(createdAt) &&
+            createdAt >= 0
+              ? createdAt
+              : Math.floor(Date.now() / 1000),
           model: res.model || state.model,
           status: finalStatus,
           output: finalOutput,
           usage: usageData,
+          ...(finalStatus === "incomplete" &&
+          (incompleteReason === "max_output_tokens" ||
+            incompleteReason === "content_filter")
+            ? { incomplete_details: { reason: incompleteReason } }
+            : {}),
         },
       }),
     );
@@ -11738,16 +12203,34 @@ export function streamResponsesRecallAware(
         const safeEnqueue = async (
           chunk: Uint8Array,
           afterEnqueue?: () => void,
+          reserveFailure = true,
         ): Promise<boolean> => {
           if (cancelled) return false;
           await waitForDemand();
           if (cancelled) return false;
+          const sequenced = sequenceChunk(chunk);
+          const reservedFailureBytes = reserveFailure
+            ? failureReserveChunkForState().byteLength + 64
+            : 0;
+          if (
+            emittedStreamBytes +
+              sequenced.chunk.byteLength +
+              reservedFailureBytes >
+            maxStreamBytes
+          ) {
+            if (!reserveFailure) return false;
+            throw new SSEStreamLimitError(
+              "Responses stream exceeded output byte limit",
+            );
+          }
           try {
-            controller.enqueue(sequenceChunk(chunk));
+            controller.enqueue(sequenced.chunk);
           } catch {
             cancelled = true;
             return false;
           }
+          nextSequenceNumber += sequenced.sequenceCount;
+          emittedStreamBytes += sequenced.chunk.byteLength;
           afterEnqueue?.();
           return true;
         };
@@ -11784,8 +12267,15 @@ export function streamResponsesRecallAware(
           if (keepaliveTimer) clearTimeout(keepaliveTimer);
           keepaliveTimer = setTimeout(function tick() {
             if (cancelled || signal.aborted) return;
-            if ((controller.desiredSize ?? 1) > 0) {
-              void safeEnqueue(keepaliveComment);
+            if (
+              (controller.desiredSize ?? 1) > 0 &&
+              emittedStreamBytes +
+                keepaliveComment.byteLength +
+                failureReserveChunkForState().byteLength +
+                64 <=
+                maxStreamBytes
+            ) {
+              void safeEnqueue(keepaliveComment).catch(() => {});
             }
             if (!signal.aborted) {
               keepaliveTimer = setTimeout(tick, KEEPALIVE_INACTIVITY_MS);
@@ -11802,6 +12292,7 @@ export function streamResponsesRecallAware(
         let principalRetrySucceededReported = false;
         let principalReadFinished = false;
         let continuationAttempted = false;
+        let continuationUsagePending = false;
         let continuationFailureCategory:
           | RecallContinuationFailureCategory
           | undefined;
@@ -11884,6 +12375,16 @@ export function streamResponsesRecallAware(
             return "terminal_reasoning_changed";
           if (message.startsWith("Responses terminal output "))
             return "terminal_output";
+          if (message === "Responses lifecycle event changed response model")
+            return "response_model";
+          if (
+            message === "Responses in-progress event changed response identity"
+          )
+            return "response_identity";
+          if (message === "response.in_progress has invalid status")
+            return "response_status";
+          if (message === "response.in_progress must have empty output")
+            return "response_snapshot_output";
           if (
             message ===
             "invalid recall function arguments: expected JSON string"
@@ -12157,14 +12658,19 @@ export function streamResponsesRecallAware(
             ) {
               recallDetected = true;
             }
+            const normalizedData =
+              opts.pinResponseId &&
+              pinResponsesLifecycleIdentity(state, event, parsed)
+                ? JSON.stringify(parsed)
+                : data;
+            principalPhase = "validate_response";
+            validateResponseLifecycle(state, event, parsed);
             principalPhase = "normalize";
             const normalizationState = normalizeCodexEvent(
               state,
               event,
               parsed,
             );
-            principalPhase = "validate_response";
-            validateResponseLifecycle(state, event, parsed);
             principalPhase = "seed_implicit";
             seedImplicitCodexItem(state, normalizationState, event, parsed);
 
@@ -12251,7 +12757,7 @@ export function streamResponsesRecallAware(
               : undefined;
             const publicData = publicCodexRateLimit
               ? JSON.stringify(publicCodexRateLimit)
-              : data;
+              : normalizedData;
             if (
               event === "response.output_item.done" &&
               outputIndex !== undefined
@@ -12466,7 +12972,7 @@ export function streamResponsesRecallAware(
                       formatResponsesEvent(
                         event,
                         terminalParsed === parsed
-                          ? data
+                          ? normalizedData
                           : JSON.stringify(terminalParsed),
                       ),
                     ),
@@ -12517,10 +13023,16 @@ export function streamResponsesRecallAware(
               };
               transactionRetainedStateBytes = retainedStateBytes;
               transactionProviderUsage = { ...ZERO_USAGE };
-              // The principal Responses stream is part of the same request
-              // budget. Count it once before its first recall is admitted;
-              // continuation streams are accounted for after each follow-up.
-              recallBudget.recordUsage(state.usage);
+              // The principal stream is sunk work. Bound its validated size,
+              // then charge each additional continuation against its own cap.
+              recallBudget.recordPrincipalUsage(
+                state.usage,
+                {
+                  expectedModel: opts.expectedPrincipalModel,
+                  actualModel: state.model,
+                },
+                state.usageComplete,
+              );
               type TransactionalEvent = {
                 chunk: Uint8Array;
                 sourceIndex?: number;
@@ -12642,6 +13154,7 @@ export function streamResponsesRecallAware(
                     continuationAttempted = true;
                     continuationFailureCategory = "follow_up_setup";
                     signal.throwIfAborted();
+                    continuationUsagePending = true;
                     let follow = await settleFollowUp({
                       finalRecallRound: recallBudget.mustFinalizeNext(),
                       anchorText: executed.anchorText,
@@ -12677,6 +13190,22 @@ export function streamResponsesRecallAware(
                       activeReader = follow.reader;
                       let retryFollowUp = false;
                       const contState = makeResponsesAccState();
+                      let continuationUsageCharged = false;
+                      const chargeContinuationUsage = (): void => {
+                        if (continuationUsageCharged) return;
+                        assertUsageMergeable(
+                          transactionProviderUsage,
+                          contState.usage,
+                        );
+                        mergeUsage(transactionProviderUsage, contState.usage);
+                        continuationUsageCharged = true;
+                        recallBudget.recordContinuationUsage(
+                          contState.usage,
+                          contState.model,
+                          contState.usageComplete,
+                        );
+                        continuationUsagePending = false;
+                      };
                       const contRecallIndices = new Set<number>();
                       const contReferenceIndices = new Map<
                         number,
@@ -12845,12 +13374,35 @@ export function streamResponsesRecallAware(
                               `Responses payload type does not match ${ce}`,
                             );
                           }
+                          const normalizedContinuationData =
+                            opts.pinResponseId &&
+                            pinResponsesLifecycleIdentity(
+                              contState,
+                              ce,
+                              cparsed,
+                            )
+                              ? JSON.stringify(cparsed)
+                              : cd;
+                          validateResponseLifecycle(contState, ce, cparsed);
+                          if (
+                            ce === "response.created" &&
+                            !recallBudget.continuationModelMatches(
+                              (
+                                cparsed.response as
+                                  | { model?: string }
+                                  | undefined
+                              )?.model,
+                            )
+                          ) {
+                            throw new RecallContinuationFailure(
+                              "follow_up_failed",
+                            );
+                          }
                           const contNormalizationState = normalizeCodexEvent(
                             contState,
                             ce,
                             cparsed,
                           );
-                          validateResponseLifecycle(contState, ce, cparsed);
                           if (
                             consumeReferenceEvent(
                               contState,
@@ -12884,7 +13436,9 @@ export function streamResponsesRecallAware(
                             contState,
                           );
                           if (ci !== undefined) {
-                            retainedStateBytes += encoder.encode(cd).byteLength;
+                            retainedStateBytes += encoder.encode(
+                              normalizedContinuationData,
+                            ).byteLength;
                             if (retainedStateBytes > maxRetainedStateBytes) {
                               throw new RecallContinuationFailure(
                                 "resource_limit",
@@ -12942,7 +13496,7 @@ export function streamResponsesRecallAware(
                             : undefined;
                           const publicContinuationData = publicCodexRateLimit
                             ? JSON.stringify(publicCodexRateLimit)
-                            : cd;
+                            : normalizedContinuationData;
                           if (
                             ce === "response.output_item.done" &&
                             ci !== undefined
@@ -13174,6 +13728,10 @@ export function streamResponsesRecallAware(
                           }
                         }
                       } catch (error) {
+                        // A validated terminal can still fail output/lifecycle
+                        // checks. Its provider usage remains spent even though
+                        // none of its output may enter recovery or persistence.
+                        chargeContinuationUsage();
                         if (
                           error instanceof SSEStreamLimitError ||
                           frameCounter.count > maxSSEFrames ||
@@ -13187,6 +13745,8 @@ export function streamResponsesRecallAware(
                         if (
                           error instanceof SSEStreamTransportError &&
                           !continuationFollowUpInput.finalRecallRound &&
+                          (recallBudget.maxTokens <= MAX_RECALL_CHAIN_TOKENS ||
+                            recallBudget.canRecover()) &&
                           recallContinuationTransportRetries <
                             maxRecallContinuationTransportRetries
                         ) {
@@ -13209,8 +13769,9 @@ export function streamResponsesRecallAware(
                           for (const identity of continuationRetryBaseline.referenceIdentities) {
                             referenceIdentities.add(identity);
                           }
-                          log.warn(
+                          reportRecallDiagnostic(
                             `retrying recall continuation after ${error.kind} transport failure${sessionID ? ` (session=${sessionID.slice(0, 16)})` : ""}`,
+                            "warn",
                           );
                           retryFollowUp = true;
                         } else {
@@ -13228,6 +13789,7 @@ export function streamResponsesRecallAware(
                       }
                       if (retryFollowUp) {
                         continuationFailureCategory = "follow_up_setup";
+                        continuationUsagePending = true;
                         follow = await settleFollowUp(
                           continuationFollowUpInput,
                         );
@@ -13254,12 +13816,19 @@ export function streamResponsesRecallAware(
                         }
                         mergeUsage(state.usage, contState.usage);
                       };
-                      assertUsageMergeable(
-                        transactionProviderUsage,
-                        contState.usage,
-                      );
-                      mergeUsage(transactionProviderUsage, contState.usage);
-                      recallBudget.recordUsage(contState.usage);
+                      chargeContinuationUsage();
+                      if (
+                        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                        !contState.usageComplete
+                      ) {
+                        throw new RecallContinuationFailure(
+                          "follow_up_usage_missing",
+                        );
+                      }
+                      if (recallBudget.exceedsTokenCeiling())
+                        throw new RecallContinuationFailure("follow_up_failed");
+                      if (!recallBudget.canRecover())
+                        throw new RecallContinuationFailure("follow_up_failed");
                       if (
                         continuationFailed ||
                         (continuationFollowUpInput.finalRecallRound &&
@@ -13447,7 +14016,9 @@ export function streamResponsesRecallAware(
                       }
                       mergeContinuation();
                       if (continuationFollowUpInput.finalRecallRound)
-                        log.info("recall final continuation: completed");
+                        reportRecallDiagnostic(
+                          "recall final continuation: completed",
+                        );
                       if (!nextRecall || !nextExecuted || contOtherTool) {
                         state.stopReason = contState.stopReason;
                         state.terminalEvent = contState.terminalEvent;
@@ -13743,7 +14314,9 @@ export function streamResponsesRecallAware(
           const isAbort =
             err instanceof DOMException && err.name === "AbortError";
           if (isAbort) {
-            log.info("openai-responses recall-aware stream aborted");
+            reportRecallDiagnostic(
+              "openai-responses recall-aware stream aborted",
+            );
             if (cancelled || signal.aborted) {
               rollbackTransaction();
               if (opts.signal?.aborted && !cancelled) {
@@ -13793,12 +14366,21 @@ export function streamResponsesRecallAware(
             (recallDetected ||
               continuationAttempted ||
               err instanceof RecallContinuationFailure);
+          if (continuationUsagePending) {
+            recallBudget.recordContinuationUsage(undefined, undefined, false);
+            continuationUsagePending = false;
+          }
           // Recovery items are appended after every source index, so sparse
           // visible indices do not reindex output already sent to the client.
           if (
             recallFailure &&
             opts.runRecovery &&
             recoverySeed &&
+            recallBudget.canRecover() &&
+            !(
+              err instanceof RecallContinuationFailure &&
+              err.category === "follow_up_usage_missing"
+            ) &&
             !signal.aborted
           ) {
             const recoveryStateBaseline = state;
@@ -13815,6 +14397,20 @@ export function streamResponsesRecallAware(
                 transactionProviderUsage,
                 rawRecovered.usage ?? ZERO_USAGE,
               );
+              if (
+                recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+                (!recallBudget.continuationModelMatches(rawRecovered.model) ||
+                  rawRecovered.usageComplete !== true)
+              ) {
+                throw new RecallContinuationFailure("follow_up_failed");
+              }
+              recallBudget.recordContinuationUsage(
+                rawRecovered.usage,
+                rawRecovered.model,
+                rawRecovered.usageComplete === true,
+              );
+              if (!recallBudget.canRecover())
+                throw new RecallContinuationFailure("follow_up_failed");
               for (const quota of rawRecovered.codexRateLimits ?? []) {
                 appendCodexRateLimitEvent(publicCodexRateLimits, quota);
               }
@@ -14069,6 +14665,18 @@ export function streamResponsesRecallAware(
               return;
             } catch (recoveryError) {
               if (signal.aborted) throw recoveryError;
+              if (recoveryError instanceof ResponsesTerminalError) {
+                try {
+                  transactionProviderUsage = mergeRecallUsage(
+                    transactionProviderUsage,
+                    recoveryError.response.usage ?? ZERO_USAGE,
+                  );
+                } catch {
+                  reportRecallStreamFailure(
+                    "failed to merge recall recovery usage for accounting",
+                  );
+                }
+              }
               if (!terminalDelivered) {
                 state = recoveryStateBaseline;
                 syntheticIdentities.clear();
@@ -14107,10 +14715,9 @@ export function streamResponsesRecallAware(
             );
             failedResponse.usage ??= { ...ZERO_USAGE };
             mergeUsage(failedResponse.usage, transactionProviderUsage);
-          } catch (usageError) {
-            log.error(
-              "failed to merge recall continuation usage for accounting:",
-              usageError,
+          } catch {
+            reportRecallStreamFailure(
+              "failed to merge recall continuation usage for accounting",
             );
           }
           transactionProviderUsage = { ...ZERO_USAGE };
@@ -14153,46 +14760,27 @@ export function streamResponsesRecallAware(
                     hiddenOutputIdentities.has(identity),
                 )),
           );
-          await safeEnqueue(
-            encoder.encode(
-              formatResponsesEvent(
-                continueAfterPrincipalTransport
-                  ? "response.incomplete"
-                  : "response.failed",
-                JSON.stringify({
-                  type: continueAfterPrincipalTransport
-                    ? "response.incomplete"
-                    : "response.failed",
-                  response: {
-                    id: state.id || "resp_error",
-                    object: "response",
-                    created_at: Math.floor(Date.now() / 1000),
-                    model: state.model,
-                    status: continueAfterPrincipalTransport
-                      ? "incomplete"
-                      : "failed",
-                    output: buildOutputItems(hiddenOutputIndices),
-                    usage: null,
-                    ...(continueAfterPrincipalTransport
-                      ? {
-                          incomplete_details: {
-                            reason: PRINCIPAL_TRANSPORT_INCOMPLETE_REASON,
-                          },
-                        }
-                      : {}),
-                    error: {
-                      type: "server_error",
-                      code: "server_error",
-                      message: recallFailure
-                        ? "Lore could not continue the response after recall"
-                        : "Gateway request failed",
-                    },
-                  },
-                }),
-              ),
-            ),
-            () => finish(failedResponse, false),
+          const failureEvent = continueAfterPrincipalTransport
+            ? "response.incomplete"
+            : "response.failed";
+          const useCreatedIdentity =
+            principalEventEmitted && state.createdId !== undefined;
+          const failureChunk = buildClientFailureChunk(
+            failureEvent,
+            useCreatedIdentity
+              ? (state.createdId ?? "resp_error")
+              : "resp_error",
+            useCreatedIdentity ? state.model : "unknown",
+            recallFailure
+              ? "Lore could not continue the response after recall"
+              : "Gateway request failed",
           );
+          const failureEnqueued = await safeEnqueue(
+            failureChunk,
+            () => finish(failedResponse, false),
+            false,
+          );
+          if (!failureEnqueued && !cancelled) finish(failedResponse, false);
           safeClose();
         }
       })().catch((error) => {
@@ -14422,6 +15010,7 @@ export async function accumulateNonStreamResponse(
   codex = false,
   signal?: AbortSignal,
   requireValidCompletion = false,
+  pinResponseId = false,
 ): Promise<GatewayResponse> {
   const finish = (response: GatewayResponse): GatewayResponse => {
     if (!requireValidCompletion) return response;
@@ -14464,6 +15053,7 @@ export async function accumulateNonStreamResponse(
           await accumulateResponsesSSEStream(sse, {
             signal,
             validation: codex ? "codex" : "public",
+            pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
             requireSuccessfulCompletion: requireValidCompletion,
@@ -15063,6 +15653,9 @@ export function accumulateOpenAINonStreamJSON(
     model: asString(json.model),
     content,
     stopReason,
+    usageComplete:
+      typeof usage?.prompt_tokens === "number" &&
+      typeof usage?.completion_tokens === "number",
     usage: {
       // prompt_tokens is inclusive of cache reads/writes; convert to the
       // gateway's disjoint convention so cache tokens aren't double-counted.
@@ -15173,6 +15766,9 @@ export function accumulateResponsesNonStreamJSON(
     content,
     rawOutputItems: replayableOutput,
     stopReason,
+    usageComplete:
+      typeof usage?.input_tokens === "number" &&
+      typeof usage?.output_tokens === "number",
     usage: {
       inputTokens: disjointOpenAIInputTokens(
         usage?.input_tokens as number | undefined,
@@ -16090,18 +16686,20 @@ function scheduleBackgroundWorkForTenant(
     // Idle-time work in idle.ts also uses runBackground(), so under sustained
     // rate pressure everything defers until the breaker naturally expires.
     //
-    // Coalesce: if a distillation is already in-flight or queued for THIS
-    // session (distillLimiter is per-session p-limit(1)), skip scheduling
-    // another. The in-flight run will pick up the newly-arrived tokens on
-    // its next segment pass, and queuing duplicates just starves the global
-    // p-limit(2) background slot — distillations getting blocked behind
-    // each other in the global queue.
-    if (!distillLimiter.isBusy(sessionID)) {
+    // Coalesce both sides of the global queue boundary. distillLimiter only
+    // becomes busy after runBackground starts the task, so the synchronous
+    // flag prevents hot sessions from filling that queue with duplicate work.
+    // The inner limiter also covers urgent and idle runs.
+    if (
+      !sessionState.distillationScheduled &&
+      !distillLimiter.isBusy(sessionID)
+    ) {
       const pendingTokens = temporal.undistilledTokens(projectPath, sessionID);
       if (pendingTokens >= cfg.distillation.maxSegmentTokens) {
         log.info(
           `incremental distillation: ${pendingTokens} undistilled tokens in ${sessionID.slice(0, 16)}`,
         );
+        sessionState.distillationScheduled = true;
         trackBackground(
           runBackground(
             () =>
@@ -16121,7 +16719,11 @@ function scheduleBackgroundWorkForTenant(
               ),
             `incremental-distill session=${sessionID.slice(0, 16)}`,
             workerProviderID,
-          ).catch((e) => log.error("background distillation failed:", e)),
+          )
+            .catch((e) => log.error("background distillation failed:", e))
+            .finally(() => {
+              sessionState.distillationScheduled = false;
+            }),
           sessionState,
         );
       }
@@ -17646,6 +18248,7 @@ export function createForegroundAbortScope(caller?: AbortSignal): {
   caller?.addEventListener("abort", onCallerAbort, { once: true });
   if (caller?.aborted) onCallerAbort();
   const requestTimeoutMs =
+    foregroundAbortTimeoutMsForTest ??
     getSSEInactivityDeadlines().foregroundRequestTimeoutMs;
   const deadlineAt = Date.now() + requestTimeoutMs;
   const timer = setTimeout(
@@ -17965,7 +18568,9 @@ export function validatedMetaStream(
   response: Response,
   protocol: "anthropic" | "openai" | "openai-responses" | "gemini",
   codex: boolean,
-  streamOptions: SSEStreamOptions = foregroundSSEStreamOptions(),
+  streamOptions: SSEStreamOptions & {
+    pinResponseId?: boolean;
+  } = foregroundSSEStreamOptions(),
 ): Response {
   const {
     signal,
@@ -17977,7 +18582,7 @@ export function validatedMetaStream(
       () => {},
       undefined,
       codex ? "codex" : "public",
-      { signal, inactivityMs },
+      { signal, inactivityMs, pinResponseId: streamOptions.pinResponseId },
     );
   }
   const abort = new AbortController();
@@ -18145,9 +18750,10 @@ async function handlePassthrough(
     throw error;
   }
   const effectiveProtocol = forwarded.effectiveProtocol;
+  const pinResponseId = forwarded.pinResponseId;
   const upstreamResponse = wrapBodyWithCleanup(
     forwarded.response,
-    abortScope.dispose,
+    req.stream || !forwarded.response.ok ? abortScope.dispose : () => {},
     abortScope.signal,
   );
 
@@ -18160,6 +18766,18 @@ async function handlePassthrough(
   // responses. Running a 4xx/429 body through an SSE validator would launder
   // it into status 200 or a synthetic stream failure.
   if (!upstreamResponse.ok) {
+    if (upstreamResponse.status === 400) {
+      logUpstreamResponseFailure(
+        400,
+        "",
+        upstreamResponse.headers,
+        req,
+        forwarded.route,
+        undefined,
+        forwarded.requestShape,
+      );
+      captureUpstream400(effectiveProtocol, forwarded.requestShape);
+    }
     return preserveUpstreamErrorResponse(upstreamResponse, abortScope.signal);
   }
 
@@ -18184,24 +18802,65 @@ async function handlePassthrough(
           upstreamResponse,
           wireProtocol,
           req.codex === true,
-          foregroundSSEStreamOptions(abortScope.signal),
+          {
+            ...foregroundSSEStreamOptions(abortScope.signal),
+            pinResponseId,
+          },
         ),
       );
     }
-    const body = await readForegroundBody(
-      upstreamResponse,
-      false,
-      undefined,
-      abortScope.signal,
-    );
-    if (wireProtocol === "openai-responses") {
-      parseResponsesNonStreamEnvelope(
-        JSON.parse(body) as Record<string, unknown>,
+    try {
+      const body = await readForegroundBody(
+        upstreamResponse,
+        false,
+        undefined,
+        abortScope.signal,
       );
+      const bodyReadPause = passthroughBodyReadPauseForTest;
+      if (bodyReadPause) {
+        bodyReadPause.onWait();
+        await bodyReadPause.pause;
+        abortScope.signal.throwIfAborted();
+      }
+      if (wireProtocol === "openai-responses") {
+        if (
+          looksLikeSSE(upstreamResponse.headers.get("content-type") ?? "", body)
+        ) {
+          const resp = await preserveIncompleteResponsesTerminal(
+            accumulateNonStreamResponse(
+              new Response(body, {
+                headers: {
+                  "content-type":
+                    upstreamResponse.headers.get("content-type") ?? "",
+                },
+              }),
+              wireProtocol,
+              req.codex === true,
+              abortScope.signal,
+              false,
+              pinResponseId,
+            ),
+          );
+          return withLimits(
+            nonStreamHttpResponse(
+              resp,
+              req.protocol,
+              req.stream,
+              undefined,
+              requestEnablesLongContext(req),
+            ),
+          );
+        }
+        parseResponsesNonStreamEnvelope(
+          JSON.parse(body) as Record<string, unknown>,
+        );
+      }
+      const headers = new Headers({ "content-type": "application/json" });
+      copyUsageLimitHeaders(upstreamResponse.headers, headers);
+      return new Response(body, { status: upstreamResponse.status, headers });
+    } finally {
+      abortScope.dispose();
     }
-    const headers = new Headers({ "content-type": "application/json" });
-    copyUsageLimitHeaders(upstreamResponse.headers, headers);
-    return new Response(body, { status: upstreamResponse.status, headers });
   }
 
   // Cross-protocol: accumulate the upstream response and re-emit in the
@@ -18256,6 +18915,7 @@ async function handlePassthrough(
           ? accumulateResponsesSSEStream(upstreamResponse, {
               ...foregroundSSEStreamOptions(abortScope.signal),
               validation: req.codex === true ? "codex" : "public",
+              pinResponseId,
               stopAtTerminal: true,
               requireCompletedTerminal: true,
             })
@@ -18283,23 +18943,29 @@ async function handlePassthrough(
   }
 
   // Non-streaming cross-protocol: accumulate + re-emit
-  const resp = await preserveIncompleteResponsesTerminal(
-    accumulateNonStreamResponse(
-      upstreamResponse,
-      wireProtocol,
-      req.codex === true,
-      abortScope.signal,
-    ),
-  );
-  return withLimits(
-    nonStreamHttpResponse(
-      resp,
-      req.protocol,
-      req.stream,
-      undefined,
-      requestEnablesLongContext(req),
-    ),
-  );
+  try {
+    const resp = await preserveIncompleteResponsesTerminal(
+      accumulateNonStreamResponse(
+        upstreamResponse,
+        wireProtocol,
+        req.codex === true,
+        abortScope.signal,
+        false,
+        pinResponseId,
+      ),
+    );
+    return withLimits(
+      nonStreamHttpResponse(
+        resp,
+        req.protocol,
+        req.stream,
+        undefined,
+        requestEnablesLongContext(req),
+      ),
+    );
+  } finally {
+    abortScope.dispose();
+  }
 }
 
 /**
@@ -18360,6 +19026,7 @@ async function handleProvisionalConversationTurn(
         ? await accumulateResponsesSSEStream(upstreamResponse, {
             ...foregroundSSEStreamOptions(abortScope.signal),
             validation: req.codex ? "codex" : "public",
+            pinResponseId: forwarded.pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           })
@@ -18390,6 +19057,7 @@ async function handleProvisionalConversationTurn(
           req.codex === true,
           abortScope.signal,
           true,
+          forwarded.pinResponseId,
         );
   } catch (error) {
     abortScope.dispose();
@@ -18432,7 +19100,10 @@ async function handleProvisionalConversationTurn(
       true,
       requestCredentialFingerprint(req.rawHeaders, config) ?? undefined,
     );
-    if (error.status === "incomplete" && !hasRecallToolUse(error.response)) {
+    if (
+      error.status === "incomplete" &&
+      (!hasGatewayRecallTool(req.tools) || !hasRecallToolUse(error.response))
+    ) {
       const response = nonStreamHttpResponse(
         error.response,
         req.protocol,
@@ -18966,9 +19637,14 @@ async function handleConversationTurn(
   const preparationTiming = new PreparationTiming(req);
   // Preparation can rewrite messages in place (notably recall expansion).
   // Preserve a pristine full request before those changes for the emergency
-  // upstream path. Suffix-only requests must never use this path.
+  // upstream path once it exceeds the durable source window. Otherwise a
+  // history can time out before publishing the checkpoint needed by its retry.
+  // Suffix-only requests must never use this path.
   let completeRequest: GatewayRequest | undefined;
-  if (!requestSourcePrefix(req) && requestSourceMessageCount(req) > 16_384) {
+  if (
+    !requestSourcePrefix(req) &&
+    requestSourceMessageCount(req) > SOURCE_WINDOW_MAX_MESSAGES
+  ) {
     try {
       completeRequest = preparationTiming.measure("fallback_snapshot", () => ({
         ...req,
@@ -19551,25 +20227,33 @@ async function handleConversationTurnPrepared(
       : {}),
   }));
 
+  // A client-owned `recall` collision must not consume or delete Lore's
+  // persisted anchors. The gateway injects its own recall tool only when the
+  // client has tools but no recall tool, so this decision is made before any
+  // marker expansion mutates the request.
+  const gatewayRecallForRequest = shouldEnableRecallMarkerReplay(req.tools);
+
   // --- Expand recall markers from previous turns ---
   // Scan all assistant messages for marker text blocks and restore them
   // to tool_use + tool_result pairs before forwarding upstream.
-  if (sessionState.recallStore.size > 0) {
-    // Cleanup must inspect the client transcript while anchors still exist.
-    // Expanding first would make every live anchor look orphaned.
-    const recallStoreChanged = cleanupRecallStore(
-      req,
-      sessionState.recallStore,
+  // Cleanup must inspect the client transcript while anchors still exist.
+  // Expanding first would make every live anchor look orphaned. Run this even
+  // with an empty store so corrupt persisted state cannot forward raw markers.
+  const recallStoreChanged = cleanupRecallStore(req, sessionState.recallStore, {
+    gatewayRecallEnabled: gatewayRecallForRequest,
+  });
+  const expanded = expandRecallMarkers(req, sessionState.recallStore, {
+    gatewayRecallEnabled: gatewayRecallForRequest,
+  });
+  if (expanded) {
+    reportRecallDiagnostic(
+      `expanded recall markers for session ${sessionID.slice(0, 16)}`,
     );
-    const expanded = expandRecallMarkers(req, sessionState.recallStore);
-    if (expanded) {
-      log.info(`expanded recall markers for session ${sessionID.slice(0, 16)}`);
-    }
-    if (recallStoreChanged) {
-      saveSessionTracking(sessionID, {
-        recallStore: serializeRecallStore(sessionState.recallStore),
-      });
-    }
+  }
+  if (recallStoreChanged) {
+    saveSessionTracking(sessionID, {
+      recallStore: serializeRecallStore(sessionState.recallStore),
+    });
   }
 
   // --- Strip context warning markers from previous turns ---
@@ -19622,6 +20306,36 @@ async function handleConversationTurnPrepared(
     req.model,
     extractProviderHeader(req.rawHeaders),
   );
+  // Flat models.dev entries can belong to a different provider. Expand recall
+  // only when the qualified context belongs to the final upstream destination.
+  const canonicalCodexRecallRoute = isCanonicalCodexRecallRoute(
+    requestUpstreamRoute,
+    req.codex,
+  );
+  const recallProviderID = canonicalCodexRecallRoute
+    ? "openai"
+    : requestUpstreamRoute.headerUpstream
+      ? undefined
+      : requestUpstreamRoute.providerID &&
+          requestUpstreamRoute.providerRoute?.url ===
+            requestUpstreamRoute.effectiveUpstreamBase
+        ? requestUpstreamRoute.providerID
+        : canonicalModelRouteProviderID(requestUpstreamRoute);
+  const providerRecallContext = knownModelContextLimit(
+    recallProviderID,
+    req.model,
+  );
+  const codexRecallContext = canonicalCodexRecallRoute
+    ? knownCodexContextLimit(req.model)
+    : undefined;
+  const verifiedRecallContext = canonicalCodexRecallRoute
+    ? providerRecallContext !== undefined && codexRecallContext !== undefined
+      ? Math.min(providerRecallContext, codexRecallContext)
+      : undefined
+    : providerRecallContext;
+  const recallModelContextTokens =
+    verifiedRecallContext ??
+    Math.min(modelSpec.context, MAX_RECALL_CHAIN_TOKENS);
   const cfg = loreConfig();
 
   // Cost-aware layer-0 cap: explicit config wins > cost formula > disabled.
@@ -20930,9 +21644,10 @@ async function handleConversationTurnPrepared(
         : RECALL_GATEWAY_TOOL;
     modifiedReq.tools = [...modifiedReq.tools, recallTool];
   }
+  const gatewayRecallEnabled = hasGatewayRecallTool(modifiedReq.tools);
   if (
     requestUpstreamRoute.effectiveProtocol === "openai-responses" &&
-    clientHasRecallTool(modifiedReq.tools)
+    gatewayRecallEnabled
   ) {
     modifiedReq.extras = {
       ...modifiedReq.extras,
@@ -20940,7 +21655,7 @@ async function handleConversationTurnPrepared(
     };
   }
   if (
-    clientHasRecallTool(modifiedReq.tools) &&
+    gatewayRecallEnabled &&
     (requestUpstreamRoute.effectiveProtocol === "anthropic" ||
       requestUpstreamRoute.effectiveProtocol === "vertex") &&
     !requestUpstreamRoute.bedrockMantle &&
@@ -21274,13 +21989,9 @@ async function handleConversationTurnPrepared(
   // The span is ended in postResponse() after usage attributes are set.
   const genAiSpan = Sentry.startInactiveSpan({
     op: "gen_ai.chat",
-    name: `chat ${req.model}`,
+    name: "AI conversation turn",
     attributes: {
       "gen_ai.operation.name": "chat",
-      "gen_ai.request.model": req.model,
-      "gen_ai.provider.name":
-        requestUpstreamRoute.providerID ??
-        requestUpstreamRoute.effectiveProtocol,
       "gen_ai.response.streaming": req.stream,
       // NO gen_ai.input.messages — privacy (proxy for other people's projects)
     },
@@ -21369,6 +22080,7 @@ async function handleConversationTurnPrepared(
     }
   };
   const { serializedBody: requestBody, effectiveProtocol } = upstreamResult;
+  const { pinResponseId } = upstreamResult;
 
   if (!upstreamResponse.ok) {
     rollback.preparation?.();
@@ -21400,7 +22112,11 @@ async function handleConversationTurnPrepared(
       req,
       requestUpstreamRoute,
       sessionID,
+      upstreamResult.requestShape,
     );
+    if (upstreamResponse.status === 400) {
+      captureUpstream400(effectiveProtocol, upstreamResult.requestShape);
+    }
 
     // When the API rejects with a context-length error, escalate the compression
     // layer for the next turn so the session doesn't get stuck in a loop.
@@ -21508,12 +22224,21 @@ async function handleConversationTurnPrepared(
     const recallBudget = new RecallChainBudget({
       maxExecutions: loreConfig().search.recall.chainMaxExecutions,
       deadlineAt: foregroundAbort.deadlineAt,
+      modelContextTokens: recallModelContextTokens,
+      allowExpandedContext: verifiedRecallContext !== undefined,
     });
-    // Account the principal response before the first recall admission. Each
-    // subsequent continuation is recorded below exactly once.
-    recallBudget.recordUsage(resp.usage);
+    recallBudget.recordPrincipalUsage(
+      resp.usage,
+      {
+        expectedModel: req.model,
+        actualModel: resp.model,
+      },
+      resp.usageComplete === true,
+    );
     const logRecallBudgetStop = (reason: RecallStopReason): void => {
-      log.info(`recall final continuation: budget exhausted reason=${reason}`);
+      reportRecallDiagnostic(
+        `recall final continuation: budget exhausted reason=${reason}`,
+      );
     };
     const bufferedRecallTransaction = createRecallPersistenceTransaction(
       sessionState,
@@ -21575,7 +22300,7 @@ async function handleConversationTurnPrepared(
       pendingKnowledgeDelta,
     );
 
-    while (hasRecallToolUse(currentResp)) {
+    while (gatewayRecallEnabled && hasRecallToolUse(currentResp)) {
       if (
         currentResp.content.filter(
           (block) =>
@@ -21594,7 +22319,7 @@ async function handleConversationTurnPrepared(
       }
       recallDepth++;
       recallPersistenceTransaction ??= bufferedRecallTransaction;
-      const { result, input, coverage } = await promiseAgainstAbort(
+      const recallExecution = await promiseAgainstAbort(
         () =>
           executeRecall(
             recallBlock,
@@ -21607,6 +22332,8 @@ async function handleConversationTurnPrepared(
           ),
         foregroundAbort.signal,
       );
+      if (!recallExecution.valid) return failRecall("recall_execution");
+      const { result, input, coverage } = recallExecution;
 
       bufferedRecallDiagnostics.record(input, result, coverage);
       const stopReason = recallBudget.record({
@@ -21667,7 +22394,7 @@ async function handleConversationTurnPrepared(
 
       if (hasOtherToolUse(currentResp)) {
         // Mixed tools — return response with marker, client handles the rest
-        log.info(
+        reportRecallDiagnostic(
           `recall (non-stream, mixed, depth=${recallDepth}): stored result for session ${sessionState.sessionID.slice(0, 16)}`,
         );
         markerResp.usage = cumulativeUsage;
@@ -21695,11 +22422,18 @@ async function handleConversationTurnPrepared(
               error.response.usage ?? ZERO_USAGE,
             ),
           );
+          recallBudget.recordContinuationUsage(
+            error.response.usage,
+            error.response.model,
+            error.response.usageComplete === true,
+          );
           if (error.response.codexRateLimits?.length) {
             for (const quota of error.response.codexRateLimits) {
               appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
             }
           }
+        } else {
+          recallBudget.recordContinuationUsage(undefined, undefined, false);
         }
       };
       const followUpRequiresStream = currentModifiedReq.codex === true;
@@ -21726,11 +22460,13 @@ async function handleConversationTurnPrepared(
             false,
             signal,
             recovery || finalRecallRound,
+            pinResponseId,
           ),
         parseSSE: (response, signal) =>
           accumulateResponsesSSEStream(response, {
             ...foregroundSSEStreamOptions(signal),
             validation: currentModifiedReq.codex ? "codex" : "public",
+            pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
             requireSuccessfulCompletion: recovery,
@@ -21740,6 +22476,7 @@ async function handleConversationTurnPrepared(
         category: RecallContinuationFailureCategory,
       ): Promise<Response> => {
         reportRecallContinuationFailure(category);
+        if (!recallBudget.canRecover()) return failRecall(category, false);
         let recovered: GatewayResponse;
         try {
           const recovery = await runRecallRecovery(
@@ -21752,6 +22489,29 @@ async function handleConversationTurnPrepared(
             foregroundAbort.signal,
           );
           if (!recovery.ok) return failRecall(category, false);
+          Object.assign(
+            cumulativeUsage,
+            mergeRecallUsage(
+              cumulativeUsage,
+              recovery.continuation.usage ?? ZERO_USAGE,
+            ),
+          );
+          if (
+            recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+            (!recallBudget.continuationModelMatches(
+              recovery.continuation.model,
+            ) ||
+              recovery.continuation.usageComplete !== true)
+          ) {
+            return failRecall(category, false);
+          }
+          recallBudget.recordContinuationUsage(
+            recovery.continuation.usage,
+            recovery.continuation.model,
+            recovery.continuation.usageComplete === true,
+          );
+          if (!recallBudget.canRecover())
+            return failRecall("follow_up_failed", false);
           const projected = projectRecallRecoveryResponse(
             recovery.continuation,
           );
@@ -21759,10 +22519,6 @@ async function handleConversationTurnPrepared(
             throw new Error("recall recovery produced unsafe output");
           }
           recovered = projected;
-          Object.assign(
-            cumulativeUsage,
-            mergeRecallUsage(cumulativeUsage, recovered.usage ?? ZERO_USAGE),
-          );
           if (recovered.codexRateLimits?.length) {
             for (const quota of recovered.codexRateLimits) {
               appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
@@ -21783,7 +22539,7 @@ async function handleConversationTurnPrepared(
           return failRecall(category, false);
         }
         if (
-          hasRecallToolUse(recovered) ||
+          (gatewayRecallEnabled && hasRecallToolUse(recovered)) ||
           !isUsableRecallContinuation(recovered)
         )
           return failRecall(category, false);
@@ -21817,7 +22573,7 @@ async function handleConversationTurnPrepared(
       // into a non-streaming continuation, so the recall loop below is
       // unchanged. Every other backend keeps the stream:false JSON follow-up
       // (the standard Responses API and Chat Completions both accept it).
-      log.info(
+      reportRecallDiagnostic(
         `recall (non-stream, depth=${recallDepth}, codex=${followUpRequiresStream}): executing follow-up for session ${sessionState.sessionID.slice(0, 16)}`,
       );
       const jsonRecallCtx = makeJSONRecallCtx(false);
@@ -21854,15 +22610,18 @@ async function handleConversationTurnPrepared(
         } catch {
           return failRecall("follow_up_failed");
         }
-        log.error(
+        reportRecallDiagnostic(
           `recall follow-up fetch failed (non-stream, depth=${recallDepth}) for session ${sessionState.sessionID.slice(0, 16)}`,
+          "error",
         );
         return recoverRecallContinuation("follow_up_failed");
       }
 
       if (!jsonFollowUp.ok) {
-        log.error(
+        recallBudget.recordContinuationUsage(undefined, undefined, false);
+        reportRecallDiagnostic(
           `recall follow-up upstream error: ${jsonFollowUp.status ?? "?"}`,
+          "error",
         );
         captureToolPairing400({
           status: jsonFollowUp.status ?? 0,
@@ -21881,11 +22640,26 @@ async function handleConversationTurnPrepared(
 
       // Accumulate usage from this iteration
       const contUsage = continuationResp.usage ?? ZERO_USAGE;
-      const continuationStopReason = recallBudget.recordUsage(contUsage);
+      const continuationStopReason = recallBudget.recordContinuationUsage(
+        continuationResp.usage,
+        continuationResp.model,
+        continuationResp.usageComplete === true,
+      );
       Object.assign(
         cumulativeUsage,
         mergeRecallUsage(cumulativeUsage, contUsage),
       );
+      if (!recallBudget.continuationModelMatches(continuationResp.model))
+        return recoverRecallContinuation("follow_up_failed");
+      if (
+        recallBudget.maxTokens > MAX_RECALL_CHAIN_TOKENS &&
+        continuationResp.usageComplete !== true
+      ) {
+        return failRecall("follow_up_failed");
+      }
+      if (recallBudget.exceedsTokenCeiling())
+        return failRecall("follow_up_failed");
+      if (!recallBudget.canRecover()) return failRecall("follow_up_failed");
       if (continuationResp.codexRateLimits?.length) {
         for (const quota of continuationResp.codexRateLimits) {
           appendCodexRateLimitEvent(cumulativeCodexRateLimits, quota);
@@ -21902,12 +22676,13 @@ async function handleConversationTurnPrepared(
       }
       currentResp = continuationResp;
       if (
-        !hasRecallToolUse(currentResp) &&
+        !(gatewayRecallEnabled && hasRecallToolUse(currentResp)) &&
         !isUsableRecallContinuation(currentResp)
       )
         return recoverRecallContinuation("follow_up_failed");
       if (
         (finalRecallRound || continuationStopReason) &&
+        gatewayRecallEnabled &&
         hasRecallToolUse(currentResp)
       ) {
         return recoverRecallContinuation("depth_exhausted");
@@ -21915,15 +22690,22 @@ async function handleConversationTurnPrepared(
       // Loop continues — hasRecallToolUse checked at top
     }
 
-    if (hasRecallToolUse(currentResp)) return failRecall("depth_exhausted");
-    if (recallBudget.stopReason() && !isUsableRecallContinuation(currentResp))
+    if (gatewayRecallEnabled && hasRecallToolUse(currentResp))
+      return failRecall("depth_exhausted");
+    if (
+      shouldRejectUnusableRecallContinuation(
+        gatewayRecallEnabled,
+        recallBudget.stopReason(),
+        currentResp,
+      )
+    )
       return failRecall("follow_up_failed");
     currentResp.usage = cumulativeUsage;
     if (cumulativeCodexRateLimits.length > 0) {
       currentResp.codexRateLimits = cumulativeCodexRateLimits;
     }
-    if (recallBudget.stopReason())
-      log.info("recall final continuation: completed");
+    if (gatewayRecallEnabled && recallBudget.stopReason())
+      reportRecallDiagnostic("recall final continuation: completed");
     finishBufferedResponse(currentResp);
     // Telemetry: flag a completion we're about to hand back with NO usable
     // content (no text, no tool_use) — the "no response data" class
@@ -21932,11 +22714,12 @@ async function handleConversationTurnPrepared(
     // blocks the read path.
     if (isEmptyCompletion(currentResp)) {
       const emptyOutputTokens = currentResp.usage?.outputTokens ?? 0;
-      log.warn(
+      reportRecallDiagnostic(
         `empty completion → client: protocol=${effectiveProtocol} ` +
           `model=${req.model} stopReason=${currentResp.stopReason} ` +
           `outputTokens=${emptyOutputTokens} recallDepth=${recallDepth} ` +
           `session=${sessionState.sessionID.slice(0, 16)}`,
+        "warn",
       );
       captureEmptyCompletion({
         protocol: effectiveProtocol,
@@ -22105,9 +22888,7 @@ async function handleConversationTurnPrepared(
       // codex "waiting for response headers" hang — the buffered path below
       // withholds all client bytes until the (slow, reasoning-heavy) upstream
       // fully completes.
-      const hasRecallTool = modifiedReq.tools.some(
-        (t) => t.name === RECALL_TOOL_NAME,
-      );
+      const hasRecallTool = gatewayRecallEnabled;
 
       // Only stream through recall-aware when the client ALSO speaks the
       // Responses API AND no warning needs to be layered in. The recall-aware
@@ -22122,6 +22903,7 @@ async function handleConversationTurnPrepared(
           return finishForeground(
             streamResponsesRecallAware(upstreamResponse, {
               validation: req.codex ? "codex" : "public",
+              pinResponseId,
               onComplete: (response, successful) => {
                 if (successful) finishStreaming(response);
                 else finishUnsuccessfulStreaming(response);
@@ -22136,6 +22918,9 @@ async function handleConversationTurnPrepared(
               noStore: suppressTemporalStorage,
               signal: foregroundAbort.signal,
               recallDeadlineAt: foregroundAbort.deadlineAt,
+              modelContextTokens: recallModelContextTokens,
+              allowExpandedContext: verifiedRecallContext !== undefined,
+              expectedPrincipalModel: req.model,
               retryPrincipal: async ({ signal }) => {
                 const retried = await upstreamResult.retry(signal);
                 return wrapBodyWithCleanup(retried, () => {}, signal);
@@ -22157,7 +22942,7 @@ async function handleConversationTurnPrepared(
                   pendingKnowledgeDelta,
                 );
                 const deferredTransferRecordings: Array<() => void> = [];
-                const { result, input, coverage } = await withTenant(
+                const recallExecution = await withTenant(
                   sessionState.storageTenantId ?? "",
                   () =>
                     executeRecall(
@@ -22182,6 +22967,10 @@ async function handleConversationTurnPrepared(
                       (record) => deferredTransferRecordings.push(record),
                     ),
                 );
+                if (!recallExecution.valid) {
+                  throw new RecallContinuationFailure("recall_execution");
+                }
+                const { result, input, coverage } = recallExecution;
                 const recallBlock = acc.content[contentPosition];
                 if (
                   recallBlock?.type !== "tool_use" ||
@@ -22367,6 +23156,7 @@ async function handleConversationTurnPrepared(
                     accumulateResponsesSSEStream(response, {
                       signal: recoverySignal,
                       validation: req.codex ? "codex" : "public",
+                      pinResponseId,
                       stopAtTerminal: true,
                       requireCompletedTerminal: true,
                       requireSuccessfulCompletion: true,
@@ -22399,7 +23189,10 @@ async function handleConversationTurnPrepared(
             },
             sessionState.sessionID,
             req.codex ? "codex" : "public",
-            foregroundSSEStreamOptions(foregroundAbort.signal),
+            {
+              ...foregroundSSEStreamOptions(foregroundAbort.signal),
+              pinResponseId,
+            },
           ),
         );
       }
@@ -22410,6 +23203,7 @@ async function handleConversationTurnPrepared(
           accumulateResponsesSSEStream(upstreamResponse, {
             ...foregroundSSEStreamOptions(foregroundAbort.signal),
             validation: req.codex ? "codex" : "public",
+            pinResponseId,
             stopAtTerminal: true,
             requireCompletedTerminal: true,
           }),
@@ -22419,7 +23213,7 @@ async function handleConversationTurnPrepared(
         return finishForeground(errorResponse(502, "Gateway request failed"));
       }
       if (!captured.successful) {
-        if (hasRecallToolUse(captured.response)) {
+        if (gatewayRecallEnabled && hasRecallToolUse(captured.response)) {
           return finishForeground(errorResponse(502, "Gateway request failed"));
         }
         return finishForeground(
@@ -22466,9 +23260,7 @@ async function handleConversationTurnPrepared(
 
     // Anthropic streaming: forward events and accumulate in parallel.
     // Pass recall context so the accumulator can intercept recall tool_use.
-    const hasRecallTool = modifiedReq.tools.some(
-      (t) => t.name === RECALL_TOOL_NAME,
-    );
+    const hasRecallTool = gatewayRecallEnabled;
     const anthropicSSE = buildStreamingResponse(
       upstreamResponse,
       finishStreaming,
@@ -22489,6 +23281,9 @@ async function handleConversationTurnPrepared(
             clientSpeaksAnthropic: req.protocol === "anthropic",
             stableLtmText,
             recallDeadlineAt: foregroundAbort.deadlineAt,
+            modelContextTokens: recallModelContextTokens,
+            allowExpandedContext: verifiedRecallContext !== undefined,
+            expectedPrincipalModel: req.model,
             ...(pendingKnowledgeDelta ? { pendingKnowledgeDelta } : {}),
           }
         : undefined,
@@ -22536,6 +23331,8 @@ async function handleConversationTurnPrepared(
         effectiveProtocol,
         modifiedReq.codex === true,
         foregroundAbort.signal,
+        false,
+        pinResponseId,
       ),
     ),
   );
@@ -22543,7 +23340,7 @@ async function handleConversationTurnPrepared(
     return finishForeground(errorResponse(502, "Gateway request failed"));
   }
   if (!captured.successful) {
-    if (hasRecallToolUse(captured.response)) {
+    if (gatewayRecallEnabled && hasRecallToolUse(captured.response)) {
       return finishForeground(errorResponse(502, "Gateway request failed"));
     }
     return finishForeground(

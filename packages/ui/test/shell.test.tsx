@@ -17,7 +17,7 @@ import {
 } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
-import { knowledgeHref } from "~/routes/Browse";
+import { knowledgeHref } from "~/lib/href";
 import { ApiError, type ApiClient } from "~/lib/api";
 import type { KnowledgeEntry, ProjectSummary } from "~/contracts";
 import {

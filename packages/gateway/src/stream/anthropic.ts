@@ -480,6 +480,7 @@ export function createStreamAccumulator(options?: {
     inputTokens: 0,
     outputTokens: 0,
   };
+  const reportedUsage = { input: false, output: false };
 
   /** Blocks indexed by their stream index. */
   const blocks = new Map<number, AccumulatingBlock>();
@@ -596,9 +597,11 @@ export function createStreamAccumulator(options?: {
     if (msgUsage) {
       if (typeof msgUsage.input_tokens === "number") {
         usage.inputTokens = msgUsage.input_tokens;
+        reportedUsage.input = true;
       }
       if (typeof msgUsage.output_tokens === "number") {
         usage.outputTokens = msgUsage.output_tokens;
+        reportedUsage.output = true;
       }
       if (typeof msgUsage.cache_read_input_tokens === "number") {
         usage.cacheReadInputTokens = msgUsage.cache_read_input_tokens;
@@ -744,6 +747,7 @@ export function createStreamAccumulator(options?: {
     if (deltaUsage) {
       if (typeof deltaUsage.output_tokens === "number") {
         usage.outputTokens = deltaUsage.output_tokens;
+        reportedUsage.output = true;
       }
     }
   }
@@ -799,6 +803,7 @@ export function createStreamAccumulator(options?: {
       content,
       stopReason,
       usage: { ...usage },
+      usageComplete: reportedUsage.input && reportedUsage.output,
     };
   }
 

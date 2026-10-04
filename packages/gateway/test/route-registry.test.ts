@@ -65,6 +65,7 @@ const MANAGEMENT_PATHS = [
   "/api/v1/contradictions/a/b",
   "/api/v1/sessions/s1/search",
   "/api/v1/sessions/s1/context",
+  "/api/v1/projects/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/imports",
   "/ui",
   "/ui/",
   "/ui/index.html",

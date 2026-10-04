@@ -72,6 +72,20 @@ export const dashboardRoutes: RouteModule = {
         wrap((dash) => dash.handleListContradictions()),
       ),
     );
+    app.get(
+      "/api/v1/projects/:id/imports",
+      ctx.declaredMethodsOnly(["GET"], async (c: GatewayContext) => {
+        const dash = await import("../dashboard-api");
+        const req = c.var.request;
+        return withManagementCors(
+          dash.handleListProjectImports(
+            new URL(req.url),
+            c.req.param("id") ?? "",
+          ),
+          c.var.allowedManagementOrigin,
+        );
+      }),
+    );
     app.patch(
       "/api/v1/contradictions/:idA/:idB",
       ctx.declaredMethodsOnly(

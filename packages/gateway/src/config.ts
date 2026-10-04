@@ -847,6 +847,8 @@ export type ProviderRoute = {
     | "vertex"
     | "gemini"
     | null;
+  /** Whether this route accepts the supported root combinators at tool-schema roots. */
+  supportsRootToolSchemaCombinators?: boolean;
   /** AWS Bedrock via the `bedrock-mantle` endpoint. When true, the gateway
    *  builds the region-specific mantle URL (`bedrock-mantle.<region>.api.aws/
    *  anthropic`) as the upstream base and remaps `body.model` to the mantle
@@ -883,10 +885,12 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   anthropic: {
     url: "https://api.anthropic.com",
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: false,
   },
   fireworks: {
     url: "https://api.fireworks.ai/inference",
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: true,
   },
   "github-copilot": {
     url: "https://api.githubcopilot.com",
@@ -895,14 +899,17 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   minimax: {
     url: "https://api.minimax.io/anthropic",
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: true,
   },
   "minimax-cn": {
     url: "https://api.minimaxi.com/anthropic",
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: true,
   },
   "kimi-coding": {
     url: "https://api.kimi.com/coding",
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: true,
   },
   // --- OpenAI protocol ---
   deepseek: { url: "https://api.deepseek.com", protocol: "openai" },
@@ -966,11 +973,13 @@ const PROVIDER_ROUTES: Record<string, ProviderRoute> = {
   bedrock: {
     url: null,
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: false,
     bedrockMantle: true,
   },
   "amazon-bedrock": {
     url: null,
     protocol: "anthropic",
+    supportsRootToolSchemaCombinators: false,
     bedrockMantle: true,
   },
   // --- Google Vertex AI (Claude via :rawPredict, GCP OAuth2/ADC) ---

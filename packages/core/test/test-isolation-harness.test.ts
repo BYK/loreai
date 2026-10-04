@@ -45,6 +45,7 @@ interface FixtureMarker {
 
 interface StartFixtureOptions {
   timeoutMs?: number;
+  timeoutAfterReadyMs?: number;
   readyPath?: string;
   descendantPidPath?: string;
 }
@@ -234,17 +235,44 @@ function startFixture(
   } = {};
   const result = new Promise<ChildResult>((resolveResult, reject) => {
     state.reject = reject;
-    let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    const onTimeout = () => {
       const error = new Error(`fixture ${fixtureLabel} did not exit`);
       void terminate(error).catch(() => {});
-    }, options.timeoutMs ?? CHILD_TIMEOUT_MS);
+    };
+    let closed = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(
+      onTimeout,
+      options.readyPath
+        ? CHILD_TIMEOUT_MS
+        : (options.timeoutMs ?? CHILD_TIMEOUT_MS),
+    );
+    const afterReadyTimeout = options.timeoutAfterReadyMs ?? options.timeoutMs;
+    if (options.readyPath && afterReadyTimeout !== undefined) {
+      void ready.then(
+        () => {
+          if (
+            closed ||
+            state.termination ||
+            child.exitCode !== null ||
+            child.signalCode !== null
+          ) {
+            return;
+          }
+          if (timeout) clearTimeout(timeout);
+          timeout = setTimeout(onTimeout, afterReadyTimeout);
+        },
+        () => {},
+      );
+    }
     child.once("error", (error) => {
+      closed = true;
       if (timeout) clearTimeout(timeout);
       readyWatch?.cancel(error);
       children.delete(child);
       reject(error);
     });
     child.once("close", (code, signal) => {
+      closed = true;
       if (timeout) clearTimeout(timeout);
       if (options.readyPath && !existsSync(options.readyPath)) {
         readyWatch?.cancel(
@@ -285,6 +313,9 @@ function startFixture(
       })();
     });
   });
+  // A caller may await readiness before observing the result. A startup
+  // failure can settle the result first; retain its rejection for that caller.
+  void result.catch(() => {});
   const terminate = (error: Error): Promise<void> => {
     if (state.termination) return state.termination;
     state.error = error;
@@ -799,7 +830,9 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        timeoutMs: 2_000,
+        // The short descendant deadline starts after nested Vitest is ready;
+        // startup retains the separate CHILD_TIMEOUT_MS bound.
+        timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
       },
@@ -807,13 +840,32 @@ describe("Vitest database isolation harness", () => {
     await ready;
     const { pid } = await readJson<{ pid: number }>(marker);
 
-    const outcome = await settleWithin(result, 10_000);
+    const outcome = await settleWithin(result, 20_000);
     if (outcome.status === "timeout") {
       if (processExists(pid)) process.kill(pid, "SIGKILL");
       await killFixtureTree(child, new Set([pid]));
       await settleWithin(result, PROCESS_EXIT_TIMEOUT_MS);
     }
 
+    expect(outcome.status).toBe("rejected");
+    await waitForProcessExit(pid);
+  });
+
+  test("the descendant exit deadline starts after fixture readiness", async () => {
+    const parent = await makeParent();
+    const marker = join(parent, "slow-descendant.json");
+    const { ready, result } = startFixture(
+      "hanging-descendant.fixture.ts",
+      parent,
+      {
+        LORE_TEST_ISOLATION_MARKER: marker,
+        LORE_TEST_ISOLATION_READY_DELAY_MS: "750",
+      },
+      { timeoutMs: 250, readyPath: marker, descendantPidPath: marker },
+    );
+    await ready;
+    const { pid } = await readJson<{ pid: number }>(marker);
+    const outcome = await settleWithin(result, 10_000);
     expect(outcome.status).toBe("rejected");
     await waitForProcessExit(pid);
   });
@@ -843,7 +895,9 @@ describe("Vitest database isolation harness", () => {
       parent,
       { LORE_TEST_ISOLATION_MARKER: marker },
       {
-        timeoutMs: 2_000,
+        // The coordinator gets time to start before its descendant exit
+        // deadline begins.
+        timeoutAfterReadyMs: 2_000,
         readyPath: marker,
         descendantPidPath: marker,
       },

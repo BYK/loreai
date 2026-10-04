@@ -16,11 +16,8 @@ import { Nav } from "~/components/shell/Nav";
 import { Shell } from "~/components/shell/Shell";
 import { isApiError } from "~/lib/api";
 
-import { knowledgeHref, projectHref } from "./Browse";
+import { knowledgeHref, projectHref } from "~/lib/href";
 import { useWorkspace } from "./workspace";
-
-export const sessionHref = (projectId: string, sessionId: string) =>
-  `${projectHref(projectId)}/sessions/${encodeURIComponent(sessionId)}`;
 
 function decodeParam(segment: string | undefined): string | undefined {
   if (segment === undefined) return undefined;
