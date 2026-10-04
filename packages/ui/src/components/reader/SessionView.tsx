@@ -817,10 +817,17 @@ export const SessionView: Component<SessionViewProps> = (props) => {
    * older-history buttons stay disabled until it settles so a click cannot
    * interleave with its re-issued `scrollToIndex` calls. */
   const [landingActive, setLandingActive] = createSignal(false);
+  /** Cancels the in-flight landing loop; a new session must not inherit a
+   * stale loop that could still issue scrolls or flip `landingActive` off
+   * early and re-arm the older-history buttons. */
+  let cancelLanding: (() => void) | null = null;
   createEffect(
     on(
       () => props.sessionId,
-      () => setLanded(false),
+      () => {
+        setLanded(false);
+        cancelLanding?.();
+      },
     ),
   );
 
@@ -834,6 +841,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     // drift off the end. Re-issue the landing each frame until the last row
     // is actually in view, the user scrolls away, or the cap hits.
     if (typeof requestAnimationFrame === "function") {
+      cancelLanding?.();
       let frames = 0;
       let reachedEnd = false;
       /** The last index the loop already reached once — a snapshot, not a
@@ -844,14 +852,24 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       let chained = false;
       setLandingActive(true);
       const serial0 = userSerial() ?? -1;
+      let frameId = 0;
+      const finish = () => {
+        setLandingActive(false);
+        if (cancelLanding === cancel) cancelLanding = null;
+      };
+      const cancel = () => {
+        cancelAnimationFrame(frameId);
+        finish();
+      };
+      cancelLanding = cancel;
       const land = () => {
         const el = scrollEl;
         if (!el || ++frames > 24) {
-          setLandingActive(false);
+          finish();
           return;
         }
         if (serial0 >= 0 && userSerial() !== serial0) {
-          setLandingActive(false);
+          finish();
           return;
         }
         if (last() !== prevLast) {
@@ -883,7 +901,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           items.length > 0 &&
           items.at(-1)!.index < endAt - 10;
         if (userAway) {
-          setLandingActive(false);
+          finish();
           return;
         }
         // Keep watching past the first arrival: rows that measure shorter
@@ -897,9 +915,9 @@ export const SessionView: Component<SessionViewProps> = (props) => {
           chained = true;
           maybeChainOlder();
         }
-        requestAnimationFrame(land);
+        frameId = requestAnimationFrame(land);
       };
-      requestAnimationFrame(land);
+      frameId = requestAnimationFrame(land);
     } else {
       // No frame loop: settle on the issued scroll and still fill a short
       // first page.
@@ -923,8 +941,12 @@ export const SessionView: Component<SessionViewProps> = (props) => {
 
   /** The manual load buttons stay disabled while the landing loop may
    * still issue scrolls — a click mid-landing would interleave a prepend
-   * with its re-issued `scrollToIndex` calls. */
-  const olderButtonsReady = () => landed() && !landingActive();
+   * with its re-issued `scrollToIndex` calls — and while a load is already
+   * in flight, so a second click cannot look like a dead button. */
+  const olderButtonsReady = () =>
+    landed() &&
+    !landingActive() &&
+    !(props.loadingOlder === true || olderInFlight());
 
   function maybeChainOlder() {
     const el = scrollEl;

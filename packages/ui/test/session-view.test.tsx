@@ -2062,4 +2062,76 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     await tick();
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
+
+  it("cancels the previous session's landing loop on session switch", async () => {
+    const [sid, setSid] = createSignal("session-a");
+    mount({
+      get sessionId() {
+        return sid();
+      },
+      messages: older(40),
+      distillations: [],
+      messageCount: 40,
+      hasOlder: true,
+      onLoadOlder: () => Promise.resolve(),
+    });
+    await tick();
+    // Ten frames into session A's landing, switch to B. A's loop must be
+    // cancelled outright: left running it would exhaust its own frame cap
+    // first and flip landingActive off while B is still landing, re-arming
+    // the older-history buttons early.
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    setSid("session-b");
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 15; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    const btn = screen.getByTestId("load-older");
+    expect(btn).toBeDisabled();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    expect(btn).toBeEnabled();
+  });
+
+  it("disables the older-history buttons the moment a load starts", async () => {
+    const onLoadOlder = vi.fn(() => new Promise<void>(() => {}));
+    mount({
+      messages: older(40),
+      distillations: [],
+      messageCount: 60,
+      hasOlder: true,
+      onLoadOlder,
+    });
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    // The status strip swaps `load-older` for `older-loading` while a page
+    // is in flight; `search-load-older` stays mounted, so it is the one
+    // that can otherwise sit enabled-but-inert until the prop updates.
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "older message" } });
+    await settleSearch();
+    const button = screen.getByTestId<HTMLButtonElement>("search-load-older");
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    // olderInFlight() is already true — the prop has not updated yet, but
+    // the button must not look clickable while the page is in flight.
+    expect(button).toBeDisabled();
+  });
 });
