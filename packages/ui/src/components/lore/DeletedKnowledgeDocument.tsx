@@ -48,7 +48,7 @@ export const DeletedKnowledgeDocument: Component<{
             }
           />
           <div class="mx-auto max-w-[940px] px-5 py-6 sm:px-7.5">
-            <StateCard kind="locked" title="This entry was merged or deleted">
+            <StateCard kind="empty" title="This entry was merged or deleted">
               The entry is no longer live. Its version history is preserved
               below.
             </StateCard>

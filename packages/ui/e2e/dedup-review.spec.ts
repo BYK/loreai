@@ -206,6 +206,12 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await page.keyboard.press("s");
     await expect(page.getByTestId("review-summary")).toContainText("1 skipped");
     await page.keyboard.press("u");
+    await expect(
+      sharedGroup.getByText("Pending", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByTestId("review-summary")).toContainText(
+      "1 accepted · 0 skipped",
+    );
     await expect(page.getByTestId("review-summary")).toContainText(
       /1 accepted · 0 skipped · \d+ pending/,
     );

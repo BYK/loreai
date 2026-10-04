@@ -534,9 +534,14 @@ describe("DuplicateReview", () => {
     expect(projectBody?.actor).toBe("lore-ui");
     expect(sharedBody?.actor).toBe("lore-ui");
     expect(projectBody?.operationId).not.toBe(sharedBody?.operationId);
-    expect(await screen.findAllByTestId("dedup-apply-operation")).toHaveLength(
-      2,
-    );
+    const operations = await screen.findAllByTestId("dedup-apply-operation");
+    expect(operations).toHaveLength(2);
+    expect(
+      within(operations[0]!).getByText("Project", { exact: true }),
+    ).toBeInTheDocument();
+    expect(
+      within(operations[1]!).getByText("Shared (no project)", { exact: true }),
+    ).toBeInTheDocument();
     await waitFor(async () =>
       expect(await createReviewDecisionsStore(db).list(projectId)).toEqual([]),
     );
@@ -742,9 +747,20 @@ describe("DuplicateReview", () => {
         (record) => record.kind === "dedup-apply",
       ),
     ).toBe(false);
-    expect(screen.getByTestId("dedup-apply-receipt")).toHaveTextContent(
-      "replayed yes",
+    const operation = screen.getByTestId("dedup-apply-operation");
+    const header = within(operation).getByTestId(
+      "dedup-apply-operation-header",
     );
+    expect(
+      within(header).getByText("Project", { exact: true }),
+    ).toBeInTheDocument();
+    expect(header).not.toHaveTextContent(/replayed/i);
+    const technicalDetails = within(operation)
+      .getByText("Technical details")
+      .closest("details");
+    if (!technicalDetails) throw new Error("Missing technical details");
+    fireEvent.click(within(operation).getByText("Technical details"));
+    expect(technicalDetails).toHaveTextContent(/Replayed:\s*true/);
   });
 
   it("drops pending state after an operation conflict without clearing marks", async () => {

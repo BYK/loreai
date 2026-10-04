@@ -1157,6 +1157,11 @@ describe("shell: empty, error, not-found and locked states", () => {
     expect(
       await screen.findByTestId("deleted-knowledge-document"),
     ).toBeInTheDocument();
+    expect(
+      screen
+        .getByText("This entry was merged or deleted")
+        .closest('[data-state="empty"]'),
+    ).not.toBeNull();
     expect(screen.getByTestId("deleted-entry-last-live")).toHaveTextContent(
       "Last live title",
     );

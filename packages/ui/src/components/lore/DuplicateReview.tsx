@@ -492,9 +492,16 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
     receipt: DedupApplyReceipt,
   ) => (
     <div class="space-y-3 border-t border-line pt-3">
-      <div class="text-xs text-muted">
-        Operation <code>{receipt.operationId}</code> · replayed{" "}
-        {receipt.replayed ? "yes" : "no"}
+      <div
+        class="flex flex-wrap items-center gap-2 text-xs text-muted"
+        data-testid="dedup-apply-operation-header"
+      >
+        <span>
+          Operation <code>{receipt.operationId}</code>
+        </span>
+        <Badge variant="outline">
+          {record.body.projectId !== null ? "Project" : "Shared (no project)"}
+        </Badge>
       </div>
       <For each={receipt.applied}>
         {(applied) => (
