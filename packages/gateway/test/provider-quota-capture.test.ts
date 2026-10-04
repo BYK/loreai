@@ -9,7 +9,11 @@ import {
   DEFAULT_SYSTEM,
   STANDARD_TOOLS,
 } from "./helpers/fixtures";
-import { setUpstreamInterceptor } from "../src/pipeline";
+import {
+  getActiveSessions,
+  setPostResponseStartObserverForTest,
+  setUpstreamInterceptor,
+} from "../src/pipeline";
 import { buildOpenAIResponsesResponse } from "../src/translate/openai-responses";
 import { db, listProviderQuotas } from "@loreai/core";
 
@@ -226,4 +230,47 @@ it("attributes quota headers to the Codex session account on the provisional pat
   for (const q of quotas) {
     expect(q.authKind).toBe("subscription");
   }
+});
+
+it("attributes conversation cost from the resolved route when session upstream is gone", async () => {
+  db().exec("DELETE FROM provider_costs");
+  const fixtures = [
+    makeFixtureEntry({
+      seq: 0,
+      requestMessages: [{ role: "user", content: "Hello" }],
+      responseText: "Hello back",
+    }),
+  ];
+  harness = await createHarness({ fixtures });
+  const replay = makeReplayInterceptor(fixtures);
+  setUpstreamInterceptor(replay);
+  try {
+    // postResponse runs before accounting; simulate the session snapshot
+    // being gone by then (deferred finalizer after idle eviction clears
+    // lastUpstream and drops the live state). The request's resolved route
+    // must still attribute the spend.
+    setPostResponseStartObserverForTest(() => {
+      for (const state of getActiveSessions().values()) {
+        state.lastUpstream = undefined;
+      }
+    });
+    const response = await harness.chat({
+      model: DEFAULT_MODEL,
+      max_tokens: 1024,
+      stream: false,
+      system: DEFAULT_SYSTEM,
+      tools: STANDARD_TOOLS,
+      messages: [{ role: "user", content: "Hello" }],
+    });
+    await response.text();
+    expect(response.status).toBe(200);
+  } finally {
+    setPostResponseStartObserverForTest(undefined);
+  }
+
+  const rows = db()
+    .query("SELECT provider, auth_kind FROM provider_costs")
+    .all() as Array<{ provider: string; auth_kind: string }>;
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toEqual({ provider: "anthropic", auth_kind: "api_key" });
 });

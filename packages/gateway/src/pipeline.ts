@@ -16163,11 +16163,25 @@ export function recordCacheTurnUsage(
   return bustCause;
 }
 
+type CostAttributionUpstream = { providerID?: string; url?: string };
+
+/**
+ * Attribution source captured at request time. The resolved route is always
+ * known when usage is accounted, while `state.lastUpstream` may already be
+ * cleared by idle eviction before a deferred finalizer runs.
+ */
+function routeAttributionUpstream(
+  route: ResolvedRequestUpstreamRoute,
+): CostAttributionUpstream {
+  return { providerID: route.providerID, url: route.effectiveUpstreamBase };
+}
+
 function accountConversationUsage(
   usage: GatewayUsage,
   model: string,
   sessionID: string,
   resolvedConversationTTL: "5m" | "1h" | undefined,
+  upstream?: CostAttributionUpstream,
 ): AnthropicUsage {
   const usageForSentry: AnthropicUsage = {
     input_tokens: usage.inputTokens,
@@ -16183,11 +16197,12 @@ function accountConversationUsage(
     resolvedConversationTTL,
   );
   const state = sessions.get(sessionID);
+  const source = upstream ?? state?.lastUpstream;
   const attribution = resolveCostAttribution({
     sessionID,
-    providerID: state?.lastUpstream?.providerID,
-    upstreamURL: state?.lastUpstream?.url,
-    credential: resolveAuth(sessionID, state?.lastUpstream?.providerID),
+    providerID: source?.providerID,
+    upstreamURL: source?.url,
+    credential: resolveAuth(sessionID, source?.providerID),
   });
   recordConversationCost(
     sessionID,
@@ -16216,6 +16231,7 @@ function postResponseForTenant(
   /** Storage policy captured when this turn resolved its session. */
   suppressTemporalStorage = false,
   endSpan?: () => void,
+  upstream?: CostAttributionUpstream,
 ): boolean {
   postResponseStartObserver?.();
   const { sessionID, projectPath } = sessionState;
@@ -16239,6 +16255,7 @@ function postResponseForTenant(
       resp.model,
       sessionID,
       sessionState.resolvedConversationTTL,
+      upstream,
     );
     if (genAiSpan) {
       setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -16523,6 +16540,7 @@ function accountUnsuccessfulResponse(
   genAiSpan: Sentry.Span | undefined,
   endSpan: () => void,
   markDirty?: () => void,
+  upstream?: CostAttributionUpstream,
 ): void {
   const usage = resp.usage ?? ZERO_USAGE;
   const hasUsage = Object.values(usage).some(
@@ -16536,6 +16554,7 @@ function accountUnsuccessfulResponse(
         resp.model,
         sessionID,
         resolvedConversationTTL,
+        upstream,
       );
       if (genAiSpan) {
         setGenAiUsageAttributes(genAiSpan, usageForSentry, resp.model);
@@ -16571,6 +16590,7 @@ function postResponse(
   genAiSpan?: Sentry.Span,
   suppressTemporalStorage = false,
   endSpan?: () => void,
+  upstream?: CostAttributionUpstream,
 ): boolean {
   return withTenant(sessionState.storageTenantId ?? "", () =>
     postResponseForTenant(
@@ -16583,6 +16603,7 @@ function postResponse(
       genAiSpan,
       suppressTemporalStorage,
       endSpan,
+      upstream,
     ),
   );
 }
@@ -19141,6 +19162,7 @@ async function handleProvisionalConversationTurn(
             const state = sessions.get(identified.sessionID);
             if (state) state._dirty = true;
           },
+          routeAttributionUpstream(requestUpstream.route),
         );
       },
       () => {},
@@ -19407,6 +19429,8 @@ async function handleProvisionalConversationTurn(
           conversationTTLForAccounting(identified.sessionID),
           undefined,
           () => {},
+          undefined,
+          routeAttributionUpstream(requestUpstream.route),
         );
         return;
       }
@@ -19426,6 +19450,7 @@ async function handleProvisionalConversationTurn(
         accumulated.model,
         identified.sessionID,
         conversationTTLForAccounting(identified.sessionID),
+        routeAttributionUpstream(requestUpstream.route),
       );
       const state = sessions.get(identified.sessionID);
       if (state) state._dirty = true;
@@ -22328,6 +22353,7 @@ async function handleConversationTurnPrepared(
           genAiSpan,
           suppressTemporalStorage,
           endGenAiSpan,
+          routeAttributionUpstream(requestUpstreamRoute),
         );
         if (persisted) {
           persistAcceptedProvenanceLayer();
@@ -22852,6 +22878,7 @@ async function handleConversationTurnPrepared(
             () => {
               sessionState._dirty = true;
             },
+            routeAttributionUpstream(requestUpstreamRoute),
           );
           return;
         }
@@ -22872,6 +22899,7 @@ async function handleConversationTurnPrepared(
                   genAiSpan,
                   suppressTemporalStorage,
                   endGenAiSpan,
+                  routeAttributionUpstream(requestUpstreamRoute),
                 );
                 if (!persisted) throw postResponseFailed;
                 recallPersistenceTransaction?.commit();
@@ -22922,6 +22950,7 @@ async function handleConversationTurnPrepared(
           () => {
             sessionState._dirty = true;
           },
+          routeAttributionUpstream(requestUpstreamRoute),
         );
       },
       dropStreamingFinalizer,
