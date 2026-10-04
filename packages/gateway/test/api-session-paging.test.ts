@@ -151,7 +151,10 @@ describe("GET /api/v1/sessions/:id — legacy shape is unchanged", () => {
     const res = await api(base);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Legacy;
-    expect(Object.keys(body)).toEqual(["messages", "distillations"]);
+    // title/title_source are additive (#1921).
+    expect(Object.keys(body).sort()).toEqual(
+      ["messages", "distillations", "title", "title_source"].sort(),
+    );
     expect(body.messages.map((m) => m.id)).toEqual(
       temporal.bySession(projectPath, "s1").map((m) => m.id),
     );
@@ -176,7 +179,9 @@ describe("GET /api/v1/sessions/:id — legacy shape is unchanged", () => {
     const other = (await (
       await api(`${base}&page=2&limit=1`)
     ).json()) as Legacy;
-    expect(Object.keys(other)).toEqual(["messages", "distillations"]);
+    expect(Object.keys(other).sort()).toEqual(
+      ["messages", "distillations", "title", "title_source"].sort(),
+    );
     expect(other.messages).toHaveLength(7);
   });
 });
@@ -188,7 +193,14 @@ describe("GET /api/v1/sessions/:id — cursor mode", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Paged;
     expect(Object.keys(body).sort()).toEqual(
-      ["distillations", "message_count", "messages", "next_cursor"].sort(),
+      [
+        "distillations",
+        "message_count",
+        "messages",
+        "next_cursor",
+        "title",
+        "title_source",
+      ].sort(),
     );
     // The newest three: m6, m7 and whichever of the 3000-tie sorts last by id.
     const ids = body.messages.map(src);

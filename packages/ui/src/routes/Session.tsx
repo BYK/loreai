@@ -8,6 +8,7 @@ import { createMemo, Match, Show, Switch } from "solid-js";
 import { useParams, useSearchParams } from "@solidjs/router";
 
 import { DocHeader } from "~/components/lore/Document";
+import { SessionIdChip } from "~/components/lore/SessionIdChip";
 import { StateCard } from "~/components/lore/StateCard";
 import { ContextWindowPane } from "~/components/reader/ContextWindow";
 import { SessionView } from "~/components/reader/SessionView";
@@ -96,13 +97,26 @@ export const Session: Component = () => {
     />
   );
 
+  // Header title (#1921): the server's derived title once the page answer
+  // carries one (title_source !== "id"), otherwise a cached list summary's
+  // title, otherwise the raw id. Summaries cached before titles existed have
+  // no `title` at all — treat them like an id-sourced title.
+  const headerTitle = createMemo(() => {
+    const page = reader.loader.data();
+    if (page?.title && page.title_source !== "id") return page.title;
+    const sid = sessionId();
+    const summary = sid ? ws.state.sessions.store.select(sid) : undefined;
+    if (summary?.title && summary.title_source !== "id") return summary.title;
+    return `Session ${sid ?? ""}`;
+  });
+
   const header = () => (
     <DocHeader
       crumb={[projectLabel(), "Sessions"]}
-      title={`Session ${sessionId() ?? ""}`}
+      title={headerTitle()}
       trailing={
         <Show when={reader.messageCount() !== null}>
-          <span class="font-mono text-[11px]">{sessionId()}</span>
+          <SessionIdChip id={sessionId() ?? ""} />
         </Show>
       }
     />

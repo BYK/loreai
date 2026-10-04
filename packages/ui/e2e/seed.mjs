@@ -157,12 +157,12 @@ for (const session of [
   {
     id: "e2e-session-sqlite",
     created: 1_700_000_000_000,
-    text: "We chose SQLite as the only store for the Lore project.",
+    text: "Refactor the sync outbox pruning",
   },
   {
     id: "e2e-session-routing",
     created: 1_700_000_100_000,
-    text: "The browser UI preserves explicit route state across reloads.",
+    text: "Investigate FTS tokenizer diacritics",
   },
 ]) {
   core.temporal.store({
@@ -186,6 +186,30 @@ for (const session of [
     ],
   });
 }
+
+// A session whose first (and only) user message is tool-only: its title
+// falls back to the raw session id (#1921).
+core.temporal.store({
+  projectPath: lore,
+  info: {
+    id: "e2e-session-tools-message",
+    sessionID: "e2e-session-tools",
+    role: "user",
+    time: { created: 1_700_000_200_000 },
+    agent: "e2e",
+    model: { providerID: "e2e", modelID: "seed" },
+  },
+  parts: [
+    {
+      id: "e2e-session-tools-part",
+      sessionID: "e2e-session-tools",
+      messageID: "e2e-session-tools-message",
+      type: "tool",
+      tool: "bash",
+      state: { status: "completed", output: "tool output" },
+    },
+  ],
+});
 core.ltm.create({
   projectPath: scratch,
   scope: "project",

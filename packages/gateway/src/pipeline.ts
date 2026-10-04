@@ -81,6 +81,7 @@ import {
   SyntheticProbeResolver,
   NoopResolver,
   buildRefcheckProbeScript,
+  data,
   entities,
   distillation,
   curator,
@@ -228,6 +229,10 @@ import {
 } from "./translate/bedrock";
 import { buildVertexUpstream, vertexHost } from "./translate/vertex";
 import { getVertexAccessToken, resolveVertexProject } from "./vertex-auth";
+import {
+  LORE_SESSION_TITLE_HEADER,
+  parseHarnessSessionTitle,
+} from "./session-title-header";
 import {
   buildOpenAICodexResponsesUrl,
   buildOpenAIResponsesUrl,
@@ -20139,6 +20144,24 @@ async function handleConversationTurnPrepared(
           );
         }
         saveSessionTracking(sessionID, { isSubagent: true });
+      }
+    }
+  }
+
+  // Harness-provided session title (x-lore-session-title): adapters send the
+  // harness's own session name percent-encoded; persist it as the session's
+  // explicit title — deduped on sessionState.harnessTitle so the write runs
+  // once per distinct title. Best-effort: never fails the request.
+  {
+    const harnessTitle = parseHarnessSessionTitle(
+      req.rawHeaders[LORE_SESSION_TITLE_HEADER],
+    );
+    if (harnessTitle !== null && harnessTitle !== sessionState.harnessTitle) {
+      try {
+        data.setSessionTitle(sessionState.sessionID, harnessTitle);
+        sessionState.harnessTitle = harnessTitle;
+      } catch (e) {
+        log.warn("harness session title write failed (non-fatal):", e);
       }
     }
   }

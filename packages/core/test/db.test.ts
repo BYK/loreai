@@ -1970,7 +1970,11 @@ describe("db", () => {
       .filter(
         (name) =>
           !name.startsWith("temporal_vec_") &&
-          !name.startsWith("distillation_vec_"),
+          !name.startsWith("distillation_vec_") &&
+          // session_meta is a disposable derived cache (#1921): a merge
+          // DELETES the source project's rows (recomputed on next list), so
+          // it is intentionally not in PROJECT_MERGE_TABLES.
+          name !== "session_meta",
       );
     const projectScoped = tables.filter((table) => {
       const quoted = table.replaceAll('"', '""');

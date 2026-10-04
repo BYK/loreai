@@ -55,6 +55,16 @@ export type {
   KnowledgeVersionDetail,
   KnowledgeVersionHistory,
 } from "./list-query";
+export * as sessionMeta from "./session-meta";
+export {
+  SESSION_TITLE_MAX,
+  deriveSessionTitle,
+  normalizeTitle,
+  titleFromMessageContent,
+  titleFromNarrative,
+  truncateTitle,
+  type SessionTitleSource,
+} from "./session-title";
 export * as distillation from "./distillation";
 export {
   sessionContext,

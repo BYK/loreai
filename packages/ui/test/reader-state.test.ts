@@ -59,6 +59,8 @@ function fakeServer(total: number) {
         distillations: [],
         next_cursor: start > 0 ? String(start) : null,
         message_count: all.length,
+        title: "s1",
+        title_source: "id" as const,
       };
     },
   } as unknown as ApiClient;

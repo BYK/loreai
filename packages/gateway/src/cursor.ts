@@ -51,6 +51,19 @@ export function decodeCursorObject(token: string): Record<string, unknown> {
   return parsed;
 }
 
+export function assertCursorBinding(
+  actual: unknown,
+  expected: unknown,
+  what: "project" | "session",
+): void {
+  if (actual !== expected) {
+    throw new BadRequest(
+      "invalid_cursor",
+      `Cursor was issued for a different ${what}`,
+    );
+  }
+}
+
 export function encodeKnowledgeCursor(
   kind: "knowledge" | "knowledge_all",
   project: string | null,
@@ -88,12 +101,7 @@ export function decodeKnowledgeCursor(
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (cursor.project !== project) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
+  assertCursorBinding(cursor.project, project, "project");
   const cursorSort = listQuery.parseKnowledgeSort(cursor.sort);
   if (
     !cursorSort ||

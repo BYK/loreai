@@ -160,7 +160,11 @@ export const Browse: Component<{
     typeof searchParams.scope === "string" ? searchParams.scope : "all";
   const sessionsPage = ws.state.sessions.page(() =>
     props.view === "sessions" && activeProjectId()
-      ? { projectId: activeProjectId()!, cursor: cursor() }
+      ? {
+          projectId: activeProjectId()!,
+          cursor: cursor(),
+          q: searchQ() ?? null,
+        }
       : null,
   );
   const projectForEntry = createMemo(
@@ -397,7 +401,12 @@ export const Browse: Component<{
       case "sessions":
         if (!id) return projectFallback();
         return (
-          <SessionList projectId={id} cursor={cursor()} page={sessionsPage} />
+          <SessionList
+            projectId={id}
+            cursor={cursor()}
+            q={searchQ() ?? null}
+            page={sessionsPage}
+          />
         );
       case "imports":
         if (!id) return projectFallback();

@@ -58,6 +58,15 @@
  * was matched; an empty list means nothing in `q` was searchable. A missing
  * `q` is 400. The cursor does not embed the query: the caller re-sends it.
  *
+ * Session title search
+ * --------------------
+ * `GET /projects/:id/sessions` gains a `q` filter (#1921) over the derived
+ * session titles (`session_meta.title_norm`, NFKC + lower-cased substring)
+ * and session-id prefixes. A non-empty `q` implies cursor mode — the legacy
+ * bare-array response is untouched. `q` longer than 512 chars is a 400
+ * (`invalid_request`); `q` is re-sent by the caller with each page, never
+ * embedded in the cursor token.
+ *
  * Session context
  * ---------------
  * `GET /sessions/:id/context` (new route, #1924, handler in
@@ -86,6 +95,7 @@
  * reviewed dedup merges can be inspected and restored. Any other value → 400.
  */
 import {
+  data,
   listQuery,
   type KnowledgeKeyset,
   type KnowledgeListOptions,
@@ -94,6 +104,7 @@ import {
   type SessionSearchMode,
 } from "@loreai/core";
 import {
+  assertCursorBinding,
   BadRequest,
   CURSOR_VERSION,
   decodeCursorObject,
@@ -146,12 +157,7 @@ function decodeSessionCursor(token: string, projectId: string): SessionKeyset {
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
   return { last_message_at: c.last_message_at, session_id: c.session_id };
 }
 
@@ -171,18 +177,8 @@ function decodeMessageCursor(
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.session !== sessionId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different session",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
+  assertCursorBinding(c.session, sessionId, "session");
   return { created_at: c.created_at, id: c.id };
 }
 
@@ -203,18 +199,8 @@ function decodeSearchCursor(
   ) {
     throw new BadRequest("invalid_cursor", "Malformed cursor");
   }
-  if (c.project !== projectId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different project",
-    );
-  }
-  if (c.session !== sessionId) {
-    throw new BadRequest(
-      "invalid_cursor",
-      "Cursor was issued for a different session",
-    );
-  }
+  assertCursorBinding(c.project, projectId, "project");
+  assertCursorBinding(c.session, sessionId, "session");
   return { before: { created_at: c.created_at, id: c.id }, mode: c.mode };
 }
 
@@ -350,20 +336,39 @@ export function handleListKnowledgeFiltered(
   }
 }
 
-/** Cursor-mode `GET /api/v1/projects/:id/sessions`; null when not opted in. */
+/** Longest sessions-list `q` accepted; longer inputs are a 400. */
+const SESSION_LIST_QUERY_MAX = 512;
+
+/** Parse `?q=` for the sessions list: absent/empty → undefined (no filter),
+ *  over-long → `invalid_request`. */
+function parseSessionListQuery(url: URL): string | undefined {
+  const q = url.searchParams.get("q");
+  if (q === null || q.trim() === "") return undefined;
+  if (q.length > SESSION_LIST_QUERY_MAX) {
+    throw new BadRequest(
+      "invalid_request",
+      `Search query longer than ${SESSION_LIST_QUERY_MAX} characters`,
+    );
+  }
+  return q;
+}
+
+/** Cursor-mode `GET /api/v1/projects/:id/sessions`; null when not opted in.
+ *  A non-empty `q` (title/id search, #1921) also opts into cursor mode. */
 export function handleListSessionsCursor(
   url: URL,
   project: { id: string; path: string },
 ): Response | null {
   try {
-    if (!wantsCursorMode(url)) return null;
+    const q = parseSessionListQuery(url);
+    if (!wantsCursorMode(url) && q === undefined) return null;
     const limit = parseLimit(url, 50, 1000);
     const token = url.searchParams.get("cursor");
     const after =
       token !== null && token !== ""
         ? decodeSessionCursor(token, project.id)
         : undefined;
-    const page = listQuery.listSessionsPage(project.path, { limit, after });
+    const page = listQuery.listSessionsPage(project.path, { limit, after, q });
     return jsonResponse({
       items: page.items,
       next_cursor: page.next
@@ -405,9 +410,12 @@ export function handleShowSessionCursor(
       limit,
       before,
     });
+    const title = data.sessionTitle(project.path, sessionId);
     return jsonResponse({
       messages: page.items,
       distillations,
+      title: title.title,
+      title_source: title.title_source,
       next_cursor: page.next
         ? encodeCursor({
             v: CURSOR_VERSION,

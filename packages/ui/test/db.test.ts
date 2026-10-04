@@ -342,6 +342,8 @@ describe("repositories", () => {
       distilled_count: 0,
       undistilled_count: 1,
       distillation_count: 0,
+      title: "s1",
+      title_source: "id",
     };
     await repo.put(session, "p1");
     expect(await repo.get("p1/s1")).toEqual(session);

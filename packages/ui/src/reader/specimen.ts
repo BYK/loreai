@@ -16,6 +16,8 @@ function meta(value: Record<string, unknown>): string {
 }
 
 export const READER_SPECIMEN: SessionDetail = {
+  title: "specimen",
+  title_source: "id",
   messages: [
     {
       id: "spec-sys",
