@@ -4,6 +4,8 @@
  * same expectations so client and server filters stay consistent.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   fuzzyRank,
   normalizeFuzzy,
@@ -132,5 +134,16 @@ describe("fuzzyRank", () => {
     for (const hit of hits) {
       expect(hit.exact || hit.score >= FUZZY_THRESHOLD).toBe(true);
     }
+  });
+});
+
+describe("shared helper copies", () => {
+  it("core and UI fuzzy.ts are identical after the leading header comment", () => {
+    const here = fileURLToPath(new URL(".", import.meta.url));
+    const stripHeader = (source: string) =>
+      source.replace(/^\/\*\*[\s\S]*?\*\//, "");
+    const core = readFileSync(`${here}../src/fuzzy.ts`, "utf8");
+    const ui = readFileSync(`${here}../../ui/src/lib/fuzzy.ts`, "utf8");
+    expect(stripHeader(ui)).toBe(stripHeader(core));
   });
 });

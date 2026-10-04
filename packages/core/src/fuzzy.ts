@@ -18,7 +18,7 @@ export const FUZZY_MIN_QUERY = 3;
 
 /** Upper bound on the candidate set a fuzzy leg ranks (titles of the most
  *  recent rows under the caller's non-query predicates). */
-export const FUZZY_CANDIDATE_CAP = 10_000;
+export const FUZZY_CANDIDATE_CAP = 2_500;
 
 export type FuzzyHit<T> = {
   item: T;

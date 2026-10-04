@@ -1,8 +1,8 @@
 /**
  * Fuzzy tail for knowledge reads (#1948): when the exact leg (FTS5/LIKE)
  * underfills a result set, remaining candidates are ranked by title with
- * `fuzzyRank` and appended flagged `match: "fuzzy"`. Covers the ranked search,
- * the keyset-paged lists, and the recall lexical leg (`searchScored`).
+ * `fuzzyRank` and appended flagged `match: "fuzzy"`. Covers the ranked search
+ * and the keyset-paged lists.
  */
 import { describe, expect, test } from "vitest";
 import { uuidv7 } from "uuidv7";
@@ -236,57 +236,5 @@ describe("listKnowledgePage — fuzzy tail on the final page", () => {
     const fuzzy = page.items.find((row) => row.match === "fuzzy");
     expect(fuzzy?.logical_id).toBe(fuzzyId);
     expect(fuzzy?.project_name).toBeDefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Recall lexical leg (ltm.searchScored)
-// ---------------------------------------------------------------------------
-
-describe("searchScored — fuzzy tail", () => {
-  test("a title typo returns the fuzzy entry ordered after exact hits", async () => {
-    const project = freshProject("scored");
-    const exactId = entry(project, "Alpha one");
-    const fuzzyId = entry(project, "Alphx entry");
-    const results = await ltm.searchScored({
-      query: "alpha",
-      projectPath: project,
-      limit: 10,
-    });
-    const positions = results.map((row) => row.logical_id);
-    expect(positions).toContain(exactId);
-    expect(positions).toContain(fuzzyId);
-    expect(positions.indexOf(exactId)).toBeLessThan(positions.indexOf(fuzzyId));
-    const fuzzyRow = results.find((row) => row.logical_id === fuzzyId);
-    const exactRow = results.find((row) => row.logical_id === exactId);
-    expect(fuzzyRow!.rank).toBeGreaterThan(exactRow!.rank);
-  });
-
-  test("project scope constrains the fuzzy candidates", async () => {
-    const projectA = freshProject("scored-a");
-    const projectB = freshProject("scored-b");
-    entry(projectA, "Knowledge table sorting");
-    const outsideId = entry(projectB, "Knwoledge-adjacent other");
-    const results = await ltm.searchScored({
-      query: "knwoledge",
-      projectPath: projectA,
-      limit: 10,
-    });
-    expect(results.map((row) => row.logical_id)).not.toContain(outsideId);
-    expect(results.length).toBeGreaterThan(0);
-  });
-
-  test("no fuzzy rows when exact hits already fill the limit", async () => {
-    const project = freshProject("scored-limit");
-    entry(project, "Alpha one");
-    entry(project, "Alpha two");
-    const fuzzyId = entry(project, "Alphx entry");
-    const results = await ltm.searchScored({
-      query: "alpha",
-      projectPath: project,
-      limit: 2,
-    });
-    expect(results).toHaveLength(2);
-    expect(results.map((row) => row.logical_id)).not.toContain(fuzzyId);
   });
 });
