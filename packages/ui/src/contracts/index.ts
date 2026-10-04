@@ -8,6 +8,8 @@ export * from "./session";
 export * from "./distillation";
 export * from "./page";
 export * from "./folk";
+export * from "./team-actions";
+export * from "./sync-conflicts";
 export * from "./promotions";
 export * from "./parse";
 export * from "./entities";

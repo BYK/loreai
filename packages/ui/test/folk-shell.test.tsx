@@ -20,7 +20,7 @@ const IDLE: SyncStatus = {
   pending_changes: 2,
 };
 
-const NO_TEAMS: TeamList = { teams: [] };
+const NO_TEAMS: TeamList = { hosted: false, teams: [] };
 
 type ClientOverrides = Partial<ApiClient>;
 
@@ -94,6 +94,7 @@ describe("Folk shell status", () => {
         },
         async getTeams() {
           return {
+            hosted: false,
             teams: [
               {
                 id: "team-acme",

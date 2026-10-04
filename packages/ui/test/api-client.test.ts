@@ -525,7 +525,7 @@ describe("api client: error classification", () => {
           state: "anonymous",
         });
       }
-      if (url.endsWith("/teams")) return json({ teams: [] });
+      if (url.endsWith("/teams")) return json({ hosted: false, teams: [] });
       if (url.endsWith("/sync/status")) {
         return json({
           enabled: false,
@@ -546,7 +546,9 @@ describe("api client: error classification", () => {
       });
     });
     expect((await client.getAccount()).state).toBe("anonymous");
-    expect((await client.getTeams()).teams).toEqual([]);
+    const teams = await client.getTeams();
+    expect(teams.hosted).toBe(false);
+    expect(teams.teams).toEqual([]);
     expect((await client.getSyncStatus()).enabled).toBe(false);
     expect((await client.getProjectSharing("p1")).state).toBe("not_linked");
     expect(calls).toEqual([
@@ -793,6 +795,154 @@ describe("promotion API client", () => {
       note: "Looks good",
     });
     expect(JSON.parse(calls[5]?.init?.body as string)).toEqual({});
+  });
+});
+
+describe("FOLK-03 API client", () => {
+  it("uses team, review-policy, and sync-conflict routes with typed receipts", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const responses = [
+      {
+        remote: "ok",
+        team: { id: "team-1", name: "Acme" },
+        my_role: "admin",
+        can_manage: true,
+        members: [
+          {
+            user_id: "user-1",
+            label: "Ada",
+            role: "admin",
+            me: true,
+          },
+        ],
+        actions: {
+          invite: "available",
+          remove: "available",
+          set_role: "available",
+          add_by_id: "cli_only",
+          offline_invite: "cli_only",
+          list_invites: "unsupported",
+          revoke_invite: "unsupported",
+        },
+      },
+      {
+        invite: {
+          team_id: "team-1",
+          role: "viewer",
+          expires_in_days: 14,
+          token: "invite-token",
+          accept_command: "lore team accept invite-token",
+          emailed: false,
+        },
+      },
+      { member: { user_id: "user-2", role: "editor" } },
+      {
+        removed: "user-2",
+        new_epoch: 2,
+        rewrapped: 3,
+        skipped_count: 1,
+      },
+      {
+        linked: true,
+        team: { id: "team-1", name: "Acme" },
+        policy: {
+          effective: "manual",
+          project_override: "manual",
+          team_default: "auto",
+        },
+        state: "linked",
+        detail: null,
+      },
+      {
+        available: true,
+        complete: true,
+        conflicts: [
+          {
+            id: 7,
+            table: "knowledge",
+            row_id: "knowledge-1",
+            detected_at: "2026-09-20T12:00:00.000Z",
+            resolution: "remote_upsert_wins",
+            recoverable: true,
+            unrecoverable_reason: null,
+            local: {
+              title: "Local",
+              content: "Local body",
+              category: "pattern",
+            },
+            current: {
+              version_id: "version-2",
+              version: 2,
+              title: "Current",
+              content: "Current body",
+            },
+          },
+        ],
+      },
+      {
+        kept: "local",
+        current: {
+          version_id: "version-3",
+          version: 3,
+          title: "Local",
+          content: "Local body",
+        },
+      },
+      { discarded: 7 },
+    ];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        return json(responses[calls.length - 1]);
+      },
+    });
+
+    await client.getTeamMembers("team-1");
+    await client.inviteTeamMember("team-1", { role: "viewer" });
+    await client.setTeamMemberRole("team-1", "user-2", "editor", "viewer");
+    await client.removeTeamMember("team-1", "user-2", "editor");
+    await client.requireProjectSharingReview("project-1", null);
+    await client.listSyncConflicts();
+    await client.keepSyncConflictLocal(7, "version-2");
+    await client.discardSyncConflict(7);
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "/api/v1/teams/team-1/members",
+      "/api/v1/teams/team-1/invites",
+      "/api/v1/teams/team-1/members/user-2/role",
+      "/api/v1/teams/team-1/members/user-2/remove",
+      "/api/v1/projects/project-1/sharing/policy",
+      "/api/v1/sync/conflicts",
+      "/api/v1/sync/conflicts/7/keep-local",
+      "/api/v1/sync/conflicts/7/discard",
+    ]);
+    expect(calls.slice(1).map(({ init }) => init?.method)).toEqual([
+      "POST",
+      "POST",
+      "POST",
+      "POST",
+      "GET",
+      "POST",
+      "POST",
+    ]);
+    expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
+      role: "viewer",
+    });
+    expect(JSON.parse(calls[2]?.init?.body as string)).toEqual({
+      role: "editor",
+      expected_role: "viewer",
+    });
+    expect(JSON.parse(calls[3]?.init?.body as string)).toEqual({
+      expected_role: "editor",
+    });
+    expect(JSON.parse(calls[4]?.init?.body as string)).toEqual({
+      policy: "manual",
+      expected_override: null,
+    });
+    expect(JSON.parse(calls[6]?.init?.body as string)).toEqual({
+      expected_version_id: "version-2",
+    });
+    expect(JSON.parse(calls[7]?.init?.body as string)).toEqual({});
   });
 });
 

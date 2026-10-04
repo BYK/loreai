@@ -54,6 +54,13 @@ import {
   promotionListResponse,
   promotionPreview,
   promotionReceipt,
+  teamMembersResponse,
+  teamInviteReceipt,
+  teamRoleReceipt,
+  teamRemovalReceipt,
+  syncConflictList,
+  syncConflictKeepReceipt,
+  syncConflictDiscardReceipt,
   query,
   sessionsMoveResult,
   recallResponse,
@@ -93,6 +100,13 @@ import {
   type PromotionListResponse,
   type PromotionPreview,
   type PromotionReceipt,
+  type TeamMembersResponse,
+  type TeamInviteReceipt,
+  type TeamRoleReceipt,
+  type TeamRemovalReceipt,
+  type SyncConflictList,
+  type SyncConflictKeepReceipt,
+  type SyncConflictDiscardReceipt,
   type ProjectSummary,
   type ProjectsMergeResult,
   type RecallResponse,
@@ -615,6 +629,58 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getTeams(signal?: AbortSignal): Promise<TeamList> {
       return getJson("/teams", teamList, signal);
     },
+    getTeamMembers(
+      teamId: string,
+      signal?: AbortSignal,
+    ): Promise<TeamMembersResponse> {
+      return getJson(
+        apiPath(["teams", teamId, "members"]),
+        teamMembersResponse,
+        signal,
+      );
+    },
+    inviteTeamMember(
+      teamId: string,
+      input: { role: "editor" | "viewer"; email?: string },
+      signal?: AbortSignal,
+    ): Promise<TeamInviteReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "invites"]),
+        input,
+        teamInviteReceipt,
+        signal,
+      );
+    },
+    setTeamMemberRole(
+      teamId: string,
+      userId: string,
+      role: "admin" | "editor" | "viewer",
+      expectedRole: "admin" | "editor" | "viewer",
+      signal?: AbortSignal,
+    ): Promise<TeamRoleReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members", userId, "role"]),
+        { role, expected_role: expectedRole },
+        teamRoleReceipt,
+        signal,
+      );
+    },
+    removeTeamMember(
+      teamId: string,
+      userId: string,
+      expectedRole: "admin" | "editor" | "viewer",
+      signal?: AbortSignal,
+    ): Promise<TeamRemovalReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["teams", teamId, "members", userId, "remove"]),
+        { expected_role: expectedRole },
+        teamRemovalReceipt,
+        signal,
+      );
+    },
     getSyncStatus(signal?: AbortSignal): Promise<SyncStatus> {
       return getJson("/sync/status", syncStatus, signal);
     },
@@ -625,6 +691,47 @@ export function createApiClient(options: ApiClientOptions = {}) {
       return getJson(
         apiPath(["projects", projectId, "sharing"]),
         sharingStatus,
+        signal,
+      );
+    },
+    requireProjectSharingReview(
+      projectId: string,
+      expectedOverride: "manual" | "auto" | null,
+      signal?: AbortSignal,
+    ): Promise<SharingStatus> {
+      return mutateJson(
+        "POST",
+        apiPath(["projects", projectId, "sharing", "policy"]),
+        { policy: "manual", expected_override: expectedOverride },
+        sharingStatus,
+        signal,
+      );
+    },
+    listSyncConflicts(signal?: AbortSignal): Promise<SyncConflictList> {
+      return getJson("/sync/conflicts", syncConflictList, signal);
+    },
+    keepSyncConflictLocal(
+      id: number,
+      expectedVersionId: string,
+      signal?: AbortSignal,
+    ): Promise<SyncConflictKeepReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["sync", "conflicts", String(id), "keep-local"]),
+        { expected_version_id: expectedVersionId },
+        syncConflictKeepReceipt,
+        signal,
+      );
+    },
+    discardSyncConflict(
+      id: number,
+      signal?: AbortSignal,
+    ): Promise<SyncConflictDiscardReceipt> {
+      return mutateJson(
+        "POST",
+        apiPath(["sync", "conflicts", String(id), "discard"]),
+        {},
+        syncConflictDiscardReceipt,
         signal,
       );
     },

@@ -161,6 +161,8 @@ export const Nav: Component<NavProps> = (props) => {
   const entitiesPath = useResolvedPath(() => "/entities/*");
   const contradictionsPath = useResolvedPath(() => "/contradictions/*");
   const promotionsPath = useResolvedPath(() => "/promotions/*");
+  const teamPath = useResolvedPath(() => "/team/*");
+  const conflictsPath = useResolvedPath(() => "/conflicts/*");
   const warmingPath = useResolvedPath(() => "/warming/*");
   const costsPath = useResolvedPath(() => "/costs/*");
   const atHome = useMatch(() => homePath() ?? "");
@@ -169,6 +171,8 @@ export const Nav: Component<NavProps> = (props) => {
   const atEntities = useMatch(() => entitiesPath() ?? "");
   const atContradictions = useMatch(() => contradictionsPath() ?? "");
   const atPromotions = useMatch(() => promotionsPath() ?? "");
+  const atTeam = useMatch(() => teamPath() ?? "");
+  const atConflicts = useMatch(() => conflictsPath() ?? "");
   const atWarming = useMatch(() => warmingPath() ?? "");
   const atCosts = useMatch(() => costsPath() ?? "");
   return (
@@ -368,6 +372,17 @@ export const Nav: Component<NavProps> = (props) => {
         end
       >
         Promotions
+      </NavItem>
+      <NavItem href="/team" active={!!atTeam()} testId="nav-team" end>
+        Team
+      </NavItem>
+      <NavItem
+        href="/conflicts"
+        active={!!atConflicts()}
+        testId="nav-conflicts"
+        end
+      >
+        Conflicts
       </NavItem>
       <div class="my-0.5 flex items-center justify-between gap-2 px-3 py-2.25 text-sm text-muted">
         <span>Sessions</span>

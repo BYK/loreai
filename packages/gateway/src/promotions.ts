@@ -3,19 +3,25 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   crypto,
   effectivePromotionPolicy,
-  isHostedMode,
   keystore,
   log,
   ltm,
-  syncData,
 } from "@loreai/core";
 import { loadConfig, type GatewayConfig } from "./config";
-import { sharingStatus, type SharingPolicy } from "./folk-status";
 import {
-  getAuthedClient,
-  getCurrentUser,
-  loadPersistedSession,
-} from "./supabase";
+  accessFor,
+  errorResponse,
+  hostedRefusal,
+  json,
+  localIdentityLabel,
+  readObjectBody,
+  requestIsHosted,
+  routeId,
+  UUID,
+} from "./folk-access";
+import type { Access, RemoteStatus } from "./folk-access";
+import { sharingStatus, type SharingPolicy } from "./folk-status";
+import { getCurrentUser } from "./supabase";
 import {
   identityLabel,
   listTeams,
@@ -23,8 +29,6 @@ import {
   teamMembers,
 } from "./team";
 import { makeEncryptionResolver, openString, sealString } from "./sync";
-
-type RemoteStatus = "ok" | "anonymous" | "unreachable" | "hosted";
 type DecisionStatus = "approved" | "rejected";
 type RequestStatus = "pending" | DecisionStatus | "withdrawn";
 type AppliedStatus = "applied" | "stale";
@@ -86,83 +90,6 @@ type TeamPresentation = {
   role: string | null;
   labels: Map<string, string | null>;
 };
-
-const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function errorResponse(
-  status: number,
-  type: string,
-  message: string,
-  fields: Record<string, unknown> = {},
-): Response {
-  return json({ type: "error", error: { type, message, ...fields } }, status);
-}
-
-function requestIsHosted(config: GatewayConfig): boolean {
-  return (
-    config.hostedMode ||
-    config.remoteGateway ||
-    isHostedMode() ||
-    !syncData.isLocalSyncContext()
-  );
-}
-
-function hostedRefusal(): Response {
-  return errorResponse(
-    403,
-    "forbidden",
-    "Knowledge promotions are not available in hosted mode.",
-  );
-}
-
-type Access = {
-  remote: RemoteStatus;
-  client: SupabaseClient | null;
-  me: string | null;
-};
-
-async function accessFor(config: GatewayConfig): Promise<Access> {
-  if (requestIsHosted(config)) {
-    return { remote: "hosted", client: null, me: null };
-  }
-  const session = loadPersistedSession();
-  if (!session) return { remote: "anonymous", client: null, me: null };
-  try {
-    const client = await getAuthedClient();
-    if (!client) return { remote: "anonymous", client: null, me: null };
-    return { remote: "ok", client, me: session.user_id };
-  } catch {
-    return { remote: "unreachable", client: null, me: session.user_id };
-  }
-}
-
-function parseObject(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-async function readObjectBody(
-  req: Request,
-): Promise<Record<string, unknown> | Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return errorResponse(400, "invalid_request", "Invalid JSON body");
-  }
-  const object = parseObject(body);
-  return (
-    object ?? errorResponse(400, "invalid_request", "Expected an object body")
-  );
-}
 
 function serviceFailure(
   status: number,
@@ -258,13 +185,6 @@ function sharingPolicy(
       team_default: null,
     },
   };
-}
-
-function localIdentityLabel(userId: string): string | null {
-  const session = loadPersistedSession();
-  if (!session || session.user_id !== userId) return null;
-  if (session.github_login) return `@${session.github_login}`;
-  return session.display_name ?? session.email ?? null;
 }
 
 async function teamPresentations(
@@ -1027,7 +947,10 @@ async function promote(
   id: string,
   config: GatewayConfig,
 ): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
+  if (requestIsHosted(config))
+    return hostedRefusal(
+      "Knowledge promotions are not available in hosted mode.",
+    );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
   if (typeof body.version_id !== "string") {
@@ -1058,7 +981,10 @@ async function review(
   decision: "approve" | "reject" | "withdraw",
   config: GatewayConfig,
 ): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
+  if (requestIsHosted(config))
+    return hostedRefusal(
+      "Knowledge promotions are not available in hosted mode.",
+    );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
   let result: PromotionServiceResult<{ request: PromotionRequest }>;
@@ -1095,7 +1021,10 @@ async function setTeamReviewPolicy(
   scopeId: string,
   config: GatewayConfig,
 ): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
+  if (requestIsHosted(config))
+    return hostedRefusal(
+      "Knowledge promotions are not available in hosted mode.",
+    );
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
   if (
@@ -1126,18 +1055,6 @@ async function setTeamReviewPolicy(
     config,
   );
   return result.ok ? json(result.value) : resultResponse(result);
-}
-
-function routeId(segment: string): string | Response {
-  let id: string;
-  try {
-    id = decodeURIComponent(segment);
-  } catch {
-    return errorResponse(400, "invalid_request", "Promotion id must be a UUID");
-  }
-  return UUID.test(id)
-    ? id
-    : errorResponse(400, "invalid_request", "Promotion id must be a UUID");
 }
 
 export async function handlePromotionRequest(

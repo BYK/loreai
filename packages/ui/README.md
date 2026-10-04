@@ -28,6 +28,8 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/entities/:entityId` | Entity detail: aliases, role/description/notes editing, relations, referencing knowledge, delete |
 | `/ui/contradictions` | Open contradiction pairs and keep/resolve decisions |
 | `/ui/promotions` | Review encrypted team knowledge proposals |
+| `/ui/team` | Team membership, role changes and invitation receipts |
+| `/ui/conflicts` | Review and recover local sync-conflict snapshots |
 | `/ui/warming` | Global cache-warming status, circuit-breaker reset, live-session controls and project histograms |
 | `/ui/costs` | Live and historical costs, worker breakdown, daily trend and budget controls |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
@@ -147,6 +149,34 @@ Tests:
 - `LORE_INTEGRATION=1 pnpm exec vitest run packages/gateway/test/promotion-requests.integration.test.ts packages/gateway/test/sync-membership-rls.integration.test.ts`
 - `pnpm --filter @loreai/ui exec vitest run test/promotions-ui.test.tsx test/api-client.test.ts test/contracts.test.ts`
 - `pnpm --filter @loreai/ui test:e2e` — `e2e/promotions.spec.ts`
+
+### Team actions and sync conflict recovery (#1808)
+
+The `/ui/team` screen lists the signed-in user's team members and supports
+admin invitations, role changes and removal. Removal rotates the team key,
+revokes outstanding invite links and blocks access to future content; copies
+already synced to a removed member cannot be revoked. Invite tokens are shown
+only in the creation receipt dialog. Pending-invite management and offline
+invites remain unsupported in the sync service; adding by user id is CLI-only.
+Team mutations require encryption to be unlocked and sync to be enabled.
+`GET /api/v1/teams` also returns `hosted`, a boolean gateway-mode signal that
+lets the page distinguish hosted deployments from an anonymous local account;
+it is computed locally without reading the saved session or calling the cloud.
+
+The `/ui/conflicts` screen reads local sync conflict snapshots. Knowledge
+conflicts with a current entry can be restored as a new version after a
+version check, or discarded. Non-knowledge, remote-delete and unreadable
+snapshots cannot be restored through the UI. The screen is local-gateway only;
+it does not upload discarded content to the cloud.
+
+For linked projects using automatic sharing, the SharingPanel can switch the
+project to manual review with confirmation. Automatic sharing can only be
+selected from the CLI.
+
+Tests:
+- `pnpm exec vitest run packages/core/test/sync-conflicts.test.ts packages/gateway/test/team-actions.test.ts packages/gateway/test/sync-conflicts.test.ts`
+- `pnpm --filter @loreai/ui exec vitest run test/folk03-ui.test.tsx test/api-client.test.ts test/contracts.test.ts`
+- `pnpm --filter @loreai/ui test:e2e` — `e2e/folk03.spec.ts`, `e2e/keyboard.spec.ts`
 
 Reference documents:
 

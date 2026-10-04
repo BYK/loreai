@@ -109,6 +109,22 @@ export const routes: RouteDefinition[] = [
     ),
   },
   {
+    path: "/team",
+    component: lazy(() =>
+      import("./routes/FolkManagement").then((m) => ({
+        default: m.TeamRoute,
+      })),
+    ),
+  },
+  {
+    path: "/conflicts",
+    component: lazy(() =>
+      import("./routes/FolkManagement").then((m) => ({
+        default: m.ConflictsRoute,
+      })),
+    ),
+  },
+  {
     path: "/entities/:entityId",
     component: lazy(() =>
       import("./routes/Entities").then((m) => ({
