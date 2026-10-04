@@ -2221,6 +2221,53 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     expect(screen.getByTestId("load-older")).toBeEnabled();
   });
 
+  it("still lands a row that arrives exactly on the landing cap frame", async () => {
+    const [msgs, setMsgs] = createSignal(older(40));
+    mount({
+      get messages() {
+        return msgs();
+      },
+      distillations: [],
+      messageCount: 41,
+      hasOlder: true,
+      onLoadOlder: () => new Promise<void>(() => {}),
+    });
+    await tick();
+    // Let the per-restart budget run out — the very next frame would have
+    // finished the loop — then grow the list. The retarget check must run
+    // before the cap check so the new row still gets its landing.
+    const scroll = scrollEl();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 24; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    // The scroll offset itself cannot witness the retarget — the stub
+    // clamps every end-aligned index to the same bottom — so count the
+    // issued scrolls instead: a live loop re-issues `scrollToIndex` for
+    // the new last row, a finished one issues nothing.
+    let issued = 0;
+    const origTo = scroll.scrollTo.bind(scroll);
+    Object.defineProperty(scroll, "scrollTo", {
+      configurable: true,
+      value: (...args: Parameters<typeof scroll.scrollTo>) => {
+        issued += 1;
+        return origTo(...args);
+      },
+    });
+    setMsgs((prev) => [...prev, { ...older(1)[0]!, id: "m.cap-40" }]);
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    delete (scroll as { scrollTo?: unknown }).scrollTo;
+    await tick();
+    expect(issued).toBeGreaterThan(0);
+    expect(screen.getByTestId("load-older")).toBeEnabled();
+  });
+
   it("disables the older-history buttons the moment a load starts", async () => {
     const onLoadOlder = vi.fn(() => new Promise<void>(() => {}));
     mount({

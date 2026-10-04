@@ -124,7 +124,8 @@ export const RichText: Component<{
     const hit = controller.searchHit?.();
     const h = controller.highlight();
     if (!el) return;
-    const wanted: { span: HighlightSpan; source: PassageHighlight }[] = [];
+    const wanted: { span: HighlightSpan; source: PassageHighlight | null }[] =
+      [];
     if (addresses(h, props.block, props.part))
       wanted.push({
         span: { start: h.start, end: h.end, className: "passage-target" },
@@ -146,7 +147,7 @@ export const RichText: Component<{
           end: other.end,
           className: "passage-search-all",
         },
-        source: other,
+        source: null,
       });
     }
     if (wanted.length === 0) {
@@ -158,7 +159,8 @@ export const RichText: Component<{
       wanted.map((w) => w.span),
     );
     marks.forEach((mark, i) => {
-      if (mark) controller.onApplied?.(mark, wanted[i]!.source);
+      const source = wanted[i]!.source;
+      if (mark && source !== null) controller.onApplied?.(mark, source);
     });
   });
   return (

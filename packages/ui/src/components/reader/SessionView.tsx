@@ -905,11 +905,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       cancelLanding = cancel;
       const land = () => {
         const el = scrollEl;
-        if (
-          !el ||
-          ++frames > LANDING_FRAME_CAP ||
-          ++totalFrames > LANDING_TOTAL_CAP
-        ) {
+        if (!el || ++totalFrames > LANDING_TOTAL_CAP) {
           finish();
           return;
         }
@@ -920,10 +916,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         if (last() !== prevLast) {
           // Rows streamed in mid-landing: land at the new end instead, and
           // restart the frame budget so a busy stream cannot starve it.
+          // Checked before the per-restart cap so a row arriving exactly
+          // on the cap frame still gets its landing.
           prevLast = last();
           reachedEnd = false;
           frames = 0;
           virtualizer.scrollToIndex(last(), { align: "end" });
+        }
+        if (++frames > LANDING_FRAME_CAP) {
+          finish();
+          return;
         }
         const items = virtualizer.getVirtualItems();
         const lastItem = items.at(-1);

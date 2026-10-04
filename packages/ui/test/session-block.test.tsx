@@ -3,15 +3,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DistillationBlockView,
+  HighlightContext,
   MessageBlockView,
+  RichText,
   TIME_UNKNOWN,
 } from "~/components/reader/SessionBlock";
+import type { PassageHighlight } from "~/components/reader/SessionBlock";
 import type { TemporalMessage } from "~/contracts";
 import {
   CHUNK_SEPARATOR,
   distillationBlock,
   messageBlock,
 } from "~/reader/blocks";
+import { renderPart } from "~/reader/render";
 
 function msg(over: Partial<TemporalMessage> = {}): TemporalMessage {
   return {
@@ -211,5 +215,57 @@ describe("DistillationBlockView", () => {
     const pre = document.querySelector("pre");
     expect(pre?.textContent).toBe("<b>summary</b> of things");
     expect(document.querySelector("b")).toBeNull();
+  });
+});
+
+describe("RichText highlight sources", () => {
+  it("reports only the target and active hits to onApplied, never the inert all-match marks", () => {
+    const block = messageBlock(
+      msg({ content: "alpha beta gamma delta epsilon" }),
+    );
+    const part = block.parts[0]!;
+    const target: PassageHighlight = {
+      blockId: block.id,
+      partIndex: part.index,
+      start: 0,
+      end: 5,
+    };
+    const active: PassageHighlight = {
+      blockId: block.id,
+      partIndex: part.index,
+      start: 6,
+      end: 10,
+    };
+    const other: PassageHighlight = {
+      blockId: block.id,
+      partIndex: part.index,
+      start: 11,
+      end: 16,
+    };
+    const applied: PassageHighlight[] = [];
+    render(() => (
+      <HighlightContext.Provider
+        value={{
+          highlight: () => target,
+          searchHit: () => active,
+          searchHits: () => [active, other],
+          onApplied: (_mark, source) => {
+            applied.push(source);
+          },
+        }}
+      >
+        <RichText
+          rendered={renderPart(block, part)}
+          block={block.id}
+          part={part.index}
+        />
+      </HighlightContext.Provider>
+    ));
+    // All three marks exist in the DOM, but the inert `passage-search-all`
+    // mark carries no source — it must never reach the scroll consumer.
+    expect(document.querySelectorAll("mark").length).toBe(3);
+    expect(applied).toContainEqual(target);
+    expect(applied).toContainEqual(active);
+    expect(applied).not.toContainEqual(other);
   });
 });
