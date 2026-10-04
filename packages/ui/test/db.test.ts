@@ -41,6 +41,7 @@ const PROJECT: ProjectSummary = {
   session_count: 0,
   message_count: 0,
   distillation_count: 0,
+  last_activity: null,
 };
 
 const ENTRY: KnowledgeEntry = {

@@ -1299,11 +1299,8 @@ describe("cache stability (e2e)", () => {
     // change). The LTM budget floors at LTM_BUDGET_STEP (8000 tokens), so we
     // seed ~30 entries (~9K tokens total) to force a real overflow tail.
     //
-    // Each entry's content stays UNDER the 1200-char knowledge cap: the pipeline
-    // runs `ltm.pruneOversized(1200)` on every turn, which zeroes the confidence
-    // of any oversized entry — pruned entries fall below the `confidence > 0.2`
-    // floor and vanish from forSession/forProject, so oversized seeds never
-    // reach the ToC at all.
+    // Each entry stays small enough to compete for the system[2] budget while
+    // the combined set exceeds the budget and exercises the overflow index.
     const turns = Array.from({ length: 4 }, (_, i) => ({
       // Mention the shared topic ("dashboard") so forSession's relevance scoring
       // keeps the whole seeded set in play — otherwise it filters to a handful

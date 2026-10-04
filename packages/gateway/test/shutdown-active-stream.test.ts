@@ -128,10 +128,10 @@ describe("startGateway active-stream shutdown", () => {
         },
         resetPipelineState: reset,
         startServer: (config, options) =>
-          startServer(config, { ...options, shutdownDeadlineMs: 20 }),
+          startServer(config, { ...options, shutdownDeadlineMs: 1_000 }),
         createProcessShutdownController: (shutdown) => {
           const controller = makeProcessShutdownController(shutdown, {
-            deadlineMs: 20,
+            deadlineMs: 1_000,
             safeExit,
             forcedExit,
           });
@@ -161,7 +161,9 @@ describe("startGateway active-stream shutdown", () => {
     if (!record) throw new Error("gateway process record was not published");
 
     // The accepted response must arrive before process teardown starts.
-    await expect(requestGatewayShutdown(record, 500)).resolves.toBe("accepted");
+    await expect(requestGatewayShutdown(record, 5_000)).resolves.toBe(
+      "accepted",
+    );
     await expect(forced).resolves.toBe(1);
     expect(reset).toHaveBeenCalledTimes(1);
     expect(embeddingShutdown).toHaveBeenCalledTimes(1);

@@ -16,12 +16,14 @@ import {
   vi,
 } from "vitest";
 import { config } from "../src/config";
+import { DatabaseSync } from "node:sqlite";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createTestDatabaseDirectory } from "./helpers/test-db-path";
 import {
   close,
   db,
+  dbPath,
   ensureProject,
   getKV,
   mergeProjectInternal,
@@ -62,6 +64,7 @@ import {
   runStartupBackfill,
 } from "../src/embedding";
 import * as log from "../src/log";
+import { withTenant } from "../src/tenant";
 import {
   drainTemporalEmbeddingQueueOnce,
   enqueueTemporalEmbedding,
@@ -76,7 +79,7 @@ import {
   deleteSession,
   moveSessions,
 } from "../src/data";
-import { prune } from "../src/temporal";
+import { prune, store as storeTemporalMessage } from "../src/temporal";
 import {
   fromBlob,
   runVectorQuery,
@@ -1879,14 +1882,21 @@ describeVec("temporal re-chunk durable admission", () => {
   const DONE_KEY = "lore:temporal_rechunk.done";
   const CURSOR_KEY = "lore:temporal_rechunk.cursor";
   const MAX_ROWID_KEY = "lore:temporal_rechunk.max_rowid";
+  const SOURCE_CAP_CURSOR_KEY = "lore:temporal_embedding.source_cap_cursor";
   const CONFIG_KEY = "lore:embedding_config";
   const LONG =
     "A temporal message with enough semantic content for durable embedding admission.";
 
   beforeEach(() => {
     db()
-      .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?, ?)")
-      .run(DONE_KEY, CURSOR_KEY, MAX_ROWID_KEY, CONFIG_KEY);
+      .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?, ?, ?)")
+      .run(
+        DONE_KEY,
+        CURSOR_KEY,
+        MAX_ROWID_KEY,
+        CONFIG_KEY,
+        SOURCE_CAP_CURSOR_KEY,
+      );
     db().query("DELETE FROM temporal_embedding_queue").run();
   });
 
@@ -1908,7 +1918,7 @@ describeVec("temporal re-chunk durable admission", () => {
     ).map((row) => row.message_id);
   }
 
-  test("schedules the whole legacy corpus without invoking a provider and invalidates stale vectors", async () => {
+  test("schedules the whole legacy corpus without invoking a provider or deleting valid vectors", async () => {
     setStorageMode(db(), "vec0");
     ensureVec0Store(db(), DIM);
     insertContent("m1", LONG, 1);
@@ -1923,10 +1933,195 @@ describeVec("temporal re-chunk durable admission", () => {
     }
 
     expect(embed).not.toHaveBeenCalled();
-    expect(chunkIds("m1")).toEqual([]);
+    expect(chunkIds("m1")).toEqual(["m1#0"]);
     expect(queuedIds()).toEqual(["m1"]);
     expect(getKV(CURSOR_KEY)).toBe("m1");
     expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("skips oversized legacy sources without reading their text into the startup walk", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent(
+      "oversized-backfill",
+      `${"x".repeat(2 * 1024 * 1024)} backfillftsmarker`,
+    );
+    const calls: string[] = [];
+    log.registerSink(recordSql(calls));
+    expect(await backfillTemporalEmbeddings()).toBe(0);
+    expect(queuedIds()).toEqual([]);
+    expect(getKV(DONE_KEY)).toBe("1");
+    expect(
+      calls.filter((sql) =>
+        sql.includes("SELECT t.content FROM temporal_messages t"),
+      ),
+    ).toEqual([]);
+    expect(
+      db()
+        .query("SELECT rowid FROM temporal_fts WHERE temporal_fts MATCH ?")
+        .get("backfillftsmarker"),
+    ).not.toBeNull();
+  });
+
+  test("retires a legacy oversized vector even when the re-chunk walk is already done", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent(
+      "oversized-indexed",
+      `${"x".repeat(2 * 1024 * 1024)} indexedftsmarker`,
+    );
+    storeTemporalChunks(db(), "oversized-indexed", [v(1, 0, 0, 0)]);
+    expect(chunkIds("oversized-indexed")).toEqual(["oversized-indexed#0"]);
+    setKV(DONE_KEY, "1");
+    const calls: string[] = [];
+    log.registerSink(recordSql(calls));
+
+    expect(await backfillTemporalEmbeddings()).toBe(0);
+
+    expect(chunkIds("oversized-indexed")).toEqual([]);
+    expect(queuedIds()).toEqual([]);
+    expect(getKV(DONE_KEY)).toBe("1");
+    expect(
+      db()
+        .query("SELECT rowid FROM temporal_fts WHERE temporal_fts MATCH ?")
+        .get("indexedftsmarker"),
+    ).not.toBeNull();
+    expect(
+      calls.filter((sql) =>
+        sql.includes("SELECT t.content FROM temporal_messages t"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("retries a moved oversized source and retires the rest of a done corpus", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent(
+      "oversized-moved",
+      `${"source ".repeat(75_000)} movedftsmarker`,
+    );
+    insertContent(
+      "oversized-following",
+      `${"source ".repeat(75_000)} followingftsmarker`,
+    );
+    storeTemporalChunks(db(), "oversized-moved", [v(1, 0, 0, 0)]);
+    storeTemporalChunks(db(), "oversized-following", [v(1, 0, 0, 0)]);
+    setKV(DONE_KEY, "1");
+    const destination = withTenant("tenant-b", () =>
+      ensureProject("/test/vec0-cutover/source-cap-transfer"),
+    );
+    const competitor = new DatabaseSync(dbPath());
+    competitor.exec("PRAGMA busy_timeout = 5000");
+    const calls: string[] = [];
+    const transfer = { moved: false };
+    log.registerSink({
+      ...passthroughSink,
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        calls.push(sql);
+        const result = fn();
+        if (!transfer.moved && sql.includes("SELECT t.rowid AS source_rowid")) {
+          transfer.moved = true;
+          competitor
+            .prepare("UPDATE temporal_messages SET project_id = ? WHERE id = ?")
+            .run(destination, "oversized-moved");
+        }
+        return result;
+      },
+    });
+    try {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(transfer.moved).toBe(true);
+      expect(chunkIds("oversized-moved")).toEqual([]);
+      expect(chunkIds("oversized-following")).toEqual([]);
+      expect(getKV(SOURCE_CAP_CURSOR_KEY)).toBe(
+        String(
+          (
+            db()
+              .query("SELECT rowid FROM temporal_messages WHERE id = ?")
+              .get("oversized-following") as { rowid: number }
+          ).rowid,
+        ),
+      );
+      expect(getKV(DONE_KEY)).toBe("1");
+      expect(
+        calls.filter((sql) =>
+          sql.includes("SELECT t.content FROM temporal_messages t"),
+        ),
+      ).toEqual([]);
+      for (const marker of ["movedftsmarker", "followingftsmarker"]) {
+        expect(
+          db()
+            .query("SELECT rowid FROM temporal_fts WHERE temporal_fts MATCH ?")
+            .get(marker),
+        ).not.toBeNull();
+      }
+    } finally {
+      log.registerSink(passthroughSink);
+      competitor.close();
+    }
+  });
+
+  test("keeps a repeatedly moved row resumable while retiring later vectors", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("oversized-contested", "source ".repeat(75_000));
+    insertContent("oversized-suffix", "source ".repeat(75_000));
+    storeTemporalChunks(db(), "oversized-contested", [v(1, 0, 0, 0)]);
+    storeTemporalChunks(db(), "oversized-suffix", [v(1, 0, 0, 0)]);
+    setKV(DONE_KEY, "1");
+    const firstOwner = withTenant("tenant-a", () =>
+      ensureProject("/test/vec0-cutover/source-cap-owner-a"),
+    );
+    const secondOwner = withTenant("tenant-b", () =>
+      ensureProject("/test/vec0-cutover/source-cap-owner-b"),
+    );
+    const competitor = new DatabaseSync(dbPath());
+    competitor.exec("PRAGMA busy_timeout = 5000");
+    const moves = { count: 0 };
+    log.registerSink({
+      ...passthroughSink,
+      withDbSpan<T>(sql: string, fn: () => T): T {
+        if (
+          sql.includes(
+            "SELECT t.project_id, length(CAST(t.content AS BLOB)) AS bytes",
+          ) &&
+          moves.count < 4
+        ) {
+          competitor
+            .prepare("UPDATE temporal_messages SET project_id = ? WHERE id = ?")
+            .run(
+              moves.count % 2 === 0 ? firstOwner : secondOwner,
+              "oversized-contested",
+            );
+          moves.count++;
+        }
+        return fn();
+      },
+    });
+    try {
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(moves.count).toBe(4);
+      expect(chunkIds("oversized-contested")).toEqual([
+        "oversized-contested#0",
+      ]);
+      expect(chunkIds("oversized-suffix")).toEqual([]);
+      expect(getKV(SOURCE_CAP_CURSOR_KEY)).toBeNull();
+      log.registerSink(passthroughSink);
+      expect(await backfillTemporalEmbeddings()).toBe(0);
+      expect(chunkIds("oversized-contested")).toEqual([]);
+      expect(getKV(SOURCE_CAP_CURSOR_KEY)).toBe(
+        String(
+          (
+            db()
+              .query("SELECT rowid FROM temporal_messages WHERE id = ?")
+              .get("oversized-suffix") as { rowid: number }
+          ).rowid,
+        ),
+      );
+    } finally {
+      log.registerSink(passthroughSink);
+      competitor.close();
+    }
   });
 
   test("schedules legacy content past an embedded NUL with consistent progress counts", async () => {
@@ -1968,6 +2163,108 @@ describeVec("temporal re-chunk durable admission", () => {
     expect(chunkIds("m1")).toEqual(["m1#0"]);
     expect(getKV(CURSOR_KEY)).toBe("m1");
     expect(getKV(DONE_KEY)).toBe("1");
+  });
+
+  test("promotes failed historical work on an identical live re-store even with an old vector", async () => {
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    const info = {
+      id: "live-restore-old-vector",
+      sessionID: "sX",
+      role: "user" as const,
+      time: { created: Date.now() },
+    };
+    const parts = [
+      {
+        id: "live-restore-part",
+        messageID: info.id,
+        sessionID: info.sessionID,
+        type: "text" as const,
+        text: LONG,
+        time: { start: Date.now(), end: Date.now() },
+      },
+    ];
+    const messageId = storeTemporalMessage({
+      projectPath: PROJECT,
+      info,
+      parts,
+    });
+    if (!messageId) throw new Error("temporal store did not save the source");
+    // A legacy vector predates this re-chunk walk. Simulate the pre-queue
+    // generation without inventing a queue row for the historical attempt.
+    db()
+      .query("DELETE FROM temporal_embedding_queue WHERE message_id = ?")
+      .run(messageId);
+    storeTemporalChunks(db(), messageId, [v(1, 0, 0, 0)]);
+    const token = _saveAndClearProvider();
+    const embed = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("historical failure"));
+    try {
+      _restoreProvider({ provider: { maxBatchSize: 8, embed } });
+      expect(await backfillTemporalEmbeddings()).toBe(1);
+      expect(chunkIds(messageId)).toEqual([`${messageId}#0`]);
+      await expect(drainTemporalEmbeddingQueueOnce()).rejects.toThrow(
+        "Embedding provider failed",
+      );
+      const pending = () =>
+        db()
+          .query(
+            "SELECT priority, failures, retry_at FROM temporal_embedding_queue WHERE message_id = ?",
+          )
+          .get(messageId) as {
+          priority: number;
+          failures: number;
+          retry_at: number;
+        } | null;
+      expect(pending()?.priority).toBe(0);
+      expect(pending()?.retry_at).toBeGreaterThan(Date.now());
+
+      expect(storeTemporalMessage({ projectPath: PROJECT, info, parts })).toBe(
+        messageId,
+      );
+      expect(pending()).toEqual({ priority: 1, failures: 0, retry_at: 0 });
+      expect(chunkIds(messageId)).toEqual([`${messageId}#0`]);
+      expect(
+        db()
+          .query("SELECT 1 FROM temporal_embedding_parked WHERE message_id = ?")
+          .get(messageId),
+      ).toBeNull();
+    } finally {
+      _restoreProvider(token);
+    }
+  });
+
+  test("holds startup admission at a bounded window and resumes the durable cursor", async () => {
+    vi.useFakeTimers();
+    setStorageMode(db(), "vec0");
+    ensureVec0Store(db(), DIM);
+    insertContent("m1");
+    for (let index = 0; index < 512; index++) {
+      const id = `z-backlog-${index}`;
+      insertContent(id);
+      enqueueTemporalEmbedding(id, LONG, "backfill");
+    }
+    const pending = backfillTemporalEmbeddings();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queuedIds()).not.toContain("m1");
+      expect(getKV(CURSOR_KEY)).toBeNull();
+
+      db()
+        .query(
+          "DELETE FROM temporal_embedding_queue WHERE message_id = 'z-backlog-0'",
+        )
+        .run();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(queuedIds()).toContain("m1");
+      expect(getKV(CURSOR_KEY)).toBe("m1");
+    } finally {
+      resetTemporalRechunkProgress();
+      await vi.advanceTimersByTimeAsync(250);
+      await pending;
+      vi.useRealTimers();
+    }
   });
 
   test("is a no-op in blob mode and never latches done", async () => {

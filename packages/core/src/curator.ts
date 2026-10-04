@@ -27,14 +27,6 @@ import type { LLMClient } from "./types";
 import type { EntityType, AliasType, RelationType } from "./entities";
 
 /**
- * Maximum length (chars) for a single knowledge entry's content.
- * ~400 tokens at chars/3. Entries exceeding this are truncated with a notice.
- * The curator prompt also instructs the model to stay within this limit,
- * so truncation is a last-resort safety net.
- */
-export const MAX_ENTRY_CONTENT_LENGTH = 1200;
-
-/**
  * Safety cap on a re-titled entry's title length (D1b). A title is the
  * top-weighted search key and is meant to be a short, discoverable phrase — this
  * is only a last-resort bound on pathological curator output, not the intended
@@ -371,11 +363,6 @@ export function applyOps(
       if (input.skipCreate) continue;
       // Defensive: skip malformed ops missing required fields
       if (!op.content || !op.title || !op.category) continue;
-      const content =
-        op.content.length > MAX_ENTRY_CONTENT_LENGTH
-          ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
-            " [truncated — entry too long]"
-          : op.content;
       // tryCreate() distinguishes genuine new inserts from dedup-merged
       // creates. Only genuine inserts surface in the delta channel — the
       // agent must not see a "new" entry whose id was reused by a dedup hit.
@@ -387,7 +374,7 @@ export function applyOps(
         projectPath: op.scope === "project" ? input.projectPath : undefined,
         category: op.category,
         title: op.title,
-        content,
+        content: op.content,
         session: input.sessionID,
         scope: op.scope,
         // Default to project-scoped. Cross-project sharing must be an explicit,
@@ -431,7 +418,7 @@ export function applyOps(
         id,
         category: op.category,
         title: op.title,
-        content,
+        content: op.content,
       });
       // D2c PR-2: record the curator's chosen file associations against the
       // new entry's logical_id. Best-effort: out-of-set files are warned but
@@ -463,12 +450,7 @@ export function applyOps(
           if (entry.project_id !== ownerProjectId()) continue;
         }
         const prevContent = entry.content;
-        const content =
-          op.content !== undefined &&
-          op.content.length > MAX_ENTRY_CONTENT_LENGTH
-            ? op.content.slice(0, MAX_ENTRY_CONTENT_LENGTH) +
-              " [truncated — entry too long]"
-            : op.content;
+        const content = op.content;
         // D1b: allow the curator to re-title an entry whose scope broadened after
         // a merge. Cap the length (titles are the top-weighted search key, meant
         // to be short/discoverable) and ignore an empty/whitespace title. ltm.update

@@ -19,6 +19,7 @@ import {
   entityDetail,
   entityListPage,
   entityRebuildStatus,
+  importListPage,
   isApiError,
   isContractError,
   knowledgeEntry,
@@ -83,6 +84,10 @@ const ROUTES: Record<string, { route: string; schema: Type }> = {
   "folk-sharing.json": {
     route: "/projects/p/sharing",
     schema: sharingStatus,
+  },
+  "project-imports.json": {
+    route: "/projects/p/imports",
+    schema: importListPage,
   },
   "entities-list.json": { route: "/entities", schema: entityListPage },
   "entity-detail.json": { route: "/entities/e", schema: entityDetail },
@@ -359,6 +364,29 @@ describe("contract violations", () => {
       result: "## Recall Results",
     });
     expect(parsed.ok).toBe(true);
+  });
+
+  it("projectSummary accepts a number or null last_activity and requires it", () => {
+    const input = readFixture("projects.json");
+    const row = (input as Record<string, unknown>[])[0]!;
+
+    const withNumber = safeParseContract("/projects", projectList, input);
+    expect(withNumber.ok).toBe(true);
+
+    const withNull = structuredClone(input);
+    (withNull as Record<string, unknown>[])[0]!.last_activity = null;
+    expect(safeParseContract("/projects", projectList, withNull).ok).toBe(true);
+
+    const missing = structuredClone(input);
+    delete (missing as Record<string, unknown>[])[0]!.last_activity;
+    expect(safeParseContract("/projects", projectList, missing).ok).toBe(false);
+
+    const mistyped = structuredClone(input);
+    (mistyped as Record<string, unknown>[])[0]!.last_activity = "yesterday";
+    expect(safeParseContract("/projects", projectList, mistyped).ok).toBe(
+      false,
+    );
+    expect(row.last_activity).toBe(1700000001000);
   });
 
   it("contracts run jitless (CSP-compatible)", () => {

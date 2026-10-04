@@ -4,6 +4,31 @@ import { log, type RecallCoverage } from "@loreai/core";
 /** Keep request-local diagnostic state bounded while observing chains beyond ten rounds. */
 export const MAX_RECALL_DIAGNOSTIC_ROUNDS = 64;
 
+export type RecallDiagnosticLevel = "info" | "warn" | "error";
+
+/** Diagnostics are best-effort and must never change response delivery. */
+export function reportRecallDiagnostic(
+  message: string,
+  level: RecallDiagnosticLevel = "info",
+  diagnostic?: Error,
+): void {
+  try {
+    switch (level) {
+      case "info":
+        log.info(message);
+        return;
+      case "warn":
+        log.warn(message);
+        return;
+      case "error":
+        log.error(diagnostic ?? message);
+        return;
+    }
+  } catch {
+    // A diagnostic sink cannot change the response path.
+  }
+}
+
 /** Request-local comparisons only. Fingerprints and recall content never leave this closure. */
 export function createRecallDiagnostics(enabled = true) {
   const inputs = new Set<string>();
@@ -18,6 +43,9 @@ export function createRecallDiagnostics(enabled = true) {
   let resultBytes = 0;
   const fingerprint = (value: string) =>
     createHash("sha256").update(value).digest("hex");
+  const report = (message: string): void => {
+    reportRecallDiagnostic(message);
+  };
   return {
     record(
       input: { query: string; scope?: string; id?: string; ids?: string[] },
@@ -56,7 +84,7 @@ export function createRecallDiagnostics(enabled = true) {
         coverage.add(key);
         return true;
       });
-      log.info(
+      report(
         `recall-round ${JSON.stringify({ round: rounds, kind: input.id || input.ids ? "detail" : "search", repeatedInput, repeatedResult, repeatedPair, coverageProgress, resultBytes: Buffer.byteLength(result) })}`,
       );
     },
@@ -64,7 +92,7 @@ export function createRecallDiagnostics(enabled = true) {
       if (finished) return;
       finished = true;
       if (enabled && rounds > 0) {
-        log.info(
+        report(
           `recall-chain ${JSON.stringify({ outcome, rounds, detailCalls, repeatedInputs: rounds - inputs.size, repeatedResults: rounds - results.size, repeatedPairs: rounds - pairs.size, emptyBodies, resultBytes, coverageItems: coverage.size, elapsedMs: Math.min(300_000, Math.max(0, Math.round(performance.now() - started))) })}`,
         );
       }

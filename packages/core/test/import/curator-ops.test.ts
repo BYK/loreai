@@ -118,8 +118,8 @@ describe("applyOps", () => {
     expect(ltm.get(id)).toBeNull();
   });
 
-  test("truncates oversized content", () => {
-    const longContent = "x".repeat(2000);
+  test("stores complete content when a curator entry is longer than its prompt guidance", () => {
+    const longContent = `${"x".repeat(1_199)}😀${"y".repeat(799)}`;
     const ops: CuratorOp[] = [
       {
         op: "create",
@@ -136,8 +136,7 @@ describe("applyOps", () => {
     const entries = ltm.forProject(PROJECT_PATH, false);
     const found = entries.find((e) => e.title === "Long entry");
     expect(found).toBeDefined();
-    expect(found?.content.length).toBeLessThan(longContent.length);
-    expect(found?.content).toContain("[truncated");
+    expect(found?.content).toBe(longContent);
   });
 
   test("skipCreate prevents create ops", () => {

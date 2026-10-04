@@ -11,16 +11,13 @@
  *   - resolve each distinct project path once,
  *   - exact-title then fuzzy-title dedup (update on content change, skip when identical),
  *   - never resurrect a tombstoned entry (by title),
- *   - enforce the 1200-char content cap ourselves (ltm.create does not),
+ *   - preserve the complete entry content (prompt packing decides what fits),
  *   - clamp confidence, default 1.0,
  *   - never set worker attribution (these are user-authored).
  */
 import * as ltm from "../ltm";
 import { db, ensureProject } from "../db";
-import { MAX_ENTRY_CONTENT_LENGTH } from "../curator";
 import { parseImportDoc, type LoreImportDoc } from "./schema";
-
-const TRUNCATION_SUFFIX = " [truncated — entry too long]";
 
 export type StructuredImportOptions = {
   /** Fallback project path for entries without an explicit `project`. */
@@ -46,14 +43,6 @@ export type StructuredImportResult = {
   skipped: number;
   entries: StructuredImportEntryResult[];
 };
-
-/** Truncate content to the knowledge-entry cap, appending a marker when cut. */
-function capContent(content: string): string {
-  if (content.length <= MAX_ENTRY_CONTENT_LENGTH) return content;
-  // Reserve room for the suffix so the final string still fits the cap.
-  const room = MAX_ENTRY_CONTENT_LENGTH - TRUNCATION_SUFFIX.length;
-  return content.slice(0, Math.max(0, room)) + TRUNCATION_SUFFIX;
-}
 
 /** Synthesize a title from content when the source did not provide one. */
 function synthesizeTitle(content: string): string {
@@ -129,7 +118,7 @@ export function importStructuredEntries(
   };
 
   for (const entry of validated.entries) {
-    const content = capContent(entry.content.trim());
+    const content = entry.content.trim();
     const title = entry.title?.trim() || synthesizeTitle(content);
     const category = entry.category ?? "pattern";
     const confidence = clampConfidence(entry.confidence);

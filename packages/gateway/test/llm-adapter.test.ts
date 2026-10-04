@@ -13,6 +13,7 @@ vi.mock("@sentry/bun", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@sentry/bun")>();
   return {
     ...actual,
+    captureMessage: vi.fn(actual.captureMessage),
     captureException: vi.fn(actual.captureException),
   };
 });
@@ -40,6 +41,7 @@ import {
   normalizeOpenAIUsage,
   resolveWorkerProtocol,
   resolveTarget,
+  shouldPinGithubCopilotWorkerResponseIdForTest,
   AUTH_ERROR_CODES,
   isTemperatureUnsupportedModel,
   isAnthropicClaudeModel,
@@ -597,6 +599,39 @@ describe("resolveWorkerProtocol", () => {
     ).toBe("openai");
   });
 
+  test("pins worker response IDs only for the canonical Copilot destination", () => {
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "https://api.githubcopilot.com?opaque=true",
+      }),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "https://api.individual.githubcopilot.com",
+      }),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "https://api.githubcopilot.com/custom",
+      }),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "github-copilot",
+        url: "http://127.0.0.1:3207",
+      }),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotWorkerResponseIdForTest({
+        providerName: "openai",
+        url: "https://api.githubcopilot.com",
+      }),
+    ).toBe(false);
+  });
+
   test("per-model override does NOT trigger for non-github-copilot providers", () => {
     // Real api.openai.com has no /responses-routes-only model; even if a
     // model id matches the prefix, the provider id is the authority and
@@ -1022,6 +1057,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "OpenAI Chat JSON",
       "openai" as const,
       "length",
+      "json",
       () =>
         new Response(
           JSON.stringify({
@@ -1039,6 +1075,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "Anthropic JSON",
       "anthropic" as const,
       "max_tokens",
+      "json",
       () =>
         new Response(
           JSON.stringify({
@@ -1057,6 +1094,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "OpenAI SSE",
       "openai" as const,
       "max_tokens",
+      "sse",
       () =>
         new Response(
           [
@@ -1073,7 +1111,7 @@ describe("createGatewayLLMClient.prompt", () => {
     ],
   ])(
     "%s truncation is incomplete even when text is valid verdict JSON",
-    async (_name, protocol, expectedFinishReason, response) => {
+    async (_name, protocol, expectedFinishReason, contentKind, response) => {
       mockFetch.mockResolvedValueOnce(response());
       const providerID = protocol === "anthropic" ? "anthropic" : "openai";
       const client = createGatewayLLMClient(
@@ -1097,6 +1135,9 @@ describe("createGatewayLLMClient.prompt", () => {
         finishReason: expectedFinishReason,
         attempts: 1,
       });
+      expect(getLastWorkerError()).toContain(
+        `worker response incomplete (${expectedFinishReason}) (stage=completion, content=${contentKind})`,
+      );
     },
   );
 
@@ -1167,6 +1208,212 @@ describe("createGatewayLLMClient.prompt", () => {
 
   test.each([
     [
+      "application/json",
+      "malformed worker response UTF-8 (stage=read, content=json)",
+    ],
+    ["text/event-stream", "malformed SSE UTF-8 (stage=stream, content=sse)"],
+  ])(
+    "malformed %s worker bytes retain only a safe category",
+    async (contentType, detail) => {
+      mockFetch.mockResolvedValueOnce(
+        new Response(new Uint8Array([0xff]), {
+          headers: { "content-type": contentType },
+        }),
+      );
+      const client = createGatewayLLMClient(
+        UPSTREAMS,
+        () => ({ scheme: "api-key", value: "sk-ant-test" }),
+        { providerID: "anthropic", modelID: "claude-test" },
+      );
+
+      await expect(
+        client.promptDetailed("system", "user", {
+          workerID: "lore-distill",
+          protocol: "anthropic",
+          upstreamProviderID: "anthropic",
+        }),
+      ).resolves.toMatchObject({ kind: "failure", code: "invalid-response" });
+      expect(getLastWorkerError()).toContain(detail);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each([
+    [
+      "malformed UTF-8",
+      "anthropic",
+      "read",
+      "json",
+      "malformed worker response UTF-8",
+      "n/a",
+      (_secret: string) =>
+        new Response(new Uint8Array([0xff]), {
+          headers: { "content-type": "application/json" },
+        }),
+    ],
+    [
+      "malformed JSON",
+      "anthropic",
+      "decode",
+      "json",
+      "malformed JSON body",
+      "n/a",
+      (secret: string) =>
+        new Response(`{"text":"${secret}"`, {
+          headers: {
+            "content-type": "application/json; private=provider-secret",
+          },
+        }),
+    ],
+    [
+      "truncated completion",
+      "anthropic",
+      "completion",
+      "json",
+      "worker response incomplete",
+      "max_tokens",
+      (secret: string) =>
+        new Response(
+          JSON.stringify({
+            content: [{ type: "text", text: secret }],
+            stop_reason: "max_tokens",
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+    [
+      "uppercase native truncation",
+      "openai",
+      "completion",
+      "json",
+      "worker response incomplete",
+      "max_tokens",
+      (secret: string) =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: { role: "assistant", content: secret },
+                finish_reason: null,
+                native_finish_reason: "MAX_TOKENS",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+    [
+      "missing OpenAI [DONE] terminal",
+      "openai",
+      "stream",
+      "sse",
+      "missing OpenAI [DONE] terminal",
+      "n/a",
+      (secret: string) =>
+        new Response(
+          [
+            `data: ${JSON.stringify({ choices: [{ delta: { content: secret }, finish_reason: null }] })}`,
+            "",
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    ],
+    [
+      "missing OpenAI [DONE] terminal with mislabeled SSE",
+      "openai",
+      "stream",
+      "sse",
+      "missing OpenAI [DONE] terminal",
+      "n/a",
+      (secret: string) =>
+        new Response(
+          [
+            `data: ${JSON.stringify({ choices: [{ delta: { content: secret }, finish_reason: null }] })}`,
+            "",
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "",
+            "",
+          ].join("\n"),
+          { headers: { "content-type": "application/json" } },
+        ),
+    ],
+  ] as const)(
+    "%s sends only structural worker diagnostics to Sentry",
+    async (
+      _name,
+      protocol,
+      stage,
+      content,
+      category,
+      finishReason,
+      response,
+    ) => {
+      const secret = "private-provider-response-secret";
+      _resetWorkerHealthForTest();
+      vi.mocked(Sentry.captureMessage).mockClear();
+      try {
+        mockFetch.mockResolvedValueOnce(response(secret));
+        const client = createGatewayLLMClient(
+          UPSTREAMS,
+          () => ({
+            scheme: "api-key",
+            value:
+              protocol === "anthropic"
+                ? "sk-ant-private-credential"
+                : "sk-openai-private-credential",
+          }),
+          { providerID: protocol, modelID: "test-model" },
+        );
+        await expect(
+          client.promptDetailed("system", "user", {
+            workerID: "lore-distill",
+            protocol,
+            upstreamProviderID: protocol,
+          }),
+        ).resolves.toMatchObject({ kind: "failure", attempts: 1 });
+        if (_name === "uppercase native truncation") {
+          expect(getLastWorkerError()).toContain(
+            "worker response incomplete (max_tokens) (stage=completion, content=json)",
+          );
+        }
+
+        expect(Sentry.captureMessage).toHaveBeenCalledWith(
+          "Worker response rejected",
+          expect.objectContaining({
+            fingerprint: [
+              "worker-response-rejected",
+              "lore-distill",
+              protocol,
+              category,
+            ],
+            contexts: {
+              worker_response: {
+                protocol,
+                stage,
+                content,
+                category,
+                finishReason,
+                httpStatus: 200,
+              },
+            },
+          }),
+        );
+        expect(
+          JSON.stringify(vi.mocked(Sentry.captureMessage).mock.calls),
+        ).not.toMatch(
+          /private-provider-response-secret|private=provider-secret|sk-(?:ant|openai)-private-credential/,
+        );
+      } finally {
+        _resetWorkerHealthForTest();
+      }
+    },
+  );
+
+  test.each([
+    [
       "finish_reason",
       [
         'data: {"choices":[{"delta":{"content":"{\\"verdict\\":\\"holds\\",\\"reason\\":\\"ok\\"}"},"finish_reason":null}]}',
@@ -1175,7 +1422,7 @@ describe("createGatewayLLMClient.prompt", () => {
         "",
         "",
       ].join("\r\n"),
-      "missing OpenAI finish_reason terminal",
+      "missing OpenAI finish_reason terminal (stage=stream, content=sse)",
     ],
     [
       "[DONE]",
@@ -1186,7 +1433,7 @@ describe("createGatewayLLMClient.prompt", () => {
         "",
         "",
       ].join("\r\n"),
-      "invalid response body",
+      "missing OpenAI [DONE] terminal (stage=stream, content=sse)",
     ],
   ])(
     "OpenAI chat SSE without %s is invalid even with a complete verdict",
@@ -1407,6 +1654,349 @@ describe("createGatewayLLMClient.prompt", () => {
     expect(distillationCost?.calls).toBe(1);
     expect(distillationCost?.cost).toBeGreaterThan(0);
   });
+
+  test("github-copilot worker accepts rotating Responses lifecycle IDs", async () => {
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(
+        event("response.created", {
+          response: {
+            id: "resp_copilot_created",
+            model: "gpt-5.6-sol",
+            status: "in_progress",
+            output: [],
+          },
+        }) +
+          event("response.in_progress", {
+            response: {
+              id: "resp_copilot_in_progress",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          }) +
+          event("response.output_item.added", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: "msg_copilot",
+              role: "assistant",
+            },
+          }) +
+          event("response.output_text.delta", {
+            output_index: 0,
+            item_id: "msg_copilot",
+            content_index: 0,
+            delta: "copilot worker reply",
+          }) +
+          event("response.output_text.done", {
+            output_index: 0,
+            item_id: "msg_copilot",
+            content_index: 0,
+            text: "copilot worker reply",
+          }) +
+          event("response.output_item.done", {
+            output_index: 0,
+            item: {
+              type: "message",
+              id: "msg_copilot",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "copilot worker reply" }],
+            },
+          }) +
+          event("response.completed", {
+            response: {
+              id: "resp_copilot_completed",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_copilot",
+                  role: "assistant",
+                  status: "completed",
+                  content: [
+                    { type: "output_text", text: "copilot worker reply" },
+                  ],
+                },
+              ],
+              usage: { input_tokens: 12, output_tokens: 3 },
+            },
+          }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com?opaque=true",
+        openai: "https://api.githubcopilot.com?opaque=true",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com?opaque=true",
+      }),
+    ).resolves.toBe("copilot worker reply");
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const url = new URL(fetchArgUrl(mockFetch.mock.calls[0][0]));
+    expect(url.pathname).toBe("/responses");
+    expect(url.search).toBe("?opaque=true");
+  });
+
+  test("github-copilot worker does not serialize pinned lifecycle projections", async () => {
+    const createdId = `resp_${"x".repeat(16_384)}`;
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const responseBody =
+      event("response.created", {
+        response: {
+          id: createdId,
+          model: "gpt-5.6-sol",
+          status: "in_progress",
+          output: [],
+        },
+      }) +
+      event("response.in_progress", {
+        response: {
+          id: "resp_short",
+          model: "gpt-5.6-sol",
+          status: "in_progress",
+          output: [],
+        },
+      }) +
+      event("response.completed", {
+        response: {
+          id: "resp_terminal",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          output: [],
+        },
+      });
+    mockFetch.mockResolvedValue(
+      new Response(responseBody, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+    const stringify = vi.spyOn(JSON, "stringify");
+
+    try {
+      await expect(
+        client.prompt("system", "user", {
+          workerID: "lore-distill",
+          upstreamProviderID: "github-copilot",
+          upstreamUrl: "https://api.githubcopilot.com",
+        }),
+      ).resolves.toBeNull();
+      const pinnedProjections = stringify.mock.calls.filter(([value]) => {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          Array.isArray(value)
+        ) {
+          return false;
+        }
+        const response = (value as Record<string, unknown>).response;
+        return (
+          typeof response === "object" &&
+          response !== null &&
+          !Array.isArray(response) &&
+          (response as Record<string, unknown>).id === createdId
+        );
+      });
+      expect(pinnedProjections).toHaveLength(0);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
+  test("github-copilot worker rejects hidden output in response.in_progress", async () => {
+    const privateValue = "private_worker_snapshot";
+    const event = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    mockFetch.mockResolvedValue(
+      new Response(
+        event("response.created", {
+          response: {
+            id: "resp_worker_created",
+            model: "gpt-5.6-sol",
+            status: "in_progress",
+            output: [],
+          },
+        }) +
+          event("response.in_progress", {
+            response: {
+              id: "resp_worker_rotated",
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_private_worker",
+                  call_id: "call_private_worker",
+                  name: "recall",
+                  arguments: JSON.stringify({ query: privateValue }),
+                  status: "completed",
+                },
+              ],
+            },
+          }) +
+          event("response.completed", {
+            response: {
+              id: "resp_worker_completed",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com",
+      }),
+    ).resolves.toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      expect.any(String),
+      "lore-distill",
+      "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(markWorkerIncapable).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain(
+      "malformed Responses terminal event",
+    );
+    expect(getLastWorkerError()).not.toContain(privateValue);
+  });
+
+  test("github-copilot worker rejects a terminal without response.created", async () => {
+    mockFetch.mockResolvedValue(
+      new Response(
+        `event: response.completed\ndata: ${JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: "resp_unanchored_worker",
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [],
+          },
+        })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    );
+    const client = createGatewayLLMClient(
+      {
+        anthropic: "https://api.githubcopilot.com",
+        openai: "https://api.githubcopilot.com",
+      },
+      () => ({ scheme: "bearer", value: "copilot-token" }),
+      { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+    );
+
+    await expect(
+      client.prompt("system", "user", {
+        workerID: "lore-distill",
+        upstreamProviderID: "github-copilot",
+        upstreamUrl: "https://api.githubcopilot.com",
+      }),
+    ).resolves.toBeNull();
+    expect(recordWorkerFailure).toHaveBeenCalledWith(
+      expect.any(String),
+      "lore-distill",
+      "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
+    );
+    expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+    expect(markWorkerIncapable).not.toHaveBeenCalled();
+    expect(getLastWorkerError()).toContain("malformed Responses stream event");
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["non-string", 7],
+  ])(
+    "github-copilot worker rejects a %s created response ID",
+    async (_case, id) => {
+      const event = (type: string, data: Record<string, unknown>) =>
+        `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+      mockFetch.mockResolvedValue(
+        new Response(
+          event("response.created", {
+            response: {
+              ...(id === undefined ? {} : { id }),
+              model: "gpt-5.6-sol",
+              status: "in_progress",
+              output: [],
+            },
+          }) +
+            event("response.completed", {
+              response: {
+                id: "resp_terminal",
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [],
+              },
+            }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+      const client = createGatewayLLMClient(
+        {
+          anthropic: "https://api.githubcopilot.com",
+          openai: "https://api.githubcopilot.com",
+        },
+        () => ({ scheme: "bearer", value: "copilot-token" }),
+        { providerID: "github-copilot", modelID: "gpt-5.6-sol" },
+      );
+
+      await expect(
+        client.prompt("system", "user", {
+          workerID: "lore-distill",
+          upstreamProviderID: "github-copilot",
+          upstreamUrl: "https://api.githubcopilot.com",
+        }),
+      ).resolves.toBeNull();
+      expect(recordWorkerFailure).toHaveBeenCalledWith(
+        expect.any(String),
+        "lore-distill",
+        "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
+      );
+      expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
+      expect(getLastWorkerError()).toContain(
+        "malformed Responses terminal event",
+      );
+    },
+  );
 
   test("OpenAI worker ignores an unproven ChatGPT backend URL", async () => {
     mockFetch.mockResolvedValue(
@@ -1714,6 +2304,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "sess-chatgpt-oversized",
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(getLastWorkerError()).toContain(
@@ -1836,6 +2427,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "sess-array-json-root",
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(getLastWorkerError()).toContain(
@@ -1869,6 +2461,7 @@ describe("createGatewayLLMClient.prompt", () => {
         `sess-json-status-${status}`,
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(getLastWorkerError()).toContain(
@@ -2041,6 +2634,7 @@ describe("createGatewayLLMClient.prompt", () => {
       "sess-public-responses-strict",
       "lore-distill",
       "upstream-error",
+      expect.objectContaining({ httpStatus: 200 }),
     );
     expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
     expect(getLastWorkerError()).toContain("malformed Responses stream event");
@@ -2226,7 +2820,7 @@ describe("createGatewayLLMClient.prompt", () => {
     [
       "response ID mismatch",
       `event: response.created\ndata: ${JSON.stringify({
-        response: { id: "resp_created" },
+        response: { id: "resp_created", model: "gpt-5.1-codex-mini" },
       })}\n\n` +
         `event: response.output_item.added\ndata: ${JSON.stringify({
           output_index: 0,
@@ -2237,7 +2831,11 @@ describe("createGatewayLLMClient.prompt", () => {
           item: { type: "message", id: "msg_response_mismatch" },
         })}\n\n` +
         `event: response.completed\ndata: ${JSON.stringify({
-          response: { id: "resp_terminal", status: "completed" },
+          response: {
+            id: "resp_terminal",
+            model: "gpt-5.1-codex-mini",
+            status: "completed",
+          },
         })}\n\n`,
       "malformed Responses terminal event",
     ],
@@ -2292,7 +2890,11 @@ describe("createGatewayLLMClient.prompt", () => {
     [
       "completed response.created status",
       `event: response.created\ndata: ${JSON.stringify({
-        response: { id: "resp_bad_created", status: "completed" },
+        response: {
+          id: "resp_bad_created",
+          model: "gpt-5.1-codex-mini",
+          status: "completed",
+        },
       })}\n\n`,
       "malformed Responses stream event",
     ],
@@ -2356,6 +2958,7 @@ describe("createGatewayLLMClient.prompt", () => {
         "sess-codex-failed-stream",
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(markWorkerIncapable).not.toHaveBeenCalled();
@@ -3187,6 +3790,7 @@ describe("worker provider body validation", () => {
         sessionID,
         "lore-distill",
         "upstream-error",
+        expect.objectContaining({ httpStatus: 200 }),
       );
       expect(recordEmptyWorkerResponse).not.toHaveBeenCalled();
       expect(markWorkerIncapable).not.toHaveBeenCalled();

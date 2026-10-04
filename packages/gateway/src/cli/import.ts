@@ -41,12 +41,7 @@ import {
 } from "./agents";
 import { exportLoreFile } from "@loreai/core";
 import { startGateway, type StartOptions } from "./start";
-import {
-  getRemoteUrl,
-  projectQueryParams,
-  remoteGet,
-  remotePost,
-} from "./remote";
+import { getRemoteUrl, projectIdentity, remoteGet, remotePost } from "./remote";
 
 const {
   detectAll,
@@ -1180,11 +1175,39 @@ export async function commandImport(
   let remoteImports: RemoteImportRecord[] | undefined;
   if (remote) {
     try {
-      const pq = projectQueryParams(projectPath);
-      remoteImports = await remoteGet<typeof remoteImports>(
-        remote,
-        `/api/v1/import/history?${pq}`,
-      );
+      // Resolve the project on the remote via its identity — `git_remote` is
+      // preferred (it survives the local path differing from the remote's),
+      // with a raw `path` match as fallback. Path *aliases* recorded on the
+      // remote are not matched client-side; since `git_remote` is tried first
+      // this only affects remote-less repos.
+      const identity = projectIdentity(projectPath);
+      const projects = await remoteGet<
+        Array<{ id: string; path: string; git_remote: string | null }>
+      >(remote, "/api/v1/projects");
+      const match = identity.git_remote
+        ? (projects.find((p) => p.git_remote === identity.git_remote) ??
+          projects.find((p) => p.path === projectPath))
+        : projects.find((p) => p.path === projectPath);
+      if (match === undefined) {
+        console.error(
+          "[lore] Note: project not yet known to remote gateway — all sessions will be imported.",
+        );
+      } else {
+        const all: RemoteImportRecord[] = [];
+        let cursor: string | null = null;
+        do {
+          const importsPage: {
+            imports: RemoteImportRecord[];
+            next_cursor: string | null;
+          } = await remoteGet(
+            remote,
+            `/api/v1/projects/${encodeURIComponent(match.id)}/imports?limit=200${cursor ? `&page=${encodeURIComponent(cursor)}` : ""}`,
+          );
+          all.push(...importsPage.imports);
+          cursor = importsPage.next_cursor;
+        } while (cursor);
+        remoteImports = all;
+      }
     } catch (err: unknown) {
       // 400/404 = project doesn't exist on remote yet (first import) — proceed without dedup
       const status =

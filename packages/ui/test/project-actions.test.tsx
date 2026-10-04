@@ -29,6 +29,7 @@ const project = (over: Partial<ProjectSummary> = {}): ProjectSummary => ({
   session_count: 2,
   message_count: 10,
   distillation_count: 1,
+  last_activity: null,
   ...over,
 });
 

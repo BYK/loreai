@@ -10,7 +10,7 @@
  * function_call (emit marker, run follow-up, rebuild the terminal
  * `response.completed`).
  */
-import { log } from "@loreai/core";
+import { log, MAX_RECALL_QUERY_CHARS } from "@loreai/core";
 import { afterEach, describe, test, expect, vi } from "vitest";
 import { streamResponsesRecallAware } from "../src/pipeline";
 import { expandRecallMarkers } from "../src/recall";
@@ -301,6 +301,299 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("response.failed");
   });
 
+  test.each(["public", "codex"] as const)(
+    "pins rotating provider lifecycle IDs before %s recall-aware validation",
+    async (validation) => {
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_copilot_created", "gpt-5.6-terra"),
+          sseEvent("response.in_progress", {
+            response: {
+              id: "resp_copilot_in_progress",
+              model: "gpt-5.6-terra",
+              status: "in_progress",
+              output: [],
+            },
+          }),
+          textItem(0, "copilot reply"),
+          sseEvent("response.completed", {
+            response: {
+              id: "resp_copilot_completed",
+              model: "gpt-5.6-terra",
+              status: "completed",
+              output: [
+                {
+                  type: "message",
+                  id: "msg_0",
+                  role: "assistant",
+                  status: "completed",
+                  content: [{ type: "output_text", text: "copilot reply" }],
+                },
+              ],
+              usage: { input_tokens: 10, output_tokens: 3 },
+            },
+          }),
+        ]),
+        {
+          validation,
+          pinResponseId: true,
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not be called");
+          },
+        },
+      );
+
+      const out = await drain(client);
+      expect(out).toContain("copilot reply");
+      expect(out).not.toContain("response.failed");
+      expect(out.match(/resp_copilot_created/g)).toHaveLength(3);
+      expect(out).not.toContain("resp_copilot_in_progress");
+      expect(out).not.toContain("resp_copilot_completed");
+    },
+  );
+
+  test("rejects a malformed provider lifecycle ID instead of pinning it", async () => {
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_copilot_created", "gpt-5.6-terra"),
+        sseEvent("response.in_progress", {
+          response: {
+            id: 7,
+            model: "gpt-5.6-terra",
+            status: "in_progress",
+            output: [],
+          },
+        }),
+      ]),
+      {
+        pinResponseId: true,
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not be called");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).not.toContain('"id":7');
+  });
+
+  test.each([
+    {
+      name: "in-progress",
+      event: "response.in_progress",
+      response: {
+        id: "resp_copilot_in_progress",
+        model: "private_changed_model",
+        status: "in_progress",
+        output: [],
+      },
+    },
+    {
+      name: "terminal",
+      event: "response.completed",
+      response: {
+        id: "resp_copilot_completed",
+        model: "private_changed_model",
+        status: "completed",
+        output: [],
+      },
+    },
+  ])(
+    "rejects $name model drift while pinning IDs",
+    async ({ event, response }) => {
+      const protocol: PrincipalProtocolFailureSample[] = [];
+      setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_copilot_created", "gpt-5.6-terra"),
+          sseEvent(event, { response }),
+        ]),
+        {
+          validation: "public",
+          pinResponseId: true,
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not be called");
+          },
+        },
+      );
+
+      const out = await drain(client);
+      expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(out).not.toContain("private_changed_model");
+      expect(protocol).toEqual([
+        {
+          phase: "validate_response",
+          event: event === "response.in_progress" ? "in_progress" : "terminal",
+          reason: "response_model",
+        },
+      ]);
+    },
+  );
+
+  test.each(["public", "codex"] as const)(
+    "%s requires complete identity on every pinned lifecycle snapshot",
+    async (validation) => {
+      const cases = [
+        {
+          name: "in-progress ID",
+          event: "response.in_progress",
+          response: {
+            model: "gpt-5.6-terra",
+            status: "in_progress",
+            output: [],
+          },
+          reason: "response_identity",
+        },
+        {
+          name: "in-progress model",
+          event: "response.in_progress",
+          response: {
+            id: "resp_rotated",
+            status: "in_progress",
+            output: [],
+          },
+          reason: "response_model",
+        },
+        {
+          name: "terminal model",
+          event: "response.completed",
+          response: {
+            id: "resp_completed",
+            status: "completed",
+            output: [],
+          },
+          reason: "response_model",
+        },
+      ] as const;
+
+      for (const { name, event, response, reason } of cases) {
+        const protocol: PrincipalProtocolFailureSample[] = [];
+        setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
+        const events = [
+          created("resp_created", "gpt-5.6-terra"),
+          sseEvent(event, { response }),
+          ...(event === "response.in_progress"
+            ? [
+                sseEvent("response.completed", {
+                  response: {
+                    id: "resp_completed",
+                    model: "gpt-5.6-terra",
+                    status: "completed",
+                    output: [],
+                  },
+                }),
+              ]
+            : []),
+        ];
+        const out = await drain(
+          streamResponsesRecallAware(streamFrom(events), {
+            validation,
+            pinResponseId: true,
+            onComplete: () => {},
+            onRecall: async () => ({ anchorText: "", resultText: "" }),
+            runFollowUp: async () => {
+              throw new Error("should not be called");
+            },
+          }),
+        );
+
+        expect(out.match(/^event: response\.failed$/gm), name).toHaveLength(1);
+        expect(protocol, name).toEqual([
+          {
+            phase: "validate_response",
+            event:
+              event === "response.in_progress" ? "in_progress" : "terminal",
+            reason,
+          },
+        ]);
+        setPrincipalProtocolFailureHook(undefined);
+      }
+    },
+  );
+
+  test.each([
+    ["response.done", "completed"],
+    ["response.incomplete", "incomplete"],
+    ["response.failed", "failed"],
+  ])(
+    "keeps rotating IDs strict for unsupported %s terminals",
+    async (event, status) => {
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_copilot_created", "gpt-5.6-terra"),
+          sseEvent(event, {
+            response: {
+              id: "private_unsupported_rotated_id",
+              model: "gpt-5.6-terra",
+              status,
+              output: [],
+            },
+          }),
+        ]),
+        {
+          validation: "public",
+          pinResponseId: true,
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not be called");
+          },
+        },
+      );
+
+      const out = await drain(client);
+      expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(out).not.toContain("private_unsupported_rotated_id");
+    },
+  );
+
+  test("charges expanded pinned IDs to the principal stream byte limit", async () => {
+    const canonicalId = `resp_${"x".repeat(512)}`;
+    const createdEvent = created(canonicalId, "gpt-5.6-terra");
+    const inProgressEvent = sseEvent("response.in_progress", {
+      response: {
+        id: "resp_short",
+        model: "gpt-5.6-terra",
+        status: "in_progress",
+        output: [],
+      },
+    });
+    const maxStreamBytes =
+      new TextEncoder().encode(createdEvent + inProgressEvent).byteLength + 900;
+    const client = streamResponsesRecallAware(
+      streamFrom([createdEvent, inProgressEvent]),
+      {
+        pinResponseId: true,
+        maxStreamBytes,
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "", resultText: "" }),
+        runFollowUp: async () => {
+          throw new Error("should not be called");
+        },
+      },
+    );
+
+    const out = await drain(client);
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("event: response.in_progress");
+    expect(Buffer.byteLength(out)).toBeLessThanOrEqual(maxStreamBytes);
+    const numbers = [...out.matchAll(/"sequence_number":(\d+)/g)].map((match) =>
+      Number(match[1]),
+    );
+    expect(numbers).toEqual([0, 1]);
+    const failure = JSON.parse(
+      /event: response\.failed\ndata: (.+)/.exec(out)?.[1] ?? "{}",
+    ) as { response?: { output?: unknown[] } };
+    expect(failure.response?.output).toEqual([]);
+  });
+
   test("finalizes when the client cancels immediately after a no-recall terminal", async () => {
     let upstreamCancelled = false;
     const upstream = new Response(
@@ -376,6 +669,60 @@ describe("streamResponsesRecallAware", () => {
     expect(out).not.toContain("ended without a terminal event");
   });
 
+  test("emits a complete bodyless-output response.incomplete after a dropped visible stream", async () => {
+    const upstreamState: {
+      controller?: ReadableStreamDefaultController<Uint8Array>;
+    } = {};
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          upstreamState.controller = controller;
+          controller.enqueue(
+            new TextEncoder().encode(
+              created("resp_transport_output", "gpt-5.6-terra") +
+                textItem(0, "visible answer", "msg_transport_output"),
+            ),
+          );
+        },
+        pull() {
+          return new Promise(() => {});
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+    const client = streamResponsesRecallAware(upstream, {
+      onComplete: () => {},
+      onRecall: async () => ({ anchorText: "", resultText: "" }),
+      runFollowUp: async () => {
+        throw new Error("should not run");
+      },
+    });
+    if (!client.body) throw new Error("missing client body");
+    const reader = client.body.getReader();
+    const decoder = new TextDecoder();
+    const chunks: string[] = [];
+    while (!chunks.join("").includes("visible answer")) {
+      const result = await reader.read();
+      if (result.done)
+        throw new Error("client stream closed before visible output");
+      chunks.push(decoder.decode(result.value, { stream: true }));
+    }
+    upstreamState.controller?.error(new Error("private transport detail"));
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      chunks.push(decoder.decode(result.value, { stream: true }));
+    }
+    const out = chunks.join("");
+    const event = JSON.parse(
+      /event: response\.incomplete\ndata: (.+)/.exec(out)?.[1] ?? "{}",
+    ) as { response?: { output?: unknown[] } };
+    expect(out).toContain("visible answer");
+    expect(out.match(/^event: response\.incomplete$/gm)).toHaveLength(1);
+    expect(event.response?.output).toEqual([]);
+    expect(out).not.toContain("private transport detail");
+  });
+
   test("accepts an empty Codex terminal output after streamed items", async () => {
     const client = streamResponsesRecallAware(
       streamFrom([
@@ -438,6 +785,416 @@ describe("streamResponsesRecallAware", () => {
     const out = await drain(client);
     expect(out).toContain("Done");
     expect(out).not.toContain("response.failed");
+  });
+
+  test.each(["principal", "continuation"] as const)(
+    "accepts a sparse Codex %s terminal without a repeated response ID",
+    async (phase) => {
+      const sparseTerminal = sseEvent("response.completed", {
+        response: { status: "completed", output: [] },
+      });
+      const followUp = streamFrom([
+        created("resp_sparse_followup", "gpt-5.6-terra"),
+        textItem(0, "Done", "msg_sparse_followup"),
+        sparseTerminal,
+      ]);
+      const completions: GatewayResponse[] = [];
+      const client = streamResponsesRecallAware(
+        streamFrom(
+          phase === "principal"
+            ? [
+                created("resp_sparse_principal", "gpt-5.6-terra"),
+                textItem(0, "Done", "msg_sparse_principal"),
+                sparseTerminal,
+              ]
+            : [
+                created("resp_sparse_principal", "gpt-5.6-terra"),
+                recallCall(0, { query: "architecture" }),
+                completed("resp_sparse_principal"),
+              ],
+        ),
+        {
+          validation: "codex",
+          onComplete: (response) => completions.push(response),
+          onRecall: async () => ({
+            anchorText: "anchor",
+            resultText: "results",
+          }),
+          runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+        },
+      );
+
+      const out = await drain(client);
+      expect(out).toContain("Done");
+      expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+      expect(out).not.toContain("event: response.failed");
+      expect(completions).toHaveLength(1);
+      expect(completions[0]).toMatchObject({
+        id: "resp_sparse_principal",
+        model: "gpt-5.6-terra",
+      });
+      expect(completions[0]?.rawOutputItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "message",
+            content: expect.arrayContaining([
+              expect.objectContaining({ text: "Done" }),
+            ]),
+          }),
+        ]),
+      );
+      if (phase === "continuation") {
+        const terminalData = out.match(
+          /event: response\.completed\ndata: ([^\n]+)\n/,
+        )?.[1];
+        expect(terminalData).toBeDefined();
+        if (terminalData === undefined)
+          throw new Error("missing terminal event");
+        const terminal = JSON.parse(terminalData) as {
+          response: Record<string, unknown>;
+        };
+        expect(terminal.response).toMatchObject({
+          id: "resp_sparse_principal",
+          model: "gpt-5.6-terra",
+          output: expect.arrayContaining([
+            expect.objectContaining({
+              type: "message",
+              content: expect.arrayContaining([
+                expect.objectContaining({ text: "Done" }),
+              ]),
+            }),
+          ]),
+        });
+      }
+    },
+  );
+
+  test.each([
+    ["mismatched Codex ID", "resp_wrong", false],
+    ["missing pinned ID", undefined, true],
+  ] as const)(
+    "rejects a %s at the terminal",
+    async (_case, id, pinResponseId) => {
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_expected", "gpt-5.6-terra"),
+          sseEvent("response.completed", {
+            response: {
+              ...(id === undefined ? {} : { id }),
+              status: "completed",
+              output: [],
+            },
+          }),
+        ]),
+        {
+          validation: "codex",
+          pinResponseId,
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not be called");
+          },
+        },
+      );
+
+      const out = await drain(client);
+      expect(out).not.toContain("event: response.completed");
+      expect(out.match(/^event: response.failed$/gm)).toHaveLength(1);
+    },
+  );
+
+  test("pins rotating Copilot IDs in a recall continuation without recovery", async () => {
+    const privateProviderField = "private_followup_provider_metadata";
+    const followUp = streamFrom([
+      created("resp_follow_created", "gpt-5.6-terra"),
+      sseEvent("response.in_progress", {
+        response: {
+          id: "resp_follow_in_progress",
+          model: "gpt-5.6-terra",
+          status: "in_progress",
+          output: [],
+        },
+      }),
+      textItem(0, "Done", "msg_follow"),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_follow_completed",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          provider_metadata: { secret: privateProviderField },
+          output: [
+            {
+              type: "message",
+              id: "msg_follow",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "Done" }],
+            },
+          ],
+        },
+      }),
+    ]);
+    const runFollowUp = vi.fn(async () => ({
+      reader: followUp.body!.getReader(),
+    }));
+    const runRecovery = vi.fn(async () => {
+      throw new Error("recovery should not run");
+    });
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_principal",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_0",
+                call_id: "call_0",
+                name: "recall",
+                arguments: '{"query":"architecture"}',
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "public",
+        pinResponseId: true,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "anchor",
+          resultText: "results",
+        }),
+        runFollowUp,
+        runRecovery,
+      },
+    );
+
+    const out = await drain(client);
+    expect(runFollowUp).toHaveBeenCalledOnce();
+    expect(runRecovery).not.toHaveBeenCalled();
+    expect(out).toContain("Done");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain("response.failed");
+    expect(out).not.toContain("resp_follow_in_progress");
+    expect(out).not.toContain("resp_follow_completed");
+    expect(out).not.toContain(privateProviderField);
+    expect(out).not.toContain('"name":"recall"');
+  });
+
+  test("drops unreviewed terminal metadata from a stable-ID recall continuation", async () => {
+    const privateValue = "private_continuation_terminal_metadata";
+    const followUp = streamFrom([
+      created("resp_stable_followup", "gpt-5.6-terra"),
+      textItem(0, "Done", "msg_stable_followup"),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_stable_followup",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          provider_metadata: { secret: privateValue },
+          output: [
+            {
+              type: "message",
+              id: "msg_stable_followup",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "Done" }],
+            },
+          ],
+        },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_stable_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "architecture" }),
+        sseEvent("response.completed", {
+          response: {
+            id: "resp_stable_principal",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            output: [
+              {
+                type: "function_call",
+                id: "fc_0",
+                call_id: "call_0",
+                name: "recall",
+                arguments: '{"query":"architecture"}',
+                status: "completed",
+              },
+            ],
+          },
+        }),
+      ]),
+      {
+        validation: "public",
+        onComplete: () => {},
+        onRecall: async () => ({ anchorText: "anchor", resultText: "results" }),
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const out = await drain(client);
+    expect(out).toContain("Done");
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).not.toContain(privateValue);
+    expect(out).not.toContain('"name":"recall"');
+  });
+
+  test("charges only emitted continuation bytes after lifecycle-ID pinning", async () => {
+    const principalEvents = [
+      created("resp_principal_limit", "gpt-5.6-terra"),
+      recallCall(0, { query: "architecture" }),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_principal_limit",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              id: "fc_0",
+              call_id: "call_0",
+              name: "recall",
+              arguments: '{"query":"architecture"}',
+              status: "completed",
+            },
+          ],
+        },
+      }),
+    ];
+    const createdId = `resp_${"x".repeat(16_384)}`;
+    const privateValue = "private_continuation_output";
+    const followUpEvents = [
+      created(createdId, "gpt-5.6-terra"),
+      sseEvent("response.in_progress", {
+        response: {
+          id: "r",
+          model: "gpt-5.6-terra",
+          status: "in_progress",
+          output: [],
+        },
+      }),
+      textItem(0, privateValue, "msg_limit"),
+      sseEvent("response.completed", {
+        response: {
+          id: "t",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_limit",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: privateValue }],
+            },
+          ],
+        },
+      }),
+    ];
+    const originalWireBytes = new TextEncoder().encode(
+      [...principalEvents, ...followUpEvents].join(""),
+    ).byteLength;
+    const client = streamResponsesRecallAware(streamFrom(principalEvents), {
+      validation: "public",
+      pinResponseId: true,
+      maxStreamBytes: originalWireBytes,
+      onComplete: () => {},
+      onRecall: async () => ({
+        anchorText: "anchor",
+        resultText: "results",
+      }),
+      runFollowUp: async () => ({
+        reader: streamFrom(followUpEvents).body!.getReader(),
+      }),
+    });
+
+    const out = await drain(client);
+    expect(Buffer.byteLength(out)).toBeLessThanOrEqual(originalWireBytes);
+    expect(out.match(/^event: response\.completed$/gm)).toHaveLength(1);
+    expect(out).toContain(privateValue);
+    expect(out).not.toContain(createdId);
+    expect(out).not.toContain('"name":"recall"');
+  });
+
+  test("rejects a pinned continuation lifecycle snapshot without an ID", async () => {
+    const privateValue = "private_unanchored_continuation";
+    const principalEvents = [
+      created("resp_principal_identity", "gpt-5.6-terra"),
+      recallCall(0, { query: "architecture" }),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_principal_identity",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              id: "fc_0",
+              call_id: "call_0",
+              name: "recall",
+              arguments: '{"query":"architecture"}',
+              status: "completed",
+            },
+          ],
+        },
+      }),
+    ];
+    const followUpEvents = [
+      created("resp_follow_identity", "gpt-5.6-terra"),
+      sseEvent("response.in_progress", {
+        response: {
+          model: "gpt-5.6-terra",
+          status: "in_progress",
+          output: [],
+        },
+      }),
+      textItem(0, privateValue, "msg_private_identity"),
+      sseEvent("response.completed", {
+        response: {
+          id: "resp_follow_identity",
+          model: "gpt-5.6-terra",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg_private_identity",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: privateValue }],
+            },
+          ],
+        },
+      }),
+    ];
+    const runFollowUp = vi.fn(async () => ({
+      reader: streamFrom(followUpEvents).body!.getReader(),
+    }));
+    const out = await drain(
+      streamResponsesRecallAware(streamFrom(principalEvents), {
+        validation: "public",
+        pinResponseId: true,
+        onComplete: () => {},
+        onRecall: async () => ({
+          anchorText: "anchor",
+          resultText: "results",
+        }),
+        runFollowUp,
+      }),
+    );
+
+    expect(runFollowUp).toHaveBeenCalledOnce();
+    expect(out.match(/^event: response\.failed$/gm)).toHaveLength(1);
+    expect(out).toContain(PUBLIC_RECALL_ERROR);
+    expect(out).not.toContain(privateValue);
+    expect(out).not.toContain('"name":"recall"');
   });
 
   test("forwards standard hosted-tool lifecycle deltas", async () => {
@@ -895,8 +1652,9 @@ describe("streamResponsesRecallAware", () => {
 
     const out = await drain(client);
     expect(retries).toBe(0);
-    expect(out).toContain("event: response.failed");
-    expect(out).toContain(PUBLIC_GATEWAY_ERROR);
+    // The configured cap cannot fit even the fixed failure terminal, so close
+    // without exceeding it rather than serializing unbounded provider fields.
+    expect(out).toBe("");
   });
 
   test("rejects an SSE event name that disagrees with the payload type", async () => {
@@ -1345,6 +2103,85 @@ describe("streamResponsesRecallAware", () => {
     expect(await drain(client)).toContain("response.failed");
   });
 
+  test.each([
+    {
+      name: "changed identity",
+      response: {
+        id: "private_changed_response_identity",
+        model: "gpt-5.6-terra",
+      },
+      reason: "response_identity" as const,
+      privateValue: "private_changed_response_identity",
+    },
+    {
+      name: "contradictory status",
+      response: {
+        id: "resp_in_progress_diagnostics",
+        model: "gpt-5.6-terra",
+        status: "private_provider_status",
+        output: [],
+      },
+      reason: "response_status" as const,
+      privateValue: "private_provider_status",
+    },
+    {
+      name: "hidden snapshot output",
+      response: {
+        id: "resp_in_progress_diagnostics",
+        model: "gpt-5.6-terra",
+        status: "in_progress",
+        output: [
+          {
+            type: "function_call",
+            id: "private_snapshot_item",
+            call_id: "private_snapshot_call",
+            name: "recall",
+            arguments: '{"query":"private_snapshot_query"}',
+          },
+        ],
+      },
+      reason: "response_snapshot_output" as const,
+      privateValue: "private_snapshot_query",
+    },
+  ])(
+    "reports a fixed reason for response.in_progress $name",
+    async ({ response, reason, privateValue }) => {
+      const protocol: PrincipalProtocolFailureSample[] = [];
+      const errors: string[] = [];
+      setPrincipalProtocolFailureHook((sample) => protocol.push(sample));
+      log.registerSink({
+        info: () => {},
+        warn: () => {},
+        error: (message) => errors.push(message),
+        captureException: () => {},
+      });
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_in_progress_diagnostics", "gpt-5.6-terra"),
+          sseEvent("response.in_progress", { response }),
+        ]),
+        {
+          onComplete: () => {},
+          onRecall: async () => ({ anchorText: "", resultText: "" }),
+          runFollowUp: async () => {
+            throw new Error("should not run");
+          },
+        },
+      );
+
+      const output = await drain(client);
+      expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(output).toContain(PUBLIC_GATEWAY_ERROR);
+      expect(output).not.toContain(privateValue);
+      expect(protocol).toEqual([
+        { phase: "validate_response", event: "in_progress", reason },
+      ]);
+      expect(errors).toEqual([
+        `openai-responses recall-aware stream failed category=principal_protocol phase=validate_response event=in_progress reason=${reason}`,
+      ]);
+    },
+  );
+
   test("rejects malformed named Responses events in a continuation", async () => {
     const failures: RecallContinuationFailureCategory[] = [];
     setRecallContinuationFailureHook((category) => failures.push(category));
@@ -1476,6 +2313,10 @@ describe("streamResponsesRecallAware", () => {
     expect(out).toContain(PUBLIC_RECALL_ERROR);
     expect(out).not.toContain("private socket reset");
     expect(failures).toEqual(["follow_up_transport"]);
+    const terminal = JSON.parse(
+      /event: response\.failed\ndata: (.+)/.exec(out)?.[1] ?? "{}",
+    ) as { response?: { output?: unknown[] } };
+    expect(terminal.response?.output).toEqual([]);
   });
 
   test("classifies a completed continuation without output", async () => {
@@ -1933,13 +2774,8 @@ describe("streamResponsesRecallAware", () => {
       /event: response\.failed\ndata: (.+)/.exec(output)?.[1] ?? "{}",
     ) as { response?: { output?: Array<Record<string, unknown>> } };
     expect(output.match(/^event: response\.failed$/gm)).toHaveLength(1);
-    expect(terminal.response?.output).toContainEqual(
-      expect.objectContaining({
-        id: "fc_terminal_name",
-        call_id: "call_terminal_name",
-        name: "read",
-      }),
-    );
+    expect(terminal.response?.output).toEqual([]);
+    expect(output).not.toContain('"name":"recall"');
     expect(completedResponse?.rawOutputItems).toContainEqual(
       expect.objectContaining({
         id: "fc_terminal_name",
@@ -7230,7 +8066,109 @@ describe("streamResponsesRecallAware", () => {
     expect(recalled).toBe(0);
   });
 
-  test("rejects an over-budget principal response before its first recall", async () => {
+  test("continues after recall when the principal context exceeds 128k tokens", async () => {
+    const completedResponses: GatewayResponse[] = [];
+    const recalled = vi.fn(async () => ({
+      anchorText: "recalled",
+      resultText: "result",
+    }));
+    const followUp = streamFrom([
+      created("resp_long_context_followup", "gpt-5.6-terra"),
+      textItem(0, "answer from recall", "msg_long_context_answer"),
+      completed("resp_long_context_followup", {
+        input_tokens: 241_000,
+        output_tokens: 30,
+        input_tokens_details: { cached_tokens: 200_000 },
+      }),
+    ]);
+    const client = streamResponsesRecallAware(
+      streamFrom([
+        created("resp_long_context_principal", "gpt-5.6-terra"),
+        recallCall(0, { query: "first" }),
+        completed("resp_long_context_principal", {
+          input_tokens: 240_000,
+          output_tokens: 10,
+          input_tokens_details: { cached_tokens: 200_000 },
+        }),
+      ]),
+      {
+        modelContextTokens: 1_000_000,
+        expectedPrincipalModel: "gpt-5.6-terra",
+        onComplete: (response, successful) => {
+          if (successful) completedResponses.push(response);
+        },
+        onRecall: recalled,
+        runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+      },
+    );
+
+    const output = await drain(client);
+    expect(recalled).toHaveBeenCalledTimes(1);
+    expect(output).toContain("answer from recall");
+    expect(output).toContain("response.completed");
+    expect(output).not.toContain(PUBLIC_RECALL_ERROR);
+    expect(completedResponses).toHaveLength(1);
+    expect(completedResponses[0]?.usage).toMatchObject({
+      inputTokens: 81_000,
+      outputTokens: 40,
+      cacheReadInputTokens: 400_000,
+    });
+  });
+
+  test.each([
+    { failure: "unmetered", usage: undefined },
+    {
+      failure: "over-budget",
+      usage: { input_tokens: 970_000, output_tokens: 1 },
+    },
+  ])(
+    "never accepts recall persistence after an $failure expanded final answer",
+    async ({ failure, usage }) => {
+      const commit = vi.fn();
+      const rollback = vi.fn();
+      const onTransactionReady = vi.fn();
+      const onComplete = vi.fn();
+      const followUp = streamFrom([
+        created(`resp_${failure}_followup`, "gpt-5.6-terra"),
+        textItem(0, `${failure} answer`, `msg_${failure}_answer`),
+        completed(`resp_${failure}_followup`, usage),
+      ]);
+      const client = streamResponsesRecallAware(
+        streamFrom([
+          created("resp_unmetered_principal", "gpt-5.6-terra"),
+          recallCall(0, { query: "first" }),
+          completed("resp_unmetered_principal", {
+            input_tokens: 240_000,
+            output_tokens: 10,
+          }),
+        ]),
+        {
+          modelContextTokens: 1_000_000,
+          expectedPrincipalModel: "gpt-5.6-terra",
+          onComplete,
+          onTransactionReady,
+          onRecall: async () => ({
+            anchorText: "recalled",
+            resultText: "result",
+            commit,
+            rollback,
+          }),
+          runFollowUp: async () => ({ reader: followUp.body!.getReader() }),
+        },
+      );
+
+      const output = await drain(client);
+      expect(output).toContain(PUBLIC_RECALL_ERROR);
+      expect(output).not.toContain(`${failure} answer`);
+      expect(output).not.toContain("response.completed");
+      expect(onTransactionReady).not.toHaveBeenCalled();
+      expect(onComplete).not.toHaveBeenCalledWith(expect.anything(), true);
+      expect(commit).not.toHaveBeenCalled();
+      expect(rollback).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("rejects an implausibly large principal response before its first recall", async () => {
     let recalled = 0;
     const followUp = streamFrom([
       created("resp_chained_usage_overflow", "gpt-5.6-terra"),
@@ -7922,7 +8860,14 @@ describe("streamResponsesRecallAware", () => {
     // them would duplicate init/terminal events and violate the SSE protocol.
     const followUpStream = streamFrom([
       created("resp_followup", "gpt-5.6-terra"),
-      sseEvent("response.in_progress", {}),
+      sseEvent("response.in_progress", {
+        response: {
+          id: "resp_followup",
+          model: "gpt-5.6-terra",
+          status: "in_progress",
+          output: [],
+        },
+      }),
       textItem(0, "Here is the answer from the continuation."),
       completed("resp_followup", { input_tokens: 5, output_tokens: 9 }),
     ]);
@@ -8545,6 +9490,7 @@ describe("streamResponsesRecallAware", () => {
 
   test("bounds request-wide no-index stream bytes", async () => {
     const lifecycle = created("resp_stream_bytes", "gpt-5.6-terra");
+    const maxStreamBytes = new TextEncoder().encode(lifecycle).byteLength + 1;
     const client = streamResponsesRecallAware(
       streamFrom([
         lifecycle,
@@ -8552,7 +9498,7 @@ describe("streamResponsesRecallAware", () => {
         completed("resp_stream_bytes"),
       ]),
       {
-        maxStreamBytes: new TextEncoder().encode(lifecycle).byteLength + 1,
+        maxStreamBytes,
         onComplete: () => {},
         onRecall: async () => ({ anchorText: "", resultText: "" }),
         runFollowUp: async () => {
@@ -8560,7 +9506,9 @@ describe("streamResponsesRecallAware", () => {
         },
       },
     );
-    expect(await drain(client)).toContain("response.failed");
+    expect(Buffer.byteLength(await drain(client))).toBeLessThanOrEqual(
+      maxStreamBytes,
+    );
   });
 
   test("caps raw stream bytes across a continuation", async () => {
@@ -10380,6 +11328,12 @@ describe("streamResponsesRecallAware", () => {
     ['{"query":"x","scope":42}', "scope_type"],
     ['{"query":"x","extra":true}', "unknown_property"],
     ['{"query":42}', "query_type"],
+    [
+      JSON.stringify({ query: "x".repeat(MAX_RECALL_QUERY_CHARS + 1) }),
+      "query_length",
+    ],
+    ['{"query":"bad\\u0001query"}', "query_length"],
+    ['{"query":"foo…bar"}', "query_length"],
     ['{"query":"x","id":42}', "id_type"],
   ])(
     "returns a repair result for invalid recall arguments %s",
@@ -10670,6 +11624,7 @@ describe("streamResponsesRecallAware", () => {
       sseEvent("response.failed", {
         response: {
           id: "resp_followup_failure",
+          model: "gpt-5.6-terra",
           status: "failed",
           usage: { input_tokens: 1_000, output_tokens: 100 },
           error: { message: "provider failed" },

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
+import * as core from "@loreai/core";
 import { db, ltm, loadSessionTracking } from "@loreai/core";
 import { getSessionCosts } from "../src/cost-tracker";
 import {
@@ -263,6 +264,45 @@ test("a cancelled in-flight continuation discards staged recall effects", async 
   expect(loadSessionTracking(state.sessionID)?.recallStore ?? null).toBeNull();
   expect(ltm.transferCount(id)).toBe(0);
 });
+
+test.each([false, true])(
+  "an operational recall failure stages no anchor or follow-up (stream=%s)",
+  async (stream) => {
+    const id = knowledge();
+    const alias = crypto.randomUUID();
+    const req = request("anthropic", alias);
+    req.stream = stream;
+    const runRecall = vi
+      .spyOn(core, "runRecallWithMetadata")
+      .mockRejectedValue(new Error("recall backend failed"));
+    let calls = 0;
+    setUpstreamInterceptor(async () => {
+      calls++;
+      return providerResponse("anthropic", calls, "recall", stream);
+    });
+
+    try {
+      const response = await handleRequest(req, config());
+      if (stream) {
+        expect(response.status).toBe(200);
+        await expect(response.text()).rejects.toBeInstanceOf(Error);
+      } else {
+        expect(response.status).toBe(502);
+        await response.text();
+      }
+      await settled();
+      const state = stateFor(alias);
+      expect(calls).toBe(1);
+      expect(state.recallStore.size).toBe(0);
+      expect(
+        loadSessionTracking(state.sessionID)?.recallStore ?? null,
+      ).toBeNull();
+      expect(ltm.transferCount(id)).toBe(0);
+    } finally {
+      runRecall.mockRestore();
+    }
+  },
+);
 
 test.each(
   (["failure", "commit", "capacity", "late-capacity"] as const).flatMap(

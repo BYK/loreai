@@ -6,6 +6,8 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { close, db, ensureProject } from "../src/db";
+import { isVecAvailable } from "../src/db/vec";
+import * as log from "../src/log";
 import { pruneIdle } from "../src/temporal";
 import {
   _resetVectorPoolForTest,
@@ -129,6 +131,7 @@ afterEach(() => {
   delete process.env.LORE_DISABLE_VEC_WORKER;
   delete process.env.LORE_VEC_SEARCH_TIMEOUT_MS;
   vi.useRealTimers();
+  log.registerSink({ info() {}, warn() {}, error() {}, captureException() {} });
 });
 
 describe("vector-pool dispatch", () => {
@@ -197,6 +200,31 @@ describe("vectorSearchTimeoutMs env override", () => {
 });
 
 describe("vector-pool fallback paths (resolve null, never throw)", () => {
+  it("never logs a worker's private exception text", async () => {
+    const privateMarker = "private-vector-worker-diagnostic-sentinel";
+    const messages: string[] = [];
+    log.registerSink({
+      info(message) {
+        messages.push(message);
+      },
+      warn(message) {
+        messages.push(message);
+      },
+      error(message) {
+        messages.push(message);
+      },
+      captureException(error) {
+        messages.push(String(error));
+      },
+    });
+    _setTestVectorWorkerFactory(
+      factoryReturning((worker, msg) =>
+        worker.replyError(msg.id, privateMarker),
+      ),
+    );
+    expect(await tryPoolVectorSearch(KNOWLEDGE, QUERY)).toBeNull();
+    expect(messages.join(" ")).not.toContain(privateMarker);
+  });
   it("returns null when the worker reports a per-request error", async () => {
     _setTestVectorWorkerFactory(
       factoryReturning((w, msg) => w.replyError(msg.id, "boom")),
@@ -1183,6 +1211,40 @@ describe("embedding.vectorSearch routes through the pool", () => {
 });
 
 describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
+  it("reports native availability on a fresh database without an embedding fingerprint", async () => {
+    const bundle = new URL(
+      "../../gateway/dist/vector-worker.cjs",
+      import.meta.url,
+    );
+    if (!existsSync(bundle))
+      throw new Error("Build the gateway bundle before probing the worker");
+    const dir = mkdtempSync(join(tmpdir(), "lore-fresh-vec-probe-"));
+    const previousPath = process.env.LORE_DB_PATH;
+    try {
+      close();
+      process.env.LORE_DB_PATH = join(dir, "fresh.db");
+      expect(isVecAvailable()).toBe(false); // the new writer has not opened yet
+      const writer = db();
+      expect(
+        writer
+          .query("SELECT 1 FROM kv_meta WHERE key = 'lore:embedding_config'")
+          .get(),
+      ).toBeNull();
+      expect(isVecAvailable()).toBe(true);
+      _setTestVectorWorkerFactory(
+        (data) => new Worker(bundle, { workerData: data }),
+      );
+      expect(await checkVecWorker()).toEqual({
+        status: "ready",
+        vecAvailable: true,
+      });
+    } finally {
+      close();
+      if (previousPath === undefined) delete process.env.LORE_DB_PATH;
+      else process.env.LORE_DB_PATH = previousPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   // The real worker posts `ready` at construction; checkVecWorker attaches its
   // listeners synchronously after spawn, so the fake must emit on a macrotask
   // (after the listeners exist) — emitting synchronously in the constructor
@@ -1220,7 +1282,7 @@ describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
     expect(r).toEqual({
       status: "init-error",
       vecAvailable: false,
-      error: "open boom",
+      error: "reader_init_failed",
     });
   });
 
@@ -1232,7 +1294,7 @@ describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
     expect(r).toEqual({
       status: "spawn-error",
       vecAvailable: false,
-      error: "crash boom",
+      error: "vector_worker_crashed",
     });
   });
 
@@ -1252,7 +1314,7 @@ describe("checkVecWorker (off-thread read-pool vec probe, #1033)", () => {
     expect(r).toEqual({
       status: "spawn-error",
       vecAvailable: false,
-      error: "no worker",
+      error: "vector_worker_spawn_failed",
     });
   });
 
@@ -1319,7 +1381,7 @@ describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () =>
       factoryEmitting((w) => w.initError("open boom")),
     );
     const r = await checkReadOffload();
-    expect(r).toEqual({ status: "init-error", error: "open boom" });
+    expect(r).toEqual({ status: "init-error", error: "reader_init_failed" });
   });
 
   it("reports read-error when the worker throws running the job", async () => {
@@ -1327,7 +1389,7 @@ describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () =>
       factoryReadProbe((w, id) => w.replyError(id, "scan boom")),
     );
     const r = await checkReadOffload();
-    expect(r).toEqual({ status: "read-error", error: "scan boom" });
+    expect(r).toEqual({ status: "read-error", error: "read_job_failed" });
   });
 
   it("reports bad-result when the worker returns an unexpected row", async () => {
@@ -1336,7 +1398,7 @@ describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () =>
     );
     const r = await checkReadOffload();
     expect(r.status).toBe("bad-result");
-    expect(r.error).toBe(JSON.stringify({ one: 2 }));
+    expect(r.error).toBe("read_probe_bad_result");
   });
 
   it("reports bad-result when the worker returns a null row", async () => {
@@ -1352,7 +1414,7 @@ describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () =>
       factoryEmitting((w) => w.crash(new Error("crash boom"))),
     );
     const r = await checkReadOffload();
-    expect(r).toEqual({ status: "spawn-error", error: "crash boom" });
+    expect(r).toEqual({ status: "spawn-error", error: "read_worker_crashed" });
   });
 
   it("reports spawn-error when the worker exits before returning a result", async () => {
@@ -1368,7 +1430,10 @@ describe("checkReadOffload (off-thread read-job round-trip probe, #1029)", () =>
       throw new Error("no worker");
     });
     const r = await checkReadOffload();
-    expect(r).toEqual({ status: "spawn-error", error: "no worker" });
+    expect(r).toEqual({
+      status: "spawn-error",
+      error: "read_worker_spawn_failed",
+    });
   });
 
   it("reports timeout when the worker never boots", async () => {

@@ -13,6 +13,7 @@ import {
   type LoopbackRequestInit,
 } from "./helpers/loopback-request";
 import { createTestDatabasePath } from "../../core/test/helpers/test-db-path";
+import { MAX_RECALL_QUERY_CHARS } from "@loreai/core";
 
 // ---------------------------------------------------------------------------
 // Test-scoped server setup
@@ -124,14 +125,22 @@ describe("GET /api/v1/projects", () => {
 
   it("returns projects after seeding", async () => {
     const { projectId } = await seedProject();
-    const projects =
-      await apiJSON<Array<{ id: string; name: string | null }>>(
-        "/api/v1/projects",
-      );
+    const projects = await apiJSON<
+      Array<{
+        id: string;
+        name: string | null;
+        last_activity: number | null;
+      }>
+    >("/api/v1/projects");
     expect(projects.length).toBeGreaterThanOrEqual(1);
     const found = projects.find((p) => p.id === projectId);
     expect(found).toBeDefined();
     expect(found?.name).toBe("test-project");
+    for (const p of projects) {
+      expect(
+        p.last_activity === null || typeof p.last_activity === "number",
+      ).toBe(true);
+    }
   });
 });
 
@@ -468,6 +477,17 @@ describe("GET /api/v1/recall", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects an oversized query before resolving the project", async () => {
+    const res = await api(
+      `/api/v1/recall?q=${"x".repeat(MAX_RECALL_QUERY_CHARS + 1)}`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe(
+      `Recall query longer than ${MAX_RECALL_QUERY_CHARS} characters`,
+    );
+  });
+
   it("returns 400 for invalid scope", async () => {
     const { projectPath } = await seedProject();
     const pq = `path=${encodeURIComponent(projectPath)}`;
@@ -532,21 +552,6 @@ describe("GET /api/v1/recall", () => {
 // Tests: Import endpoints
 // ---------------------------------------------------------------------------
 
-describe("GET /api/v1/import/history", () => {
-  it("returns 400 when project is not identified", async () => {
-    const res = await api("/api/v1/import/history");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns empty array for project with no imports", async () => {
-    const { projectPath } = await seedProject();
-    const pq = `path=${encodeURIComponent(projectPath)}`;
-    const records = await apiJSON<unknown[]>(`/api/v1/import/history?${pq}`);
-    expect(Array.isArray(records)).toBe(true);
-    expect(records.length).toBe(0);
-  });
-});
-
 describe("POST /api/v1/import/record", () => {
   it("records an import", async () => {
     const { projectPath } = await seedProject();
@@ -565,14 +570,14 @@ describe("POST /api/v1/import/record", () => {
     const body = (await res.json()) as { recorded: boolean };
     expect(body.recorded).toBe(true);
 
-    // Verify via history endpoint
-    const pq = `path=${encodeURIComponent(projectPath)}`;
-    const records = await apiJSON<
-      Array<{ agent_name: string; source_id: string }>
-    >(`/api/v1/import/history?${pq}`);
-    expect(records.length).toBe(1);
-    expect(records[0].agent_name).toBe("test-agent");
-    expect(records[0].source_id).toBe("session-123");
+    // Verify via the paged project imports route
+    const { projectId } = await seedProject();
+    const page = await apiJSON<{
+      imports: Array<{ agent_name: string; source_id: string }>;
+    }>(`/api/v1/projects/${projectId}/imports`);
+    expect(page.imports.length).toBe(1);
+    expect(page.imports[0].agent_name).toBe("test-agent");
+    expect(page.imports[0].source_id).toBe("session-123");
   });
 
   it("returns 400 for missing fields", async () => {
@@ -1453,6 +1458,14 @@ describe("GET /api/v1/projects/:id/knowledge — cursor mode", () => {
         kind: "knowledge",
         project: projectId,
         sort: "bogus",
+        key: 1,
+        id: "x",
+      }),
+      forged({
+        v: 1,
+        kind: "knowledge_all",
+        project: null,
+        sort: "updated_desc",
         key: 1,
         id: "x",
       }),

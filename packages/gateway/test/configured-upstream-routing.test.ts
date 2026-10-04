@@ -48,12 +48,134 @@ function openAIResponsesResponse(): Response {
   );
 }
 
+function openAIResponsesClientRecallStreamResponse(inputTokens = 1): Response {
+  const event = (type: string, payload: Record<string, unknown>) =>
+    `event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`;
+  const args = JSON.stringify({ query: "client-owned" });
+  return new Response(
+    event("response.created", {
+      response: { id: "resp-client-recall", model: "gpt-5.6-codex" },
+    }) +
+      event("response.output_item.added", {
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc-client-recall",
+          call_id: "call-client-recall",
+          name: "recall",
+          arguments: "",
+        },
+      }) +
+      event("response.function_call_arguments.done", {
+        output_index: 0,
+        item_id: "fc-client-recall",
+        arguments: args,
+      }) +
+      event("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc-client-recall",
+          call_id: "call-client-recall",
+          name: "recall",
+          arguments: args,
+          status: "completed",
+        },
+      }) +
+      event("response.completed", {
+        response: {
+          id: "resp-client-recall",
+          model: "gpt-5.6-codex",
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              id: "fc-client-recall",
+              call_id: "call-client-recall",
+              name: "recall",
+              arguments: args,
+              status: "completed",
+            },
+          ],
+          usage: {
+            input_tokens: inputTokens,
+            output_tokens: 1,
+            total_tokens: inputTokens + 1,
+          },
+        },
+      }) +
+      "data: [DONE]\n\n",
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+function openAIResponsesClientRecallResponse(inputTokens = 128_001): Response {
+  const args = JSON.stringify({ query: "client-owned" });
+  return new Response(
+    JSON.stringify({
+      id: "resp-client-recall-buffered",
+      object: "response",
+      created_at: 1,
+      status: "completed",
+      model: "gpt-5.6-codex",
+      output: [
+        {
+          type: "function_call",
+          id: "fc-client-recall-buffered",
+          call_id: "call-client-recall-buffered",
+          name: "recall",
+          arguments: args,
+          status: "completed",
+        },
+      ],
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: 1,
+        total_tokens: inputTokens + 1,
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
 describe("configured upstream routing", () => {
   let harness: Harness | undefined;
 
   afterEach(async () => {
     if (harness) await harness.teardown();
     harness = undefined;
+  });
+
+  test("never dispatches credentials through a malformed configured OpenAI base", async () => {
+    harness = await createHarness({
+      fixtures: [],
+      configOverrides: { upstreamOpenAI: "https:/" },
+    });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(openAIResponsesResponse());
+
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer private-openai-credential",
+        "x-lore-agent": "title",
+        "x-lore-project": "/tmp/malformed-configured-upstream",
+      },
+      body: JSON.stringify({
+        model: "custom-model",
+        stream: false,
+        input: "hi",
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(await response.text()).not.toContain("private-openai-credential");
   });
 
   test("uses the configured Anthropic upstream for claude models", async () => {
@@ -92,6 +214,232 @@ describe("configured upstream routing", () => {
     expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
       "http://127.0.0.1:3209/v1/messages",
     );
+  });
+
+  test("preserves root tool combinators for compatible Anthropic providers", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    let capturedBody: Record<string, unknown> | undefined;
+    setUpstreamInterceptor(async (body, _model, _stream, makeReal) => {
+      capturedBody = body as Record<string, unknown>;
+      return makeReal();
+    });
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(anthropicResponse());
+
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+      oneOf: [{ required: ["value"] }, { additionalProperties: false }],
+      not: { type: "null" },
+    };
+    const response = await harness.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "test-key",
+        "x-lore-provider": "minimax",
+        "x-lore-upstream-url": "https://api.minimax.io/anthropic",
+        "x-lore-upstream-path": "/anthropic/v1/messages",
+        "x-lore-project": "/tmp/compatible-anthropic-provider",
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M2.7",
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ name: "union", description: "union", input_schema: schema }],
+      }),
+    });
+    await response.text();
+
+    expect(response.status).toBe(200);
+    if (!capturedBody || !Array.isArray(capturedBody.tools)) {
+      throw new Error("upstream request did not contain tools");
+    }
+    const firstTool = capturedBody.tools[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(firstTool?.input_schema).toEqual(schema);
+  });
+
+  test("does not weaken a client-owned recall tool", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (body, _model, _stream, makeReal) => {
+      return makeReal();
+    });
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(anthropicResponse());
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+      oneOf: [{ required: ["value"] }],
+    };
+
+    const response = await harness.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": "test-key",
+        "x-lore-provider": "minimax",
+        "x-lore-upstream-url": "https://api.anthropic.com",
+        "x-lore-project": "/tmp/client-owned-recall",
+      },
+      body: JSON.stringify({
+        model: "MiniMax-M2.7",
+        max_tokens: 16,
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "recall",
+            description: "client tool",
+            input_schema: schema,
+          },
+        ],
+      }),
+    });
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(502);
+  });
+
+  test("trusts capability only for the final canonical endpoint", async () => {
+    const [
+      { loadConfig },
+      {
+        resolveRequestUpstreamRouteForTest,
+        supportsEffectiveRootToolSchemaCombinatorsForTest,
+      },
+    ] = await Promise.all([import("../src/config"), import("../src/pipeline")]);
+    const baseHeaders = {
+      "x-api-key": "test-key",
+      "x-lore-provider": "minimax",
+      "x-lore-upstream-url": "https://api.minimax.io/anthropic",
+    };
+    const config = { ...loadConfig(), remoteGateway: false };
+    const canonicalRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/v1/messages",
+        },
+      },
+      config,
+    );
+    const noncanonicalRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/custom/messages",
+        },
+      },
+      config,
+    );
+    const canonicalQueryRoute = resolveRequestUpstreamRouteForTest(
+      {
+        model: "MiniMax-M2.7",
+        protocol: "anthropic",
+        rawHeaders: {
+          ...baseHeaders,
+          "x-lore-upstream-path": "/anthropic/v1/messages?trace=1",
+        },
+      },
+      config,
+    );
+
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalRoute),
+    ).toBe(true);
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(noncanonicalRoute),
+    ).toBe(false);
+    expect(
+      supportsEffectiveRootToolSchemaCombinatorsForTest(canonicalQueryRoute),
+    ).toBe(true);
+  });
+
+  test("pins Copilot response IDs only for the canonical Responses endpoint", async () => {
+    const [
+      { loadConfig },
+      {
+        resolveRequestUpstreamRouteForTest,
+        shouldPinGithubCopilotResponseIdForTest,
+      },
+    ] = await Promise.all([import("../src/config"), import("../src/pipeline")]);
+    const config = { ...loadConfig(), remoteGateway: false };
+    const route = (
+      upstreamPath?: string,
+      upstreamUrl = "https://api.githubcopilot.com",
+    ) =>
+      resolveRequestUpstreamRouteForTest(
+        {
+          model: "gpt-5.6-sol",
+          protocol: "openai-responses",
+          rawHeaders: {
+            "x-api-key": "test-key",
+            "x-lore-provider": "github-copilot",
+            "x-lore-upstream-url": upstreamUrl,
+            ...(upstreamPath ? { "x-lore-upstream-path": upstreamPath } : {}),
+          },
+        },
+        config,
+      );
+
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route(),
+        "https://api.githubcopilot.com/responses",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/responses?opaque=true"),
+        "https://api.githubcopilot.com/responses?opaque=true",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/v1/responses"),
+        "https://api.githubcopilot.com/v1/responses",
+      ),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/responses", "https://api.individual.githubcopilot.com"),
+        "https://api.individual.githubcopilot.com/responses",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/custom/responses"),
+        "https://api.githubcopilot.com/custom/responses",
+      ),
+    ).toBe(false);
+    expect(
+      shouldPinGithubCopilotResponseIdForTest(
+        route("/responses", "https://example.com"),
+        "https://example.com/responses",
+      ),
+    ).toBe(false);
+    for (const finalUrl of [
+      "https://user:pass@api.githubcopilot.com/responses",
+      "https://api.githubcopilot.com/responses#fragment",
+      "http://api.githubcopilot.com/responses",
+      "https://api.githubcopilot.com:8443/responses",
+    ]) {
+      expect(
+        shouldPinGithubCopilotResponseIdForTest(route(), finalUrl),
+        finalUrl,
+      ).toBe(false);
+    }
   });
 
   test("marks a configured Anthropic proxy as Anthropic for cache warming", async () => {
@@ -156,5 +504,84 @@ describe("configured upstream routing", () => {
     expect(fetchArgUrl(mockFetch.mock.calls[0]?.[0])).toBe(
       "https://api.anthropic.com/v1/responses",
     );
+  });
+
+  test("forwards a client-owned recall tool on Responses streaming ingress", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue(
+      openAIResponsesClientRecallStreamResponse(128_001),
+    );
+
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-key",
+        "x-lore-project": "/tmp/client-owned-responses-recall",
+        "x-lore-session-id": "client-owned-responses-recall",
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-codex",
+        input: "hi",
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            name: "recall",
+            description: "client tool",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    });
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(200);
+    expect(responseText).toContain('"name":"recall"');
+    expect(responseText).toContain("client-owned");
+  });
+
+  test("does not apply the recall budget to a buffered client-owned recall call", async () => {
+    harness = await createHarness({ fixtures: [] });
+    const { setUpstreamInterceptor } = await import("../src/pipeline");
+    setUpstreamInterceptor(async (_body, _model, _stream, makeReal) =>
+      makeReal(),
+    );
+    mockFetch.mockReset();
+    const sessionHeaders = {
+      "content-type": "application/json",
+      authorization: "Bearer test-key",
+      "x-lore-project": "/tmp/client-owned-buffered-recall",
+      "x-lore-session-id": "client-owned-buffered-recall",
+    };
+    mockFetch.mockResolvedValue(openAIResponsesClientRecallResponse());
+
+    const response = await harness.request("/v1/responses", {
+      method: "POST",
+      headers: sessionHeaders,
+      body: JSON.stringify({
+        model: "gpt-5.6-codex",
+        input: "hi",
+        stream: false,
+        tools: [
+          {
+            type: "function",
+            name: "recall",
+            description: "client tool",
+            parameters: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    });
+    const responseText = await response.text();
+
+    expect(response.status, responseText).toBe(200);
+    expect(responseText).toContain('"name":"recall"');
+    expect(responseText).toContain("client-owned");
   });
 });

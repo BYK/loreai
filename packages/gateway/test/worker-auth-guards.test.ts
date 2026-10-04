@@ -126,6 +126,10 @@ describe("alias-aware worker auth guards", () => {
     stop();
 
     expect(doIdleWork).toHaveBeenCalledTimes(1);
-    expect(doIdleWork).toHaveBeenCalledWith(aliasState.sessionID, aliasState);
+    expect(doIdleWork).toHaveBeenCalledWith(
+      aliasState.sessionID,
+      aliasState,
+      expect.any(Function),
+    );
   });
 });

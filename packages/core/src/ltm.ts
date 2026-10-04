@@ -1552,8 +1552,8 @@ function curatorEntryTokens(e: KnowledgeEntry): number {
  * scaling with stored count. Returns the entries the curator may update / delete
  * / dedup against, packed into `maxTokens` by priority:
  *
- *   1. ALL cross-project / global entries — shared and few; they must stay
- *      visible so a project can update them and avoid re-minting duplicates.
+ *   1. Cross-project / global entries that fit — shared knowledge has priority,
+ *      but no entry can exceed the curator's total context budget.
  *   2. Project-scoped entries are CONSIDERED in `forProject` rank order
  *      (confidence DESC, updated_at DESC), so the highest-confidence entries are
  *      always packed first.
@@ -1569,8 +1569,8 @@ function curatorEntryTokens(e: KnowledgeEntry): number {
  * everything.
  *
  * When everything fits (the common case) the full set is returned unchanged.
- * Dropped entries are the lowest-confidence / stalest project-scoped ones —
- * least likely to be re-observed this session; the curator's post-create
+ * Dropped entries are over-budget entries or the lowest-confidence / stalest
+ * project-scoped ones; the curator's post-create
  * embedding dedup sweep backstops any duplicate minted for an unseen entry.
  * Result preserves `forProject` ordering for determinism.
  */
@@ -1585,11 +1585,14 @@ export function forCurator(
 
   const keep = new Set<string>();
   let used = 0;
-  // Pass 1: pin all cross-project / global entries (always visible).
+  // Pass 1: prioritize cross-project / global entries within the same hard
+  // budget. A single long shared entry must not overflow the curator request.
   for (const e of all) {
     if (e.cross_project === 1 || e.project_id === null) {
+      const cost = curatorEntryTokens(e);
+      if (used + cost > maxTokens) continue;
       keep.add(e.id);
-      used += curatorEntryTokens(e);
+      used += cost;
     }
   }
   // Pass 2: pack project-scoped entries by rank until the budget is full.
@@ -3286,9 +3289,6 @@ export function recordPreferenceEffects(
   }
 }
 
-/** Cap on the inline size of a single recalled temporal message (chars). */
-const RECALLED_TEMPORAL_MAX_CHARS = 2000;
-
 /**
  * Build synthetic, relevance-scored context entries from non-knowledge sources
  * (distillation, temporal).
@@ -3566,15 +3566,11 @@ async function loadContextSourceCandidates(
           if (added >= limit) break;
           const r = byId.get(mid);
           if (!r?.content) continue;
-          const content =
-            r.content.length > RECALLED_TEMPORAL_MAX_CHARS
-              ? `${r.content.slice(0, RECALLED_TEMPORAL_MAX_CHARS)}…`
-              : r.content;
           out.push({
             entry: mkEntry(
               `t:${r.id}`,
               `Relevant earlier message (${r.role})`,
-              content,
+              r.content,
               r.created_at,
             ),
             score,
@@ -4293,7 +4289,7 @@ export function cleanDeadRefs(): number {
 
 export type IntegrityIssue = {
   entryId: string;
-  type: "duplicate" | "stale-path" | "oversized" | "empty";
+  type: "duplicate" | "stale-path" | "empty";
   description: string;
   suggestion?: string;
 };
@@ -4304,23 +4300,11 @@ export type IntegrityIssue = {
  *
  * Checks:
  * 1. Duplicate detection — FTS5 title similarity between entries
- * 2. Content quality — empty content, oversized entries
+ * 2. Content quality — empty content
  */
 export function check(projectPath: string): IntegrityIssue[] {
   const entries = forProject(projectPath, false);
   const issues: IntegrityIssue[] = [];
-
-  // Oversized entries (>1200 chars with confidence > 0)
-  for (const entry of entries) {
-    if (entry.content.length > 1200) {
-      issues.push({
-        entryId: entry.id,
-        type: "oversized",
-        description: `Content is ${entry.content.length} chars (max 1200)`,
-        suggestion: "Trim or split into multiple entries",
-      });
-    }
-  }
 
   // Empty or near-empty content
   for (const entry of entries) {
@@ -4911,6 +4895,12 @@ export interface OpenContradiction {
   similarity: number;
   rationale: string | null;
   detectedAt: number;
+  /** Project each side belongs to; null when the entry is global (no
+   * project_id). Names fall back to the project path. */
+  projectIdA: string | null;
+  projectNameA: string | null;
+  projectIdB: string | null;
+  projectNameB: string | null;
 }
 
 /** Canonical (a <= b) ordering so a pair maps to exactly one PK row. */
@@ -5007,10 +4997,15 @@ export function listOpenContradictions(
   const rows = db()
     .query(
       `SELECT c.logical_id_a, c.logical_id_b, c.similarity, c.rationale, c.detected_at,
-              ka.title AS title_a, kb.title AS title_b
+              ka.title AS title_a, kb.title AS title_b,
+              ka.project_id AS project_id_a, kb.project_id AS project_id_b,
+              COALESCE(pa.name, pa.path) AS project_name_a,
+              COALESCE(pb.name, pb.path) AS project_name_b
          FROM knowledge_contradictions c
          JOIN knowledge_current ka ON ka.logical_id = c.logical_id_a
          JOIN knowledge_current kb ON kb.logical_id = c.logical_id_b
+         LEFT JOIN projects pa ON pa.id = ka.project_id
+         LEFT JOIN projects pb ON pb.id = kb.project_id
         WHERE c.tenant_id = ? AND ka.tenant_id = ? AND kb.tenant_id = ? AND c.status = 'open'
         ${pid ? "AND (c.project_id = ? OR c.project_id IS NULL)" : ""}
         ORDER BY c.detected_at DESC`,
@@ -5028,6 +5023,10 @@ export function listOpenContradictions(
     detected_at: number;
     title_a: string;
     title_b: string;
+    project_id_a: string | null;
+    project_id_b: string | null;
+    project_name_a: string | null;
+    project_name_b: string | null;
   }>;
   return rows.map((r) => ({
     logicalIdA: r.logical_id_a,
@@ -5037,6 +5036,10 @@ export function listOpenContradictions(
     similarity: r.similarity,
     rationale: r.rationale,
     detectedAt: r.detected_at,
+    projectIdA: r.project_id_a,
+    projectNameA: r.project_name_a,
+    projectIdB: r.project_id_b,
+    projectNameB: r.project_name_b,
   }));
 }
 

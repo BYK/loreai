@@ -18,6 +18,7 @@ import { compactRoutes } from "./compact";
 import { modelsRoutes } from "./models";
 import { controlRoutes } from "./control";
 import { dashboardRoutes } from "./dashboard";
+import { knowledgeRoutes } from "./knowledge";
 import { managementRoutes } from "./management";
 import { geminiRoutes } from "./gemini";
 import { bedrockRoutes } from "./bedrock";
@@ -33,6 +34,7 @@ export const ROUTE_MODULES: readonly RouteModule[] = [
   modelsRoutes,
   controlRoutes,
   dashboardRoutes,
+  knowledgeRoutes,
   managementRoutes,
   geminiRoutes,
   bedrockRoutes,

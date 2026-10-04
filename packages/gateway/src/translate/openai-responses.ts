@@ -36,6 +36,10 @@ import {
 import { extractAuth } from "../auth";
 import { safeTokenSum } from "../usage-validation";
 import {
+  buildOpenAICodexResponsesUrl,
+  buildOpenAIResponsesUrl,
+} from "./openai";
+import {
   parseContextBoundary,
   type ContextBoundaryProtocol,
 } from "../context-boundary";
@@ -739,7 +743,11 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Add tools in Responses API format
   if (req.tools.length > 0) {
     body.tools = req.tools.map((t) => {
-      if (t.name !== "recall" || t.inputSchema.additionalProperties !== false) {
+      if (
+        t.name !== "recall" ||
+        t.gatewayOwned !== true ||
+        t.inputSchema.additionalProperties !== false
+      ) {
         return {
           type: "function",
           name: t.name,
@@ -820,10 +828,14 @@ export function buildOpenAIResponsesUpstreamRequest(
   // Codex-agnostic and nobody has to sprinkle `req.codex` checks inline.
   if (req.codex) {
     applyCodexResponsesDelta(body, req);
-    return { url: `${upstreamBase}/codex/responses`, headers, body };
+    return {
+      url: buildOpenAICodexResponsesUrl(upstreamBase),
+      headers,
+      body,
+    };
   }
 
-  return { url: `${upstreamBase}/v1/responses`, headers, body };
+  return { url: buildOpenAIResponsesUrl(upstreamBase), headers, body };
 }
 
 /**

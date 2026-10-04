@@ -75,6 +75,28 @@ describe("buildOpenAIResponsesUpstreamRequest (codex)", () => {
     expect(result.url).toBe("https://chatgpt.com/backend-api/codex/responses");
   });
 
+  test("preserves opaque query data when appending the Codex path", () => {
+    const req = parseOpenAICodexRequest(codexBody, {
+      authorization: "Bearer jwt-token",
+    });
+    const result = buildOpenAIResponsesUpstreamRequest(
+      req,
+      "https://chatgpt.com/backend-api?opaque=true",
+    );
+    expect(result.url).toBe(
+      "https://chatgpt.com/backend-api/codex/responses?opaque=true",
+    );
+  });
+
+  test("rejects malformed Responses upstream bases", () => {
+    const req = parseOpenAIResponsesRequest(codexBody, {
+      authorization: "Bearer private-openai-credential",
+    });
+    expect(() => buildOpenAIResponsesUpstreamRequest(req, "https:/")).toThrow(
+      "Invalid upstream base URL",
+    );
+  });
+
   test("preserves Codex control fields and forces store:false", () => {
     const req = parseOpenAICodexRequest(codexBody, {});
     const result = buildOpenAIResponsesUpstreamRequest(

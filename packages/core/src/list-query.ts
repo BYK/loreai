@@ -16,6 +16,7 @@
 import { db, ensureProject } from "./db";
 import { hydrateKnowledgeEntry, type KnowledgeEntry, logicalIdOf } from "./ltm";
 import { ftsQuery, EMPTY_QUERY } from "./search";
+import { config } from "./config";
 import { sql, type SqlFragment } from "./sql";
 import { currentTenantId } from "./tenant";
 import type { SessionSummary } from "./data";
@@ -86,6 +87,10 @@ export type KnowledgePage = {
   items: KnowledgeEntry[];
   /** Keyset of the last item, or null when this is the final page. */
   next: KnowledgeKeyset | null;
+};
+
+export type CrossProjectKnowledgeEntry = KnowledgeEntry & {
+  project_name: string | null;
 };
 
 const SORT_SPEC: Record<
@@ -168,6 +173,96 @@ function queryFilter(q: string): SqlFragment | null {
 const KNOWLEDGE_LIST_COLS =
   "id, tenant_id, project_id, category, title, content, source_session, cross_project, confidence, created_at, updated_at, metadata, created_by, updated_by, sensitivity, promotion_status, promoted_at, approval_status, approved_by, approved_at, source_user_id, source_entry_id, last_accessed_at, worker_provider_id, worker_model_id, last_reinforced_at, logical_id";
 
+const KNOWLEDGE_PROJECT_NAME =
+  "(SELECT COALESCE(NULLIF(p.name, ''), p.path) FROM projects p WHERE p.id = knowledge_current.project_id) AS project_name";
+
+function knowledgePredicates(
+  options: KnowledgeListOptions,
+  scopePredicate: SqlFragment | null,
+  includeQuery = true,
+): SqlFragment[] {
+  const where: SqlFragment[] = [
+    sql`tenant_id = ${currentTenantId()}`,
+    sql`confidence > 0.2`,
+  ];
+  if (scopePredicate) where.push(scopePredicate);
+  if (options.category) where.push(sql`category = ${options.category}`);
+  if (includeQuery && options.q !== undefined) {
+    const f = queryFilter(options.q);
+    if (f) where.push(f);
+  }
+  return where;
+}
+
+function buildKnowledgePage<T extends KnowledgeEntry>(
+  options: KnowledgeListOptions & {
+    limit: number;
+    after?: KnowledgeKeyset;
+  },
+  scopePredicate: SqlFragment | null,
+  columns = KNOWLEDGE_LIST_COLS,
+): { items: T[]; next: KnowledgeKeyset | null } {
+  const sort = options.sort ?? "updated_desc";
+  const spec = SORT_SPEC[sort];
+  const where = knowledgePredicates(options, scopePredicate);
+
+  if (options.after) {
+    // Keyset predicate: rows strictly after (key, id) in sort order. DESC sorts
+    // continue with smaller keys; ties on the key continue with the id in the
+    // same direction.
+    const cmp = spec.dir === "DESC" ? "<" : ">";
+    where.push(
+      sql`(${sql.raw(spec.column)} ${sql.raw(cmp)} ${options.after.key} OR (${sql.raw(spec.column)} = ${options.after.key} AND id ${sql.raw(cmp)} ${options.after.id}))`,
+    );
+  }
+
+  const limit = Math.max(1, Math.floor(options.limit));
+  const rows = sql
+    .all<T>(
+      db(),
+      sql`SELECT ${sql.raw(columns)} FROM knowledge_current
+        WHERE ${sql.and(where)}
+        ORDER BY ${sql.raw(spec.column)} ${sql.raw(spec.dir)}, id ${sql.raw(spec.dir)}
+        LIMIT ${limit + 1}`,
+    )
+    .map(hydrateKnowledgeEntry) as T[];
+
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  const last = items[items.length - 1];
+  return {
+    items,
+    next:
+      hasMore && last
+        ? { key: knowledgeSortKey(last, sort), id: last.id }
+        : null,
+  };
+}
+
+function knowledgeScopePredicate(
+  scope: KnowledgeScope,
+  projectId?: string,
+): SqlFragment | null {
+  if (projectId !== undefined) {
+    switch (scope) {
+      case "project":
+        return sql`project_id = ${projectId}`;
+      case "global":
+        return sql`project_id IS NULL`;
+      case "all":
+        return sql`project_id = ${projectId} OR project_id IS NULL OR cross_project = 1`;
+    }
+  }
+  switch (scope) {
+    case "project":
+      return sql`project_id IS NOT NULL`;
+    case "global":
+      return sql`project_id IS NULL`;
+    case "all":
+      return null;
+  }
+}
+
 /**
  * Filtered, sorted, keyset-paginated read over `knowledge_current` for one
  * project. `limit` rows are returned at most; `next` is set only when a
@@ -184,63 +279,112 @@ export function listKnowledgePage(
   options: KnowledgeListOptions & { limit: number; after?: KnowledgeKeyset },
 ): KnowledgePage {
   const pid = ensureProject(projectPath);
-  const sort = options.sort ?? "updated_desc";
-  const spec = SORT_SPEC[sort];
-  const where: SqlFragment[] = [
-    sql`tenant_id = ${currentTenantId()}`,
-    sql`confidence > 0.2`,
-  ];
+  return buildKnowledgePage(
+    options,
+    knowledgeScopePredicate(options.scope ?? "project", pid),
+  );
+}
 
-  switch (options.scope ?? "project") {
-    case "project":
-      where.push(sql`project_id = ${pid}`);
-      break;
-    case "global":
-      where.push(sql`project_id IS NULL`);
-      break;
-    case "all":
-      where.push(
-        sql`project_id = ${pid} OR project_id IS NULL OR cross_project = 1`,
-      );
-      break;
-  }
-  if (options.category) {
-    where.push(sql`category = ${options.category}`);
-  }
-  if (options.q !== undefined) {
-    const f = queryFilter(options.q);
-    if (f) where.push(f);
-  }
-  if (options.after) {
-    // Keyset predicate: rows strictly after (key, id) in sort order. DESC sorts
-    // continue with smaller keys; ties on the key continue with the id in the
-    // same direction.
-    const cmp = spec.dir === "DESC" ? "<" : ">";
-    where.push(
-      sql`(${sql.raw(spec.column)} ${sql.raw(cmp)} ${options.after.key} OR (${sql.raw(spec.column)} = ${options.after.key} AND id ${sql.raw(cmp)} ${options.after.id}))`,
-    );
-  }
+/**
+ * Read a cross-project keyset page from the tenant's current live knowledge.
+ * Without a project filter, `all` covers every project; with one, scope
+ * semantics match `listKnowledgePage` for that exact project ID.
+ */
+export function listAllKnowledgePage(
+  options: KnowledgeListOptions & {
+    limit: number;
+    after?: KnowledgeKeyset;
+    projectId?: string;
+  },
+): { items: CrossProjectKnowledgeEntry[]; next: KnowledgeKeyset | null } {
+  const scopePredicate = knowledgeScopePredicate(
+    options.scope ?? (options.projectId === undefined ? "all" : "project"),
+    options.projectId,
+  );
+  return buildKnowledgePage<CrossProjectKnowledgeEntry>(
+    options,
+    scopePredicate,
+    `${KNOWLEDGE_LIST_COLS}, ${KNOWLEDGE_PROJECT_NAME}`,
+  );
+}
 
+/**
+ * BM25-ranked cross-project knowledge search. The total is exact and results
+ * are intentionally top-N rather than paginated.
+ */
+export function searchKnowledgeRanked(options: {
+  q: string;
+  limit: number;
+  projectId?: string;
+  category?: KnowledgeCategory;
+  scope?: KnowledgeScope;
+}): {
+  items: Array<CrossProjectKnowledgeEntry & { rank: number | null }>;
+  total: number;
+  mode: "fts" | "like" | "none";
+} {
+  const scopePredicate = knowledgeScopePredicate(
+    options.scope ?? (options.projectId === undefined ? "all" : "project"),
+    options.projectId,
+  );
+  const where = knowledgePredicates(options, scopePredicate, false);
   const limit = Math.max(1, Math.floor(options.limit));
-  const rows = sql
-    .all<KnowledgeEntry>(
-      db(),
-      sql`SELECT ${sql.raw(KNOWLEDGE_LIST_COLS)} FROM knowledge_current
-        WHERE ${sql.and(where)}
-        ORDER BY ${sql.raw(spec.column)} ${sql.raw(spec.dir)}, id ${sql.raw(spec.dir)}
-        LIMIT ${limit + 1}`,
-    )
-    .map(hydrateKnowledgeEntry);
+  const match = ftsQuery(options.q.trim());
 
-  const hasMore = rows.length > limit;
-  const items = hasMore ? rows.slice(0, limit) : rows;
-  const last = items[items.length - 1];
+  if (match !== EMPTY_QUERY) {
+    const { title, content, category } = config().search.ftsWeights;
+    const matchedRows = sql`SELECT k.id AS fts_id, bm25(knowledge_fts, ${title}, ${content}, ${category}) AS rank
+      FROM knowledge_fts
+      JOIN knowledge k ON k.rowid = knowledge_fts.rowid
+      WHERE knowledge_fts MATCH ${match}`;
+    const from = sql`FROM (${matchedRows}) r
+      JOIN knowledge_current ON knowledge_current.id = r.fts_id
+      WHERE ${sql.and(where)}`;
+    const totalRow = sql.get<{ total: number }>(
+      db(),
+      sql`SELECT COUNT(*) AS total ${from}`,
+    );
+    const rows = sql.all<CrossProjectKnowledgeEntry & { rank: number }>(
+      db(),
+      sql`SELECT ${sql.raw(KNOWLEDGE_LIST_COLS)}, ${sql.raw(KNOWLEDGE_PROJECT_NAME)}, r.rank
+        ${from}
+        ORDER BY r.rank ASC, knowledge_current.id ASC
+        LIMIT ${limit}`,
+    );
+    return {
+      items: rows.map(hydrateKnowledgeEntry),
+      total: totalRow?.total ?? 0,
+      mode: "fts",
+    };
+  }
+
+  const terms = likeTerms(options.q.trim());
+  if (terms.length === 0) return { items: [], total: 0, mode: "none" };
+
+  const like = sql.and(
+    terms.map(
+      (term) =>
+        sql`LOWER(title) LIKE ${`%${term}%`} OR LOWER(content) LIKE ${`%${term}%`}`,
+    ),
+  );
+  where.push(like);
+  const whereClause = sql.and(where);
+  const totalRow = sql.get<{ total: number }>(
+    db(),
+    sql`SELECT COUNT(*) AS total FROM knowledge_current WHERE ${whereClause}`,
+  );
+  const rows = sql.all<CrossProjectKnowledgeEntry & { rank: null }>(
+    db(),
+    sql`SELECT ${sql.raw(KNOWLEDGE_LIST_COLS)}, ${sql.raw(KNOWLEDGE_PROJECT_NAME)}, NULL AS rank
+      FROM knowledge_current
+      WHERE ${whereClause}
+      ORDER BY updated_at DESC, id DESC
+      LIMIT ${limit}`,
+  );
   return {
-    items,
-    next:
-      hasMore && last
-        ? { key: knowledgeSortKey(last, sort), id: last.id }
-        : null,
+    items: rows.map(hydrateKnowledgeEntry),
+    total: totalRow?.total ?? 0,
+    mode: "like",
   };
 }
 

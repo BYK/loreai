@@ -702,21 +702,16 @@ export function toolGotchaTitle(
   return `Recurring ${tool} failure: ${errorType ?? "unknown error"}`;
 }
 
-/** Maximum length for a knowledge entry's content field (chars). */
-const MAX_ENTRY_CONTENT_LENGTH = 1200;
-
-/** Body text for an auto-created tool-failure gotcha entry (capped at 1200 chars). */
+/** Body text for an auto-created tool-failure gotcha entry. */
 export function toolGotchaContent(stat: ToolFailureStat): string {
   const sample = stat.sample_message
     ? ` Sample error: ${stat.sample_message.slice(0, 200)}.`
     : "";
-  const raw =
+  return (
     `The \`${stat.tool}\` tool repeatedly failed with "${stat.error_type ?? "unknown error"}" ` +
     `across ${stat.session_count} sessions (${stat.failure_count} total failures).${sample} ` +
-    `Investigate the root cause — this is a recurring obstacle in this project.`;
-  return raw.length > MAX_ENTRY_CONTENT_LENGTH
-    ? raw.slice(0, MAX_ENTRY_CONTENT_LENGTH)
-    : raw;
+    `Investigate the root cause — this is a recurring obstacle in this project.`
+  );
 }
 
 // ---------------------------------------------------------------------------

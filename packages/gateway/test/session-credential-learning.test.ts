@@ -285,6 +285,12 @@ describe("Tier 2 credential exclusion", () => {
       })),
     );
     expect(
+      harness.queryDB(
+        `SELECT session_id FROM session_state_owners WHERE session_id IN (${placeholders})`,
+        credentialSessionIDs,
+      ),
+    ).toEqual([]);
+    expect(
       harness.queryDB<{
         session_id: string;
         header_name: string;

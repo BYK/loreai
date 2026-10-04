@@ -12,6 +12,7 @@ import { describe, expect, test } from "vitest";
 import {
   MAX_RECALL_BATCH_IDS,
   MAX_RECALL_ID_CHARS,
+  MAX_RECALL_QUERY_CHARS,
   type RecallScope,
 } from "@loreai/core";
 import {
@@ -69,12 +70,16 @@ const scopeArb: fc.Arbitrary<RecallScope> = fc.constantFrom(
   "knowledge",
 );
 
-// \u2028/\u2029 are JS line terminators: MARKER_REGEX uses `.` which
-// cannot match them, so a query carrying them cannot round-trip — same
-// class as \n/\r. Counterexample found by shrinking: query "\u2028\"".
-const LINE_TERMINATORS = /[\n\r\u2028\u2029]/;
 const markerQuery = (): fc.Arbitrary<string> =>
-  hostileString().filter((q) => q.length > 0 && !LINE_TERMINATORS.test(q));
+  hostileString().filter(
+    (q) =>
+      q.length > 0 &&
+      q.length <= MAX_RECALL_QUERY_CHARS &&
+      !Array.from(q).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127 || char === "…";
+      }),
+  );
 
 // Structural equality: deserialized values are fresh objects, so compare
 // the canonical serialized form (entry order included).
@@ -83,7 +88,13 @@ const mapEquals = (a: RecallStore, b: RecallStore): boolean =>
 
 const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
   const idArb = hostileString().filter(
-    (s) => s.length > 0 && s.length <= MAX_RECALL_ID_CHARS,
+    (s) =>
+      s.length > 0 &&
+      s.length <= MAX_RECALL_ID_CHARS &&
+      !Array.from(s).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127 || char === "…";
+      }),
   );
   const scopeOpt = fc.option(scopeArb, { nil: undefined });
   const detail = fc.option(
@@ -105,7 +116,7 @@ const storedRecallArb = (idLenMax: number): fc.Arbitrary<StoredRecall> => {
     .record({
       toolUseId: fc.string({ unit: "grapheme" }).filter((s) => s.length > 0),
       position: fc.integer({ min: 0, max: 10_000 }),
-      query: hostileString().filter((s) => Buffer.byteLength(s) <= idLenMax),
+      query: markerQuery().filter((s) => Buffer.byteLength(s) <= idLenMax),
       scope: scopeOpt,
       lookup,
       detail,
@@ -187,7 +198,7 @@ const storeEntryArb = (): fc.Arbitrary<[string, StoredRecall]> =>
       scopeArb,
       storedRecallArb(400),
     )
-    .chain(([kind, uuid, scope, rec]) => {
+    .chain(([kind, uuid, _scope, rec]) => {
       if (kind === "anchor") {
         const anchored: StoredRecall = {
           ...rec,
@@ -201,10 +212,9 @@ const storeEntryArb = (): fc.Arbitrary<[string, StoredRecall]> =>
       }
       const plain: StoredRecall = { ...rec, anchorId: undefined };
       delete plain.anchorId;
-      const key =
-        kind === "id" && rec.input.id
-          ? `id:${rec.input.id}`
-          : `${scope}:${rec.input.query}`;
+      const key = rec.input.id
+        ? `id:${rec.input.id}`
+        : `${rec.input.scope ?? "all"}:${rec.input.query}`;
       return fc.constant([key, plain] as [string, StoredRecall]);
     });
 
@@ -283,7 +293,10 @@ describe("recall marker property battery", () => {
           (s) =>
             s.length > 0 &&
             s.length <= MAX_RECALL_ID_CHARS &&
-            !LINE_TERMINATORS.test(s),
+            !Array.from(s).some((char) => {
+              const code = char.charCodeAt(0);
+              return code < 32 || code === 127 || char === "…";
+            }),
         ),
         (id) => {
           const parsed = parseRecallMarker(buildRecallMarker("", "all", id));

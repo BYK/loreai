@@ -268,6 +268,7 @@ describe.each([
         return {
           result: "real recall result",
           input: { query: "architecture" },
+          valid: true,
           coverage: [
             {
               identity: `t:source-${recallCalls}`,

@@ -9,7 +9,8 @@
  * being spread across ltm/temporal/distillation modules.
  */
 
-import { statSync, unlinkSync, existsSync, rmSync } from "node:fs";
+import { statSync, unlinkSync, existsSync, lstatSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import {
   db,
@@ -27,6 +28,7 @@ import {
   loadParentChildMap,
   invalidateParentChildCache,
   rebuildDirtySessionRollups,
+  withSavepoint,
 } from "./db";
 import { getGitRemote } from "./git";
 import { resyncStaleEntityRanks } from "./entities";
@@ -34,6 +36,7 @@ import * as ltm from "./ltm";
 import * as agentsFile from "./agents-file";
 import { config as loreConfig } from "./config";
 import * as log from "./log";
+import { currentTenantId } from "./tenant";
 import {
   deleteEmbeddings,
   type EmbeddingTable,
@@ -77,6 +80,9 @@ export type ProjectSummary = {
   session_count: number;
   message_count: number;
   distillation_count: number;
+  /** Max(last temporal message created_at, last knowledge_current updated_at);
+   * null when the project has neither. */
+  last_activity: number | null;
 };
 
 export type SessionSummary = {
@@ -168,17 +174,25 @@ export function listProjects(): ProjectSummary[] {
         COALESCE(k.cnt, 0) AS knowledge_count,
         COALESCE(t.session_count, 0) AS session_count,
         COALESCE(t.message_count, 0) AS message_count,
-        COALESCE(d.cnt, 0) AS distillation_count
+        COALESCE(d.cnt, 0) AS distillation_count,
+        CASE
+          WHEN t.last_message_at IS NULL THEN k.last_knowledge_at
+          WHEN k.last_knowledge_at IS NULL THEN t.last_message_at
+          ELSE MAX(t.last_message_at, k.last_knowledge_at)
+        END AS last_activity
        FROM projects p
        LEFT JOIN (
-         SELECT project_id, COUNT(*) AS cnt
-         FROM knowledge_current WHERE confidence > 0.2
+         SELECT project_id,
+                COUNT(*) FILTER (WHERE confidence > 0.2) AS cnt,
+                MAX(updated_at) AS last_knowledge_at
+         FROM knowledge_current
          GROUP BY project_id
        ) k ON k.project_id = p.id
        LEFT JOIN (
          SELECT project_id,
                 COUNT(DISTINCT session_id) AS session_count,
-                COUNT(*) AS message_count
+                COUNT(*) AS message_count,
+                MAX(created_at) AS last_message_at
          FROM temporal_messages
          GROUP BY project_id
        ) t ON t.project_id = p.id
@@ -187,7 +201,7 @@ export function listProjects(): ProjectSummary[] {
          FROM distillations
          GROUP BY project_id
        ) d ON d.project_id = p.id
-       ORDER BY p.created_at DESC`,
+       ORDER BY last_activity IS NULL, last_activity DESC, p.created_at DESC`,
     )
     .all() as ProjectSummary[];
   if (cacheable) {
@@ -611,6 +625,30 @@ export function countForProject(projectPath: string): {
   return row;
 }
 
+/** Only globally keyed state confirmed to belong to this project may cascade. */
+function deleteOwnedProjectSessionStates(
+  database: ReturnType<typeof db>,
+  projectId: string,
+): void {
+  database
+    .query(
+      `DELETE FROM session_state
+       WHERE project_path_provisional = 0
+         AND EXISTS (
+           SELECT 1 FROM session_state_owners o
+           JOIN projects p ON p.tenant_id = o.tenant_id
+           WHERE o.session_id = session_state.session_id
+              AND p.id = ? AND p.tenant_id = ?
+             AND (session_state.project_path = p.path OR EXISTS (
+               SELECT 1 FROM project_path_aliases a
+               WHERE a.project_id = p.id AND a.tenant_id = p.tenant_id
+                 AND a.path = session_state.project_path
+             ))
+         )`,
+    )
+    .run(projectId, currentTenantId());
+}
+
 /**
  * Clear all data for a project.
  * Deletes: knowledge, temporal_messages, distillations, session_state.
@@ -662,13 +700,10 @@ export function clearProject(projectPath: string): ClearResult {
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(pid);
-    // Delete session_state BEFORE temporal_messages (subquery needs the rows)
-    database
-      .query(
-        `DELETE FROM session_state WHERE session_id IN
-         (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
-      )
-      .run(pid);
+    // Match confirmed ownership before deleting the source rows. A different
+    // project may have messages with the same globally keyed session ID, while
+    // the owning project may have a state before its first temporal message.
+    deleteOwnedProjectSessionStates(database, pid);
     database.query("DELETE FROM tool_calls WHERE project_id = ?").run(pid);
     // knowledge_transfers has two project columns (origin via knowledge_id, and
     // recalled_in). Delete BEFORE knowledge so the subquery still sees the rows.
@@ -769,14 +804,15 @@ export function clearProject(projectPath: string): ClearResult {
  */
 export function deleteProject(projectId: string): ClearResult | null {
   const database = db();
+  const tenantId = currentTenantId();
 
   // Verify the project exists and collect all paths BEFORE deleting.
   // We need these to invalidate the .lore.md file cache (kv_meta) after
   // deletion — otherwise shouldImportLoreFile() sees the stale cache,
   // skips re-import, and the curator overwrites .lore.md with junk.
   const project = database
-    .query("SELECT id, path FROM projects WHERE id = ?")
-    .get(projectId) as { id: string; path: string } | null;
+    .query("SELECT id, path FROM projects WHERE id = ? AND tenant_id = ?")
+    .get(projectId, tenantId) as { id: string; path: string } | null;
   if (!project) return null;
 
   const aliasPaths = database
@@ -816,16 +852,16 @@ export function deleteProject(projectId: string): ClearResult | null {
 
   database.exec("BEGIN IMMEDIATE");
   try {
+    if (
+      database
+        .query("SELECT 1 FROM projects WHERE id = ? AND tenant_id = ?")
+        .get(projectId, tenantId) === null
+    )
+      throw new Error("project ownership changed during deletion");
     database
       .query("DELETE FROM session_prompt_deltas WHERE project_id = ?")
       .run(projectId);
-    // Delete session_state BEFORE temporal_messages (subquery needs the rows)
-    database
-      .query(
-        `DELETE FROM session_state WHERE session_id IN
-         (SELECT DISTINCT session_id FROM temporal_messages WHERE project_id = ?)`,
-      )
-      .run(projectId);
+    deleteOwnedProjectSessionStates(database, projectId);
     database
       .query("DELETE FROM tool_calls WHERE project_id = ?")
       .run(projectId);
@@ -881,6 +917,21 @@ export function deleteProject(projectId: string): ClearResult | null {
     database
       .query("DELETE FROM temporal_messages WHERE project_id = ?")
       .run(projectId);
+    // Fair re-chunk cursors are local scheduling metadata, not FK-backed rows.
+    // Purge them in the same transaction as the project they identify.
+    for (const prefix of [
+      "lore:temporal_rechunk.fair:",
+      "lore:temporal_rechunk.fair_scan:",
+    ]) {
+      database
+        .query("DELETE FROM kv_meta WHERE key = ?")
+        .run(prefix + projectId);
+    }
+    database
+      .query(
+        "UPDATE kv_meta SET value = '' WHERE key = 'lore:temporal_rechunk.skip' AND value = ?",
+      )
+      .run(projectId);
     database
       .query("DELETE FROM distillations WHERE project_id = ?")
       .run(projectId);
@@ -900,7 +951,12 @@ export function deleteProject(projectId: string): ClearResult | null {
       .query("DELETE FROM warmup_histograms WHERE project_id = ?")
       .run(projectId);
     // Finally, delete the project row itself
-    database.query("DELETE FROM projects WHERE id = ?").run(projectId);
+    if (
+      database
+        .query("DELETE FROM projects WHERE id = ? AND tenant_id = ?")
+        .run(projectId, tenantId).changes !== 1
+    )
+      throw new Error("project ownership changed during deletion");
     database.exec("COMMIT");
   } catch (e) {
     database.exec("ROLLBACK");
@@ -1130,28 +1186,61 @@ export function deleteSession(
   // Note: knowledge_transfers has no session_id column (it is a pure per-project
   // tally); per-session dedup is handled in-memory in ltm.ts, so there is
   // nothing session-scoped to delete here.
-  database
-    .query("DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?")
-    .run(pid, sessionId);
-  database
-    .query("DELETE FROM session_prompt_deltas WHERE session_id = ?")
-    .run(sessionId);
-  database
-    .query(
-      "DELETE FROM temporal_messages WHERE project_id = ? AND session_id = ?",
-    )
-    .run(pid, sessionId);
-  database
-    .query("DELETE FROM distillations WHERE project_id = ? AND session_id = ?")
-    .run(pid, sessionId);
-  database
-    .query("DELETE FROM session_state WHERE session_id = ?")
-    .run(sessionId);
-  // Outcome-reward injection log (#497) is keyed on session_id — purge it here
-  // or its rows orphan once the session's messages are gone (#996).
-  database
-    .query("DELETE FROM knowledge_session_injections WHERE session_id = ?")
-    .run(sessionId);
+  withSavepoint("delete_project_session", () => {
+    // A source-only or provisional session can retain a checkpoint without a
+    // temporal row or a deletable global state. The project binding is enough
+    // to remove this local payload without touching another project's state.
+    database
+      .query(
+        "DELETE FROM source_windows WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    database
+      .query("DELETE FROM tool_calls WHERE project_id = ? AND session_id = ?")
+      .run(pid, sessionId);
+    database
+      .query(
+        "DELETE FROM session_prompt_deltas WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    database
+      .query(
+        "DELETE FROM temporal_messages WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    database
+      .query(
+        "DELETE FROM distillations WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+    // Session state is keyed globally, so the requested project and the
+    // server-derived tenant must both match its confirmed owner. Deleting an
+    // unrelated project's rows must never cascade into another owner's state.
+    database
+      .query(
+        `DELETE FROM session_state WHERE session_id = ?
+           AND project_path_provisional = 0
+           AND EXISTS (
+             SELECT 1 FROM session_state_owners o
+             JOIN projects p ON p.tenant_id = o.tenant_id
+             WHERE o.session_id = session_state.session_id
+                AND p.id = ? AND p.tenant_id = ?
+               AND (session_state.project_path = p.path OR EXISTS (
+                 SELECT 1 FROM project_path_aliases a
+                 WHERE a.project_id = p.id AND a.tenant_id = p.tenant_id
+                   AND a.path = session_state.project_path
+               ))
+           )`,
+      )
+      .run(sessionId, pid, currentTenantId());
+    // Outcome-reward injection rows have their own project binding and must
+    // survive a different project's deletion of the same global session ID.
+    database
+      .query(
+        "DELETE FROM knowledge_session_injections WHERE project_id = ? AND session_id = ?",
+      )
+      .run(pid, sessionId);
+  });
 
   // Reclaim the session's now-dangling temporal/distillation vec0 chunks.
   reclaimVec0Orphans(["temporal", "distillations"]);
@@ -1194,22 +1283,19 @@ export function backupDatabase(destPath?: string): string {
   const src = dbPath();
   const dest =
     destPath ??
-    `${src}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-  // Never let the backup target collide with the live DB — the cleanup below
-  // would otherwise delete the live file and its WAL/SHM. Guards the exported
-  // API against a caller passing the live path.
-  if (resolvePath(dest) === resolvePath(src)) {
-    throw new Error(
-      `backupDatabase: destination must differ from the live DB path (${src})`,
-    );
-  }
-  // VACUUM INTO refuses to overwrite an existing file; clear any stale target
-  // (and its sidecar files) first. We only ever remove files WE are creating.
+    `${src}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}`;
+  const sourcePaths = new Set(
+    ["", "-wal", "-shm"].map((suffix) => resolvePath(`${src}${suffix}`)),
+  );
   for (const suffix of ["", "-wal", "-shm"]) {
-    try {
-      rmSync(`${dest}${suffix}`, { force: true });
-    } catch {
-      // best-effort cleanup of our own target
+    const target = resolvePath(`${dest}${suffix}`);
+    if (sourcePaths.has(target)) {
+      throw new Error("backupDatabase: destination overlaps the live database");
+    }
+    // Reject all existing paths, including dangling symlinks. A backup never
+    // owns an older destination or its SQLite sidecars and must not remove it.
+    if (lstatSync(target, { throwIfNoEntry: false })) {
+      throw new Error("backupDatabase: destination already exists");
     }
   }
   db().query("VACUUM INTO ?").run(dest);
@@ -1295,201 +1381,346 @@ export function moveSessions(
 
   if (!sessionIds.length) return emptyResult;
 
-  const toId = ensureProject(toProjectPath, undefined, opts?.gitRemote);
-
-  // Same project → idempotent no-op.
-  if (fromProjectId === toId) return emptyResult;
-
-  // Expand to include sub-agent children unless explicitly opted out.
-  let allIds = [...new Set(sessionIds)];
-  if (opts?.includeChildren !== false) {
-    const parentChildMap = loadParentChildMap();
-    // Build a reverse map: parent → children
-    const childrenOf = new Map<string, string[]>();
-    for (const [childId, parentId] of parentChildMap) {
-      let children = childrenOf.get(parentId);
-      if (!children) {
-        children = [];
-        childrenOf.set(parentId, children);
-      }
-      children.push(childId);
-    }
-    // BFS to collect all descendants of the requested sessions.
-    const expanded = new Set(allIds);
-    const queue = [...allIds];
-    while (queue.length > 0) {
-      const current = queue.pop();
-      if (current === undefined) break;
-      const children = childrenOf.get(current);
-      if (children) {
-        for (const child of children) {
-          if (!expanded.has(child)) {
-            expanded.add(child);
-            queue.push(child);
-          }
-        }
-      }
-    }
-    allIds = [...expanded];
+  // The source ID can come from a dashboard request. Check ownership before
+  // creating the destination or expanding children across project boundaries.
+  const sourceOwner = db()
+    .query("SELECT tenant_id FROM projects WHERE id = ?")
+    .get(fromProjectId) as { tenant_id: string } | null;
+  if (!sourceOwner || sourceOwner.tenant_id !== currentTenantId()) {
+    throw new Error("source project unavailable");
   }
 
   const database = db();
-  const placeholders = allIds.map(() => "?").join(",");
-
-  // Count rows before the UPDATE (FTS triggers inflate stmt.changes).
-  // Also count distinct sessions that actually have data in the source
-  // project — the expanded allIds may include sessions that don't exist
-  // in this project, and we must not overcount.
-  const sessionCount = (
-    database
-      .query(
-        `SELECT COUNT(DISTINCT session_id) as c FROM temporal_messages WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .get(fromProjectId, ...allIds) as { c: number }
-  ).c;
-
-  const msgCount = (
-    database
-      .query(
-        `SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .get(fromProjectId, ...allIds) as { c: number }
-  ).c;
-
-  const distCount = (
-    database
-      .query(
-        `SELECT COUNT(*) as c FROM distillations WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .get(fromProjectId, ...allIds) as { c: number }
-  ).c;
-
-  const toolCount = (
-    database
-      .query(
-        `SELECT COUNT(*) as c FROM tool_calls WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .get(fromProjectId, ...allIds) as { c: number }
-  ).c;
-
-  const knowledgeCount = (
-    database
-      .query(
-        `SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ? AND source_session IN (${placeholders})`,
-      )
-      .get(fromProjectId, ...allIds) as { c: number }
-  ).c;
-
-  // Collect logical_ids of knowledge entries being moved (knowledge_transfers
-  // keys on logical_id, A2). DISTINCT because an entry may have multiple versions.
-  const movedKnowledgeIds = (
-    database
-      .query(
-        `SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
-      )
-      .all(fromProjectId, ...allIds) as Array<{ logical_id: string }>
-  ).map((r) => r.logical_id);
-
-  // All mutations in a single transaction.
-  database.query("BEGIN IMMEDIATE").run();
   try {
-    database
-      .query(
-        `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+    return withSavepoint("move_sessions", () => {
+      // Destination creation and every ownership check share one transaction.
+      // A rejected move cannot leave a newly created project or path alias.
+      const source = database
+        .query("SELECT tenant_id FROM projects WHERE id = ?")
+        .get(fromProjectId) as { tenant_id: string } | null;
+      if (!source || source.tenant_id !== currentTenantId()) {
+        throw new Error("source project unavailable");
+      }
+      const toId = ensureProject(toProjectPath, undefined, opts?.gitRemote);
 
-    database
-      .query(
-        `UPDATE distillations SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+      // Same project → idempotent no-op.
+      if (fromProjectId === toId) return emptyResult;
 
-    // vec0: the base project_id UPDATEs above leave temporal_vec/distillation_vec
-    // partitioned under the OLD project. vec0 forbids UPDATE of a partition key,
-    // so re-point by DELETE+reINSERT — inside this transaction so a failure rolls
-    // the whole move back (a stale partition silently breaks scoped recall and
-    // has no orphan-sweep backstop). No-op in blob mode.
-    repartitionVec0Project(database, fromProjectId, toId, allIds);
+      // Expand to include sub-agent children unless explicitly opted out.
+      let allIds = [...new Set(sessionIds)];
+      if (opts?.includeChildren !== false) {
+        const parentChildMap = loadParentChildMap();
+        // Build a reverse map: parent → children
+        const childrenOf = new Map<string, string[]>();
+        for (const [childId, parentId] of parentChildMap) {
+          let children = childrenOf.get(parentId);
+          if (!children) {
+            children = [];
+            childrenOf.set(parentId, children);
+          }
+          children.push(childId);
+        }
+        // BFS to collect all descendants of the requested sessions.
+        const expanded = new Set(allIds);
+        const queue = [...allIds];
+        while (queue.length > 0) {
+          const current = queue.pop();
+          if (current === undefined) break;
+          const children = childrenOf.get(current);
+          if (children) {
+            for (const child of children) {
+              if (!expanded.has(child)) {
+                expanded.add(child);
+                queue.push(child);
+              }
+            }
+          }
+        }
+        allIds = [...expanded];
+      }
 
-    // Re-point the session rollup set-based: the project_id UPDATEs above do NOT
-    // fire the rollup triggers (scoped to content/tokens/metadata + insert/delete),
-    // so move the rows here. session_id is globally unique ⇒ no PK collision.
-    database
-      .query(
-        `UPDATE session_rollup SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+      const placeholders = allIds.map(() => "?").join(",");
 
-    database
-      .query(
-        `UPDATE tool_calls SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+      // Count rows before the UPDATE (FTS triggers inflate stmt.changes).
+      // Also count distinct sessions that actually have data in the source
+      // project — the expanded allIds may include sessions that don't exist
+      // in this project, and we must not overcount.
+      const sessionCount = (
+        database
+          .query(
+            `SELECT COUNT(DISTINCT session_id) as c FROM temporal_messages WHERE project_id = ? AND session_id IN (${placeholders})`,
+          )
+          .get(fromProjectId, ...allIds) as { c: number }
+      ).c;
 
-    database
-      .query(
-        `UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+      const msgCount = (
+        database
+          .query(
+            `SELECT COUNT(*) as c FROM temporal_messages WHERE project_id = ? AND session_id IN (${placeholders})`,
+          )
+          .get(fromProjectId, ...allIds) as { c: number }
+      ).c;
 
-    // Outcome-reward injection log (#497) is keyed on session_id and scoped by
-    // project_id; creditSessionOutcome filters on the session's CURRENT project,
-    // so the rows must follow the session to the target or its credits are
-    // silently dropped (and the rows orphan if the source project is later
-    // deleted). Mirror the per-session re-point above. (#996)
-    database
-      .query(
-        `UPDATE knowledge_session_injections SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+      const distCount = (
+        database
+          .query(
+            `SELECT COUNT(*) as c FROM distillations WHERE project_id = ? AND session_id IN (${placeholders})`,
+          )
+          .get(fromProjectId, ...allIds) as { c: number }
+      ).c;
 
-    // Re-bind session_state to the target project path (confident, not provisional).
-    database
-      .query(
-        `UPDATE session_state SET project_path = ?, project_path_provisional = 0 WHERE session_id IN (${placeholders})`,
-      )
-      .run(toProjectPath, ...allIds);
+      const toolCount = (
+        database
+          .query(
+            `SELECT COUNT(*) as c FROM tool_calls WHERE project_id = ? AND session_id IN (${placeholders})`,
+          )
+          .get(fromProjectId, ...allIds) as { c: number }
+      ).c;
 
-    // Move knowledge entries linked by source_session.
-    database
-      .query(
-        `UPDATE knowledge SET project_id = ? WHERE project_id = ? AND source_session IN (${placeholders})`,
-      )
-      .run(toId, fromProjectId, ...allIds);
+      const knowledgeCount = (
+        database
+          .query(
+            `SELECT COUNT(*) as c FROM knowledge_current WHERE project_id = ? AND source_session IN (${placeholders})`,
+          )
+          .get(fromProjectId, ...allIds) as { c: number }
+      ).c;
 
-    // Clean up knowledge_transfers that became self-referential after the
-    // move: an entry whose project_id is now toId, recalled in toId.
-    // This mirrors the self-referential cleanup in mergeProjectInternal().
-    if (movedKnowledgeIds.length > 0) {
-      const kPlaceholders = movedKnowledgeIds.map(() => "?").join(",");
+      // Collect logical_ids of knowledge entries being moved (knowledge_transfers
+      // keys on logical_id, A2). DISTINCT because an entry may have multiple versions.
+      const movedKnowledgeIds = (
+        database
+          .query(
+            `SELECT DISTINCT logical_id FROM knowledge WHERE project_id = ? AND source_session IN (${placeholders})`,
+          )
+          .all(fromProjectId, ...allIds) as Array<{ logical_id: string }>
+      ).map((r) => r.logical_id);
+
+      // All mutations, including destination creation, share this savepoint.
+      const movedSessionIds: string[] = [];
+      // Child expansion includes relationships from the global session map.
+      // Only IDs backed by data in the authorized source project may rebind
+      // session_state or be returned to the gateway for active-session rebinding.
+      const ownedIds = new Set<string>();
+      for (const [table, column] of [
+        ["temporal_messages", "session_id"],
+        ["distillations", "session_id"],
+        ["tool_calls", "session_id"],
+        ["session_rollup", "session_id"],
+        ["session_prompt_deltas", "session_id"],
+        ["knowledge_session_injections", "session_id"],
+        ["knowledge_current", "source_session"],
+      ] as const) {
+        const rows = database
+          .query(
+            `SELECT DISTINCT ${column} AS id FROM ${table} WHERE project_id = ? AND ${column} IN (${placeholders})`,
+          )
+          .all(fromProjectId, ...allIds) as Array<{ id: string }>;
+        for (const row of rows) ownedIds.add(row.id);
+      }
+      // Preparation can publish a lease before the first temporal row, but the
+      // lease alone does not establish ownership of a globally keyed state: an
+      // unbound foreign state can also acquire one. Require its confirmed path
+      // to identify this source project and, for remote tenants, its credential
+      // fingerprint to identify the same server-derived tenant.
+      const sourceOnlyRows = database
+        .query(
+          `SELECT DISTINCT w.session_id AS id FROM source_windows w
+         JOIN projects p ON p.id = w.project_id
+         JOIN session_state s ON s.session_id = w.session_id
+         JOIN session_state_owners o ON o.session_id = s.session_id
+          WHERE w.project_id = ? AND p.tenant_id = ?
+            AND w.session_id IN (${placeholders})
+            AND s.project_path_provisional = 0
+           AND (s.project_path = p.path OR EXISTS (
+             SELECT 1 FROM project_path_aliases a
+             WHERE a.project_id = p.id AND a.tenant_id = p.tenant_id
+               AND a.path = s.project_path))
+           AND o.tenant_id = p.tenant_id
+           AND (p.tenant_id = '' OR s.credential_fingerprint = p.tenant_id)`,
+        )
+        .all(fromProjectId, currentTenantId(), ...allIds) as Array<{
+        id: string;
+      }>;
+      for (const row of sourceOnlyRows) ownedIds.add(row.id);
+      // Source-project rows prove that the rows may move, not that the globally
+      // keyed state with the same session ID belongs to this tenant. Require
+      // the owner's ledger, credential and confirmed source binding to agree.
+      const stateRows = database
+        .query(
+          `SELECT s.session_id AS id, o.tenant_id AS owner_tenant,
+                 s.credential_fingerprint AS fingerprint,
+                 s.project_path AS project_path,
+                 s.project_path_provisional AS provisional,
+                 p.path AS source_path,
+                EXISTS (SELECT 1 FROM project_path_aliases a
+                  WHERE a.project_id = p.id AND a.tenant_id = p.tenant_id
+                    AND a.path = s.project_path) AS source_alias
+         FROM session_state s
+         LEFT JOIN session_state_owners o ON o.session_id = s.session_id
+         JOIN projects p ON p.id = ?
+         WHERE s.session_id IN (${placeholders})`,
+        )
+        .all(fromProjectId, ...allIds) as Array<{
+        id: string;
+        owner_tenant: string | null;
+        fingerprint: string | null;
+        project_path: string | null;
+        provisional: number;
+        source_path: string;
+        source_alias: number;
+      }>;
+      // Source-scoped rows cannot establish ownership of the globally keyed
+      // session state. Older rows without an owner ledger cannot be safely split
+      // from their source data or silently rebound to the destination.
+      const leasedIds = new Set(
+        (
+          database
+            .query(
+              `SELECT session_id AS id FROM source_windows
+             WHERE project_id = ? AND session_id IN (${placeholders})`,
+            )
+            .all(fromProjectId, ...allIds) as Array<{ id: string }>
+        ).map((row) => row.id),
+      );
+      if (
+        stateRows.some(
+          (state) =>
+            (ownedIds.has(state.id) || leasedIds.has(state.id)) &&
+            state.owner_tenant === null,
+        )
+      ) {
+        throw new Error("session state ownership unavailable");
+      }
+      const foreignStates = new Set(
+        stateRows
+          .filter(
+            (state) =>
+              state.owner_tenant !== sourceOwner.tenant_id ||
+              state.provisional !== 0 ||
+              (sourceOwner.tenant_id === ""
+                ? state.fingerprint !== null && state.fingerprint !== ""
+                : state.fingerprint !== sourceOwner.tenant_id) ||
+              (state.project_path !== state.source_path &&
+                state.source_alias !== 1),
+          )
+          .map((state) => state.id),
+      );
+      movedSessionIds.push(
+        ...allIds.filter((id) => ownedIds.has(id) && !foreignStates.has(id)),
+      );
+
       database
         .query(
-          `DELETE FROM knowledge_transfers
+          `UPDATE temporal_messages SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+      // Clear both projects' fair cursors within this write transaction whenever
+      // moving; queued rows remain durable even if ownership changed before
+      // the transaction began.
+      database
+        .query("DELETE FROM kv_meta WHERE key IN (?, ?, ?, ?)")
+        .run(
+          `lore:temporal_rechunk.fair:${fromProjectId}`,
+          `lore:temporal_rechunk.fair_scan:${fromProjectId}`,
+          `lore:temporal_rechunk.fair:${toId}`,
+          `lore:temporal_rechunk.fair_scan:${toId}`,
+        );
+
+      database
+        .query(
+          `UPDATE distillations SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      // vec0: the base project_id UPDATEs above leave temporal_vec/distillation_vec
+      // partitioned under the OLD project. vec0 forbids UPDATE of a partition key,
+      // so re-point by DELETE+reINSERT — inside this transaction so a failure rolls
+      // the whole move back (a stale partition silently breaks scoped recall and
+      // has no orphan-sweep backstop). No-op in blob mode.
+      repartitionVec0Project(database, fromProjectId, toId, allIds);
+
+      // Re-point the session rollup set-based: the project_id UPDATEs above do NOT
+      // fire the rollup triggers (scoped to content/tokens/metadata + insert/delete),
+      // so move the rows here. session_id is globally unique ⇒ no PK collision.
+      database
+        .query(
+          `UPDATE session_rollup SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      database
+        .query(
+          `UPDATE tool_calls SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      database
+        .query(
+          `UPDATE session_prompt_deltas SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      // Outcome-reward injection log (#497) is keyed on session_id and scoped by
+      // project_id; creditSessionOutcome filters on the session's CURRENT project,
+      // so the rows must follow the session to the target or its credits are
+      // silently dropped (and the rows orphan if the source project is later
+      // deleted). Mirror the per-session re-point above. (#996)
+      database
+        .query(
+          `UPDATE knowledge_session_injections SET project_id = ? WHERE project_id = ? AND session_id IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      // Re-bind session_state to the target project path (confident, not provisional).
+      if (movedSessionIds.length > 0) {
+        const ownedPlaceholders = movedSessionIds.map(() => "?").join(",");
+        database
+          .query(
+            `UPDATE session_state SET project_path = ?, project_path_provisional = 0 WHERE session_id IN (${ownedPlaceholders})`,
+          )
+          .run(toProjectPath, ...movedSessionIds);
+      }
+
+      // Move knowledge entries linked by source_session.
+      database
+        .query(
+          `UPDATE knowledge SET project_id = ? WHERE project_id = ? AND source_session IN (${placeholders})`,
+        )
+        .run(toId, fromProjectId, ...allIds);
+
+      // Clean up knowledge_transfers that became self-referential after the
+      // move: an entry whose project_id is now toId, recalled in toId.
+      // This mirrors the self-referential cleanup in mergeProjectInternal().
+      if (movedKnowledgeIds.length > 0) {
+        const kPlaceholders = movedKnowledgeIds.map(() => "?").join(",");
+        database
+          .query(
+            `DELETE FROM knowledge_transfers
            WHERE recalled_in_project_id = ?
              AND knowledge_id IN (${kPlaceholders})`,
-        )
-        .run(toId, ...movedKnowledgeIds);
-    }
+          )
+          .run(toId, ...movedKnowledgeIds);
+      }
 
-    database.query("COMMIT").run();
-  } catch (e) {
-    database.query("ROLLBACK").run();
-    throw e;
+      invalidateProjectsCache();
+      invalidateGlobalStatsCache();
+      invalidateParentChildCache();
+
+      return {
+        sessions_moved: sessionCount,
+        messages_moved: msgCount,
+        distillations_moved: distCount,
+        tool_calls_moved: toolCount,
+        knowledge_moved: knowledgeCount,
+        movedSessionIds,
+      };
+    });
+  } catch (error) {
+    // ensureProject may have memoized an ID rolled back with the savepoint.
+    invalidateProjectIdCache();
+    invalidateProjectsCache();
+    throw error;
   }
-
-  invalidateProjectsCache();
-  invalidateGlobalStatsCache();
-  invalidateParentChildCache();
-
-  return {
-    sessions_moved: sessionCount,
-    messages_moved: msgCount,
-    distillations_moved: distCount,
-    tool_calls_moved: toolCount,
-    knowledge_moved: knowledgeCount,
-    movedSessionIds: allIds,
-  };
 }
 
 /**

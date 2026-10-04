@@ -8,7 +8,6 @@
 
 import * as Sentry from "@sentry/bun";
 import { getInstanceId, embedding } from "@loreai/core";
-import { createHash } from "node:crypto";
 import { freemem } from "node:os";
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import {
@@ -24,6 +23,50 @@ import {
   setPrincipalProtocolFailureHook,
   type PrincipalProtocolFailureSample,
 } from "./principal-protocol-failure";
+import type { UpstreamRequestShape } from "./upstream-request-shape";
+
+/** Emit an alertable issue for a rejected request without capturing provider data. */
+export function captureUpstream400(
+  protocol: "anthropic" | "openai" | "openai-responses" | "vertex" | "gemini",
+  shape?: UpstreamRequestShape,
+): void {
+  try {
+    if (!Sentry.isInitialized()) return;
+    const currentScope = new Sentry.Scope();
+    const isolationScope = new Sentry.Scope();
+    currentScope.setClient(Sentry.getClient());
+    Sentry.captureEvent({
+      level: "warning",
+      message: "Upstream request rejected (HTTP 400)",
+      fingerprint: ["upstream-400", protocol],
+      tags: { protocol },
+      contexts: shape
+        ? {
+            upstream_request_shape: {
+              request_bytes: shape.bodyBytes,
+              input_items: shape.inputItems,
+              tool_count: shape.tools,
+              ...(shape.instructionsBytes !== undefined
+                ? { instructions_bytes: shape.instructionsBytes }
+                : {}),
+              ...(shape.largestItemBytes !== undefined
+                ? { largest_item_bytes: shape.largestItemBytes }
+                : {}),
+              ...(shape.largestItemType !== undefined
+                ? { largest_item_type: shape.largestItemType }
+                : {}),
+            },
+          }
+        : undefined,
+      sdkProcessingMetadata: {
+        capturedSpanScope: currentScope,
+        capturedSpanIsolationScope: isolationScope,
+      },
+    });
+  } catch {
+    // Telemetry never affects the response path.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Scope enrichment
@@ -32,9 +75,8 @@ import {
 /**
  * Configure Sentry scope for a gateway request.
  *
- * Sets user identity, tags, and conversation ID. Called once per
- * conversation turn before forwarding to upstream. All values are
- * non-sensitive (hashed or random identifiers only).
+ * Sets only installation identity and the gateway's configured port.
+ * Request model, session, origin, and project fields are private.
  */
 export function setSentryRequestContext(opts: {
   authFingerprint: string | null;
@@ -49,60 +91,21 @@ export function setSentryRequestContext(opts: {
   // Installation identity — integrates with Sentry's unique users feature
   Sentry.setUser({ id: getInstanceId() });
 
-  // Request-scoped tags (filterable in Sentry UI)
-  if (opts.authFingerprint) {
-    Sentry.setTag("auth_fingerprint", opts.authFingerprint);
-  }
-  Sentry.setTag("model", opts.model);
-  Sentry.setTag("upstream_origin", safeTelemetryOrigin(opts.upstreamUrl));
   Sentry.setTag("port", String(opts.port));
-
-  // Hash project path — sensitive info for secret projects
-  const projectHash = createHash("sha256")
-    .update(opts.projectPath)
-    .digest("hex")
-    .slice(0, 16);
-  Sentry.setTag("project_hash", projectHash);
-
-  // Link to Sentry AI monitoring conversation tracking
-  Sentry.setConversationId(opts.sessionID);
-}
-
-function safeTelemetryOrigin(value: string): string {
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:"
-      ? url.origin
-      : "unknown";
-  } catch {
-    return "unknown";
-  }
 }
 
 /**
  * Lighter-weight scope enrichment for passthrough and compaction handlers.
  *
- * Sets just the installation identity and basic tags so errors in these
- * paths are attributable, without the full conversation turn context.
+ * Sets just the installation identity, without private request fields.
  */
-export function setSentryLightContext(opts: {
+export function setSentryLightContext(_opts: {
   model?: string;
   projectPath?: string;
 }): void {
   if (!Sentry.isInitialized()) return;
 
   Sentry.setUser({ id: getInstanceId() });
-
-  if (opts.model) {
-    Sentry.setTag("model", opts.model);
-  }
-  if (opts.projectPath) {
-    const projectHash = createHash("sha256")
-      .update(opts.projectPath)
-      .digest("hex")
-      .slice(0, 16);
-    Sentry.setTag("project_hash", projectHash);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,11 +158,8 @@ export type AnthropicUsage = {
 export function setGenAiUsageAttributes(
   span: Sentry.Span,
   usage: AnthropicUsage,
-  responseModel?: string,
+  _responseModel?: string,
 ): void {
-  if (responseModel) {
-    span.setAttribute("gen_ai.response.model", responseModel);
-  }
   span.setAttribute("gen_ai.usage.input_tokens", usage.input_tokens ?? 0);
   span.setAttribute("gen_ai.usage.output_tokens", usage.output_tokens ?? 0);
   if (usage.cache_read_input_tokens != null) {
@@ -234,7 +234,7 @@ export function setCacheAnalyticsAttributes(
  * Emit cache-bust cause metrics for observability and cost analysis.
  *
  * Emits a counter per cause category and a distribution of cache-write
- * token counts, both tagged by cause and model. Enables identifying which
+ * token counts, tagged by cause. Enables identifying which
  * bust causes dominate and tracking improvements over time.
  *
  * The `idle_resume` tag separates AVOIDABLE busts from FREE ones — critical for
@@ -253,7 +253,7 @@ export function setCacheAnalyticsAttributes(
 export function emitCacheBustMetric(
   cause: string,
   writeTokens: number,
-  model: string,
+  _model: string,
   /** issue #791: whether a system[0] divergence looked relocatable. */
   relocatable = false,
   /** True when this bust was a post-idle cold-cache re-warm (the write was
@@ -264,12 +264,12 @@ export function emitCacheBustMetric(
   if (!Sentry.isInitialized()) return;
 
   Sentry.metrics.count("lore.cache_bust", 1, {
-    attributes: { cause, model, relocatable, idle_resume: isIdleResume },
+    attributes: { cause, relocatable, idle_resume: isIdleResume },
   });
 
   if (writeTokens > 0) {
     Sentry.metrics.distribution("lore.cache_bust_tokens", writeTokens, {
-      attributes: { cause, model, relocatable, idle_resume: isIdleResume },
+      attributes: { cause, relocatable, idle_resume: isIdleResume },
       unit: "token",
     });
   }
@@ -334,7 +334,7 @@ import type { SessionState, WarmupResult } from "./translate/types";
  * Emit metrics for a cache warmup attempt.
  *
  * Tracks warmup sent/hit/miss counts and estimated cost/savings for
- * ROI analysis. All metrics are tagged by model and TTL.
+ * ROI analysis. Metrics are tagged by TTL; the model stays local for pricing.
  */
 export function emitWarmupMetric(
   state: SessionState,
@@ -344,7 +344,7 @@ export function emitWarmupMetric(
 
   const model = state.lastUpstream?.model ?? "unknown";
   const ttl = state.resolvedConversationTTL ?? "5m";
-  const attrs = { model, ttl };
+  const attrs = { ttl };
 
   // Count every warmup sent
   Sentry.metrics.count("lore.cache_warmup.sent", 1, { attributes: attrs });
@@ -391,10 +391,10 @@ export function emitWarmupMetric(
 /**
  * Emit a metric when a user returns after a warmup (confirmed save).
  */
-export function emitWarmupHitMetric(model: string, ttl: string): void {
+export function emitWarmupHitMetric(_model: string, ttl: string): void {
   if (!Sentry.isInitialized()) return;
   Sentry.metrics.count("lore.cache_warmup.hit", 1, {
-    attributes: { model, ttl },
+    attributes: { ttl },
   });
 }
 
@@ -451,7 +451,7 @@ export function emitCostMetric(
         uncachedInputCost + cacheReadCost + cacheWriteCost + outputCost;
 
       Sentry.metrics.distribution("lore.llm_cost_usd", totalCost, {
-        attributes: { model, call_type: callType },
+        attributes: { call_type: callType },
         unit: "dollar",
       });
     })
@@ -975,7 +975,6 @@ export function captureEmptyCompletion(info: EmptyCompletionInfo): void {
       contexts: {
         empty_completion: {
           protocol: info.protocol,
-          model: info.model,
           stopReason: info.stopReason,
           outputTokens: info.outputTokens,
           recallDepth: info.recallDepth,

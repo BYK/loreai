@@ -17,6 +17,7 @@ const project: ProjectSummary = {
   session_count: 0,
   message_count: 0,
   distillation_count: 0,
+  last_activity: null,
 };
 
 const client = {
@@ -228,7 +229,7 @@ describe("ProjectPage", () => {
     fireEvent.click(await screen.findByRole("option", { name: "knowledge" }));
     fireEvent.submit(screen.getByRole("search"));
     await waitFor(() =>
-      expect(history.get()).toBe("/projects/p-1/search?q=&scope=knowledge"),
+      expect(history.get()).toBe("/projects/p-1/search?scope=knowledge"),
     );
   });
 

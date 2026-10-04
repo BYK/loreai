@@ -36,6 +36,7 @@ import {
   type StandaloneInstallProvenance,
 } from "./uninstall";
 import {
+  preflightStandaloneUpgradeRecovery,
   persistStandaloneUpgradeRecoveryJournal,
   recoverStandaloneUpgradePublication,
   standaloneUpgradeBackupTokens,
@@ -52,6 +53,11 @@ import {
   versionExists,
   VERSION_PREFIX_REGEX,
 } from "./lib/upgrade";
+import {
+  closeUpgradeDownloadDirectory,
+  createUpgradeDownloadDirectory,
+  removeUpgradeDownloadDirectory,
+} from "./lib/upgrade-download";
 import { withLifecycleLock } from "../lifecycle-lock";
 
 /** Special version strings that select a channel */
@@ -60,13 +66,35 @@ const CHANNEL_VERSIONS = new Set(["nightly", "stable"]);
 export function standaloneUpgradeTargetDir(
   executable: string,
   provenance: StandaloneInstallProvenance,
+  home?: string,
+  channel: ReleaseChannel = "stable",
 ): string {
   if (!provenance.hostedInstall) {
+    const reinstallCommand =
+      channel === "nightly"
+        ? "curl -fsSL https://withlore.ai/install | bash -s -- --version nightly"
+        : "curl -fsSL https://withlore.ai/install | bash";
     throw new UpgradeError(
       "execution_failed",
-      "This Lore CLI is package-managed or lacks a verified standalone receipt. Upgrade it with its package manager (for global npm: npm install -g @loreai/gateway@latest); no standalone binary was created or overwritten.",
+      `This Lore CLI is package-managed or lacks a verified standalone receipt. For curl installs, restore the binary and receipt with \`${reinstallCommand}\` (set LORE_INSTALL_DIR to the original directory if customized). For global npm, use \`npm install -g @loreai/gateway@latest\`; no standalone binary was created or overwritten.`,
     );
   }
+  if (
+    !provenance.receiptPath ||
+    !provenance.receiptIdentity ||
+    !provenance.executableIdentity ||
+    !provenance.pathInstallDir
+  ) {
+    throw new UpgradeError(
+      "execution_failed",
+      "Refusing standalone upgrade without complete verified executable and receipt provenance",
+    );
+  }
+  preflightStandaloneUpgradeRecovery({
+    executable,
+    receiptPath: provenance.receiptPath,
+    home,
+  });
   return resolve(dirname(executable));
 }
 
@@ -247,6 +275,23 @@ Examples:
     console.error(`[lore] Current version: ${VERSION}`);
     console.error(`[lore] Channel: ${channel}`);
 
+    // An upgrade attempt must validate its standalone installation even when
+    // the requested version is already current or cannot be resolved offline.
+    // --check still skips standalone provenance checks when querying versions.
+    const destination = flags.check
+      ? null
+      : (() => {
+          const provenance = standaloneInstallProvenance(upgradeExecutable);
+          return {
+            provenance,
+            targetDir: standaloneUpgradeTargetDir(
+              upgradeExecutable,
+              provenance,
+              undefined,
+              channel,
+            ),
+          };
+        })();
     // Resolve target version
     let target: string;
     let offline: OfflineMode = false;
@@ -303,6 +348,11 @@ Examples:
       return;
     }
 
+    if (destination === null) {
+      throw new Error("Upgrade destination missing after installation check");
+    }
+    const { provenance, targetDir } = destination;
+
     // Already on target — unless forced or switching channels
     if (VERSION === target && !flags.force && !channelChanged) {
       console.error(`[lore] Already up to date (${VERSION})`);
@@ -324,113 +374,145 @@ Examples:
     const verb = downgrade ? "Downgrading" : "Upgrading";
     console.error(`[lore] ${verb} to ${target}...`);
 
-    // A package invocation must never manufacture or overwrite an unreceipted
-    // standalone binary. Check before download/publication work so guidance is
-    // immediate and a verified custom hosted path remains authoritative.
-    const provenance = standaloneInstallProvenance(upgradeExecutable);
-    const targetDir = standaloneUpgradeTargetDir(upgradeExecutable, provenance);
-
     // Use the rolling "nightly" tag only when upgrading to latest nightly
     const downloadTag =
       channel === "nightly" && !cleanVersionArg ? NIGHTLY_TAG : undefined;
 
-    // Download the new binary
-    const downloadResult = await executeUpgrade(
-      target,
-      lifecycleLock,
-      downloadTag,
-      offline,
-      upgradeExecutable,
-    );
-
-    // Install: replace the current binary atomically
-    const downloadedSha256 = createHash("sha256")
-      .update(readFileSync(downloadResult.tempBinaryPath))
-      .digest("hex");
-    const receiptInstallDir =
-      provenance.pathInstallDir ??
-      (process.platform === "win32" ? undefined : dirname(upgradeExecutable));
-    if (
-      resolve(dirname(upgradeExecutable)) !== targetDir ||
-      !provenance.receiptPath ||
-      !provenance.receiptIdentity ||
-      !provenance.executableIdentity ||
-      !receiptInstallDir
-    ) {
-      throw new Error(
-        "Refusing standalone upgrade because the verified executable path/receipt provenance could not be preserved",
-      );
+    if (!provenance.receiptPath) {
+      throw new Error("Upgrade receipt path missing after installation check");
     }
-    const receiptPath = provenance.receiptPath;
-    const oldReceipt = provenance.receiptIdentity;
-    const oldExecutable = provenance.executableIdentity;
-    const previousBackupTokens =
-      standaloneUpgradeBackupTokens(upgradeExecutable);
-    const receiptTransaction = stageStandaloneUpgradeReceipt({
+    preflightStandaloneUpgradeRecovery({
       executable: upgradeExecutable,
-      executableIdentity: oldExecutable,
-      receiptPath,
-      receiptIdentity: oldReceipt,
-      pathInstallDir: receiptInstallDir,
+      receiptPath: provenance.receiptPath,
     });
-    let installedPath: string;
+    // Delta and full-download writers use an opened inode in a private temp
+    // directory. Changes to the install directory cannot redirect those writes.
+    const openedDownloadDir = createUpgradeDownloadDirectory(
+      upgradeExecutable,
+      provenance.receiptPath,
+    );
     try {
-      lifecycleLock.assertOwned();
-      installedPath = await installBinary(
-        downloadResult.tempBinaryPath,
-        targetDir,
+      // Download the new binary
+      const downloadResult = await executeUpgrade(
+        target,
         lifecycleLock,
-        {
-          expectedInstallIdentity: oldExecutable,
-          beforeQuarantine: () => {
-            lifecycleLock.assertOwned();
-            persistStandaloneUpgradeRecoveryJournal({
-              executable: upgradeExecutable,
-              receiptPath,
-              pathInstallDir: receiptInstallDir,
-              oldExecutable,
-              oldReceipt,
-              replacementPath: `${upgradeExecutable}.download`,
-              expectedReplacementSha256: downloadedSha256,
-              previousBackupTokens,
-            });
-          },
-        },
+        downloadTag,
+        offline,
+        upgradeExecutable,
+        openedDownloadDir,
       );
-      lifecycleLock.assertOwned();
-      if (resolve(installedPath) !== resolve(upgradeExecutable)) {
+
+      // Install: replace the current binary atomically
+      const downloadedSha256 = createHash("sha256")
+        .update(readFileSync(downloadResult.tempBinaryPath))
+        .digest("hex");
+      const receiptInstallDir =
+        provenance.pathInstallDir ??
+        (process.platform === "win32" ? undefined : dirname(upgradeExecutable));
+      if (
+        resolve(dirname(upgradeExecutable)) !== targetDir ||
+        !provenance.receiptPath ||
+        !provenance.receiptIdentity ||
+        !provenance.executableIdentity ||
+        !receiptInstallDir
+      ) {
         throw new Error(
-          "Standalone upgrade changed install path before receipt refresh",
+          "Refusing standalone upgrade because the verified executable path/receipt provenance could not be preserved",
         );
       }
-      receiptTransaction.refresh(downloadedSha256);
-      lifecycleLock.assertOwned();
-      verifyStandaloneUpgradePublicationDurable({
+      // Permissions can change while the download is in flight. Reject before
+      // backup links are staged as well as before starting the download.
+      preflightStandaloneUpgradeRecovery({
         executable: upgradeExecutable,
-        receiptPath,
+        receiptPath: provenance.receiptPath,
       });
-      receiptTransaction.commit();
-      lifecycleLock.assertOwned();
-      recoverStandaloneUpgradePublication({ executable: upgradeExecutable });
-    } catch (error) {
+      const receiptPath = provenance.receiptPath;
+      const oldReceipt = provenance.receiptIdentity;
+      const oldExecutable = provenance.executableIdentity;
+      const previousBackupTokens =
+        standaloneUpgradeBackupTokens(upgradeExecutable);
+      const receiptTransaction = stageStandaloneUpgradeReceipt({
+        executable: upgradeExecutable,
+        executableIdentity: oldExecutable,
+        receiptPath,
+        receiptIdentity: oldReceipt,
+        pathInstallDir: receiptInstallDir,
+      });
+      let installedPath: string;
       try {
         lifecycleLock.assertOwned();
-        recoverStandaloneUpgradePublication({ executable: upgradeExecutable });
-      } catch (rollbackError) {
-        throw new AggregateError(
-          [error, rollbackError],
-          "Upgrade failed and the standalone executable/receipt generation could not be restored deterministically.",
+        installedPath = await installBinary(
+          downloadResult.tempBinaryPath,
+          targetDir,
+          lifecycleLock,
+          {
+            expectedInstallIdentity: oldExecutable,
+            beforeQuarantine: () => {
+              lifecycleLock.assertOwned();
+              persistStandaloneUpgradeRecoveryJournal({
+                executable: upgradeExecutable,
+                receiptPath,
+                pathInstallDir: receiptInstallDir,
+                oldExecutable,
+                oldReceipt,
+                replacementPath: `${upgradeExecutable}.download`,
+                expectedReplacementSha256: downloadedSha256,
+                previousBackupTokens,
+              });
+            },
+          },
         );
+        lifecycleLock.assertOwned();
+        if (resolve(installedPath) !== resolve(upgradeExecutable)) {
+          throw new Error(
+            "Standalone upgrade changed install path before receipt refresh",
+          );
+        }
+        receiptTransaction.refresh(downloadedSha256);
+        lifecycleLock.assertOwned();
+        verifyStandaloneUpgradePublicationDurable({
+          executable: upgradeExecutable,
+          receiptPath,
+        });
+        receiptTransaction.commit();
+        lifecycleLock.assertOwned();
+        recoverStandaloneUpgradePublication({ executable: upgradeExecutable });
+      } catch (error) {
+        try {
+          lifecycleLock.assertOwned();
+          recoverStandaloneUpgradePublication({
+            executable: upgradeExecutable,
+          });
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            "Upgrade failed and the standalone executable/receipt generation could not be restored deterministically.",
+          );
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    console.error(
-      `[lore] ${downgrade ? "Downgraded" : "Upgraded"} successfully: ${VERSION} -> ${target}`,
-    );
-    console.error(`[lore] Binary installed at: ${installedPath}`);
-    if (offline) {
-      console.error("[lore] (upgraded from cached patches)");
+      console.error(
+        `[lore] ${downgrade ? "Downgraded" : "Upgraded"} successfully: ${VERSION} -> ${target}`,
+      );
+      console.error(`[lore] Binary installed at: ${installedPath}`);
+      if (offline) {
+        console.error("[lore] (upgraded from cached patches)");
+      }
+    } finally {
+      try {
+        if (!removeUpgradeDownloadDirectory(openedDownloadDir)) {
+          console.error(
+            "[lore] Private upgrade download directory changed; reuse skipped.",
+          );
+        }
+      } catch {
+        console.error(
+          "[lore] Could not verify the private upgrade download directory.",
+        );
+      } finally {
+        closeUpgradeDownloadDirectory(openedDownloadDir);
+      }
     }
   });
 }

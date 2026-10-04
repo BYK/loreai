@@ -218,11 +218,15 @@ function assertTrustedDirectory(
     !info.isDirectory() ||
     info.isSymbolicLink() ||
     (requireOwner && uid !== undefined && info.uid !== uid) ||
-    (process.platform !== "win32" && (info.mode & 0o022) !== 0) ||
     realpathSync.native(path) !== resolve(path)
   ) {
     throw new Error(
       `Refusing unsafe standalone upgrade recovery directory: ${path}`,
+    );
+  }
+  if (process.platform !== "win32" && (info.mode & 0o022) !== 0) {
+    throw new Error(
+      `Refusing unsafe standalone upgrade recovery directory: ${path} is group/world-writable. Remove group/other write permission from that directory before retrying.`,
     );
   }
 }
@@ -245,6 +249,21 @@ function assertTrustedPaths(
       `Refusing standalone upgrade recovery outside the trusted state directory: ${receiptPath}`,
     );
   }
+}
+
+/** Check recovery prerequisites before downloading or staging either generation. */
+export function preflightStandaloneUpgradeRecovery(input: {
+  executable: string;
+  receiptPath: string;
+  home?: string;
+  uid?: number;
+}): void {
+  assertTrustedPaths(
+    input.executable,
+    input.receiptPath,
+    input.home ?? homedir(),
+    input.uid ?? process.getuid?.(),
+  );
 }
 
 function receiptBindsExecutable(

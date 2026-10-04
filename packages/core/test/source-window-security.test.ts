@@ -26,6 +26,9 @@ beforeEach(() => {
   db()
     .query("DELETE FROM temporal_messages WHERE session_id = ?")
     .run(scope.sessionID);
+  db()
+    .query("DELETE FROM session_state WHERE session_id = ?")
+    .run(scope.sessionID);
   ensureProject(scope.projectPath);
   saveSessionTracking(scope.sessionID, {
     amnesia: false,

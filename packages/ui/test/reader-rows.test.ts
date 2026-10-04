@@ -112,6 +112,42 @@ describe("buildRows with markers", () => {
     ]);
   });
 
+  it("places markers around an untimed message by its successor's stamp", () => {
+    const blocks = buildBlocks({
+      messages: [
+        msg({ id: "a", created_at: 1_000 }),
+        msg({ id: "u", created_at: 0 }), // time unknown
+        msg({ id: "b", created_at: 10_000 }),
+      ],
+      distillations: [],
+    });
+    // u inherits b's stamp (10_000), so both markers flush above it instead of
+    // being trapped behind the untimed message.
+    expect(
+      keys(blocks, [
+        marker({ id: "k.m1", createdAt: 2_000 }),
+        marker({ id: "k.m2", createdAt: 8_000 }),
+      ]),
+    ).toEqual(["m.a", "k.m1", "k.m2", "m.u", "m.b"]);
+  });
+
+  it("places a marker before a trailing untimed message, not after it", () => {
+    const blocks = buildBlocks({
+      messages: [
+        msg({ id: "a", created_at: 1_000 }),
+        msg({ id: "u", created_at: 0 }), // time unknown, last in order
+      ],
+      distillations: [],
+    });
+    // No timed successor: the untimed message inherits +Infinity, so a marker
+    // newer than every timed message still lands above it.
+    expect(keys(blocks, [marker({ id: "k.tail", createdAt: 5_000 })])).toEqual([
+      "m.a",
+      "k.tail",
+      "m.u",
+    ]);
+  });
+
   it("returns only markers when there are no messages", () => {
     const blocks = buildBlocks({ messages: [], distillations: [] });
     expect(

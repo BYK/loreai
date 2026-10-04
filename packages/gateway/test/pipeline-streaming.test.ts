@@ -65,6 +65,8 @@ import {
   resetPipelineState,
   scheduleStreamingPostResponseForTest,
   setPipelinePreUpstreamPauseForTest,
+  setPassthroughBodyReadPauseForTest,
+  setForegroundAbortTimeoutForTest,
   setPipelineResponseReadFailureForTest,
   setMaxActivePipelineRequestsForTest,
   setMaxDetachedPipelineRequestsForTest,
@@ -99,6 +101,7 @@ import { translateAnthropicStreamToOpenAI } from "../src/stream/openai";
 import { translateAnthropicStreamToResponses } from "../src/stream/openai-responses";
 import { translateAnthropicStreamToGemini } from "../src/stream/gemini";
 import { buildRecallMarker, recallStoreKey } from "../src/recall";
+import { _setModelDataForTest, clearModelDataCache } from "../src/worker-model";
 import {
   makeConversationFixtures,
   STANDARD_TOOLS,
@@ -174,10 +177,11 @@ function responsesEvent(type: string, data: Record<string, unknown>): string {
 function validResponsesSSE(
   id: string,
   text?: string,
-  usage: Record<string, unknown> = {
+  usage: Record<string, unknown> | null = {
     input_tokens: 1,
     output_tokens: text ? 1 : 0,
   },
+  model = "gpt-5.6-sol",
 ): string {
   const output = text
     ? {
@@ -190,7 +194,7 @@ function validResponsesSSE(
     : undefined;
   return (
     responsesEvent("response.created", {
-      response: { id, model: "gpt-5.6-sol", status: "in_progress" },
+      response: { id, model, status: "in_progress" },
     }) +
     (output
       ? responsesEvent("response.output_item.added", {
@@ -222,16 +226,60 @@ function validResponsesSSE(
     responsesEvent("response.completed", {
       response: {
         id,
-        model: "gpt-5.6-sol",
+        model,
         status: "completed",
         output: output ? [output] : [],
-        usage,
+        ...(usage === null ? {} : { usage }),
       },
     })
   );
 }
 
-function recallResponsesSSE(id: string, query: string): string {
+function conflictingResponsesSSE(
+  id: string,
+  usage: Record<string, unknown> | null,
+  model = "gpt-5.6-sol",
+  terminalEvent:
+    | "response.completed"
+    | "response.incomplete" = "response.completed",
+): string {
+  const valid = validResponsesSSE(id, "rejected continuation", usage, model);
+  const terminalAt = valid.lastIndexOf("event: response.completed\n");
+  return (
+    valid.slice(0, terminalAt) +
+    responsesEvent(terminalEvent, {
+      response: {
+        id,
+        model,
+        status:
+          terminalEvent === "response.incomplete" ? "incomplete" : "completed",
+        ...(terminalEvent === "response.incomplete"
+          ? { incomplete_details: { reason: "max_output_tokens" } }
+          : {}),
+        output: [
+          {
+            type: "message",
+            id: `msg_${id}`,
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "conflicting snapshot" }],
+          },
+        ],
+        ...(usage === null ? {} : { usage }),
+      },
+    })
+  );
+}
+
+function recallResponsesSSE(
+  id: string,
+  query: string,
+  model = "gpt-5.6-sol",
+  usage: Record<string, unknown> | null = {
+    input_tokens: 10,
+    output_tokens: 1,
+  },
+): string {
   const item = {
     type: "function_call",
     id: `fc_${id}`,
@@ -242,7 +290,7 @@ function recallResponsesSSE(id: string, query: string): string {
   };
   return (
     responsesEvent("response.created", {
-      response: { id, model: "gpt-5.6-sol", status: "in_progress" },
+      response: { id, model, status: "in_progress" },
     }) +
     responsesEvent("response.output_item.added", {
       output_index: 0,
@@ -260,10 +308,10 @@ function recallResponsesSSE(id: string, query: string): string {
     responsesEvent("response.completed", {
       response: {
         id,
-        model: "gpt-5.6-sol",
+        model,
         status: "completed",
         output: [item],
-        usage: { input_tokens: 10, output_tokens: 1 },
+        ...(usage === null ? {} : { usage }),
       },
     })
   );
@@ -316,6 +364,156 @@ function makeResponsesRequest(input: {
   };
 }
 
+async function exerciseBufferedPassthroughAbort(input: {
+  abort?: AbortController;
+  timeoutMs?: number;
+}): Promise<Response> {
+  let releasePause = (): void => {};
+  let reachedPause = (): void => {};
+  const paused = new Promise<void>((resolve) => {
+    reachedPause = resolve;
+  });
+  const pause = new Promise<void>((resolve) => {
+    releasePause = resolve;
+  });
+  setPassthroughBodyReadPauseForTest(pause, reachedPause);
+  setForegroundAbortTimeoutForTest(input.timeoutMs);
+  setUpstreamInterceptor(
+    async () =>
+      new Response(validResponsesSSE("resp_passthrough_abort"), {
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  const request = makeResponsesRequest({ sessionHeaders: {} });
+  request.stream = false;
+  request.tools = [];
+  request.rawHeaders["x-lore-agent"] = "title";
+  request.rawHeaders["x-lore-provider"] = "github-copilot";
+  request.rawHeaders["x-lore-upstream-url"] = "https://api.githubcopilot.com";
+  request.rawHeaders["x-lore-upstream-path"] = "/responses";
+  request.signal = input.abort?.signal;
+
+  const responsePromise = handleRequest(request, loadLocalConfig());
+  await paused;
+  input.abort?.abort(new DOMException("client disconnected", "AbortError"));
+  const timeoutMs = input.timeoutMs;
+  if (timeoutMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs + 10));
+  }
+  releasePause();
+  return responsePromise;
+}
+
+describe("buffered passthrough cancellation", () => {
+  it("keeps caller cancellation live after buffering SSE", async () => {
+    try {
+      const response = await exerciseBufferedPassthroughAbort({
+        abort: new AbortController(),
+      });
+      expect(response.status).toBe(502);
+    } finally {
+      await resetPipelineState();
+    }
+  });
+
+  it("keeps the foreground deadline live after buffering SSE", async () => {
+    try {
+      const response = await exerciseBufferedPassthroughAbort({ timeoutMs: 5 });
+      expect(response.status).toBe(502);
+    } finally {
+      await resetPipelineState();
+    }
+  });
+});
+
+describe("startup backfill shutdown", () => {
+  it("aborts foreground work before waiting for a stalled real startup backfill", async () => {
+    await resetPipelineState({ fast: true });
+    const originalNodeEnv = process.env.NODE_ENV;
+    const savedProvider = core.embedding._saveAndClearProvider();
+    const warmup = vi
+      .spyOn(core.embedding, "warmupEmbedding")
+      .mockImplementation(() => {});
+    const startup = vi.spyOn(core.embedding, "runStartupBackfill");
+    const diagnostics = vi.spyOn(core.log, "info");
+    const project = core.ensureProject(process.cwd());
+    core
+      .db()
+      .query(
+        "INSERT INTO temporal_messages (id, project_id, session_id, role, content, tokens, distilled, created_at) VALUES ('shutdown-backfill-pending', ?, 's', 'user', 'old temporal source awaiting the startup re-chunk walk', 0, 0, 0)",
+      )
+      .run(project);
+    core.setKV("lore:temporal_rechunk.queue_recovery_pending", "1");
+    core.setKV("lore:temporal_rechunk.done", "0");
+    core.embedding._restoreProvider({
+      provider: {
+        maxBatchSize: 8,
+        async embed(texts: string[]) {
+          return texts.map(() =>
+            new Float32Array(core.config().search.embeddings.dimensions).fill(
+              1,
+            ),
+          );
+        },
+      },
+    });
+    core.embedding._setRecallEmbedsInFlightForTest(1);
+    setUpstreamInterceptor(async () => new Response("{}", { status: 200 }));
+    process.env.NODE_ENV = "development";
+    setPipelineResetSettleTimeoutForTest(100);
+    let foreground: ReturnType<typeof createForegroundAbortScope> | undefined;
+    let reset: Promise<void> | undefined;
+    let priming: Promise<Response> | undefined;
+    try {
+      const request = makeResponsesRequest({ sessionHeaders: {} });
+      request.rawHeaders["x-lore-no-store"] = "true";
+      priming = handleRequest(request, loadLocalConfig());
+      await vi.waitFor(() => expect(startup).toHaveBeenCalledOnce());
+      await vi.waitFor(
+        () =>
+          expect(
+            diagnostics.mock.calls.some(
+              ([message]) =>
+                typeof message === "string" &&
+                message.startsWith("temporal re-chunk parked"),
+            ),
+          ).toBe(true),
+        {
+          timeout: 6_000,
+        },
+      );
+      const backfill = startup.mock.results[0]?.value as Promise<unknown>;
+      let backfillSettled = false;
+      void backfill.then(
+        () => (backfillSettled = true),
+        () => (backfillSettled = true),
+      );
+      expect(backfillSettled).toBe(false);
+
+      foreground = createForegroundAbortScope();
+      reset = resetPipelineState({ fast: true });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(foreground.signal.aborted).toBe(true);
+      await reset;
+    } finally {
+      core.temporalEmbeddingQueue.stopTemporalEmbeddingScheduler();
+      core.embedding._setRecallEmbedsInFlightForTest(0);
+      await reset?.catch(() => {});
+      await core.temporalEmbeddingQueue.settleTemporalEmbeddingScheduler(1_000);
+      await priming?.catch(() => {});
+      foreground?.dispose();
+      setPipelineResetSettleTimeoutForTest();
+      setUpstreamInterceptor(undefined);
+      process.env.NODE_ENV = originalNodeEnv;
+      warmup.mockRestore();
+      startup.mockRestore();
+      diagnostics.mockRestore();
+      core.embedding._restoreProvider(savedProvider);
+      await resetPipelineState({ fast: true });
+    }
+  });
+});
+
 describe("principal Responses transport recovery", () => {
   it("retries the exact transformed request once before client-visible output", async () => {
     const forwardedBodies: string[] = [];
@@ -363,6 +561,958 @@ describe("principal Responses transport recovery", () => {
 });
 
 describe("non-stream recall usage aggregation", () => {
+  it("completes and accounts for a buffered answer with an invalid models.dev context", async () => {
+    clearAllCosts();
+    _setModelDataForTest({
+      "gpt-5.6-sol": {
+        id: "gpt-5.6-sol",
+        limit: { context: 0, output: 8_192 },
+      },
+    });
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "resp_invalid_context",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                id: "msg_invalid_context",
+                role: "assistant",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "ordinary answer",
+                    annotations: [],
+                  },
+                ],
+              },
+            ],
+            usage: { input_tokens: 10, output_tokens: 2 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "invalid-context-answer" },
+      });
+      request.stream = false;
+      request.rawHeaders["x-lore-no-store"] = "true";
+      const response = await handleRequest(request, loadLocalConfig());
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("ordinary answer");
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === "invalid-context-answer",
+      );
+      expect(state).toBeDefined();
+      await vi.waitFor(() =>
+        expect(
+          getSessionCosts(state?.sessionID ?? "")?.conversation,
+        ).toMatchObject({ inputTokens: 10, outputTokens: 2, turns: 1 }),
+      );
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearModelDataCache();
+      clearAllCosts();
+    }
+  });
+
+  it.each(["gpt-5.6-sol", "gpt-5.6-mini"] as const)(
+    "bounds a 240k-token recall principal to the answering model %s",
+    async (answeredModel) => {
+      _setModelDataForTest(
+        {
+          "gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+          "gpt-5.6-mini": {
+            id: "gpt-5.6-mini",
+            limit: { context: 200_000, output: 8_192 },
+          },
+        },
+        {
+          "openai/gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+        },
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        if (calls.count === 1) {
+          return new Response(
+            JSON.stringify({
+              id: "resp_model_identity_recall",
+              object: "response",
+              created_at: 0,
+              model: answeredModel,
+              status: "completed",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_model_identity_recall",
+                  call_id: "call_model_identity_recall",
+                  name: "recall",
+                  arguments: JSON.stringify({ query: "model identity budget" }),
+                  status: "completed",
+                },
+              ],
+              usage: { input_tokens: 240_000, output_tokens: 10 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            id: "resp_model_identity_answer",
+            object: "response",
+            created_at: 0,
+            model: "gpt-5.6-sol",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                id: "msg_model_identity_answer",
+                role: "assistant",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: "recalled answer",
+                    annotations: [],
+                  },
+                ],
+              },
+            ],
+            usage: { input_tokens: 240_000, output_tokens: 10 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": `model-identity-${answeredModel}`,
+          },
+        });
+        request.stream = false;
+        request.rawHeaders["x-lore-provider"] = "openai";
+        delete request.rawHeaders["x-lore-upstream-url"];
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        if (answeredModel === "gpt-5.6-sol") {
+          expect(response.status).toBe(200);
+          expect(await response.text()).toContain("recalled answer");
+          expect(calls.count).toBe(2);
+        } else {
+          expect(calls.count).toBe(1);
+          expect(response.status).not.toBe(200);
+        }
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it.each(["gpt-5.6-sol", "gpt-5.6-mini"] as const)(
+    "checks the answering model before streaming a 240k-token recall for %s",
+    async (answeredModel) => {
+      _setModelDataForTest(
+        {
+          "gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+          "gpt-5.6-mini": {
+            id: "gpt-5.6-mini",
+            limit: { context: 200_000, output: 8_192 },
+          },
+        },
+        {
+          "openai/gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+        },
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_stream_model_identity",
+                "model identity budget",
+                answeredModel,
+                { input_tokens: 240_000, output_tokens: 10 },
+              )
+            : validResponsesSSE("resp_stream_model_answer", "recalled answer"),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": `stream-model-identity-${answeredModel}`,
+          },
+        });
+        request.rawHeaders["x-lore-provider"] = "openai";
+        delete request.rawHeaders["x-lore-upstream-url"];
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        if (answeredModel === "gpt-5.6-sol") {
+          expect(output).toContain("recalled answer");
+          expect(output).toContain("response.completed");
+          expect(calls.count).toBe(2);
+        } else {
+          expect(calls.count).toBe(1);
+          expect(output).toContain("response.failed");
+          expect(output).not.toContain("recalled answer");
+        }
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it.each([
+    { principalTokens: 240_000, continuationTokens: 241_000 },
+    { principalTokens: 70_000, continuationTokens: 90_000 },
+  ])(
+    "continues a canonical Codex recall with $principalTokens principal and $continuationTokens follow-up tokens",
+    async ({ principalTokens, continuationTokens }) => {
+      _setModelDataForTest(
+        {
+          "gpt-6-sol": {
+            id: "gpt-6-sol",
+            limit: { context: 1_050_000, output: 128_000 },
+          },
+        },
+        {
+          "openai/gpt-6-sol": {
+            id: "gpt-6-sol",
+            limit: { context: 1_050_000, output: 128_000 },
+          },
+        },
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_codex_recall_principal",
+                "find prior context",
+                "gpt-6-sol",
+                { input_tokens: principalTokens, output_tokens: 10 },
+              )
+            : validResponsesSSE(
+                "resp_codex_recall_answer",
+                "recalled answer",
+                { input_tokens: continuationTokens, output_tokens: 10 },
+                "gpt-6-sol",
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": `codex-recall-${principalTokens}`,
+          },
+        });
+        request.model = "gpt-6-sol";
+        request.codex = true;
+        request.rawHeaders["x-lore-upstream-url"] =
+          "https://chatgpt.com/backend-api";
+        request.rawHeaders["x-lore-upstream-path"] =
+          "/backend-api/codex/responses";
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(2);
+        expect(output).toContain("recalled answer");
+        expect(output).toContain("response.completed");
+        expect(output).not.toContain("response.failed");
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it("rejects a Codex principal that fits the OpenAI API window but exceeds Codex's window", async () => {
+    const modelEntry = {
+      id: "gpt-6-sol",
+      limit: { context: 1_050_000, output: 128_000 },
+    };
+    _setModelDataForTest(
+      { "gpt-6-sol": modelEntry },
+      { "openai/gpt-6-sol": modelEntry },
+    );
+    const calls = { count: 0 };
+    setUpstreamInterceptor(async () => {
+      calls.count++;
+      return new Response(
+        calls.count === 1
+          ? recallResponsesSSE(
+              "resp_codex_over_context_principal",
+              "find prior context",
+              "gpt-6-sol",
+              { input_tokens: 300_000, output_tokens: 10 },
+            )
+          : validResponsesSSE(
+              "resp_codex_over_context_answer",
+              "unverified Codex answer",
+              { input_tokens: 100, output_tokens: 10 },
+              "gpt-6-sol",
+            ),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "codex-over-context" },
+      });
+      request.model = "gpt-6-sol";
+      request.codex = true;
+      request.rawHeaders["x-lore-provider"] = "openai-codex";
+      delete request.rawHeaders["x-lore-upstream-url"];
+      request.rawHeaders["x-lore-no-store"] = "true";
+      const response = await handleRequest(request, loadLocalConfig());
+      const output = await response.text();
+      expect(calls.count).toBe(1);
+      expect(output).toContain("response.failed");
+      expect(output).not.toContain("unverified Codex answer");
+    } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearModelDataCache();
+    }
+  });
+
+  it.each([
+    {
+      scenario: "a different destination",
+      upstreamURL: "https://example.invalid/backend-api",
+      upstreamPath: "/backend-api/codex/responses",
+      codex: true,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "a different endpoint",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/other",
+      codex: true,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "a query-modified endpoint",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/responses?model=other",
+      codex: true,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "a non-Codex request",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/responses",
+      codex: false,
+      qualifiedContext: true,
+    },
+    {
+      scenario: "missing provider-qualified model data",
+      upstreamURL: "https://chatgpt.com/backend-api",
+      upstreamPath: "/backend-api/codex/responses",
+      codex: true,
+      qualifiedContext: false,
+    },
+  ])(
+    "does not expand recall for $scenario",
+    async ({
+      scenario,
+      upstreamURL,
+      upstreamPath,
+      codex,
+      qualifiedContext,
+    }) => {
+      const modelEntry = {
+        id: "gpt-6-sol",
+        limit: { context: 1_050_000, output: 128_000 },
+      };
+      _setModelDataForTest(
+        { "gpt-6-sol": modelEntry },
+        qualifiedContext ? { "openai/gpt-6-sol": modelEntry } : {},
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_unverified_codex_route",
+                "find prior context",
+                "gpt-6-sol",
+                { input_tokens: 240_000, output_tokens: 10 },
+              )
+            : validResponsesSSE(
+                "resp_unverified_codex_answer",
+                "unverified answer",
+                { input_tokens: 241_000, output_tokens: 10 },
+                "gpt-6-sol",
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": `unverified-codex-${scenario}`,
+          },
+        });
+        request.model = "gpt-6-sol";
+        request.codex = codex;
+        request.rawHeaders["x-lore-upstream-url"] = upstreamURL;
+        request.rawHeaders["x-lore-upstream-path"] = upstreamPath;
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(1);
+        expect(output).toContain("response.failed");
+        expect(output).not.toContain("unverified answer");
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it.each([
+    {
+      scenario: "a switched continuation model",
+      continuationModel: "gpt-5.6-mini",
+      continuationUsage: { input_tokens: 241_000, output_tokens: 10 },
+    },
+    {
+      scenario: "an unmetered continuation",
+      continuationModel: "gpt-6-sol",
+      continuationUsage: null,
+    },
+    {
+      scenario: "an over-budget continuation",
+      continuationModel: "gpt-6-sol",
+      continuationUsage: { input_tokens: 970_000, output_tokens: 10 },
+    },
+    {
+      scenario: "a continuation beyond Codex's context window",
+      continuationModel: "gpt-6-sol",
+      continuationUsage: { input_tokens: 300_000, output_tokens: 10 },
+    },
+  ])(
+    "rejects $scenario on the canonical Codex route",
+    async ({ scenario, continuationModel, continuationUsage }) => {
+      const modelEntry = {
+        id: "gpt-6-sol",
+        limit: { context: 1_050_000, output: 128_000 },
+      };
+      _setModelDataForTest(
+        { "gpt-6-sol": modelEntry },
+        { "openai/gpt-6-sol": modelEntry },
+      );
+      const calls = { count: 0 };
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        return new Response(
+          calls.count === 1
+            ? recallResponsesSSE(
+                "resp_codex_guard_principal",
+                "find prior context",
+                "gpt-6-sol",
+                { input_tokens: 240_000, output_tokens: 10 },
+              )
+            : validResponsesSSE(
+                "resp_codex_guard_answer",
+                "rejected answer",
+                continuationUsage,
+                continuationModel,
+              ),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": `codex-guard-${scenario}` },
+        });
+        request.model = "gpt-6-sol";
+        request.codex = true;
+        request.rawHeaders["x-lore-upstream-url"] =
+          "https://chatgpt.com/backend-api";
+        request.rawHeaders["x-lore-upstream-path"] =
+          "/backend-api/codex/responses";
+        request.rawHeaders["x-lore-no-store"] = "true";
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(2);
+        expect(output).toContain("response.failed");
+        expect(output).not.toContain("rejected answer");
+        expect(output).not.toContain("response.completed");
+      } finally {
+        setUpstreamInterceptor(undefined);
+        await resetPipelineState();
+        clearModelDataCache();
+      }
+    },
+  );
+
+  it.each(
+    [
+      {
+        scenario: "switched continuation",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-mini",
+        continuationUsage: { input_tokens: 240_000, output_tokens: 1 },
+      },
+      {
+        scenario: "unbound provider context",
+        provider: false,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 240_000, output_tokens: 1 },
+      },
+      {
+        scenario: "caller upstream override",
+        provider: true,
+        override: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 240_000, output_tokens: 1 },
+      },
+      {
+        scenario: "small mismatched principal",
+        provider: true,
+        principalTokens: 120_000,
+        principalModel: "gpt-5.6-mini",
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 120_000, output_tokens: 1 },
+      },
+      {
+        scenario: "missing continuation usage",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: null,
+      },
+      {
+        scenario: "missing principal output usage",
+        provider: true,
+        principalTokens: 240_000,
+        principalUsage: { input_tokens: 240_000 },
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 240_000, output_tokens: 1 },
+      },
+      {
+        scenario: "unmetered final answer",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: null,
+        finalAnswer: "unmetered answer",
+      },
+      {
+        scenario: "switched recovery answer",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 240_000, output_tokens: 1 },
+        recoveryModel: "gpt-5.6-mini",
+        recoveryUsage: { input_tokens: 600_000, output_tokens: 1 },
+      },
+      {
+        scenario: "unmetered recovery answer",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 240_000, output_tokens: 1 },
+        recoveryModel: "gpt-5.6-sol",
+        recoveryUsage: { input_tokens: 600_000 },
+      },
+      {
+        scenario: "over-budget final answer",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 970_000, output_tokens: 1 },
+        finalAnswer: "over-budget final answer",
+      },
+      {
+        scenario: "over-budget recovery answer",
+        provider: true,
+        principalTokens: 140_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 1, output_tokens: 1 },
+        recoveryModel: "gpt-5.6-sol",
+        recoveryUsage: { input_tokens: 700_000, output_tokens: 1 },
+      },
+      {
+        scenario: "over-context Codex recovery answer",
+        provider: true,
+        principalTokens: 240_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 1, output_tokens: 1 },
+        recoveryModel: "gpt-5.6-sol",
+        recoveryUsage: { input_tokens: 300_000, output_tokens: 1 },
+      },
+      {
+        scenario: "metered recovery answer",
+        provider: true,
+        principalTokens: 140_000,
+        continuationModel: "gpt-5.6-sol",
+        continuationUsage: { input_tokens: 1, output_tokens: 1 },
+        recoveryModel: "gpt-5.6-sol",
+        recoveryUsage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ].flatMap((scenario) =>
+      [false, true].map((streaming) => ({ ...scenario, streaming })),
+    ),
+  )(
+    "fails closed for a $scenario in streaming=$streaming recall",
+    async ({
+      scenario,
+      provider,
+      override,
+      principalTokens,
+      principalUsage,
+      principalModel,
+      continuationModel,
+      continuationUsage,
+      finalAnswer,
+      recoveryModel,
+      recoveryUsage,
+      streaming,
+    }) => {
+      const originalQueryExpansion = core.config().search.queryExpansion;
+      const originalMaxExecutions =
+        core.config().search.recall.chainMaxExecutions;
+      core.config().search.queryExpansion = false;
+      const codexRecovery = scenario === "over-context Codex recovery answer";
+      if (scenario.endsWith("recovery answer")) {
+        // Exhaust execution depth after the accepted principal recall. The
+        // follow-up must remain metered and on the principal's model so only
+        // the recovery's own model, usage and ceiling determine its outcome.
+        core.config().search.recall.chainMaxExecutions = 1;
+      }
+      try {
+        _setModelDataForTest(
+          {
+            "gpt-5.6-sol": {
+              id: "gpt-5.6-sol",
+              limit: { context: 1_000_000, output: 8_192 },
+            },
+          },
+          provider
+            ? {
+                "openai/gpt-5.6-sol": {
+                  id: "gpt-5.6-sol",
+                  limit: { context: 1_000_000, output: 8_192 },
+                },
+              }
+            : {
+                "other/gpt-5.6-sol": {
+                  id: "gpt-5.6-sol",
+                  limit: { context: 1_000_000, output: 8_192 },
+                },
+              },
+        );
+        const calls = { count: 0 };
+        const recoveryCalls = { count: 0 };
+        const committed = vi.fn();
+        if (scenario.startsWith("over-budget") || codexRecovery)
+          setRecallPersistenceCommitObserverForTest(committed);
+        setUpstreamInterceptor(async (body) => {
+          const tools = (
+            body as {
+              tools?: Array<{ name?: string; function?: { name?: string } }>;
+            }
+          ).tools;
+          if (
+            !tools?.some(
+              (tool) =>
+                tool.name === "recall" || tool.function?.name === "recall",
+            )
+          ) {
+            recoveryCalls.count++;
+            if (streaming || codexRecovery)
+              return new Response(
+                validResponsesSSE(
+                  "recovery_budget_boundary",
+                  "recovery answer",
+                  recoveryUsage ?? { input_tokens: 1, output_tokens: 1 },
+                  recoveryModel,
+                ),
+                { headers: { "content-type": "text/event-stream" } },
+              );
+            return new Response(
+              JSON.stringify({
+                id: "recovery_budget_boundary",
+                object: "response",
+                created_at: 0,
+                model: recoveryModel ?? "gpt-5.6-sol",
+                status: "completed",
+                output:
+                  scenario === "over-budget recovery answer" ||
+                  codexRecovery ||
+                  scenario === "metered recovery answer"
+                    ? [
+                        {
+                          type: "function_call",
+                          id: "fc_recovery_budget_boundary",
+                          call_id: "call_recovery_budget_boundary",
+                          name: "read",
+                          arguments: "{}",
+                          status: "completed",
+                        },
+                      ]
+                    : [
+                        {
+                          type: "message",
+                          id: "msg_recovery_budget_boundary",
+                          role: "assistant",
+                          status: "completed",
+                          content: [
+                            {
+                              type: "output_text",
+                              text: "recovery answer",
+                              annotations: [],
+                            },
+                          ],
+                        },
+                      ],
+                usage: recoveryUsage ?? { input_tokens: 1, output_tokens: 1 },
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+          }
+          calls.count++;
+          if (streaming || (codexRecovery && calls.count > 1)) {
+            const sse =
+              calls.count === 1
+                ? recallResponsesSSE(
+                    `principal_${scenario.replaceAll(" ", "_")}`,
+                    "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                    principalModel ?? "gpt-5.6-sol",
+                    principalUsage ?? {
+                      input_tokens: principalTokens,
+                      output_tokens: 1,
+                    },
+                  )
+                : calls.count === 2
+                  ? finalAnswer
+                    ? validResponsesSSE(
+                        `continuation_${scenario.replaceAll(" ", "_")}`,
+                        finalAnswer,
+                        continuationUsage,
+                      )
+                    : recallResponsesSSE(
+                        `continuation_${scenario.replaceAll(" ", "_")}`,
+                        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                        continuationModel,
+                        continuationUsage,
+                      )
+                  : validResponsesSSE(
+                      "unwanted_third_call",
+                      "unbounded answer",
+                    );
+            return new Response(sse, {
+              headers: { "content-type": "text/event-stream" },
+            });
+          }
+          const id = `resp_${calls.count}_${scenario.replaceAll(" ", "_")}`;
+          return new Response(
+            JSON.stringify({
+              id,
+              object: "response",
+              created_at: 0,
+              model:
+                calls.count === 1
+                  ? (principalModel ?? "gpt-5.6-sol")
+                  : continuationModel,
+              status: "completed",
+              output: [
+                {
+                  type:
+                    calls.count === 2 && finalAnswer
+                      ? "message"
+                      : "function_call",
+                  id:
+                    calls.count === 2 && finalAnswer ? `msg_${id}` : `fc_${id}`,
+                  ...(calls.count === 2 && finalAnswer
+                    ? {
+                        role: "assistant",
+                        content: [{ type: "output_text", text: finalAnswer }],
+                      }
+                    : {
+                        call_id: `call_${id}`,
+                        name: "recall",
+                        arguments: JSON.stringify({
+                          query:
+                            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                        }),
+                      }),
+                  status: "completed",
+                },
+              ],
+              ...(calls.count === 1
+                ? {
+                    usage: {
+                      ...(principalUsage ?? {
+                        input_tokens: principalTokens,
+                        output_tokens: 1,
+                      }),
+                    },
+                  }
+                : continuationUsage
+                  ? { usage: continuationUsage }
+                  : finalAnswer
+                    ? { usage: { input_tokens: principalTokens } }
+                    : {}),
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        });
+        try {
+          const request = makeResponsesRequest({
+            sessionHeaders: {
+              "x-lore-session-id": `budget-boundary-${scenario}-${streaming}`,
+            },
+          });
+          request.stream = streaming;
+          request.rawHeaders["x-lore-provider"] = codexRecovery
+            ? "openai-codex"
+            : "openai";
+          if (codexRecovery) request.codex = true;
+          if (!override) delete request.rawHeaders["x-lore-upstream-url"];
+          if (!scenario.startsWith("over-budget") && !codexRecovery)
+            request.rawHeaders["x-lore-no-store"] = "true";
+          const response = await handleRequest(request, loadLocalConfig());
+          const output = await response.text();
+          if (scenario === "metered recovery answer") {
+            expect(calls.count).toBe(2);
+            expect(recoveryCalls.count).toBe(1);
+            expect(response.status).toBe(200);
+            expect(output).toContain(
+              streaming ? "recovery answer" : "call_recovery_budget_boundary",
+            );
+            return;
+          }
+          expect(output).not.toContain("unbounded answer");
+          if (finalAnswer || recoveryModel) {
+            expect(output).not.toContain(
+              finalAnswer ??
+                (streaming
+                  ? "recovery answer"
+                  : "call_recovery_budget_boundary"),
+            );
+            if (streaming) expect(output).toContain("response.failed");
+            else expect(response.status).not.toBe(200);
+          }
+          if (codexRecovery) expect(output).not.toContain("response.completed");
+          if (finalAnswer && streaming) expect(recoveryCalls.count).toBe(0);
+          if (recoveryModel) expect(recoveryCalls.count).toBe(1);
+          if (scenario.startsWith("over-budget") || codexRecovery) {
+            expect(committed).not.toHaveBeenCalled();
+            const state = [...getActiveSessions().values()].find(
+              (candidate) =>
+                candidate.headerSessionId ===
+                `budget-boundary-${scenario}-${streaming}`,
+            );
+            expect(state?.recallStore.size ?? 0).toBe(0);
+            if (scenario === "over-budget recovery answer") {
+              await vi.waitFor(() =>
+                expect(
+                  getSessionCosts(state?.sessionID ?? "")?.conversation,
+                ).toMatchObject({
+                  inputTokens: 840_001,
+                  outputTokens: 3,
+                  turns: 1,
+                }),
+              );
+            }
+            if (codexRecovery) {
+              await vi.waitFor(() =>
+                expect(
+                  getSessionCosts(state?.sessionID ?? "")?.conversation,
+                ).toMatchObject({
+                  inputTokens: 540_001,
+                  outputTokens: 3,
+                  turns: 1,
+                }),
+              );
+            }
+          }
+          if (
+            scenario === "unmetered recovery answer" ||
+            scenario === "switched recovery answer"
+          ) {
+            const state = [...getActiveSessions().values()].find(
+              (candidate) =>
+                candidate.headerSessionId ===
+                `budget-boundary-${scenario}-${streaming}`,
+            );
+            expect(state).toBeDefined();
+            await vi.waitFor(() =>
+              expect(
+                getSessionCosts(state?.sessionID ?? "")?.conversation,
+              ).toMatchObject({
+                inputTokens: 1_080_000,
+                outputTokens: scenario === "switched recovery answer" ? 3 : 2,
+                turns: 1,
+              }),
+            );
+          }
+          expect(calls.count).toBe(
+            scenario === "unbound provider context" ||
+              scenario === "missing principal output usage" ||
+              override
+              ? 1
+              : 2,
+          );
+        } finally {
+          setRecallPersistenceCommitObserverForTest(undefined);
+          setUpstreamInterceptor(undefined);
+          await resetPipelineState();
+          clearModelDataCache();
+        }
+      } finally {
+        core.config().search.queryExpansion = originalQueryExpansion;
+        core.config().search.recall.chainMaxExecutions = originalMaxExecutions;
+      }
+    },
+  );
+
   it("rejects per-field and cross-component safe-integer overflow", () => {
     expect(() =>
       mergeRecallUsage(
@@ -635,6 +1785,258 @@ describe("non-stream recall usage aggregation", () => {
     }
   });
 
+  it("charges failed buffered continuation usage before admitting a metered recovery", async () => {
+    clearAllCosts();
+    _setModelDataForTest(
+      {
+        "gpt-5.6-sol": {
+          id: "gpt-5.6-sol",
+          limit: { context: 1_000_000, output: 8_192 },
+        },
+      },
+      {
+        "openai/gpt-5.6-sol": {
+          id: "gpt-5.6-sol",
+          limit: { context: 1_000_000, output: 8_192 },
+        },
+      },
+    );
+    const calls = { count: 0 };
+    const committed = vi.fn();
+    setRecallPersistenceCommitObserverForTest(committed);
+    setUpstreamInterceptor(async () => {
+      calls.count++;
+      const response =
+        calls.count === 1
+          ? {
+              id: "resp_failed_budget_principal",
+              object: "response",
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_failed_budget_principal",
+                  call_id: "call_failed_budget_principal",
+                  name: "recall",
+                  arguments: JSON.stringify({
+                    query:
+                      "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                  }),
+                  status: "completed",
+                },
+              ],
+              usage: { input_tokens: 240_000, output_tokens: 1 },
+            }
+          : calls.count === 2
+            ? {
+                id: "resp_failed_budget_followup",
+                object: "response",
+                model: "gpt-5.6-sol",
+                status: "failed",
+                output: [],
+                usage: { input_tokens: 900_000, output_tokens: 1 },
+                error: { type: "server_error", message: "provider failed" },
+              }
+            : {
+                id: "resp_failed_budget_recovery",
+                object: "response",
+                model: "gpt-5.6-sol",
+                status: "completed",
+                output: [
+                  {
+                    type: "message",
+                    id: "msg_failed_budget_recovery",
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      { type: "output_text", text: "over-budget recovery" },
+                    ],
+                  },
+                ],
+                usage: { input_tokens: 900_000, output_tokens: 1 },
+              };
+      return new Response(JSON.stringify(response), {
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    try {
+      const request = makeResponsesRequest({
+        sessionHeaders: { "x-lore-session-id": "failed-budget-recovery" },
+      });
+      request.stream = false;
+      request.rawHeaders["x-lore-provider"] = "openai";
+      delete request.rawHeaders["x-lore-upstream-url"];
+      const response = await handleRequest(request, loadLocalConfig());
+      const output = await response.text();
+      expect(calls.count).toBe(3);
+      expect(response.status).not.toBe(200);
+      expect(output).not.toContain("over-budget recovery");
+      expect(committed).not.toHaveBeenCalled();
+      const state = [...getActiveSessions().values()].find(
+        (candidate) => candidate.headerSessionId === "failed-budget-recovery",
+      );
+      expect(state?.recallStore.size ?? 0).toBe(0);
+      await vi.waitFor(() =>
+        expect(
+          getSessionCosts(state?.sessionID ?? "")?.conversation,
+        ).toMatchObject({
+          inputTokens: 2_040_000,
+          outputTokens: 3,
+          turns: 1,
+        }),
+      );
+    } finally {
+      setRecallPersistenceCommitObserverForTest(undefined);
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+      clearModelDataCache();
+      clearAllCosts();
+    }
+  });
+
+  it.each([
+    {
+      clientStream: false,
+      continuationUsage: { input_tokens: 900_000, output_tokens: 1 },
+      continuationModel: "gpt-5.6-sol",
+      terminalEvent: "response.completed" as const,
+      expectedCalls: 3,
+      expectedInput: 2_040_000,
+    },
+    {
+      clientStream: false,
+      continuationUsage: { input_tokens: 900_000, output_tokens: 1 },
+      continuationModel: "gpt-5.6-sol",
+      terminalEvent: "response.incomplete" as const,
+      expectedCalls: 3,
+      expectedInput: 2_040_000,
+    },
+    {
+      clientStream: false,
+      continuationUsage: null,
+      continuationModel: "gpt-5.6-sol",
+      terminalEvent: "response.completed" as const,
+      expectedCalls: 2,
+      expectedInput: 240_000,
+    },
+    {
+      clientStream: true,
+      continuationUsage: null,
+      continuationModel: "gpt-5.6-sol",
+      terminalEvent: "response.completed" as const,
+      expectedCalls: 2,
+      expectedInput: 240_000,
+    },
+    {
+      clientStream: true,
+      continuationUsage: null,
+      continuationModel: "gpt-5.6-narrow",
+      terminalEvent: "response.completed" as const,
+      expectedCalls: 2,
+      expectedInput: 240_000,
+    },
+  ])(
+    "rejects recovery after a conflicting $continuationModel $terminalEvent terminal with $continuationUsage (stream=$clientStream)",
+    async ({
+      clientStream,
+      continuationUsage,
+      continuationModel,
+      terminalEvent,
+      expectedCalls,
+      expectedInput,
+    }) => {
+      clearAllCosts();
+      _setModelDataForTest(
+        {
+          "gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+        },
+        {
+          "openai/gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+        },
+      );
+      const sessionHeader = `untrusted-terminal-${clientStream}-${continuationModel}-${terminalEvent}-${continuationUsage === null ? "unmetered" : "metered"}`;
+      const calls = { count: 0 };
+      const committed = vi.fn();
+      const store = vi.spyOn(temporal, "store");
+      setRecallPersistenceCommitObserverForTest(committed);
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        const wire =
+          calls.count === 1
+            ? recallResponsesSSE(
+                "untrusted_terminal_principal",
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                "gpt-5.6-sol",
+                { input_tokens: 240_000, output_tokens: 1 },
+              )
+            : calls.count === 2
+              ? conflictingResponsesSSE(
+                  "untrusted_terminal_followup",
+                  continuationUsage,
+                  continuationModel,
+                  terminalEvent,
+                )
+              : validResponsesSSE(
+                  "untrusted_terminal_recovery",
+                  "recovery answer",
+                  { input_tokens: 900_000, output_tokens: 1 },
+                );
+        return new Response(wire, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": sessionHeader },
+        });
+        request.stream = clientStream;
+        request.codex = !clientStream;
+        delete request.rawHeaders["x-lore-upstream-url"];
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(expectedCalls);
+        if (clientStream) {
+          expect(output).toContain("event: response.failed");
+          expect(output).not.toContain("event: response.completed");
+        } else {
+          expect(response.status).not.toBe(200);
+        }
+        expect(output).not.toContain("rejected continuation");
+        expect(output).not.toContain("recovery answer");
+        expect(committed).not.toHaveBeenCalled();
+        expect(store).not.toHaveBeenCalled();
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === sessionHeader,
+        );
+        expect(state?.recallStore.size ?? 0).toBe(0);
+        await vi.waitFor(() =>
+          expect(
+            getSessionCosts(state?.sessionID ?? "")?.conversation,
+          ).toMatchObject({
+            inputTokens: expectedInput,
+            outputTokens: continuationUsage === null ? 1 : expectedCalls,
+            turns: 1,
+          }),
+        );
+      } finally {
+        setRecallPersistenceCommitObserverForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        store.mockRestore();
+        await resetPipelineState();
+        clearModelDataCache();
+        clearAllCosts();
+      }
+    },
+  );
+
   it.each([
     "tool",
     "malformed",
@@ -647,6 +2049,13 @@ describe("non-stream recall usage aggregation", () => {
     "%s recovery makes exactly one no-recall synthesis request after a failed JSON continuation",
     async (recoveryOutcome) => {
       clearAllCosts();
+      const originalMaxExecutions =
+        core.config().search.recall.chainMaxExecutions;
+      if (recoveryOutcome === "repeated-recall") {
+        // Exhaust execution depth explicitly: the principal no longer consumes
+        // the additional-call token budget before the first recall.
+        core.config().search.recall.chainMaxExecutions = 1;
+      }
       let call = 0;
       const upstreamBodies: Record<string, unknown>[] = [];
       setUpstreamInterceptor(async (body) => {
@@ -922,6 +2331,7 @@ describe("non-stream recall usage aggregation", () => {
           }),
         );
       } finally {
+        core.config().search.recall.chainMaxExecutions = originalMaxExecutions;
         setUpstreamInterceptor(undefined);
         await resetPipelineState();
         clearAllCosts();
@@ -1120,7 +2530,10 @@ describe("Pipeline — streaming responses", () => {
     async (scenario) => {
       const mixedProvenance = scenario === "provenance";
       const priorTimeout = process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS;
-      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
+      // Prime the session outside the deliberately tiny timeout used by the
+      // request under test. Under aggregate load, applying that timeout here
+      // can reject the priming request before it creates session state.
+      process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "60000";
       const upstreamBodies: string[] = [];
       let stallFallback = false;
       let enteredFallback!: () => void;
@@ -1152,11 +2565,13 @@ describe("Pipeline — streaming responses", () => {
         const primingRequest = makeResponsesRequest({ sessionHeaders });
         primingRequest.model = "gpt-5.4-mini";
         await (await handleRequest(primingRequest, loadLocalConfig())).text();
-        await new Promise((resolve) => setImmediate(resolve));
-        const state = [...getActiveSessions().values()].find(
-          (candidate) =>
-            candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
-        );
+        const activeState = () =>
+          [...getActiveSessions().values()].find(
+            (candidate) =>
+              candidate.headerSessionId === sessionHeaders["x-lore-session-id"],
+          );
+        await vi.waitFor(() => expect(activeState()).toBeDefined());
+        const state = activeState();
         expect(state).toBeDefined();
         state!.recallStore.set(recallStoreKey("secret", "all"), {
           toolUseId: "toolu_private_recall",
@@ -1165,6 +2580,7 @@ describe("Pipeline — streaming responses", () => {
           result: "PRIVATE_LORE_RECALL_RESULT",
         });
         upstreamBodies.length = 0;
+        process.env.LORE_MEMORY_PREPARATION_TIMEOUT_MS = "1000";
         selection = vi.spyOn(ltm, "forSession").mockImplementation(
           (_project, _session, _budget, options) =>
             new Promise((_, reject) => {
@@ -1214,10 +2630,11 @@ describe("Pipeline — streaming responses", () => {
           ],
           provenancePositions: [1, 2],
         };
+        const historyLength = 15_952;
         const request = makeResponsesRequest({
           sessionHeaders,
           messages: [
-            ...Array.from({ length: 16_383 }, (_, index) => ({
+            ...Array.from({ length: historyLength }, (_, index) => ({
               role: "user" as const,
               content: [{ type: "text" as const, text: `history-${index}` }],
             })),
@@ -1245,7 +2662,7 @@ describe("Pipeline — streaming responses", () => {
                   text:
                     scenario === "oversized"
                       ? "x ".repeat(300_000)
-                      : "continue after history-16382",
+                      : `continue after history-${historyLength - 1}`,
                 },
               ],
             },
@@ -1278,11 +2695,13 @@ describe("Pipeline — streaming responses", () => {
         expect(response.status).toBe(200);
         expect(await response.text()).toContain("still working");
         expect(upstreamBodies).toHaveLength(1);
-        expect(upstreamBodies[0].includes('"text":"history-16382"')).toBe(true);
+        expect(
+          upstreamBodies[0].includes(`"text":"history-${historyLength - 1}"`),
+        ).toBe(true);
         expect(upstreamBodies[0].includes('"text":"history-0"')).toBe(false);
         // Real preparation expands the marker in-place, but the emergency
         // forward must use the original transcript without the stored result.
-        expect(request.messages[16_383].content[0]).toMatchObject({
+        expect(request.messages[historyLength].content[0]).toMatchObject({
           type: "tool_use",
           name: "recall",
         });
@@ -1296,9 +2715,9 @@ describe("Pipeline — streaming responses", () => {
             true,
           );
         } else {
-          expect(JSON.stringify(request.messages.slice(16_383))).toContain(
-            "PRIVATE_LORE_RECALL_RESULT",
-          );
+          expect(
+            JSON.stringify(request.messages.slice(historyLength)),
+          ).toContain("PRIVATE_LORE_RECALL_RESULT");
         }
       } finally {
         unblockFallback();
@@ -1314,34 +2733,39 @@ describe("Pipeline — streaming responses", () => {
   );
 
   it("reattaches a context selection after a caller leaves without recording phantom injections", async () => {
-    const projectPath = `/tmp/lore-context-queue-${Date.now()}`;
-    const sessionHeaders = {
-      "x-lore-session-id": `context-queue-${Date.now()}`,
-      "x-lore-project": projectPath,
-    };
-    const selectedId = ltm.create({
-      projectPath,
-      category: "gotcha",
-      title: "Queued context selection",
-      content: "Use the returned context after the retry",
-      scope: "project",
-    });
-    const overflowId = ltm.create({
-      projectPath,
-      category: "decision",
-      title: "Overflow context choice",
-      content: "Available through recall",
-      scope: "project",
-    });
-    const bodies: string[] = [];
-    setUpstreamInterceptor(async (body) => {
-      bodies.push(typeof body === "string" ? body : JSON.stringify(body));
-      return new Response(validResponsesSSE(`queue_${bodies.length}`), {
-        headers: { "content-type": "text/event-stream" },
-      });
-    });
+    // A late fire-and-forget knowledge embedding changes the selection revision
+    // and correctly requires a new selection. Keep the revision stable here so
+    // this test isolates reattachment after a caller disconnects.
+    const savedProvider = core.embedding._saveAndClearProvider();
     let selection: { mockRestore(): void } | undefined;
     try {
+      core.embedding._restoreProvider({ provider: null });
+      const projectPath = `/tmp/lore-context-queue-${Date.now()}`;
+      const sessionHeaders = {
+        "x-lore-session-id": `context-queue-${Date.now()}`,
+        "x-lore-project": projectPath,
+      };
+      const selectedId = ltm.create({
+        projectPath,
+        category: "gotcha",
+        title: "Queued context selection",
+        content: "Use the returned context after the retry",
+        scope: "project",
+      });
+      const overflowId = ltm.create({
+        projectPath,
+        category: "decision",
+        title: "Overflow context choice",
+        content: "Available through recall",
+        scope: "project",
+      });
+      const bodies: string[] = [];
+      setUpstreamInterceptor(async (body) => {
+        bodies.push(typeof body === "string" ? body : JSON.stringify(body));
+        return new Response(validResponsesSSE(`queue_${bodies.length}`), {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
       const initial = makeResponsesRequest({ sessionHeaders });
       await (await handleRequest(initial, loadLocalConfig())).text();
       await new Promise((resolve) => setImmediate(resolve));
@@ -1367,6 +2791,7 @@ describe("Pipeline — streaming responses", () => {
           return original(...args);
         calls++;
         args[3].overflowSink?.push(ltm.get(overflowId)!);
+        if (calls > 1) return Promise.resolve([ltm.get(selectedId)!]);
         return new Promise((resolve) => (release = resolve));
       });
       const caller = new AbortController();
@@ -1403,6 +2828,7 @@ describe("Pipeline — streaming responses", () => {
       selection?.mockRestore();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
+      core.embedding._restoreProvider(savedProvider);
     }
   });
 
@@ -2311,6 +3737,13 @@ describe("Pipeline — streaming responses", () => {
       await response.text();
       await vi.waitFor(() => expect(postResponses).toBe(1));
 
+      const conversationSpanOptions = vi
+        .mocked(Sentry.startInactiveSpan)
+        .mock.calls.find(([options]) => options.op === "gen_ai.chat")?.[0];
+      expect(conversationSpanOptions?.name).toBe("AI conversation turn");
+      expect(JSON.stringify(conversationSpanOptions)).not.toContain(
+        "gpt-5.6-sol",
+      );
       expect(end).toHaveBeenCalledOnce();
       expect(streamingPostResponsePendingForTest()).toBe(0);
     } finally {
@@ -2687,6 +4120,7 @@ describe("Pipeline — streaming responses", () => {
         loadLocalConfig(),
       );
       expect(await response.text()).toContain("event: response.failed");
+      expect(upstreamCall).toBe(3);
       const state = [...getActiveSessions().values()].find(
         (candidate) => candidate.headerSessionId === sessionHeader,
       );
@@ -2695,8 +4129,8 @@ describe("Pipeline — streaming responses", () => {
         expect(
           getSessionCosts(state?.sessionID ?? "")?.conversation,
         ).toMatchObject({
-          inputTokens: 1_010,
-          outputTokens: 101,
+          inputTokens: 2_010,
+          outputTokens: 201,
           turns: 1,
         });
       });
@@ -2708,6 +4142,146 @@ describe("Pipeline — streaming responses", () => {
       clearAllCosts();
     }
   });
+
+  it.each([
+    { continuationTokens: 900_000, expectedCalls: 3, expectedInput: 2_040_000 },
+    { continuationTokens: 970_000, expectedCalls: 2, expectedInput: 1_210_000 },
+  ])(
+    "charges a conflicting terminal with $continuationTokens tokens before recovery",
+    async ({ continuationTokens, expectedCalls, expectedInput }) => {
+      clearAllCosts();
+      _setModelDataForTest(
+        {
+          "gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+        },
+        {
+          "openai/gpt-5.6-sol": {
+            id: "gpt-5.6-sol",
+            limit: { context: 1_000_000, output: 8_192 },
+          },
+        },
+      );
+      const sessionHeader = "conflicting-terminal-recall-usage";
+      const calls = { count: 0 };
+      const committed = vi.fn();
+      const store = vi.spyOn(temporal, "store");
+      setRecallPersistenceCommitObserverForTest(committed);
+      setUpstreamInterceptor(async () => {
+        calls.count++;
+        const wire =
+          calls.count === 1
+            ? recallResponsesSSE(
+                "conflicting_terminal_principal",
+                "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
+                "gpt-5.6-sol",
+                { input_tokens: 240_000, output_tokens: 1 },
+              )
+            : calls.count === 2
+              ? responsesEvent("response.created", {
+                  response: {
+                    id: "resp_conflicting_terminal",
+                    model: "gpt-5.6-sol",
+                    status: "in_progress",
+                  },
+                }) +
+                responsesEvent("response.output_item.added", {
+                  output_index: 0,
+                  item: {
+                    type: "message",
+                    id: "msg_conflicting_terminal",
+                    role: "assistant",
+                    status: "in_progress",
+                  },
+                }) +
+                responsesEvent("response.output_text.delta", {
+                  output_index: 0,
+                  item_id: "msg_conflicting_terminal",
+                  content_index: 0,
+                  delta: "rejected continuation",
+                }) +
+                responsesEvent("response.output_text.done", {
+                  output_index: 0,
+                  item_id: "msg_conflicting_terminal",
+                  content_index: 0,
+                  text: "rejected continuation",
+                }) +
+                responsesEvent("response.output_item.done", {
+                  output_index: 0,
+                  item: {
+                    type: "message",
+                    id: "msg_conflicting_terminal",
+                    role: "assistant",
+                    status: "completed",
+                    content: [
+                      { type: "output_text", text: "rejected continuation" },
+                    ],
+                  },
+                }) +
+                responsesEvent("response.completed", {
+                  response: {
+                    id: "resp_conflicting_terminal",
+                    model: "gpt-5.6-sol",
+                    status: "completed",
+                    output: [],
+                    usage: {
+                      input_tokens: continuationTokens,
+                      output_tokens: 1,
+                    },
+                  },
+                })
+              : validResponsesSSE(
+                  "conflicting_terminal_recovery",
+                  "recovery answer",
+                  {
+                    input_tokens: 900_000,
+                    output_tokens: 1,
+                  },
+                );
+        return new Response(wire, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+
+      try {
+        const request = makeResponsesRequest({
+          sessionHeaders: { "x-lore-session-id": sessionHeader },
+        });
+        delete request.rawHeaders["x-lore-upstream-url"];
+        const response = await handleRequest(request, loadLocalConfig());
+        const output = await response.text();
+        expect(calls.count).toBe(expectedCalls);
+        expect(output).toContain("event: response.failed");
+        expect(output).not.toContain("event: response.completed");
+        expect(output).not.toContain("rejected continuation");
+        expect(output).not.toContain("recovery answer");
+        expect(committed).not.toHaveBeenCalled();
+        expect(store).not.toHaveBeenCalled();
+        const state = [...getActiveSessions().values()].find(
+          (candidate) => candidate.headerSessionId === sessionHeader,
+        );
+        expect(state?.recallStore.size ?? 0).toBe(0);
+        await vi.waitFor(() =>
+          expect(
+            getSessionCosts(state?.sessionID ?? "")?.conversation,
+          ).toMatchObject({
+            inputTokens: expectedInput,
+            outputTokens: expectedCalls,
+            turns: 1,
+          }),
+        );
+      } finally {
+        setRecallPersistenceCommitObserverForTest(undefined);
+        setUpstreamInterceptor(undefined);
+        store.mockRestore();
+        await resetPipelineState();
+        clearModelDataCache();
+        clearAllCosts();
+      }
+    },
+  );
 
   it("defers non-stream incomplete accounting and span closure until EOF", async () => {
     clearAllCosts();
@@ -2903,6 +4477,48 @@ describe("Pipeline — streaming responses", () => {
       expect(response.status).toBe(502);
       expect(await response.text()).toContain("Gateway request failed");
     } finally {
+      setUpstreamInterceptor(undefined);
+      await resetPipelineState();
+    }
+  });
+
+  it("rejects a provisional Responses terminal without response.created", async () => {
+    const privateId = "private_unanchored_provisional";
+    setUpstreamInterceptor(
+      async () =>
+        new Response(
+          `event: response.completed\ndata: ${JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: privateId,
+              model: "gpt-5.6-sol",
+              status: "completed",
+              output: [],
+            },
+          })}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const store = vi.spyOn(temporal, "store");
+
+    try {
+      const response = await handleRequest(
+        makeResponsesRequest({
+          sessionHeaders: {
+            "x-lore-session-id": "provisional-unanchored-responses",
+          },
+        }),
+        loadLocalConfig(),
+      );
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("Gateway request failed");
+      expect(body.match(/^event: response\.failed$/gm)).toHaveLength(1);
+      expect(body).not.toContain("event: response.completed");
+      expect(body).not.toContain(privateId);
+      expect(store).not.toHaveBeenCalled();
+    } finally {
+      store.mockRestore();
       setUpstreamInterceptor(undefined);
       await resetPipelineState();
     }
@@ -5393,7 +7009,11 @@ describe("Pipeline — streaming responses", () => {
         if (failure === "missing-terminal") {
           return new Response(
             responsesEvent("response.created", {
-              response: { id: `resp_${failure}`, status: "in_progress" },
+              response: {
+                id: `resp_${failure}`,
+                model: "gpt-5.6-sol",
+                status: "in_progress",
+              },
             }),
             { headers: { "content-type": "text/event-stream" } },
           );
@@ -8512,7 +10132,7 @@ describe("Pipeline — streaming responses", () => {
       path: "/v1/responses",
       request: { model: "gpt-4o", stream: true, input: "meta" },
       upstream:
-        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_meta","model":"gpt-4o","status":"in_progress","output":[]}}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_meta","model":"gpt-4o","status":"completed","output":[]}}\n\n',
       expected: "response.completed",
     },
     {

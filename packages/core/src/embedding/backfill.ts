@@ -46,9 +46,20 @@ import {
 } from "./runtime";
 import {
   enqueueTemporalEmbedding,
-  invalidateTemporalEmbedding,
+  MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES,
+  retireOversizedTemporalEmbedding,
 } from "../temporal-embedding-admission";
+import { currentTenantId, LOCAL_TENANT_ID, withTenant } from "../tenant";
 import { TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH } from "../embedding-units";
+
+/** Diagnostic sinks must never stop source admission or config recovery. */
+function reportBackfillInfo(message: string): void {
+  try {
+    log.info(message);
+  } catch {
+    // A failed sink cannot discard the rest of the corpus walk.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Config change detection
@@ -92,8 +103,9 @@ export function checkConfigChange(): boolean {
         mode === "vec0" ? countVec0Embeddings() : countBlobEmbeddings();
       if (total > 0) {
         clearAllEmbeddings(db());
-        log.info(
-          `embedding config changed (${stored.value} → ${current}), cleared ${total} stale embeddings`,
+        // The stored fingerprint is data from disk, not a safe log field.
+        reportBackfillInfo(
+          `embedding config changed, cleared ${total} stale embeddings`,
         );
       }
       // A *dimension* change makes the fixed-width vec0 tables incompatible:
@@ -190,11 +202,15 @@ export function maybeCutoverToVec0(): void {
       // Rare corpus corruption (blobs written under a different dimension). The
       // rows were skipped from the copy and will be re-embedded at `dim` by the
       // backfills below; surface it so an operator can see it happened.
-      log.notice(
-        `vec0 cutover skipped ${staleSkipped} stale-dimension embedding blob(s) (not ${dim}-dim / ${dim * 4} bytes); they will be re-embedded by the startup backfills`,
-      );
+      try {
+        log.notice(
+          `vec0 cutover skipped ${staleSkipped} stale-dimension embedding blob(s) (not ${dim}-dim / ${dim * 4} bytes); they will be re-embedded by the startup backfills`,
+        );
+      } catch {
+        // Cutover progress does not depend on a diagnostic sink.
+      }
     }
-    log.info(`vec0 storage cutover complete (dim=${dim})`);
+    reportBackfillInfo(`vec0 storage cutover complete (dim=${dim})`);
   }
 
   // Reclaim: drop any leftover base embedding columns. Runs STRICTLY in vec0
@@ -262,11 +278,21 @@ function emptyBackfillStats(): BackfillStats {
 /** Host-supplied knobs for {@link runStartupBackfill}. */
 export interface BackfillOptions {
   shouldPause?: () => boolean;
+  signal?: AbortSignal;
 }
 
 export async function runStartupBackfill(
   opts: BackfillOptions = {},
 ): Promise<BackfillStats> {
+  // One process-wide walk owns the durable cursors. Request tenants never
+  // launch a startup scan over another owner's corpus.
+  if (currentTenantId() !== LOCAL_TENANT_ID) return emptyBackfillStats();
+  const connection = db();
+  const isActive = () => isCurrentDatabase(connection) && !opts.signal?.aborted;
+  // Temporal admission remains active during a provider outage. Reconcile the
+  // generation first so old vectors cannot be mixed with newly queued work
+  // if the provider becomes available again in this process.
+  checkConfigChange();
   if (!isAvailable()) {
     // Make the degraded state visible in the startup path — this early return
     // was previously silent, so a consumer who omitted the optional
@@ -276,7 +302,7 @@ export async function runStartupBackfill(
     // `isAvailable()` already emits the local-broken FTS-only line once; this is
     // the startup-scoped, backfill-specific companion.
     if (config().search.embeddings.enabled !== false) {
-      log.info(
+      reportBackfillInfo(
         "startup embedding backfill skipped — embeddings unavailable " +
           "(recall will use FTS-only search)",
       );
@@ -286,6 +312,7 @@ export async function runStartupBackfill(
     // progress even while vector recall is temporarily FTS-only.
     stats.temporalRechunked = await backfillTemporalEmbeddings({
       shouldPause: opts.shouldPause,
+      signal: opts.signal,
     });
     return stats;
   }
@@ -294,7 +321,6 @@ export async function runStartupBackfill(
   // cutover (both no-ops in the steady state). Order matters: a config change
   // clears stale blobs BEFORE the cutover relocates the survivors, so the vec0
   // tables are never seeded with vectors from a since-changed model/dimension.
-  checkConfigChange();
   maybeCutoverToVec0();
 
   const mode = readStorageMode(db());
@@ -304,10 +330,14 @@ export async function runStartupBackfill(
   // recall degrades to empty (FTS still answers) and re-converges when the DB is
   // next opened on a capable runtime.
   if (resolveReadMode(mode, isVecAvailable()) === "degraded") {
-    log.warn(
-      "vec0 storage but sqlite-vec unavailable — skipping embedding backfill " +
-        "(vector recall is FTS-only until reopened on a capable runtime)",
-    );
+    try {
+      log.warn(
+        "vec0 storage but sqlite-vec unavailable — skipping embedding backfill " +
+          "(vector recall is FTS-only until reopened on a capable runtime)",
+      );
+    } catch {
+      // Vector availability is independent of a diagnostic sink.
+    }
     return emptyBackfillStats();
   }
 
@@ -318,52 +348,89 @@ export async function runStartupBackfill(
   const pendingKnowledge = (
     db()
       .query(
-        `SELECT COUNT(*) as n FROM knowledge_current WHERE ${missingEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
+        `SELECT COUNT(*) as n FROM knowledge_current k
+         LEFT JOIN projects p ON p.id = k.project_id
+         WHERE ${missingEmbeddingSql("knowledge", mode, "k")}
+           AND k.confidence > 0.2
+           AND (k.project_id IS NULL OR p.tenant_id = k.tenant_id)`,
       )
       .get() as { n: number }
   ).n;
   const pendingDistillations = (
     db()
       .query(
-        `SELECT COUNT(*) as n FROM distillations WHERE ${missingEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
+        `SELECT COUNT(*) as n FROM distillations d
+         JOIN projects p ON p.id = d.project_id
+         WHERE ${missingEmbeddingSql("distillations", mode, "d")}
+           AND d.archived = 0 AND d.observations != ''`,
       )
       .get() as { n: number }
   ).n;
 
+  const stats: BackfillStats = {
+    ...emptyBackfillStats(),
+    pendingKnowledge,
+    pendingDistillations,
+  };
   if (pendingKnowledge + pendingDistillations > 0) {
-    log.info(
+    reportBackfillInfo(
       `embedding backfill scheduled: ${pendingKnowledge} knowledge + ` +
         `${pendingDistillations} distillations pending — starting in ` +
         `${STARTUP_BACKFILL_DELAY_MS / 1000}s, batches yield between calls ` +
         `(host stays responsive)`,
     );
-    await new Promise<void>((r) => setTimeout(r, STARTUP_BACKFILL_DELAY_MS));
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, STARTUP_BACKFILL_DELAY_MS);
+      opts.signal?.addEventListener("abort", done, { once: true });
+      if (opts.signal?.aborted) done();
+    });
   }
 
-  const knowledgeEmbedded = await backfillEmbeddings();
-  const distillationEmbedded = await backfillDistillationEmbeddings();
-  const entityEmbedded = await backfillEntityEmbeddings();
+  if (!isActive()) return stats;
+  try {
+    stats.knowledgeEmbedded = await backfillEmbeddings({ signal: opts.signal });
+  } catch (error) {
+    if (opts.signal?.aborted && error instanceof EmbeddingAbortError)
+      return stats;
+    throw error;
+  }
+  if (!isActive()) return stats;
+  try {
+    stats.distillationEmbedded = await backfillDistillationEmbeddings({
+      signal: opts.signal,
+    });
+  } catch (error) {
+    if (opts.signal?.aborted && error instanceof EmbeddingAbortError)
+      return stats;
+    throw error;
+  }
+  if (!isActive()) return stats;
+  try {
+    stats.entityEmbedded = await backfillEntityEmbeddings({
+      signal: opts.signal,
+    });
+  } catch (error) {
+    if (opts.signal?.aborted && error instanceof EmbeddingAbortError)
+      return stats;
+    throw error;
+  }
+  if (!isActive()) return stats;
   // Re-chunk pre-multi-vector temporal survivors into the vec0 layout. Resumable
   // + done-flagged, so this is the heavy walk only on the first vec0 run (and
   // again after a config change); a no-op in blob mode and once converged. Idle-
   // gated (opts.shouldPause) so it yields the shared embed pool to live traffic.
-  const temporalConnection = db();
-  const temporalRechunked = await backfillTemporalEmbeddings({
+  stats.temporalRechunked = await backfillTemporalEmbeddings({
     shouldPause: opts.shouldPause,
+    signal: opts.signal,
   });
   // The walk may stop after shutdown. Do not reopen storage for GC or coverage
   // stats, or use a successor connection that belongs to a different startup.
-  if (!isCurrentDatabase(temporalConnection)) {
-    return {
-      ...emptyBackfillStats(),
-      pendingKnowledge,
-      pendingDistillations,
-      knowledgeEmbedded,
-      distillationEmbedded,
-      entityEmbedded,
-      temporalRechunked,
-    };
-  }
+  if (!isActive()) return stats;
 
   // Orphan discovery belongs to the host's idle read-worker maintenance.
   // Never scan the full vector corpus on the startup writer (#1681).
@@ -372,21 +439,30 @@ export async function runStartupBackfill(
   const kTotal = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM knowledge_current WHERE confidence > 0.2",
+        `SELECT COUNT(*) as n FROM knowledge_current k
+         LEFT JOIN projects p ON p.id = k.project_id
+         WHERE k.confidence > 0.2
+           AND (k.project_id IS NULL OR p.tenant_id = k.tenant_id)`,
       )
       .get() as { n: number }
   ).n;
   const kWithEmb = (
     db()
       .query(
-        `SELECT COUNT(*) as n FROM knowledge_current WHERE ${hasEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
+        `SELECT COUNT(*) as n FROM knowledge_current k
+         LEFT JOIN projects p ON p.id = k.project_id
+         WHERE ${hasEmbeddingSql("knowledge", mode, "k")}
+           AND k.confidence > 0.2
+           AND (k.project_id IS NULL OR p.tenant_id = k.tenant_id)`,
       )
       .get() as { n: number }
   ).n;
   const dTotal = (
     db()
       .query(
-        "SELECT COUNT(*) as n FROM distillations WHERE archived = 0 AND observations != ''",
+        `SELECT COUNT(*) as n FROM distillations d
+         JOIN projects p ON p.id = d.project_id
+         WHERE d.archived = 0 AND d.observations != ''`,
       )
       .get() as { n: number }
   ).n;
@@ -395,7 +471,10 @@ export async function runStartupBackfill(
       .query(
         // Mirror dTotal's predicate (incl. observations != '') so the coverage
         // numerator is always a subset of the denominator (never reads "11/10").
-        `SELECT COUNT(*) as n FROM distillations WHERE ${hasEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
+        `SELECT COUNT(*) as n FROM distillations d
+         JOIN projects p ON p.id = d.project_id
+         WHERE ${hasEmbeddingSql("distillations", mode, "d")}
+           AND d.archived = 0 AND d.observations != ''`,
       )
       .get() as { n: number }
   ).n;
@@ -407,39 +486,50 @@ export async function runStartupBackfill(
   // FTS-only until reopened on a capable runtime.
   parts.push(`storage_mode=${mode} vec=${isVecAvailable() ? "on" : "off"}`);
   if (
-    knowledgeEmbedded > 0 ||
-    distillationEmbedded > 0 ||
-    entityEmbedded > 0 ||
-    temporalRechunked > 0
+    stats.knowledgeEmbedded > 0 ||
+    stats.distillationEmbedded > 0 ||
+    stats.entityEmbedded > 0 ||
+    stats.temporalRechunked > 0
   ) {
     parts.push(
-      `backfilled ${knowledgeEmbedded} knowledge + ${distillationEmbedded} distillations + ${entityEmbedded} entities + ${temporalRechunked} temporal re-chunked`,
+      `backfilled ${stats.knowledgeEmbedded} knowledge + ${stats.distillationEmbedded} distillations + ${stats.entityEmbedded} entities + ${stats.temporalRechunked} temporal re-chunked`,
     );
   }
   parts.push(
     `coverage: knowledge ${kWithEmb}/${kTotal}, distillations ${dWithEmb}/${dTotal}`,
   );
-  log.info(`embedding startup: ${parts.join("; ")}`);
+  const coverageSummary = `embedding startup: ${parts.join("; ")}`;
+  // Coverage must remain visible even when debug logging is disabled or a
+  // diagnostic sink fails. This line contains only fixed labels and counts.
+  try {
+    console.error(`[lore] ${coverageSummary}`);
+  } catch {
+    // Stderr is best-effort; it never controls the backfill outcome.
+  }
+  reportBackfillInfo(coverageSummary);
 
   return {
-    pendingKnowledge,
-    pendingDistillations,
-    knowledgeEmbedded,
-    distillationEmbedded,
-    entityEmbedded,
+    ...stats,
     knowledgeTotal: kTotal,
     knowledgeWithEmbedding: kWithEmb,
     distillationTotal: dTotal,
     distillationWithEmbedding: dWithEmb,
-    temporalRechunked,
   };
 }
 
 interface BackfillItem {
   id: string;
   text: string;
+  tenantId: string;
+  projectId: string | null;
   scopeKey?: string;
 }
+
+const BACKFILL_SOURCE_PAGE = 128;
+const BACKFILL_TEXT_BATCH = 8;
+// Startup backfill is best-effort: enormous sources remain in FTS until they
+// can be handled without materializing unbounded text in the gateway.
+const MAX_BACKFILL_SOURCE_BYTES = 256 * 1024;
 
 type ContextIndexSource = "knowledge" | "distillations";
 const contextIndexBackfills = new Map<
@@ -542,69 +632,240 @@ function beginContextIndexBackfill(
   };
 }
 
+function backfillCurrentText(
+  table: "knowledge" | "distillations" | "entities",
+  item: BackfillItem,
+): string | null {
+  const mode = readStorageMode(db());
+  if (table === "distillations") {
+    const row = db()
+      .query(
+        `SELECT d.observations, d.project_id FROM distillations d
+         JOIN projects p ON p.id = d.project_id
+          WHERE d.id = ? AND p.tenant_id = ? AND d.archived = 0
+            AND length(CAST(d.observations AS BLOB)) <= ?
+            AND ${missingEmbeddingSql("distillations", mode, "d")}`,
+      )
+      .get(item.id, item.tenantId, MAX_BACKFILL_SOURCE_BYTES) as {
+      observations: string;
+      project_id: string;
+    } | null;
+    return row?.project_id === item.projectId ? row.observations : null;
+  }
+  if (table === "knowledge") {
+    const row = db()
+      .query(
+        `SELECT k.title, k.content, k.project_id FROM knowledge_current k
+         LEFT JOIN projects p ON p.id = k.project_id
+          WHERE k.id = ? AND k.tenant_id = ? AND k.confidence > 0.2
+            AND (k.project_id IS NULL OR p.tenant_id = k.tenant_id)
+            AND length(CAST(k.title AS BLOB)) + length(CAST(k.content AS BLOB)) + 1 <= ?
+            AND ${missingEmbeddingSql("knowledge", mode, "k")}`,
+      )
+      .get(item.id, item.tenantId, MAX_BACKFILL_SOURCE_BYTES) as {
+      title: string;
+      content: string;
+      project_id: string | null;
+    } | null;
+    return row?.project_id === item.projectId
+      ? `${row.title}\n${row.content}`
+      : null;
+  }
+  const row = db()
+    .query(
+      `SELECT e.canonical_name, e.project_id,
+         (SELECT GROUP_CONCAT(da.alias_value, ' ')
+          FROM (SELECT DISTINCT alias_value FROM entity_aliases WHERE entity_id = e.id) da
+         ) AS aliases
+       FROM entities e LEFT JOIN projects p ON p.id = e.project_id
+        WHERE e.id = ? AND e.tenant_id = ?
+          AND (e.project_id IS NULL OR p.tenant_id = e.tenant_id)
+          AND length(CAST(e.canonical_name AS BLOB)) + COALESCE(
+            (SELECT SUM(length(CAST(da.alias_value AS BLOB)) + 1)
+             FROM (SELECT DISTINCT alias_value FROM entity_aliases WHERE entity_id = e.id) da), 0
+          ) <= ?
+          AND ${missingEmbeddingSql("entities", mode, "e")}`,
+    )
+    .get(item.id, item.tenantId, MAX_BACKFILL_SOURCE_BYTES) as {
+    canonical_name: string;
+    aliases: string | null;
+    project_id: string | null;
+  } | null;
+  return row?.project_id === item.projectId
+    ? `${row.canonical_name} ${row.aliases ?? ""}`.trim()
+    : null;
+}
+
+function backfillRowStillCurrent(
+  table: "knowledge" | "distillations" | "entities",
+  item: BackfillItem,
+): boolean {
+  return backfillCurrentText(table, item) === item.text;
+}
+
 async function embedBackfill(
   items: BackfillItem[],
   table: "knowledge" | "distillations" | "entities",
   label: string,
   completeLabel: string,
+  isActive: () => boolean,
   guard?: ReturnType<typeof createEmbeddingAbortGuard>,
   progressEvery?: number,
-): Promise<number> {
-  const endIndexBackfill = beginContextIndexBackfill(items, table);
-  try {
-    let embedded = 0;
-    let nextProgress = progressEvery ?? Infinity;
+): Promise<{ embedded: number; stopped: boolean }> {
+  let embedded = 0;
+  let stopped = false;
+  let nextProgress = progressEvery ?? Infinity;
 
-    for (let i = 0; i < items.length;) {
-      if (guard) throwIfEmbeddingAborted(guard);
-      const batch = nextEmbeddingBatch(items, i);
-      i += batch.length;
+  for (let i = 0; i < items.length;) {
+    if (guard) throwIfEmbeddingAborted(guard);
+    if (!isActive()) return { embedded, stopped: true };
+    const candidates = nextEmbeddingBatch(items, i);
+    const tenantId = candidates[0].tenantId;
+    // Provider requests never combine text from different tenants, even
+    // when their IDs are adjacent in the corpus scan.
+    const firstForeign = candidates.findIndex(
+      (item) => item.tenantId !== tenantId,
+    );
+    const batch = candidates.slice(
+      0,
+      firstForeign === -1 ? candidates.length : firstForeign,
+    );
+    i += batch.length;
 
-      try {
+    try {
+      embedded += await withTenant(tenantId, async () => {
+        if (!isActive()) return 0;
+        // A later item in a fetched page may have moved while an earlier
+        // provider batch was in flight. Validate immediately before sending
+        // any text across the provider boundary.
+        const currentBatch = batch.filter((item) =>
+          backfillRowStillCurrent(table, item),
+        );
+        if (!currentBatch.length) return 0;
         const work = embed(
-          batch.map(({ text }) => text),
+          currentBatch.map(({ text }) => text),
           "document",
         );
         const vectors = guard
           ? await awaitEmbeddingOperation(work, guard)
           : await work;
         if (guard) throwIfEmbeddingAborted(guard);
+        // close() may replace the writer during inference. Never let the
+        // continuation's db() calls reopen or write the successor database.
+        if (!isActive()) return 0;
 
-        for (let j = 0; j < batch.length; j++) {
-          storeEmbedding(db(), table, batch[j].id, vectors[j], {
-            backfill: true,
-          });
-          embedded++;
+        // A project or tenant can change while the provider is running.
+        // Hold the writer lock only for this short, synchronous commit and
+        // check the source's current owner before each vector is written.
+        const commit = () => {
+          let stored = 0;
+          for (let j = 0; j < currentBatch.length; j++) {
+            if (!backfillRowStillCurrent(table, currentBatch[j])) continue;
+            storeEmbedding(db(), table, currentBatch[j].id, vectors[j], {
+              backfill: true,
+            });
+            stored++;
+          }
+          return stored;
+        };
+        return databaseInTransaction(db())
+          ? withSavepoint("commit_embedding_backfill", commit)
+          : withTransaction(commit);
+      });
+      if (!isActive()) return { embedded, stopped: true };
+    } catch (error) {
+      if (error instanceof EmbeddingAbortError) throw error;
+      if (
+        error instanceof EmbeddingQueueCapacityError ||
+        error instanceof LocalProviderUnavailableError
+      ) {
+        const reason =
+          error instanceof EmbeddingQueueCapacityError
+            ? "queue saturated"
+            : "provider unavailable";
+        try {
+          reportBackfillInfo(`${label} backfill stopped: ${reason}`);
+        } catch {
+          // A diagnostic sink cannot change durable backfill state.
         }
-      } catch (error) {
-        if (error instanceof EmbeddingAbortError) throw error;
-        if (
-          error instanceof EmbeddingQueueCapacityError ||
-          error instanceof LocalProviderUnavailableError
-        ) {
-          const reason =
-            error instanceof EmbeddingQueueCapacityError
-              ? "queue saturated"
-              : "provider unavailable";
-          log.info(`${label} backfill stopped: ${reason}`);
-          break;
-        }
-        log.error(
-          `${label} backfill batch failed (${batch.length} items):`,
-          error,
-        );
+        stopped = true;
+        break;
       }
-
-      if (embedded >= nextProgress) {
-        log.info(`embedding ${completeLabel}: ${embedded}/${items.length}…`);
-        nextProgress = embedded + (progressEvery ?? Infinity);
+      // Provider/storage errors can contain private text. Diagnostics are
+      // fixed and may never leak an exception or part of its message.
+      try {
+        log.error(`${label} backfill batch failed`);
+      } catch {
+        // Failed logging must not replace the provider/storage failure.
       }
     }
 
-    if (embedded > 0) log.info(`embedded ${embedded} ${completeLabel}`);
-    return embedded;
-  } finally {
-    endIndexBackfill();
+    if (embedded >= nextProgress) {
+      reportBackfillInfo(
+        `embedding ${completeLabel}: ${embedded}/${items.length}…`,
+      );
+      nextProgress = embedded + (progressEvery ?? Infinity);
+    }
+  }
+
+  if (embedded > 0) reportBackfillInfo(`embedded ${embedded} ${completeLabel}`);
+  return { embedded, stopped };
+}
+
+/** Read a bounded page, then release its text before fetching the next one. */
+async function embedBackfillPages(
+  selectPage: (after: string) => BackfillItem[],
+  table: "knowledge" | "distillations" | "entities",
+  label: string,
+  completeLabel: string,
+  isActive: () => boolean,
+  guard?: ReturnType<typeof createEmbeddingAbortGuard>,
+  progressEvery?: number,
+): Promise<number> {
+  const progress = { after: "", total: 0 };
+  while (true) {
+    if (guard) throwIfEmbeddingAborted(guard);
+    if (!isActive()) return progress.total;
+    const candidates = selectPage(progress.after);
+    if (candidates.length === 0) return progress.total;
+    // A process-wide page contains only IDs and owner metadata. Fetch private
+    // text only after entering its authoritative tenant, then recheck it again
+    // before provider submission and after inference.
+    // Retain the revision snapshot over the whole metadata page, even though
+    // only one bounded text sub-batch is in memory at a time.
+    const endIndexBackfill = beginContextIndexBackfill(candidates, table);
+    try {
+      for (
+        let offset = 0;
+        offset < candidates.length;
+        offset += BACKFILL_TEXT_BATCH
+      ) {
+        if (!isActive()) return progress.total;
+        const page = candidates
+          .slice(offset, offset + BACKFILL_TEXT_BATCH)
+          .flatMap((item) =>
+            withTenant(item.tenantId, (): BackfillItem[] => {
+              const text = backfillCurrentText(table, item);
+              return text === null ? [] : [{ ...item, text }];
+            }),
+          );
+        if (page.length === 0) continue;
+        const result = await embedBackfill(
+          page,
+          table,
+          label,
+          completeLabel,
+          isActive,
+          guard,
+          progressEvery,
+        );
+        progress.total += result.embedded;
+        if (result.stopped) return progress.total;
+      }
+    } finally {
+      endIndexBackfill();
+    }
+    progress.after = candidates[candidates.length - 1].id;
   }
 }
 
@@ -613,89 +874,121 @@ export async function backfillEmbeddings(
 ): Promise<number> {
   const guard = createEmbeddingAbortGuard("knowledge-backfill", options);
   throwIfEmbeddingAborted(guard);
+  const connection = db();
   checkConfigChange();
   throwIfEmbeddingAborted(guard);
   if (!getProvider()) return 0;
 
   const mode = readStorageMode(db());
-  const rows = db()
-    .query(
-      `SELECT id, title, content, tenant_id, project_id, cross_project FROM knowledge_current WHERE ${missingEmbeddingSql("knowledge", mode)} AND confidence > 0.2`,
-    )
-    .all() as Array<{
-    id: string;
-    title: string;
-    content: string;
-    tenant_id: string;
-    project_id: string | null;
-    cross_project: number;
-  }>;
-
-  throwIfEmbeddingAborted(guard);
-  return embedBackfill(
-    rows.map(
-      ({ id, title, content, tenant_id, project_id, cross_project }) => ({
+  return embedBackfillPages(
+    (after) => {
+      const rows = db()
+        .query(
+          `SELECT k.id, k.tenant_id, k.project_id, k.cross_project
+           FROM knowledge_current k
+           LEFT JOIN projects p ON p.id = k.project_id
+           WHERE ${missingEmbeddingSql("knowledge", mode, "k")}
+             AND k.confidence > 0.2 AND k.id > ?
+             AND (k.project_id IS NULL OR p.tenant_id = k.tenant_id)
+           ORDER BY k.id LIMIT ?`,
+        )
+        .all(after, BACKFILL_SOURCE_PAGE) as Array<{
+        id: string;
+        tenant_id: string;
+        project_id: string | null;
+        cross_project: number;
+      }>;
+      return rows.map(({ id, tenant_id, project_id, cross_project }) => ({
         id,
-        text: `${title}\n${content}`,
+        text: "",
+        tenantId: tenant_id,
+        projectId: project_id,
         scopeKey: `${tenant_id}\0${project_id === null || cross_project ? "" : project_id}`,
-      }),
-    ),
+      }));
+    },
     "knowledge",
     "embedding",
     "knowledge entries",
+    () => isCurrentDatabase(connection) && !options.signal?.aborted,
     guard,
   );
 }
 
-export async function backfillDistillationEmbeddings(): Promise<number> {
+export async function backfillDistillationEmbeddings(
+  options: EmbeddingOperationOptions = {},
+): Promise<number> {
+  const guard = createEmbeddingAbortGuard("distillation-backfill", options);
+  throwIfEmbeddingAborted(guard);
   if (!getProvider()) return 0;
-  const mode = readStorageMode(db());
-  const rows = db()
-    .query(
-      `SELECT id, observations, project_id FROM distillations WHERE ${missingEmbeddingSql("distillations", mode)} AND archived = 0 AND observations != ''`,
-    )
-    .all() as Array<{ id: string; observations: string; project_id: string }>;
-
-  return embedBackfill(
-    rows.map(({ id, observations, project_id }) => ({
-      id,
-      text: observations,
-      scopeKey: project_id,
-    })),
+  const connection = db();
+  const mode = readStorageMode(connection);
+  return embedBackfillPages(
+    (after) => {
+      const rows = db()
+        .query(
+          `SELECT d.id, d.project_id, p.tenant_id
+           FROM distillations d JOIN projects p ON p.id = d.project_id
+           WHERE ${missingEmbeddingSql("distillations", mode, "d")}
+             AND d.archived = 0 AND d.observations != '' AND d.id > ?
+           ORDER BY d.id LIMIT ?`,
+        )
+        .all(after, BACKFILL_SOURCE_PAGE) as Array<{
+        id: string;
+        project_id: string;
+        tenant_id: string;
+      }>;
+      return rows.map(({ id, project_id, tenant_id }) => ({
+        id,
+        text: "",
+        tenantId: tenant_id,
+        projectId: project_id,
+        scopeKey: project_id,
+      }));
+    },
     "distillations",
     "distillation embedding",
     "distillations",
-    undefined,
+    () => isCurrentDatabase(connection) && !options.signal?.aborted,
+    guard,
     256,
   );
 }
 
-export async function backfillEntityEmbeddings(): Promise<number> {
+export async function backfillEntityEmbeddings(
+  options: EmbeddingOperationOptions = {},
+): Promise<number> {
+  const guard = createEmbeddingAbortGuard("entity-backfill", options);
+  throwIfEmbeddingAborted(guard);
   if (!getProvider()) return 0;
-  const mode = readStorageMode(db());
-  const rows = db()
-    .query(
-      `SELECT e.id AS id, e.canonical_name AS canonical_name,
-              (SELECT GROUP_CONCAT(da.alias_value, ' ')
-               FROM (SELECT DISTINCT alias_value FROM entity_aliases WHERE entity_id = e.id) da
-              ) AS aliases
-       FROM entities e
-       WHERE ${missingEmbeddingSql("entities", mode, "e")}`,
-    )
-    .all() as Array<{
-    id: string;
-    canonical_name: string;
-    aliases: string | null;
-  }>;
-
-  return embedBackfill(
-    rows.map(({ id, canonical_name, aliases }) => ({
-      id,
-      text: `${canonical_name} ${aliases ?? ""}`.trim(),
-    })),
+  const connection = db();
+  const mode = readStorageMode(connection);
+  return embedBackfillPages(
+    (after) => {
+      const rows = db()
+        .query(
+          `SELECT e.id, e.tenant_id, e.project_id
+           FROM entities e LEFT JOIN projects p ON p.id = e.project_id
+           WHERE ${missingEmbeddingSql("entities", mode, "e")}
+             AND e.id > ? AND (e.project_id IS NULL OR p.tenant_id = e.tenant_id)
+           ORDER BY e.id LIMIT ?`,
+        )
+        .all(after, BACKFILL_SOURCE_PAGE) as Array<{
+        id: string;
+        tenant_id: string;
+        project_id: string | null;
+      }>;
+      return rows.map(({ id, tenant_id, project_id }) => ({
+        id,
+        text: "",
+        tenantId: tenant_id,
+        projectId: project_id,
+      }));
+    },
     "entities",
     "entity embedding",
     "entities",
+    () => isCurrentDatabase(connection) && !options.signal?.aborted,
+    guard,
   );
 }
 const TEMPORAL_RECHUNK_CURSOR_KEY = "lore:temporal_rechunk.cursor";
@@ -703,19 +996,133 @@ const TEMPORAL_RECHUNK_DONE_KEY = "lore:temporal_rechunk.done";
 const TEMPORAL_RECHUNK_PAGE = 256;
 const TEMPORAL_RECHUNK_YIELD_ROWS = 32;
 const TEMPORAL_RECHUNK_YIELD_MS = 8;
-const TEMPORAL_RECHUNK_ELIGIBLE_SQL = `length(CAST(content AS BLOB)) >= ${TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH}`;
+const TEMPORAL_SOURCE_CAP_CURSOR_KEY =
+  "lore:temporal_embedding.source_cap_cursor";
+const TEMPORAL_RECHUNK_ELIGIBLE_SQL = `length(CAST(content AS BLOB)) BETWEEN ${TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH} AND ${MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES}`;
 const TEMPORAL_RECHUNK_ATTEMPTS_KEY = "lore:temporal_rechunk.attempts";
 const TEMPORAL_RECHUNK_INFLIGHT_KEY = "lore:temporal_rechunk.inflight";
 const TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY = "lore:temporal_rechunk.row_attempts";
 const TEMPORAL_RECHUNK_SKIP_KEY = "lore:temporal_rechunk.skip";
+const TEMPORAL_RECHUNK_FAIR_CURSOR_PREFIX = "lore:temporal_rechunk.fair:";
+const TEMPORAL_RECHUNK_FAIR_SCAN_PREFIX = "lore:temporal_rechunk.fair_scan:";
+const TEMPORAL_RECHUNK_PARK_NEXT_KEY = "lore:temporal_rechunk.park_next";
+const TEMPORAL_RECHUNK_PARK_RETRY_KEY = "lore:temporal_rechunk.park_retry";
+const TEMPORAL_RECHUNK_PARK_MESSAGE_KEY = "lore:temporal_rechunk.park_message";
+const TEMPORAL_RECHUNK_QUEUE_RECOVERY_KEY =
+  "lore:temporal_rechunk.queue_recovery_pending";
 const TEMPORAL_RECHUNK_MAX_ROWID_KEY = "lore:temporal_rechunk.max_rowid";
 /** Fence active walks across config resets, including resets by other processes. */
 const TEMPORAL_RECHUNK_EPOCH_KEY = "lore:temporal_rechunk.epoch";
 const TEMPORAL_RECHUNK_PAUSE_POLL_MS = 250;
+// The durable queue can already contain more than this on upgrade. Do not
+// discard it: park the walk and let the scheduler reduce historical debt.
+// Live arrivals never consume the historical admission window.
+const TEMPORAL_RECHUNK_PENDING_WINDOW = 512;
+const TEMPORAL_RECHUNK_FAIR_PROBE_MS = 1_000;
+const TEMPORAL_RECHUNK_FAIR_PROJECT_PAGE = 16;
+const TEMPORAL_RECHUNK_FAIR_MESSAGE_PAGE = 32;
+const TEMPORAL_RECHUNK_FAIR_EXTRA_SLOTS = 16;
+
+/** Retire legacy vectors above the source cap, even after re-chunking finished. */
+async function retireOversizedTemporalVectors(
+  connection: ReturnType<typeof db>,
+  isActive: () => boolean,
+): Promise<void> {
+  const saved = Number(getKV(TEMPORAL_SOURCE_CAP_CURSOR_KEY) ?? "0");
+  let after = Number.isSafeInteger(saved) && saved >= 0 ? saved : 0;
+  let checkpoint = after;
+  let blocked = false;
+  while (isActive()) {
+    // Read only metadata. Loading or hashing a legacy 128 MiB source here
+    // would block the event loop before the scheduler has even started.
+    const rows = connection
+      .query(
+        `SELECT t.rowid AS source_rowid, t.id, t.project_id, p.tenant_id,
+                length(CAST(t.content AS BLOB)) AS bytes
+           FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+          WHERE t.rowid > ? ORDER BY t.rowid LIMIT ?`,
+      )
+      .all(after, TEMPORAL_RECHUNK_YIELD_ROWS) as Array<{
+      source_rowid: number;
+      id: string;
+      project_id: string;
+      tenant_id: string;
+      bytes: number;
+    }>;
+    if (!rows.length) return;
+    for (const row of rows) {
+      if (!isActive()) return;
+      if (row.bytes > MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES) {
+        let retired = withTenant(row.tenant_id, () =>
+          retireOversizedTemporalEmbedding(row.id, row.project_id),
+        );
+        for (let attempt = 0; !retired && attempt < 3; attempt++) {
+          if (!isActive()) return;
+          // The source may have moved between page selection and retirement.
+          // Re-read its owner, never its text, before trying again.
+          const current = connection
+            .query(
+              `SELECT t.id, t.project_id, p.tenant_id,
+                      length(CAST(t.content AS BLOB)) AS bytes
+                 FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+                WHERE t.rowid = ?`,
+            )
+            .get(row.source_rowid) as {
+            id: string;
+            project_id: string;
+            tenant_id: string;
+            bytes: number;
+          } | null;
+          if (
+            !current ||
+            current.bytes <= MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES
+          ) {
+            retired = true;
+            break;
+          }
+          retired = withTenant(current.tenant_id, () =>
+            retireOversizedTemporalEmbedding(current.id, current.project_id),
+          );
+          if (!retired && attempt < 2)
+            await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        if (!retired) blocked = true;
+      }
+      after = row.source_rowid;
+      // Later rows can still be retired after a repeatedly moving source, but
+      // its rowid remains the next run's starting point until it is resolved.
+      if (!blocked) checkpoint = after;
+    }
+    if (!isActive()) return;
+    withSavepoint("checkpoint_temporal_source_cap", () => {
+      const recorded = Number(getKV(TEMPORAL_SOURCE_CAP_CURSOR_KEY) ?? "0");
+      if (!Number.isSafeInteger(recorded) || recorded < checkpoint)
+        setKV(TEMPORAL_SOURCE_CAP_CURSOR_KEY, String(checkpoint));
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+/** Wake parked startup work on cancellation without holding the process open. */
+async function waitForTemporalRetry(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, TEMPORAL_RECHUNK_PAUSE_POLL_MS);
+    timer.unref?.();
+    signal?.addEventListener("abort", done, { once: true });
+    if (signal?.aborted) done();
+  });
+}
 
 async function awaitBackfillIdle(
   shouldPause: (() => boolean) | undefined,
   isCurrent: () => boolean,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!shouldPause) return;
   // Edge-triggered logging: because this call blocks until the host is idle,
@@ -733,16 +1140,13 @@ async function awaitBackfillIdle(
     if (!paused) break;
     if (!parked) {
       parked = true;
-      log.info("temporal re-chunk parked — deferring to live traffic");
+      reportBackfillInfo(
+        "temporal re-chunk parked — deferring to live traffic",
+      );
     }
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(resolve, TEMPORAL_RECHUNK_PAUSE_POLL_MS);
-      // Don't let a parked walk hold the process open on its own; the host's
-      // server keeps it alive, and if it doesn't, resuming next start is fine.
-      (t as { unref?: () => void }).unref?.();
-    });
+    await waitForTemporalRetry(signal);
   }
-  if (parked) log.info("temporal re-chunk resumed");
+  if (parked) reportBackfillInfo("temporal re-chunk resumed");
 }
 
 /** Reset durable scheduling progress so the next startup walks the corpus again. */
@@ -755,7 +1159,19 @@ export function resetTemporalRechunkProgress(): void {
     setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
     setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
     setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
+    setKV(TEMPORAL_RECHUNK_PARK_NEXT_KEY, "0");
+    setKV(TEMPORAL_RECHUNK_PARK_RETRY_KEY, "0");
+    setKV(TEMPORAL_RECHUNK_PARK_MESSAGE_KEY, "");
     setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, "0");
+    db()
+      .query("DELETE FROM kv_meta WHERE key LIKE ?")
+      .run(`${TEMPORAL_RECHUNK_FAIR_CURSOR_PREFIX}%`);
+    db()
+      .query("DELETE FROM kv_meta WHERE key LIKE ?")
+      .run(`${TEMPORAL_RECHUNK_FAIR_SCAN_PREFIX}%`);
+    // Fair slots live on queued rows, so a reset cannot mint new slots while
+    // pending work is still durable. Preserve queue-recovery mode until its
+    // admission walk has completed, including across a config change.
   });
 }
 
@@ -776,8 +1192,12 @@ export function formatTemporalRechunkProgress(
 
 /** Durably schedule existing temporal messages for the multi-vector vec0 layout. */
 export async function backfillTemporalEmbeddings(
-  opts: { shouldPause?: () => boolean } = {},
+  opts: { shouldPause?: () => boolean; signal?: AbortSignal } = {},
 ): Promise<number> {
+  // There is one durable corpus cursor for the whole database. A request-bound
+  // tenant must never drive that shared cursor or read another tenant's text.
+  // The server-owned startup walk re-enters each source tenant on admission.
+  if (currentTenantId() !== LOCAL_TENANT_ID) return 0;
   // Multi-vector chunking only exists in vec0 mode. Skip WITHOUT latching done
   // so a later cutover to vec0 still triggers the walk.
   //
@@ -787,9 +1207,12 @@ export async function backfillTemporalEmbeddings(
   // the first walk after a blob->vec0 cutover is always armed and re-embeds the
   // rows that cutover skipped. (maybeCutoverToVec0 also explicitly re-arms the
   // walk on cutover as belt-and-suspenders.) Do not reorder these two lines.
+  if (opts.signal?.aborted) return 0;
   const connection = db();
+  const isActive = () => isCurrentDatabase(connection) && !opts.signal?.aborted;
   const snapshot = withSavepoint("start_temporal_rechunk", () => {
-    if (readStorageMode(connection) !== "vec0") return null;
+    const recovering = getKV(TEMPORAL_RECHUNK_QUEUE_RECOVERY_KEY) === "1";
+    if (readStorageMode(connection) !== "vec0" && !recovering) return null;
     if (getKV(TEMPORAL_RECHUNK_DONE_KEY) === "1") return null;
     const cursor = getKV(TEMPORAL_RECHUNK_CURSOR_KEY) ?? "";
     const epoch = getKV(TEMPORAL_RECHUNK_EPOCH_KEY);
@@ -797,27 +1220,352 @@ export async function backfillTemporalEmbeddings(
     if (!Number.isSafeInteger(maxRowid) || maxRowid <= 0) {
       maxRowid = (
         connection
-          .query(
-            `SELECT COALESCE(MAX(rowid), 0) AS n FROM temporal_messages WHERE ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
-          )
+          .query("SELECT COALESCE(MAX(rowid), 0) AS n FROM temporal_messages")
           .get() as { n: number }
       ).n;
       setKV(TEMPORAL_RECHUNK_MAX_ROWID_KEY, String(maxRowid));
     }
-    return { cursor, epoch, maxRowid };
+    return { cursor, epoch, maxRowid, recovering };
   });
+  if (readStorageMode(connection) !== "vec0" || isVecAvailable()) {
+    await retireOversizedTemporalVectors(connection, isActive);
+  }
+  if (!isActive()) return 0;
   if (!snapshot) return 0;
+  if (getKV(TEMPORAL_RECHUNK_EPOCH_KEY) !== snapshot.epoch) return 0;
   let { cursor } = snapshot;
-  const { maxRowid, epoch } = snapshot;
+  const { maxRowid, epoch, recovering } = snapshot;
+  // The lost queue may have held short/empty updates that remove stale vectors.
+  // Re-admit every source row after queue loss; normal re-chunking still selects
+  // only text with enough semantic content to produce a vector.
+  const eligibleSql = recovering
+    ? `length(CAST(content AS BLOB)) <= ${MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES}`
+    : TEMPORAL_RECHUNK_ELIGIBLE_SQL;
   // Identity must be checked first: getKV/db() would reopen storage after close.
   const isCurrent = () =>
-    isCurrentDatabase(connection) &&
-    getKV(TEMPORAL_RECHUNK_EPOCH_KEY) === epoch;
+    isActive() && getKV(TEMPORAL_RECHUNK_EPOCH_KEY) === epoch;
+  let scheduled = 0;
+  let lastFairProbeAt = -Infinity;
+  // A legacy queue can already exceed the normal window. This bounded index
+  // probe counts only active extra claims, not the source-backed retry parks.
+  const fairSlotsFull = () =>
+    connection
+      .query(
+        `SELECT 1 FROM temporal_embedding_queue INDEXED BY idx_temporal_embedding_queue_fair_ahead
+         WHERE priority = 0 AND fair_ahead = 1 LIMIT 1 OFFSET ?`,
+      )
+      .get(TEMPORAL_RECHUNK_FAIR_EXTRA_SLOTS - 1) !== null;
+  const fairClaimPending = () =>
+    connection
+      .query(
+        `SELECT 1 FROM temporal_embedding_queue INDEXED BY idx_temporal_embedding_queue_fair_ahead
+         WHERE priority = 0 AND fair_ahead = 1 LIMIT 1`,
+      )
+      .get() !== null;
+  const promoteParked = (lastOwner: string): boolean => {
+    if (fairSlotsFull()) return false;
+    // A bounded page prevents a large failed owner's park from forcing a
+    // full-table probe. Persist a keyset cursor so pages owned by full projects
+    // cannot hide a healthy later owner indefinitely, including after restart.
+    const recordedRetry = Number(getKV(TEMPORAL_RECHUNK_PARK_RETRY_KEY) ?? "0");
+    const afterRetry =
+      Number.isSafeInteger(recordedRetry) && recordedRetry >= 0
+        ? recordedRetry
+        : 0;
+    const afterMessage = getKV(TEMPORAL_RECHUNK_PARK_MESSAGE_KEY) ?? "";
+    const due = connection
+      .query(
+        `SELECT d.message_id, d.retry_at, t.project_id, p.tenant_id
+            FROM temporal_embedding_parked d INDEXED BY idx_temporal_embedding_parked_retry
+            JOIN temporal_messages t ON t.id = d.message_id
+            JOIN projects p ON p.id = t.project_id
+           WHERE d.retry_at <= ? AND t.rowid <= ?
+             AND (d.retry_at > ? OR (d.retry_at = ? AND d.message_id > ?))
+           ORDER BY d.retry_at, d.message_id LIMIT ?`,
+      )
+      .all(
+        Date.now(),
+        maxRowid,
+        afterRetry,
+        afterRetry,
+        afterMessage,
+        TEMPORAL_RECHUNK_FAIR_PROJECT_PAGE,
+      ) as Array<{
+      message_id: string;
+      retry_at: number;
+      project_id: string;
+      tenant_id: string;
+    }>;
+    if (!due.length) {
+      if (afterRetry || afterMessage) {
+        setKV(TEMPORAL_RECHUNK_PARK_RETRY_KEY, "0");
+        setKV(TEMPORAL_RECHUNK_PARK_MESSAGE_KEY, "");
+      }
+      return false;
+    }
+    // A due owner may have refilled its 512-row window while the retry was
+    // parked. Rotate past it instead of either granting a 513th row or hiding
+    // another due owner's work behind the first park.
+    const candidates = [
+      ...due.filter((row) => row.project_id !== lastOwner),
+      ...due.filter((row) => row.project_id === lastOwner),
+    ];
+    for (const parked of candidates) {
+      const promoted = withSavepoint(
+        "promote_parked_temporal_embedding",
+        () => {
+          if (!isCurrent() || fairSlotsFull()) return false;
+          const alreadyQueued =
+            connection
+              .query(
+                "SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?",
+              )
+              .get(parked.message_id) !== null;
+          if (
+            !alreadyQueued &&
+            connection
+              .query(
+                `SELECT 1 FROM temporal_embedding_queue INDEXED BY idx_temporal_embedding_queue_owner
+               WHERE priority = 0 AND project_id = ? LIMIT 1 OFFSET ?`,
+              )
+              .get(parked.project_id, TEMPORAL_RECHUNK_PENDING_WINDOW - 1) !==
+              null
+          )
+            return false;
+          const source = withTenant(
+            parked.tenant_id,
+            () =>
+              connection
+                .query(
+                  `SELECT t.content FROM temporal_messages t
+              JOIN projects p ON p.id = t.project_id
+              WHERE t.id = ? AND t.project_id = ? AND p.tenant_id = ?
+                   AND t.rowid <= ?
+                   AND length(CAST(t.content AS BLOB)) <= ${MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES}`,
+                )
+                .get(
+                  parked.message_id,
+                  parked.project_id,
+                  parked.tenant_id,
+                  maxRowid,
+                ) as { content: string } | null,
+          );
+          if (!source)
+            return withTenant(parked.tenant_id, () =>
+              retireOversizedTemporalEmbedding(
+                parked.message_id,
+                parked.project_id,
+              ),
+            );
+          const admitted = withTenant(parked.tenant_id, () =>
+            enqueueTemporalEmbedding(
+              parked.message_id,
+              source.content,
+              "backfill",
+            ),
+          );
+          if (!admitted && !alreadyQueued) return false;
+          if (!alreadyQueued) {
+            connection
+              .query(
+                `UPDATE temporal_embedding_queue SET fair_ahead = 1
+               WHERE message_id = ? AND project_id = ? AND priority = 0`,
+              )
+              .run(parked.message_id, parked.project_id);
+            scheduled++;
+          }
+          connection
+            .query("DELETE FROM temporal_embedding_parked WHERE message_id = ?")
+            .run(parked.message_id);
+          setKV(TEMPORAL_RECHUNK_SKIP_KEY, parked.project_id);
+          return true;
+        },
+      );
+      if (promoted) return true;
+    }
+    const last = due[due.length - 1];
+    setKV(TEMPORAL_RECHUNK_PARK_RETRY_KEY, String(last.retry_at));
+    setKV(TEMPORAL_RECHUNK_PARK_MESSAGE_KEY, last.message_id);
+    return false;
+  };
+  const admitFairOwner = (): void => {
+    const now = performance.now();
+    if (now - lastFairProbeAt < TEMPORAL_RECHUNK_FAIR_PROBE_MS) return;
+    lastFairProbeAt = now;
+    if (fairSlotsFull()) return;
+    const lastOwner = getKV(TEMPORAL_RECHUNK_SKIP_KEY) ?? "";
+    if (getKV(TEMPORAL_RECHUNK_PARK_NEXT_KEY) === "1") {
+      if (promoteParked(lastOwner)) {
+        setKV(TEMPORAL_RECHUNK_PARK_NEXT_KEY, "0");
+        setKV(TEMPORAL_RECHUNK_PARK_RETRY_KEY, "0");
+        setKV(TEMPORAL_RECHUNK_PARK_MESSAGE_KEY, "");
+        return;
+      }
+    }
+    const nextPage = connection.query(
+      "SELECT id, tenant_id FROM projects WHERE id > ? ORDER BY id LIMIT ?",
+    );
+    const projects = nextPage.all(
+      lastOwner,
+      TEMPORAL_RECHUNK_FAIR_PROJECT_PAGE,
+    ) as Array<{ id: string; tenant_id: string }>;
+    const page = projects.length
+      ? projects
+      : (nextPage.all("", TEMPORAL_RECHUNK_FAIR_PROJECT_PAGE) as Array<{
+          id: string;
+          tenant_id: string;
+        }>);
+    for (const project of page) {
+      if (!isCurrent()) return;
+      const fairKey = `${TEMPORAL_RECHUNK_FAIR_CURSOR_PREFIX}${project.id}`;
+      const scanKey = `${TEMPORAL_RECHUNK_FAIR_SCAN_PREFIX}${project.id}`;
+      const after = [cursor, getKV(fairKey) ?? "", getKV(scanKey) ?? ""].reduce(
+        (latest, id) => (id > latest ? id : latest),
+        "",
+      );
+      // Scan raw IDs, not an unbounded eligible suffix. Include post-snapshot
+      // IDs in the short page, then reject them by rowid; filtering them in
+      // SQL would still walk an unbounded suffix before LIMIT applies. Fetch
+      // full text only for an admitted candidate.
+      const candidates = connection
+        .query(
+          `SELECT id, rowid AS source_rowid, length(CAST(content AS BLOB)) AS bytes
+           FROM temporal_messages INDEXED BY idx_temporal_project_message_id
+             WHERE project_id = ? AND id > ?
+             ORDER BY id LIMIT ?`,
+        )
+        .all(project.id, after, TEMPORAL_RECHUNK_FAIR_MESSAGE_PAGE) as Array<{
+        id: string;
+        source_rowid: number;
+        bytes: number;
+      }>;
+      const candidate = candidates.find(
+        ({ bytes, source_rowid }) =>
+          source_rowid <= maxRowid &&
+          bytes <= MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES &&
+          (recovering || bytes >= TEMPORAL_EMBEDDING_MIN_CONTENT_LENGTH),
+      );
+      if (!candidate) {
+        const lastScanned = candidates.at(-1);
+        if (lastScanned) {
+          withSavepoint("scan_fair_temporal_rechunk", () => {
+            if (!isCurrent()) return;
+            const current = getKV(scanKey) ?? "";
+            if (lastScanned.id > current) setKV(scanKey, lastScanned.id);
+            setKV(TEMPORAL_RECHUNK_SKIP_KEY, project.id);
+          });
+          return;
+        }
+        continue;
+      }
+      const admitted = withSavepoint("admit_fair_temporal_rechunk", () => {
+        if (!isCurrent()) return false;
+        if (fairSlotsFull()) return false;
+        // Count actual queued work for this owner, not a sampled owner from
+        // the queue. One failed owner must not exclude a different owner, and
+        // a mixed queue must never give the full owner a 513th row.
+        if (
+          connection
+            .query(
+              `SELECT 1 FROM temporal_embedding_queue INDEXED BY idx_temporal_embedding_queue_owner
+               WHERE priority = 0 AND project_id = ?
+               LIMIT 1 OFFSET ?`,
+            )
+            .get(project.id, TEMPORAL_RECHUNK_PENDING_WINDOW - 1) !== null
+        )
+          return false;
+        const currentFairCursor = getKV(fairKey) ?? "";
+        if (currentFairCursor >= candidate.id) return false;
+        const current = withTenant(
+          project.tenant_id,
+          () =>
+            connection
+              .query(
+                `SELECT t.content FROM temporal_messages t
+               JOIN projects p ON p.id = t.project_id
+               WHERE t.id = ? AND t.project_id = ? AND p.tenant_id = ? AND t.rowid <= ?
+                   AND ${eligibleSql}`,
+              )
+              .get(candidate.id, project.id, project.tenant_id, maxRowid) as {
+              content: string;
+            } | null,
+        );
+        if (!current) return false;
+        const newClaim =
+          connection
+            .query(
+              "SELECT 1 FROM temporal_embedding_queue WHERE message_id = ?",
+            )
+            .get(candidate.id) === null;
+        if (
+          withTenant(project.tenant_id, () =>
+            enqueueTemporalEmbedding(candidate.id, current.content, "backfill"),
+          )
+        ) {
+          scheduled++;
+        }
+        if (newClaim) {
+          connection
+            .query(
+              "UPDATE temporal_embedding_queue SET fair_ahead = 1 WHERE message_id = ? AND priority = 0",
+            )
+            .run(candidate.id);
+        }
+        setKV(fairKey, candidate.id);
+        setKV(TEMPORAL_RECHUNK_SKIP_KEY, project.id);
+        return true;
+      });
+      if (admitted) {
+        setKV(TEMPORAL_RECHUNK_PARK_NEXT_KEY, "1");
+        return;
+      }
+      // A full owner can be first on the project page. Advance the fair
+      // rotation instead of permanently blocking a healthy owner behind it.
+      if (isCurrent()) setKV(TEMPORAL_RECHUNK_SKIP_KEY, project.id);
+    }
+    if (page.length && isCurrent()) {
+      setKV(TEMPORAL_RECHUNK_SKIP_KEY, page[page.length - 1].id);
+    }
+    if (promoteParked(lastOwner)) setKV(TEMPORAL_RECHUNK_PARK_NEXT_KEY, "0");
+  };
   // Core owns the shared embed-pool signal; hosts only contribute their own
   // pause policy. This keeps recall-priority admission true for every host.
-  const shouldPause = () =>
-    recallEmbedsInFlight() > 0 || opts.shouldPause?.() === true;
-  let scheduled = 0;
+  const shouldPause = () => {
+    if (!isActive() || recallEmbedsInFlight() > 0) return true;
+    try {
+      if (
+        connection
+          .query(
+            "SELECT 1 FROM temporal_embedding_queue WHERE priority = 0 LIMIT 1 OFFSET ?",
+          )
+          .get(TEMPORAL_RECHUNK_PENDING_WINDOW - 1) !== null
+      ) {
+        // Provider failure can fill the historical window forever. Keep a
+        // bounded path for another project's work while the primary cursor
+        // remains parked on the failed owner.
+        try {
+          const hostPaused = (() => {
+            try {
+              return opts.shouldPause?.() === true;
+            } catch {
+              // A throwing host gate cannot brick the core-owned rescue path.
+              return false;
+            }
+          })();
+          if (!hostPaused) admitFairOwner();
+        } catch {
+          // An auxiliary fairness probe never authorizes unbounded admission.
+        }
+        return true;
+      }
+    } catch {
+      // A failed capacity probe cannot authorize unlimited admission.
+      return true;
+    }
+    // A throwing host gate remains best-effort, but it cannot bypass the
+    // core-owned durable queue limit checked above.
+    return opts.shouldPause?.() === true;
+  };
   let scanned = 0;
 
   // Up-front backlog so a long walk is explainable from the logs. The corpus is
@@ -829,7 +1577,7 @@ export async function backfillTemporalEmbeddings(
     db()
       .query(
         `SELECT COUNT(*) AS n FROM temporal_messages
-         WHERE id > ? AND rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
+          WHERE id > ? AND rowid <= ? AND ${eligibleSql}`,
       )
       .get(cursor, maxRowid) as { n: number }
   ).n;
@@ -849,13 +1597,13 @@ export async function backfillTemporalEmbeddings(
     total = (
       db()
         .query(
-          `SELECT COUNT(*) AS n FROM temporal_messages WHERE rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}`,
+          `SELECT COUNT(*) AS n FROM temporal_messages WHERE rowid <= ? AND ${eligibleSql}`,
         )
         .get(maxRowid) as { n: number }
     ).n;
     baseDone = Math.max(0, total - backlog);
     const basePct = total > 0 ? Math.round((baseDone / total) * 1000) / 10 : 0;
-    log.info(
+    reportBackfillInfo(
       `temporal re-chunk: ${backlog} messages to scan (${baseDone}/${total} already done, ${basePct}%)${cursor ? ", resuming" : ""}`,
     );
   }
@@ -870,40 +1618,116 @@ export async function backfillTemporalEmbeddings(
   for (;;) {
     if (!isCurrent()) return scheduled;
     // Keep the legacy walk aligned with scheduler eligibility.
-    const rows = db()
+    const rows = connection
       .query(
         `SELECT id FROM temporal_messages
-         WHERE id > ? AND rowid <= ? AND ${TEMPORAL_RECHUNK_ELIGIBLE_SQL}
-         ORDER BY id ASC LIMIT ?`,
+          WHERE id > ? AND rowid <= ? AND ${eligibleSql}
+          ORDER BY id ASC LIMIT ?`,
       )
       .all(cursor, maxRowid, TEMPORAL_RECHUNK_PAGE) as Array<{ id: string }>;
 
     if (!rows.length) {
-      withSavepoint("finish_temporal_rechunk", () => {
-        if (!isCurrent()) return;
-        setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
+      const parked = connection
+        .query("SELECT 1 FROM temporal_embedding_parked LIMIT 1")
+        .get();
+      if (parked) {
+        await awaitBackfillIdle(shouldPause, isCurrent, opts.signal);
+        if (!isCurrent()) return scheduled;
+        // The normal window may drain while the last source page is in flight.
+        // Restore due retries before latching completion; otherwise a restart
+        // would permanently hide source-backed parked work behind done=1.
+        if (
+          parked &&
+          connection
+            .query(
+              "SELECT 1 FROM temporal_embedding_queue WHERE priority = 0 LIMIT 1 OFFSET ?",
+            )
+            .get(TEMPORAL_RECHUNK_PENDING_WINDOW - 1) === null
+        )
+          promoteParked("");
+        await waitForTemporalRetry(opts.signal);
+        continue;
+      }
+      const finished = withSavepoint("finish_temporal_rechunk", () => {
+        if (!isCurrent()) return false;
+        // Recheck under the completion write unit: a concurrent drain can
+        // park a fair claim between the first probe and this latch.
+        if (
+          connection
+            .query("SELECT 1 FROM temporal_embedding_parked LIMIT 1")
+            .get() ||
+          fairClaimPending()
+        )
+          return false;
+        // Blob mode has no multi-vector completion latch. This one-time walk
+        // only restores local queue metadata lost when the table disappeared.
+        if (readStorageMode(connection) === "vec0")
+          setKV(TEMPORAL_RECHUNK_DONE_KEY, "1");
+        if (recovering) setKV(TEMPORAL_RECHUNK_QUEUE_RECOVERY_KEY, "0");
         setKV(TEMPORAL_RECHUNK_ATTEMPTS_KEY, "0");
         setKV(TEMPORAL_RECHUNK_INFLIGHT_KEY, "");
         setKV(TEMPORAL_RECHUNK_ROW_ATTEMPTS_KEY, "0");
         setKV(TEMPORAL_RECHUNK_SKIP_KEY, "");
+        setKV(TEMPORAL_RECHUNK_PARK_NEXT_KEY, "0");
+        connection
+          .query("DELETE FROM kv_meta WHERE key LIKE ?")
+          .run(`${TEMPORAL_RECHUNK_FAIR_CURSOR_PREFIX}%`);
+        connection
+          .query("DELETE FROM kv_meta WHERE key LIKE ?")
+          .run(`${TEMPORAL_RECHUNK_FAIR_SCAN_PREFIX}%`);
+        return true;
       });
+      if (!finished) {
+        // A fair claim can fail after the source cursor reaches EOF. Keep the
+        // walk alive until it settles so a late park is not hidden by done=1.
+        await waitForTemporalRetry(opts.signal);
+        continue;
+      }
       break;
     }
 
     for (const row of rows) {
-      await awaitBackfillIdle(shouldPause, isCurrent);
-      if (!isCurrentDatabase(connection)) return scheduled;
+      await awaitBackfillIdle(shouldPause, isCurrent, opts.signal);
+      if (!isActive()) return scheduled;
       const admitted = withSavepoint("schedule_temporal_rechunk", () => {
         if (!isCurrent()) return false;
         const current = db()
           .query(
-            "SELECT content FROM temporal_messages WHERE id = ? AND rowid <= ?",
+            `SELECT t.project_id, p.tenant_id
+             FROM temporal_messages t JOIN projects p ON p.id = t.project_id
+             WHERE t.id = ? AND t.rowid <= ?`,
           )
-          .get(row.id, maxRowid) as { content: string } | null;
+          .get(row.id, maxRowid) as {
+          project_id: string;
+          tenant_id: string;
+        } | null;
         if (current) {
-          const enqueued = enqueueTemporalEmbedding(row.id, current.content);
+          // Fair-ahead work has already been admitted under this epoch. The
+          // normal cursor catches up without re-enqueuing a completed vector.
+          // Ownership may have moved while awaitBackfillIdle() held this page;
+          // never use the earlier project's fair cursor or tenant for this row.
+          const fairCursor = getKV(
+            `${TEMPORAL_RECHUNK_FAIR_CURSOR_PREFIX}${current.project_id}`,
+          );
+          const enqueued = withTenant(current.tenant_id, () => {
+            if (fairCursor && row.id <= fairCursor) return false;
+            const source = db()
+              .query(
+                `SELECT t.content FROM temporal_messages t
+                 JOIN projects p ON p.id = t.project_id
+                  WHERE t.id = ? AND t.project_id = ? AND p.tenant_id = ? AND t.rowid <= ?
+                    AND length(CAST(t.content AS BLOB)) <= ${MAX_TEMPORAL_EMBEDDING_SOURCE_BYTES}`,
+              )
+              .get(row.id, current.project_id, current.tenant_id, maxRowid) as {
+              content: string;
+            } | null;
+            return source
+              ? enqueueTemporalEmbedding(row.id, source.content, "backfill")
+              : false;
+          });
           if (enqueued) {
-            invalidateTemporalEmbedding(row.id);
+            // Existing vectors for unchanged content stay searchable until the
+            // complete replacement is installed atomically by the drain.
             scheduled++;
           }
         }
@@ -915,7 +1739,7 @@ export async function backfillTemporalEmbeddings(
       if (!admitted) return scheduled;
 
       if (Date.now() - lastProgressAt >= PROGRESS_INTERVAL_MS) {
-        log.info(
+        reportBackfillInfo(
           formatTemporalRechunkProgress(baseDone + scanned, total, scheduled),
         );
         lastProgressAt = Date.now();
@@ -937,7 +1761,7 @@ export async function backfillTemporalEmbeddings(
   }
 
   if (scheduled > 0) {
-    log.info(
+    reportBackfillInfo(
       formatTemporalRechunkProgress(baseDone + scanned, total, scheduled),
     );
   }

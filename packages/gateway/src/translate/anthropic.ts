@@ -435,6 +435,52 @@ export type AnthropicCacheOptions = {
   distilledPrefixLength?: number;
 };
 
+export type AnthropicRequestOptions = {
+  /** Remove root combinators rejected by Anthropic-compatible native APIs. */
+  sanitizeRootToolSchemas?: boolean;
+};
+
+const ROOT_TOOL_SCHEMA_COMBINATORS = [
+  "oneOf",
+  "allOf",
+  "anyOf",
+  "not",
+  "if",
+  "then",
+  "else",
+] as const;
+
+/**
+ * Anthropic Messages rejects combinators at the input schema root. Keep the
+ * full schema internally for validation. Only the intercepted recall tool may
+ * remove rejected root keywords from its wire schema; ordinary tools fail
+ * closed because removing those keywords changes validation. Nested
+ * combinators remain valid JSON Schema.
+ */
+function sanitizeAnthropicToolInputSchema(
+  inputSchema: Record<string, unknown>,
+  allowLossyRootCombinatorRemoval = false,
+): Record<string, unknown> {
+  const schema = { ...inputSchema };
+  const hasRootCombinator = ROOT_TOOL_SCHEMA_COMBINATORS.some((keyword) =>
+    Object.hasOwn(schema, keyword),
+  );
+  if (hasRootCombinator && !allowLossyRootCombinatorRemoval) {
+    throw new Error(
+      "Anthropic tool schema root combinators cannot be removed without changing validation",
+    );
+  }
+  for (const keyword of ROOT_TOOL_SCHEMA_COMBINATORS) delete schema[keyword];
+  if (
+    hasRootCombinator &&
+    allowLossyRootCombinatorRemoval &&
+    schema.type !== "object"
+  ) {
+    throw new Error("Anthropic tool schema must retain an object root");
+  }
+  return schema;
+}
+
 // ---------------------------------------------------------------------------
 // buildAnthropicRequest
 // ---------------------------------------------------------------------------
@@ -453,6 +499,7 @@ export type AnthropicCacheOptions = {
 export function buildAnthropicRequest(
   req: GatewayRequest,
   cache?: AnthropicCacheOptions,
+  options: AnthropicRequestOptions = {},
 ): {
   url: string;
   headers: Record<string, string>;
@@ -594,7 +641,13 @@ export function buildAnthropicRequest(
     const tools = req.tools.map((t) => ({
       name: t.name,
       description: t.description,
-      input_schema: t.inputSchema,
+      input_schema:
+        options.sanitizeRootToolSchemas === false
+          ? { ...t.inputSchema }
+          : sanitizeAnthropicToolInputSchema(
+              t.inputSchema,
+              t.gatewayOwned === true,
+            ),
     }));
 
     // Tool caching: place a breakpoint on the last tool definition.
@@ -707,6 +760,9 @@ export function parseAnthropicResponseJSON(
     stopReason: normalizeAnthropicStopReason(
       String((json.stop_reason as string) ?? "end_turn"),
     ),
+    usageComplete:
+      typeof usage?.input_tokens === "number" &&
+      typeof usage?.output_tokens === "number",
     usage: {
       inputTokens: (usage?.input_tokens as number | undefined) ?? 0,
       outputTokens: (usage?.output_tokens as number | undefined) ?? 0,
