@@ -6,6 +6,7 @@ import { Button } from "~/components/ui/button";
 import { THEME_CHOICES, theme, type ThemeChoice } from "~/lib/theme";
 
 import { Avatar } from "../lore/Avatar";
+import { FolkStatus } from "./FolkStatus";
 import { Logo } from "./Logo";
 import { SearchEntry } from "./SearchEntry";
 
@@ -70,9 +71,7 @@ export const AppBar: Component<{
     </A>
     <SearchEntry searchProjectId={props.searchProjectId} />
     <div class="ml-auto flex items-center gap-2 sm:gap-4">
-      <small class="hidden text-[13px] text-muted md:inline">
-        Local workspace
-      </small>
+      <FolkStatus />
       <ThemeToggle />
       <Avatar label="You" class="hidden sm:inline-flex" />
       <Show when={props.onOpenNav}>

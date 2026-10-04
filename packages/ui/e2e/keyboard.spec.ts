@@ -25,6 +25,7 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
     const expected = [
       "logo",
       "search",
+      "Account and sync: Not signed in",
       "theme-system",
       "theme-light",
       "theme-dark",

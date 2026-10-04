@@ -642,6 +642,16 @@ core.close();
 // only the distiller produces them). The reader must show it as labelled
 // compressed context after message 9, never as speech.
 const db = new DatabaseSync(process.env.LORE_DB_PATH);
+// FOLK-01: Link scratch to a mirrored team so its sharing panel renders "degraded".
+db.prepare(
+  "INSERT INTO scopes (id, kind, name, promotion_policy) VALUES ('e2e-team-acme','team','Acme e2e','manual')",
+).run();
+const linkResult = db
+  .prepare("UPDATE projects SET scope_id='e2e-team-acme' WHERE name='scratch'")
+  .run();
+if (linkResult.changes !== 1) {
+  throw new Error("expected to link exactly the seeded scratch project");
+}
 db.prepare(
   `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
    VALUES (?, (SELECT id FROM projects WHERE name = 'lore'), ?, '', '[]', ?, ?, 0, ?, ?, ?, ?, 'batch')`,
