@@ -14,15 +14,18 @@ describe("UI knowledge query contract", () => {
       parseKnowledgeQuery({
         q: "  wal  ",
         category: "architecture",
-        scope: "global",
-        sort: "confidence_desc",
+        scope: "shared",
+        sort: "confidence:desc,title:asc",
         cursor: "cursor-1",
       }),
     ).toEqual({
       q: "wal",
       category: "architecture",
-      scope: "global",
-      sort: "confidence_desc",
+      scope: "shared",
+      sort: [
+        { field: "confidence", dir: "desc" },
+        { field: "title", dir: "asc" },
+      ],
       cursor: "cursor-1",
     });
     expect(parseKnowledgeQuery({})).toEqual(DEFAULT_KNOWLEDGE_QUERY);
@@ -34,11 +37,14 @@ describe("UI knowledge query contract", () => {
         q: "wal mode",
         category: "gotcha",
         scope: "project",
-        sort: "created_desc",
+        sort: [
+          { field: "created_at", dir: "desc" },
+          { field: "confidence", dir: "asc" },
+        ],
         cursor: "next page",
       }),
     ).toBe(
-      "?q=wal+mode&category=gotcha&scope=project&sort=created_desc&cursor=next+page",
+      "?q=wal+mode&category=gotcha&scope=project&sort=created_at%3Adesc%2Cconfidence%3Aasc&cursor=next+page",
     );
   });
 
@@ -47,7 +53,7 @@ describe("UI knowledge query contract", () => {
     const query = { ...DEFAULT_KNOWLEDGE_QUERY, cursor: "next" };
     expect(isDefaultKnowledgeQuery(query)).toBe(false);
     expect(knowledgeQueryKey("p/1", query)).toBe(
-      "projectId=p%2F1&q=&category=&scope=&sort=updated_desc&cursor=next",
+      "projectId=p%2F1&q=&category=&scope=&sort=updated_at%3Adesc&cursor=next",
     );
   });
 });

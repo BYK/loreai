@@ -85,14 +85,14 @@ test.describe("knowledge detail provenance and history", () => {
     test("back from detail preserves the table query", async ({ page }) => {
       const { project, live } = await projectAndEntry(page);
       await page.goto(
-        `/ui/projects/${project.id}/knowledge?q=SQLite&sort=title_asc`,
+        `/ui/projects/${project.id}/knowledge?q=SQLite&sort=title:asc`,
       );
       await page.goto(
-        `/ui/projects/${project.id}/knowledge/${live.id}?q=SQLite&sort=title_asc`,
+        `/ui/projects/${project.id}/knowledge/${live.id}?q=SQLite&sort=title:asc`,
       );
       await expect(page.getByTestId("knowledge-document")).toBeVisible();
       await page.getByTestId("mobile-back").click();
-      await expect(page).toHaveURL(/\/knowledge\?q=SQLite&sort=title_asc$/);
+      await expect(page).toHaveURL(/\/knowledge\?q=SQLite&sort=title:asc$/);
     });
   });
 });

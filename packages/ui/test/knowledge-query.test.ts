@@ -5,10 +5,12 @@ import {
   DEFAULT_ALL_KNOWLEDGE_QUERY,
   allKnowledgeQueryKey,
   allKnowledgeQueryToSearch,
+  formatKnowledgeSort,
   isDefaultAllKnowledgeQuery,
   isDefaultKnowledgeQuery,
   knowledgeQueryKey,
   knowledgeQueryToSearch,
+  parseKnowledgeSort,
   parseKnowledgeQuery,
   parseAllKnowledgeQuery,
 } from "~/contracts";
@@ -31,7 +33,7 @@ describe("knowledge query URL state", () => {
       q: "sqlite",
       category: null,
       scope: "project",
-      sort: "updated_desc",
+      sort: [{ field: "updated_at", dir: "desc" }],
       cursor: "next page",
     });
   });
@@ -40,19 +42,49 @@ describe("knowledge query URL state", () => {
     expect(
       parseKnowledgeQuery({
         category: "architecture",
-        scope: "global",
-        sort: "confidence_desc",
+        scope: "shared",
+        sort: "confidence:desc,updated_at:asc",
         q: "  wal  ",
         cursor: "cursor-1",
       }),
     ).toEqual({
       q: "wal",
       category: "architecture",
-      scope: "global",
-      sort: "confidence_desc",
+      scope: "shared",
+      sort: [
+        { field: "confidence", dir: "desc" },
+        { field: "updated_at", dir: "asc" },
+      ],
       cursor: "cursor-1",
     });
+    expect(parseKnowledgeQuery({ scope: "global" }).scope).toBeNull();
     expect(parseKnowledgeQuery({})).toEqual(DEFAULT_KNOWLEDGE_QUERY);
+  });
+
+  it("strictly parses and canonically formats stacked sorts", () => {
+    const sort = [
+      { field: "updated_at", dir: "desc" },
+      { field: "confidence", dir: "asc" },
+      { field: "title", dir: "desc" },
+    ] as const;
+    expect(
+      parseKnowledgeSort("updated_at:desc,confidence:asc,title:desc"),
+    ).toEqual(sort);
+    expect(formatKnowledgeSort(sort)).toBe(
+      "updated_at:desc,confidence:asc,title:desc",
+    );
+    for (const invalid of [
+      "",
+      "updated_at",
+      "updated_at:up",
+      "updated_at:desc,updated_at:asc",
+      "updated_at:desc,created_at:desc,confidence:desc,title:asc",
+      "updated_at:desc, confidence:asc",
+      " updated_at:desc",
+      "updated_desc",
+    ]) {
+      expect(parseKnowledgeSort(invalid)).toBeNull();
+    }
   });
 
   it("serializes only non-default values", () => {
@@ -61,9 +93,9 @@ describe("knowledge query URL state", () => {
       knowledgeQueryToSearch({
         ...DEFAULT_KNOWLEDGE_QUERY,
         q: "wal mode",
-        sort: "title_asc",
+        sort: [{ field: "title", dir: "asc" }],
       }),
-    ).toBe("?q=wal+mode&sort=title_asc");
+    ).toBe("?q=wal+mode&sort=title%3Aasc");
   });
 
   it("serializes every query field in a stable order", () => {
@@ -72,11 +104,14 @@ describe("knowledge query URL state", () => {
         q: "wal mode",
         category: "gotcha",
         scope: "project",
-        sort: "created_desc",
+        sort: [
+          { field: "created_at", dir: "desc" },
+          { field: "confidence", dir: "asc" },
+        ],
         cursor: "next page",
       }),
     ).toBe(
-      "?q=wal+mode&category=gotcha&scope=project&sort=created_desc&cursor=next+page",
+      "?q=wal+mode&category=gotcha&scope=project&sort=created_at%3Adesc%2Cconfidence%3Aasc&cursor=next+page",
     );
   });
 
@@ -92,14 +127,16 @@ describe("knowledge query URL state", () => {
 
   it("includes the project in keyed loader identity", () => {
     expect(knowledgeQueryKey("p/1", DEFAULT_KNOWLEDGE_QUERY)).toBe(
-      "projectId=p%2F1&q=&category=&scope=&sort=updated_desc&cursor=",
+      "projectId=p%2F1&q=&category=&scope=&sort=updated_at%3Adesc&cursor=",
     );
     expect(
       knowledgeQueryKey("p/1", {
         ...DEFAULT_KNOWLEDGE_QUERY,
         cursor: "next",
       }),
-    ).toBe("projectId=p%2F1&q=&category=&scope=&sort=updated_desc&cursor=next");
+    ).toBe(
+      "projectId=p%2F1&q=&category=&scope=&sort=updated_at%3Adesc&cursor=next",
+    );
   });
 
   it("parses a bounded, trimmed project filter", () => {
@@ -129,11 +166,14 @@ describe("knowledge query URL state", () => {
         category: "gotcha",
         scope: "project",
         project: "p/1",
-        sort: "title_asc",
+        sort: [
+          { field: "title", dir: "asc" },
+          { field: "confidence", dir: "desc" },
+        ],
         cursor: "next page",
       }),
     ).toBe(
-      "?q=sqlite+wal&category=gotcha&scope=project&project=p%2F1&sort=title_asc&cursor=next+page",
+      "?q=sqlite+wal&category=gotcha&scope=project&project=p%2F1&sort=title%3Aasc%2Cconfidence%3Adesc&cursor=next+page",
     );
   });
 

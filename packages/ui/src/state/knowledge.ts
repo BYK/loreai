@@ -16,7 +16,6 @@ import type { CursorPage, KnowledgeQuery } from "~/contracts";
 import { mergeCursorPage, type MergedPage } from "./pages";
 import {
   allKnowledgeQueryKey,
-  isDefaultKnowledgeQuery,
   KNOWLEDGE_PAGE_SIZE,
   knowledgeQueryKey,
 } from "~/contracts";
@@ -27,10 +26,6 @@ export interface KnowledgeDeps {
   repo: Repository<KnowledgeEntry>;
   tracked: <T>(read: () => Promise<T>) => Promise<T>;
 }
-
-/** `ltm.forProject` order — cached rows must render in the server's order. */
-const LIST_ORDER = (a: KnowledgeEntry, b: KnowledgeEntry) =>
-  b.confidence - a.confidence || (b.updated_at ?? 0) - (a.updated_at ?? 0);
 
 export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
   const store = createEntityStore<KnowledgeEntry>((k) => k.id);
@@ -43,20 +38,6 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
       projectId,
       (id, signal) => tracked(() => client.listProjectKnowledge(id, signal)),
       {
-        async cached(id) {
-          const [rows, collection] = await Promise.all([
-            repo.getScope(id),
-            repo.collection(id),
-          ]);
-          if (!collection) return undefined;
-          const sorted = [...rows].sort(LIST_ORDER);
-          for (const k of sorted) store.reconcileOne(k);
-          return {
-            value: sorted,
-            // Rows lost to TTL/LRU eviction → render them, marked partial.
-            partial: rows.length !== collection.count,
-          };
-        },
         async onServer(id, values) {
           for (const k of values) store.reconcileOne(k);
           store.reconcileList(id, values, { complete: true });
@@ -115,27 +96,6 @@ export function createKnowledgeState({ client, repo, tracked }: KnowledgeDeps) {
         );
       },
       {
-        async cached() {
-          const value = keyed();
-          if (!value || !isDefaultKnowledgeQuery(value.query)) return undefined;
-          const [rows, collection] = await Promise.all([
-            repo.getScope(value.projectId),
-            repo.collection(value.projectId),
-          ]);
-          if (!collection) return undefined;
-          const items = [...rows].sort(
-            (a, b) =>
-              (b.updated_at ?? 0) - (a.updated_at ?? 0) ||
-              b.id.localeCompare(a.id),
-          );
-          return {
-            value: {
-              items: items.slice(0, KNOWLEDGE_PAGE_SIZE),
-              next_cursor: null,
-            },
-            partial: true,
-          };
-        },
         async onServer(_, value) {
           for (const item of value.items) {
             store.reconcileOne(item);

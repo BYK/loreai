@@ -154,11 +154,11 @@ describe("api client: happy path", () => {
       q: "SQLite",
       category: "gotcha",
       scope: "project",
-      sort: "title_asc",
+      sort: [{ field: "title", dir: "asc" }],
       project: "p/1",
     });
     expect(calls).toEqual([
-      "/api/v1/knowledge?cursor=next+page&limit=25&q=SQLite&category=gotcha&scope=project&sort=title_asc&project=p%2F1",
+      "/api/v1/knowledge?cursor=next+page&limit=25&q=SQLite&category=gotcha&scope=project&sort=title%3Aasc&project=p%2F1",
     ]);
     expect(page.items[0]?.project_name).toBe("lore");
     expect(page.next_cursor).toBe("next");

@@ -44,7 +44,34 @@ test.describe("cross-project knowledge", () => {
     await expect(allKnowledge).not.toHaveClass(/bg-accent-soft/);
   });
 
-  test("lists projects and Global, opens an entry, and filters category plus project", async ({
+  test("workspace links highlight Entities on list and detail, and Costs", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    const response = await page.request.get("/api/v1/entities");
+    const { entities } = (await response.json()) as {
+      entities: Array<{ id: string; canonical_name: string }>;
+    };
+    const ada = entities.find(
+      (entity) => entity.canonical_name === "Ada Lovelace",
+    );
+    if (!ada) throw new Error("missing seeded Ada Lovelace entity");
+
+    await page.goto("/ui/entities");
+    const entitiesLink = page.getByTestId("nav-entities");
+    const costsLink = page.getByTestId("nav-costs");
+    await expect(entitiesLink).toHaveClass(/bg-accent-soft/);
+    await page.goto(`/ui/entities/${ada.id}`);
+    await expect(page.getByTestId("entity-page")).toBeVisible();
+    await expect(entitiesLink).toHaveClass(/bg-accent-soft/);
+
+    await page.goto("/ui/costs");
+    await expect(page.getByTestId("costs-page")).toBeVisible();
+    await expect(costsLink).toHaveClass(/bg-accent-soft/);
+    await expect(entitiesLink).not.toHaveClass(/bg-accent-soft/);
+  });
+
+  test("lists projects and shared knowledge, opens an entry, and filters category plus project", async ({
     page,
   }) => {
     await openAllKnowledgeFromHome(page);
@@ -56,16 +83,16 @@ test.describe("cross-project knowledge", () => {
     await expect(
       table.getByText("scratch", { exact: true }).first(),
     ).toHaveText("scratch");
-    await expect(table.getByText("Global", { exact: true })).toHaveText(
-      "Global",
+    await expect(table.getByText("No project", { exact: true })).toHaveText(
+      "No project",
     );
-    const globalRow = page
+    const sharedRow = page
       .getByTestId("knowledge-row")
-      .filter({ hasText: "Global: prefer inert rendering" });
-    await globalRow.click();
+      .filter({ hasText: "Shared: prefer inert rendering" });
+    await sharedRow.click();
     await expect(page).toHaveURL(/\/ui\/knowledge\/[^/?]+$/);
     await expect(page.getByTestId("knowledge-document")).toContainText(
-      "Global: prefer inert rendering",
+      "Shared: prefer inert rendering",
     );
 
     await openAllKnowledgeFromHome(page);
@@ -89,7 +116,7 @@ test.describe("cross-project knowledge", () => {
     page,
   }) => {
     const loreId = await projectId(page, "lore");
-    const listUrl = `/ui/knowledge?project=${loreId}&category=gotcha&sort=title_asc`;
+    const listUrl = `/ui/knowledge?project=${loreId}&category=gotcha&sort=title:asc`;
     await page.goto(listUrl);
     const rows = page.getByTestId("knowledge-row");
     await expect(rows).not.toHaveCount(0);
@@ -120,6 +147,105 @@ test.describe("cross-project knowledge", () => {
         elements.map((hit) => hit.getAttribute("href")),
       ),
     ).toEqual(hrefs);
+  });
+
+  test("stacked header sorting preserves order and indicators across reload", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.goto("/ui/knowledge");
+
+    await page.getByRole("button", { name: "Sort by Confidence" }).click();
+    await expect(page).toHaveURL(
+      "/ui/knowledge?sort=confidence%3Adesc%2Cupdated_at%3Adesc",
+    );
+    await page
+      .getByRole("button", {
+        name: "Sort by Updated, level 2, descending",
+      })
+      .click();
+    const deepLink = "/ui/knowledge?sort=updated_at%3Adesc%2Cconfidence%3Adesc";
+    await expect(page).toHaveURL(deepLink);
+    const table = page.getByRole("table");
+    await expect(table).toContainText(
+      "Sorted by Updated ↓, then Confidence ↓ · page of up to 50",
+    );
+
+    await page.reload();
+    await expect(page).toHaveURL(deepLink);
+    await expect(
+      page.getByRole("button", {
+        name: "Sort by Updated, level 1, descending",
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: "Sort by Confidence, level 2, descending",
+      }),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByRole("button", {
+          name: "Sort by Updated, level 1, descending",
+        })
+        .locator("xpath=.."),
+    ).toHaveAttribute("aria-sort", "descending");
+    await expect(
+      page
+        .getByRole("button", {
+          name: "Sort by Confidence, level 2, descending",
+        })
+        .locator("xpath=.."),
+    ).toHaveAttribute("aria-sort", "none");
+  });
+
+  test("shared scope shows cross-project and projectless rows only", async ({
+    page,
+  }) => {
+    await page.goto("/ui/knowledge?scope=shared");
+    const rows = page.getByTestId("knowledge-row");
+    const crossProject = rows.filter({
+      hasText: "Shared: cross-project filter fixture",
+    });
+    const projectless = rows.filter({
+      hasText: "Shared: prefer inert rendering",
+    });
+    await expect(crossProject).toHaveCount(1);
+    await expect(projectless).toHaveCount(1);
+    await expect(crossProject.locator("td").nth(2)).toHaveText("shared");
+    await expect(crossProject.locator("td").nth(3)).toHaveText("scratch");
+    await expect(projectless.locator("td").nth(2)).toHaveText("shared");
+    await expect(projectless.locator("td").nth(3)).toHaveText("No project");
+    await expect(
+      rows.filter({ hasText: "Prefer terse commit messages" }),
+    ).toHaveCount(0);
+  });
+
+  test("knowledge filter controls share a top edge and 36px height", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop-chromium");
+    await page.goto("/ui/knowledge");
+    const controls = [
+      page.getByRole("textbox", { name: "Knowledge search" }),
+      page.getByRole("search").getByRole("button", {
+        name: "Search",
+        exact: true,
+      }),
+      page.getByRole("button", { name: "category" }),
+    ];
+    const boxes = await Promise.all(
+      controls.map((control) => control.boundingBox()),
+    );
+    expect(boxes.every((box) => box !== null)).toBe(true);
+    const [input, search, category] = boxes;
+    if (!input || !search || !category) {
+      throw new Error("knowledge filter controls must have bounding boxes");
+    }
+    expect(Math.abs(input.y - search.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(input.y - category.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(input.height - search.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(input.height - category.height)).toBeLessThanOrEqual(1);
   });
 
   test("workspace search links to ranked hits and the complete table", async ({

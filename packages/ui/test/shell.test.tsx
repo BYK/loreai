@@ -1,4 +1,4 @@
-import { MemoryRouter, createMemoryHistory } from "@solidjs/router";
+import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
 import {
   fireEvent,
   render,
@@ -17,8 +17,10 @@ import {
 } from "vitest";
 
 import { createAppRoot, routes } from "~/app";
+import { Nav } from "~/components/shell/Nav";
 import { knowledgeHref } from "~/lib/href";
 import { ApiError, type ApiClient } from "~/lib/api";
+import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import type {
   KnowledgeEntry,
   KnowledgeSearchResponse,
@@ -113,7 +115,7 @@ const ALL_ENTRIES = [
     logical_id: "k-global",
     project_id: null,
     category: "preference",
-    title: "Global setting",
+    title: "Shared setting",
     cross_project: 1,
     project_name: null,
   },
@@ -286,6 +288,30 @@ function mount(
   return { ...utils, history };
 }
 
+function mountBaseNav(path: string) {
+  const history = createMemoryHistory();
+  history.set({ value: path });
+  const utils = render(() => (
+    <MemoryRouter base="/ui" history={history}>
+      <Route
+        path="*"
+        component={() => (
+          <ConnectionContext.Provider value={createConnectionStore()}>
+            <Nav
+              projects={PROJECTS}
+              loading={false}
+              error={null}
+              activeProjectId={null}
+              totalKnowledge={4}
+            />
+          </ConnectionContext.Provider>
+        )}
+      />
+    </MemoryRouter>
+  ));
+  return { ...utils, history };
+}
+
 /** Seed a fake-indexeddb cache with the shared fixtures and hand it to mount. */
 async function seededDb(): Promise<Promise<LoreUiDb | null>> {
   const { IDBFactory } = await import("./idb-globals");
@@ -364,6 +390,35 @@ describe("shell: project navigation and real-data path", () => {
         "bg-accent-soft",
       );
     });
+  });
+
+  it("matches nav descendants under the /ui router base", async () => {
+    const { history } = mountBaseNav("/ui");
+    const navIds = [
+      "nav-entities",
+      "nav-contradictions",
+      "nav-warming",
+      "nav-costs",
+    ] as const;
+    const activeRoutes = [
+      ["/ui/entities", "nav-entities"],
+      ["/ui/entities/entity-1", "nav-entities"],
+      ["/ui/contradictions", "nav-contradictions"],
+      ["/ui/warming", "nav-warming"],
+      ["/ui/costs", "nav-costs"],
+    ] as const;
+
+    for (const [path, activeId] of activeRoutes) {
+      history.set({ value: path });
+      await waitFor(() =>
+        expect(screen.getByTestId(activeId)).toHaveClass("bg-accent-soft"),
+      );
+      for (const id of navIds) {
+        if (id !== activeId) {
+          expect(screen.getByTestId(id)).not.toHaveClass("bg-accent-soft");
+        }
+      }
+    }
   });
 
   it("loads projects into the nav and shows the welcome document", async () => {
@@ -457,7 +512,7 @@ describe("shell: project navigation and real-data path", () => {
       "WAL recovery",
     );
     expect(within(doc).getByTestId("category")).toHaveTextContent("gotcha");
-    expect(within(doc).getByText("Cross-project")).toBeInTheDocument();
+    expect(within(doc).getByText("shared")).toBeInTheDocument();
     expect(within(doc).getByText("Confidence 60%")).toBeInTheDocument();
     expect(
       within(doc).getByText("No source session recorded."),
@@ -532,7 +587,7 @@ describe("shell: project navigation and real-data path", () => {
         q: undefined,
         category: undefined,
         scope: undefined,
-        sort: "updated_desc",
+        sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
   });
@@ -583,7 +638,7 @@ describe("shell: project navigation and real-data path", () => {
         q: undefined,
         category: undefined,
         scope: undefined,
-        sort: "updated_desc",
+        sort: [{ field: "updated_at", dir: "desc" }],
       },
     });
     expect(pane("list")).toHaveTextContent("Knowledge · lore");
@@ -643,7 +698,7 @@ describe("shell: workspace knowledge and search", () => {
     const table = screen.getByRole("table");
     expect(within(table).getAllByText("Lore workspace")).toHaveLength(2);
     expect(within(table).getByText("/home/me/empty")).toBeInTheDocument();
-    expect(within(table).getByText("Global")).toBeInTheDocument();
+    expect(within(table).getByText("No project")).toBeInTheDocument();
 
     const nav = screen.getByRole("navigation", { name: "Workspace" });
     const allKnowledge = within(nav).getByTestId("nav-all-knowledge");
@@ -755,7 +810,7 @@ describe("shell: workspace knowledge and search", () => {
       "/knowledge/k-global",
     );
     expect(screen.getByTestId("search-hit")).toHaveTextContent(
-      "preference · Global",
+      "preference · No project",
     );
     expect(screen.getByTestId("search-summary")).toHaveTextContent(
       "Top 1 of 100 matches",
@@ -1313,24 +1368,20 @@ describe("shell: search entry, theme and fixture", () => {
   });
 });
 
-describe("shell: cached-first rendering (IndexedDB)", () => {
-  it("renders cached rows with 'Cached · refreshing…' while the server is silent", async () => {
+describe("shell: IndexedDB cache behavior", () => {
+  it("does not show cached knowledge rows while a project page is loading", async () => {
     const db = await seededDb();
     const client = fakeClient({
-      listProjects: () => new Promise<ProjectSummary[]>(() => {}),
       listProjectKnowledgePage: () =>
         new Promise<{ items: KnowledgeEntry[]; next_cursor: null }>(() => {}),
-      getKnowledge: () => new Promise<KnowledgeEntry>(() => {}),
     });
     mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
-    const rows = await screen.findAllByTestId("knowledge-row");
-    expect(rows[0]).toHaveTextContent("Keep SQLite");
-    const badges = await screen.findAllByTestId("stale-indicator");
-    expect(badges.map((b) => b.textContent)).toContain("Cached · refreshing…");
-    expect(screen.queryByText("Knowledge unavailable")).toBeNull();
+    await screen.findByText("Loading knowledge");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    expect(screen.queryByText("Keep SQLite")).toBeNull();
   });
 
-  it("replaces the cached value and drops the badge when the server answers", async () => {
+  it("renders the server page without consulting cached knowledge rows", async () => {
     const db = await seededDb();
     let release: (page: {
       items: KnowledgeEntry[];
@@ -1345,21 +1396,22 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
       listProjectKnowledgePage: () => server,
     });
     mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
-    await screen.findAllByTestId("stale-indicator");
+    await screen.findByText("Loading knowledge");
     release({
       items: [{ ...ENTRIES[0]!, title: "Keep SQLite (v2)" }],
       next_cursor: null,
     });
     await screen.findByText("Keep SQLite (v2)");
+    expect(screen.getAllByTestId("knowledge-row")).toHaveLength(1);
     await waitFor(() =>
       expect(screen.queryByTestId("stale-indicator")).toBeNull(),
     );
   });
 
-  it("keeps cached rows and shows 'Cached · gateway unavailable' when the server rejects", async () => {
+  it("shows the page error instead of cached knowledge rows when the server rejects", async () => {
     const db = await seededDb();
     const client = fakeClient({
-      listProjectKnowledgePage: () => {
+      listProjectKnowledgePage: async () => {
         throw new ApiError("unreachable", "/projects/p-lore/knowledge", "down");
       },
       getKnowledge: () => {
@@ -1367,17 +1419,11 @@ describe("shell: cached-first rendering (IndexedDB)", () => {
       },
     });
     mount("/projects/p-lore/knowledge", client, Promise.resolve(db));
-    // The title appears in the list row and the open document.
-    await screen.findAllByText("Keep SQLite");
-    const badges = await screen.findAllByTestId("stale-indicator");
-    expect(badges.map((b) => b.textContent)).toContain(
-      "Cached · gateway unavailable",
-    );
-    // Cached rows stay; no error card replaces them. The list's cached read
-    // settles a few tasks after the document's, so wait the transient out.
+    await screen.findByText("Gateway unreachable");
+    expect(screen.queryByTestId("knowledge-row")).toBeNull();
+    expect(screen.queryByText("Keep SQLite")).toBeNull();
     await waitFor(() => {
-      expect(screen.queryByText("Knowledge unavailable")).toBeNull();
-      expect(screen.queryByText("Knowledge entry unavailable")).toBeNull();
+      expect(screen.queryByTestId("stale-indicator")).toBeNull();
     });
   });
 

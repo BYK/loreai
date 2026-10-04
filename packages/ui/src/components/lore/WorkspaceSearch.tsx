@@ -2,6 +2,7 @@ import type { Component } from "solid-js";
 import { For, Match, Show, Switch } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 
+import { DEFAULT_KNOWLEDGE_QUERY } from "~/contracts";
 import type { AllKnowledgeQuery, KnowledgeSearchResponse } from "~/contracts";
 import { pluralize, previewOf, formatWhen } from "~/lib/format";
 import type { Loader } from "~/lib/loader";
@@ -111,7 +112,7 @@ export const WorkspaceSearch: Component<{
                     q: props.q,
                     category: null,
                     scope: null,
-                    sort: "updated_desc",
+                    sort: DEFAULT_KNOWLEDGE_QUERY.sort,
                     cursor: null,
                     project: null,
                   })}
@@ -127,7 +128,7 @@ export const WorkspaceSearch: Component<{
                           href={props.entryHref(hit.id)}
                           title={hit.title}
                           preview={previewOf(hit.content)}
-                          footLeft={`${hit.category} · ${hit.project_name ?? (hit.project_id ? "Unknown project" : "Global")}`}
+                          footLeft={`${hit.category} · ${hit.project_name ?? (hit.project_id ? "Unknown project" : "No project")}`}
                           footRight={formatWhen(
                             hit.updated_at ?? hit.created_at,
                           )}

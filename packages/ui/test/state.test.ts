@@ -218,13 +218,12 @@ describe("projects state: cached-first then server", () => {
 });
 
 describe("knowledge state", () => {
-  it("serves the list in the server's order (confidence DESC, updated_at DESC)", async () => {
+  it("does not fall back to cached rows or reorder project lists", async () => {
     const factory = new IDBFactory();
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
     const repo = createKnowledgeRepo(db);
-    // Cache rows in the opposite order to prove sorting happens.
-    await repo.putMany([ENTRIES[1]!, ENTRIES[0]!], "p1", {
+    await repo.putMany([ENTRIES[0]!, ENTRIES[1]!], "p1", {
       replaceScope: true,
     });
     await repo.setCollection("p1", {
@@ -243,11 +242,14 @@ describe("knowledge state", () => {
       const list = state.list(projectId);
       void (async () => {
         await flush();
-        expect(list.loader.data()?.map((k) => k.id)).toEqual(["k1", "k2"]);
-        expect(list.loader.stale()).toBe(true);
-        server.resolve([ENTRIES[0]!]);
+        expect(list.loader.data()).toBeUndefined();
+        expect(list.loader.loading()).toBe(true);
+        server.resolve([ENTRIES[1]!, ENTRIES[0]!]);
         await flush();
-        expect(list.loader.data()?.map((k) => k.id)).toEqual(["k1"]);
+        expect(list.loader.data()?.map((k) => k.id)).toEqual([
+          ENTRIES[1]!.id,
+          ENTRIES[0]!.id,
+        ]);
         expect(list.loader.stale()).toBe(false);
         dispose();
       })();
@@ -257,14 +259,14 @@ describe("knowledge state", () => {
     await closeLoreDb();
   });
 
-  it("preserves a global entry in the project list after loading its detail", async () => {
+  it("preserves a shared entry in the project list after loading its detail", async () => {
     const factory = new IDBFactory();
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
-    const globalEntry = { ...ENTRIES[0]!, project_id: null };
+    const sharedEntry = { ...ENTRIES[0]!, project_id: null };
     const client = {
-      listProjectKnowledge: () => Promise.resolve([globalEntry, ENTRIES[1]!]),
-      getKnowledge: () => Promise.resolve(globalEntry),
+      listProjectKnowledge: () => Promise.resolve([sharedEntry, ENTRIES[1]!]),
+      getKnowledge: () => Promise.resolve(sharedEntry),
     } as unknown as ApiClient;
     const state = createRoot(() =>
       createKnowledgeState({
@@ -279,9 +281,9 @@ describe("knowledge state", () => {
     expect(list.loader.data()).toHaveLength(2);
     expect(list.status().partial).toBe(false);
 
-    const detail = state.entry(() => globalEntry.id);
+    const detail = state.entry(() => sharedEntry.id);
     await flush();
-    expect(detail.loader.data()).toEqual(globalEntry);
+    expect(detail.loader.data()).toEqual(sharedEntry);
     // The detail write-through must not move the row out of the list scope.
     const repo = createKnowledgeRepo(db);
     expect(await repo.getScope("p1")).toHaveLength(2);
@@ -337,8 +339,10 @@ describe("knowledge state", () => {
 
     const list = createRoot(() => state.list(() => "p1"));
     await flush();
-    expect(list.loader.data()).toEqual([]);
-    expect(list.status().partial).toBe(true);
+    expect(list.loader.data()).toBeUndefined();
+    expect(list.status().source).toBeNull();
+    expect(list.status().error).toHaveProperty("message", "offline");
+    expect(list.status().partial).toBe(false);
     await closeLoreDb();
   });
 
@@ -430,7 +434,7 @@ describe("knowledge state", () => {
       q: "",
       category: null,
       scope: null,
-      sort: "updated_desc",
+      sort: [{ field: "updated_at", dir: "desc" }],
       cursor: null,
       project: null,
     };
@@ -468,7 +472,7 @@ describe("knowledge state: partial collections", () => {
     );
   }
 
-  it("marks cached rows partial when cap eviction dropped rows", async () => {
+  it("does not fall back to a cached list after cap eviction", async () => {
     const factory = new IDBFactory();
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
@@ -492,18 +496,20 @@ describe("knowledge state: partial collections", () => {
     );
     const list = state.list(() => "p1");
     await flush();
-    expect(list.loader.data()!.length).toBe(2);
-    expect(list.status().stale).toBe(true);
-    expect(list.status().partial).toBe(true);
+    expect(list.loader.data()).toBeUndefined();
+    expect(list.status().source).toBeNull();
+    expect(list.status().stale).toBe(false);
+    expect(list.status().partial).toBe(false);
 
     server.resolve([...ENTRIES, ENTRY3]);
     await flush();
+    expect(list.loader.data()).toEqual([...ENTRIES, ENTRY3]);
     expect(list.status().partial).toBe(false);
     expect(list.status().stale).toBe(false);
     await closeLoreDb();
   });
 
-  it("marks scope A partial when scope B's writes evicted its rows", async () => {
+  it("does not fall back to a scope evicted by other writes", async () => {
     const factory = new IDBFactory();
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
@@ -537,12 +543,14 @@ describe("knowledge state: partial collections", () => {
     );
     const list = state.list(() => "a");
     await flush();
-    expect(list.loader.data()!.length).toBeLessThan(2);
-    expect(list.status().partial).toBe(true);
+    expect(list.loader.data()).toBeUndefined();
+    expect(list.status().source).toBeNull();
+    expect(list.status().stale).toBe(false);
+    expect(list.status().partial).toBe(false);
     await closeLoreDb();
   });
 
-  it("marks a cached list partial when a row aged out", async () => {
+  it("does not fall back to a cached list with aged rows", async () => {
     const factory = new IDBFactory();
     await closeLoreDb();
     const db = (await openLoreDb({ factory }))!;
@@ -572,9 +580,10 @@ describe("knowledge state: partial collections", () => {
     );
     const list = state.list(() => "p1");
     await flush();
-    expect(list.loader.data()!.length).toBe(1);
-    expect(list.status().stale).toBe(true);
-    expect(list.status().partial).toBe(true);
+    expect(list.loader.data()).toBeUndefined();
+    expect(list.status().source).toBeNull();
+    expect(list.status().stale).toBe(false);
+    expect(list.status().partial).toBe(false);
     await closeLoreDb();
   });
 });
@@ -968,7 +977,7 @@ describe("paged sessions and recall state", () => {
         q: "SQLite",
         category: null,
         scope: null,
-        sort: "updated_desc",
+        sort: [{ field: "updated_at", dir: "desc" }],
         cursor: null,
       },
     }));
@@ -1103,10 +1112,11 @@ describe("app state: cache reset", () => {
     expect(await createKnowledgeRepo(reopened).getScope("p1")).toEqual(ENTRIES);
 
     online = false;
-    const cached = state.knowledge.list(() => "p1");
+    const unavailable = state.knowledge.list(() => "p1");
     await flush();
-    expect(cached.loader.data()).toEqual(ENTRIES);
-    expect(cached.status().source).toBe("cache");
+    expect(unavailable.loader.data()).toBeUndefined();
+    expect(unavailable.status().source).toBeNull();
+    expect(unavailable.status().error).toBeInstanceOf(Error);
     await closeLoreDb();
   });
 });

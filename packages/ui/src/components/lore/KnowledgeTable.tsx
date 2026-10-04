@@ -8,7 +8,12 @@ import {
   tableFeatures,
 } from "@tanstack/solid-table";
 
-import type { KnowledgeEntry, KnowledgeQuery } from "~/contracts";
+import type {
+  KnowledgeEntry,
+  KnowledgeQuery,
+  KnowledgeSortField,
+  KnowledgeSortKey,
+} from "~/contracts";
 import {
   DEFAULT_KNOWLEDGE_QUERY,
   KNOWLEDGE_CATEGORIES,
@@ -37,11 +42,20 @@ type KnowledgeTableRow = KnowledgeEntry & {
 export const prevCursorOf = new Map<string, string | null>();
 const features = tableFeatures({});
 const helper = createColumnHelper<typeof features, KnowledgeTableRow>();
-const SORT_LABELS: Record<KnowledgeQuery["sort"], string> = {
-  updated_desc: "Updated",
-  created_desc: "Created",
-  confidence_desc: "Confidence",
-  title_asc: "Title A–Z",
+const SORT_LABELS: Record<KnowledgeSortField, string> = {
+  updated_at: "Updated",
+  created_at: "Created",
+  confidence: "Confidence",
+  title: "Title",
+};
+const DEFAULT_SORT_DIRECTION: Record<
+  KnowledgeSortField,
+  KnowledgeSortKey["dir"]
+> = {
+  updated_at: "desc",
+  created_at: "desc",
+  confidence: "desc",
+  title: "asc",
 };
 
 export type KnowledgeTableRoutes<Q extends KnowledgeQuery> = {
@@ -130,20 +144,64 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
     },
     getRowId: (row) => row.id,
   });
-  const sortOf = (id: string): KnowledgeQuery["sort"] =>
+  const sortFieldOf = (id: string): KnowledgeSortField | null =>
     id === "title"
-      ? "title_asc"
+      ? "title"
       : id === "confidence"
-        ? "confidence_desc"
+        ? "confidence"
         : id === "updated"
-          ? "updated_desc"
-          : props.query.sort;
-  const ariaSort = (id: string) =>
-    props.query.sort === sortOf(id)
-      ? id === "title"
-        ? "ascending"
-        : "descending"
-      : "none";
+          ? "updated_at"
+          : null;
+  const sortPosition = (field: KnowledgeSortField) =>
+    props.query.sort.findIndex((key) => key.field === field);
+  const ariaSort = (id: string) => {
+    const field = sortFieldOf(id);
+    const primary = props.query.sort[0];
+    if (!field || primary?.field !== field) return "none";
+    return primary.dir === "asc" ? "ascending" : "descending";
+  };
+  const sortButtonLabel = (id: string) => {
+    const field = sortFieldOf(id);
+    if (!field) return "";
+    const position = sortPosition(field);
+    if (position < 0) return `Sort by ${SORT_LABELS[field]}`;
+    const key = props.query.sort[position]!;
+    return `Sort by ${SORT_LABELS[field]}, level ${position + 1}, ${
+      key.dir === "asc" ? "ascending" : "descending"
+    }`;
+  };
+  const sortIndicator = (field: KnowledgeSortField) => {
+    const position = sortPosition(field);
+    if (position < 0) return null;
+    const key = props.query.sort[position]!;
+    return (
+      <span class="ml-1 text-muted" aria-hidden="true">
+        {props.query.sort.length > 1 ? `${position + 1} ` : ""}
+        {key.dir === "asc" ? "↑" : "↓"}
+      </span>
+    );
+  };
+  const sortCaption = () =>
+    props.query.sort
+      .map(
+        (key) => `${SORT_LABELS[key.field]} ${key.dir === "asc" ? "↑" : "↓"}`,
+      )
+      .join(", then ");
+  const clickSort = (field: KnowledgeSortField) => {
+    const [primary, ...remaining] = props.query.sort;
+    const next: KnowledgeSortKey[] =
+      primary?.field === field
+        ? [{ field, dir: primary.dir === "asc" ? "desc" : "asc" }, ...remaining]
+        : [
+            { field, dir: DEFAULT_SORT_DIRECTION[field] },
+            ...props.query.sort.filter((key) => key.field !== field),
+          ];
+    go({
+      ...props.query,
+      sort: next.slice(0, 3),
+      cursor: null,
+    });
+  };
   const filter = (
     name: "category" | "scope",
     options: readonly string[],
@@ -186,6 +244,7 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
               value={props.query.q}
               aria-label="Knowledge search"
               placeholder="Filter knowledge"
+              class="h-9 text-xs"
             />
           </TextField>
           <Button type="submit" size="sm">
@@ -195,36 +254,6 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
         {filter("category", KNOWLEDGE_CATEGORIES, "All categories")}
         {filter("scope", KNOWLEDGE_SCOPES, "Any scope")}
         {props.extraFilters}
-        <Select
-          value={props.query.sort}
-          onChange={(value) =>
-            go({
-              ...props.query,
-              sort: value as KnowledgeQuery["sort"],
-              cursor: null,
-            })
-          }
-          options={[
-            "updated_desc",
-            "created_desc",
-            "confidence_desc",
-            "title_asc",
-          ]}
-          itemComponent={(item) => (
-            <SelectItem item={item.item}>
-              {SORT_LABELS[item.item.rawValue]}
-            </SelectItem>
-          )}
-        >
-          <SelectTrigger aria-label="Sort" class="h-9 min-w-32 text-xs">
-            <SelectValue<string>>
-              {(state) =>
-                SORT_LABELS[state.selectedOption() as KnowledgeQuery["sort"]]
-              }
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent />
-        </Select>
       </div>
       <Show when={props.page.loader.stale()}>
         <StaleBadge
@@ -275,7 +304,7 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
             class="w-full table-fixed text-left text-xs"
           >
             <caption class="mb-2 text-left text-[11px] text-muted">
-              Sorted on the server · page of up to 50
+              Sorted by {sortCaption()} · page of up to 50
             </caption>
             <thead>
               <For each={table.getHeaderGroups()}>
@@ -304,18 +333,19 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                             {sortable ? (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  go({
-                                    ...props.query,
-                                    sort: sortOf(id),
-                                    cursor: null,
-                                  })
-                                }
+                                aria-label={sortButtonLabel(id)}
+                                onClick={() => {
+                                  const field = sortFieldOf(id);
+                                  if (field) clickSort(field);
+                                }}
                               >
                                 {flexRender(
                                   header.column.columnDef.header,
                                   header.getContext(),
                                 )}
+                                <Show when={sortFieldOf(id)}>
+                                  {(field) => sortIndicator(field())}
+                                </Show>
                               </button>
                             ) : (
                               flexRender(
@@ -383,16 +413,19 @@ export function KnowledgeTable<Q extends KnowledgeQuery>(
                           ) : cell.column.id === "category" ? (
                             <Badge>{row.original.category}</Badge>
                           ) : cell.column.id === "scope" ? (
-                            row.original.cross_project ? (
-                              "global"
+                            row.original.project_id == null ||
+                            row.original.cross_project === true ||
+                            row.original.cross_project === 1 ? (
+                              "shared"
                             ) : (
                               "project"
                             )
                           ) : cell.column.id === "project" ? (
-                            (row.original.project_name ??
-                            (row.original.project_id
-                              ? "Unknown project"
-                              : "Global"))
+                            row.original.project_id == null ? (
+                              "No project"
+                            ) : (
+                              (row.original.project_name ?? "Unknown project")
+                            )
                           ) : cell.column.id === "confidence" ? (
                             <>
                               {formatConfidence(row.original.confidence)}{" "}

@@ -5,6 +5,7 @@ import { nonNegInt } from "./primitives";
 import { knowledgeEntry } from "./knowledge";
 import {
   DEFAULT_KNOWLEDGE_QUERY,
+  formatKnowledgeSort,
   isDefaultKnowledgeQuery,
   parseKnowledgeQuery,
   type KnowledgeQuery,
@@ -55,7 +56,8 @@ export function allKnowledgeQueryToSearch(query: AllKnowledgeQuery): string {
   if (query.category) params.set("category", query.category);
   if (query.scope) params.set("scope", query.scope);
   if (query.project) params.set("project", query.project);
-  if (query.sort !== "updated_desc") params.set("sort", query.sort);
+  const sort = formatKnowledgeSort(query.sort);
+  if (sort !== "updated_at:desc") params.set("sort", sort);
   if (query.cursor) params.set("cursor", query.cursor);
   const encoded = params.toString();
   return encoded ? `?${encoded}` : "";
@@ -71,7 +73,7 @@ export function allKnowledgeQueryKey(query: AllKnowledgeQuery): string {
     q: query.q,
     category: query.category ?? "",
     scope: query.scope ?? "",
-    sort: query.sort,
+    sort: formatKnowledgeSort(query.sort),
     cursor: query.cursor ?? "",
   }).toString()}`;
 }

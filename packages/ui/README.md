@@ -31,6 +31,13 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
 | `/ui/_compat` | **Dev/test only** — #1796 compatibility smoke page |
 
+The knowledge list and workspace search accept `scope=project`, `scope=shared`,
+or `scope=all`; omitting `scope` shows all knowledge. `shared` includes entries
+without a project and entries shared across projects. Knowledge list routes
+also accept `sort=field:direction` terms for `updated_at`, `created_at`,
+`confidence`, and `title`, joined with commas for a stacked sort of up to three
+distinct fields (for example, `sort=updated_at:desc,confidence:desc`). The
+default `updated_at:desc` sort is omitted from the URL.
 
 Dev/test-only routes are mounted when `import.meta.env.DEV` is set (Vite dev
 server, Vitest); production builds drop them and their chunks from the route
@@ -47,7 +54,7 @@ losing knowledge entry. Keeping both preserves both entries and marks the pair
 dismissed so the detector does not reopen it. The route stays behind the
 management boundary and writes are refused in hosted mode. Pairs are grouped
 by project (#1919) — each project's pairs render under a collapsible header
-with a count, and pairs spanning two projects (or involving a global entry)
+with a count, and pairs spanning two projects (or involving a shared entry)
 fall into a trailing "Cross-project" group labelled with both sides' project
 names.
 
