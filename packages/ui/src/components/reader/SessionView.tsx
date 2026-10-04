@@ -723,14 +723,23 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     }
     prependLanded = false;
     setOlderInFlight(true);
-    try {
-      await props.onLoadOlder();
-    } catch {
-      // the owner reports the failure through `olderError` — drop the
-      // request state now so the pin loop stops next frame instead of
-      // polling a page that will never land.
+    // Dropping the request state bumps the generation so the pin loop
+    // stops next frame instead of polling a page that will never land.
+    const dropRequest = () => {
       loadGen += 1;
       prepend = null;
+    };
+    try {
+      await props.onLoadOlder();
+      // Owners that report a failure through `olderError` and resolve
+      // (sessions.ts does) land here — with no prepend landed, the pin
+      // loop is still polling, so drop the request just like a rejection.
+      if (props.olderError && rows()[0]?.key === firstKeyAtCall) {
+        dropRequest();
+      }
+    } catch {
+      // the owner reports the failure through `olderError`
+      dropRequest();
     } finally {
       // `prepend` is cleared by the rows effect once it has consumed it —
       // clearing it here would race a rows update that lands after this

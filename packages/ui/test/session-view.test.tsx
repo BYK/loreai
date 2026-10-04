@@ -2368,4 +2368,55 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     scroll.querySelector = origQuery;
     expect(Math.max(...counts)).toBe(0);
   });
+
+  it("stops the pin-capture loop when the owner reports the error and resolves", async () => {
+    const [err, setErr] = createSignal<unknown>(null);
+    // The real owner (sessions.ts) never rejects: it sets olderError and
+    // resolves, so the catch branch alone cannot stop the loop.
+    const onLoadOlder = vi.fn(() => {
+      setErr(new Error("page failed"));
+      return Promise.resolve();
+    });
+    mount({
+      messages: older(40),
+      distillations: [],
+      get hasOlder() {
+        return true;
+      },
+      get olderError() {
+        return err();
+      },
+      messageCount: 60,
+      onLoadOlder,
+    });
+    await tick();
+    if (typeof requestAnimationFrame === "function") {
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    await tick();
+    const scroll = scrollEl();
+    fireScroll(scroll, 3_000);
+    fireScroll(scroll, 0);
+    await tick();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 2; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    const counts: number[] = [];
+    let current = 0;
+    const origQuery = scroll.querySelector.bind(scroll);
+    scroll.querySelector = (sel: string) => {
+      current += 1;
+      return origQuery(sel);
+    };
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      counts.push(current);
+      current = 0;
+    }
+    scroll.querySelector = origQuery;
+    expect(Math.max(...counts)).toBe(0);
+  });
 });
