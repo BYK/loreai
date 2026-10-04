@@ -2238,7 +2238,10 @@ describe("SessionView: newest-first landing and lazy older history", () => {
     // before the cap check so the new row still gets its landing.
     const scroll = scrollEl();
     if (typeof requestAnimationFrame === "function") {
-      for (let i = 0; i < 24; i++) {
+      // One frame shy of the cap: mount+tick can already have consumed a
+      // frame of the loop's budget, so waiting the full 24 lets the loop
+      // finish first and the retarget path is never exercised.
+      for (let i = 0; i < 23; i++) {
         await new Promise((r) => requestAnimationFrame(r));
       }
     }
