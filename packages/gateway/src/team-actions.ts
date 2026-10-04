@@ -264,6 +264,13 @@ async function changeMemberRole(
       "You cannot change your own team role.",
     );
   }
+  if (access.role !== "admin") {
+    return errorResponse(
+      403,
+      "not_admin",
+      "Only team admins can change or remove members.",
+    );
+  }
   try {
     const target = (await teamMembers(access.client, scopeId)).find(
       (member) => member.userId === userId,
@@ -313,6 +320,13 @@ async function removeMember(
       409,
       "self_action_unsupported",
       "You cannot remove yourself from a team.",
+    );
+  }
+  if (access.role !== "admin") {
+    return errorResponse(
+      403,
+      "not_admin",
+      "Only team admins can change or remove members.",
     );
   }
   try {

@@ -270,8 +270,7 @@ describe("Folk Lore status routes", () => {
     test("anonymous → empty array even when mirrors have rows", async () => {
       mirrorTeam();
       const body = await (await get(server, "/api/v1/teams")).json();
-      expect(body.teams).toEqual([]);
-      expect(body.hosted).toBe(false);
+      expect(body).toEqual({ hosted: false, teams: [] });
     });
 
     test("signed in → the current user's team memberships from the local mirror", async () => {
@@ -300,10 +299,10 @@ describe("Folk Lore status routes", () => {
         .run("10000000-0000-4000-8000-000000000003", USER);
       signIn();
       const body = await (await get(server, "/api/v1/teams")).json();
-      expect(body.teams).toEqual([
-        { id: TEAM, name: "Acme", role: "admin", member_count: 2 },
-      ]);
-      expect(body.hosted).toBe(false);
+      expect(body).toEqual({
+        hosted: false,
+        teams: [{ id: TEAM, name: "Acme", role: "admin", member_count: 2 }],
+      });
     });
 
     test("expired session still lists memberships (they are local knowledge)", async () => {
@@ -317,8 +316,7 @@ describe("Folk Lore status routes", () => {
       mirrorTeam();
       signIn();
       const body = await (await get(hosted, "/api/v1/teams")).json();
-      expect(body.teams).toEqual([]);
-      expect(body.hosted).toBe(true);
+      expect(body).toEqual({ hosted: true, teams: [] });
     });
   });
 
