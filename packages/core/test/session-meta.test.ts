@@ -307,13 +307,13 @@ describe("listSessionsPage search (q)", () => {
         (s) => s.session_id,
       ),
     ).toEqual(["sess-abd", "sess-abc"]);
-    // `%` and `_` in q are literal, not wildcards.
-    expect(
-      listSessionsPage(project, { limit: 50, q: "sess-ab%" }).items,
-    ).toHaveLength(0);
-    expect(
-      listSessionsPage(project, { limit: 50, q: "sess_ab" }).items,
-    ).toHaveLength(0);
+    // `%` and `_` in q are literal, not wildcards: the exact leg returns
+    // nothing. The fuzzy tail (#1948) may still rescue the near-identical
+    // session ids — but only as flagged approximate hits, never exact.
+    for (const q of ["sess-ab%", "sess_ab"]) {
+      const items = listSessionsPage(project, { limit: 50, q }).items;
+      expect(items.every((s) => s.match === "fuzzy")).toBe(true);
+    }
   });
 
   test("no match → empty items and null next; paging with after works", () => {
