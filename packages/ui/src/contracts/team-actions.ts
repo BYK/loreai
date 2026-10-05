@@ -60,6 +60,7 @@ export const teamRemovalReceipt = type({
   new_epoch: "number.integer >= 1",
   rewrapped: "number.integer >= 0",
   skipped_count: "number.integer >= 0",
+  unlinked_projects: "number.integer >= 0",
 });
 
 export type TeamRemovalReceipt = typeof teamRemovalReceipt.infer;

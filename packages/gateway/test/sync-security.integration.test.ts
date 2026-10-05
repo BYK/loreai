@@ -2293,7 +2293,7 @@ describe.skipIf(gate())(
     const CLIENT_RPCS = [
       "create_team",
       "add_scope_member",
-      "remove_scope_member",
+      "remove_scope_member_rotating",
       "set_scope_role",
       "rotate_scope_key",
     ];
@@ -2355,6 +2355,13 @@ describe.skipIf(gate())(
           `${fn}: authenticated must EXECUTE`,
         ).toBe(true);
       }
+    });
+
+    it("the legacy remove_scope_member RPC is no longer executable", async () => {
+      const grantees = await execGrantees("remove_scope_member");
+      expect(grantees.has("PUBLIC")).toBe(false);
+      expect(grantees.has("anon")).toBe(false);
+      expect(grantees.has("authenticated")).toBe(false);
     });
 
     it("trigger/internal functions are executable only by postgres/service_role", async () => {

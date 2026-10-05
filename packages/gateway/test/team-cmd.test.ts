@@ -267,6 +267,7 @@ describe("remove", () => {
       newEpoch: 3,
       rewrapped: 2,
       skipped: [],
+      unlinkedProjects: 0,
     });
     await run("remove", "s", "u");
     expect(logs.join("\n")).toMatch(
@@ -280,12 +281,44 @@ describe("remove", () => {
       newEpoch: 1,
       rewrapped: 1,
       skipped: ["x", "y"],
+      unlinkedProjects: 0,
     });
     await run("remove", "s", "u");
     expect(logs.join("\n")).toMatch(
       /Warning: 2 member\(s\) had no published key/,
     );
     expect(logs.join("\n")).toContain("x, y");
+  });
+});
+
+describe("leave", () => {
+  it("requires a team reference", async () => {
+    await run("leave");
+    expect(errs.join("\n")).toMatch(/Usage: lore team/);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("removes the caller from a team resolved by name and reports unlinked projects", async () => {
+    vi.mocked(getCurrentUser).mockResolvedValue({
+      user_id: "self-user",
+    } as never);
+    vi.mocked(team.listTeams).mockResolvedValue([
+      { scopeId: "scope-1", name: "Acme", role: "admin" },
+    ]);
+    vi.mocked(team.removeTeamMember).mockResolvedValue({
+      newEpoch: 4,
+      rewrapped: 2,
+      skipped: [],
+      unlinkedProjects: 3,
+    });
+    await run("leave", "acme");
+    expect(vi.mocked(team.removeTeamMember)).toHaveBeenCalledWith(
+      FAKE_CLIENT,
+      "scope-1",
+      "self-user",
+    );
+    expect(logs.join("\n")).toContain('Left team "Acme"');
+    expect(logs.join("\n")).toContain("Unlinked 3 local project(s).");
   });
 });
 

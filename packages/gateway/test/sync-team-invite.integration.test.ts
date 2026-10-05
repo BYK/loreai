@@ -410,7 +410,7 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
 
   it("revokes the scope's outstanding invite tokens on member removal (F-2, #1345)", async () => {
     // A removed member (or anyone holding a live/leaked token) must not be able to re-join via a
-    // still-valid invite. remove_scope_member now wipes ALL of the scope's pending_invites.
+    // still-valid invite. Atomic member removal wipes ALL of the scope's pending_invites.
     const scope = await freshAdminTeam("Revoke-On-Remove");
     await addTeamMember(clientFor(admin), scope, invitee, "editor");
     // An admin mints an outstanding invite (for some future member) that is still live.
@@ -424,10 +424,15 @@ describe.skipIf(SKIP)("lore team — direct email invite (E-5-c)", () => {
         .then((r) => r.rows[0].n),
     ).toBe(1);
     // Admin removes the member → the removal revokes ALL of the scope's outstanding tokens.
-    const { error: rmErr } = await clientFor(admin).rpc("remove_scope_member", {
-      p_scope: scope,
-      p_user: invitee,
-    });
+    const { error: rmErr } = await clientFor(admin).rpc(
+      "remove_scope_member_rotating",
+      {
+        p_scope: scope,
+        p_user: invitee,
+        p_expected_epoch: 0,
+        p_wraps: [],
+      },
+    );
     expect(rmErr).toBeNull();
     expect(
       await h.client

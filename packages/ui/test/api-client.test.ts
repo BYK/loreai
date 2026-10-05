@@ -912,6 +912,7 @@ describe("FOLK-03 API client", () => {
         new_epoch: 2,
         rewrapped: 3,
         skipped_count: 1,
+        unlinked_projects: 0,
       },
       {
         linked: true,
