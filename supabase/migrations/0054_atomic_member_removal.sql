@@ -176,3 +176,5 @@ revoke all on function public.remove_scope_member_rotating(uuid, uuid, integer, 
   from public, anon, authenticated;
 grant execute on function public.remove_scope_member_rotating(uuid, uuid, integer, jsonb)
   to authenticated;
+revoke all on function public.rotate_scope_key(uuid)
+  from public, anon, authenticated;
