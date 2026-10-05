@@ -192,19 +192,22 @@ function mountEditor(
     "currentHistory" in options ? options.currentHistory : history(),
     options.onReload,
   );
+  const [currentEntry, setCurrentEntry] = createSignal(
+    options.currentEntry ?? entry(),
+  );
   const view = render(() => (
     <WorkspaceProvider
       client={options.client ?? makeClient()}
       db={options.db ?? Promise.resolve(null)}
     >
       <KnowledgeEditor
-        entry={options.currentEntry ?? entry()}
+        entry={currentEntry()}
         versions={versions.loader}
         reloadEntry={options.onReload ?? vi.fn()}
       />
     </WorkspaceProvider>
   ));
-  return { ...view, versions };
+  return { ...view, versions, setEntry: setCurrentEntry };
 }
 
 afterEach(async () => {
@@ -269,10 +272,14 @@ describe("KnowledgeEditor", () => {
     });
     await waitFor(async () =>
       expect(await drafts.get("knowledge/knowledge-1")).toMatchObject({
-        body: { title: "Debounced replacement", confidence: 0.82 },
+        body: { title: "Debounced replacement" },
+        confidenceEdited: false,
         baseRevision: 1,
       }),
     );
+    expect(
+      (await drafts.get("knowledge/knowledge-1"))?.body,
+    ).not.toHaveProperty("confidence");
   });
 
   it("does not treat an empty confidence field as zero or save it", async () => {
@@ -291,6 +298,174 @@ describe("KnowledgeEditor", () => {
     expect(editKnowledge).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Confidence must be a number from 0 to 1.",
+    );
+  });
+
+  it("sends exactly the changed fields for a title-only edit", async () => {
+    const edit = vi.fn(async () =>
+      editResult(2, entry({ title: "Title-only edit" }), ["title"]),
+    );
+    mountEditor({ client: makeClient({ editKnowledge: edit }) });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Title-only edit" },
+    });
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    await waitFor(() =>
+      expect(edit).toHaveBeenCalledWith("knowledge-1", {
+        expected_revision: 1,
+        title: "Title-only edit",
+      }),
+    );
+    expect(edit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send stale confidence after the current entry changes", async () => {
+    const edit = vi.fn(async () =>
+      editResult(2, entry({ confidence: 0.91, content: "Edited content" }), [
+        "content",
+      ]),
+    );
+    const mounted = mountEditor({
+      client: makeClient({ editKnowledge: edit }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    mounted.setEntry(entry({ confidence: 0.91 }));
+    fireEvent.input(screen.getByLabelText("Content"), {
+      target: { value: "Edited content" },
+    });
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    await waitFor(() =>
+      expect(edit).toHaveBeenCalledWith("knowledge-1", {
+        expected_revision: 1,
+        content: "Edited content",
+      }),
+    );
+  });
+
+  it("does not send stale confidence from an older local draft", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("fake IndexedDB did not open");
+    await createDraftsStore(db).put({
+      key: "knowledge/knowledge-1",
+      kind: "knowledge",
+      target: "knowledge-1",
+      body: {
+        title: "Draft title",
+        content: "Current content",
+        category: "decision",
+        confidence: 0.82,
+        scope: "project",
+      },
+      baseRevision: 1,
+      updatedAt: Date.now(),
+    });
+    const edit = vi.fn(async () =>
+      editResult(2, entry({ title: "Draft title", confidence: 0.91 }), [
+        "title",
+      ]),
+    );
+    mountEditor({
+      client: makeClient({ editKnowledge: edit }),
+      currentEntry: entry({ confidence: 0.91 }),
+      db: Promise.resolve(db),
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Resume draft" }),
+    );
+    expect(screen.getByLabelText(/^Confidence/)).toHaveValue(0.91);
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    await waitFor(() =>
+      expect(edit).toHaveBeenCalledWith("knowledge-1", {
+        expected_revision: 1,
+        title: "Draft title",
+      }),
+    );
+  });
+
+  it("preserves an explicitly edited confidence in a local draft", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("fake IndexedDB did not open");
+    await createDraftsStore(db).put({
+      key: "knowledge/knowledge-1",
+      kind: "knowledge",
+      target: "knowledge-1",
+      body: {
+        title: "Current title",
+        content: "Current content",
+        category: "decision",
+        confidence: 0.7,
+        scope: "project",
+      },
+      confidenceEdited: true,
+      baseRevision: 1,
+      updatedAt: Date.now(),
+    });
+    const edit = vi.fn(async () =>
+      editResult(2, entry({ confidence: 0.7 }), ["confidence"]),
+    );
+    mountEditor({
+      client: makeClient({ editKnowledge: edit }),
+      currentEntry: entry({ confidence: 0.91 }),
+      db: Promise.resolve(db),
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Resume draft" }),
+    );
+    expect(screen.getByLabelText(/^Confidence/)).toHaveValue(0.7);
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    await waitFor(() =>
+      expect(edit).toHaveBeenCalledWith("knowledge-1", {
+        expected_revision: 1,
+        confidence: 0.7,
+      }),
+    );
+  });
+
+  it("does not send an unchanged draft and removes it from local storage", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("fake IndexedDB did not open");
+    const drafts = createDraftsStore(db);
+    await drafts.put({
+      key: "knowledge/knowledge-1",
+      kind: "knowledge",
+      target: "knowledge-1",
+      body: {
+        title: "Current title",
+        content: "Current content",
+        category: "decision",
+        confidence: 0.82,
+        scope: "project",
+      },
+      baseRevision: 1,
+      updatedAt: Date.now(),
+    });
+    const edit = vi.fn();
+    mountEditor({
+      client: makeClient({ editKnowledge: edit }),
+      db: Promise.resolve(db),
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Resume draft" }),
+    );
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    const notice = await screen.findByTestId("knowledge-save-success");
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveTextContent("No changes to save.");
+    expect(edit).not.toHaveBeenCalled();
+    expect(screen.getByTestId("knowledge-editor")).toBeInTheDocument();
+    await waitFor(async () =>
+      expect(await drafts.get("knowledge/knowledge-1")).toBeUndefined(),
     );
   });
 
@@ -597,6 +772,9 @@ describe("KnowledgeEditor", () => {
     });
     mountEditor({ client: titleConflict });
     fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Conflicting title" },
+    });
     fireEvent.submit(screen.getByTestId("knowledge-editor"));
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
@@ -618,6 +796,9 @@ describe("KnowledgeEditor", () => {
     });
     mountEditor({ client: hosted });
     fireEvent.click(await screen.findByRole("button", { name: /^Edit$/ }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Hosted edit" },
+    });
     fireEvent.submit(screen.getByTestId("knowledge-editor"));
     await waitFor(() =>
       expect(screen.getByText("Editing unavailable")).toBeVisible(),

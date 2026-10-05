@@ -63,6 +63,8 @@ function isStoredDraft(value: unknown, key: string): value is LocalDraft {
     (body.scope === undefined ||
       body.scope === "project" ||
       body.scope === "shared") &&
+    (draft.confidenceEdited === undefined ||
+      typeof draft.confidenceEdited === "boolean") &&
     (draft.baseRevision === undefined ||
       (Number.isSafeInteger(draft.baseRevision) && draft.baseRevision > 0))
   );
@@ -106,6 +108,7 @@ export const KnowledgeEditor: Component<{
   const [category, setCategory] =
     createSignal<(typeof CATEGORIES)[number]>("decision");
   const [confidenceText, setConfidenceText] = createSignal("0.8");
+  const [confidenceEdited, setConfidenceEdited] = createSignal(false);
   const confidence = () => {
     const raw = confidenceText().trim();
     if (!raw) return undefined;
@@ -163,6 +166,11 @@ export const KnowledgeEditor: Component<{
     })();
   });
 
+  createEffect(() => {
+    if (editing() && !confidenceEdited())
+      setConfidenceText(String(props.entry.confidence));
+  });
+
   const makeDraft = (): LocalDraft => ({
     key: draftKey(),
     kind: "knowledge",
@@ -171,9 +179,12 @@ export const KnowledgeEditor: Component<{
       title: title(),
       content: content(),
       category: category(),
-      ...(confidence() === undefined ? {} : { confidence: confidence() }),
+      ...(confidenceEdited() && confidence() !== undefined
+        ? { confidence: confidence() }
+        : {}),
       scope: scope(),
     },
+    confidenceEdited: confidenceEdited(),
     baseRevision: baseRevision(),
     updatedAt: Date.now(),
   });
@@ -208,6 +219,7 @@ export const KnowledgeEditor: Component<{
         : "decision",
     );
     setConfidenceText(String(props.entry.confidence));
+    setConfidenceEdited(false);
     setScope(entryScope(props.entry));
     setBaseRevision(revision());
     setDirty(false);
@@ -230,7 +242,15 @@ export const KnowledgeEditor: Component<{
         ? (draft.body.category as (typeof CATEGORIES)[number])
         : "decision",
     );
-    setConfidenceText(String(draft.body.confidence ?? props.entry.confidence));
+    const draftConfidenceEdited = draft.confidenceEdited === true;
+    setConfidenceText(
+      String(
+        draftConfidenceEdited
+          ? (draft.body.confidence ?? props.entry.confidence)
+          : props.entry.confidence,
+      ),
+    );
+    setConfidenceEdited(draftConfidenceEdited);
     setScope(
       projectless() ? "shared" : (draft.body.scope ?? entryScope(props.entry)),
     );
@@ -300,16 +320,40 @@ export const KnowledgeEditor: Component<{
     setSaveError("");
     setTitleConflict("");
     setConflict("");
+    setSuccess("");
     try {
+      const currentConfidence = props.entry.confidence;
+      const confidenceToSave = confidenceEdited()
+        ? confidenceValue
+        : currentConfidence;
+      const body: Parameters<typeof ws.client.editKnowledge>[1] = {
+        expected_revision: expectedRevision,
+        ...(title() !== props.entry.title ? { title: title() } : {}),
+        ...(content() !== props.entry.content ? { content: content() } : {}),
+        ...(category() !== props.entry.category
+          ? { category: category() }
+          : {}),
+        ...(confidenceToSave !== currentConfidence
+          ? { confidence: confidenceToSave }
+          : {}),
+        ...(scope() !== entryScope(props.entry) ? { scope: scope() } : {}),
+      };
+      if (Object.keys(body).length === 1) {
+        setDirty(false);
+        const removed = await ws.state.drafts.delete(draftKey());
+        if (removed) {
+          setSavedDraft(undefined);
+          setDraftNotice("");
+        } else if (savedDraft()) {
+          setDraftNotice(
+            "No changes were sent, but the local draft could not be removed from this device.",
+          );
+        }
+        setSuccess("No changes to save.");
+        return;
+      }
       const result = await ws.tracked(() =>
-        ws.client.editKnowledge(id(), {
-          expected_revision: expectedRevision,
-          title: title(),
-          content: content(),
-          category: category(),
-          confidence: confidenceValue,
-          scope: projectless() ? "shared" : scope(),
-        }),
+        ws.client.editKnowledge(id(), body),
       );
       if (!result.entry)
         throw new Error("Saved knowledge entry was unavailable");
@@ -555,6 +599,7 @@ export const KnowledgeEditor: Component<{
                   setTitle(event.currentTarget.value);
                   setDirty(true);
                   setTitleConflict("");
+                  setSuccess("");
                 }}
               />
               <Show when={titleConflict()}>
@@ -574,6 +619,7 @@ export const KnowledgeEditor: Component<{
                     event.currentTarget.value as (typeof CATEGORIES)[number],
                   );
                   setDirty(true);
+                  setSuccess("");
                 }}
               >
                 <For each={CATEGORIES}>
@@ -598,7 +644,9 @@ export const KnowledgeEditor: Component<{
                 value={confidenceText()}
                 onInput={(event) => {
                   setConfidenceText(event.currentTarget.value);
+                  setConfidenceEdited(true);
                   setDirty(true);
+                  setSuccess("");
                 }}
               />
             </label>
@@ -614,6 +662,7 @@ export const KnowledgeEditor: Component<{
                   onChange={() => {
                     setScope("project");
                     setDirty(true);
+                    setSuccess("");
                   }}
                 />
                 Project
@@ -627,6 +676,7 @@ export const KnowledgeEditor: Component<{
                   onChange={() => {
                     setScope("shared");
                     setDirty(true);
+                    setSuccess("");
                   }}
                 />
                 Shared
@@ -648,6 +698,7 @@ export const KnowledgeEditor: Component<{
               onInput={(event) => {
                 setContent(event.currentTarget.value);
                 setDirty(true);
+                setSuccess("");
               }}
             />
           </label>

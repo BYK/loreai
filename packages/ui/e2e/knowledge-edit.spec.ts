@@ -147,7 +147,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     const firstPatch = JSON.parse(
       patchResponse.request().postData() ?? "{}",
     ) as Record<string, unknown>;
-    expect(firstPatch).toMatchObject({
+    expect(firstPatch).toEqual({
       expected_revision: expectedRevision,
       title: titleDraft,
       content: contentDraft,
