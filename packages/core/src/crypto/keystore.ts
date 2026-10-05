@@ -312,39 +312,56 @@ export function putWrappedScopeKey(
   dekCache.delete(dekKey(scopeId, keyEpoch));
 }
 
+export interface PreparedScopeKeyRotation {
+  dek: Uint8Array;
+  wraps: { userId: string; wrappedDek: Uint8Array }[];
+  keystoreEpoch: number;
+}
+
+export async function prepareScopeKeyRotation(
+  members: { userId: string; publicKey: Uint8Array }[],
+): Promise<PreparedScopeKeyRotation> {
+  const capturedEpoch = keystoreEpoch;
+  const dek = generateDek();
+  const wraps = await Promise.all(
+    members.map(async (member) => ({
+      userId: member.userId,
+      wrappedDek: await wrapDekForMember(member.publicKey, dek),
+    })),
+  );
+  return { dek, wraps, keystoreEpoch: capturedEpoch };
+}
+
+export function persistScopeKeyRotation(
+  scopeId: string,
+  newEpoch: number,
+  rotation: PreparedScopeKeyRotation,
+): void {
+  const now = Date.now();
+  for (const wrap of rotation.wraps) {
+    putWrappedScopeKey(scopeId, wrap.userId, wrap.wrappedDek, newEpoch, now);
+  }
+  if (keystoreEpoch === rotation.keystoreEpoch) {
+    dekCache.set(dekKey(scopeId, newEpoch), rotation.dek);
+  }
+}
+
 /**
  * Rotate the scope's DEK (E-4c-3): mint a FRESH DEK and wrap it to EACH remaining member at
  * `newEpoch`, INSERTing new rows while OLD-epoch rows are retained (so past blobs stay
  * decryptable). New content seals at `newEpoch` once it is the highest local epoch. `newEpoch`
- * MUST be allocated server-atomically via the `rotate_scope_key(scope)` RPC so concurrent admins
- * never mint the same epoch with divergent DEKs. `members` MUST include the caller (self) with
- * their own public key, or the rotator locks itself out of the new epoch. Members + their
- * identity public keys are supplied by the caller (CLI/registry).
+ * MUST be allocated server-atomically by the `remove_scope_member_rotating` RPC so concurrent
+ * member removals never mint the same epoch with divergent DEKs. `members` MUST include the caller
+ * (self) with their own public key, or the rotator locks itself out of the new epoch. Members +
+ * their identity public keys are supplied by the caller (CLI/registry).
  */
 export async function rotateScopeKey(
   scopeId: string,
   newEpoch: number,
   members: { userId: string; publicKey: Uint8Array }[],
 ): Promise<void> {
-  const kEpoch = keystoreEpoch;
-  const dek = generateDek();
-  const now = Date.now();
-  // Wrap to ALL members FIRST (async HPKE), THEN persist — so a mid-wrap failure leaves NO
-  // partial epoch. Otherwise a half-written epoch + a retry (fresh DEK) would collide with the
-  // already-written members at the remote first-write-wins guard (23514 poison).
-  const wraps = await Promise.all(
-    members.map(async (m) => ({
-      userId: m.userId,
-      wrapped: await wrapDekForMember(m.publicKey, dek),
-    })),
-  );
-  for (const w of wraps) {
-    putWrappedScopeKey(scopeId, w.userId, w.wrapped, newEpoch, now);
-  }
-  // Cache the fresh DEK for (scope, newEpoch) so the encrypt path uses it immediately — unless a
-  // lock()/identity swap raced (then leave it for a fresh unwrap; putWrappedScopeKey already
-  // invalidated the slot).
-  if (keystoreEpoch === kEpoch) dekCache.set(dekKey(scopeId, newEpoch), dek);
+  const rotation = await prepareScopeKeyRotation(members);
+  persistScopeKeyRotation(scopeId, newEpoch, rotation);
 }
 
 /**

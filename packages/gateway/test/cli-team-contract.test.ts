@@ -38,7 +38,7 @@ describe("Phase 3D.3c — typed lore team", () => {
     expect(LEGACY_ROUTES.has("team")).toBe(false);
   });
 
-  test("team declares --invite, --role, --email, --offline, --project flags", async () => {
+  test("team declares --invite, --role, --email, --note, --team, --offline, --project flags", async () => {
     const { buildApplication, buildRouteMap, run } =
       await import("@stricli/core");
     const { teamCommand } = await import("../src/cli/commands/team");
@@ -67,6 +67,8 @@ describe("Phase 3D.3c — typed lore team", () => {
     expect(seen.has("--invite")).toBe(true);
     expect(seen.has("--role")).toBe(true);
     expect(seen.has("--email")).toBe(true);
+    expect(seen.has("--note")).toBe(true);
+    expect(seen.has("--team")).toBe(true);
     expect(seen.has("--offline")).toBe(true);
     expect(seen.has("--project")).toBe(true);
   });
@@ -108,6 +110,10 @@ describe("Phase 3D.3c — typed lore team", () => {
       "viewer",
       "--email",
       "alice@example.com",
+      "--note",
+      "decision context",
+      "--team",
+      "Acme",
       "--project",
       "/tmp/test",
     ];
@@ -124,6 +130,8 @@ describe("Phase 3D.3c — typed lore team", () => {
     expect(calls[0]?.positionals).toEqual(["invite", "alice"]);
     expect(calls[0]?.values.role).toBe("viewer");
     expect(calls[0]?.values.email).toBe("alice@example.com");
+    expect(calls[0]?.values.note).toBe("decision context");
+    expect(calls[0]?.values.team).toBe("Acme");
     expect(calls[0]?.values.project).toBe("/tmp/test");
     expect(Buffer.concat(stdoutChunks).toString("utf8")).toContain("team ok");
     vi.resetModules();

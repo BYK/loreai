@@ -23,6 +23,7 @@ import {
 } from "~/lib/href";
 import { formatWhen, pluralize, previewOf } from "~/lib/format";
 import { KnowledgeDocument } from "~/components/lore/KnowledgeDocument";
+import { PromotionPanel } from "~/components/lore/PromotionPanel";
 import { KnowledgeTable } from "~/components/lore/KnowledgeTable";
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { MergeProjectsAction } from "~/components/lore/ProjectActions";
@@ -390,15 +391,18 @@ export const Browse: Component<{
             </Match>
             <Match when={entry.loader.data()}>
               {(value) => (
-                <KnowledgeDocument
-                  entry={value()}
-                  project={projectForEntry()}
-                  versions={versions.loader}
-                  evidence={evidence.loader}
-                  loadDistillation={(id) =>
-                    ws.tracked(() => ws.client.getDistillation(id))
-                  }
-                />
+                <>
+                  <KnowledgeDocument
+                    entry={value()}
+                    project={projectForEntry()}
+                    versions={versions.loader}
+                    evidence={evidence.loader}
+                    loadDistillation={(id) =>
+                      ws.tracked(() => ws.client.getDistillation(id))
+                    }
+                  />
+                  <PromotionPanel knowledgeId={value().id} client={ws.client} />
+                </>
               )}
             </Match>
           </Switch>

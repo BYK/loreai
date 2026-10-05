@@ -99,6 +99,8 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
   for (const [path, navId, marker] of [
     ["/ui/entities", "nav-entities", "entities-page"],
     ["/ui/contradictions", "nav-contradictions", "contradictions-page"],
+    ["/ui/team", "nav-team", "team-page"],
+    ["/ui/conflicts", "nav-conflicts", "conflicts-page"],
   ] as const) {
     test(`shell keyboard navigation reaches ${navId} content`, async ({
       page,
@@ -107,6 +109,76 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         testInfo.project.name.includes("mobile"),
         "desktop shell has persistent navigation",
       );
+      if (navId === "nav-team") {
+        await page.route("**/api/v1/account", (route) =>
+          route.fulfill({
+            json: {
+              signed_in: true,
+              user: {
+                id: "user-admin",
+                email: null,
+                display_name: "Admin",
+              },
+              provider: "github",
+              expires_at: null,
+              state: "signed_in",
+            },
+          }),
+        );
+        await page.route("**/api/v1/teams", (route) =>
+          route.fulfill({
+            json: {
+              hosted: false,
+              teams: [
+                {
+                  id: "team-1",
+                  name: "Acme e2e",
+                  role: "admin",
+                  member_count: 2,
+                },
+              ],
+            },
+          }),
+        );
+        await page.route("**/api/v1/teams/team-1/members", (route) =>
+          route.fulfill({
+            json: {
+              remote: "ok",
+              team: { id: "team-1", name: "Acme e2e" },
+              my_role: "admin",
+              can_manage: true,
+              members: [
+                {
+                  user_id: "user-admin",
+                  label: "Admin",
+                  role: "admin",
+                  me: true,
+                },
+                {
+                  user_id: "user-member",
+                  label: "Member",
+                  role: "viewer",
+                  me: false,
+                },
+              ],
+              actions: {
+                invite: "available",
+                remove: "available",
+                set_role: "available",
+                add_by_id: "cli_only",
+                offline_invite: "cli_only",
+                list_invites: "unsupported",
+                revoke_invite: "unsupported",
+              },
+            },
+          }),
+        );
+        await page.route("**/api/v1/sync/status", (route) =>
+          route.fulfill({
+            json: { enabled: true, state: "idle", pending_changes: 0 },
+          }),
+        );
+      }
       await page.goto(path);
       await expect(page.getByTestId(marker)).toBeVisible();
       await page.getByTestId("theme-dark").click();

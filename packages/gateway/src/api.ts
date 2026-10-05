@@ -35,6 +35,9 @@ import { defaultModelForProvider } from "./worker-model";
 import { hasRecentAuthRejectedFailure } from "./worker-health";
 import { decodeRequestBody } from "./http-body";
 import { handleFolkStatusRequest } from "./folk-status";
+import { handlePromotionRequest } from "./promotions";
+import { handleTeamActionRequest } from "./team-actions";
+import { handleSyncConflictRequest } from "./sync-conflicts";
 import { handleDedupApply, handleDedupPreview } from "./dedup-api";
 import {
   BadRequest,
@@ -906,6 +909,15 @@ export async function handleAPIRequest(
   // -----------------------------------------------------------------------
 
   if (method === "GET") {
+    const promotion = await handlePromotionRequest(req, url, config);
+    if (promotion) return promotion;
+
+    const teamAction = await handleTeamActionRequest(req, url, config);
+    if (teamAction) return teamAction;
+
+    const syncConflict = await handleSyncConflictRequest(req, url, config);
+    if (syncConflict) return syncConflict;
+
     // GET /api/v1/account, /teams, /sync/status, /projects/:id/sharing (FOLK-01)
     const folk = handleFolkStatusRequest(pathname, config);
     if (folk) return folk;
@@ -1052,6 +1064,15 @@ export async function handleAPIRequest(
   }
 
   if (method === "POST") {
+    const promotion = await handlePromotionRequest(req, url, config);
+    if (promotion) return promotion;
+
+    const teamAction = await handleTeamActionRequest(req, url, config);
+    if (teamAction) return teamAction;
+
+    const syncConflict = await handleSyncConflictRequest(req, url, config);
+    if (syncConflict) return syncConflict;
+
     // Literal routes first (before parameterized :id routes)
 
     // POST /api/v1/projects/merge
@@ -1141,6 +1162,11 @@ export async function handleAPIRequest(
         );
       return await handleDedupApply(req, project.id);
     }
+  }
+
+  if (method === "PUT") {
+    const promotion = await handlePromotionRequest(req, url, config);
+    if (promotion) return promotion;
   }
 
   return errorResponse(

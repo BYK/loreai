@@ -27,6 +27,9 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/entities` (`?type=`, `?cursor=`) | Entity list with type filter, keyset paging and the rebuild card |
 | `/ui/entities/:entityId` | Entity detail: aliases, role/description/notes editing, relations, referencing knowledge, delete |
 | `/ui/contradictions` | Open contradiction pairs and keep/resolve decisions |
+| `/ui/promotions` | Review encrypted team knowledge proposals |
+| `/ui/team` | Team membership, role changes and invitation receipts |
+| `/ui/conflicts` | Review and recover local sync-conflict snapshots |
 | `/ui/warming` | Global cache-warming status, circuit-breaker reset, live-session controls and project histograms |
 | `/ui/costs` | Live and historical costs, worker breakdown, daily trend and budget controls |
 | `/ui/fixture` (`?view=focus`, `?view=blocks`) | **Dev/test only** — design specimen (labelled **NOT PRODUCTION**): invented content, every P3/P4 state; `?view=blocks` runs an invented session through the #1843 block model and renderer |
@@ -119,6 +122,61 @@ team changes remain CLI operations; no provider tokens are displayed.
 Tests:
 - pnpm --filter @loreai/ui exec vitest run test/folk-status.test.ts test/folk-shell.test.tsx test/project-page.test.tsx
 - pnpm --filter @loreai/ui test:e2e — `e2e/folk-status.spec.ts`
+
+### Knowledge promotion (#1807)
+
+Knowledge detail pages include a promotion preview that shows the exact title
+and content before a team request is sent. Eligible entries in a linked
+project can be proposed by editors and admins; restricted entries cannot be
+promoted. Proposals are sealed with the team encryption key and stay private
+until a team admin approves them. The decision is
+applied to the proposer's local entry on a later Lore sync; if that entry
+changed or was deleted first, the request is marked stale and can be proposed
+again. Reviewers may approve or reject with an optional note, and proposers may
+withdraw a pending request.
+
+The CLI `lore team review|approve|reject` path remains unchanged and continues
+to provide local self-approval. Lore has no branch-scoped knowledge field;
+`metadata.gitHead` is not used to gate promotion.
+
+Commands: `lore team link <team> --project <path>`, `lore login`,
+`lore sync enable`, and `lore sync now`. Local review remains available via
+`lore team review`, `lore team approve <id>`, and `lore team reject <id>`.
+
+Tests:
+- `pnpm exec vitest run packages/core/test/scope-selection.test.ts`
+- `pnpm exec vitest run packages/gateway/test/promotions.test.ts packages/gateway/test/folk-status.test.ts packages/gateway/test/sync.test.ts packages/gateway/test/sync.property.test.ts packages/gateway/test/sync-cmd.test.ts`
+- `LORE_INTEGRATION=1 pnpm exec vitest run packages/gateway/test/promotion-requests.integration.test.ts packages/gateway/test/sync-membership-rls.integration.test.ts`
+- `pnpm --filter @loreai/ui exec vitest run test/promotions-ui.test.tsx test/api-client.test.ts test/contracts.test.ts`
+- `pnpm --filter @loreai/ui test:e2e` — `e2e/promotions.spec.ts`
+
+### Team actions and sync conflict recovery (#1808)
+
+The `/ui/team` screen lists the signed-in user's team members and supports
+admin invitations, role changes and removal. Removal rotates the team key,
+revokes outstanding invite links and blocks access to future content; copies
+already synced to a removed member cannot be revoked. Invite tokens are shown
+only in the creation receipt dialog. Pending-invite management and offline
+invites remain unsupported in the sync service; adding by user id is CLI-only.
+Team mutations require encryption to be unlocked and sync to be enabled.
+`GET /api/v1/teams` also returns `hosted`, a boolean gateway-mode signal that
+lets the page distinguish hosted deployments from an anonymous local account;
+it is computed locally without reading the saved session or calling the cloud.
+
+The `/ui/conflicts` screen reads local sync conflict snapshots. Knowledge
+conflicts with a current entry can be restored as a new version after a
+version check, or discarded. Non-knowledge, remote-delete and unreadable
+snapshots cannot be restored through the UI. The screen is local-gateway only;
+it does not upload discarded content to the cloud.
+
+For linked projects using automatic sharing, the SharingPanel can switch the
+project to manual review with confirmation. Automatic sharing can only be
+selected from the CLI.
+
+Tests:
+- `pnpm exec vitest run packages/core/test/sync-conflicts.test.ts packages/gateway/test/team-actions.test.ts packages/gateway/test/sync-conflicts.test.ts`
+- `pnpm --filter @loreai/ui exec vitest run test/folk03-ui.test.tsx test/api-client.test.ts test/contracts.test.ts`
+- `pnpm --filter @loreai/ui test:e2e` — `e2e/folk03.spec.ts`, `e2e/keyboard.spec.ts`
 
 Reference documents:
 
@@ -507,12 +565,12 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 
 | Layer | Command | Where it runs |
 |---|---|---|
-| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/dedup-review.test.ts`, `test/duplicate-review.test.tsx`, `test/state.test.ts`, `test/shell.test.tsx`, `test/folk-status.test.ts`, `test/folk-shell.test.tsx`, `test/project-page.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/session-route.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, `test/entities-list.test.tsx`, `test/entity-page.test.tsx`, `test/entities-rebuild.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
+| Unit (jsdom) | `pnpm --filter @loreai/ui test` — `test/api-client.test.ts`, `test/contracts.test.ts`, `test/db.test.ts`, `test/dedup-review.test.ts`, `test/duplicate-review.test.tsx`, `test/state.test.ts`, `test/shell.test.tsx`, `test/folk-status.test.ts`, `test/folk-shell.test.tsx`, `test/project-page.test.tsx`, `test/promotions-ui.test.tsx`, `test/knowledge-table.test.tsx`, `test/knowledge-document.test.tsx`, `test/session-list.test.tsx`, `test/session-route.test.tsx`, `test/search-results.test.tsx`, `test/recall-text.test.ts`, `test/compat-smoke.test.tsx`, `test/entities-list.test.tsx`, `test/entity-page.test.tsx`, `test/entities-rebuild.test.tsx`, reader tests (see [Tests (#1843)](#tests-1843) and [Tests (#1846)](#tests-1846)) | root `pnpm test`, regular CI job |
 
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/dedup-review.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/sessions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`, `e2e/folk-status.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/dedup-review.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/sessions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`, `e2e/folk-status.spec.ts`, `e2e/promotions.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 

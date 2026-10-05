@@ -525,7 +525,7 @@ describe("api client: error classification", () => {
           state: "anonymous",
         });
       }
-      if (url.endsWith("/teams")) return json({ teams: [] });
+      if (url.endsWith("/teams")) return json({ hosted: false, teams: [] });
       if (url.endsWith("/sync/status")) {
         return json({
           enabled: false,
@@ -546,7 +546,9 @@ describe("api client: error classification", () => {
       });
     });
     expect((await client.getAccount()).state).toBe("anonymous");
-    expect((await client.getTeams()).teams).toEqual([]);
+    const teams = await client.getTeams();
+    expect(teams.hosted).toBe(false);
+    expect(teams.teams).toEqual([]);
     expect((await client.getSyncStatus()).enabled).toBe(false);
     expect((await client.getProjectSharing("p1")).state).toBe("not_linked");
     expect(calls).toEqual([
@@ -705,6 +707,314 @@ describe("contradiction API client", () => {
       decision: "keep-a",
     });
   });
+});
+
+describe("promotion API client", () => {
+  it("uses the FOLK-02 routes and validates preview, list, and receipts", async () => {
+    const request = {
+      id: "request-id",
+      team: { id: "team-1", name: "Acme" },
+      logical_id: "knowledge-1",
+      entry_version_id: "version-1",
+      entry_version: 1,
+      category: "decision",
+      title: "Keep the local-first store",
+      content: "Use SQLite as the only store.",
+      sealed: false,
+      proposer: { id: "user-1", label: "Ada" },
+      mine: true,
+      status: "pending",
+      decided_by: { id: "user-2", label: null },
+      decided_at: null,
+      decision_note: null,
+      applied: null,
+      applied_at: null,
+      created_at: "2026-09-20T12:00:00.000Z",
+      can_decide: true,
+      decide_blocked_reason: null,
+    };
+    const responseFor = (index: number) => {
+      if (index === 0) {
+        return {
+          entry: {
+            id: "knowledge-1",
+            version_id: "version-1",
+            version: 1,
+            title: "Keep the local-first store",
+            content: "Use SQLite as the only store.",
+            category: "decision",
+            project_id: "project-1",
+            sensitivity: "normal",
+            approval_status: "pending",
+          },
+          team: { id: "team-1", name: "Acme" },
+          policy: {
+            effective: "manual",
+            project_override: null,
+            team_default: "manual",
+          },
+          eligibility: { promotable: true, reason: null },
+          previous_team_version: null,
+          pending_request: null,
+          remote: "ok",
+        };
+      }
+      if (index === 2 || index === 3)
+        return { remote: "ok", requests: [request], complete: true };
+      return { request };
+    };
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        const index = calls.length;
+        calls.push({ url, init });
+        return json(responseFor(index));
+      },
+    });
+
+    await client.getPromotionPreview("entry/a");
+    await client.promoteKnowledge("knowledge-1", "version-1");
+    await client.listPromotions("team-1", "decided");
+    await client.listPromotions(null, "all");
+    await client.decidePromotion("request/id", "approved", "Looks good");
+    await client.withdrawPromotion("request-id");
+
+    expect(calls.map((call) => call.url)).toEqual([
+      "/api/v1/knowledge/entry%2Fa/promotion",
+      "/api/v1/knowledge/knowledge-1/promote",
+      "/api/v1/promotions?team=team-1&status=decided",
+      "/api/v1/promotions?status=all",
+      "/api/v1/promotions/request%2Fid/approve",
+      "/api/v1/promotions/request-id/withdraw",
+    ]);
+    expect(calls[1]?.init?.method).toBe("POST");
+    expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
+      version_id: "version-1",
+    });
+    expect(JSON.parse(calls[4]?.init?.body as string)).toEqual({
+      note: "Looks good",
+    });
+    expect(JSON.parse(calls[5]?.init?.body as string)).toEqual({});
+  });
+});
+
+describe("FOLK-03 API client", () => {
+  it("uses team, review-policy, and sync-conflict routes with typed receipts", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const responses = [
+      {
+        remote: "ok",
+        team: { id: "team-1", name: "Acme" },
+        my_role: "admin",
+        can_manage: true,
+        members: [
+          {
+            user_id: "user-1",
+            label: "Ada",
+            role: "admin",
+            me: true,
+          },
+        ],
+        actions: {
+          invite: "available",
+          remove: "available",
+          set_role: "available",
+          add_by_id: "cli_only",
+          offline_invite: "cli_only",
+          list_invites: "unsupported",
+          revoke_invite: "unsupported",
+        },
+      },
+      {
+        invite: {
+          team_id: "team-1",
+          role: "viewer",
+          expires_in_days: 14,
+          token: "invite-token",
+          accept_command: "lore team accept invite-token",
+          emailed: false,
+        },
+      },
+      { member: { user_id: "user-2", role: "editor" } },
+      {
+        removed: "user-2",
+        new_epoch: 2,
+        rewrapped: 3,
+        skipped_count: 1,
+        unlinked_projects: 0,
+      },
+      {
+        linked: true,
+        team: { id: "team-1", name: "Acme" },
+        policy: {
+          effective: "manual",
+          project_override: "manual",
+          team_default: "auto",
+        },
+        state: "linked",
+        detail: null,
+      },
+      {
+        available: true,
+        complete: true,
+        conflicts: [
+          {
+            id: 7,
+            table: "knowledge",
+            row_id: "knowledge-1",
+            detected_at: "2026-09-20T12:00:00.000Z",
+            resolution: "remote_upsert_wins",
+            recoverable: true,
+            unrecoverable_reason: null,
+            local: {
+              title: "Local",
+              content: "Local body",
+              category: "pattern",
+            },
+            current: {
+              version_id: "version-2",
+              version: 2,
+              title: "Current",
+              content: "Current body",
+            },
+          },
+        ],
+      },
+      {
+        kept: "local",
+        current: {
+          version_id: "version-3",
+          version: 3,
+          title: "Local",
+          content: "Local body",
+        },
+      },
+      { discarded: 7 },
+    ];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        return json(responses[calls.length - 1]);
+      },
+    });
+
+    await client.getTeamMembers("team-1");
+    await client.inviteTeamMember("team-1", { role: "viewer" });
+    await client.setTeamMemberRole("team-1", "user-2", "editor", "viewer");
+    await client.removeTeamMember("team-1", "user-2", "editor");
+    await client.requireProjectSharingReview("project-1", null);
+    await client.listSyncConflicts();
+    await client.keepSyncConflictLocal(7, "version-2");
+    await client.discardSyncConflict(7);
+
+    expect(calls.map(({ url }) => url)).toEqual([
+      "/api/v1/teams/team-1/members",
+      "/api/v1/teams/team-1/invites",
+      "/api/v1/teams/team-1/members/user-2/role",
+      "/api/v1/teams/team-1/members/user-2/remove",
+      "/api/v1/projects/project-1/sharing/policy",
+      "/api/v1/sync/conflicts",
+      "/api/v1/sync/conflicts/7/keep-local",
+      "/api/v1/sync/conflicts/7/discard",
+    ]);
+    expect(calls.slice(1).map(({ init }) => init?.method)).toEqual([
+      "POST",
+      "POST",
+      "POST",
+      "POST",
+      "GET",
+      "POST",
+      "POST",
+    ]);
+    expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
+      role: "viewer",
+    });
+    expect(JSON.parse(calls[2]?.init?.body as string)).toEqual({
+      role: "editor",
+      expected_role: "viewer",
+    });
+    expect(JSON.parse(calls[3]?.init?.body as string)).toEqual({
+      expected_role: "editor",
+    });
+    expect(JSON.parse(calls[4]?.init?.body as string)).toEqual({
+      policy: "manual",
+      expected_override: null,
+    });
+    expect(JSON.parse(calls[6]?.init?.body as string)).toEqual({
+      expected_version_id: "version-2",
+    });
+    expect(JSON.parse(calls[7]?.init?.body as string)).toEqual({});
+  });
+});
+
+describe("api client: error envelopes", () => {
+  it("preserves the gateway error type in ApiError.code", async () => {
+    const { client } = clientFor(() =>
+      json(
+        {
+          type: "error",
+          error: {
+            type: "stale_version",
+            message: "Knowledge entry changed",
+          },
+        },
+        409,
+      ),
+    );
+    const error = await failure(
+      client.promoteKnowledge("knowledge-1", "version-1"),
+    );
+    expect(error).toMatchObject({
+      kind: "http",
+      status: 409,
+      code: "stale_version",
+    });
+  });
+
+  it.each([
+    {
+      errorType: "stale_member",
+      extra: { current_role: "editor" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.setTeamMemberRole("team-1", "user-1", "editor", "viewer"),
+    },
+    {
+      errorType: "stale_version",
+      extra: { current_version_id: "version-3" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.keepSyncConflictLocal(17, "version-2"),
+    },
+    {
+      errorType: "stale_policy",
+      extra: { current_override: "manual" },
+      mutate: (client: ReturnType<typeof createApiClient>) =>
+        client.requireProjectSharingReview("project-1", null),
+    },
+  ])(
+    "preserves $errorType and the message when error envelopes include extra fields",
+    async ({ errorType, extra, mutate }) => {
+      const message = "The server state changed; reload and try again.";
+      const { client } = clientFor(() =>
+        json(
+          {
+            type: "error",
+            error: {
+              type: errorType,
+              message,
+              ...extra,
+            },
+          },
+          409,
+        ),
+      );
+      const error = await failure(mutate(client));
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.kind).toBe("http");
+      expect(error.code).toBe(errorType);
+      expect(error.status).toBe(409);
+      expect(error.message).toBe(message);
+    },
+  );
 });
 
 describe("connection store", () => {

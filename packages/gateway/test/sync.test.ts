@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+const promotionCycle = vi.hoisted(() => ({ calls: [] as string[] }));
 import {
   db,
   close as closeDb,
@@ -42,6 +43,9 @@ interface RemoteRow extends Record<string, unknown> {
   updated_at: string;
 }
 const remote = new Map<string, RemoteRow[]>();
+const nonMemberScopes = new Set<string>();
+const deleteCalls: Array<{ table: string; filter: Record<string, string> }> =
+  [];
 let quotaTables = new Set<string>();
 let upsertError: { code?: string; message: string } | null = null;
 let updateError: { code?: string; message: string } | null = null;
@@ -332,6 +336,7 @@ function makeClient() {
         delete() {
           return {
             match(filter: Record<string, string>) {
+              deleteCalls.push({ table, filter: { ...filter } });
               const rows = tableRows(table);
               for (let i = rows.length - 1; i >= 0; i--) {
                 if (Object.entries(filter).every(([k, v]) => rows[i][k] === v))
@@ -351,6 +356,24 @@ function makeClient() {
           let lim = Infinity;
           const run = () => {
             let rows = tableRows(table).slice();
+            if (table === "scope_members") {
+              const scopeFilter = filters.find((f) => f.col === "scope_id");
+              if (scopeFilter && nonMemberScopes.has(scopeFilter.val)) {
+                rows = [];
+              } else if (
+                scopeFilter &&
+                !rows.some((r) => r.scope_id === scopeFilter.val)
+              ) {
+                rows = [
+                  {
+                    scope_id: scopeFilter.val,
+                    user_id: mockUserId ?? REMOTE_SCOPE,
+                    role: "admin",
+                    updated_at: new Date(clock).toISOString(),
+                  },
+                ];
+              }
+            }
             for (const f of filters) {
               rows = rows.filter((r) => {
                 const rv = r[f.col];
@@ -434,6 +457,14 @@ vi.mock("../src/supabase", () => ({
   getAuthedClient: () => Promise.resolve(authed ? makeClient() : null),
   getCurrentUser: () =>
     Promise.resolve({ github_login: "octocat", user_id: mockUserId }),
+}));
+vi.mock("../src/promotions", () => ({
+  autoProposePending: async () => {
+    promotionCycle.calls.push("propose");
+  },
+  applyPromotionDecisions: async () => {
+    promotionCycle.calls.push("apply");
+  },
 }));
 
 import {
@@ -532,6 +563,8 @@ beforeEach(() => {
   // prior test installed) so tier-gated capture doesn't leak across tests (#826/D).
   reinstallSyncCapture();
   remote.clear();
+  nonMemberScopes.clear();
+  deleteCalls.length = 0;
   quotaTables = new Set();
   __resetQuotaWarnedTables(); // module-level dedupe state persists across tests
   upsertError = null;
@@ -2535,6 +2568,15 @@ describe("pull parent-ownership registry", () => {
 });
 
 describe("syncOnce", () => {
+  test("auto-proposes pending entries before applying promotion decisions", async () => {
+    syncData.enableSync("basic");
+    promotionCycle.calls.length = 0;
+
+    await syncOnce();
+
+    expect(promotionCycle.calls).toEqual(["propose", "apply"]);
+  });
+
   test("the v81 marker re-seeds trustworthy live local rows after legacy quarantine", async () => {
     syncData.enableSync("basic");
     syncData.withApplying(() => insertKnowledge("v81-local", "live local"));
@@ -3118,6 +3160,59 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     expect(syncData.getSyncState("knowledge", id)?.scope_id).toBe("T");
   });
 
+  test("keeps the team copy when a former member syncs a detached entry", async () => {
+    const pid = ensureProjectCore("/tmp/lore-f3leave");
+    db()
+      .query("UPDATE projects SET git_remote='github.com/x/f3leave' WHERE id=?")
+      .run(pid);
+    db()
+      .query(
+        "INSERT INTO scopes (id, org_id, kind, name, promotion_policy, created_at, updated_at) VALUES ('TL','o','team','TL','manual',0,0)",
+      )
+      .run();
+    setProjectScope(pid, "TL");
+    const id = ltm.create({
+      projectPath: "/tmp/lore-f3leave",
+      category: "pattern",
+      title: "Detached",
+      content: "personal copy",
+      scope: "project",
+    });
+
+    syncData.enableSync("basic");
+    await pushOnce(makeClient() as never);
+    expect(tableRows("knowledge").find((r) => r.id === id)?.scope_id).toBe(
+      REMOTE_SCOPE,
+    );
+
+    expect(ltm.approveForTeam(id, "u1")).toBe(true);
+    await pushOnce(makeClient() as never);
+    expect(tableRows("knowledge").filter((r) => r.id === id)).toMatchObject([
+      { scope_id: "TL" },
+    ]);
+
+    nonMemberScopes.add("TL");
+    const deletesBeforeLeave = deleteCalls.length;
+    setProjectScope(pid, null);
+    syncData.reseedProjectContent(pid);
+    await pushOnce(makeClient() as never);
+
+    expect(
+      deleteCalls
+        .slice(deletesBeforeLeave)
+        .some(
+          (call) => call.table === "knowledge" && call.filter.scope_id === "TL",
+        ),
+    ).toBe(false);
+    expect(
+      tableRows("knowledge")
+        .filter((r) => r.id === id)
+        .map((r) => r.scope_id)
+        .sort((a, b) => String(a).localeCompare(String(b))),
+    ).toEqual([REMOTE_SCOPE, "TL"].sort((a, b) => a.localeCompare(b)));
+    expect(syncData.getSyncState("knowledge", id)?.scope_id).toBeNull();
+  });
+
   test("a pending entry is NOT team-scoped (stays personal until approved)", async () => {
     const pid = ensureProjectCore("/tmp/lore-f3team2");
     db()
@@ -3257,6 +3352,8 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
       content: "c2",
       scope: "project",
     });
+    expect(ltm.approveForTeam(kid)).toBe(true);
+    expect(ltm.approveForTeam(kid2)).toBe(true);
     for (const e of ["e1", "e2"])
       db()
         .query(
@@ -3289,7 +3386,7 @@ describe("pushOnce — team scope promotion + migration (E-5-F3-3)", () => {
     await pushOnce(makeClient() as never);
     const scopeOf = (t: string, pred: (r: RemoteRow) => boolean) =>
       tableRows(t).find(pred)?.scope_id;
-    // Auto policy → K and K2 approved on create → the whole linked graph is team-scoped.
+    // Server-approved K and K2 make the whole linked graph team-scoped.
     expect(scopeOf("knowledge", (r) => r.id === kid)).toBe("TD");
     expect(scopeOf("entities", (r) => r.id === "e1")).toBe("TD");
     expect(scopeOf("entities", (r) => r.id === "e2")).toBe("TD");
@@ -3318,7 +3415,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
   const TEAM = "team-f2";
   const FAST = { t: 1, m: 256, p: 1 };
 
-  // A team-bound, auto-approved project so the knowledge resolves to the TEAM scope on push (F3-3).
+  // A team-bound project whose server-approved knowledge resolves to the TEAM scope on push.
   function bindTeamProject(path: string): string {
     const pid = ensureProjectCore(path);
     db()
@@ -3355,6 +3452,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
       content: "team secret",
       scope: "project",
     });
+    expect(ltm.approveForTeam(id)).toBe(true);
 
     syncData.enableSync("basic");
     await pushOnce(makeClient() as never);
@@ -3383,6 +3481,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
       content: "team secret",
       scope: "project",
     });
+    expect(ltm.approveForTeam(id)).toBe(true);
     syncData.enableSync("basic");
     await pushOnce(makeClient() as never);
 
@@ -3413,6 +3512,7 @@ describe("knowledge team-scope pull decrypt — E-5-F2 (#827)", () => {
       content: "rotated secret",
       scope: "project",
     });
+    expect(ltm.approveForTeam(id)).toBe(true);
 
     syncData.enableSync("basic");
     await pushOnce(makeClient() as never);

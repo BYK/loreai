@@ -266,6 +266,47 @@ describe("knowledgePushPlan — append-only remote mapping keyed by logical_id (
     expect(rowIds).toEqual([id]); // every knowledge op coalesced to the logical_id
   });
 
+  test("restoring a deleted knowledge entry is captured as a live sync upsert", () => {
+    const projectPath = "/tmp/lore-restore-capture";
+    ensureProject(projectPath);
+    setTeamConfig("sync.enabled", "1");
+    const id = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Restored entry",
+      content: "Before delete",
+    });
+    ltm.remove(id);
+    const deathCert = db()
+      .query("SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1")
+      .get(id) as { id: string };
+    db().exec("DELETE FROM sync_outbox");
+
+    const restored = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 19,
+      title: "Restored entry",
+      content: "Recovered content",
+      metadata: null,
+    });
+
+    expect(restored.ok).toBe(true);
+    expect(
+      outboxFor("knowledge").filter((entry) => entry.row_id === id),
+    ).toEqual(
+      expect.arrayContaining([expect.objectContaining({ op: "upsert" })]),
+    );
+    expect(knowledgePushPlan(id)).toMatchObject({
+      op: "upsert",
+      row: {
+        id,
+        title: "Restored entry",
+        content: "Recovered content",
+      },
+    });
+  });
+
   test("seedOutbox skips an already-synced versioned (v2) entry — no re-enqueue bloat (#823)", () => {
     setTeamConfig("sync.enabled", "1");
     const id = ltm.create({

@@ -9,9 +9,10 @@ import {
 } from "vitest";
 import { EventEmitter } from "node:events";
 import { uuidv7 } from "uuidv7";
-import { db, ensureProject } from "../src/db";
+import { db, ensureProject, setProjectScope } from "../src/db";
 import * as ltm from "../src/ltm";
 import * as embedding from "../src/embedding";
+import { currentTenantId } from "../src/tenant";
 import { config } from "../src/config";
 import { ReadPreparationUnavailableError } from "../src/read-offload";
 import { runReadJob } from "../src/read-job";
@@ -88,6 +89,143 @@ describe("ltm", () => {
     expect(ltm.get(id)).toBeNull();
     expect(ltm.getByLogical(id)).toBeNull(); // no current, live version
     expect(ltm.isTombstoned(id)).toBe(true);
+  });
+
+  test("restoreDeletedKnowledge appends a reviewed live version with provenance", () => {
+    const projectPath = `${PROJECT}/restore-team`;
+    const projectId = ensureProject(projectPath);
+    setProjectScope(projectId, "team-scope");
+    const id = ltm.create({
+      projectPath,
+      category: "gotcha",
+      title: "Deleted team entry",
+      content: "Original content",
+      scope: "project",
+      metadata: { gitHead: "a".repeat(40) },
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET approval_status = 'approved', approved_by = 'reviewer', approved_at = 123 WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(id);
+    ltm.remove(id);
+    const deathCert = db()
+      .query(
+        "SELECT id, version FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(id) as { id: string; version: number };
+    db()
+      .query(
+        "INSERT INTO knowledge_tombstones (id, project_id, deleted_at, tenant_id) VALUES (?, ?, ?, ?)",
+      )
+      .run(id, projectId, Date.now(), currentTenantId());
+
+    const restored = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 17,
+      title: "Recovered team entry",
+      content: "Recovered local content",
+      metadata: { enforce: "soft" },
+    });
+
+    expect(restored).toEqual({ ok: true, versionId: expect.any(String) });
+    const entry = ltm.getByLogical(id);
+    expect(entry).toMatchObject({
+      id: restored.ok ? restored.versionId : "",
+      category: "gotcha",
+      title: "Recovered team entry",
+      content: "Recovered local content",
+      approval_status: "pending",
+      approved_by: null,
+      approved_at: null,
+      metadata: {
+        gitHead: "a".repeat(40),
+        enforce: "soft",
+        recovered_from: {
+          kind: "sync_conflict_keep_local",
+          conflict_id: 17,
+          remote_deleted_version_id: deathCert.id,
+          restored_at: expect.any(String),
+        },
+      },
+    });
+    expect(ltm.versionHistory(id).at(-1)?.version).toBe(deathCert.version + 1);
+    expect(ltm.isTombstoned(id)).toBe(false);
+  });
+
+  test("restoreDeletedKnowledge rejects a stale death-certificate id without mutation", () => {
+    const id = ltm.create({
+      category: "pattern",
+      title: "Stale restore",
+      content: "Original content",
+      scope: "global",
+    });
+    ltm.remove(id);
+    const deathCert = db()
+      .query(
+        "SELECT id, version FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(id) as { id: string; version: number };
+
+    const result = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: "stale-death-cert",
+      conflictId: 18,
+      title: "Local title",
+      content: "Local content",
+      metadata: null,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "stale",
+      currentVersionId: deathCert.id,
+    });
+    expect(
+      db()
+        .query(
+          "SELECT id, version, is_deleted, is_current FROM knowledge WHERE logical_id = ? AND is_current = 1",
+        )
+        .get(id),
+    ).toEqual({
+      id: deathCert.id,
+      version: deathCert.version,
+      is_deleted: 1,
+      is_current: 1,
+    });
+    expect(ltm.isTombstoned(id)).toBe(true);
+  });
+
+  test("restoreDeletedKnowledge keeps non-team entries automatically approved", () => {
+    const id = ltm.create({
+      category: "preference",
+      title: "Deleted personal entry",
+      content: "Original personal content",
+      scope: "global",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET approval_status = 'approved', approved_by = 'reviewer', approved_at = 123 WHERE logical_id = ? AND is_current = 1",
+      )
+      .run(id);
+    ltm.remove(id);
+    const deathCert = db()
+      .query("SELECT id FROM knowledge WHERE logical_id = ? AND is_current = 1")
+      .get(id) as { id: string };
+
+    const result = ltm.restoreDeletedKnowledge(id, {
+      expectedDeletedVersionId: deathCert.id,
+      conflictId: 20,
+      title: "Restored personal entry",
+      content: "Restored personal content",
+      metadata: null,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(ltm.getByLogical(id)).toMatchObject({
+      approval_status: "auto",
+      approved_by: null,
+      approved_at: null,
+    });
   });
 
   test("update knowledge entry appends a new current version", () => {

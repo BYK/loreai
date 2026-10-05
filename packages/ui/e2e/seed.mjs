@@ -688,6 +688,57 @@ const linkResult = db
 if (linkResult.changes !== 1) {
   throw new Error("expected to link exactly the seeded scratch project");
 }
+const conflictLogicalId = core.ltm.logicalIdOf(firstKnowledgeId);
+const conflictEntry = db
+  .prepare(
+    `SELECT title, content, category FROM knowledge_current
+      WHERE COALESCE(logical_id, id) = ? LIMIT 1`,
+  )
+  .get(conflictLogicalId);
+if (!conflictEntry) throw new Error("expected seeded knowledge conflict entry");
+db.prepare(
+  `INSERT INTO sync_conflicts
+    (table_name, row_id, detected_at, resolution, local_content)
+   VALUES ('knowledge', ?, ?, 'remote_upsert_wins', ?)`,
+).run(
+  conflictLogicalId,
+  Date.UTC(2026, 8, 20, 12),
+  JSON.stringify({
+    title: "Local discarded version",
+    content: "Keep the local-first database.",
+    category: conflictEntry.category,
+  }),
+);
+const remoteDeletedLogicalId = core.ltm.create({
+  id: "01996200-1823-7000-8000-000000000099",
+  projectPath: scratch,
+  scope: "project",
+  category: "decision",
+  title: "Remote-deleted decision",
+  content: "The remote copy was removed.",
+});
+core.ltm.remove(remoteDeletedLogicalId);
+const remoteDeathCert = db
+  .prepare(
+    `SELECT id FROM knowledge
+      WHERE COALESCE(logical_id, id) = ? AND is_current = 1 AND is_deleted = 1`,
+  )
+  .get(remoteDeletedLogicalId);
+if (!remoteDeathCert)
+  throw new Error("expected remote-delete death certificate");
+db.prepare(
+  `INSERT INTO sync_conflicts
+    (table_name, row_id, detected_at, resolution, local_content)
+   VALUES ('knowledge', ?, ?, 'remote_delete_wins', ?)`,
+).run(
+  remoteDeletedLogicalId,
+  Date.UTC(2026, 8, 20, 12, 30),
+  JSON.stringify({
+    title: "Keep the local copy",
+    content: "Keep the local-first database.",
+    category: "decision",
+  }),
+);
 db.prepare(
   `INSERT INTO distillations (id, project_id, session_id, narrative, facts, observations, source_ids, generation, token_count, created_at, r_compression, c_norm, call_type)
    VALUES (?, (SELECT id FROM projects WHERE name = 'lore'), ?, '', '[]', ?, ?, 0, ?, ?, ?, ?, 'batch')`,

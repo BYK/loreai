@@ -270,7 +270,7 @@ describe("Folk Lore status routes", () => {
     test("anonymous → empty array even when mirrors have rows", async () => {
       mirrorTeam();
       const body = await (await get(server, "/api/v1/teams")).json();
-      expect(body).toEqual({ teams: [] });
+      expect(body).toEqual({ hosted: false, teams: [] });
     });
 
     test("signed in → the current user's team memberships from the local mirror", async () => {
@@ -300,6 +300,7 @@ describe("Folk Lore status routes", () => {
       signIn();
       const body = await (await get(server, "/api/v1/teams")).json();
       expect(body).toEqual({
+        hosted: false,
         teams: [{ id: TEAM, name: "Acme", role: "admin", member_count: 2 }],
       });
     });
@@ -314,9 +315,8 @@ describe("Folk Lore status routes", () => {
     test("hosted mode → empty array", async () => {
       mirrorTeam();
       signIn();
-      expect(await (await get(hosted, "/api/v1/teams")).json()).toEqual({
-        teams: [],
-      });
+      const body = await (await get(hosted, "/api/v1/teams")).json();
+      expect(body).toEqual({ hosted: true, teams: [] });
     });
   });
 
