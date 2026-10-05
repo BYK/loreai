@@ -127,7 +127,7 @@ Knowledge detail pages include a promotion preview that shows the exact title
 and content before a team request is sent. Eligible entries in a linked
 project can be proposed by editors and admins; restricted entries cannot be
 promoted. Proposals are sealed with the team encryption key and stay private
-until a team admin other than the proposer approves them. The decision is
+until a team admin approves them. The decision is
 applied to the proposer's local entry on a later Lore sync; if that entry
 changed or was deleted first, the request is marked stale and can be proposed
 again. Reviewers may approve or reject with an optional note, and proposers may

@@ -319,7 +319,7 @@ export const PromotionPanel: Component<{
                 <p class="text-sm text-muted">
                   Approving makes this visible to every member of{" "}
                   {value().team?.name ?? "the team"} after your Lore syncs. A
-                  team admin other than you must approve.
+                  team admin must approve.
                 </p>
                 <Show when={actionError()}>
                   <p class="text-sm text-danger" role="alert">

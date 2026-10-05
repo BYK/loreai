@@ -145,7 +145,7 @@ describe("PromotionPanel", () => {
     const dialog = await screen.findByTestId("promotion-preview-dialog");
     expect(dialog).toHaveTextContent("Use SQLite as the only store.");
     expect(dialog).toHaveTextContent(
-      "Approving makes this visible to every member of Acme after your Lore syncs. A team admin other than you must approve.",
+      "Approving makes this visible to every member of Acme after your Lore syncs. A team admin must approve.",
     );
     fireEvent.click(screen.getByRole("button", { name: "Propose" }));
     expect(
