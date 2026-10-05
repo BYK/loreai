@@ -499,6 +499,9 @@ describe("DuplicateReview", () => {
       ),
     );
 
+    // The workspace's shell status loader also reads sync status; count only
+    // the read the confirmation itself makes.
+    const syncReadsBeforeConfirm = getSyncStatus.mock.calls.length;
     fireEvent.click(screen.getByTestId("apply-accepted"));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent(
@@ -546,7 +549,7 @@ describe("DuplicateReview", () => {
     await waitFor(async () =>
       expect(await createReviewDecisionsStore(db).list(projectId)).toEqual([]),
     );
-    expect(getSyncStatus).toHaveBeenCalledTimes(1);
+    expect(getSyncStatus).toHaveBeenCalledTimes(syncReadsBeforeConfirm + 1);
   });
 
   it("applies only fresh accepted marks and retains the stale mark", async () => {
