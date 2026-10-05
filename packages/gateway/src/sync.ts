@@ -1530,7 +1530,9 @@ export async function syncOnce(
     );
   }
   try {
-    const { applyPromotionDecisions } = await import("./promotions");
+    const { applyPromotionDecisions, autoProposePending } =
+      await import("./promotions");
+    await autoProposePending(client);
     await applyPromotionDecisions(client);
   } catch (e) {
     log.notice(

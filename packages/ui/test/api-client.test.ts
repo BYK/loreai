@@ -728,8 +728,8 @@ describe("promotion API client", () => {
       applied: null,
       applied_at: null,
       created_at: "2026-09-20T12:00:00.000Z",
-      can_decide: false,
-      decide_blocked_reason: "own_proposal",
+      can_decide: true,
+      decide_blocked_reason: null,
     };
     const responseFor = (index: number) => {
       if (index === 0) {

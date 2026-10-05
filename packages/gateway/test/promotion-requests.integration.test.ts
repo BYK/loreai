@@ -23,6 +23,7 @@ let h: PgHarness;
 let adminA: string;
 let adminB: string;
 let editorC: string;
+let editorD: string;
 let viewerV: string;
 let nonMemberX: string;
 let scopeId: string;
@@ -33,6 +34,7 @@ beforeAll(async () => {
   adminA = await h.createUser("promotion-admin-a@test.dev");
   adminB = await h.createUser("promotion-admin-b@test.dev");
   editorC = await h.createUser("promotion-editor@test.dev");
+  editorD = await h.createUser("promotion-editor-other@test.dev");
   viewerV = await h.createUser("promotion-viewer@test.dev");
   nonMemberX = await h.createUser("promotion-outsider@test.dev");
   const orgId = randomUUID();
@@ -46,8 +48,8 @@ beforeAll(async () => {
     [scopeId, orgId],
   );
   await h.client.query(
-    "insert into public.scope_members (scope_id, user_id, role) values ($1,$2,'admin'),($1,$3,'admin'),($1,$4,'editor'),($1,$5,'viewer')",
-    [scopeId, adminA, adminB, editorC, viewerV],
+    "insert into public.scope_members (scope_id, user_id, role) values ($1,$2,'admin'),($1,$3,'admin'),($1,$4,'editor'),($1,$5,'editor'),($1,$6,'viewer')",
+    [scopeId, adminA, adminB, editorC, editorD, viewerV],
   );
 }, 240_000);
 
@@ -86,15 +88,12 @@ function requestRow(logicalId: string, createdAt?: string) {
   };
 }
 
-async function insertAs(uid: string, logicalId: string, createdAt?: string) {
-  const values = requestRow(logicalId, createdAt);
+async function insertAs(uid: string, logicalId: string, id = randomUUID()) {
+  const values = requestRow(logicalId);
+  values.id = id;
   return h.asUser(uid, (client) =>
     client.query(
-      `insert into public.promotion_requests
-         (id, scope_id, logical_id, entry_version_id, entry_version, category,
-          title_enc, content_enc${createdAt ? ", created_at" : ""})
-       values ($1,$2,$3,$4,$5,$6,$7,$8${createdAt ? ",$9" : ""})
-       returning *`,
+      `select * from public.propose_promotion($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         values.id,
         values.scope_id,
@@ -104,9 +103,18 @@ async function insertAs(uid: string, logicalId: string, createdAt?: string) {
         values.category,
         values.title_enc,
         values.content_enc,
-        ...(createdAt ? [createdAt] : []),
       ],
     ),
+  );
+}
+
+async function setPolicy(uid: string, policy: string, expected: string) {
+  return h.asUser(uid, (client) =>
+    client.query("select public.set_team_promotion_policy($1,$2,$3)", [
+      scopeId,
+      policy,
+      expected,
+    ]),
   );
 }
 
@@ -245,23 +253,68 @@ describe.skipIf(gate())("promotion request RLS and decisions (#1807)", () => {
       insertAs(editorC, "visible-proposal"),
     );
     expect(duplicate.code).toBe("23505");
+
+    const withId = await insertAs(editorC, "duplicate-id-original");
+    const duplicateId = await expectError(() =>
+      insertAs(editorC, "duplicate-id-different-logical", withId.rows[0].id),
+    );
+    expect(duplicateId.code).toBe("23505");
   });
 
-  it("enforces reviewer roles, self-review rejection, decisions, and note limits", async () => {
+  it("allows admin self-review and keeps editor decisions from changing requests", async () => {
+    const selfReview = await insertAs(adminA, "admin-self-review");
+    const selfId = selfReview.rows[0].id as string;
+    const selfApproved = await decide(adminA, selfId, "approved");
+    expect(selfApproved.rows[0]).toMatchObject({
+      status: "approved",
+      decided_by: adminA,
+    });
+
     const request = await insertAs(editorC, "editor-needs-review");
     const id = request.rows[0].id as string;
-    expect(
-      (await expectError(() => decide(editorC, id, "approved"))).code,
-    ).toBe("42501");
     expect(
       (await expectError(() => decide(nonMemberX, id, "approved"))).code,
     ).toBe("P0002");
 
-    const selfReview = await insertAs(adminA, "admin-self-review");
-    const selfId = selfReview.rows[0].id as string;
-    expect(
-      (await expectError(() => decide(adminA, selfId, "approved"))).code,
-    ).toBe("42501");
+    for (const editor of [editorC, editorD]) {
+      for (const decision of ["approved", "rejected"] as const) {
+        expect(
+          (await expectError(() => decide(editor, id, decision))).code,
+        ).toBe("42501");
+      }
+    }
+    const unchanged = await h.client.query(
+      "select status, decided_by, decided_at, decision_note from public.promotion_requests where id=$1",
+      [id],
+    );
+    expect(unchanged.rows[0]).toEqual({
+      status: "pending",
+      decided_by: null,
+      decided_at: null,
+      decision_note: null,
+    });
+
+    const approved = await decide(adminB, id, "approved", "Reviewed");
+    expect(approved.rows[0]).toMatchObject({
+      status: "approved",
+      decided_by: adminB,
+      decision_note: "Reviewed",
+    });
+    expect((await expectError(() => decide(adminB, id, "rejected"))).code).toBe(
+      "55000",
+    );
+
+    const rejected = await insertAs(editorC, "admin-can-reject");
+    const rejection = await decide(
+      adminB,
+      rejected.rows[0].id as string,
+      "rejected",
+    );
+    expect(rejection.rows[0]).toMatchObject({
+      status: "rejected",
+      decided_by: adminB,
+    });
+
     const oversized = await insertAs(editorC, "oversized-note");
     expect(
       (
@@ -275,16 +328,40 @@ describe.skipIf(gate())("promotion request RLS and decisions (#1807)", () => {
         )
       ).code,
     ).toBe("22001");
+  });
 
-    const approved = await decide(adminB, id, "approved", "Reviewed");
-    expect(approved.rows[0]).toMatchObject({
-      status: "approved",
-      decided_by: adminB,
-      decision_note: "Reviewed",
+  it("applies server review policy to proposals and guards policy updates", async () => {
+    const manual = await insertAs(editorC, "manual-policy-pending");
+    expect(manual.rows[0]).toMatchObject({
+      status: "pending",
+      decided_by: null,
+      decision_note: null,
     });
-    expect((await expectError(() => decide(adminB, id, "rejected"))).code).toBe(
-      "55000",
+
+    expect(
+      (await expectError(() => setPolicy(editorC, "auto", "manual"))).code,
+    ).toBe("42501");
+    expect(
+      (await expectError(() => setPolicy(adminA, "invalid", "manual"))).code,
+    ).toBe("22023");
+
+    await setPolicy(adminA, "auto", "manual");
+    const automatic = await insertAs(editorC, "automatic-policy-approved");
+    expect(automatic.rows[0]).toMatchObject({
+      status: "approved",
+      decided_by: editorC,
+      decision_note: "auto-approved: team does not require review",
+    });
+
+    expect(
+      (await expectError(() => setPolicy(adminA, "manual", "manual"))).code,
+    ).toBe("40001");
+    const unchanged = await h.client.query(
+      "select promotion_policy from public.scopes where id=$1",
+      [scopeId],
     );
+    expect(unchanged.rows[0].promotion_policy).toBe("auto");
+    await setPolicy(adminA, "manual", "auto");
   });
 
   it("allows proposer-only pending withdrawal and proposer-only one-time applied markers", async () => {
@@ -317,7 +394,25 @@ describe.skipIf(gate())("promotion request RLS and decisions (#1807)", () => {
 
   it("stamps created_at server-side and supports the two-account proposal flow", async () => {
     const oldDate = "2000-01-01T00:00:00.000Z";
-    const inserted = await insertAs(editorC, "stamped", oldDate);
+    const values = requestRow("stamped", oldDate);
+    const inserted = await h.client.query(
+      `insert into public.promotion_requests
+         (id, scope_id, logical_id, entry_version_id, entry_version, category,
+          title_enc, content_enc, proposer_id, created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *`,
+      [
+        values.id,
+        values.scope_id,
+        values.logical_id,
+        values.entry_version_id,
+        values.entry_version,
+        values.category,
+        values.title_enc,
+        values.content_enc,
+        editorC,
+        oldDate,
+      ],
+    );
     const id = inserted.rows[0].id as string;
     expect(new Date(inserted.rows[0].created_at).getTime()).toBeGreaterThan(
       new Date(oldDate).getTime(),
@@ -329,5 +424,35 @@ describe.skipIf(gate())("promotion request RLS and decisions (#1807)", () => {
       applied: "applied",
       proposer_id: editorC,
     });
+  });
+
+  it("returns current member profiles only through the scope-authorized RPC", async () => {
+    const memberProfiles = await h.asUser(adminA, (client) =>
+      client.query("select * from public.team_member_profiles($1)", [scopeId]),
+    );
+    const editorProfile = memberProfiles.rows.find(
+      (row) => row.user_id === editorC,
+    );
+    expect(editorProfile).toBeDefined();
+    expect(Object.keys(editorProfile).sort()).toEqual([
+      "display_name",
+      "email",
+      "github_login",
+      "user_id",
+    ]);
+
+    const nonmemberError = await expectError(() =>
+      h.asUser(nonMemberX, (client) =>
+        client.query("select * from public.team_member_profiles($1)", [
+          scopeId,
+        ]),
+      ),
+    );
+    expect(nonmemberError.code).toBe("42501");
+
+    const directProfile = await h.asUser(nonMemberX, (client) =>
+      client.query("select id from public.profiles where id=$1", [editorC]),
+    );
+    expect(directProfile.rowCount).toBe(0);
   });
 });

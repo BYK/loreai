@@ -19,6 +19,7 @@ import {
 import { loadConfig, type GatewayConfig } from "../src/config";
 import {
   handlePromotionRequest,
+  autoProposePending,
   applyPromotionDecisions,
 } from "../src/promotions";
 import { clearSession, persistSession } from "../src/supabase";
@@ -35,6 +36,7 @@ vi.mock("@supabase/supabase-js", () => ({
 
 const USER = "00000000-0000-4000-8000-000000000001";
 const OTHER = "00000000-0000-4000-8000-000000000002";
+const UNKNOWN = "00000000-0000-4000-8000-000000000003";
 const TEAM = "10000000-0000-4000-8000-000000000001";
 const REQUEST = "20000000-0000-4000-8000-000000000001";
 const FAST = { params: { t: 1, m: 256, p: 1 } };
@@ -64,6 +66,7 @@ let insertError: { code?: string; message: string } | null = null;
 let selectError: { code?: string; message: string } | null = null;
 let rpcError: { code?: string; message: string } | null = null;
 let rpcThrow: Error | null = null;
+let teamPolicy: "manual" | "auto" = "manual";
 let rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
 let fakeClient: Record<string, unknown>;
 
@@ -74,6 +77,12 @@ function queryResult(
   filters: Filter[],
   limit: number,
 ) {
+  if (table === "scopes") {
+    return {
+      data: { promotion_policy: teamPolicy },
+      error: null,
+    };
+  }
   if (table === "scope_members") {
     const scopeFilter = filters.find((filter) => filter.column === "scope_id");
     if (!scopeFilter) {
@@ -201,6 +210,54 @@ function makeClient() {
       rpcCalls.push({ name, args });
       if (rpcThrow) throw rpcThrow;
       if (rpcError) return { data: null, error: rpcError };
+      if (name === "team_member_profiles") {
+        return {
+          data: [
+            {
+              user_id: USER,
+              display_name: null,
+              github_login: "folk-user",
+              email: "user@example.test",
+            },
+            {
+              user_id: OTHER,
+              display_name: "Other Member",
+              github_login: "other",
+              email: "other@example.test",
+            },
+          ],
+          error: null,
+        };
+      }
+      if (name === "propose_promotion") {
+        const row: Row = {
+          id: String(args.p_id),
+          scope_id: String(args.p_scope),
+          logical_id: String(args.p_logical_id),
+          entry_version_id: String(args.p_entry_version_id),
+          entry_version: Number(args.p_entry_version),
+          category: String(args.p_category),
+          title_enc: String(args.p_title_enc),
+          content_enc: String(args.p_content_enc),
+          proposer_id: USER,
+          status: teamPolicy === "auto" ? "approved" : "pending",
+          decided_by: teamPolicy === "auto" ? USER : null,
+          decided_at: teamPolicy === "auto" ? new Date().toISOString() : null,
+          decision_note:
+            teamPolicy === "auto"
+              ? "auto-approved: team does not require review"
+              : null,
+          applied: null,
+          applied_at: null,
+          created_at: new Date().toISOString(),
+        };
+        rows.push(row);
+        return { data: row, error: null };
+      }
+      if (name === "set_team_promotion_policy") {
+        teamPolicy = args.p_policy as "manual" | "auto";
+        return { data: teamPolicy, error: null };
+      }
       if (name === "mark_promotion_applied") {
         const row = rows.find((item) => item.id === args.p_id);
         if (row) {
@@ -289,6 +346,14 @@ function makeEntry(
   return id;
 }
 
+function enableAutoShare(id: string): void {
+  const candidate = ltm.teamPromotionCandidate(id);
+  if (!candidate?.projectId) throw new Error("expected a project candidate");
+  db()
+    .query("UPDATE projects SET promotion_policy='auto' WHERE id=?")
+    .run(candidate.projectId);
+}
+
 async function unlockTeam(): Promise<void> {
   keystore.setPassphrase("test passphrase", FAST);
   await keystore.getScopeKey(TEAM, USER, { mint: true });
@@ -363,6 +428,7 @@ beforeEach(() => {
   selectError = null;
   rpcError = null;
   rpcThrow = null;
+  teamPolicy = "manual";
   rpcCalls = [];
   fakeClient = makeClient();
   supabase.createClient.mockImplementation(() => fakeClient);
@@ -683,8 +749,17 @@ describe("promotion request routes", () => {
       proposer: { id: USER, label: "@folk-user" },
       mine: true,
       status: "pending",
-      can_decide: false,
-      decide_blocked_reason: "own_proposal",
+      can_decide: true,
+      decide_blocked_reason: null,
+    });
+    expect(rpcCalls[0]).toMatchObject({
+      name: "propose_promotion",
+      args: {
+        p_id: body.request.id,
+        p_scope: TEAM,
+        p_logical_id: id,
+        p_entry_version_id: id,
+      },
     });
     expect(body.request.id).toMatch(/^[0-9a-f-]{36}$/i);
     expect(ltm.teamPromotionCandidate(id)?.approvalStatus).toBe("pending");
@@ -725,7 +800,7 @@ describe("promotion request routes", () => {
 
     const id = makeEntry();
     await unlockTeam();
-    insertError = { code: "23505", message: "duplicate pending" };
+    rpcError = { code: "23505", message: "duplicate pending" };
     let response = await request(
       `/api/v1/knowledge/${id}/promote`,
       "POST",
@@ -736,7 +811,7 @@ describe("promotion request routes", () => {
       error: { type: "already_pending" },
     });
 
-    insertError = { code: "42501", message: "row-level security denied" };
+    rpcError = { code: "42501", message: "row-level security denied" };
     response = await request(
       `/api/v1/knowledge/${id}/promote`,
       "POST",
@@ -784,14 +859,39 @@ describe("promotion request routes", () => {
 
   it("leaves unknown reviewer labels null instead of exposing raw ids", async () => {
     signIn();
-    rows = [rowFor("logical-1", { decided_by: OTHER })];
+    rows = [rowFor("logical-1", { decided_by: UNKNOWN })];
 
     const body = await (
       await request(`/api/v1/promotions?team=${TEAM}&status=all`)
     ).json();
     expect(body.requests[0].decided_by).toEqual({
-      id: OTHER,
+      id: UNKNOWN,
       label: null,
+    });
+  });
+
+  it("uses cached identity only for self when the profile RPC fails", async () => {
+    signIn();
+    rows = [
+      rowFor("logical-1", {
+        proposer_id: UNKNOWN,
+        status: "pending",
+        decided_by: USER,
+      }),
+    ];
+    rpcError = { code: "42501", message: "profile lookup denied" };
+
+    const body = await (
+      await request(`/api/v1/promotions?team=${TEAM}&status=all`)
+    ).json();
+
+    expect(body.requests[0].proposer).toEqual({
+      id: UNKNOWN,
+      label: null,
+    });
+    expect(body.requests[0].decided_by).toEqual({
+      id: USER,
+      label: "@folk-user",
     });
   });
 
@@ -831,6 +931,81 @@ describe("promotion request routes", () => {
     }
   });
 
+  it("routes team review-policy PUT through the management API", async () => {
+    signIn();
+    const url = new URL(
+      `/api/v1/teams/${TEAM}/review-policy`,
+      "http://127.0.0.1",
+    );
+    const { handleAPIRequest } = await import("../src/api");
+    const response = await handleAPIRequest(
+      new Request(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          policy: "auto",
+          expected_policy: "manual",
+        }),
+      }),
+      url,
+      makeConfig(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ policy: "auto" });
+    expect(rpcCalls).toContainEqual({
+      name: "set_team_promotion_policy",
+      args: {
+        p_scope: TEAM,
+        p_policy: "auto",
+        p_expected: "manual",
+      },
+    });
+  });
+
+  it("rejects malformed review-policy PUT requests and refuses them when hosted", async () => {
+    const malformed = await request(
+      `/api/v1/teams/${TEAM}/review-policy`,
+      "PUT",
+      "{",
+    );
+    expect(malformed.status).toBe(400);
+    const invalid = await request(
+      `/api/v1/teams/${TEAM}/review-policy`,
+      "PUT",
+      JSON.stringify({ policy: "automatic", expected_policy: "manual" }),
+    );
+    expect(invalid.status).toBe(400);
+
+    const hosted = await request(
+      `/api/v1/teams/${TEAM}/review-policy`,
+      "PUT",
+      JSON.stringify({ policy: "auto", expected_policy: "manual" }),
+      makeConfig({ hostedMode: true, remoteGateway: true }),
+    );
+    expect(hosted.status).toBe(403);
+    expect(await hosted.json()).toMatchObject({
+      error: { type: "forbidden" },
+    });
+  });
+
+  it("maps stale team review policy to a revision conflict", async () => {
+    signIn();
+    teamPolicy = "auto";
+    rpcError = { code: "40001", message: "stale expected policy" };
+    const response = await request(
+      `/api/v1/teams/${TEAM}/review-policy`,
+      "PUT",
+      JSON.stringify({ policy: "manual", expected_policy: "manual" }),
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: {
+        type: "stale_policy",
+        current_policy: "auto",
+      },
+    });
+  });
+
   it("returns hosted status without promotion data from GET routes", async () => {
     const entryId = makeEntry({ linked: true });
     const hosted = makeConfig({ hostedMode: true, remoteGateway: true });
@@ -868,6 +1043,7 @@ describe("promotion request routes", () => {
       ["POST", `/api/v1/promotions/${REQUEST}/approve`],
       ["POST", `/api/v1/promotions/${REQUEST}/reject`],
       ["POST", `/api/v1/promotions/${REQUEST}/withdraw`],
+      ["PUT", `/api/v1/teams/${TEAM}/review-policy`],
     ] as const;
     for (const [method, path] of paths) {
       const response = await loopbackRequest(
@@ -884,6 +1060,86 @@ describe("promotion request routes", () => {
       );
       expect(response.status, `${method} ${path}`).toBe(404);
     }
+  });
+});
+
+describe("autoProposePending", () => {
+  it("proposes eligible auto-share entries once and skips the same version", async () => {
+    signIn();
+    const id = makeEntry();
+    enableAutoShare(id);
+    await unlockTeam();
+
+    await autoProposePending(fakeClient as never, makeConfig());
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(
+      rpcCalls.filter((call) => call.name === "propose_promotion"),
+    ).toHaveLength(1);
+    expect(rows[0].logical_id).toBe(id);
+    expect(rows[0].entry_version_id).toBe(id);
+  });
+
+  it("does not repropose a rejected request for the same version", async () => {
+    signIn();
+    const id = makeEntry();
+    enableAutoShare(id);
+    await unlockTeam();
+    await autoProposePending(fakeClient as never, makeConfig());
+    rows[0].status = "rejected";
+    rpcCalls = [];
+
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(
+      rpcCalls.filter((call) => call.name === "propose_promotion"),
+    ).toHaveLength(0);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("proposes a new version after the prior version was rejected", async () => {
+    signIn();
+    const id = makeEntry();
+    enableAutoShare(id);
+    await unlockTeam();
+    await autoProposePending(fakeClient as never, makeConfig());
+    rows[0].status = "rejected";
+    expect(ltm.rejectForTeam(id)).toBe(true);
+    ltm.update(id, { content: "Updated team content" });
+
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.entry_version_id)).toEqual([
+      id,
+      ltm.teamPromotionCandidate(id)?.versionId,
+    ]);
+  });
+
+  it("does not propose when the effective policy is manual", async () => {
+    signIn();
+    const id = makeEntry();
+    await unlockTeam();
+
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(ltm.teamPromotionCandidate(id)?.approvalStatus).toBe("pending");
+    expect(
+      rpcCalls.filter((call) => call.name === "propose_promotion"),
+    ).toHaveLength(0);
+  });
+
+  it("reuses route eligibility and skips restricted entries", async () => {
+    signIn();
+    const id = makeEntry({ sensitivity: "restricted" });
+    enableAutoShare(id);
+    await unlockTeam();
+
+    await autoProposePending(fakeClient as never, makeConfig());
+
+    expect(
+      rpcCalls.filter((call) => call.name === "propose_promotion"),
+    ).toHaveLength(0);
   });
 });
 

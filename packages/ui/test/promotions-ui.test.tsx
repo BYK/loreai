@@ -244,7 +244,7 @@ describe("PromotionPanel", () => {
     expect(getPromotionPreview).toHaveBeenCalledTimes(2);
   });
 
-  it("uses teammate identity fallbacks in the request status", async () => {
+  it("labels missing request identities as former members", async () => {
     renderPanel(
       clientWith({
         getPromotionPreview: async () =>
@@ -258,10 +258,10 @@ describe("PromotionPanel", () => {
       }),
     );
 
-    const proposer = await screen.findByText("Teammate user-edi");
-    expect(proposer).toHaveAttribute("title", "user-editor");
-    const reviewer = screen.getByText("Teammate user-adm");
-    expect(reviewer).toHaveAttribute("title", "user-admin");
+    const identities = await screen.findAllByText("Former member");
+    expect(identities).toHaveLength(2);
+    for (const identity of identities)
+      expect(identity).not.toHaveAttribute("title");
   });
 
   it("shows the previous approved team version beside the new preview", async () => {
@@ -292,25 +292,22 @@ describe("PromotionPanel", () => {
 });
 
 describe("PromotionsPage", () => {
-  it("shows a visible disabled reason for a proposer's own request", async () => {
+  it("allows an admin to decide their own pending request", async () => {
     renderPage(
       clientWith({
         listPromotions: async () =>
           listResponse([
             request({
               mine: true,
-              can_decide: false,
-              decide_blocked_reason: "own_proposal",
+              can_decide: true,
+              decide_blocked_reason: null,
             }),
           ]),
       }),
     );
 
-    expect(
-      await screen.findByText("You proposed this; another admin must review."),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("promotion-approve")).toBeDisabled();
-    expect(screen.getByTestId("promotion-reject")).toBeDisabled();
+    expect(await screen.findByTestId("promotion-approve")).toBeEnabled();
+    expect(screen.getByTestId("promotion-reject")).toBeEnabled();
   });
 
   it("shows the not-admin reason and sealed-content guidance", async () => {
@@ -466,7 +463,7 @@ describe("PromotionsPage", () => {
     expect(listPromotions).toHaveBeenCalledTimes(2);
   });
 
-  it("uses teammate identity fallbacks in the review table", async () => {
+  it("labels missing review identities as former members", async () => {
     renderPage(
       clientWith({
         listPromotions: async () =>
@@ -478,8 +475,8 @@ describe("PromotionsPage", () => {
       }),
     );
 
-    const proposer = await screen.findByText("Teammate user-edi");
-    expect(proposer).toHaveAttribute("title", "user-editor");
+    const proposer = await screen.findByText("Former member");
+    expect(proposer).not.toHaveAttribute("title");
   });
 
   it("confirms team impact and updates a row only from the server receipt", async () => {

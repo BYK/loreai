@@ -2,26 +2,42 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   crypto,
+  effectivePromotionPolicy,
   isHostedMode,
   keystore,
   log,
   ltm,
   syncData,
 } from "@loreai/core";
-import type { GatewayConfig } from "./config";
+import { loadConfig, type GatewayConfig } from "./config";
 import { sharingStatus, type SharingPolicy } from "./folk-status";
 import {
   getAuthedClient,
   getCurrentUser,
   loadPersistedSession,
 } from "./supabase";
-import { listTeams, teamMembers } from "./team";
+import {
+  identityLabel,
+  listTeams,
+  teamMemberProfiles,
+  teamMembers,
+} from "./team";
 import { makeEncryptionResolver, openString, sealString } from "./sync";
 
 type RemoteStatus = "ok" | "anonymous" | "unreachable" | "hosted";
 type DecisionStatus = "approved" | "rejected";
 type RequestStatus = "pending" | DecisionStatus | "withdrawn";
 type AppliedStatus = "applied" | "stale";
+type PromotionServiceFailure = {
+  ok: false;
+  status: number;
+  code: string;
+  message: string;
+  extra?: Record<string, unknown>;
+};
+export type PromotionServiceResult<T> =
+  | { ok: true; value: T }
+  | PromotionServiceFailure;
 
 type PromotionRow = {
   id: string;
@@ -148,22 +164,43 @@ async function readObjectBody(
   );
 }
 
-function postgresError(error: { code?: string; message?: string }): Response {
+function serviceFailure(
+  status: number,
+  code: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): PromotionServiceFailure {
+  return { ok: false, status, code, message, ...(extra ? { extra } : {}) };
+}
+
+function resultResponse(result: PromotionServiceFailure): Response {
+  return errorResponse(
+    result.status,
+    result.code,
+    result.message,
+    result.extra,
+  );
+}
+
+function postgresError(error: {
+  code?: string;
+  message?: string;
+}): PromotionServiceFailure {
   const message = error.message ?? "Promotion request failed";
   switch (error.code) {
     case "P0002":
-      return errorResponse(404, "not_found", message);
+      return serviceFailure(404, "not_found", message);
     case "42501":
-      return errorResponse(403, "forbidden", message);
+      return serviceFailure(403, "forbidden", message);
     case "55000":
-      return errorResponse(409, "already_decided", message);
+      return serviceFailure(409, "already_decided", message);
     case "23505":
-      return errorResponse(409, "already_pending", message);
+      return serviceFailure(409, "already_pending", message);
     case "22023":
     case "22001":
-      return errorResponse(400, "invalid_request", message);
+      return serviceFailure(400, "invalid_request", message);
     default:
-      return errorResponse(502, "remote_unreachable", message);
+      return serviceFailure(502, "remote_unreachable", message);
   }
 }
 
@@ -252,17 +289,35 @@ async function teamPresentations(
       } catch {
         members = [];
       }
+      let profiles: Awaited<ReturnType<typeof teamMemberProfiles>> = [];
+      let profileLookupFailed = false;
+      try {
+        profiles = await teamMemberProfiles(client, scopeId);
+      } catch {
+        profileLookupFailed = true;
+      }
       const role =
         members.find((member) => member.userId === me)?.role ??
         team?.role ??
         null;
-      const labels = new Map(
-        members.map((member) => [
-          member.userId,
-          member.userId === me ? localIdentityLabel(me) : null,
-        ]),
+      const profilesByUser = new Map(
+        profiles.map((profile) => [profile.user_id, profile]),
       );
-      if (!labels.has(me)) labels.set(me, localIdentityLabel(me));
+      const labels = new Map(
+        members.map((member) => {
+          const profile = profilesByUser.get(member.userId);
+          return [
+            member.userId,
+            profile
+              ? identityLabel(profile)
+              : profileLookupFailed && member.userId === me
+                ? localIdentityLabel(me)
+                : null,
+          ] as const;
+        }),
+      );
+      if (!labels.has(me) && profileLookupFailed)
+        labels.set(me, localIdentityLabel(me));
       presentations.set(scopeId, {
         name: team?.name || null,
         role,
@@ -309,16 +364,13 @@ async function shapeRequest(
     }
   }
   const mine = row.proposer_id === me;
-  const canDecide =
-    row.status === "pending" && !mine && presentation.role === "admin";
+  const canDecide = row.status === "pending" && presentation.role === "admin";
   const blockedReason =
     row.status !== "pending"
       ? "decided"
-      : mine
-        ? "own_proposal"
-        : presentation.role !== "admin"
-          ? "not_admin"
-          : null;
+      : presentation.role !== "admin"
+        ? "not_admin"
+        : null;
   return {
     id: row.id,
     team: { id: row.scope_id, name: presentation.name },
@@ -338,9 +390,7 @@ async function shapeRequest(
     decided_by: row.decided_by
       ? {
           id: row.decided_by,
-          label:
-            presentation.labels.get(row.decided_by) ??
-            (row.decided_by === me ? localIdentityLabel(me) : null),
+          label: presentation.labels.get(row.decided_by) ?? null,
         }
       : null,
     decided_at: row.decided_at,
@@ -435,24 +485,11 @@ async function getPreview(
   });
 }
 
-async function promote(
-  req: Request,
-  id: string,
-  config: GatewayConfig,
-): Promise<Response> {
-  if (requestIsHosted(config)) return hostedRefusal();
-  const body = await readObjectBody(req);
-  if (isResponse(body)) return body;
-  if (typeof body.version_id !== "string") {
-    return errorResponse(400, "invalid_request", "version_id must be a string");
-  }
-  if (Object.keys(body).some((key) => key !== "version_id")) {
-    return errorResponse(400, "invalid_request", "Only version_id is accepted");
-  }
-  const candidate = ltm.teamPromotionCandidate(id);
-  if (!candidate)
-    return errorResponse(404, "not_found", "Knowledge entry not found");
-  const access = await accessFor(config);
+async function proposeCandidate(
+  candidate: NonNullable<ReturnType<typeof ltm.teamPromotionCandidate>>,
+  expectedVersionId: string,
+  access: Access,
+): Promise<PromotionServiceResult<{ request: PromotionRequest }>> {
   const resolver = makeEncryptionResolver();
   const ctx =
     candidate.scopeId &&
@@ -462,9 +499,9 @@ async function promote(
       : null;
   const eligibilityResult = eligibility(candidate, access.remote, ctx !== null);
   if (!eligibilityResult.promotable) {
-    const reason = eligibilityResult.reason!;
+    const reason = eligibilityResult.reason;
     if (reason === "remote_unavailable") {
-      return errorResponse(
+      return serviceFailure(
         503,
         "remote_unreachable",
         "Lore cloud could not be reached. Try again later.",
@@ -475,7 +512,7 @@ async function promote(
       reason === "account_required" || reason === "encryption_locked"
         ? 409
         : 422;
-    return errorResponse(
+    return serviceFailure(
       status,
       reason === "account_required" || reason === "encryption_locked"
         ? reason
@@ -484,8 +521,8 @@ async function promote(
       { reason },
     );
   }
-  if (body.version_id !== candidate.versionId) {
-    return errorResponse(
+  if (expectedVersionId !== candidate.versionId) {
+    return serviceFailure(
       409,
       "stale_version",
       "Knowledge entry changed; reload the preview",
@@ -495,7 +532,7 @@ async function promote(
     );
   }
   if (!access.client || !access.me || !candidate.scopeId || !ctx) {
-    return errorResponse(
+    return serviceFailure(
       503,
       "remote_unreachable",
       "Promotion service is unavailable",
@@ -523,41 +560,49 @@ async function promote(
     ),
     candidate.content,
   );
-  const { data, error } = await access.client
-    .from("promotion_requests")
-    .insert({
-      id: requestId,
-      scope_id: candidate.scopeId,
-      logical_id: candidate.logicalId,
-      entry_version_id: candidate.versionId,
-      entry_version: candidate.version,
-      category: candidate.category,
-      title_enc: titleEnc,
-      content_enc: contentEnc,
-      proposer_id: access.me,
-    })
-    .select("*")
-    .single();
-  if (error) return postgresError(error);
-  if (!data)
-    return errorResponse(
+  let data: unknown;
+  let rpcError: { code?: string; message?: string } | null;
+  try {
+    const result = await access.client.rpc("propose_promotion", {
+      p_id: requestId,
+      p_scope: candidate.scopeId,
+      p_logical_id: candidate.logicalId,
+      p_entry_version_id: candidate.versionId,
+      p_entry_version: candidate.version,
+      p_category: candidate.category,
+      p_title_enc: titleEnc,
+      p_content_enc: contentEnc,
+    });
+    data = result.data;
+    rpcError = result.error;
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not submit promotion request",
+    );
+  }
+  if (rpcError) return postgresError(rpcError);
+  const raw = Array.isArray(data) ? data[0] : data;
+  if (!raw)
+    return serviceFailure(
       502,
       "remote_unreachable",
       "Promotion service returned no receipt",
     );
   try {
-    const row = data as PromotionRow;
+    const row = raw as PromotionRow;
     const presentation = (
       await teamPresentations(access.client, access.me, [row])
     ).get(row.scope_id) ?? { name: null, role: null, labels: new Map() };
-    return json(
-      {
+    return {
+      ok: true,
+      value: {
         request: await shapeRequest(row, access.me, presentation, resolver),
       },
-      201,
-    );
+    };
   } catch {
-    return errorResponse(
+    return serviceFailure(
       502,
       "remote_unreachable",
       "Could not read promotion receipt",
@@ -565,39 +610,142 @@ async function promote(
   }
 }
 
-async function listPromotions(
-  url: URL,
-  config: GatewayConfig,
-): Promise<Response> {
-  const teamId = url.searchParams.get("team");
-  const status = url.searchParams.get("status") ?? "pending";
+export async function proposePromotionService(
+  logicalId: string,
+  expectedVersionId: string,
+  config: GatewayConfig = loadConfig(),
+): Promise<PromotionServiceResult<{ request: PromotionRequest }>> {
+  if (requestIsHosted(config))
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Knowledge promotions are not available in hosted mode.",
+    );
+  const candidate = ltm.teamPromotionCandidate(logicalId);
+  if (!candidate)
+    return serviceFailure(404, "not_found", "Knowledge entry not found");
+  try {
+    return await proposeCandidate(
+      candidate,
+      expectedVersionId,
+      await accessFor(config),
+    );
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not submit promotion request",
+    );
+  }
+}
+
+export async function autoProposePending(
+  client: SupabaseClient,
+  config?: GatewayConfig,
+): Promise<void> {
+  try {
+    const gatewayConfig = config ?? loadConfig();
+    if (requestIsHosted(gatewayConfig) || keystore.encryptionState() !== "on")
+      return;
+    const user = await getCurrentUser();
+    if (!user) return;
+    const candidates = ltm
+      .listPendingTeamPromotions()
+      .map((item) => ltm.teamPromotionCandidate(item.logicalId))
+      .filter(
+        (
+          candidate,
+        ): candidate is NonNullable<
+          ReturnType<typeof ltm.teamPromotionCandidate>
+        > =>
+          candidate !== null &&
+          candidate.approvalStatus === "pending" &&
+          candidate.projectId !== null &&
+          candidate.scopeId !== null &&
+          effectivePromotionPolicy(candidate.projectId) === "auto" &&
+          eligibility(candidate, "ok", true).promotable,
+      );
+    if (candidates.length === 0) return;
+    const { data, error } = await client
+      .from("promotion_requests")
+      .select("logical_id,entry_version_id,status")
+      .eq("proposer_id", user.user_id)
+      .in("logical_id", [
+        ...new Set(candidates.map((candidate) => candidate.logicalId)),
+      ]);
+    if (error) {
+      log.notice("sync: auto-proposal request lookup failed");
+      return;
+    }
+    const requests = (data ?? []) as Array<{
+      logical_id: string;
+      entry_version_id: string;
+      status: RequestStatus;
+    }>;
+    for (const candidate of candidates) {
+      const matching = requests.filter(
+        (request) => request.logical_id === candidate.logicalId,
+      );
+      if (
+        matching.some(
+          (request) => request.entry_version_id === candidate.versionId,
+        ) ||
+        matching.some((request) => request.status === "pending")
+      ) {
+        continue;
+      }
+      try {
+        const result = await proposeCandidate(candidate, candidate.versionId, {
+          remote: "ok",
+          client,
+          me: user.user_id,
+        });
+        if (!result.ok) log.notice("sync: automatic promotion proposal failed");
+      } catch {
+        log.notice("sync: automatic promotion proposal failed");
+      }
+    }
+  } catch {
+    log.notice("sync: auto-propose lookup failed");
+  }
+}
+
+export async function listPromotionRequestsService(
+  teamId: string | null,
+  status: string = "pending",
+  config: GatewayConfig = loadConfig(),
+): Promise<
+  PromotionServiceResult<{
+    remote: RemoteStatus;
+    requests: PromotionRequest[];
+    complete: boolean;
+  }>
+> {
   if (teamId !== null && !UUID.test(teamId)) {
-    return errorResponse(400, "invalid_request", "team must be a UUID");
+    return serviceFailure(400, "invalid_request", "team must be a UUID");
   }
   const access = await accessFor(config);
   if (teamId === null && access.remote !== "ok") {
-    return json({
-      remote: access.remote,
-      requests: [],
-      complete: true,
-    });
+    return {
+      ok: true,
+      value: { remote: access.remote, requests: [], complete: true },
+    };
   }
   if (status !== "pending" && status !== "decided" && status !== "all") {
-    return errorResponse(
+    return serviceFailure(
       400,
       "invalid_request",
       "status must be pending, decided, or all",
     );
   }
   if (teamId === null) {
-    return errorResponse(400, "invalid_request", "team is required");
+    return serviceFailure(400, "invalid_request", "team is required");
   }
   if (!access.client || !access.me) {
-    return json({
-      remote: access.remote,
-      requests: [],
-      complete: true,
-    });
+    return {
+      ok: true,
+      value: { remote: access.remote, requests: [], complete: true },
+    };
   }
   let query = access.client
     .from("promotion_requests")
@@ -608,11 +756,22 @@ async function listPromotions(
   if (status === "pending") query = query.eq("status", "pending");
   if (status === "decided")
     query = query.in("status", ["approved", "rejected", "withdrawn"]);
-  const { data, error } = await query;
-  if (error) {
-    return json({ remote: "unreachable", requests: [], complete: true });
+  let rows: PromotionRow[];
+  try {
+    const { data, error } = await query;
+    if (error) {
+      return {
+        ok: true,
+        value: { remote: "unreachable", requests: [], complete: true },
+      };
+    }
+    rows = (data ?? []) as PromotionRow[];
+  } catch {
+    return {
+      ok: true,
+      value: { remote: "unreachable", requests: [], complete: true },
+    };
   }
-  const rows = (data ?? []) as PromotionRow[];
   const complete = rows.length <= 100;
   const visible = rows.slice(0, 100);
   try {
@@ -636,10 +795,261 @@ async function listPromotions(
         ),
       ),
     );
-    return json({ remote: "ok", requests, complete });
+    return { ok: true, value: { remote: "ok", requests, complete } };
   } catch {
-    return json({ remote: "unreachable", requests: [], complete: true });
+    return {
+      ok: true,
+      value: { remote: "unreachable", requests: [], complete: true },
+    };
   }
+}
+
+async function shapeReceipt(
+  data: unknown,
+  access: Access,
+): Promise<PromotionServiceResult<{ request: PromotionRequest }>> {
+  const raw = Array.isArray(data) ? data[0] : data;
+  if (!raw)
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Promotion service returned no receipt",
+    );
+  if (!access.client || !access.me)
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Sign in with lore login to review promotions.",
+    );
+  try {
+    const row = raw as PromotionRow;
+    const presentation = (
+      await teamPresentations(access.client, access.me, [row])
+    ).get(row.scope_id) ?? { name: null, role: null, labels: new Map() };
+    return {
+      ok: true,
+      value: {
+        request: await shapeRequest(
+          row,
+          access.me,
+          presentation,
+          makeEncryptionResolver(),
+        ),
+      },
+    };
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not read promotion receipt",
+    );
+  }
+}
+
+export async function decidePromotionService(
+  id: string,
+  decision: "approve" | "reject",
+  note?: string,
+  config: GatewayConfig = loadConfig(),
+): Promise<PromotionServiceResult<{ request: PromotionRequest }>> {
+  if (requestIsHosted(config))
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Knowledge promotions are not available in hosted mode.",
+    );
+  if (note !== undefined && note.length > 500)
+    return serviceFailure(
+      400,
+      "invalid_request",
+      "note must be at most 500 characters",
+    );
+  const access = await accessFor(config);
+  if (!access.client || !access.me)
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Sign in with lore login to review promotions.",
+    );
+  let data: unknown;
+  let rpcError: { code?: string; message?: string } | null;
+  try {
+    const result = await access.client.rpc("decide_promotion", {
+      p_id: id,
+      p_decision: decision === "approve" ? "approved" : "rejected",
+      p_note: note ?? null,
+    });
+    data = result.data;
+    rpcError = result.error;
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not update promotion request",
+    );
+  }
+  if (rpcError) return postgresError(rpcError);
+  return shapeReceipt(data, access);
+}
+
+export async function withdrawPromotionService(
+  id: string,
+  config: GatewayConfig = loadConfig(),
+): Promise<PromotionServiceResult<{ request: PromotionRequest }>> {
+  if (requestIsHosted(config))
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Knowledge promotions are not available in hosted mode.",
+    );
+  const access = await accessFor(config);
+  if (!access.client || !access.me)
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Sign in with lore login to review promotions.",
+    );
+  let data: unknown;
+  let rpcError: { code?: string; message?: string } | null;
+  try {
+    const result = await access.client.rpc("withdraw_promotion", { p_id: id });
+    data = result.data;
+    rpcError = result.error;
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not withdraw promotion request",
+    );
+  }
+  if (rpcError) return postgresError(rpcError);
+  return shapeReceipt(data, access);
+}
+
+export async function setTeamReviewPolicyService(
+  scopeId: string,
+  policy: "manual" | "auto",
+  expected: "manual" | "auto",
+  config: GatewayConfig = loadConfig(),
+): Promise<PromotionServiceResult<{ policy: "manual" | "auto" }>> {
+  if (requestIsHosted(config))
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Knowledge promotions are not available in hosted mode.",
+    );
+  if (!UUID.test(scopeId))
+    return serviceFailure(400, "invalid_request", "team must be a UUID");
+  if (policy !== "manual" && policy !== "auto")
+    return serviceFailure(
+      400,
+      "invalid_request",
+      "policy must be manual or auto",
+    );
+  if (expected !== "manual" && expected !== "auto")
+    return serviceFailure(
+      400,
+      "invalid_request",
+      "expected_policy must be manual or auto",
+    );
+  const access = await accessFor(config);
+  if (!access.client || !access.me)
+    return serviceFailure(
+      403,
+      "forbidden",
+      "Sign in with lore login to change team review policy.",
+    );
+  let data: unknown;
+  let error: { code?: string; message?: string } | null;
+  try {
+    const result = await access.client.rpc("set_team_promotion_policy", {
+      p_scope: scopeId,
+      p_policy: policy,
+      p_expected: expected,
+    });
+    data = result.data;
+    error = result.error;
+  } catch {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Could not update team review policy",
+    );
+  }
+  if (error?.code === "40001") {
+    let current: { promotion_policy: "manual" | "auto" | null } | null;
+    try {
+      const result = await access.client
+        .from("scopes")
+        .select("promotion_policy")
+        .eq("id", scopeId)
+        .maybeSingle();
+      if (result.error) {
+        return serviceFailure(
+          502,
+          "remote_unreachable",
+          "Could not read current team review policy",
+        );
+      }
+      current = result.data;
+    } catch {
+      return serviceFailure(
+        502,
+        "remote_unreachable",
+        "Could not read current team review policy",
+      );
+    }
+    return serviceFailure(
+      409,
+      "stale_policy",
+      "Team review policy changed; reload and try again.",
+      {
+        current_policy: current?.promotion_policy ?? "manual",
+      },
+    );
+  }
+  if (error) return postgresError(error);
+  if (data !== "manual" && data !== "auto") {
+    return serviceFailure(
+      502,
+      "remote_unreachable",
+      "Team review policy returned no receipt",
+    );
+  }
+  return {
+    ok: true,
+    value: { policy: data },
+  };
+}
+
+async function promote(
+  req: Request,
+  id: string,
+  config: GatewayConfig,
+): Promise<Response> {
+  if (requestIsHosted(config)) return hostedRefusal();
+  const body = await readObjectBody(req);
+  if (isResponse(body)) return body;
+  if (typeof body.version_id !== "string") {
+    return errorResponse(400, "invalid_request", "version_id must be a string");
+  }
+  if (Object.keys(body).some((key) => key !== "version_id")) {
+    return errorResponse(400, "invalid_request", "Only version_id is accepted");
+  }
+  const result = await proposePromotionService(id, body.version_id, config);
+  return result.ok ? json(result.value, 201) : resultResponse(result);
+}
+
+async function listPromotions(
+  url: URL,
+  config: GatewayConfig,
+): Promise<Response> {
+  const result = await listPromotionRequestsService(
+    url.searchParams.get("team"),
+    url.searchParams.get("status") ?? "pending",
+    config,
+  );
+  return result.ok ? json(result.value) : resultResponse(result);
 }
 
 async function review(
@@ -651,7 +1061,7 @@ async function review(
   if (requestIsHosted(config)) return hostedRefusal();
   const body = await readObjectBody(req);
   if (isResponse(body)) return body;
-  let note: string | undefined;
+  let result: PromotionServiceResult<{ request: PromotionRequest }>;
   if (decision !== "withdraw") {
     if (Object.keys(body).some((key) => key !== "note")) {
       return errorResponse(400, "invalid_request", "Only note is accepted");
@@ -666,58 +1076,56 @@ async function review(
         "note must be at most 500 characters",
       );
     }
-    note = body.note;
-  } else if (Object.keys(body).length > 0) {
+    result = await decidePromotionService(id, decision, body.note, config);
+  } else {
+    if (Object.keys(body).length > 0) {
+      return errorResponse(
+        400,
+        "invalid_request",
+        "Withdraw does not accept fields",
+      );
+    }
+    result = await withdrawPromotionService(id, config);
+  }
+  return result.ok ? json(result.value) : resultResponse(result);
+}
+
+async function setTeamReviewPolicy(
+  req: Request,
+  scopeId: string,
+  config: GatewayConfig,
+): Promise<Response> {
+  if (requestIsHosted(config)) return hostedRefusal();
+  const body = await readObjectBody(req);
+  if (isResponse(body)) return body;
+  if (
+    Object.keys(body).some(
+      (key) => key !== "policy" && key !== "expected_policy",
+    )
+  ) {
     return errorResponse(
       400,
       "invalid_request",
-      "Withdraw does not accept fields",
+      "Only policy and expected_policy are accepted",
     );
   }
-  const access = await accessFor(config);
-  if (!access.client || !access.me) {
+  if (
+    (body.policy !== "manual" && body.policy !== "auto") ||
+    (body.expected_policy !== "manual" && body.expected_policy !== "auto")
+  ) {
     return errorResponse(
-      403,
-      "forbidden",
-      "Sign in with lore login to review promotions.",
+      400,
+      "invalid_request",
+      "policy and expected_policy must be manual or auto",
     );
   }
-  const rpc =
-    decision === "withdraw"
-      ? await access.client.rpc("withdraw_promotion", { p_id: id })
-      : await access.client.rpc("decide_promotion", {
-          p_id: id,
-          p_decision: decision === "approve" ? "approved" : "rejected",
-          p_note: note ?? null,
-        });
-  if (rpc.error) return postgresError(rpc.error);
-  const raw = Array.isArray(rpc.data) ? rpc.data[0] : rpc.data;
-  if (!raw)
-    return errorResponse(
-      502,
-      "remote_unreachable",
-      "Promotion service returned no receipt",
-    );
-  try {
-    const row = raw as PromotionRow;
-    const presentation = (
-      await teamPresentations(access.client, access.me, [row])
-    ).get(row.scope_id) ?? { name: null, role: null, labels: new Map() };
-    return json({
-      request: await shapeRequest(
-        row,
-        access.me,
-        presentation,
-        makeEncryptionResolver(),
-      ),
-    });
-  } catch {
-    return errorResponse(
-      502,
-      "remote_unreachable",
-      "Could not read promotion receipt",
-    );
-  }
+  const result = await setTeamReviewPolicyService(
+    scopeId,
+    body.policy,
+    body.expected_policy,
+    config,
+  );
+  return result.ok ? json(result.value) : resultResponse(result);
 }
 
 function routeId(segment: string): string | Response {
@@ -739,6 +1147,20 @@ export async function handlePromotionRequest(
 ): Promise<Response | null> {
   const path = url.pathname;
   let match: RegExpExecArray | null;
+  if (req.method === "PUT") {
+    match = /^\/api\/v1\/teams\/([^/]+)\/review-policy$/.exec(path);
+    if (match) {
+      let scopeId: string;
+      try {
+        scopeId = decodeURIComponent(match[1]);
+      } catch {
+        return errorResponse(400, "invalid_request", "team must be a UUID");
+      }
+      if (!UUID.test(scopeId))
+        return errorResponse(400, "invalid_request", "team must be a UUID");
+      return setTeamReviewPolicy(req, scopeId, config);
+    }
+  }
   if (req.method === "GET") {
     match = /^\/api\/v1\/knowledge\/([^/]+)\/promotion$/.exec(path);
     if (match) {

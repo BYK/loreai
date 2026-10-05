@@ -1150,6 +1150,11 @@ export async function handleAPIRequest(
     }
   }
 
+  if (method === "PUT") {
+    const promotion = await handlePromotionRequest(req, url, config);
+    if (promotion) return promotion;
+  }
+
   return errorResponse(
     404,
     "not_found",

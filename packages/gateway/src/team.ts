@@ -26,6 +26,12 @@ export interface MemberSummary {
   userId: string;
   role: string;
 }
+export interface TeamMemberProfile {
+  user_id: string;
+  display_name: string | null;
+  github_login: string | null;
+  email: string | null;
+}
 
 /** A repo's contributor roster with a Lore-membership flag per contributor (E-5-d, #630). */
 export interface DiscoveredContributor {
@@ -211,6 +217,29 @@ export async function teamMembers(
     userId: r.user_id as string,
     role: r.role as string,
   }));
+}
+
+/** Read profile labels for current members through the scope-authorized RPC. */
+export async function teamMemberProfiles(
+  client: SupabaseClient,
+  scopeId: string,
+): Promise<TeamMemberProfile[]> {
+  const { data, error } = await client.rpc("team_member_profiles", {
+    p_scope: scopeId,
+  });
+  if (error) throw new Error(`team member profiles: ${error.message}`);
+  return (data ?? []) as TeamMemberProfile[];
+}
+
+export function identityLabel(
+  profile: Pick<TeamMemberProfile, "display_name" | "github_login" | "email">,
+): string | null {
+  return (
+    profile.display_name ??
+    (profile.github_login ? `@${profile.github_login}` : null) ??
+    profile.email ??
+    null
+  );
 }
 
 /** The teams (shared scopes) the current user belongs to. */
