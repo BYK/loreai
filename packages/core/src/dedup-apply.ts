@@ -421,10 +421,12 @@ function checkedRow(rows: Map<string, CurrentRow>, id: string): CurrentRow {
 function applyGroup(
   group: ResolvedGroup,
   request: DedupApplyRequest,
-): DedupGroupApplied | DedupGroupRefused {
+):
+  | { outcome: DedupGroupApplied; mergedProjectIds: string[] }
+  | { outcome: DedupGroupRefused } {
   return withTransaction(() => {
     const checked = checkGroup(group, request.projectId);
-    if (!("rows" in checked)) return refusal(group, checked);
+    if (!("rows" in checked)) return { outcome: refusal(group, checked) };
     const { decision } = group;
     const keepRow = checkedRow(checked.rows, decision.keepId);
     const appliedAt = Date.now();
@@ -472,11 +474,18 @@ function applyGroup(
       });
     }
     return {
-      groupIndex: group.index,
-      keepId: decision.keepId,
-      keepRevision: keepRow.version,
-      merged,
-      appliedAt,
+      outcome: {
+        groupIndex: group.index,
+        keepId: decision.keepId,
+        keepRevision: keepRow.version,
+        merged,
+        appliedAt,
+      },
+      // Origin projects of the merged rows (a shared-pool merge can tombstone
+      // another project's promoted entry) — their .lore.md files export too.
+      mergedProjectIds: decision.mergeIds.map(
+        (id) => checkedRow(checked.rows, id).project_id ?? "",
+      ),
     };
   });
 }
@@ -548,8 +557,7 @@ function storeReceipt(receipt: StoredReceipt): void {
 }
 
 /** Same post-commit hook the other core knowledge mutations run (data.ts). */
-function exportAfterCommit(projectId: string | null): void {
-  if (projectId === null) return;
+function exportAfterCommit(projectId: string): void {
   const path = projectPathById(projectId);
   if (!path || !existsSync(path)) return;
   try {
@@ -615,14 +623,20 @@ export function applyDedupDecisions(
 
   const applied: DedupGroupApplied[] = [];
   const refused: DedupGroupRefused[] = [];
+  const mergedProjectIds = new Set<string>();
   for (const group of groups) {
     if (conflicting.has(group.index)) {
       refused.push(conflictRefusal(group, groups));
       continue;
     }
-    const outcome = applyGroup(group, request);
-    if ("error" in outcome) refused.push(outcome);
-    else applied.push(outcome);
+    const result = applyGroup(group, request);
+    if ("error" in result.outcome) {
+      refused.push(result.outcome);
+    } else if ("mergedProjectIds" in result) {
+      applied.push(result.outcome);
+      for (const pid of result.mergedProjectIds)
+        if (pid) mergedProjectIds.add(pid);
+    }
   }
 
   const receipt: StoredReceipt = {
@@ -634,7 +648,14 @@ export function applyDedupDecisions(
     finishedAt: Date.now(),
   };
   storeReceipt(receipt);
-  if (applied.length > 0) exportAfterCommit(request.projectId);
+  if (applied.length > 0) {
+    // Export once per touched project, after everything committed. Besides
+    // the request scope, a merge may have tombstoned a promoted entry whose
+    // ORIGIN project (e.g. a Q-promoted row merged in the shared pool, where
+    // request.projectId is null) still lists it in its .lore.md.
+    if (request.projectId !== null) mergedProjectIds.add(request.projectId);
+    for (const pid of mergedProjectIds) exportAfterCommit(pid);
+  }
   return { ...receipt, replayed: false };
 }
 

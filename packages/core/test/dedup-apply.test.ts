@@ -905,7 +905,9 @@ describe("shared pool", () => {
     });
     expect(restoredId).not.toBeNull();
     expect(ltm.getByLogical(dupe)?.title).toBe("Shared Pool Dupe");
-    expect(exportLoreFile).not.toHaveBeenCalled();
+    // The merged row was Q-promoted: Q's .lore.md still listed it.
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_Q);
   });
 
   test("projectId null refuses a P-private member and writes nothing", () => {
@@ -1004,5 +1006,77 @@ describe("shared pool", () => {
     expect(isLive(keep)).toBe(true);
     expect(isLive(dupe)).toBe(true);
     expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+});
+
+describe("shared-pool merge exports", () => {
+  const PROJECT_Q2 = join(ROOT, "project-q2");
+  const PROJECT_R2 = join(ROOT, "project-r2");
+  mkdirSync(PROJECT_Q2, { recursive: true });
+  mkdirSync(PROJECT_R2, { recursive: true });
+
+  function createPromoted(title: string, projectPath: string): string {
+    return ltm.create({
+      id: uuidv7(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: `Promoted content for ${title}`,
+      scope: "project",
+      crossProject: true,
+      session: "test-session",
+    });
+  }
+
+  test("a shared-pool merge of a Q-promoted entry exports Q's .lore.md exactly once", () => {
+    ensureProject(PROJECT_Q2, "dedup-apply-q2");
+    const keep = createGlobalEntry("Export Null Keep");
+    const dupe = createPromoted("Export Q-Promoted Dupe", PROJECT_Q2);
+    const receipt = apply(request([decision(keep, dupe)], { projectId: null }));
+
+    expect(receipt.refused).toEqual([]);
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_Q2);
+  });
+
+  test("a shared-pool merge of two NULL entries exports nothing", () => {
+    const keep = createGlobalEntry("Export Null Keep 2");
+    const dupe = createGlobalEntry("Export Null Dupe 2");
+    const receipt = apply(request([decision(keep, dupe)], { projectId: null }));
+    expect(receipt.refused).toEqual([]);
+    expect(exportLoreFile).not.toHaveBeenCalled();
+  });
+
+  test("a mixed operation exports each origin project once", () => {
+    ensureProject(PROJECT_Q2, "dedup-apply-q2");
+    ensureProject(PROJECT_R2, "dedup-apply-r2");
+    const keepA = createGlobalEntry("Export Mixed Keep A");
+    const dupeQ = createPromoted("Export Mixed Dupe Q", PROJECT_Q2);
+    const keepB = createGlobalEntry("Export Mixed Keep B");
+    const dupeR = createPromoted("Export Mixed Dupe R", PROJECT_R2);
+    const receipt = apply(
+      request([decision(keepA, dupeQ), decision(keepB, dupeR)], {
+        projectId: null,
+      }),
+    );
+
+    expect(receipt.refused).toEqual([]);
+    expect(exportLoreFile).toHaveBeenCalledTimes(2);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_Q2);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT_R2);
+  });
+
+  test("a replayed operation does not export again", () => {
+    ensureProject(PROJECT_Q2, "dedup-apply-q2");
+    const keep = createGlobalEntry("Export Replay Keep");
+    const dupe = createPromoted("Export Replay Dupe", PROJECT_Q2);
+    const req = request([decision(keep, dupe)], { projectId: null });
+    apply(req);
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    exportLoreFile.mockClear();
+
+    const second = apply(req);
+    expect(second.replayed).toBe(true);
+    expect(exportLoreFile).not.toHaveBeenCalled();
   });
 });
