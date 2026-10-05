@@ -633,18 +633,35 @@ async function pushEntry(
   if (scopeChanged && state) {
     const oldScopeId = priorScope ?? personal;
     if (oldScopeId) {
-      const { error: delErr } = await client
-        .from(table)
-        .delete()
-        .match({ scope_id: oldScopeId, ...decomposeId(table, effectiveId) });
-      if (delErr) {
-        // Don't block the new-scope push on a stale-copy cleanup failure; a later reconcile/reaper
-        // collects it. Keep the row pending only on a transient error.
-        if (classifyPushError(delErr) === "transient") {
+      let stillMember = priorScope === null;
+      if (priorScope !== null) {
+        const { data: memberships, error: membershipError } = await client
+          .from("scope_members")
+          .select("scope_id")
+          .eq("scope_id", oldScopeId)
+          .limit(1);
+        if (membershipError) {
           log.notice(
-            `sync: scope-migrate delete ${table}/${effectiveId} from ${oldScopeId}: ${delErr.message}`,
+            `sync: scope-migrate membership ${oldScopeId}: ${membershipError.message}`,
           );
           return "stop";
+        }
+        stillMember = (memberships ?? []).length > 0;
+      }
+      if (stillMember) {
+        const { error: delErr } = await client
+          .from(table)
+          .delete()
+          .match({ scope_id: oldScopeId, ...decomposeId(table, effectiveId) });
+        if (delErr) {
+          // Don't block the new-scope push on a stale-copy cleanup failure; a later reconcile/reaper
+          // collects it. Keep the row pending only on a transient error.
+          if (classifyPushError(delErr) === "transient") {
+            log.notice(
+              `sync: scope-migrate delete ${table}/${effectiveId} from ${oldScopeId}: ${delErr.message}`,
+            );
+            return "stop";
+          }
         }
       }
     }

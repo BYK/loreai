@@ -21,6 +21,7 @@ import {
   keystore,
   ltm,
   resolveProjectByRemoteOrPath,
+  setProjectScope,
   setKV,
   syncData,
 } from "@loreai/core";
@@ -39,7 +40,9 @@ import {
   pullOnce,
   pushOnce,
   refreshRegistryMirror,
+  syncOnce,
 } from "../src/sync";
+import { addTeamMember, createTeam, removeTeamMember } from "../src/team";
 import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 
 // The engine drives real supabase-js clients we pass in explicitly, but the encryption
@@ -47,9 +50,11 @@ import { type PgHarness, startPgHarness } from "./helpers/pg-harness";
 // aren't locally logged in (they auth via a JWT client), so pin getCurrentUser to the
 // test user so the scope matches the JWT's auth.uid(). All other real exports are kept.
 let mockUid = "";
+let mockAuthedClient: SupabaseClient | null = null;
 vi.mock("../src/supabase", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/supabase")>()),
   getCurrentUser: () => Promise.resolve(mockUid ? { user_id: mockUid } : null),
+  getAuthedClient: () => Promise.resolve(mockAuthedClient),
 }));
 
 function dockerReady(): boolean {
@@ -70,6 +75,7 @@ const SKIP = !RUN
 
 let h: PgHarness;
 let uid: string;
+let resetLocalIdentityAfterTest = false;
 
 /**
  * A supabase-js client authenticated as `uid` against the local PostgREST.
@@ -170,7 +176,17 @@ beforeEach(async () => {
 
 // Local sync invariants must hold after every real-engine round-trip too (#834).
 afterEach(() => {
+  if (resetLocalIdentityAfterTest) {
+    resetLocalIdentityAfterTest = false;
+    keystore.lock();
+    db().exec(
+      "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys; DELETE FROM sync_outbox; DELETE FROM sync_state",
+    );
+    setKV("sync.identityPub", "");
+    mockUid = uid;
+  }
   if (!SKIP) syncData.assertSyncInvariants();
+  mockAuthedClient = null;
 });
 
 // P2a (#1246): content syncs only for REMOTE-BACKED projects. These engine tests exercise
@@ -1194,3 +1210,127 @@ describe.skipIf(SKIP)(
     });
   },
 );
+
+describe.skipIf(SKIP)("sync engine self-leave", () => {
+  it("keeps team knowledge intact when a removed member syncs its local copy", async () => {
+    resetLocalIdentityAfterTest = true;
+    const admin = await h.createUser("sync-leave-admin@test.dev");
+    const member = await h.createUser("sync-leave-member@test.dev");
+    const fastKdf = { t: 1, m: 256, p: 1 } as const;
+
+    keystore.lock();
+    db().exec(
+      "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys",
+    );
+    setKV("sync.identityPub", "");
+    mockUid = member;
+    keystore.setPassphrase("member pass", { params: fastKdf });
+    await publishIdentityPub(clientFor(member));
+
+    keystore.lock();
+    db().exec(
+      "DELETE FROM account_identity; DELETE FROM account_escrow; DELETE FROM scope_keys",
+    );
+    setKV("sync.identityPub", "");
+    mockUid = admin;
+    keystore.setPassphrase("admin pass", { params: fastKdf });
+    syncData.enableSync("basic");
+    const client = clientFor(admin);
+    const scope = await createTeam(client, "Self-leave sync");
+    await addTeamMember(client, scope, member, "admin");
+
+    const projectPath = "/tmp/lore-self-leave-sync";
+    const projectId = ensureProject(projectPath, "Self-leave sync");
+    setProjectScope(projectId, scope);
+    const logicalId = ltm.create({
+      projectPath,
+      scope: "project",
+      category: "decision",
+      title: "Shared team knowledge",
+      content: "This remains available to the other admin.",
+    });
+    expect(ltm.approveForTeam(logicalId, admin)).toBe(true);
+    expect(syncData.teamScopeForContent("knowledge", logicalId)).toBe(scope);
+
+    mockAuthedClient = client;
+    const initialCycle = await syncOnce();
+    expect(initialCycle.notAuthed).not.toBe(true);
+    expect(initialCycle.quotaHit).toBeUndefined();
+    expect(initialCycle.pushed).toBeGreaterThan(0);
+    expect(
+      await h.client.query(
+        "select id, scope_id from public.knowledge where id=$1",
+        [logicalId],
+      ),
+    ).toMatchObject({ rows: [{ id: logicalId, scope_id: scope }] });
+    expect(
+      await h.asUser(member, (c) =>
+        c
+          .query(
+            "select user_id from public.scope_members where scope_id=$1 and user_id=$2",
+            [scope, member],
+          )
+          .then((result) => result.rows),
+      ),
+    ).toHaveLength(1);
+    expect(
+      await h.asUser(member, (c) =>
+        c
+          .query(
+            "select id from public.knowledge where scope_id=$1 and id=$2",
+            [scope, logicalId],
+          )
+          .then((result) => result.rows),
+      ),
+    ).toHaveLength(1);
+
+    const removal = await removeTeamMember(client, scope, admin);
+    expect(removal.unlinkedProjects).toBe(1);
+
+    const leaveCycle = await syncOnce();
+    expect(leaveCycle.notAuthed).toBeUndefined();
+    expect(leaveCycle.quotaHit).toBeUndefined();
+    expect(leaveCycle.skipped).toBe(0);
+    expect(leaveCycle.pushed).toBeGreaterThan(0);
+    expect(
+      db()
+        .query(
+          "select title, content, approval_status from knowledge_current where logical_id=?",
+        )
+        .get(logicalId),
+    ).toMatchObject({
+      title: "Shared team knowledge",
+      content: "This remains available to the other admin.",
+      approval_status: "approved",
+    });
+    expect(
+      await h.asUser(member, (c) =>
+        c
+          .query(
+            "select id from public.knowledge where scope_id=$1 and id=$2",
+            [scope, logicalId],
+          )
+          .then((result) => result.rows),
+      ),
+    ).toHaveLength(1);
+    expect(
+      await h.asUser(admin, (c) =>
+        c
+          .query(
+            "select id from public.knowledge where scope_id=$1 and id=$2",
+            [admin, logicalId],
+          )
+          .then((result) => result.rows),
+      ),
+    ).toHaveLength(1);
+
+    const secondCycle = await syncOnce();
+    expect(secondCycle).toEqual({
+      pushed: 0,
+      pulled: 0,
+      conflicts: 0,
+      skipped: 0,
+    });
+    expect(syncData.getSyncState("knowledge", logicalId)?.scope_id).toBeNull();
+  });
+});
