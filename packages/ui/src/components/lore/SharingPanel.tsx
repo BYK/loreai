@@ -75,6 +75,10 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
     setPolicyError(null);
     sharing.reload();
   };
+  const closeReviewDialog = (open: boolean) => {
+    if (!open && savingPolicy()) return;
+    setConfirmReview(open);
+  };
   const reloadAfterPolicyError = () => {
     setConfirmReview(false);
     reload();
@@ -218,7 +222,7 @@ export const SharingPanel: Component<{ projectId: string }> = (props) => {
           />
         </Match>
       </Switch>
-      <Dialog open={confirmReview()} onOpenChange={setConfirmReview}>
+      <Dialog open={confirmReview()} onOpenChange={closeReviewDialog}>
         <DialogContent data-testid="sharing-policy-confirmation">
           <DialogHeader>
             <DialogTitle>Require review before sharing?</DialogTitle>
