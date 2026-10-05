@@ -16,8 +16,8 @@ import {
 import { DocHeader } from "./Document";
 import { ProjectActions } from "./ProjectActions";
 import { ListRow } from "./Panes";
+import { SharingPanel } from "./SharingPanel";
 import { StateCard } from "./StateCard";
-import { createLoader } from "~/lib/loader";
 import { Button } from "../ui/button";
 import {
   Select,
@@ -36,10 +36,6 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
     projectId: props.project.id,
     cursor: null,
   }));
-  const sharingState = createLoader(
-    () => props.project.id,
-    (projectId) => ws.tracked(() => ws.client.getProjectSharing(projectId)),
-  );
   const aliases = () =>
     props.project.git_remote
       ? (ws.projects.data() ?? []).filter(
@@ -57,10 +53,6 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
     return undefined;
   };
   const recent = () => sessions.loader.data()?.items.slice(0, 5) ?? [];
-  const humanizeState = (state: string) =>
-    state
-      .replace(/_/g, " ")
-      .replace(/^./, (character) => character.toUpperCase());
   return (
     <div class="mx-auto max-w-[940px] px-5 py-7 sm:px-7.5">
       <DocHeader
@@ -125,30 +117,7 @@ export const ProjectPage: Component<{ project: ProjectSummary }> = (props) => {
           </Show>
         </div>
       </section>
-      <section class="border-b border-line py-5">
-        <div class="eyebrow mb-2">Sharing</div>
-        <Switch>
-          <Match when={sharingState.loading() && !sharingState.data()}>
-            <StateCard kind="loading" title="Loading sharing status" compact />
-          </Match>
-          <Match when={sharingState.data()}>
-            {(status) => (
-              <div class="text-sm">
-                {humanizeState(status().state)} ·{" "}
-                {status().team?.name ?? "No team"} · policy:{" "}
-                {status().policy.effective}
-              </div>
-            )}
-          </Match>
-          <Match when={sharingState.error()}>
-            <StateCard
-              kind="empty"
-              title="Sharing status not available"
-              compact
-            />
-          </Match>
-        </Switch>
-      </section>
+      <SharingPanel projectId={props.project.id} />
       <section class="border-b border-line py-5">
         <div class="mb-3 flex items-center justify-between">
           <div class="eyebrow">Recent sessions</div>

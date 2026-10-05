@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { ProjectPage } from "~/components/lore/ProjectPage";
 import { WorkspaceProvider } from "~/routes/workspace";
-import type { ApiClient } from "~/lib/api";
-import type { ProjectSummary } from "~/contracts";
+import { ApiError, type ApiClient } from "~/lib/api";
+import type { ProjectSummary, SharingStatus } from "~/contracts";
 
 const project: ProjectSummary = {
   id: "p-1",
@@ -35,6 +35,33 @@ const client = {
     detail: null,
   }),
 } as unknown as ApiClient;
+
+function mountProject(apiClient: ApiClient) {
+  return render(() => (
+    <MemoryRouter>
+      <Route
+        path="*"
+        component={() => (
+          <WorkspaceProvider client={apiClient} db={Promise.resolve(null)}>
+            <ProjectPage project={project} />
+          </WorkspaceProvider>
+        )}
+      />
+    </MemoryRouter>
+  ));
+}
+
+const linkedAuto: SharingStatus = {
+  linked: true,
+  team: { id: "team-acme", name: "Acme" },
+  policy: {
+    effective: "auto",
+    project_override: null,
+    team_default: "auto",
+  },
+  state: "linked",
+  detail: null,
+};
 
 describe("ProjectPage", () => {
   it("offers project-level knowledge navigation", () => {
@@ -255,5 +282,122 @@ describe("ProjectPage", () => {
     expect(
       await screen.findByText("Sharing status not available"),
     ).toBeInTheDocument();
+  });
+
+  it("explains linked automatic sharing", async () => {
+    mountProject({
+      ...client,
+      async getProjectSharing() {
+        return linkedAuto;
+      },
+    });
+
+    expect(
+      await screen.findByText("Linked · Acme · policy: auto"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("New knowledge is shared with the team automatically."),
+    ).toBeInTheDocument();
+  });
+
+  it("labels a linked team with no name", async () => {
+    mountProject({
+      ...client,
+      async getProjectSharing() {
+        return {
+          ...linkedAuto,
+          team: { id: "team-acme", name: null },
+        };
+      },
+    });
+
+    expect(
+      await screen.findByText("Linked · Unnamed team · policy: auto"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows locked sharing detail", async () => {
+    mountProject({
+      ...client,
+      async getProjectSharing() {
+        return {
+          ...linkedAuto,
+          state: "locked",
+          detail: "Encryption keys are locked on this device",
+        };
+      },
+    });
+
+    expect(
+      await screen.findByText("Encryption keys are locked on this device"),
+    ).toBeInTheDocument();
+    const state = screen
+      .getByTestId("sharing-panel")
+      .querySelector("[data-sharing-state]");
+    expect(state?.getAttribute("data-sharing-state")).toBe("locked");
+  });
+
+  it("shows degraded status and inherited policy detail", async () => {
+    mountProject({
+      ...client,
+      async getProjectSharing() {
+        return {
+          ...linkedAuto,
+          state: "degraded",
+          detail: "Not signed in; team content cannot sync",
+          policy: {
+            effective: "manual",
+            project_override: null,
+            team_default: "manual",
+          },
+        };
+      },
+    } as unknown as ApiClient);
+
+    expect(
+      await screen.findByText("Not signed in; team content cannot sync"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("sharing-panel")).toHaveTextContent(
+      "project override none · team default manual",
+    );
+  });
+
+  it("renders unauthorized sharing status as hidden", async () => {
+    mountProject({
+      ...client,
+      async getProjectSharing() {
+        throw new ApiError(
+          "unauthorized",
+          "/api/v1/projects/p-1/sharing",
+          "hidden",
+        );
+      },
+    });
+
+    expect(
+      await screen.findByText("Sharing status hidden"),
+    ).toBeInTheDocument();
+  });
+
+  it("retries a failed sharing read", async () => {
+    let attempts = 0;
+    mountProject({
+      ...client,
+      async getProjectSharing() {
+        attempts++;
+        if (attempts === 1) throw new Error("sharing endpoint unavailable");
+        return linkedAuto;
+      },
+    });
+
+    expect(
+      await screen.findByText("Sharing status not available"),
+    ).toBeInTheDocument();
+    expect(attempts).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByText("Linked · Acme · policy: auto"),
+    ).toBeInTheDocument();
+    expect(attempts).toBe(2);
   });
 });

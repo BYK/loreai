@@ -16,6 +16,7 @@ import {
 } from "~/db";
 
 import { createEntitiesState } from "./entities";
+import { createFolkState } from "./folk";
 import { createProjectActionsState } from "./project-actions";
 import { createKnowledgeState } from "./knowledge";
 import { createProjectsState } from "./projects";
@@ -131,6 +132,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     projects,
   });
   const knowledgeSearch = createKnowledgeSearchState({ client, tracked });
+  const folk = createFolkState({ client });
 
   return {
     projects,
@@ -140,6 +142,7 @@ export function createAppState({ client, db, tracked }: AppStateDeps) {
     recall,
     projectActions,
     knowledgeSearch,
+    folk,
     cache: {
       status: cacheStatus,
       async reset(): Promise<void> {
