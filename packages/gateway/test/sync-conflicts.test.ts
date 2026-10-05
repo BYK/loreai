@@ -334,6 +334,52 @@ describe("sync conflict routes", () => {
     });
   });
 
+  it("updates a live version for a remote-delete conflict with a revision check", async () => {
+    const logicalId = makeKnowledge();
+    const initial = currentEntry(logicalId);
+    const id = recordKnowledgeConflict(
+      logicalId,
+      {
+        title: "Local title",
+        content: "Local content",
+        category: "decision",
+      },
+      "remote_delete_wins",
+    );
+
+    const stale = await request(
+      `/api/v1/sync/conflicts/${id}/keep-local`,
+      "POST",
+      JSON.stringify({ expected_version_id: "stale-live-version" }),
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        type: "stale_version",
+        current_version_id: initial.version_id,
+      },
+    });
+    expect(currentEntry(logicalId)).toMatchObject(initial);
+    expect(syncData.getSyncConflict(id)).not.toBeNull();
+
+    const response = await request(
+      `/api/v1/sync/conflicts/${id}/keep-local`,
+      "POST",
+      JSON.stringify({ expected_version_id: initial.version_id }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      kept: "local",
+      current: {
+        version_id: expect.any(String),
+        version: initial.version + 1,
+        title: "Local title",
+        content: "Local content",
+      },
+    });
+    expect(syncData.getSyncConflict(id)).toBeNull();
+  });
+
   it("returns the actual title when a local rename collides with another entry", async () => {
     const logicalId = makeKnowledge();
     const collisionTitle = `Collision ${randomUUID()}`;
