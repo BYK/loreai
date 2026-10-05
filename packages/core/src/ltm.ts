@@ -1174,12 +1174,16 @@ export function clearTombstone(id: string): void {
  * - intersectionSize = number of shared meaningful words
  * Filters stopwords and single-char tokens for meaningful comparison.
  */
-function titleOverlap(
-  a: string,
-  b: string,
+/** Lowercased meaningful-term set for a title — tokenize once, score many pairs. */
+function titleTermSet(title: string): Set<string> {
+  return new Set(filterTerms(title).map((w) => w.toLowerCase()));
+}
+
+/** Word-overlap between two precomputed term sets. */
+function titleOverlapSets(
+  wordsA: Set<string>,
+  wordsB: Set<string>,
 ): { coefficient: number; intersectionSize: number } {
-  const wordsA = new Set(filterTerms(a).map((w) => w.toLowerCase()));
-  const wordsB = new Set(filterTerms(b).map((w) => w.toLowerCase()));
   if (wordsA.size === 0 || wordsB.size === 0)
     return { coefficient: 0, intersectionSize: 0 };
   const intersection = [...wordsA].filter((w) => wordsB.has(w));
@@ -1187,6 +1191,13 @@ function titleOverlap(
     coefficient: intersection.length / Math.min(wordsA.size, wordsB.size),
     intersectionSize: intersection.length,
   };
+}
+
+function titleOverlap(
+  a: string,
+  b: string,
+): { coefficient: number; intersectionSize: number } {
+  return titleOverlapSets(titleTermSet(a), titleTermSet(b));
 }
 
 /** Minimum word-overlap coefficient to consider two titles as duplicates. */
@@ -4509,16 +4520,16 @@ function loadDedupEmbeddings(
 
 /** Score one entry pair against the two dedup signals. */
 function scoreDedupPair(
-  entry: KnowledgeEntry,
-  other: KnowledgeEntry,
+  entryTerms: Set<string>,
+  otherTerms: Set<string>,
   entryVec: Float32Array | undefined,
   otherVec: Float32Array | undefined,
   embeddingThreshold: number,
 ): DedupPairSignals {
   // Signal 1: title word-overlap
-  const { coefficient, intersectionSize } = titleOverlap(
-    entry.title,
-    other.title,
+  const { coefficient, intersectionSize } = titleOverlapSets(
+    entryTerms,
+    otherTerms,
   );
   const titleMatch =
     coefficient >= FUZZY_DEDUP_THRESHOLD &&
@@ -4591,6 +4602,8 @@ function _dedup(
   // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
   const embeddingMap = loadDedupEmbeddings(entries);
+  // Tokenize each title once — the O(n²) pair loop reuses the term sets.
+  const termSets = new Map(entries.map((e) => [e.id, titleTermSet(e.title)]));
 
   // Pre-compute neighbors for all UNIQUE pairs — title overlap and cosine
   // similarity are both symmetric, so (A,B) == (B,A). Iterating over unique
@@ -4603,14 +4616,15 @@ function _dedup(
   for (let i = 0; i < entries.length; i++) {
     if (!neighborMap.has(entries[i].id)) neighborMap.set(entries[i].id, []);
     const entryVec = embeddingMap.get(entries[i].id);
+    const entryTerms = termSets.get(entries[i].id) ?? new Set<string>();
 
     for (let j = i + 1; j < entries.length; j++) {
       const entry = entries[i];
       const other = entries[j];
 
       const signals = scoreDedupPair(
-        entry,
-        other,
+        entryTerms,
+        termSets.get(other.id) ?? new Set<string>(),
         entryVec,
         embeddingMap.get(other.id),
         embeddingThreshold,
@@ -4837,6 +4851,10 @@ export async function deduplicateAgainstShared(
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   };
 
+  // Tokenize each title once — the n×m pair loop reuses the term sets.
+  const termSets = new Map(
+    [...privates, ...shared].map((e) => [e.id, titleTermSet(e.title)]),
+  );
   const pairMatches = new Map<string, DedupPairMatch>();
   const pairSimilarities = new Map<string, number>();
   const sharedById = new Map(shared.map((e) => [e.id, e]));
@@ -4845,10 +4863,11 @@ export async function deduplicateAgainstShared(
 
   for (const priv of privates) {
     const privVec = embeddingMap.get(priv.id);
+    const privTerms = termSets.get(priv.id) ?? new Set<string>();
     for (const sh of shared) {
       const signals = scoreDedupPair(
-        priv,
-        sh,
+        privTerms,
+        termSets.get(sh.id) ?? new Set<string>(),
         privVec,
         embeddingMap.get(sh.id),
         threshold,
