@@ -87,6 +87,9 @@ function handleFailure(error: unknown): Response {
           ...(error.current_revision === undefined
             ? {}
             : { current_revision: error.current_revision }),
+          ...(error.conflicting_entry === undefined
+            ? {}
+            : { conflicting_entry: error.conflicting_entry }),
         },
       },
       status,

@@ -8,6 +8,10 @@
  * The typed wrapper owns machine-mode confirmation while preserving each
  * legacy handler's own prompt and preview behavior.
  */
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { WRITE_DATA_SUBCOMMANDS } from "../src/cli/commands/data";
 
@@ -754,6 +758,79 @@ describe("Phase 3C slice 1 — typed lore data (read-only)", () => {
       process.exitCode = priorExitCode;
     }
     expect(calls[0]?.values["min-confidence"]).toBe("low");
+    vi.resetModules();
+  });
+
+  test("local knowledge move refuses a normalized shared-title conflict", async () => {
+    vi.resetModules();
+    vi.doUnmock("../src/cli/data");
+    vi.doUnmock("../src/cli/commands/data");
+    const root = mkdtempSync(join(tmpdir(), "lore-cli-title-conflict-"));
+    const titleSuffix = randomUUID();
+    const title = `CLI move title conflict ${titleSuffix}`;
+    const source = join(root, "source");
+    const shared = join(root, "shared");
+    const target = join(root, "target");
+    mkdirSync(source);
+    mkdirSync(shared);
+    mkdirSync(target);
+    const { ensureProject, ltm } = await import("@loreai/core");
+    ensureProject(source, "move-source");
+    ensureProject(shared, "move-shared");
+    const id = ltm.create({
+      projectPath: source,
+      category: "decision",
+      title,
+      content: "Project-only source",
+      scope: "project",
+    });
+    const sharedId = ltm.create({
+      id: randomUUID(),
+      projectPath: shared,
+      category: "decision",
+      title: ` ${title.toLowerCase()} `,
+      content: "Existing shared entry",
+      scope: "project",
+      crossProject: true,
+    });
+    expect(ltm.getByLogical(id)?.project_id).toBe(ensureProject(source));
+    expect(ltm.getByLogical(sharedId)?.cross_project).toBe(1);
+    expect(ltm.findSharedTitleConflict(id, title)?.logical_id).toBe(sharedId);
+
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit called");
+    });
+    const priorRemoteUrl = process.env.LORE_REMOTE_URL;
+    const priorRemote = process.env.LORE_REMOTE;
+    const priorHostedMode = process.env.LORE_HOSTED_MODE;
+    delete process.env.LORE_REMOTE_URL;
+    delete process.env.LORE_REMOTE;
+    delete process.env.LORE_HOSTED_MODE;
+    try {
+      const { commandData } = await import("../src/cli/data");
+      await expect(
+        commandData(["move", "knowledge", id], {
+          project: source,
+          to: target,
+          yes: true,
+        }),
+      ).rejects.toThrow("process.exit called");
+      expect(stderr).toHaveBeenCalledWith(
+        `Refusing to move: title "${title}" is already used by shared entry " ${title.toLowerCase()} " (${sharedId}). Rename one entry or review duplicates in the Lore UI.`,
+      );
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      stderr.mockRestore();
+      exit.mockRestore();
+      if (priorRemoteUrl === undefined) delete process.env.LORE_REMOTE_URL;
+      else process.env.LORE_REMOTE_URL = priorRemoteUrl;
+      if (priorRemote === undefined) delete process.env.LORE_REMOTE;
+      else process.env.LORE_REMOTE = priorRemote;
+      if (priorHostedMode === undefined) delete process.env.LORE_HOSTED_MODE;
+      else process.env.LORE_HOSTED_MODE = priorHostedMode;
+      rmSync(root, { recursive: true, force: true });
+    }
     vi.resetModules();
   });
 
