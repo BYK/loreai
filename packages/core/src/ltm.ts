@@ -4463,8 +4463,102 @@ export type DedupResult = {
   pairMatches?: Map<string, DedupPairMatch>;
 };
 
+/** Signals computed for one candidate pair, before clustering decides. */
+type DedupPairSignals = {
+  /** Title word-overlap coefficient (0–1). */
+  coefficient: number;
+  /** Embedding cosine similarity (0 when either side lacks an embedding). */
+  similarity: number;
+  titleMatch: boolean;
+  embeddingMatch: boolean;
+};
+
 /**
- * Deduplicate knowledge entries for a project.
+ * Load embeddings for the given entries (if available).
+ * We query directly rather than using vectorSearch() because we need
+ * pairwise comparison among entries, not a query-vs-all search.
+ */
+function loadDedupEmbeddings(
+  entries: KnowledgeEntry[],
+): Map<string, Float32Array> {
+  const embeddingMap = new Map<string, Float32Array>();
+  if (entries.length === 0) return embeddingMap;
+  const entryIds = entries.map((e) => e.id);
+  // Build parameterized IN clause for the entry IDs
+  const placeholders = entryIds.map(() => "?").join(",");
+  const src = embeddingByIdSource(
+    "knowledge",
+    readStorageMode(db()),
+    "knowledge_current",
+  );
+  const rows = db()
+    .query(
+      `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
+    )
+    .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
+  for (const row of rows) {
+    try {
+      embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
+    } catch {
+      // Skip corrupted embeddings — entry falls back to title-overlap only.
+      log.info(`skipping corrupted embedding for entry ${row.id}`);
+    }
+  }
+  return embeddingMap;
+}
+
+/** Score one entry pair against the two dedup signals. */
+function scoreDedupPair(
+  entry: KnowledgeEntry,
+  other: KnowledgeEntry,
+  entryVec: Float32Array | undefined,
+  otherVec: Float32Array | undefined,
+  embeddingThreshold: number,
+): DedupPairSignals {
+  // Signal 1: title word-overlap
+  const { coefficient, intersectionSize } = titleOverlap(
+    entry.title,
+    other.title,
+  );
+  const titleMatch =
+    coefficient >= FUZZY_DEDUP_THRESHOLD &&
+    intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP;
+
+  // Signal 2: embedding cosine similarity
+  let embeddingMatch = false;
+  let similarity = 0;
+  if (entryVec) {
+    if (otherVec && entryVec.length === otherVec.length) {
+      similarity = embedding.cosineSimilarity(entryVec, otherVec);
+      embeddingMatch = similarity >= embeddingThreshold;
+    }
+  }
+  return { coefficient, similarity, titleMatch, embeddingMatch };
+}
+
+/** Reasons + score for a pair whose signals crossed a threshold. */
+function dedupPairMatch(signals: DedupPairSignals): DedupPairMatch {
+  const reasons: DedupMatchReason[] = [];
+  if (signals.titleMatch) reasons.push("title_overlap");
+  if (signals.embeddingMatch) reasons.push("embedding_similarity");
+  return {
+    score: Math.max(signals.coefficient, signals.similarity),
+    reasons,
+  };
+}
+
+function emptyDedupResult(): DedupResult {
+  return {
+    clusters: [],
+    totalRemoved: 0,
+    pairSimilarities: new Map(),
+    entryTitles: new Map(),
+    pairMatches: new Map(),
+  };
+}
+
+/**
+ * Core dedup logic — operates on an arbitrary list of entries.
  *
  * Uses two complementary signals with "star" clustering (no transitive
  * chains) to prevent snowball merging:
@@ -4481,25 +4575,13 @@ export type DedupResult = {
  * Pairs matching either signal are clustered together. For each cluster,
  * picks a survivor (highest confidence, then most recently updated, then
  * shortest title) and removes the rest.
- *
- * @param projectPath   Project root path
- * @param opts.dryRun   If true (default), report clusters without deleting
- * @returns             Cluster report and count of removed entries
  */
-/** Core dedup logic — operates on an arbitrary list of entries. */
 function _dedup(
   entries: KnowledgeEntry[],
   dryRun: boolean,
   embeddingThreshold: number = EMBEDDING_DEDUP_THRESHOLD,
 ): DedupResult {
-  if (entries.length < 2)
-    return {
-      clusters: [],
-      totalRemoved: 0,
-      pairSimilarities: new Map(),
-      entryTitles: new Map(),
-      pairMatches: new Map(),
-    };
+  if (entries.length < 2) return emptyDedupResult();
 
   // --- Build neighbor map using title overlap + embedding similarity ---
   // Two entries are considered neighbors (potential duplicates) if EITHER:
@@ -4508,33 +4590,7 @@ function _dedup(
   // Star clustering (no transitivity) prevents snowball merging.
   // O(n²) pairwise comparison — acceptable for n ≤ 25 (maxEntries cap).
 
-  // Load embeddings for the given entries (if available).
-  // We query directly rather than using vectorSearch() because we need
-  // pairwise comparison among entries, not a query-vs-all search.
-  const embeddingMap = new Map<string, Float32Array>();
-  {
-    const entryIds = entries.map((e) => e.id);
-    // Build parameterized IN clause for the entry IDs
-    const placeholders = entryIds.map(() => "?").join(",");
-    const src = embeddingByIdSource(
-      "knowledge",
-      readStorageMode(db()),
-      "knowledge_current",
-    );
-    const rows = db()
-      .query(
-        `SELECT id, embedding FROM ${src.table} WHERE id IN (${placeholders})${src.presenceFilter}`,
-      )
-      .all(...entryIds) as Array<{ id: string; embedding: Buffer }>;
-    for (const row of rows) {
-      try {
-        embeddingMap.set(row.id, embedding.fromBlob(row.embedding));
-      } catch {
-        // Skip corrupted embeddings — entry falls back to title-overlap only.
-        log.info(`skipping corrupted embedding for entry ${row.id}`);
-      }
-    }
-  }
+  const embeddingMap = loadDedupEmbeddings(entries);
 
   // Pre-compute neighbors for all UNIQUE pairs — title overlap and cosine
   // similarity are both symmetric, so (A,B) == (B,A). Iterating over unique
@@ -4552,42 +4608,32 @@ function _dedup(
       const entry = entries[i];
       const other = entries[j];
 
-      // Signal 1: title word-overlap
-      const { coefficient, intersectionSize } = titleOverlap(
-        entry.title,
-        other.title,
+      const signals = scoreDedupPair(
+        entry,
+        other,
+        entryVec,
+        embeddingMap.get(other.id),
+        embeddingThreshold,
       );
-      const titleMatch =
-        coefficient >= FUZZY_DEDUP_THRESHOLD &&
-        intersectionSize >= FUZZY_DEDUP_MIN_OVERLAP;
-
-      // Signal 2: embedding cosine similarity
-      let embeddingMatch = false;
-      let similarity = 0;
-      if (entryVec) {
-        const otherVec = embeddingMap.get(other.id);
-        if (otherVec && entryVec.length === otherVec.length) {
-          similarity = embedding.cosineSimilarity(entryVec, otherVec);
-          embeddingMatch = similarity >= embeddingThreshold;
-        }
-      }
 
       // Track pairwise embedding similarity for calibration
-      if (similarity > 0) {
-        pairSimilarities.set(dedupPairKey(entry.id, other.id), similarity);
+      if (signals.similarity > 0) {
+        pairSimilarities.set(
+          dedupPairKey(entry.id, other.id),
+          signals.similarity,
+        );
       }
 
-      if (titleMatch || embeddingMatch) {
-        const score = Math.max(coefficient, similarity);
-        const reasons: DedupMatchReason[] = [];
-        if (titleMatch) reasons.push("title_overlap");
-        if (embeddingMatch) reasons.push("embedding_similarity");
-        pairMatches.set(dedupPairKey(entry.id, other.id), { score, reasons });
+      if (signals.titleMatch || signals.embeddingMatch) {
+        const match = dedupPairMatch(signals);
+        pairMatches.set(dedupPairKey(entry.id, other.id), match);
         const entryNeighbors = neighborMap.get(entry.id);
-        if (entryNeighbors) entryNeighbors.push({ id: other.id, score });
+        if (entryNeighbors)
+          entryNeighbors.push({ id: other.id, score: match.score });
         if (!neighborMap.has(other.id)) neighborMap.set(other.id, []);
         const otherNeighbors = neighborMap.get(other.id);
-        if (otherNeighbors) otherNeighbors.push({ id: entry.id, score });
+        if (otherNeighbors)
+          otherNeighbors.push({ id: entry.id, score: match.score });
       }
     }
   }
@@ -4670,17 +4716,41 @@ function _dedup(
   };
 }
 
+/**
+ * Deduplicate the PRIVATE entries of one project (`project_id = P AND
+ * cross_project = 0`). Shared-visible entries (`project_id IS NULL` or
+ * `cross_project = 1`) are deliberately excluded: they are the shared pool's
+ * responsibility (see {@link deduplicateGlobal}), and folding a promoted entry
+ * into a private survivor here would silently un-share it. Private↔shared
+ * duplicates are surfaced separately by {@link deduplicateAgainstShared}.
+ *
+ * @param projectPath   Project root path
+ * @param opts.dryRun   If true (default), report clusters without deleting
+ * @returns             Cluster report and count of removed entries
+ */
 export async function deduplicate(
   projectPath: string,
   opts?: { dryRun?: boolean },
 ): Promise<DedupResult> {
   const pid = ensureProject(projectPath);
   const threshold = loadCalibratedThreshold(pid) ?? EMBEDDING_DEDUP_THRESHOLD;
-  const entries = forProject(projectPath, false);
+  const entries = db()
+    .query(
+      `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+       WHERE tenant_id = ? AND project_id = ? AND cross_project = 0
+       AND confidence > 0.2
+       ORDER BY confidence DESC, updated_at DESC`,
+    )
+    .all(currentTenantId(), pid)
+    .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   return _dedup(entries, opts?.dryRun ?? true, threshold);
 }
 
-/** Deduplicate global (cross-project) entries that have no project_id. */
+/**
+ * Deduplicate the shared pool: entries visible across projects
+ * (`project_id IS NULL OR cross_project = 1`), including entries promoted out
+ * of their origin project. Project-private rows are never in scope.
+ */
 export async function deduplicateGlobal(opts?: {
   dryRun?: boolean;
 }): Promise<DedupResult> {
@@ -4688,13 +4758,160 @@ export async function deduplicateGlobal(opts?: {
   const entries = db()
     .query(
       `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
-       WHERE project_id IS NULL
+       WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1)
        AND confidence > 0.2
        ORDER BY confidence DESC, updated_at DESC`,
     )
-    .all()
+    .all(currentTenantId())
     .map(hydrateKnowledgeEntry) as KnowledgeEntry[];
   return _dedup(entries, opts?.dryRun ?? true, threshold);
+}
+
+/**
+ * Find a project's private entries that duplicate shared-visible entries
+ * (issue #1980 — the "project_shared" preview pool).
+ *
+ * ALWAYS a dry run: nothing is written. Scores every private(P) × shared
+ * pair with the same two signals as {@link _dedup} and assigns each matched
+ * private entry to its single best shared match, so every cluster contains
+ * exactly one shared entry — which is always the survivor. A merge under the
+ * project scope can therefore only ever fold a private entry INTO a shared
+ * keeper, never the reverse (a shared-visible entry is never removed in
+ * favour of a private one, and private content is never made shared: the
+ * survivor row is untouched by a merge).
+ *
+ * `pairSimilarities`/`entryTitles` are populated only for pairs/entries that
+ * appear in `pairMatches`: the private×shared cross-product is unbounded, so
+ * recording every pair's similarity would grow with n×m for no benefit.
+ *
+ * @param projectPath   Project root path
+ * @param opts.exclude  Entry ids or logical ids to drop from BOTH pools
+ *                      (e.g. ids already claimed by the project/shared runs).
+ */
+export async function deduplicateAgainstShared(
+  projectPath: string,
+  opts?: { exclude?: Iterable<string> },
+): Promise<DedupResult> {
+  const pid = ensureProject(projectPath);
+  const threshold = loadCalibratedThreshold(pid) ?? EMBEDDING_DEDUP_THRESHOLD;
+  const tenantId = currentTenantId();
+
+  const exclude = opts?.exclude ? new Set(opts.exclude) : null;
+  const eligible = (e: KnowledgeEntry) =>
+    !exclude || (!exclude.has(e.id) && !exclude.has(e.logical_id));
+
+  const privates = (
+    db()
+      .query(
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+         WHERE tenant_id = ? AND project_id = ? AND cross_project = 0
+         AND confidence > 0.2
+         ORDER BY confidence DESC, updated_at DESC`,
+      )
+      .all(tenantId, pid)
+      .map(hydrateKnowledgeEntry) as KnowledgeEntry[]
+  ).filter(eligible);
+  const shared = (
+    db()
+      .query(
+        `SELECT ${KNOWLEDGE_COLS} FROM knowledge_current
+         WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1)
+         AND confidence > 0.2
+         ORDER BY confidence DESC, updated_at DESC`,
+      )
+      .all(tenantId)
+      .map(hydrateKnowledgeEntry) as KnowledgeEntry[]
+  ).filter(eligible);
+
+  if (privates.length === 0 || shared.length === 0) return emptyDedupResult();
+
+  const embeddingMap = loadDedupEmbeddings([...privates, ...shared]);
+
+  // Survivor ranking with an id tail for deterministic ties: confidence desc,
+  // updated_at desc, shorter title, then id asc.
+  const rank = (a: KnowledgeEntry, b: KnowledgeEntry): number => {
+    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+    if (b.updated_at !== a.updated_at) return b.updated_at - a.updated_at;
+    if (a.title.length !== b.title.length)
+      return a.title.length - b.title.length;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  };
+
+  const pairMatches = new Map<string, DedupPairMatch>();
+  const pairSimilarities = new Map<string, number>();
+  const sharedById = new Map(shared.map((e) => [e.id, e]));
+  // private id → its single best shared match.
+  const bestMatch = new Map<string, { sharedId: string; score: number }>();
+
+  for (const priv of privates) {
+    const privVec = embeddingMap.get(priv.id);
+    for (const sh of shared) {
+      const signals = scoreDedupPair(
+        priv,
+        sh,
+        privVec,
+        embeddingMap.get(sh.id),
+        threshold,
+      );
+      if (!signals.titleMatch && !signals.embeddingMatch) continue;
+      const match = dedupPairMatch(signals);
+      pairMatches.set(dedupPairKey(priv.id, sh.id), match);
+      // Bounded memory: similarities are recorded only for matched pairs
+      // (see doc comment), unlike _dedup which tracks all of its small pool.
+      if (signals.similarity > 0) {
+        pairSimilarities.set(dedupPairKey(priv.id, sh.id), signals.similarity);
+      }
+      const best = bestMatch.get(priv.id);
+      if (
+        !best ||
+        match.score > best.score ||
+        (match.score === best.score &&
+          rank(sh, sharedById.get(best.sharedId) ?? sh) < 0)
+      ) {
+        bestMatch.set(priv.id, { sharedId: sh.id, score: match.score });
+      }
+    }
+  }
+
+  // One cluster per shared keeper.
+  const privById = new Map(privates.map((e) => [e.id, e]));
+  const membersByShared = new Map<string, KnowledgeEntry[]>();
+  for (const [privId, { sharedId }] of bestMatch) {
+    const priv = privById.get(privId);
+    if (!priv) continue;
+    const members = membersByShared.get(sharedId) ?? [];
+    members.push(priv);
+    membersByShared.set(sharedId, members);
+  }
+
+  const clusters: DedupCluster[] = [];
+  let totalRemoved = 0;
+  for (const [sharedId, members] of membersByShared) {
+    const keeper = sharedById.get(sharedId);
+    if (!keeper || members.length === 0) continue;
+    members.sort(rank);
+    clusters.push({
+      surviving: { id: keeper.id, title: keeper.title },
+      merged: members.map((e) => ({ id: e.id, title: e.title })),
+    });
+    totalRemoved += members.length;
+  }
+  // Sort clusters by size descending for readability, like _dedup.
+  clusters.sort((a, b) => b.merged.length - a.merged.length);
+
+  const entryTitles = new Map<string, string>();
+  for (const cluster of clusters) {
+    entryTitles.set(cluster.surviving.id, cluster.surviving.title);
+    for (const m of cluster.merged) entryTitles.set(m.id, m.title);
+  }
+
+  return {
+    clusters,
+    totalRemoved,
+    pairSimilarities,
+    entryTitles,
+    pairMatches,
+  };
 }
 
 // ---------------------------------------------------------------------------

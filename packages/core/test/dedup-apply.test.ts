@@ -840,3 +840,169 @@ describe("recoverability and downstream effects", () => {
     ).toEqual({ n: 0 });
   });
 });
+
+describe("shared pool", () => {
+  const PROJECT_Q = join(ROOT, "project-q");
+  mkdirSync(PROJECT_Q, { recursive: true });
+
+  /** Promoted entry: project_id = its origin project, cross_project = 1. */
+  function createPromoted(title: string, projectPath = PROJECT_Q): string {
+    const id = ltm.create({
+      id: uuidv7(),
+      projectPath,
+      category: "gotcha",
+      title,
+      content: `Promoted content for ${title}`,
+      scope: "project",
+      crossProject: true,
+      session: "test-session",
+    });
+    return id;
+  }
+
+  function row(id: string) {
+    return db()
+      .query(
+        "SELECT version, project_id, cross_project, is_deleted FROM knowledge WHERE logical_id = ? AND is_current = 1",
+      )
+      .get(ltm.logicalIdOf(id)) as {
+      version: number;
+      project_id: string | null;
+      cross_project: number;
+      is_deleted: number;
+    };
+  }
+
+  test("projectId null merges a promoted entry into a NULL keep", () => {
+    const keep = createGlobalEntry("Shared Pool Keep");
+    const dupe = createPromoted("Shared Pool Dupe");
+    const receipt = apply(request([decision(keep, dupe)], { projectId: null }));
+
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(1);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(dupe)).toBe(false);
+    // Keep row untouched: still version 1, still NULL/shared.
+    expect(row(keep)).toMatchObject({
+      version: 1,
+      project_id: null,
+      cross_project: 1,
+    });
+    expect(dedupProvenanceFor(receipt.operationId)[0]).toMatchObject({
+      keep_logical_id: keep,
+      merged_logical_id: dupe,
+    });
+    // Recoverable like any other merge: history ends in a tombstone and the
+    // last live version restores.
+    const history = ltm.versionHistory(dupe);
+    expect(history.at(-1)?.is_deleted).toBe(1);
+    const last = history[history.length - 2];
+    const restoredId = ltm.appendVersion(dupe, {
+      title: last.title,
+      content: last.content,
+      category: last.category,
+      isDeleted: false,
+    });
+    expect(restoredId).not.toBeNull();
+    expect(ltm.getByLogical(dupe)?.title).toBe("Shared Pool Dupe");
+    expect(exportLoreFile).not.toHaveBeenCalled();
+  });
+
+  test("projectId null refuses a P-private member and writes nothing", () => {
+    const keep = createGlobalEntry("Shared Null Keep");
+    const priv = createEntry("Shared Null Private");
+    const receipt = apply(request([decision(keep, priv)], { projectId: null }));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: priv, reason: "scope_mismatch", expectedRevision: 1 },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(priv)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("projectId P merges P-private entries into shared keepers", () => {
+    const nullKeep = createGlobalEntry("P Null Keep");
+    const promotedKeep = createPromoted("P Promoted Keep");
+    const privA = createEntry("P Private Dupe A");
+    const privB = createEntry("P Private Dupe B");
+    const receipt = apply(
+      request([decision(nullKeep, privA), decision(promotedKeep, privB)]),
+    );
+
+    expect(receipt.refused).toEqual([]);
+    expect(receipt.applied).toHaveLength(2);
+    expect(isLive(privA)).toBe(false);
+    expect(isLive(privB)).toBe(false);
+    // The shared keepers are untouched: same version, same scope fields.
+    expect(row(nullKeep)).toMatchObject({
+      version: 1,
+      project_id: null,
+      cross_project: 1,
+    });
+    expect(row(promotedKeep)).toMatchObject({
+      version: 1,
+      project_id: ensureProject(PROJECT_Q),
+      cross_project: 1,
+    });
+    const provenance = dedupProvenanceFor(receipt.operationId);
+    expect(provenance.map((p) => p.keep_logical_id)).toEqual([
+      nullKeep,
+      promotedKeep,
+    ]);
+    // The operation ran under the project scope, so P's .lore.md exports.
+    expect(exportLoreFile).toHaveBeenCalledTimes(1);
+    expect(exportLoreFile).toHaveBeenCalledWith(PROJECT);
+  });
+
+  test("NULL merged into a P-private keep is scope_mismatch and writes nothing", () => {
+    const keep = createEntry("Scope Priv Keep");
+    const global = createGlobalEntry("Scope Null Merge");
+    const receipt = apply(request([decision(keep, global)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(global)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("P-promoted merged into a P-private keep is scope_mismatch and writes nothing", () => {
+    const keep = createEntry("Scope Priv Keep 2");
+    const promoted = createPromoted("Scope P-Promoted Merge", PROJECT);
+    const receipt = apply(request([decision(keep, promoted)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(promoted)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("NULL keep + Q-promoted merge under P is scope_mismatch and writes nothing", () => {
+    const keep = createGlobalEntry("Scope Null Keep Under P");
+    const merge = createPromoted("Scope Q-Promoted Merge");
+    const receipt = apply(request([decision(keep, merge)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: merge, reason: "scope_mismatch", expectedRevision: 1 },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(merge)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+
+  test("Q-private keep under P is scope_mismatch and writes nothing", () => {
+    const keep = createEntry("Scope Q Keep", PROJECT_B);
+    const dupe = createEntry("Scope P Dupe");
+    const receipt = apply(request([decision(keep, dupe)]));
+    expect(receipt.applied).toEqual([]);
+    expect(receipt.refused[0].error.code).toBe("scope_mismatch");
+    expect(receipt.refused[0].error.details).toEqual([
+      { id: keep, reason: "scope_mismatch", expectedRevision: 1 },
+    ]);
+    expect(isLive(keep)).toBe(true);
+    expect(isLive(dupe)).toBe(true);
+    expect(dedupProvenanceFor(receipt.operationId)).toEqual([]);
+  });
+});

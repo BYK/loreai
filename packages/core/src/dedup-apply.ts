@@ -11,6 +11,16 @@
  * `ltm.remove()`, so its history stays in `knowledge` and it can be restored
  * with `ltm.appendVersion()`. The `dedup_operations` / `dedup_provenance`
  * ledger records why the merge happened and makes the operation idempotent.
+ *
+ * Scope rule (`projectId` on the request): `null` is the SHARED pool — every
+ * keep and merge must be shared-visible (`project_id IS NULL` or
+ * `cross_project = 1`). A concrete `P` is the project pool — every merge must
+ * be private to P (`project_id = P AND cross_project = 0`); the keep may be
+ * private to P OR shared-visible. The asymmetry is what makes private→shared
+ * merges safe: a merge can only ever fold a private entry INTO a shared (or
+ * same-project) survivor, so a shared entry can never be removed in favour of
+ * a private one and private content never becomes shared — the survivor row
+ * itself is never modified by a merge.
  */
 
 import { createHash } from "node:crypto";
@@ -45,7 +55,11 @@ export type DedupDecision = {
 };
 
 export type DedupApplyRequest = {
-  /** Project scope of every referenced entry; `null` = global entries. */
+  /**
+   * Pool the decisions were reviewed under. `null` = the shared pool (every
+   * entry shared-visible); `P` = the project pool (merges private to P, the
+   * keep private to P or shared-visible).
+   */
   projectId: string | null;
   /** Client-chosen stable id; a retry with the same id replays the receipt. */
   operationId: string;
@@ -264,6 +278,7 @@ type CurrentRow = {
   id: string;
   logical_id: string;
   project_id: string | null;
+  cross_project: number;
   version: number;
   is_deleted: number;
 };
@@ -280,7 +295,7 @@ type StoredReceipt = Omit<DedupApplyReceipt, "replayed">;
 function currentRow(logicalId: string): CurrentRow | null {
   return db()
     .query(
-      `SELECT id, logical_id, project_id, version, is_deleted
+      `SELECT id, logical_id, project_id, cross_project, version, is_deleted
          FROM knowledge WHERE tenant_id = ? AND logical_id = ? AND is_current = 1`,
     )
     .get(currentTenantId(), logicalId) as CurrentRow | null;
@@ -301,7 +316,22 @@ function checkGroup(
       details.push({ id, reason: "not_found", expectedRevision });
       continue;
     }
-    if (row.project_id !== projectId) {
+    // Shared pool (projectId null): keep and merges must all be
+    // shared-visible. Project pool P: merges must be private(P); the keep may
+    // be private(P) or shared-visible — see the module doc for why the
+    // asymmetry preserves the visibility invariant.
+    const sharedVisible = row.project_id === null || row.cross_project === 1;
+    const privateToScope =
+      projectId !== null &&
+      row.project_id === projectId &&
+      row.cross_project === 0;
+    const inScope =
+      projectId === null
+        ? sharedVisible
+        : id === decision.keepId
+          ? privateToScope || sharedVisible
+          : privateToScope;
+    if (!inScope) {
       details.push({ id, reason: "scope_mismatch", expectedRevision });
       continue;
     }

@@ -5,9 +5,18 @@
  *   POST /api/v1/projects/:id/dedup/apply  — apply reviewed decisions
  *
  * The preview keeps the legacy `{ project, global }` `DedupResult` payload that
- * `lore data dedup --remote` prints, and adds `dry_run` + `groups`: one typed
- * group per cluster with the revision of every candidate, so a later
- * `/dedup/apply` can prove the reviewer saw the entries it is about to merge.
+ * `lore data dedup --remote` prints (plus `project_shared`), and adds
+ * `dry_run` + `groups`: one typed group per cluster with the revision of every
+ * candidate, so a later `/dedup/apply` can prove the reviewer saw the entries
+ * it is about to merge.
+ *
+ * Three pools (#1980), disjoint by construction — `project_shared` excludes
+ * every id the other two runs already clustered:
+ *   - `pool: "project"` (scope `project`): private(P) ↔ private(P) merges;
+ *   - `pool: "project_shared"` (scope `project`): private(P) entries folded
+ *     INTO a shared-visible keeper — applied under the route projectId;
+ *   - `pool: "shared"` (scope `global`): shared-visible ↔ shared-visible —
+ *     applied with `projectId: null`.
  */
 import { createHash } from "node:crypto";
 import { db, dedupApply, isHostedMode, ltm } from "@loreai/core";
@@ -41,6 +50,8 @@ export type DedupPreviewCandidate = {
 export type DedupPreviewGroup = {
   group_id: string;
   scope: DedupScope;
+  /** Which candidate pool produced this group — see the header comment. */
+  pool: "project" | "shared" | "project_shared";
   project_id: string | null;
   candidates: DedupPreviewCandidate[];
   suggested_keep_id: string;
@@ -51,6 +62,7 @@ export type DedupPreviewResponse = {
   groups: DedupPreviewGroup[];
   project: DedupResult;
   global: DedupResult;
+  project_shared: DedupResult;
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -75,12 +87,12 @@ function excerpt(content: string): string {
 }
 
 /** Stable across previews (and edits) as long as the cluster's membership is unchanged. */
-function groupIdFor(scope: DedupScope, logicalIds: string[]): string {
+function groupIdFor(prefix: string, logicalIds: string[]): string {
   const digest = createHash("sha256")
     .update([...logicalIds].sort().join("\n"))
     .digest("hex")
     .slice(0, 16);
-  return `${scope}:${digest}`;
+  return `${prefix}:${digest}`;
 }
 
 /**
@@ -94,6 +106,7 @@ export function dedupPreviewGroups(
   result: DedupResult,
   scope: DedupScope,
   projectId: string | null,
+  pool: DedupPreviewGroup["pool"] = scope === "project" ? "project" : "shared",
 ): DedupPreviewGroup[] {
   const groups: DedupPreviewGroup[] = [];
   const pairMatches =
@@ -143,10 +156,12 @@ export function dedupPreviewGroups(
     if (candidates.length < 2) continue;
     groups.push({
       group_id: groupIdFor(
-        scope,
+        // Keep the historical prefixes: the shared pool's ids stay `global:`.
+        pool === "shared" ? "global" : pool,
         candidates.map((c) => c.logical_id),
       ),
       scope,
+      pool,
       project_id: projectId,
       candidates,
       // `merged` is ordered by the survivor ranking, so when the survivor is
@@ -164,14 +179,33 @@ export async function handleDedupPreview(
 ): Promise<Response> {
   const project = await ltm.deduplicate(projectPath, { dryRun: true });
   const global = await ltm.deduplicateGlobal({ dryRun: true });
+  // Exclude every id the other two runs already clustered so no logical id
+  // appears in two preview groups (the pools overlap by design — a promoted
+  // entry is visible to both the shared pool and a project's private↔shared
+  // pairing).
+  const exclude = new Set<string>();
+  for (const cluster of [...project.clusters, ...global.clusters]) {
+    exclude.add(cluster.surviving.id);
+    for (const member of cluster.merged) exclude.add(member.id);
+  }
+  const project_shared = await ltm.deduplicateAgainstShared(projectPath, {
+    exclude,
+  });
   const body: DedupPreviewResponse = {
     dry_run: true,
     groups: [
       ...dedupPreviewGroups(project, "project", projectId),
+      ...dedupPreviewGroups(
+        project_shared,
+        "project",
+        projectId,
+        "project_shared",
+      ),
       ...dedupPreviewGroups(global, "global", null),
     ],
     project,
     global,
+    project_shared,
   };
   return jsonResponse(body);
 }

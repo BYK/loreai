@@ -998,3 +998,267 @@ describe("dedup — DB migration", () => {
       .run();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Shared/promoted pools (#1980)
+// ---------------------------------------------------------------------------
+
+const PROJECT_Q = "/test/dedup/project-q";
+const PROJECT_R = "/test/dedup/project-r";
+
+/**
+ * Create a promoted entry: project_id = its origin project, cross_project = 1.
+ * Asserts the shape so the tests below are actually exercising promoted rows.
+ */
+function createPromoted(opts: {
+  title: string;
+  projectPath: string;
+  confidence?: number;
+}): string {
+  const id = ltm.create({
+    id: uuidv7(),
+    projectPath: opts.projectPath,
+    category: "gotcha",
+    title: opts.title,
+    content: `Content for ${opts.title}`,
+    scope: "project",
+    crossProject: true,
+    session: "test-session",
+  });
+  const row = db()
+    .query(
+      "SELECT project_id, cross_project FROM knowledge_current WHERE id = ?",
+    )
+    .get(id) as { project_id: string | null; cross_project: number };
+  expect(row.cross_project).toBe(1);
+  expect(row.project_id).toBe(ensureProject(opts.projectPath));
+  if (opts.confidence != null) ltm.update(id, { confidence: opts.confidence });
+  return id;
+}
+
+function createGlobal(opts: { title: string; confidence?: number }): string {
+  const id = ltm.create({
+    id: uuidv7(),
+    category: "gotcha",
+    title: opts.title,
+    content: `Global content for ${opts.title}`,
+    scope: "global",
+    crossProject: true,
+    session: "test-session",
+  });
+  const row = db()
+    .query(
+      "SELECT project_id, cross_project FROM knowledge_current WHERE id = ?",
+    )
+    .get(id) as { project_id: string | null; cross_project: number };
+  expect(row.project_id).toBeNull();
+  expect(row.cross_project).toBe(1);
+  if (opts.confidence != null) ltm.update(id, { confidence: opts.confidence });
+  return id;
+}
+
+/** All ids (surviving + merged) appearing anywhere in a DedupResult. */
+function clusterIds(result: ltm.DedupResult): Set<string> {
+  const ids = new Set<string>();
+  for (const c of result.clusters) {
+    ids.add(c.surviving.id);
+    for (const m of c.merged) ids.add(m.id);
+  }
+  return ids;
+}
+
+describe("dedup — promoted/shared pools (#1980)", () => {
+  beforeEach(cleanup);
+
+  test("deduplicate ignores P-promoted entries", async () => {
+    const priv = createEntry({
+      title: "Cache eviction policy uses hysteresis to avoid flapping",
+    });
+    const promoted = createPromoted({
+      title: "Cache eviction policy uses hysteresis to avoid flapping dup",
+      projectPath: PROJECT,
+    });
+
+    const dry = await ltm.deduplicate(PROJECT, { dryRun: true });
+    expect(dry.clusters).toHaveLength(0);
+
+    // Even the applying run must leave the promoted entry (and the private
+    // one) untouched.
+    const applied = await ltm.deduplicate(PROJECT, { dryRun: false });
+    expect(applied.clusters).toHaveLength(0);
+    expect(ltm.get(priv)).not.toBeNull();
+    expect(ltm.get(promoted)).not.toBeNull();
+  });
+
+  test("deduplicateGlobal clusters promoted + NULL shared entries, never private rows", async () => {
+    const nul = createGlobal({
+      title: "Shared cache eviction policy for all tenants",
+    });
+    const promotedQ = createPromoted({
+      title: "Shared cache eviction policy for all tenants (q)",
+      projectPath: PROJECT_Q,
+    });
+    const promotedR = createPromoted({
+      title: "Shared cache eviction policy for all tenants (r)",
+      projectPath: PROJECT_R,
+    });
+    const priv = createEntry({
+      title: "Shared cache eviction policy for all tenants (private copy)",
+      projectPath: PROJECT,
+    });
+
+    const result = await ltm.deduplicateGlobal({ dryRun: true });
+    const ids = clusterIds(result);
+    // The three shared-visible entries cluster; the private row never appears.
+    for (const id of [nul, promotedQ, promotedR]) expect(ids).toContain(id);
+    expect(ids).not.toContain(priv);
+    expect(result.pairMatches?.has(dedupPairKey(priv, nul))).toBe(false);
+    expect(result.pairMatches?.has(dedupPairKey(priv, promotedQ))).toBe(false);
+    expect(result.pairMatches?.has(dedupPairKey(priv, promotedR))).toBe(false);
+  });
+
+  test("deduplicateAgainstShared keeps the shared entry even when the private one has higher confidence", async () => {
+    const shared = createGlobal({
+      title: "Retry backoff jitter window avoids thundering herd",
+      confidence: 0.5,
+    });
+    const priv = createEntry({
+      title: "Retry backoff jitter window avoids thundering herd dup",
+    }); // confidence 1.0 — would win _dedup's survivor ranking
+
+    const result = await ltm.deduplicateAgainstShared(PROJECT);
+    expect(result.clusters).toHaveLength(1);
+    expect(result.clusters[0].surviving.id).toBe(shared);
+    expect(result.clusters[0].merged.map((m) => m.id)).toEqual([priv]);
+    expect(result.totalRemoved).toBe(1);
+    expect(result.pairMatches?.has(dedupPairKey(priv, shared))).toBe(true);
+    expect(result.entryTitles.get(priv)).toBe(
+      "Retry backoff jitter window avoids thundering herd dup",
+    );
+    expect(result.entryTitles.get(shared)).toBe(
+      "Retry backoff jitter window avoids thundering herd",
+    );
+    expect(ltm.get(priv)).not.toBeNull();
+    expect(ltm.get(shared)).not.toBeNull();
+  });
+
+  test("deduplicateAgainstShared assigns a private entry to its single best shared match", async () => {
+    const titleMatch = createGlobal({
+      // 7/8 shared words → title-overlap match, score 0.875 < the 1.0 below.
+      title: "Connection pool exhaustion under concurrent cold starts quota",
+    });
+    const embMatch = createGlobal({
+      title: "Completely unrelated shared entry",
+    });
+    const priv = createEntry({
+      title: "Connection pool exhaustion under concurrent cold starts dup",
+    });
+    // Private × embMatch: identical embeddings (score 1.0) beat the title
+    // overlap (0.875) with titleMatch.
+    injectEmbedding(priv, 42);
+    injectEmbedding(embMatch, 42);
+
+    const result = await ltm.deduplicateAgainstShared(PROJECT);
+    expect(result.clusters).toHaveLength(1);
+    const cluster = result.clusters[0];
+    expect(cluster.surviving.id).toBe(embMatch);
+    expect(cluster.merged.map((m) => m.id)).toEqual([priv]);
+    // Both cross pairs crossed a threshold and are reported.
+    expect(result.pairMatches?.has(dedupPairKey(priv, titleMatch))).toBe(true);
+    expect(result.pairMatches?.has(dedupPairKey(priv, embMatch))).toBe(true);
+    // Exactly one shared member per cluster.
+    for (const c of result.clusters) {
+      expect(
+        [c.surviving.id, ...c.merged.map((m) => m.id)].filter((id) =>
+          [titleMatch, embMatch].includes(id),
+        ),
+      ).toHaveLength(1);
+    }
+  });
+
+  test("deduplicateAgainstShared never pairs P-private with Q-private or two shared entries", async () => {
+    const _privP = createEntry({
+      title: "Tenant isolation boundary must be enforced in query layer",
+    });
+    const _privQ = createEntry({
+      title: "Tenant isolation boundary must be enforced in query layer q",
+      projectPath: PROJECT_Q,
+    });
+    const _sharedA = createGlobal({ title: "Shared alpha global entry one" });
+    const _sharedB = createGlobal({
+      title: "Shared alpha global entry one twin",
+    });
+
+    const result = await ltm.deduplicateAgainstShared(PROJECT);
+    expect(result.clusters).toHaveLength(0);
+    expect(result.pairMatches?.size).toBe(0);
+  });
+
+  test("deduplicateAgainstShared exclude drops entries by id and by logical id", async () => {
+    const shared = createGlobal({
+      title: "Write batching window trades latency for throughput",
+    });
+    const priv = createEntry({
+      title: "Write batching window trades latency for throughput dup",
+    });
+
+    // Exclude the shared side by its current version id.
+    const byId = await ltm.deduplicateAgainstShared(PROJECT, {
+      exclude: [shared],
+    });
+    expect(byId.clusters).toHaveLength(0);
+
+    // Exclude the private side by its LOGICAL id (a versioned entry whose
+    // logical id differs from its current version id).
+    ltm.update(priv, { content: "edited so it has a second version id" });
+    const currentPriv = ltm.getByLogical(priv);
+    expect(currentPriv?.id).not.toBe(priv);
+    const byLogical = await ltm.deduplicateAgainstShared(PROJECT, {
+      exclude: [priv],
+    });
+    expect(byLogical.clusters).toHaveLength(0);
+
+    // Sanity: unexcluded, the pair still matches under the new version id.
+    const control = await ltm.deduplicateAgainstShared(PROJECT);
+    expect(control.clusters).toHaveLength(1);
+    expect(control.clusters[0].merged.map((m) => m.id)).toEqual([
+      currentPriv?.id,
+    ]);
+  });
+
+  test("deduplicateAgainstShared writes nothing", async () => {
+    const shared = createGlobal({
+      title: "Migration ordering must precede first tenant read",
+    });
+    const _priv = createEntry({
+      title: "Migration ordering must precede first tenant read dup",
+    });
+    const before = db()
+      .query(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(version), 0) AS v, COALESCE(SUM(is_deleted), 0) AS d FROM knowledge",
+      )
+      .get() as { n: number; v: number; d: number };
+
+    const result = await ltm.deduplicateAgainstShared(PROJECT);
+    expect(result.clusters).toHaveLength(1);
+
+    const after = db()
+      .query(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(version), 0) AS v, COALESCE(SUM(is_deleted), 0) AS d FROM knowledge",
+      )
+      .get() as { n: number; v: number; d: number };
+    expect(after).toEqual(before);
+    expect(ltm.get(shared)).not.toBeNull();
+  });
+
+  test("deduplicateAgainstShared returns empty when there are no shared entries", async () => {
+    createEntry({ title: "Lonely private entry alpha beta gamma delta" });
+    createEntry({
+      title: "Lonely private entry alpha beta gamma delta twin",
+    });
+    const result = await ltm.deduplicateAgainstShared(PROJECT);
+    expect(result.clusters).toHaveLength(0);
+    expect(result.totalRemoved).toBe(0);
+    expect(result.pairMatches?.size).toBe(0);
+  });
+});
