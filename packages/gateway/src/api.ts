@@ -451,15 +451,42 @@ async function handleMoveKnowledge(
   }
 
   const resolvedId = data.resolveId("knowledge", knowledgeId) ?? knowledgeId;
-  const success = data.reassignKnowledge(resolvedId, targetPath);
-  if (!success) {
-    return errorResponse(
-      404,
-      "not_found",
-      `Knowledge entry not found: ${knowledgeId}`,
-    );
+  try {
+    const success = data.reassignKnowledge(resolvedId, targetPath);
+    if (!success) {
+      return errorResponse(
+        404,
+        "not_found",
+        `Knowledge entry not found: ${knowledgeId}`,
+      );
+    }
+    return jsonResponse({ moved: true, id: resolvedId });
+  } catch (error) {
+    if (error instanceof ltm.TitleConflictError) {
+      const conflict = error.conflicting;
+      const scope =
+        conflict.project_id === null || conflict.cross_project === 1
+          ? "shared"
+          : "project";
+      return jsonResponse(
+        {
+          type: "error",
+          error: {
+            type: "title_conflict",
+            message: error.message,
+            conflicting_entry: {
+              id: conflict.logical_id,
+              title: conflict.title,
+              project_id: conflict.project_id,
+              scope,
+            },
+          },
+        },
+        409,
+      );
+    }
+    throw error;
   }
-  return jsonResponse({ moved: true, id: resolvedId });
 }
 
 function handleMergeProjects(): Response {

@@ -458,9 +458,98 @@ describe("revision-checked knowledge mutations", () => {
     });
     expect(restore.status).toBe(409);
     expect(await restore.json()).toMatchObject({
-      error: { type: "title_conflict" },
+      error: {
+        type: "title_conflict",
+        conflicting_entry: {
+          id: occupiedTitleId,
+          title: "A title to restore",
+          project_id: expect.any(String),
+          scope: "project",
+        },
+      },
     });
     expect(occupiedTitleId).not.toBe(id);
+  });
+
+  it("returns conflicting entry details when PATCH broadens scope", async () => {
+    const { id, projectPath } = await seedKnowledgeEntry(
+      "Shared scope conflict",
+    );
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const conflictPath = `/test/api/shared-conflict/${randomUUID()}`;
+    const conflictProjectId = ensureProject(conflictPath, "shared-conflict");
+    const conflictId = ltm.create({
+      projectPath: conflictPath,
+      category: "decision",
+      title: "shared scope conflict",
+      content: "Existing shared entry",
+      scope: "project",
+      crossProject: true,
+    });
+    expect(projectPath).not.toBe(conflictPath);
+
+    const response = await api(`/api/v1/knowledge/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: 1, scope: "shared" }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "title_conflict",
+        conflicting_entry: {
+          id: conflictId,
+          title: "shared scope conflict",
+          project_id: conflictProjectId,
+          scope: "shared",
+        },
+      },
+    });
+  });
+
+  it("returns 409 with conflict details when moving into shared visibility", async () => {
+    const title = `Move title conflict ${randomUUID()}`;
+    const { id, projectId, projectPath } = await seedKnowledgeEntry(title);
+    const { ensureProject, ltm } = await import("@loreai/core");
+    const targetPath = `/test/api/move-target/${randomUUID()}`;
+    ensureProject(targetPath, "move-target");
+    const conflictPath = `/test/api/move-conflict/${randomUUID()}`;
+    const conflictProjectId = ensureProject(conflictPath, "move-conflict");
+    const conflictId = ltm.create({
+      projectPath: conflictPath,
+      category: "decision",
+      title,
+      content: "Existing shared move title",
+      scope: "project",
+      crossProject: true,
+    });
+
+    const response = await api(`/api/v1/knowledge/${id}/move`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ to_project: { path: targetPath } }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      type: "error",
+      error: {
+        type: "title_conflict",
+        conflicting_entry: {
+          id: conflictId,
+          title,
+          project_id: conflictProjectId,
+          scope: "shared",
+        },
+      },
+    });
+    const { ltm: coreLtm } = await import("@loreai/core");
+    expect(coreLtm.getByLogical(id)).toMatchObject({
+      project_id: projectId,
+      cross_project: 0,
+      title,
+    });
+    expect(projectPath).not.toBe(targetPath);
   });
 
   it("returns 404 for missing records and preserves the live head on confidence-only PATCH", async () => {
@@ -999,6 +1088,15 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     groups: Group[];
     project: { clusters: unknown[]; totalRemoved: number };
     global: { clusters: unknown[]; totalRemoved: number };
+    shared_title_conflicts: Array<{
+      title_key: string;
+      entries: Array<{
+        id: string;
+        title: string;
+        project_id: string | null;
+        scope: "project" | "shared";
+      }>;
+    }>;
   };
   type Receipt = {
     operationId: string;
@@ -1108,6 +1206,62 @@ describe("POST /api/v1/projects/:id/dedup (+ /apply)", () => {
     expect(
       preview.groups.flatMap((g) => g.candidates.map((c) => c.id)),
     ).not.toContain(unrelated);
+  });
+
+  it("includes shared-title duplicates in the read-only preview", async () => {
+    const { projectId } = await seedDuplicates();
+    const { ensureProject, db, ltm } = await import("@loreai/core");
+    const projectA = `/test/api/title-duplicates-a/${randomUUID()}`;
+    const projectB = `/test/api/title-duplicates-b/${randomUUID()}`;
+    const projectAId = ensureProject(projectA, "title-duplicates-a");
+    const projectBId = ensureProject(projectB, "title-duplicates-b");
+    const first = ltm.create({
+      projectPath: projectA,
+      category: "decision",
+      title: "Preview shared duplicate",
+      content: "Legacy duplicate A",
+      scope: "project",
+    });
+    const second = ltm.create({
+      projectPath: projectB,
+      category: "decision",
+      title: " preview shared duplicate ",
+      content: "Legacy duplicate B",
+      scope: "project",
+    });
+    db()
+      .query(
+        "UPDATE knowledge SET cross_project = 1 WHERE logical_id IN (?, ?)",
+      )
+      .run(first, second);
+
+    const res = await post(`/api/v1/projects/${projectId}/dedup`, {});
+    expect(res.status).toBe(200);
+    const preview = (await res.json()) as Preview;
+    const group = preview.shared_title_conflicts.find(
+      (item) => item.title_key === "preview shared duplicate",
+    );
+
+    expect(group?.title_key).toBe("preview shared duplicate");
+    expect(group?.entries.map((entry) => entry.id).sort()).toEqual(
+      [first, second].sort(),
+    );
+    expect(group?.entries).toEqual(
+      expect.arrayContaining([
+        {
+          id: first,
+          title: "Preview shared duplicate",
+          project_id: projectAId,
+          scope: "shared",
+        },
+        {
+          id: second,
+          title: " preview shared duplicate ",
+          project_id: projectBId,
+          scope: "shared",
+        },
+      ]),
+    );
   });
 
   it("labels global duplicate candidates as shared with no project", async () => {

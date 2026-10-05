@@ -46,11 +46,22 @@ export type DedupPreviewGroup = {
   suggested_keep_id: string;
 };
 
+export type SharedTitleConflictGroup = {
+  title_key: string;
+  entries: Array<{
+    id: string;
+    title: string;
+    project_id: string | null;
+    scope: "project" | "shared";
+  }>;
+};
+
 export type DedupPreviewResponse = {
   dry_run: true;
   groups: DedupPreviewGroup[];
   project: DedupResult;
   global: DedupResult;
+  shared_title_conflicts: SharedTitleConflictGroup[];
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -172,6 +183,18 @@ export async function handleDedupPreview(
     ],
     project,
     global,
+    shared_title_conflicts: ltm.listSharedTitleDuplicates().map((group) => ({
+      title_key: group.title_key,
+      entries: group.entries.map((entry) => ({
+        id: entry.id,
+        title: entry.title,
+        project_id: entry.project_id,
+        scope:
+          entry.project_id === null || entry.cross_project === 1
+            ? "shared"
+            : "project",
+      })),
+    })),
   };
   return jsonResponse(body);
 }
