@@ -18,11 +18,13 @@ import {
 } from "./folk-access";
 import {
   createTeamInvite,
+  identityLabel,
   isEmailAddress,
   removeTeamMember,
   sendInviteEmail,
   setTeamRole,
   teamMembers,
+  teamMemberProfiles,
   TeamRpcError,
 } from "./team";
 import { sharingStatus } from "./folk-status";
@@ -72,6 +74,10 @@ function teamRpcError(error: unknown): Response {
         return errorResponse(403, "forbidden", error.message);
       case "23514":
         return errorResponse(409, "last_admin", error.message);
+      case "40001":
+        return errorResponse(409, "rotation_conflict", error.message);
+      case "P0002":
+        return errorResponse(404, "not_found", error.message);
       case "22023":
         return errorResponse(400, "invalid_request", error.message);
     }
@@ -110,18 +116,34 @@ async function teamMembersStatus(
   const team = { id: scopeId, name: teamName(scopeId) };
   try {
     const members = await teamMembers(access.client, scopeId);
+    let profiles: Awaited<ReturnType<typeof teamMemberProfiles>> = [];
+    let profileLookupFailed = false;
+    try {
+      profiles = await teamMemberProfiles(access.client, scopeId);
+    } catch {
+      profileLookupFailed = true;
+    }
+    const profilesByUser = new Map(
+      profiles.map((profile) => [profile.user_id, profile]),
+    );
     return json({
       remote: "ok",
       team,
       my_role: myRole,
       can_manage: myRole === "admin",
-      members: members.map((member) => ({
-        user_id: member.userId,
-        label:
-          member.userId === access.me ? localIdentityLabel(access.me) : null,
-        role: member.role,
-        me: member.userId === access.me,
-      })),
+      members: members.map((member) => {
+        const profile = profilesByUser.get(member.userId);
+        return {
+          user_id: member.userId,
+          label: profile
+            ? identityLabel(profile)
+            : profileLookupFailed && member.userId === access.me
+              ? localIdentityLabel(access.me)
+              : null,
+          role: member.role,
+          me: member.userId === access.me,
+        };
+      }),
       actions: actionsFor("ok", myRole),
     });
   } catch {
@@ -257,13 +279,6 @@ async function changeMemberRole(
   }
   const access = await teamMutationAccess(scopeId, config);
   if (access instanceof Response) return access;
-  if (userId === access.me) {
-    return errorResponse(
-      409,
-      "self_action_unsupported",
-      "You cannot change your own team role.",
-    );
-  }
   if (access.role !== "admin") {
     return errorResponse(
       403,
@@ -315,13 +330,6 @@ async function removeMember(
   }
   const access = await teamMutationAccess(scopeId, config);
   if (access instanceof Response) return access;
-  if (userId === access.me) {
-    return errorResponse(
-      409,
-      "self_action_unsupported",
-      "You cannot remove yourself from a team.",
-    );
-  }
   if (access.role !== "admin") {
     return errorResponse(
       403,
@@ -349,6 +357,7 @@ async function removeMember(
       new_epoch: receipt.newEpoch,
       rewrapped: receipt.rewrapped,
       skipped_count: receipt.skipped.length,
+      unlinked_projects: receipt.unlinkedProjects,
     });
   } catch (error) {
     return teamRpcError(error);

@@ -75,7 +75,7 @@ function actionMessage(error: unknown): string {
 }
 
 function memberLabel(member: TeamMember): string {
-  return member.label ?? `Teammate ${member.user_id.slice(0, 8)}`;
+  return member.label ?? "Former member";
 }
 
 export const TeamPage: Component = () => {
@@ -106,6 +106,7 @@ export const TeamPage: Component = () => {
   const [roleReceipt, setRoleReceipt] = createSignal<TeamRoleReceipt | null>(
     null,
   );
+  const [leftTeam, setLeftTeam] = createSignal(false);
   const [removing, setRemoving] = createSignal(false);
 
   const teams = () => folk.teams.data()?.teams ?? [];
@@ -128,7 +129,12 @@ export const TeamPage: Component = () => {
 
   const loadMembers = async (selectedTeam: string) => {
     if (!selectedTeam) return;
-    if (selectedTeam !== teamId()) setStaleMemberId(null);
+    if (selectedTeam !== teamId()) {
+      setStaleMemberId(null);
+      setRemoveReceipt(null);
+      setRoleReceipt(null);
+      setLeftTeam(false);
+    }
     setTeamId(selectedTeam);
     setPageState("loading");
     setPageError(undefined);
@@ -197,7 +203,7 @@ export const TeamPage: Component = () => {
     const id = staleMemberId();
     if (!id) return "";
     const member = members()?.members.find((item) => item.user_id === id);
-    const teammate = `Teammate ${id.slice(0, 8)}`;
+    const teammate = member ? memberLabel(member) : "Former member";
     if (!member)
       return `${teammate}'s team membership changed since you loaded the team. The list has been reloaded.`;
     const role = member.role.charAt(0).toUpperCase() + member.role.slice(1);
@@ -210,13 +216,7 @@ export const TeamPage: Component = () => {
     select: HTMLSelectElement,
   ) => {
     const current = members();
-    if (
-      !current ||
-      !current.can_manage ||
-      member.me ||
-      role === member.role ||
-      busy()
-    )
+    if (!current || !current.can_manage || role === member.role || busy())
       return;
     setBusy(true);
     setActionError("");
@@ -236,6 +236,10 @@ export const TeamPage: Component = () => {
         previous
           ? {
               ...previous,
+              my_role: member.me ? receipt.member.role : previous.my_role,
+              can_manage: member.me
+                ? receipt.member.role === "admin"
+                : previous.can_manage,
               members: previous.members.map((row) =>
                 row.user_id === receipt.member.user_id
                   ? { ...row, role: receipt.member.role }
@@ -299,10 +303,13 @@ export const TeamPage: Component = () => {
       );
       setStaleMemberId(null);
       setRemoveReceipt(receipt);
+      setLeftTeam(target.me);
       setMembers((previous) =>
         previous
           ? {
               ...previous,
+              my_role: target.me ? null : previous.my_role,
+              can_manage: target.me ? false : previous.can_manage,
               members: previous.members.filter(
                 (member) => member.user_id !== receipt.removed,
               ),
@@ -363,17 +370,20 @@ export const TeamPage: Component = () => {
     return "";
   };
 
-  const memberActionReason = (
-    member: TeamMember,
-    action: "remove" | "set_role",
-  ) => {
-    if (member.me) return "You cannot change or remove yourself here.";
+  const memberActionReason = (action: "remove" | "set_role") => {
     const capability = members()?.actions[action];
     if (!members()?.can_manage || capability === "admin_only")
       return "Only team admins can manage members.";
     if (capability === "unavailable")
       return "This action is unavailable while the team service is offline.";
     return "";
+  };
+  const onlyAdmin = () => {
+    const current = members();
+    return (
+      current?.my_role === "admin" &&
+      current.members.filter((member) => member.role === "admin").length === 1
+    );
   };
 
   return (
@@ -429,6 +439,23 @@ export const TeamPage: Component = () => {
         <p class="mb-4 text-sm text-danger" role="alert">
           {actionError()}
         </p>
+      </Show>
+      <Show when={removeReceipt()}>
+        {(receipt) => (
+          <div
+            class="mb-4 rounded-md border border-line bg-bg p-3 text-sm"
+            role="status"
+            data-testid="team-removal-receipt"
+          >
+            {leftTeam() ? "You left the team." : "Member removed."} Team key
+            epoch {receipt().new_epoch}; {receipt().rewrapped} keys rewrapped;{" "}
+            {receipt().skipped_count} member(s) without a published key need to
+            be re-added.{" "}
+            {receipt().unlinked_projects > 0
+              ? `${receipt().unlinked_projects} linked local project(s) unlinked.`
+              : ""}
+          </div>
+        )}
       </Show>
 
       <Switch>
@@ -489,19 +516,14 @@ export const TeamPage: Component = () => {
                     </p>
                   )}
                 </Show>
-                <Show when={removeReceipt()}>
-                  {(receipt) => (
-                    <div
-                      class="mb-4 rounded-md border border-line bg-bg p-3 text-sm"
-                      role="status"
-                      data-testid="team-removal-receipt"
-                    >
-                      Member removed. Team key epoch {receipt().new_epoch};{" "}
-                      {receipt().rewrapped} keys rewrapped;{" "}
-                      {receipt().skipped_count} member(s) without a published
-                      key need to be re-added.
-                    </div>
-                  )}
+                <Show when={onlyAdmin()}>
+                  <p
+                    class="mb-4 text-sm text-muted"
+                    data-testid="team-only-admin-hint"
+                  >
+                    You're the only admin. Promote another member to admin
+                    first.
+                  </p>
                 </Show>
                 <Show when={roleReceipt()}>
                   {(receipt) => (
@@ -553,6 +575,7 @@ export const TeamPage: Component = () => {
                                         <PromotionIdentity
                                           id={row.original.user_id}
                                           label={row.original.label}
+                                          showId
                                         />
                                         <Show when={row.original.me}>
                                           <span class="ml-2 text-xs text-muted">
@@ -569,7 +592,6 @@ export const TeamPage: Component = () => {
                                             disabled={
                                               busy() ||
                                               !current().can_manage ||
-                                              row.original.me ||
                                               current().actions.set_role !==
                                                 "available"
                                             }
@@ -592,15 +614,11 @@ export const TeamPage: Component = () => {
                                           </select>
                                           <Show
                                             when={memberActionReason(
-                                              row.original,
                                               "set_role",
                                             )}
                                           >
                                             <span class="text-xs text-muted">
-                                              {memberActionReason(
-                                                row.original,
-                                                "set_role",
-                                              )}
+                                              {memberActionReason("set_role")}
                                             </span>
                                           </Show>
                                         </div>
@@ -614,7 +632,6 @@ export const TeamPage: Component = () => {
                                           disabled={
                                             busy() ||
                                             !current().can_manage ||
-                                            row.original.me ||
                                             current().actions.remove !==
                                               "available"
                                           }
@@ -622,19 +639,15 @@ export const TeamPage: Component = () => {
                                             setRemoveTarget(row.original)
                                           }
                                         >
-                                          Remove
+                                          {row.original.me
+                                            ? "Leave team"
+                                            : "Remove"}
                                         </Button>
                                         <Show
-                                          when={memberActionReason(
-                                            row.original,
-                                            "remove",
-                                          )}
+                                          when={memberActionReason("remove")}
                                         >
                                           <span class="ml-2 text-xs text-muted">
-                                            {memberActionReason(
-                                              row.original,
-                                              "remove",
-                                            )}
+                                            {memberActionReason("remove")}
                                           </span>
                                         </Show>
                                       </Match>
@@ -732,7 +745,9 @@ export const TeamPage: Component = () => {
       >
         <DialogContent data-testid="team-remove-confirmation">
           <DialogHeader>
-            <DialogTitle>Remove team member?</DialogTitle>
+            <DialogTitle>
+              {removeTarget()?.me ? "Leave team?" : "Remove team member?"}
+            </DialogTitle>
             <DialogDescription>
               This rotates the team key.{" "}
               {removeTarget() ? memberLabel(removeTarget()!) : "This member"}{" "}
@@ -782,7 +797,13 @@ export const TeamPage: Component = () => {
               }
               onClick={() => void confirmRemove()}
             >
-              {removing() ? "Removing…" : "Remove member"}
+              {removing()
+                ? removeTarget()?.me
+                  ? "Leaving…"
+                  : "Removing…"
+                : removeTarget()?.me
+                  ? "Leave team"
+                  : "Remove member"}
             </Button>
           </DialogFooter>
         </DialogContent>
