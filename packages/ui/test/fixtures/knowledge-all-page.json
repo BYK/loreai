@@ -5,10 +5,10 @@
       "tenant_id": "",
       "project_id": "<uuid-1>",
       "category": "gotcha",
-      "title": "Tenant quota eviction ordering rule across projects shared",
-      "content": "Evict lowest-quota tenants first, everywhere.",
+      "title": "Cache warming threshold configuration",
+      "content": "Duplicate threshold configuration.",
       "source_session": "ui-contracts-dedup-session",
-      "cross_project": 1,
+      "cross_project": 0,
       "confidence": 1,
       "created_at": 1700000000000,
       "updated_at": 1700000001000,
@@ -28,7 +28,7 @@
       "worker_model_id": null,
       "last_reinforced_at": 1700000002000,
       "logical_id": "<uuid-0>",
-      "project_name": "ui-contracts-dedup-other",
+      "project_name": "ui-contracts-dedup",
       "match": "exact"
     }
   ],

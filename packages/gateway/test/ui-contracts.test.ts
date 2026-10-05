@@ -130,7 +130,7 @@ beforeAll(async () => {
     session: "ui-contracts-dedup-session",
     scope: "project",
   });
-  ltm.create({
+  const cacheWarming = ltm.create({
     id: crypto.randomUUID(),
     projectPath: SEEDED.dedupProjectPath,
     category: "gotcha",
@@ -143,7 +143,7 @@ beforeAll(async () => {
   // project — produces a `pool: "project_shared"` preview group.
   const otherDedupPath = "/test/ui-contracts/dedup-preview-other";
   ensureProject(otherDedupPath, "ui-contracts-dedup-other");
-  ltm.create({
+  const tenantQuotaPrivate = ltm.create({
     id: crypto.randomUUID(),
     projectPath: SEEDED.dedupProjectPath,
     category: "gotcha",
@@ -152,7 +152,7 @@ beforeAll(async () => {
     session: "ui-contracts-dedup-session",
     scope: "project",
   });
-  ltm.create({
+  const tenantQuotaShared = ltm.create({
     id: crypto.randomUUID(),
     projectPath: otherDedupPath,
     category: "gotcha",
@@ -162,6 +162,24 @@ beforeAll(async () => {
     scope: "project",
     crossProject: true,
   });
+  // /knowledge pages sort by `updated_at DESC, id DESC`, and every seed lands
+  // in the same millisecond — the tiebreak is a coin flip between random-v4
+  // ids. Pin the new dedup seeds to a strictly older timestamp and bump "Cache
+  // warming" ahead of every other seed so the limit:1 first page is
+  // deterministically the same entry as on main.
+  db()
+    .query(
+      "UPDATE knowledge SET created_at = ?, updated_at = ? WHERE id IN (?, ?)",
+    )
+    .run(
+      1700000000000 - 86_400_000,
+      1700000000000 - 86_400_000,
+      tenantQuotaPrivate,
+      tenantQuotaShared,
+    );
+  db()
+    .query("UPDATE knowledge SET updated_at = ? WHERE id = ?")
+    .run(Date.now() + 86_400_000, cacheWarming);
   for (const i of [0, 1]) {
     temporal.store({
       projectPath: SEEDED.projectPath,
