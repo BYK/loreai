@@ -20,9 +20,6 @@ import { db, ensureProject } from "../db";
 import { parseImportDoc, type LoreImportDoc } from "./schema";
 import { currentTenantId } from "../tenant";
 
-const TITLE_KEY_SQL = (column: string): string =>
-  `LOWER(TRIM(${column}, ' ' || char(9) || char(10) || char(13)))`;
-
 export type StructuredImportOptions = {
   /** Fallback project path for entries without an explicit `project`. */
   defaultProjectPath: string;
@@ -75,7 +72,7 @@ function findExactTitle(title: string, pid: string | null): string | null {
           .query(
             `SELECT id FROM knowledge_current
              WHERE tenant_id = ? AND project_id = ?
-               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+               AND ${ltm.titleKeySql("title")} = ${ltm.titleKeySql("?")}
                AND confidence > 0
              ORDER BY logical_id
              LIMIT 1`,
@@ -85,7 +82,7 @@ function findExactTitle(title: string, pid: string | null): string | null {
           .query(
             `SELECT id FROM knowledge_current
              WHERE tenant_id = ? AND project_id IS NULL
-               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+               AND ${ltm.titleKeySql("title")} = ${ltm.titleKeySql("?")}
                AND confidence > 0
              ORDER BY logical_id
              LIMIT 1`,
@@ -97,7 +94,7 @@ function findExactTitle(title: string, pid: string | null): string | null {
     .query(
       `SELECT id FROM knowledge_current
        WHERE tenant_id = ? AND cross_project = 1
-         AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+         AND ${ltm.titleKeySql("title")} = ${ltm.titleKeySql("?")}
          AND confidence > 0
        ORDER BY logical_id
        LIMIT 1`,
