@@ -5,7 +5,15 @@
  * group-wrap with/without a published key, and the remove→rotate→re-wrap flow (self via the local
  * key; a keyless remaining member skipped).
  */
-import { db, keystore, setKV } from "@loreai/core";
+import {
+  db,
+  ensureProject,
+  keystore,
+  projectScope,
+  setKV,
+  setProjectScope,
+  syncData,
+} from "@loreai/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const SELF = "self-user-id";
@@ -46,22 +54,28 @@ import {
 interface ClientOpts {
   scopeId?: string;
   newEpoch?: number;
+  epoch?: number | (() => number);
   pub?: string | null; // identity_pub public_key returned for any user
   pubFor?: (userId: string) => string | null; // per-user override
   members?: { user_id: string; role: string }[]; // scope_members rows
   listRows?: Record<string, unknown>[]; // listTeams embed rows
-  membersErr?: { message: string };
-  identityErr?: { message: string };
+  membersErr?: { message: string; code?: string };
+  identityErr?: { message: string; code?: string };
   rpc?: (
     name: string,
     params: Record<string, unknown>,
-  ) => { data?: unknown; error?: { message: string } | null } | null;
+  ) => {
+    data?: unknown;
+    error?: { message: string; code?: string } | null;
+  } | null;
 }
 
 function makeClient(opts: ClientOpts = {}) {
   const rpcCalls: { name: string; params: Record<string, unknown> }[] = [];
+  const queries: { table: string; columns: string; value: string }[] = [];
   const client = {
     rpcCalls,
+    queries,
     rpc(name: string, params: Record<string, unknown>) {
       rpcCalls.push({ name, params });
       const override = opts.rpc?.(name, params);
@@ -71,8 +85,15 @@ function makeClient(opts: ClientOpts = {}) {
           data: opts.scopeId ?? "scope-uuid",
           error: null,
         });
-      if (name === "rotate_scope_key")
-        return Promise.resolve({ data: opts.newEpoch ?? 1, error: null });
+      if (name === "remove_scope_member_rotating")
+        return Promise.resolve({
+          data:
+            opts.newEpoch ??
+            (typeof opts.epoch === "function"
+              ? opts.epoch()
+              : (opts.epoch ?? 0) + 1),
+          error: null,
+        });
       return Promise.resolve({ data: null, error: null });
     },
     from(table: string) {
@@ -80,6 +101,7 @@ function makeClient(opts: ClientOpts = {}) {
         select(cols: string) {
           return {
             eq(_col: string, val: string) {
+              queries.push({ table, columns: cols, value: val });
               if (table === "identity_pub") {
                 return {
                   maybeSingle() {
@@ -91,6 +113,20 @@ function makeClient(opts: ClientOpts = {}) {
                     const pub = opts.pubFor ? opts.pubFor(val) : opts.pub;
                     return Promise.resolve({
                       data: pub ? { public_key: pub } : null,
+                      error: null,
+                    });
+                  },
+                };
+              }
+              if (table === "scopes" && cols === "key_epoch") {
+                return {
+                  maybeSingle() {
+                    const epoch =
+                      typeof opts.epoch === "function"
+                        ? opts.epoch()
+                        : (opts.epoch ?? 0);
+                    return Promise.resolve({
+                      data: { key_epoch: epoch },
                       error: null,
                     });
                   },
@@ -113,6 +149,7 @@ function makeClient(opts: ClientOpts = {}) {
   };
   return client as unknown as import("@supabase/supabase-js").SupabaseClient & {
     rpcCalls: { name: string; params: Record<string, unknown> }[];
+    queries: { table: string; columns: string; value: string }[];
   };
 }
 
@@ -222,20 +259,35 @@ describe("addTeamMember", () => {
 });
 
 describe("removeTeamMember", () => {
-  it("removes, rotates, and re-wraps the fresh DEK to the remaining members (self via local key)", async () => {
+  it("atomically removes and re-wraps the fresh DEK to the remaining members", async () => {
     const c = makeClient({
       scopeId: "s-4",
       newEpoch: 1,
-      members: [{ user_id: SELF, role: "admin" }], // B already removed server-side
+      epoch: 0,
+      members: [{ user_id: SELF, role: "admin" }],
     });
     await createTeam(c, "T");
     const r = await removeTeamMember(c, "s-4", MEMBER);
-    expect(r).toEqual({ newEpoch: 1, rewrapped: 1, skipped: [] });
-    expect(c.rpcCalls.map((x) => x.name)).toEqual([
-      "create_team",
-      "remove_scope_member",
-      "rotate_scope_key",
-    ]);
+    expect(r).toEqual({
+      newEpoch: 1,
+      rewrapped: 1,
+      skipped: [],
+      unlinkedProjects: 0,
+    });
+    expect(
+      c.rpcCalls.filter((x) => x.name === "remove_scope_member_rotating"),
+    ).toHaveLength(1);
+    expect(c.rpcCalls[1]?.params).toMatchObject({
+      p_scope: "s-4",
+      p_user: MEMBER,
+      p_expected_epoch: 0,
+      p_wraps: [
+        {
+          member_user_id: SELF,
+          wrapped_dek: expect.any(String),
+        },
+      ],
+    });
     expect(wraps("s-4")).toEqual([
       { member: SELF, epoch: 0 },
       { member: SELF, epoch: 1 }, // fresh epoch-1 wrap for the survivor
@@ -246,6 +298,7 @@ describe("removeTeamMember", () => {
     const c = makeClient({
       scopeId: "s-5",
       newEpoch: 1,
+      epoch: 0,
       members: [
         { user_id: SELF, role: "admin" },
         { user_id: "other", role: "editor" },
@@ -259,28 +312,169 @@ describe("removeTeamMember", () => {
     expect(r.skipped).toEqual(["other"]);
   });
 
-  it("throws on a remove_scope_member RPC error (no rotate attempted)", async () => {
+  it("does not persist partial local wraps when a member wrap fails", async () => {
     const c = makeClient({
-      rpc: (n) =>
-        n === "remove_scope_member"
-          ? { data: null, error: { message: "not admin" } }
-          : null,
+      scopeId: "s-wrap-failure",
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: "other", role: "editor" },
+        { user_id: "broken-key", role: "editor" },
+      ],
+      pubFor: (uid) =>
+        uid === "other" ? selfPubB64 : uid === "broken-key" ? "AA==" : null,
     });
-    await expect(removeTeamMember(c, "s", MEMBER)).rejects.toThrow(
-      /remove_scope_member: not admin/,
+    await createTeam(c, "T");
+    await expect(removeTeamMember(c, "s-wrap-failure", MEMBER)).rejects.toThrow(
+      "recipient pubkey must be 32 bytes",
     );
-    expect(c.rpcCalls.some((x) => x.name === "rotate_scope_key")).toBe(false);
+    expect(
+      c.rpcCalls.some((call) => call.name === "remove_scope_member_rotating"),
+    ).toBe(false);
+    expect(wraps("s-wrap-failure")).toEqual([{ member: SELF, epoch: 0 }]);
   });
 
-  it("throws on a rotate_scope_key RPC error", async () => {
+  it("does not persist local wraps when the atomic RPC fails", async () => {
     const c = makeClient({
-      rpc: (n) =>
-        n === "rotate_scope_key"
-          ? { data: null, error: { message: "locked" } }
+      scopeId: "s-rpc-failure",
+      members: [{ user_id: SELF, role: "admin" }],
+      rpc: (name) =>
+        name === "remove_scope_member_rotating"
+          ? {
+              data: null,
+              error: { message: "network down", code: "FetchError" },
+            }
           : null,
     });
-    await expect(removeTeamMember(c, "s", MEMBER)).rejects.toThrow(
-      /rotate_scope_key: locked/,
+    await createTeam(c, "T");
+    await expect(removeTeamMember(c, "s-rpc-failure", MEMBER)).rejects.toThrow(
+      /remove_scope_member_rotating: network down/,
+    );
+    expect(wraps("s-rpc-failure")).toEqual([{ member: SELF, epoch: 0 }]);
+  });
+
+  it("retries the whole removal once after an epoch conflict", async () => {
+    let epoch = 0;
+    let attempts = 0;
+    const c = makeClient({
+      scopeId: "s-retry",
+      epoch: () => epoch,
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: "other", role: "editor" },
+      ],
+      pubFor: (uid) => (uid === "other" ? selfPubB64 : null),
+      rpc: (name, params) => {
+        if (name !== "remove_scope_member_rotating") return null;
+        attempts++;
+        if (attempts === 1) {
+          epoch = 1;
+          return {
+            data: null,
+            error: {
+              message: "team key changed concurrently; retry",
+              code: "40001",
+            },
+          };
+        }
+        expect(params.p_expected_epoch).toBe(1);
+        return { data: 2, error: null };
+      },
+    });
+    await createTeam(c, "T");
+    const result = await removeTeamMember(c, "s-retry", MEMBER);
+    expect(result.newEpoch).toBe(2);
+    expect(attempts).toBe(2);
+    expect(
+      c.queries.filter(
+        (query) => query.table === "scopes" && query.columns === "key_epoch",
+      ),
+    ).toHaveLength(2);
+    expect(
+      c.queries.filter((query) => query.table === "scope_members"),
+    ).toHaveLength(2);
+    expect(
+      c.queries.filter((query) => query.table === "identity_pub"),
+    ).toHaveLength(2);
+    expect(wraps("s-retry")).toEqual([
+      { member: "other", epoch: 2 },
+      { member: SELF, epoch: 0 },
+      { member: SELF, epoch: 2 },
+    ]);
+  });
+
+  it("recovers the committed wrap through applyRemoteScopeKey after a local crash", async () => {
+    let committedWraps: {
+      member_user_id: string;
+      wrapped_dek: string;
+    }[] = [];
+    const c = makeClient({
+      scopeId: "s-crash",
+      members: [{ user_id: SELF, role: "admin" }],
+      rpc: (name, params) => {
+        if (name !== "remove_scope_member_rotating") return null;
+        committedWraps = params.p_wraps as typeof committedWraps;
+        return { data: 1, error: null };
+      },
+    });
+    await createTeam(c, "T");
+    const persist = vi
+      .spyOn(keystore, "persistScopeKeyRotation")
+      .mockImplementation(() => {
+        throw new Error("simulated process crash after server commit");
+      });
+    await expect(removeTeamMember(c, "s-crash", MEMBER)).rejects.toThrow(
+      "simulated process crash after server commit",
+    );
+    persist.mockRestore();
+    expect(wraps("s-crash")).toEqual([{ member: SELF, epoch: 0 }]);
+    const committed = committedWraps[0];
+    if (!committed) throw new Error("server did not receive the caller wrap");
+    syncData.applyRemoteScopeKey({
+      scope_id: "s-crash",
+      member_user_id: SELF,
+      wrapped_dek: committed.wrapped_dek,
+      key_epoch: 1,
+      author_id: SELF,
+      updated_at: new Date().toISOString(),
+    });
+    expect(wraps("s-crash")).toContainEqual({ member: SELF, epoch: 1 });
+    expect((await keystore.getScopeKey("s-crash", SELF)).byteLength).toBe(32);
+  });
+
+  it("leaves without persisting a wrap and unlinks every local project", async () => {
+    const c = makeClient({
+      scopeId: "s-leave",
+      members: [
+        { user_id: SELF, role: "admin" },
+        { user_id: "other-admin", role: "admin" },
+        { user_id: "editor", role: "editor" },
+      ],
+      pubFor: (uid) => (uid === SELF ? null : selfPubB64),
+    });
+    await createTeam(c, "T");
+    const projects = [
+      ensureProject("/test/team-leave-project"),
+      ensureProject("/test/team-leave-project-two"),
+    ];
+    for (const project of projects) setProjectScope(project, "s-leave");
+    const receipt = await removeTeamMember(c, "s-leave", SELF);
+    expect(receipt).toMatchObject({
+      unlinkedProjects: 2,
+      rewrapped: 2,
+      newEpoch: 1,
+    });
+    expect(projects.map(projectScope)).toEqual([null, null]);
+    expect(wraps("s-leave")).toEqual([{ member: SELF, epoch: 0 }]);
+    expect(c.rpcCalls[1]?.params.p_wraps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ member_user_id: "other-admin" }),
+        expect.objectContaining({ member_user_id: "editor" }),
+      ]),
+    );
+    expect(c.rpcCalls[1]?.params.p_wraps).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ member_user_id: SELF }),
+      ]),
     );
   });
 });

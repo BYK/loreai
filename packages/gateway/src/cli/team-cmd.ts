@@ -48,7 +48,7 @@ import {
 } from "../promotions";
 
 const USAGE =
-  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] [--team <team>] | propose <knowledge-id> | approve <request-id> [--note <text>] | reject <request-id> [--note <text>] | withdraw <request-id> | review-policy <team> <required|optional> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
+  "Usage: lore team [list | members <scope> | discover [repo...] [--invite <team>] [--role editor|viewer] | create <name> | add <scope> <userId> [role] | remove <scope> <userId> | leave <team> | set-role <scope> <userId> <role> | invite [<scope>] <invitee> [--role editor|viewer] [--email <hint>] [--offline] | accept <token> | link <team> [--project <path>] | unlink [--project <path>] | review [--project <path>] [--team <team>] | propose <knowledge-id> | approve <request-id> [--note <text>] | reject <request-id> [--note <text>] | withdraw <request-id> | review-policy <team> <required|optional> | policy <manual|auto> [--project <path>] | domain <claim <org> <domain> [--role member] | request <org> <domain> | requests <org> | approve <request-id> | reject <request-id>>]";
 
 function reportPromotionFailure(result: {
   code: string;
@@ -76,6 +76,7 @@ export async function commandTeam(
     "create",
     "add",
     "remove",
+    "leave",
     "set-role",
     "invite",
     "accept",
@@ -294,11 +295,8 @@ export async function commandTeam(
       case "remove": {
         const [, scope, userId] = positionals;
         if (!scope || !userId) return usage();
-        const { newEpoch, rewrapped, skipped } = await removeTeamMember(
-          client,
-          scope,
-          userId,
-        );
+        const { newEpoch, rewrapped, skipped, unlinkedProjects } =
+          await removeTeamMember(client, scope, userId);
         console.log(
           `Removed ${userId} and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
         );
@@ -306,6 +304,40 @@ export async function commandTeam(
           console.log(
             `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.join(", ")}`,
           );
+        if (unlinkedProjects > 0)
+          console.log(`  Unlinked ${unlinkedProjects} local project(s).`);
+        break;
+      }
+      case "leave": {
+        const teamRef = positionals[1];
+        if (!teamRef) return usage();
+        const user = await getCurrentUser();
+        if (!user) {
+          console.error("Not logged in — run `lore login` first.");
+          process.exitCode = 1;
+          return;
+        }
+        const team = (await listTeams(client)).find(
+          (item) =>
+            item.scopeId === teamRef ||
+            item.name.toLocaleLowerCase() === teamRef.toLocaleLowerCase(),
+        );
+        if (!team) {
+          console.error(`Team not found: ${teamRef}`);
+          process.exitCode = 1;
+          return;
+        }
+        const { newEpoch, rewrapped, skipped, unlinkedProjects } =
+          await removeTeamMember(client, team.scopeId, user.user_id);
+        console.log(
+          `Left team "${team.name}" and rotated the team key to epoch ${newEpoch} (${rewrapped} member(s) re-wrapped).`,
+        );
+        if (skipped.length > 0)
+          console.log(
+            `  Warning: ${skipped.length} member(s) had no published key and lost access until re-added: ${skipped.join(", ")}`,
+          );
+        if (unlinkedProjects > 0)
+          console.log(`  Unlinked ${unlinkedProjects} local project(s).`);
         break;
       }
       case "set-role": {

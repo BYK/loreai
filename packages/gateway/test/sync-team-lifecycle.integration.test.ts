@@ -73,7 +73,10 @@ const addMember = (
   );
 const removeMember = (admin: string, scope: string, user: string) =>
   h.asUser(admin, (c) =>
-    c.query("select public.remove_scope_member($1,$2)", [scope, user]),
+    c.query("select public.remove_scope_member_rotating($1,$2,0,'[]'::jsonb)", [
+      scope,
+      user,
+    ]),
   );
 const setRole = (admin: string, scope: string, user: string, role: string) =>
   h.asUser(admin, (c) =>
