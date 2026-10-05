@@ -61,6 +61,13 @@ import * as log from "./log";
 import { estimateTokens } from "./tokenize";
 import { currentTenantId } from "./tenant";
 
+const TITLE_KEY_SQL = (column: string): string =>
+  `LOWER(TRIM(${column}, ' ' || char(9) || char(10) || char(13)))`;
+
+export function normalizeTitleKey(title: string): string {
+  return title.trim().toLowerCase();
+}
+
 /**
  * Cheap durable change stamp for a context-bound selection. Knowledge writes
  * advance local or shared tenant counters (including sync/import/other sessions),
@@ -271,6 +278,29 @@ export type KnowledgeEntry = {
   last_reinforced_at: number | null;
 };
 
+export type TitleConflict = {
+  logical_id: string;
+  id: string;
+  title: string;
+  project_id: string | null;
+  cross_project: number;
+};
+
+export class TitleConflictError extends Error {
+  readonly code = "title_conflict";
+  readonly title: string;
+  readonly conflicting: TitleConflict;
+
+  constructor(title: string, conflicting: TitleConflict) {
+    super(
+      `Title "${title}" is already used by shared entry "${conflicting.title}" (${conflicting.logical_id})`,
+    );
+    this.name = "TitleConflictError";
+    this.title = title;
+    this.conflicting = conflicting;
+  }
+}
+
 /** Columns to select for KnowledgeEntry — excludes the embedding BLOB
  *  (4KB per entry) which is only needed by vectorSearch() in embedding.ts. */
 const KNOWLEDGE_COLS =
@@ -422,13 +452,27 @@ export function create(input: {
   // where forSession() can't find them in either the project or cross-project pool.
   const crossProject = pid === null ? true : (input.crossProject ?? false);
 
+  // Build the update payload — forward confidence when the caller provided one
+  // so the curator's scoring intent isn't silently dropped on dedup.
+  const dedupUpdate = {
+    content: input.content,
+    ...(input.confidence != null ? { confidence: input.confidence } : {}),
+  };
+
+  if (input.id && (pid === null || crossProject)) {
+    const sharedConflict = findSharedTitleConflict(null, input.title);
+    if (sharedConflict) {
+      update(sharedConflict.logical_id, dedupUpdate);
+      return sharedConflict.logical_id;
+    }
+  }
+
   // Dedup guard: if an entry with the same project_id + title already exists,
   // update its content instead of inserting a duplicate. This prevents the
   // curator from creating multiple entries for the same concept across sessions.
   // Also checks cross-project entries to prevent the curator from creating
   // project-scoped duplicates of globally-shared knowledge.
-  // Note: when an explicit id is provided (cross-machine import), skip dedup —
-  // the caller (importFromFile) already handles duplicate detection by UUID.
+  // Explicit-id project-scoped imports still use their UUID-based dedup path.
   if (!input.id) {
     // First check same project_id
     // Return the stable logical_id (not the per-version id): update() below
@@ -437,22 +481,25 @@ export function create(input: {
       pid !== null
         ? db()
             .query(
-              "SELECT logical_id FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT logical_id FROM knowledge_current
+               WHERE tenant_id = ? AND project_id = ?
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
-            .get(pid, input.title)
+            .get(tenantId, pid, input.title)
         : db()
             .query(
-              "SELECT logical_id FROM knowledge_current WHERE tenant_id = ? AND project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT logical_id FROM knowledge_current
+               WHERE tenant_id = ? AND project_id IS NULL
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
             .get(tenantId, input.title)
     ) as { logical_id: string } | null;
-
-    // Build the update payload — forward confidence when the caller provided one
-    // so the curator's scoring intent isn't silently dropped on dedup.
-    const dedupUpdate = {
-      content: input.content,
-      ...(input.confidence != null ? { confidence: input.confidence } : {}),
-    };
 
     if (existing) {
       update(existing.logical_id, dedupUpdate);
@@ -463,7 +510,12 @@ export function create(input: {
     // duplicates of entries that already exist as cross-project knowledge.
     const crossExisting = db()
       .query(
-        "SELECT logical_id FROM knowledge_current WHERE tenant_id = ? AND cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        `SELECT logical_id FROM knowledge_current
+         WHERE tenant_id = ? AND cross_project = 1
+           AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+           AND confidence > 0
+         ORDER BY logical_id
+         LIMIT 1`,
       )
       .get(tenantId, input.title) as { logical_id: string } | null;
 
@@ -675,17 +727,36 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
       ? ensureProject(input.projectPath)
       : null;
 
+  if (input.id && (pid === null || input.crossProject === true)) {
+    const existing = findSharedTitleConflict(null, input.title);
+    if (existing) {
+      const previousContent = getByLogical(existing.logical_id)?.content;
+      const id = create(input);
+      return { id, created: false, previousContent };
+    }
+  }
+
   if (!input.id) {
     const existing = (
       pid !== null
         ? db()
             .query(
-              "SELECT id, content FROM knowledge_current WHERE project_id = ? AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT id, content FROM knowledge_current
+               WHERE tenant_id = ? AND project_id = ?
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
-            .get(pid, input.title)
+            .get(tenantId, pid, input.title)
         : db()
             .query(
-              "SELECT id, content FROM knowledge_current WHERE tenant_id = ? AND project_id IS NULL AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+              `SELECT id, content FROM knowledge_current
+               WHERE tenant_id = ? AND project_id IS NULL
+                 AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+                 AND confidence > 0
+               ORDER BY logical_id
+               LIMIT 1`,
             )
             .get(tenantId, input.title)
     ) as { id: string; content: string } | null;
@@ -698,7 +769,12 @@ export function tryCreate(input: Parameters<typeof create>[0]): {
 
     const crossExisting = db()
       .query(
-        "SELECT id, content FROM knowledge_current WHERE tenant_id = ? AND cross_project = 1 AND LOWER(title) = LOWER(?) AND confidence > 0 LIMIT 1",
+        `SELECT id, content FROM knowledge_current
+         WHERE tenant_id = ? AND cross_project = 1
+           AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+           AND confidence > 0
+         ORDER BY logical_id
+         LIMIT 1`,
       )
       .get(tenantId, input.title) as { id: string; content: string } | null;
     if (crossExisting) {
@@ -841,46 +917,106 @@ export function rejectForTeam(logicalId: string): boolean {
   return res.changes > 0;
 }
 
+export function findSharedTitleConflict(
+  excludeLogicalId: string | null,
+  title: string,
+): TitleConflict | null {
+  const exclusion = excludeLogicalId === null ? "" : "AND logical_id != ?";
+  const params: unknown[] = [currentTenantId(), title];
+  if (excludeLogicalId !== null) params.push(excludeLogicalId);
+  const conflict = db()
+    .query(
+      `SELECT logical_id, id, title, project_id, cross_project
+         FROM knowledge_current
+        WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1)
+          AND confidence > 0
+          AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+          ${exclusion}
+        ORDER BY logical_id
+        LIMIT 1`,
+    )
+    .get(...params) as TitleConflict | null;
+  return conflict;
+}
+
 /**
- * Whether re-titling the entry identified by `logicalId` to `newTitle` would
- * collide with a DIFFERENT live entry sharing the same case-insensitive title in
- * the same dedup scope. Mirrors (and is a superset of) create()'s dedup guard:
- * - a plain project entry checks its own project AND the cross/global pool;
- * - a PROMOTED entry (project_id set, cross_project=1) checks BOTH its origin
- *   project AND the cross/global pool — a promoted entry is visible in its home
- *   project, so a same-project sibling with that title is still a real duplicate;
- * - a global entry (project_id IS NULL) checks the cross/global pool.
- * The entry's own `logical_id` is excluded so a no-op or case-only re-title never
- * counts as a collision, and `confidence > 0` matches create()'s "live" filter
- * (a dead/zeroed entry never blocks a re-title). Used ONLY by the re-title path
- * — create() has its own inline guard.
+ * Find a live title collision in the shared pool and, when project-owned, the
+ * entry's own project pool.
  */
+export function findTitleConflict(
+  logicalId: string,
+  entry: Pick<KnowledgeEntry, "project_id" | "cross_project">,
+  title: string,
+): TitleConflict | null {
+  const projectClause = entry.project_id === null ? "" : "OR project_id = ?";
+  const params: unknown[] = [currentTenantId(), logicalId, title];
+  if (entry.project_id !== null) params.push(entry.project_id);
+  return (
+    (db()
+      .query(
+        `SELECT logical_id, id, title, project_id, cross_project
+           FROM knowledge_current
+          WHERE tenant_id = ? AND logical_id != ? AND confidence > 0
+            AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+            AND (project_id IS NULL OR cross_project = 1 ${projectClause})
+          ORDER BY logical_id
+          LIMIT 1`,
+      )
+      .get(...params) as TitleConflict | undefined) ?? null
+  );
+}
+
+/** Whether re-titling the entry would collide in its dedup scope. */
 export function titleCollides(
   logicalId: string,
   entry: Pick<KnowledgeEntry, "project_id" | "cross_project">,
   newTitle: string,
 ): boolean {
-  const pid = entry.project_id;
-  // Pool = the cross/global pool, PLUS the entry's own project when it has one
-  // (true for both plain project entries and promoted entries — a promoted entry
-  // is still surfaced in its home project, so a same-project collision is real).
-  const scopeClause =
-    pid !== null
-      ? "(project_id IS NULL OR cross_project = 1 OR project_id = ?)"
-      : "(project_id IS NULL OR cross_project = 1)";
-  const params: unknown[] =
-    pid !== null
-      ? [currentTenantId(), logicalId, newTitle, pid]
-      : [currentTenantId(), logicalId, newTitle];
-  const hit = db()
+  return findTitleConflict(logicalId, entry, newTitle) !== null;
+}
+
+export type SharedTitleDuplicateGroup = {
+  title_key: string;
+  entries: Array<{
+    id: string;
+    title: string;
+    project_id: string | null;
+    cross_project: number;
+  }>;
+};
+
+/** Read-only report of pre-existing normalized-title duplicates in shared scope. */
+export function listSharedTitleDuplicates(): SharedTitleDuplicateGroup[] {
+  const rows = db()
     .query(
-      `SELECT 1 FROM knowledge_current
-         WHERE tenant_id = ? AND logical_id != ? AND confidence > 0 AND LOWER(title) = LOWER(?)
-           AND ${scopeClause}
-         LIMIT 1`,
+      `SELECT logical_id, title, project_id, cross_project,
+              ${TITLE_KEY_SQL("title")} AS title_key
+         FROM knowledge_current
+        WHERE tenant_id = ? AND (project_id IS NULL OR cross_project = 1)
+          AND confidence > 0
+        ORDER BY title_key, logical_id`,
     )
-    .get(...(params as [string, ...unknown[]]));
-  return hit != null;
+    .all(currentTenantId()) as Array<{
+    logical_id: string;
+    title: string;
+    project_id: string | null;
+    cross_project: number;
+    title_key: string;
+  }>;
+  const groups = new Map<string, SharedTitleDuplicateGroup["entries"]>();
+  for (const row of rows) {
+    const entries = groups.get(row.title_key) ?? [];
+    entries.push({
+      id: row.logical_id,
+      title: row.title,
+      project_id: row.project_id,
+      cross_project: row.cross_project,
+    });
+    groups.set(row.title_key, entries);
+  }
+  return [...groups]
+    .filter(([, entries]) => entries.length > 1)
+    .map(([title_key, entries]) => ({ title_key, entries }));
 }
 
 export function update(
@@ -1134,12 +1270,20 @@ export function findTombstonedByTitle(input: {
     input.projectId !== null
       ? (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0
+               AND (project_id = ? OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.projectId, input.title) as { 1: number } | null)
       : (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 0
+               AND (project_id IS NULL OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.title) as { 1: number } | null);
   if (live) return false;
@@ -1148,12 +1292,20 @@ export function findTombstonedByTitle(input: {
     input.projectId !== null
       ? (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1 AND (project_id = ? OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1
+               AND (project_id = ? OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.projectId, input.title) as { 1: number } | null)
       : (db()
           .query(
-            "SELECT 1 FROM knowledge WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1 AND (project_id IS NULL OR cross_project = 1) AND LOWER(title) = LOWER(?) LIMIT 1",
+            `SELECT 1 FROM knowledge
+             WHERE tenant_id = ? AND is_current = 1 AND is_deleted = 1
+               AND (project_id IS NULL OR cross_project = 1)
+               AND ${TITLE_KEY_SQL("title")} = ${TITLE_KEY_SQL("?")}
+             LIMIT 1`,
           )
           .get(tenantId, input.title) as { 1: number } | null);
   return deathCert != null;
@@ -4720,6 +4872,11 @@ export type PromotionResult = {
   promoted: number;
   /** Qualifying clusters (distinctProjects >= MIN_PROMOTION_PROJECTS). */
   clusters: PromotionCluster[];
+  conflicts: Array<{
+    logicalId: string;
+    title: string;
+    conflictingLogicalId: string;
+  }>;
 };
 
 /**
@@ -4739,7 +4896,8 @@ export function promoteCrossProject(opts?: {
   dryRun?: boolean;
 }): PromotionResult {
   const dryRun = opts?.dryRun ?? false;
-  if (!embedding.isAvailable()) return { promoted: 0, clusters: [] };
+  if (!embedding.isAvailable())
+    return { promoted: 0, clusters: [], conflicts: [] };
 
   // 1. Load eligible candidate entries (project-scoped, high-confidence, embedded).
   //    Capped at MAX_PROMOTION_CANDIDATES to keep pairwise comparison bounded.
@@ -4765,7 +4923,7 @@ export function promoteCrossProject(opts?: {
   if (candidates.length < MIN_PROMOTION_PROJECTS) {
     // Fewer entries than the minimum distinct-project requirement — impossible
     // to span enough projects.
-    return { promoted: 0, clusters: [] };
+    return { promoted: 0, clusters: [], conflicts: [] };
   }
 
   // 2. Load embeddings for the candidate set.
@@ -4849,20 +5007,36 @@ export function promoteCrossProject(opts?: {
     toPromote.push(...members);
   }
 
-  // 6. Flip qualifying members to cross_project = 1 in place.
-  if (!dryRun && toPromote.length) {
-    const now = Date.now();
-    const stmt = db().query(
-      `UPDATE knowledge
-       SET cross_project = 1, promotion_status = 'promoted', promoted_at = ?, updated_at = ?
-       WHERE id = ? AND is_current = 1`,
-    );
-    for (const id of toPromote) {
-      stmt.run(now, now, id);
+  // 6. Promote qualifying members only when their shared title key is unused.
+  const conflicts: PromotionResult["conflicts"] = [];
+  const promotedByTitleKey = new Map<string, string>();
+  const promotedIds: string[] = [];
+  const now = Date.now();
+  const stmt = db().query(
+    `UPDATE knowledge
+     SET cross_project = 1, promotion_status = 'promoted', promoted_at = ?, updated_at = ?
+     WHERE id = ? AND is_current = 1`,
+  );
+  for (const id of toPromote) {
+    const member = entryById.get(id);
+    if (!member) continue;
+    const conflict = findSharedTitleConflict(member.logical_id, member.title);
+    const titleKey = normalizeTitleKey(member.title);
+    const inBatchConflict = promotedByTitleKey.get(titleKey);
+    if (conflict || inBatchConflict) {
+      conflicts.push({
+        logicalId: member.logical_id,
+        title: member.title,
+        conflictingLogicalId: conflict?.logical_id ?? inBatchConflict!,
+      });
+      continue;
     }
+    promotedByTitleKey.set(titleKey, member.logical_id);
+    promotedIds.push(id);
+    if (!dryRun) stmt.run(now, now, id);
   }
 
-  return { promoted: toPromote.length, clusters };
+  return { promoted: promotedIds.length, clusters, conflicts };
 }
 
 // ---------------------------------------------------------------------------

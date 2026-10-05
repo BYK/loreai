@@ -1052,9 +1052,9 @@ async function runInner(input: {
       try {
         input.signal?.throwIfAborted();
         const promotion = ltm.promoteCrossProject({ dryRun: false });
-        if (promotion.promoted > 0) {
+        if (promotion.promoted > 0 || promotion.conflicts.length > 0) {
           log.info(
-            `cross-project promotion: promoted ${promotion.promoted} entries across ${promotion.clusters.length} cluster(s)`,
+            `cross-project promotion: promoted ${promotion.promoted} entries, skipped ${promotion.conflicts.length} title conflict(s) across ${promotion.clusters.length} cluster(s)`,
           );
         }
       } catch (err) {
