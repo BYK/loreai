@@ -39,7 +39,17 @@ const teamMocks = vi.hoisted(() => {
   }
   return {
     TeamRpcError: MockTeamRpcError,
+    identityLabel: (profile: {
+      display_name: string | null;
+      github_login: string | null;
+      email: string | null;
+    }) =>
+      profile.display_name ??
+      (profile.github_login ? `@${profile.github_login}` : null) ??
+      profile.email ??
+      null,
     teamMembers: vi.fn(),
+    teamMemberProfiles: vi.fn(),
     setTeamRole: vi.fn(),
     removeTeamMember: vi.fn(),
     createTeamInvite: vi.fn(),
@@ -187,11 +197,13 @@ beforeEach(() => {
     { userId: USER, role: "admin" },
     { userId: OTHER, role: "editor" },
   ]);
+  teamMocks.teamMemberProfiles.mockResolvedValue([]);
   teamMocks.setTeamRole.mockResolvedValue(undefined);
   teamMocks.removeTeamMember.mockResolvedValue({
     newEpoch: 3,
     rewrapped: 2,
     skipped: ["30000000-0000-4000-8000-000000000001"],
+    unlinkedProjects: 0,
   });
   teamMocks.createTeamInvite.mockResolvedValue("one-time-secret-token");
   teamMocks.sendInviteEmail.mockResolvedValue({
@@ -207,9 +219,23 @@ beforeEach(() => {
 });
 
 describe("team action routes", () => {
-  it("lists mirrored membership with only the local identity label", async () => {
+  it("lists member identities from server profiles", async () => {
     signIn();
     mirrorTeam();
+    teamMocks.teamMemberProfiles.mockResolvedValue([
+      {
+        user_id: USER,
+        display_name: "Folk User",
+        github_login: "folk-user",
+        email: "user@example.test",
+      },
+      {
+        user_id: OTHER,
+        display_name: null,
+        github_login: "other-user",
+        email: "other@example.test",
+      },
+    ]);
     const response = await request(`/api/v1/teams/${TEAM}/members`);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -218,8 +244,8 @@ describe("team action routes", () => {
       my_role: "admin",
       can_manage: true,
       members: [
-        { user_id: USER, label: "@folk-user", role: "admin", me: true },
-        { user_id: OTHER, label: null, role: "editor", me: false },
+        { user_id: USER, label: "Folk User", role: "admin", me: true },
+        { user_id: OTHER, label: "@other-user", role: "editor", me: false },
       ],
       actions: {
         invite: "available",
@@ -230,6 +256,21 @@ describe("team action routes", () => {
         list_invites: "unsupported",
         revoke_invite: "unsupported",
       },
+    });
+  });
+
+  it("uses the cached local identity for self only when profile lookup fails", async () => {
+    signIn();
+    mirrorTeam();
+    teamMocks.teamMemberProfiles.mockRejectedValueOnce(
+      new Error("profile lookup failed"),
+    );
+    const response = await request(`/api/v1/teams/${TEAM}/members`);
+    expect(await response.json()).toMatchObject({
+      members: [
+        { user_id: USER, label: "@folk-user", me: true },
+        { user_id: OTHER, label: null, me: false },
+      ],
     });
   });
 
@@ -387,25 +428,33 @@ describe("team action routes", () => {
     });
   });
 
-  it("checks self-targeting, existence, and stale roles before role changes", async () => {
+  it("allows self role changes and checks existence and stale roles", async () => {
     enableWrites();
     const self = await request(
       `/api/v1/teams/${TEAM}/members/${USER}/role`,
       "POST",
       JSON.stringify({ role: "viewer", expected_role: "admin" }),
     );
-    expect(self.status).toBe(409);
+    expect(self.status).toBe(200);
     expect(await self.json()).toMatchObject({
-      error: { type: "self_action_unsupported" },
+      member: { user_id: USER, role: "viewer" },
     });
+    expect(teamMocks.setTeamRole).toHaveBeenCalledWith(
+      expect.anything(),
+      TEAM,
+      USER,
+      "viewer",
+    );
+
     const selfRemoval = await request(
       `/api/v1/teams/${TEAM}/members/${USER}/remove`,
       "POST",
       JSON.stringify({ expected_role: "admin" }),
     );
-    expect(selfRemoval.status).toBe(409);
+    expect(selfRemoval.status).toBe(200);
     expect(await selfRemoval.json()).toMatchObject({
-      error: { type: "self_action_unsupported" },
+      removed: USER,
+      unlinked_projects: 0,
     });
 
     teamMocks.teamMembers.mockResolvedValueOnce([
@@ -466,11 +515,13 @@ describe("team action routes", () => {
     expect(teamMocks.removeTeamMember).not.toHaveBeenCalled();
   });
 
-  it("maps role RPC codes and preserves last-admin protection", async () => {
+  it("maps role and removal RPC codes, including atomic rotation conflicts", async () => {
     enableWrites();
     const cases = [
       ["42501", 403, "forbidden"],
       ["23514", 409, "last_admin"],
+      ["40001", 409, "rotation_conflict"],
+      ["P0002", 404, "not_found"],
       ["22023", 400, "invalid_request"],
       ["XX000", 502, "remote_unreachable"],
       [null, 502, "remote_unreachable"],
@@ -489,7 +540,7 @@ describe("team action routes", () => {
     }
   });
 
-  it("returns only a skipped count from member-removal receipts", async () => {
+  it("returns only counts from member-removal receipts", async () => {
     enableWrites();
     const response = await request(
       `/api/v1/teams/${TEAM}/members/${OTHER}/remove`,
@@ -503,6 +554,7 @@ describe("team action routes", () => {
       new_epoch: 3,
       rewrapped: 2,
       skipped_count: 1,
+      unlinked_projects: 0,
     });
     expect(JSON.stringify(body)).not.toContain("30000000-0000-4000-8000");
   });

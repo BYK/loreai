@@ -49,7 +49,7 @@ const memberResponse: TeamMembersResponse = {
     },
     {
       user_id: "user-12345678-90ab-cdef",
-      label: null,
+      label: "Jordan",
       role: "viewer",
       me: false,
     },
@@ -142,6 +142,7 @@ function clientWith(partial: Partial<ApiClient>): ApiClient {
       new_epoch: 2,
       rewrapped: 3,
       skipped_count: 1,
+      unlinked_projects: 0,
     }),
     getProjectSharing: async () => automaticSharing,
     requireProjectSharingReview: async () => manualSharing,
@@ -191,7 +192,7 @@ describe("TeamPage", () => {
     expect(screen.queryByText("Sign in with `lore login`")).toBeNull();
   });
 
-  it("shows fallback teammate identity and applies the role receipt", async () => {
+  it("shows the server member identity and applies the role receipt", async () => {
     const setTeamMemberRole = vi.fn<ApiClient["setTeamMemberRole"]>(
       async () => ({
         member: { user_id: "user-12345678-90ab-cdef", role: "editor" },
@@ -200,12 +201,15 @@ describe("TeamPage", () => {
     mount(() => <TeamPage />, clientWith({ setTeamMemberRole }));
 
     await screen.findByTestId("team-members");
-    expect(screen.getByText("Teammate user-123")).toHaveAttribute(
+    expect(screen.getByText("Jordan")).toHaveAttribute(
       "title",
       "user-12345678-90ab-cdef",
     );
+    expect(
+      screen.getByText("Jordan").closest("[data-user-id]"),
+    ).toHaveAttribute("data-user-id", "user-12345678-90ab-cdef");
     const role = screen.getByRole("combobox", {
-      name: "Role for Teammate user-123",
+      name: "Role for Jordan",
     });
     fireEvent.change(role, { target: { value: "editor" } });
     await screen.findByText("user-12345678-90ab-cdef is now editor.");
@@ -215,6 +219,24 @@ describe("TeamPage", () => {
       "editor",
       "viewer",
     );
+  });
+
+  it("uses Former member when the server has no member label", async () => {
+    const members: TeamMembersResponse = {
+      ...memberResponse,
+      members: memberResponse.members.map((member) =>
+        member.me ? member : { ...member, label: null },
+      ),
+    };
+    mount(
+      () => <TeamPage />,
+      clientWith({ getTeamMembers: async () => members }),
+    );
+
+    expect(await screen.findByText("Former member")).toBeVisible();
+    expect(
+      screen.getByRole("combobox", { name: "Role for Former member" }),
+    ).toBeVisible();
   });
 
   it("restores the server-known role after a failed role change", async () => {
@@ -232,7 +254,7 @@ describe("TeamPage", () => {
     mount(() => <TeamPage />, clientWith({ setTeamMemberRole }));
 
     const role = await screen.findByRole("combobox", {
-      name: "Role for Teammate user-123",
+      name: "Role for Jordan",
     });
     expect(role).toHaveValue("viewer");
     fireEvent.change(role, { target: { value: "editor" } });
@@ -271,20 +293,90 @@ describe("TeamPage", () => {
     );
 
     const role = await screen.findByRole("combobox", {
-      name: "Role for Teammate user-123",
+      name: "Role for Jordan",
     });
     fireEvent.change(role, { target: { value: "editor" } });
     const notice = await screen.findByTestId("team-stale-member-notice");
     expect(notice).toHaveTextContent(
-      "Teammate user-123's role changed to Editor since you loaded the team.",
+      "Jordan's role changed to Editor since you loaded the team.",
     );
     expect(notice).toHaveTextContent("The list has been reloaded.");
     expect(
       screen.getByRole("combobox", {
-        name: "Role for Teammate user-123",
+        name: "Role for Jordan",
       }),
     ).toHaveValue("editor");
     expect(getTeamMembers).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows an admin to change their own role", async () => {
+    const twoAdmins: TeamMembersResponse = {
+      ...memberResponse,
+      members: memberResponse.members.map((member) =>
+        member.user_id === "user-12345678-90ab-cdef"
+          ? { ...member, role: "admin" }
+          : member,
+      ),
+    };
+    const setTeamMemberRole = vi.fn<ApiClient["setTeamMemberRole"]>(
+      async () => ({
+        member: { user_id: "user-me", role: "viewer" },
+      }),
+    );
+    mount(
+      () => <TeamPage />,
+      clientWith({
+        getTeamMembers: async () => twoAdmins,
+        setTeamMemberRole,
+      }),
+    );
+
+    const role = await screen.findByRole("combobox", {
+      name: "Role for Admin",
+    });
+    expect(role).toBeEnabled();
+    fireEvent.change(role, { target: { value: "viewer" } });
+    await waitFor(() =>
+      expect(setTeamMemberRole).toHaveBeenCalledWith(
+        "team-1",
+        "user-me",
+        "viewer",
+        "admin",
+      ),
+    );
+    expect(role).toHaveValue("viewer");
+  });
+
+  it("keeps sole-admin leave available and shows the server last-admin message", async () => {
+    const message =
+      "cannot remove the last admin; promote another member to admin first";
+    const removeTeamMember = vi.fn<ApiClient["removeTeamMember"]>(async () => {
+      throw new ApiError(
+        "http",
+        "/teams/team-1/members/user-me/remove",
+        message,
+        409,
+        "last_admin",
+      );
+    });
+    mount(() => <TeamPage />, clientWith({ removeTeamMember }));
+
+    expect(await screen.findByTestId("team-only-admin-hint")).toHaveTextContent(
+      "You're the only admin. Promote another member to admin first.",
+    );
+    const selfRow = screen
+      .getAllByTestId("team-member-row")
+      .find((row) => row.getAttribute("data-user-id") === "user-me");
+    if (!selfRow) throw new Error("current-user row missing");
+    fireEvent.click(
+      within(selfRow).getByRole("button", { name: "Leave team" }),
+    );
+    const dialog = await screen.findByTestId("team-remove-confirmation");
+    const confirm = within(dialog).getByRole("button", { name: "Leave team" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(message);
+    expect(confirm).toBeEnabled();
   });
 
   it("confirms removal and keeps the invite token only inside its receipt dialog", async () => {
@@ -303,6 +395,7 @@ describe("TeamPage", () => {
       new_epoch: 2,
       rewrapped: 3,
       skipped_count: 1,
+      unlinked_projects: 0,
     }));
     mount(
       () => <TeamPage />,
@@ -426,7 +519,7 @@ describe("TeamPage", () => {
     );
     expect(
       await screen.findByTestId("team-stale-member-notice"),
-    ).toHaveTextContent("Teammate user-123's role changed to Editor");
+    ).toHaveTextContent("Jordan's role changed to Editor");
     expect(screen.queryByTestId("team-remove-confirmation")).toBeNull();
     expect(getTeamMembers).toHaveBeenCalledTimes(2);
   });
@@ -453,7 +546,7 @@ describe("TeamPage", () => {
     );
     await screen.findByTestId("team-sync-disabled");
     fireEvent.change(
-      screen.getByRole("combobox", { name: "Role for Teammate user-123" }),
+      screen.getByRole("combobox", { name: "Role for Jordan" }),
       { target: { value: "editor" } },
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -488,6 +581,57 @@ describe("ConflictsPage", () => {
     ).toHaveTextContent("version-3");
     expect(screen.queryByTestId("conflict-card")).not.toBeInTheDocument();
     expect(keepSyncConflictLocal).toHaveBeenCalledWith(17, "version-2");
+  });
+
+  it("offers Keep mine for a remote-deleted entry and restores it", async () => {
+    const deletedConflicts: SyncConflictList = {
+      ...conflicts,
+      conflicts: [
+        {
+          ...conflicts.conflicts[0]!,
+          resolution: "remote_delete_wins",
+          current: {
+            ...conflicts.conflicts[0]!.current!,
+            version_id: "death-cert-3",
+            version: 3,
+            deleted: true,
+          },
+        },
+      ],
+    };
+    const keepSyncConflictLocal = vi.fn<ApiClient["keepSyncConflictLocal"]>(
+      async () => ({
+        kept: "local",
+        current: {
+          version_id: "restored-4",
+          version: 4,
+          title: "Local decision",
+          content: "Keep SQLite.",
+        },
+      }),
+    );
+    mount(
+      () => <ConflictsPage />,
+      clientWith({
+        listSyncConflicts: async () => deletedConflicts,
+        keepSyncConflictLocal,
+      }),
+    );
+
+    const card = await screen.findByTestId("conflict-card");
+    expect(card).toHaveTextContent("The remote entry was deleted.");
+    expect(card).toHaveTextContent("deleted remotely");
+    fireEvent.click(within(card).getByRole("button", { name: "Keep mine" }));
+    const dialog = await screen.findByTestId("conflict-action-confirmation");
+    expect(dialog).toHaveTextContent(
+      "restores the saved local snapshot as a new current version",
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Keep mine" }));
+
+    expect(
+      await screen.findByTestId("conflict-recovery-receipt"),
+    ).toHaveTextContent("restored-4");
+    expect(keepSyncConflictLocal).toHaveBeenCalledWith(17, "death-cert-3");
   });
 
   it("keeps stale keep errors in the dialog and reloads from there", async () => {
