@@ -29,17 +29,33 @@ export class KnowledgeEditError extends Error {
   readonly code: KnowledgeEditErrorCode;
   readonly expected_revision?: number;
   readonly current_revision?: number;
+  readonly conflicting_entry?: {
+    id: string;
+    title: string;
+    project_id: string | null;
+    scope: "project" | "shared";
+  };
 
   constructor(
     code: KnowledgeEditErrorCode,
     message: string,
-    details?: { expected_revision?: number; current_revision?: number },
+    details?: {
+      expected_revision?: number;
+      current_revision?: number;
+      conflicting_entry?: {
+        id: string;
+        title: string;
+        project_id: string | null;
+        scope: "project" | "shared";
+      };
+    },
   ) {
     super(message);
     this.name = "KnowledgeEditError";
     this.code = code;
     this.expected_revision = details?.expected_revision;
     this.current_revision = details?.current_revision;
+    this.conflicting_entry = details?.conflicting_entry;
   }
 }
 
@@ -327,15 +343,33 @@ export function editKnowledge(
         "deleted",
         `Knowledge entry is deleted: ${logicalId}`,
       );
-    if (title !== head.title && ltm.titleCollides(logicalId, current, title))
+    const nextState = {
+      project_id: head.project_id,
+      cross_project: nextScope === "shared" ? 1 : 0,
+    };
+    const titleOrScopeChanged =
+      ltm.normalizeTitleKey(title) !== ltm.normalizeTitleKey(head.title) ||
+      scopeOf(head) !== nextScope;
+    const conflict = titleOrScopeChanged
+      ? ltm.findTitleConflict(logicalId, nextState, title)
+      : null;
+    if (conflict) {
+      const conflictScope = scopeOf(conflict);
       throw new KnowledgeEditError(
         "title_conflict",
-        `Another live knowledge entry already uses the title "${title}"`,
+        `Title "${title}" is already used by ${conflictScope} entry "${conflict.title}" (${conflict.logical_id})`,
         {
           expected_revision: input.expectedRevision,
           current_revision: head.version,
+          conflicting_entry: {
+            id: conflict.logical_id,
+            title: conflict.title,
+            project_id: conflict.project_id,
+            scope: conflictScope,
+          },
         },
       );
+    }
 
     const confidenceChanged =
       input.confidence !== undefined && input.confidence !== current.confidence;
@@ -461,15 +495,24 @@ export function restoreKnowledge(
       invalid("the requested restore version is unavailable");
     if (head.is_deleted === 0 && target.id === head.id)
       invalid("the requested version is already current");
-    if (ltm.titleCollides(logicalId, target, target.title))
+    const conflict = ltm.findTitleConflict(logicalId, target, target.title);
+    if (conflict) {
+      const conflictScope = scopeOf(conflict);
       throw new KnowledgeEditError(
         "title_conflict",
-        `Another live knowledge entry already uses the title "${target.title}"`,
+        `Title "${target.title}" is already used by ${conflictScope} entry "${conflict.title}" (${conflict.logical_id})`,
         {
           expected_revision: input.expectedRevision,
           current_revision: head.version,
+          conflicting_entry: {
+            id: conflict.logical_id,
+            title: conflict.title,
+            project_id: conflict.project_id,
+            scope: conflictScope,
+          },
         },
       );
+    }
 
     const versionId = ltm.appendVersion(logicalId, {
       title: target.title,
