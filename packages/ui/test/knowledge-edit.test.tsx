@@ -813,6 +813,75 @@ describe("KnowledgeEditor", () => {
     await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
   });
 
+  it("keeps a draft and reloads after save finds a deleted entry", async () => {
+    const db = await openLoreDb({ factory: new IDBFactory() });
+    if (!db) throw new Error("fake IndexedDB did not open");
+    const reloadEntry = vi.fn();
+    const client = makeClient({
+      editKnowledge: async () => {
+        throw new ApiError(
+          "http",
+          "/api/v1/knowledge/knowledge-1",
+          "Entry is deleted",
+          409,
+          "deleted",
+        );
+      },
+    });
+    mountEditor({ client, db: Promise.resolve(db), onReload: reloadEntry });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Draft for deleted entry" },
+    });
+    fireEvent.submit(screen.getByTestId("knowledge-editor"));
+
+    await waitFor(() => expect(reloadEntry).toHaveBeenCalledOnce());
+    expect(
+      await createDraftsStore(db).get("knowledge/knowledge-1"),
+    ).toMatchObject({
+      body: { title: "Draft for deleted entry" },
+      baseRevision: 1,
+    });
+    expect(screen.getByRole("button", { name: "Edit" })).toBeVisible();
+  });
+
+  it("treats a deleted refusal as a completed deletion", async () => {
+    const deleteKnowledge = vi.fn(async () => {
+      throw new ApiError(
+        "http",
+        "/api/v1/knowledge/knowledge-1",
+        "Entry is deleted",
+        409,
+        "deleted",
+      );
+    });
+    const onDeleted = vi.fn();
+    render(() => (
+      <WorkspaceProvider
+        client={makeClient({ deleteKnowledge })}
+        db={Promise.resolve(null)}
+      >
+        <KnowledgeEditor
+          entry={entry()}
+          versions={makeLoader(history()).loader}
+          reloadEntry={vi.fn()}
+          onDeleted={onDeleted}
+        />
+      </WorkspaceProvider>
+    ));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete entry" }),
+    );
+
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("reloads a stale entry before opening delete confirmation", async () => {
     const latest = history(2);
     const listKnowledgeVersions = vi.fn(async () => latest);
