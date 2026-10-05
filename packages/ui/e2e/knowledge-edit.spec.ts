@@ -15,6 +15,102 @@ async function projectIdByName(page: Page, name: string): Promise<string> {
 }
 
 test.describe("revision-checked knowledge editing (MEM-03)", () => {
+  test("refuses sharing a project title used by shared entries", async ({
+    page,
+  }, testInfo) => {
+    const viewport = testInfo.project.name.includes("mobile")
+      ? "mobile"
+      : "desktop";
+    const run = testInfo.retry + 1;
+    const projectId = await projectIdByName(
+      page,
+      `dd-apply-${viewport}-${run}`,
+    );
+    const sharedTitle = "Shared title conflict legacy duplicate E2E";
+    const entriesResponse = await page.request.get(
+      `/api/v1/projects/${projectId}/knowledge`,
+    );
+    expect(entriesResponse.ok()).toBe(true);
+    const entries = (await entriesResponse.json()) as KnowledgeEntry[];
+    const entry = entries.find((item) => item.title === sharedTitle);
+    if (!entry) throw new Error("seeded shared-title edit entry is missing");
+
+    await page.goto(`/ui/projects/${projectId}/knowledge/${entry.id}`);
+    await expect(page.getByTestId("knowledge-document")).toBeVisible();
+    const attemptShare = async (knowledgeId: string) => {
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      const editor = page.getByTestId("knowledge-editor");
+      await editor.getByLabel("Shared").check();
+      const response = page.waitForResponse(
+        (candidate) =>
+          candidate.request().method() === "PATCH" &&
+          new URL(candidate.url()).pathname ===
+            `/api/v1/knowledge/${knowledgeId}`,
+      );
+      await editor.getByRole("button", { name: "Save", exact: true }).click();
+      return response;
+    };
+
+    const firstResponse = await attemptShare(entry.id);
+    expect(firstResponse.status()).toBe(409);
+    const firstBody = (await firstResponse.json()) as {
+      error: { conflicting_entry: { id: string; title: string } };
+    };
+    const conflict = firstBody.error.conflicting_entry;
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText(
+      "already uses this title among shared entries",
+    );
+    const existingEntryLink = alert.getByRole("link", {
+      name: `Open “${conflict.title}”`,
+    });
+    await expect(existingEntryLink).toHaveAttribute(
+      "href",
+      `/ui/knowledge/${conflict.id}`,
+    );
+    const duplicatesLink = alert.getByRole("link", {
+      name: "Review duplicates",
+    });
+    await expect(duplicatesLink).toHaveAttribute(
+      "href",
+      `/ui/projects/${projectId}/duplicates`,
+    );
+
+    await existingEntryLink.click();
+    await expect(page).toHaveURL(`/ui/knowledge/${conflict.id}`);
+    await expect(page.getByTestId("knowledge-document")).toContainText(
+      conflict.title,
+    );
+
+    const reviewRun = run === 3 ? 1 : run + 1;
+    const reviewProjectId = await projectIdByName(
+      page,
+      `dd-apply-${viewport}-${reviewRun}`,
+    );
+    const reviewEntriesResponse = await page.request.get(
+      `/api/v1/projects/${reviewProjectId}/knowledge`,
+    );
+    expect(reviewEntriesResponse.ok()).toBe(true);
+    const reviewEntries =
+      (await reviewEntriesResponse.json()) as KnowledgeEntry[];
+    const reviewEntry = reviewEntries.find(
+      (item) => item.title === sharedTitle,
+    );
+    if (!reviewEntry)
+      throw new Error("second seeded shared-title edit entry is missing");
+    await page.goto(
+      `/ui/projects/${reviewProjectId}/knowledge/${reviewEntry.id}`,
+    );
+    const secondResponse = await attemptShare(reviewEntry.id);
+    expect(secondResponse.status()).toBe(409);
+    await page
+      .getByRole("alert")
+      .getByRole("link", { name: "Review duplicates" })
+      .click();
+    await expect(page).toHaveURL(`/ui/projects/${reviewProjectId}/duplicates`);
+    await expect(page.getByTestId("shared-title-conflicts")).toBeVisible();
+  });
+
   test("restores a superseded live history version", async ({
     page,
   }, testInfo) => {
