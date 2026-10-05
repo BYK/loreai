@@ -24,6 +24,7 @@ export type DedupPreviewCandidate = typeof dedupPreviewCandidate.infer;
 export const dedupPreviewGroup = type({
   group_id: nonEmptyString,
   scope: "'project' | 'global'",
+  pool: "'project' | 'shared' | 'project_shared'",
   project_id: "string | null",
   candidates: dedupPreviewCandidate.array(),
   suggested_keep_id: nonEmptyString,
@@ -41,6 +42,7 @@ export const dedupPreviewResponse = type({
   groups: dedupPreviewGroup.array(),
   project: dedupResult,
   global: dedupResult,
+  project_shared: dedupResult,
 });
 
 export type DedupPreviewResponse = typeof dedupPreviewResponse.infer;

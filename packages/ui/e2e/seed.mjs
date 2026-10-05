@@ -68,6 +68,32 @@ for (const [title, content, confidence] of [
     confidence,
   });
 }
+// A private entry in dedup-review duplicating a promoted entry of another
+// project — produces a `pool: "project_shared"` ("Project + shared") group.
+const dedupOrigin = join(root, "dedup-origin");
+mkdirSync(dedupOrigin, { recursive: true });
+core.ensureProject(dedupOrigin, "dedup-origin", null);
+core.ltm.create({
+  id: crypto.randomUUID(),
+  projectPath: dedupReview,
+  category: "decision",
+  title: "Cross pool duplicate tenant eviction ordering evidence",
+  content: "Private copy of the shared eviction ordering rule.",
+  session: "e2e-dedup-review",
+  scope: "project",
+  confidence: 0.8,
+});
+core.ltm.create({
+  id: crypto.randomUUID(),
+  projectPath: dedupOrigin,
+  category: "decision",
+  title: "Cross pool duplicate tenant eviction ordering evidence promoted",
+  content: "Shared eviction ordering rule, promoted from its origin project.",
+  session: "e2e-dedup-review",
+  scope: "project",
+  crossProject: true,
+  confidence: 0.9,
+});
 // #1918: five extra empty projects so the sidebar has more entries than the
 // Recent limit and the filter / "All projects" surfaces render. They have no
 // messages or knowledge, so `last_activity` is null and they sort last.

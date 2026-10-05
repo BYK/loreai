@@ -6,6 +6,7 @@ import { markFrom, markStatus } from "~/lib/dedup-review";
 const GROUP: DedupPreviewGroup = {
   group_id: "project:abc",
   scope: "project",
+  pool: "project_shared",
   project_id: "p1",
   suggested_keep_id: "v1",
   candidates: [
