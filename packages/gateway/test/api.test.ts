@@ -370,6 +370,45 @@ describe("revision-checked knowledge mutations", () => {
     });
   });
 
+  it("returns deleted for stale PATCH and checked DELETE after a concurrent delete", async () => {
+    const { id } = await seedKnowledgeEntry();
+    const concurrentDelete = await api(
+      `/api/v1/knowledge/${id}?expected_revision=1`,
+      { method: "DELETE" },
+    );
+    expect(concurrentDelete.status).toBe(200);
+
+    const patch = await api(`/api/v1/knowledge/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: 1,
+        content: "This edit races with deletion",
+      }),
+    });
+    expect(patch.status).toBe(409);
+    expect(await patch.json()).toMatchObject({
+      error: {
+        type: "deleted",
+        expected_revision: 1,
+        current_revision: 2,
+      },
+    });
+
+    const checkedDelete = await api(
+      `/api/v1/knowledge/${id}?expected_revision=1`,
+      { method: "DELETE" },
+    );
+    expect(checkedDelete.status).toBe(409);
+    expect(await checkedDelete.json()).toMatchObject({
+      error: {
+        type: "deleted",
+        expected_revision: 1,
+        current_revision: 2,
+      },
+    });
+  });
+
   it("rejects malformed input and title conflicts", async () => {
     const { id, projectPath } = await seedKnowledgeEntry("A title to restore");
     const malformedBodies = [

@@ -91,7 +91,41 @@ describe("revision-checked knowledge editing", () => {
     expect(ltm.getByLogical(id)?.title).not.toBe("A stale title");
   });
 
-  test("a dedup apply racing an edit makes the old PATCH revision stale", () => {
+  test("a concurrent delete makes an edit at the old revision return deleted", () => {
+    const id = createEntry();
+    deleteEntry(id, 1);
+
+    expectEditError(
+      () =>
+        knowledgeEdit.editKnowledge(id, {
+          expectedRevision: 1,
+          actor: "editor",
+          content: "The entry was deleted concurrently",
+        }),
+      {
+        code: "deleted",
+        expected_revision: 1,
+        current_revision: 2,
+      },
+    );
+    expect(revisionOf(id)).toBe(2);
+    expect(ltm.versionHistory(id)).toHaveLength(2);
+  });
+
+  test("a concurrent delete makes checked delete at the old revision return deleted", () => {
+    const id = createEntry();
+    deleteEntry(id, 1);
+
+    expectEditError(() => deleteEntry(id, 1), {
+      code: "deleted",
+      expected_revision: 1,
+      current_revision: 2,
+    });
+    expect(revisionOf(id)).toBe(2);
+    expect(ltm.versionHistory(id)).toHaveLength(2);
+  });
+
+  test("a dedup apply racing an edit returns deleted for the tombstoned PATCH target", () => {
     const keep = createEntry();
     const merged = createEntry();
     const revisions = {
@@ -116,12 +150,13 @@ describe("revision-checked knowledge editing", () => {
           content: "The dedup apply already deleted this entry",
         }),
       {
-        code: "stale_revision",
+        code: "deleted",
         expected_revision: 1,
         current_revision: 2,
       },
     );
     expect(revisionOf(merged)).toBe(2);
+    expect(ltm.versionHistory(merged)).toHaveLength(2);
   });
 
   test("confidence-only changes the register without appending a version", () => {

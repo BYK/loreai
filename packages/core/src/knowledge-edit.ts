@@ -138,12 +138,22 @@ function headFor(logicalId: string): KnowledgeHead | null {
 function requireHead(
   logicalId: string,
   expectedRevision: number,
+  options?: { refuseDeleted?: boolean },
 ): KnowledgeHead {
   const head = headFor(logicalId);
   if (!head)
     throw new KnowledgeEditError(
       "not_found",
       `Knowledge entry not found: ${logicalId}`,
+    );
+  if (options?.refuseDeleted && head.is_deleted === 1)
+    throw new KnowledgeEditError(
+      "deleted",
+      `Knowledge entry is deleted: ${logicalId}`,
+      {
+        expected_revision: expectedRevision,
+        current_revision: head.version,
+      },
     );
   if (head.version !== expectedRevision) {
     throw new KnowledgeEditError(
@@ -292,16 +302,9 @@ export function editKnowledge(
   assertOutsideTransaction();
   const logicalId = ltm.logicalIdOf(id);
   const outcome = withTransaction(() => {
-    const head = requireHead(logicalId, input.expectedRevision);
-    if (head.is_deleted === 1)
-      throw new KnowledgeEditError(
-        "deleted",
-        `Knowledge entry is deleted: ${logicalId}`,
-        {
-          expected_revision: input.expectedRevision,
-          current_revision: head.version,
-        },
-      );
+    const head = requireHead(logicalId, input.expectedRevision, {
+      refuseDeleted: true,
+    });
     if (input.scope === "project" && head.project_id === null)
       invalid(
         "a shared entry without a project cannot be changed to project scope",
@@ -393,16 +396,9 @@ export function deleteKnowledgeChecked(
   assertOutsideTransaction();
   const logicalId = ltm.logicalIdOf(id);
   const outcome = withTransaction(() => {
-    const head = requireHead(logicalId, input.expectedRevision);
-    if (head.is_deleted === 1)
-      throw new KnowledgeEditError(
-        "deleted",
-        `Knowledge entry is deleted: ${logicalId}`,
-        {
-          expected_revision: input.expectedRevision,
-          current_revision: head.version,
-        },
-      );
+    const head = requireHead(logicalId, input.expectedRevision, {
+      refuseDeleted: true,
+    });
     ltm.remove(logicalId);
     const tombstone = headFor(logicalId);
     if (!tombstone || tombstone.is_deleted !== 1)
