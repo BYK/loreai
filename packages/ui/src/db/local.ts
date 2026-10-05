@@ -19,7 +19,14 @@ export interface LocalDraft {
   kind: "knowledge";
   /** Logical id being edited, or null for a new entry. */
   target: string | null;
-  body: { title: string; content: string; category: string };
+  body: {
+    title: string;
+    content: string;
+    category: string;
+    confidence?: number;
+    scope?: "project" | "shared";
+  };
+  baseRevision?: number;
   updatedAt: number;
 }
 

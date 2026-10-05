@@ -47,6 +47,7 @@ import {
 } from "./api-lists";
 import { parseBooleanParam } from "./query-bool";
 import { handleSessionContext } from "./session-context-api";
+import { handleCheckedDeleteKnowledge } from "./knowledge-edit-api";
 
 // ---------------------------------------------------------------------------
 // Route matching (adapted from ui.ts)
@@ -1036,7 +1037,11 @@ export async function handleAPIRequest(
   if (method === "DELETE") {
     // DELETE /api/v1/knowledge/:id
     params = matchRoute(pathname, "/api/v1/knowledge/:id");
-    if (params) return handleDeleteKnowledge(params.id);
+    if (params) {
+      if (url.searchParams.has("expected_revision"))
+        return handleCheckedDeleteKnowledge(url, params.id, config.hostedMode);
+      return handleDeleteKnowledge(params.id);
+    }
 
     // DELETE /api/v1/sessions/:id
     params = matchRoute(pathname, "/api/v1/sessions/:id");

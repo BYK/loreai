@@ -120,6 +120,25 @@ for (const viewport of ["desktop", "mobile"]) {
     }
   }
 }
+
+const knowledgeEditFixtureCount = 12;
+for (const viewport of ["desktop", "mobile"]) {
+  for (const run of [1, 2, 3]) {
+    const projectPath = join(root, `dd-apply-${viewport}-${run}`);
+    for (const purpose of ["edit", "restore"]) {
+      core.ltm.create({
+        id: crypto.randomUUID(),
+        projectPath,
+        category: "decision",
+        title: `Revision checked ${purpose} ${viewport} ${run} disposable fixture`,
+        content: `A unique knowledge entry reserved for MEM-03 ${purpose} ${viewport} retry ${run}.`,
+        scope: "project",
+        confidence: 0.82,
+      });
+    }
+  }
+}
+
 // #1918: five extra empty projects so the sidebar has more entries than the
 // Recent limit and the filter / "All projects" surfaces render. They have no
 // messages or knowledge, so `last_activity` is null and they sort last.
@@ -824,7 +843,7 @@ db.prepare(
 db.close();
 
 console.log(
-  `seeded ${entries.length + 1 + contradictionFixtureId} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
+  `seeded ${entries.length + 1 + contradictionFixtureId + knowledgeEditFixtureCount} knowledge entries, ${MESSAGES} messages and 2 distillations into ${process.env.LORE_DB_PATH}`,
 );
 // Core keeps worker pools / maintenance timers alive; the DB is closed, so exit.
 process.exit(0);

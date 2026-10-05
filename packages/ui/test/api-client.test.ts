@@ -753,6 +753,132 @@ describe("contradiction API client", () => {
   });
 });
 
+describe("knowledge edit API client", () => {
+  const effects = {
+    scope: "project",
+    project_id: "p1",
+    revision: 2,
+    is_deleted: false,
+    lore_file: {
+      enabled: true,
+      path: "/tmp/project/.lore.md",
+      affected: true,
+      regenerated: true,
+    },
+    agents_file: { enabled: true, mode: "pointer", immediate: false },
+    sync: { enabled: false },
+  };
+  const entry = {
+    id: ENTRY.id,
+    logical_id: ENTRY.id,
+    project_id: "p1",
+    category: "decision",
+    title: "Edited",
+    content: "Updated content",
+    confidence: 0.8,
+    cross_project: 0,
+  };
+  const edited = {
+    id: ENTRY.id,
+    revision: 2,
+    previous_revision: 1,
+    version_id: "version-2",
+    changed: ["title", "content"],
+    effects,
+    entry,
+  };
+
+  it("reads effects and sends checked edit, restore, and delete requests", async () => {
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      body: unknown;
+    }> = [];
+    const client = createApiClient({
+      fetch: async (url, init) => {
+        requests.push({
+          url,
+          method: init?.method,
+          body: init?.body,
+        });
+        if (url.endsWith("/effects")) return json(effects);
+        if (url.endsWith("/restore"))
+          return json({
+            ...edited,
+            restored_from: { version_id: "version-1", version: 1 },
+          });
+        if (init?.method === "DELETE")
+          return json({ deleted: true, ...edited, entry: null });
+        return json(edited);
+      },
+    });
+
+    await client.getKnowledgeEffects("a/b");
+    await client.editKnowledge("a/b", {
+      expected_revision: 1,
+      title: "Edited",
+      scope: "shared",
+    });
+    await client.restoreKnowledge("a/b", {
+      expected_revision: 2,
+      version_id: "version-1",
+    });
+    await client.deleteKnowledge("a/b", 3);
+
+    expect(requests).toEqual([
+      {
+        url: "/api/v1/knowledge/a%2Fb/effects",
+        method: "GET",
+        body: undefined,
+      },
+      {
+        url: "/api/v1/knowledge/a%2Fb",
+        method: "PATCH",
+        body: JSON.stringify({
+          expected_revision: 1,
+          title: "Edited",
+          scope: "shared",
+        }),
+      },
+      {
+        url: "/api/v1/knowledge/a%2Fb/restore",
+        method: "POST",
+        body: JSON.stringify({
+          expected_revision: 2,
+          version_id: "version-1",
+        }),
+      },
+      {
+        url: "/api/v1/knowledge/a%2Fb?expected_revision=3",
+        method: "DELETE",
+        body: undefined,
+      },
+    ]);
+  });
+
+  it("preserves revision conflict codes for the editor", async () => {
+    const client = createApiClient({
+      fetch: async () =>
+        json(
+          {
+            type: "error",
+            error: {
+              type: "stale_revision",
+              message: "Knowledge entry changed",
+            },
+          },
+          409,
+        ),
+    });
+
+    const error = await failure(
+      client.editKnowledge(ENTRY.id, { expected_revision: 1 }),
+    );
+    expect(error.status).toBe(409);
+    expect(error.errorType).toBe("stale_revision");
+  });
+});
+
 describe("connection store", () => {
   it("starts as checking and follows read outcomes", () => {
     const store = createConnectionStore();

@@ -41,8 +41,12 @@ import {
   entityRebuildStatus,
   importListPage,
   knowledgeEntry,
+  knowledgeDeleteResult,
+  knowledgeEditResult,
+  knowledgeEffects,
   knowledgeList,
   formatKnowledgeSort,
+  knowledgeRestoreResult,
   knowledgeSearchResponse,
   knowledgeVersionHistory,
   sessionWarmingModeResult,
@@ -85,8 +89,12 @@ import {
   type EntityRebuildStatus,
   type ImportListPage,
   type KnowledgeEntry,
+  type KnowledgeDeleteResult,
+  type KnowledgeEditResult,
+  type KnowledgeEffects,
   type KnowledgeSearchResponse,
   type KnowledgeVersionHistory,
+  type KnowledgeRestoreResult,
   type ProjectClearResult,
   type ProjectDeleteResult,
   type ProjectRenameResult,
@@ -143,23 +151,30 @@ export interface ApiClientOptions {
   base?: string;
 }
 
-async function readErrorDetails(
-  res: Response,
-): Promise<{ message: string | null; isErrorEnvelope: boolean }> {
+async function readErrorDetails(res: Response): Promise<{
+  message: string | null;
+  errorType: string | null;
+  isErrorEnvelope: boolean;
+}> {
   const text = await res.text().catch(() => "");
-  if (!text) return { message: null, isErrorEnvelope: false };
+  if (!text) return { message: null, errorType: null, isErrorEnvelope: false };
   try {
     const parsed = safeParseContract("<error>", apiErrorBody, JSON.parse(text));
     if (parsed.ok) {
       return {
         message: parsed.value.error.message,
+        errorType: parsed.value.error.type,
         isErrorEnvelope: true,
       };
     }
   } catch {
     // Fall through to the bounded text diagnostic for generic HTTP errors.
   }
-  return { message: text.slice(0, 200), isErrorEnvelope: false };
+  return {
+    message: text.slice(0, 200),
+    errorType: null,
+    isErrorEnvelope: false,
+  };
 }
 
 async function readErrorMessage(res: Response): Promise<string | null> {
@@ -216,6 +231,7 @@ export function createApiClient(options: ApiClientOptions = {}) {
           path,
           details.message ?? "Gateway refused this operation",
           res.status,
+          details.errorType ?? undefined,
         );
       }
       if (details.message === null) {
@@ -240,7 +256,8 @@ export function createApiClient(options: ApiClientOptions = {}) {
     }
 
     if (!res.ok) {
-      const message = await readErrorMessage(res);
+      const details = await readErrorDetails(res);
+      const message = details.message;
       if (res.status === 404) {
         // A bodyless 404 is the management-boundary denial; a JSON 404 is a
         // real "no such record".
@@ -252,13 +269,20 @@ export function createApiClient(options: ApiClientOptions = {}) {
             404,
           );
         }
-        throw new ApiError("not_found", path, message, 404);
+        throw new ApiError(
+          "not_found",
+          path,
+          message,
+          404,
+          details.errorType ?? undefined,
+        );
       }
       throw new ApiError(
         "http",
         path,
         message ?? `Gateway responded ${res.status}`,
         res.status,
+        details.errorType ?? undefined,
       );
     }
 
@@ -442,6 +466,64 @@ export function createApiClient(options: ApiClientOptions = {}) {
         }),
         knowledgeVersionHistory,
         opts.signal,
+      );
+    },
+    getKnowledgeEffects(
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeEffects> {
+      return getJson(
+        apiPath(["knowledge", id, "effects"]),
+        knowledgeEffects,
+        signal,
+      );
+    },
+    editKnowledge(
+      id: string,
+      body: {
+        expected_revision: number;
+        title?: string;
+        content?: string;
+        category?: KnowledgeEntry["category"];
+        confidence?: number;
+        scope?: KnowledgeScope;
+      },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeEditResult> {
+      return mutateJson(
+        "PATCH",
+        apiPath(["knowledge", id]),
+        body,
+        knowledgeEditResult,
+        signal,
+      );
+    },
+    restoreKnowledge(
+      id: string,
+      body: { expected_revision: number; version_id?: string },
+      signal?: AbortSignal,
+    ): Promise<KnowledgeRestoreResult> {
+      return mutateJson(
+        "POST",
+        apiPath(["knowledge", id, "restore"]),
+        body,
+        knowledgeRestoreResult,
+        signal,
+      );
+    },
+    deleteKnowledge(
+      id: string,
+      expectedRevision: number,
+      signal?: AbortSignal,
+    ): Promise<KnowledgeDeleteResult> {
+      return mutateJson(
+        "DELETE",
+        apiPath(["knowledge", id], {
+          expected_revision: expectedRevision,
+        }),
+        undefined,
+        knowledgeDeleteResult,
+        signal,
       );
     },
     listProjectSessions(

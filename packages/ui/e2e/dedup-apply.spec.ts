@@ -223,7 +223,7 @@ test.describe("duplicate apply (MEM-02)", () => {
     await expect(deletedView).toContainText("Deleted");
     await expect(deletedView.getByText(/^Deleted /)).toBeVisible();
     await expect(
-      deletedView.getByText("Restoring arrives with knowledge editing (#1805)"),
+      deletedView.getByRole("button", { name: "Restore…" }),
     ).toBeVisible();
     await expect(page.getByTestId("knowledge-version-2")).toContainText(
       "Deleted",

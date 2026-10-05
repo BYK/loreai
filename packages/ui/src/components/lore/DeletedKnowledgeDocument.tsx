@@ -1,7 +1,7 @@
-import type { Component } from "solid-js";
+import type { Component, JSX } from "solid-js";
 import { Match, Show, Switch } from "solid-js";
 
-import type { KnowledgeVersionHistory } from "~/contracts";
+import type { KnowledgeVersion, KnowledgeVersionHistory } from "~/contracts";
 import type { Loader } from "~/lib/loader";
 import { formatFullDate } from "~/lib/format";
 import { isApiError } from "~/lib/api";
@@ -14,6 +14,8 @@ import { VersionHistory } from "./VersionHistory";
 export const DeletedKnowledgeDocument: Component<{
   history: Loader<KnowledgeVersionHistory>;
   projectId?: string;
+  restoreAction?: JSX.Element;
+  renderRestore?: (version: KnowledgeVersion) => JSX.Element;
 }> = (props) => {
   const head = () => {
     const history = props.history.data();
@@ -80,12 +82,13 @@ export const DeletedKnowledgeDocument: Component<{
                 Deleted {formatFullDate(head()?.created_at)}
               </p>
             </section>
-            <p class="mt-4 text-sm text-muted">
-              Restoring arrives with knowledge editing (#1805)
-            </p>
+            <Show when={props.restoreAction}>
+              <div class="mt-4">{props.restoreAction}</div>
+            </Show>
             <VersionHistory
               loader={props.history}
               projectId={props.projectId}
+              renderRestore={props.renderRestore}
             />
           </div>
         </article>

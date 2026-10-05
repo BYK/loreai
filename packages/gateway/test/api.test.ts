@@ -113,6 +113,27 @@ async function seedProject() {
   return { projectPath, projectId, knowledgeId };
 }
 
+async function seedKnowledgeEntry(
+  title = `Edit target ${randomUUID()}`,
+  existingProjectPath?: string,
+) {
+  const { ensureProject, ltm } = await import("@loreai/core");
+  const projectPath =
+    existingProjectPath ?? `/test/api/knowledge-edit/${randomUUID()}`;
+  const projectId = ensureProject(projectPath, "knowledge-edit-test");
+  const id = randomUUID();
+  ltm.create({
+    id,
+    projectPath,
+    category: "decision",
+    title,
+    content: "Initial content",
+    session: "knowledge-edit-test",
+    scope: "project",
+  });
+  return { id, projectPath, projectId };
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Data read endpoints
 // ---------------------------------------------------------------------------
@@ -240,7 +261,9 @@ describe("DELETE /api/v1/knowledge/:id", () => {
       method: "DELETE",
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { deleted: boolean };
+    const raw = await res.text();
+    expect(raw).toBe(JSON.stringify({ deleted: true, id: knowledgeId }));
+    const body = JSON.parse(raw) as { deleted: boolean };
     expect(body.deleted).toBe(true);
 
     // Verify it's gone
@@ -254,6 +277,218 @@ describe("DELETE /api/v1/knowledge/:id", () => {
       { method: "DELETE" },
     );
     expect(res.status).toBe(404);
+  });
+});
+
+describe("revision-checked knowledge mutations", () => {
+  it("edits, reports effects, rejects stale revisions, and restores history", async () => {
+    const { id } = await seedKnowledgeEntry();
+    const effects = await apiJSON<{
+      revision: number;
+      is_deleted: boolean;
+      project_id: string;
+    }>(`/api/v1/knowledge/${id}/effects`);
+    expect(effects).toMatchObject({
+      revision: 1,
+      is_deleted: false,
+      project_id: expect.any(String),
+    });
+
+    const patch = await api(`/api/v1/knowledge/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: 1,
+        title: "Edited title",
+        content: "Edited content",
+        category: "pattern",
+      }),
+    });
+    expect(patch.status).toBe(200);
+    const edited = (await patch.json()) as {
+      revision: number;
+      previous_revision: number;
+      entry: { id: string; title: string; content: string };
+      effects: { lore_file: { regenerated: boolean } };
+    };
+    expect(edited).toMatchObject({
+      revision: 2,
+      previous_revision: 1,
+      entry: { id, title: "Edited title", content: "Edited content" },
+      effects: { lore_file: { regenerated: expect.any(Boolean) } },
+    });
+
+    const stale = await api(`/api/v1/knowledge/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: 1,
+        actor: "second-tab",
+        content: "Stale content",
+      }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        type: "stale_revision",
+        expected_revision: 1,
+        current_revision: 2,
+      },
+    });
+
+    const deleted = await api(`/api/v1/knowledge/${id}?expected_revision=2`, {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toMatchObject({
+      deleted: true,
+      previous_revision: 2,
+      revision: 3,
+      entry: null,
+    });
+
+    const deletedEffects = await apiJSON<{
+      revision: number;
+      is_deleted: boolean;
+    }>(`/api/v1/knowledge/${id}/effects`);
+    expect(deletedEffects).toMatchObject({ revision: 3, is_deleted: true });
+
+    const restored = await api(`/api/v1/knowledge/${id}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: 3 }),
+    });
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({
+      previous_revision: 3,
+      revision: 4,
+      restored_from: {
+        version_id: expect.any(String),
+        version: 2,
+      },
+      entry: { id, title: "Edited title", content: "Edited content" },
+    });
+  });
+
+  it("rejects malformed input and title conflicts", async () => {
+    const { id, projectPath } = await seedKnowledgeEntry("A title to restore");
+    const malformedBodies = [
+      "{",
+      JSON.stringify({ expected_revision: 1, unknown: true }),
+      JSON.stringify({ expected_revision: "1", content: "bad revision" }),
+      JSON.stringify({ expected_revision: 1 }),
+    ];
+    for (const body of malformedBodies) {
+      const response = await api(`/api/v1/knowledge/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { type: "invalid_request" },
+      });
+    }
+
+    const { id: occupiedTitleId } = await seedKnowledgeEntry(
+      "A title to restore",
+      projectPath,
+    );
+    const rename = await api(`/api/v1/knowledge/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: 1,
+        title: "Temporary title",
+      }),
+    });
+    expect(rename.status).toBe(200);
+    const deleteResponse = await api(
+      `/api/v1/knowledge/${id}?expected_revision=2`,
+      { method: "DELETE" },
+    );
+    expect(deleteResponse.status).toBe(200);
+
+    const restore = await api(`/api/v1/knowledge/${id}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: 3,
+        version_id: id,
+      }),
+    });
+    expect(restore.status).toBe(409);
+    expect(await restore.json()).toMatchObject({
+      error: { type: "title_conflict" },
+    });
+    expect(occupiedTitleId).not.toBe(id);
+  });
+
+  it("returns 404 for missing records and preserves the live head on confidence-only PATCH", async () => {
+    const { id } = await seedKnowledgeEntry();
+    const missing = await api(
+      "/api/v1/knowledge/00000000-0000-0000-0000-000000000000/effects",
+    );
+    expect(missing.status).toBe(404);
+
+    const response = await api(`/api/v1/knowledge/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: 1, confidence: 0.4 }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      revision: 1,
+      previous_revision: 1,
+      changed: ["confidence"],
+    });
+    const history = await apiJSON<{ versions: Array<{ version: number }> }>(
+      `/api/v1/knowledge/${id}/versions`,
+    );
+    expect(history.versions).toHaveLength(1);
+  });
+
+  it("refuses every knowledge write in hosted mode without changing the head", async () => {
+    const { id } = await seedKnowledgeEntry();
+    const { createGatewayApp } = await import("../src/app");
+    const { loadConfig } = await import("../src/config");
+    const config = loadConfig();
+    config.hostedMode = true;
+    config.remoteGateway = false;
+    const app = createGatewayApp(config);
+    const peer = { peerAddress: "127.0.0.1" };
+    const url = `http://127.0.0.1/api/v1/knowledge/${id}`;
+    const patch = await app.fetch(
+      new Request(url, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: 1,
+          content: "Hosted edit",
+        }),
+      }),
+      peer,
+    );
+    const restore = await app.fetch(
+      new Request(`${url}/restore`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expected_revision: 1 }),
+      }),
+      peer,
+    );
+    const deletion = await app.fetch(
+      new Request(`${url}?expected_revision=1`, { method: "DELETE" }),
+      peer,
+    );
+
+    expect([patch.status, restore.status, deletion.status]).toEqual([
+      403, 403, 403,
+    ]);
+    const effects = await apiJSON<{ revision: number; is_deleted: boolean }>(
+      `/api/v1/knowledge/${id}/effects`,
+    );
+    expect(effects).toMatchObject({ revision: 1, is_deleted: false });
   });
 });
 

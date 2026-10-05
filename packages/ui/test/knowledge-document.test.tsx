@@ -162,6 +162,14 @@ describe("KnowledgeDocument", () => {
   it("renders content before the trust and history sections", () => {
     const view = renderDocument();
     const article = view.getByTestId("knowledge-document");
+    expect(
+      screen.getByText(
+        "Edits and deletions are revision-checked; restores create a new version.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Nothing on this page writes to memory/),
+    ).not.toBeInTheDocument();
     expect(article.textContent?.indexOf("c")).toBeLessThan(
       article.textContent?.indexOf("Why trust this") ?? 0,
     );

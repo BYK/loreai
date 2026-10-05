@@ -29,18 +29,21 @@ export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status: number | null;
   readonly path: string;
+  readonly errorType?: string;
 
   constructor(
     kind: ApiErrorKind,
     path: string,
     message: string,
     status: number | null = null,
+    errorType?: string,
   ) {
     super(message);
     this.name = "ApiError";
     this.kind = kind;
     this.status = status;
     this.path = path;
+    this.errorType = errorType;
   }
 }
 

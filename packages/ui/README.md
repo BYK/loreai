@@ -17,7 +17,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui/projects/:projectId` | Project identity, health, recent sessions and knowledge list |
 | `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
 | `/ui/projects/:projectId/duplicates` | Duplicate review with browser-local marks, explicit apply receipts, and deleted-entry recovery |
-| `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
+| `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge document with revision-checked edit, delete, history and restore actions; `:knowledgeId` is the **stable logical id** |
 | `/ui/knowledge` (`?q=&category=&scope=&project=&sort=&cursor=`) | Cross-project, server-filtered and sorted knowledge table with a project column |
 | `/ui/search` (`?q=`) | Ranked cross-project knowledge search, top 50 of an exact total |
 | `/ui/projects/:projectId/sessions` (`?q=`, `?cursor=`) | Cursor-paged sessions for a project with human-readable titles and title/id search (#1921) |
@@ -92,15 +92,40 @@ exact body and operation ID are persisted as a `dedup-apply` record in the
 same IndexedDB store. If the result is unknown, **Retry** reuses that body and
 ID, allowing the gateway's idempotency receipt to replay safely. A receipt
 clears marks only for applied groups; refused marks stay available for review.
-Merged-entry links open a read-only recovery view showing the last live
-version and the complete history, including its tombstone. An unknown ID
-remains not found. Restoring a deleted entry is out of scope and is noted as
-arriving with knowledge editing (#1805).
+Merged-entry links open a recovery view showing the last live version and the
+complete history, including its tombstone. Restore creates a new revision from
+a selected live version; deletion-purged references are not restored. An
+unknown ID remains not found.
 
 Tests:
 - `pnpm --filter @loreai/ui exec vitest run test/duplicate-review.test.tsx test/dedup-review.test.ts test/db.test.ts test/shell.test.tsx`
 - `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts packages/gateway/test/api.test.ts`
 - `pnpm --filter @loreai/ui test:e2e` (`e2e/dedup-review.spec.ts`, `e2e/dedup-apply.spec.ts`)
+
+### Knowledge editing and recovery (#1805)
+
+Knowledge edits and deletes require the current history revision. The inline
+editor stores unfinished drafts only in the browser's existing `drafts` store
+under `knowledge/<logical-id>`; old draft rows are read with presence checks,
+and draft content is sent to the gateway only in the explicit Save PATCH.
+The draft banner shows its save time and base revision; stale drafts compare the
+current server version with the local draft and require an explicit rebase.
+Delete confirmation loads the effects first, and the deleted view plus
+superseded live history versions offer revision-checked Restore actions.
+Restore appends a version and does not recover references purged by deletion.
+Project knowledge export, AGENTS timing/mode and sync consequences are shown
+without claiming that AGENTS changes immediately.
+
+The management routes are `/api/v1/knowledge/:id` (PATCH and opt-in checked
+DELETE), `/api/v1/knowledge/:id/restore` (POST), and
+`/api/v1/knowledge/:id/effects` (GET). Writes are refused in hosted mode and
+remain behind the management-plane boundary. Legacy reads and DELETE without
+`expected_revision` retain their existing response shapes.
+
+Tests:
+- `pnpm --filter @loreai/ui exec vitest run test/knowledge-edit.test.tsx test/api-client.test.ts test/knowledge-document.test.tsx`
+- `pnpm exec vitest run packages/core/test/knowledge-edit.test.ts packages/gateway/test/api.test.ts packages/gateway/test/management-access.test.ts`
+- `pnpm --filter @loreai/ui test:e2e` (`e2e/knowledge-edit.spec.ts`; verifies local-only drafts, conflict/rebase, delete/restore, and superseded-version restore)
 
 ### Sidebar projects (#1918)
 

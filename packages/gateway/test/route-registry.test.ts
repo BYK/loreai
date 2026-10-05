@@ -52,6 +52,10 @@ const MANAGEMENT_PATHS = [
   "/api/",
   "/api/v1/projects",
   "/api/v1/projects/019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+  "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
+  "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/versions",
+  "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/effects",
+  "/api/v1/knowledge/019e18ec-e328-76c4-9c3c-09dbe8d51c6c/restore",
   "/api/v1/entities",
   "/api/v1/entities/rebuild",
   "/api/v1/entities/019e18ec-e328-76c4-9c3c-09dbe8d51c6c",
@@ -110,6 +114,23 @@ describe("classifyPath parity with the hand-written matcher", () => {
 });
 
 describe("registry invariants", () => {
+  test("knowledge reads and mutations retain management dispatcher ownership", () => {
+    const app = createGatewayApp(makeConfig());
+    const legacyPaths = [
+      "/api/v1/knowledge/entry-id",
+      "/api/v1/knowledge/entry-id/versions",
+    ];
+    for (const path of legacyPaths) {
+      expect(routeModuleFor(path)?.name, path).toBe("management");
+      expect(classifyPath(path), path).toBe(MANAGEMENT_PLANE);
+    }
+    expect(
+      app.routes.some(
+        (route) => route.method === "ALL" && route.path === "/api/*",
+      ),
+    ).toBe(true);
+  });
+
   test("indexed lookup agrees with a linear scan of the declarations", () => {
     const probes = [
       ...DATA_PLANE_PATHS,
