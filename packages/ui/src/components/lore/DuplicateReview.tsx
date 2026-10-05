@@ -27,7 +27,7 @@ import { ScopeLabel } from "~/components/lore/Document";
 import { errorStateFor } from "~/components/lore/ErrorState";
 import { StateCard } from "~/components/lore/StateCard";
 import { formatConfidence, formatWhen } from "~/lib/format";
-import { markFrom, markStatus } from "~/lib/dedup-review";
+import { loreFileConsequence, markFrom, markStatus } from "~/lib/dedup-review";
 import { isApiError } from "~/lib/api";
 import { globalKnowledgeHref, knowledgeHref, sessionHref } from "~/lib/href";
 import { createLoader } from "~/lib/loader";
@@ -1183,9 +1183,12 @@ export const DuplicateReview: Component<{ projectId: string }> = (props) => {
                         {keepTitle()} ← {mergeTitles()}
                       </p>
                       <p class="mt-1 text-xs text-muted">
-                        {group.scope === "project"
-                          ? "This project's .lore.md is regenerated (when .lore.md export is enabled)"
-                          : ".lore.md files are not affected (shared entries are not exported)"}
+                        {loreFileConsequence(
+                          group,
+                          mark()?.keepId ?? suggestedKeeper(group),
+                          props.projectId,
+                          ws.projects.data() ?? [],
+                        )}
                       </p>
                     </li>
                   );

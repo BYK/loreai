@@ -142,10 +142,10 @@ test.describe("duplicate apply (MEM-02)", () => {
     await review.getByTestId("apply-accepted").click();
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toContainText(
-      "This project's .lore.md is regenerated (when .lore.md export is enabled)",
+      "Regenerates .lore.md for this project (when .lore.md export is enabled)",
     );
     await expect(dialog).toContainText(
-      ".lore.md files are not affected (shared entries are not exported)",
+      ".lore.md files are not affected (the removed entries belong to no project)",
     );
     await expect(dialog).toContainText("Sync is off — this device only");
 

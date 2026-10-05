@@ -505,10 +505,10 @@ describe("DuplicateReview", () => {
     fireEvent.click(screen.getByTestId("apply-accepted"));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent(
-      "This project's .lore.md is regenerated (when .lore.md export is enabled)",
+      "Regenerates .lore.md for this project (when .lore.md export is enabled)",
     );
     expect(dialog).toHaveTextContent(
-      ".lore.md files are not affected (shared entries are not exported)",
+      ".lore.md files are not affected (the removed entries belong to no project)",
     );
     await within(dialog).findByText(
       "Deletions are synced (3 changes already pending)",
@@ -645,7 +645,7 @@ describe("DuplicateReview", () => {
     fireEvent.click(screen.getByTestId("apply-accepted"));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent(
-      "This project's .lore.md is regenerated (when .lore.md export is enabled)",
+      "Regenerates .lore.md for this project (when .lore.md export is enabled)",
     );
     await within(dialog).findByText("Sync is off — this device only");
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
