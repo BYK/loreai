@@ -1097,7 +1097,7 @@ describe("autoProposePending", () => {
     expect(rows).toHaveLength(1);
   });
 
-  it("proposes a new version after the prior version was rejected", async () => {
+  it("preserves a rejected decision when content changes", async () => {
     signIn();
     const id = makeEntry();
     enableAutoShare(id);
@@ -1109,11 +1109,8 @@ describe("autoProposePending", () => {
 
     await autoProposePending(fakeClient as never, makeConfig());
 
-    expect(rows).toHaveLength(2);
-    expect(rows.map((row) => row.entry_version_id)).toEqual([
-      id,
-      ltm.teamPromotionCandidate(id)?.versionId,
-    ]);
+    expect(rows).toHaveLength(1);
+    expect(ltm.teamPromotionCandidate(id)?.approvalStatus).toBe("rejected");
   });
 
   it("does not propose when the effective policy is manual", async () => {
