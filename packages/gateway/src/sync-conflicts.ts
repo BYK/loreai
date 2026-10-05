@@ -235,7 +235,9 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
       "not_recoverable",
       "Local snapshot is unreadable.",
     );
-  if (conflict.resolution === "remote_delete_wins") {
+  const isRemoteDelete = conflict.resolution === "remote_delete_wins";
+  const current = currentKnowledge(conflict.row_id, isRemoteDelete);
+  if (isRemoteDelete && current?.is_deleted === 1) {
     const result = ltm.restoreDeletedKnowledge(conflict.row_id, {
       expectedDeletedVersionId: body.expected_version_id,
       conflictId: id,
@@ -253,7 +255,6 @@ async function keepLocal(req: Request, id: number): Promise<Response> {
       );
     }
   } else {
-    const current = currentKnowledge(conflict.row_id);
     if (!current) {
       return errorResponse(
         409,
