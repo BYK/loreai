@@ -47,12 +47,12 @@ for (const [title, content, confidence] of [
     0.82,
   ],
   [
-    "Shared duplicate review evidence sample candidate alpha",
+    "Shared-only evidence review seed alpha",
     "First shared candidate for the no-project duplicate group.",
     0.91,
   ],
   [
-    'Shared duplicate review evidence sample <img src=x onerror="window.__pwned=1">',
+    'Shared-only evidence review seed <img src=x onerror="window.__pwned=1">',
     'Hostile text stays inert in the review screen: <img src=x onerror="window.__pwned=1">',
     0.88,
   ],
@@ -67,6 +67,58 @@ for (const [title, content, confidence] of [
     scope: title.startsWith("Duplicate review") ? "project" : "global",
     confidence,
   });
+}
+for (const viewport of ["desktop", "mobile"]) {
+  for (const run of [1, 2, 3]) {
+    const name = `dd-apply-${viewport}-${run}`;
+    const refusalTitle =
+      viewport === "desktop"
+        ? [
+            "Cobalt geodesic lantern astronomy beacon silver",
+            "Papaya acoustic kettle geometry artisan violet",
+            "Thimble glacier rainfall magnetism particle amber",
+          ][run - 1]
+        : [
+            "Quasar maple jukebox fossil moonlit engine",
+            "Velvet otter cathedral bacteria canvas monsoon",
+            "Saffron bicycle fjord tessellation trumpet eclipse",
+          ][run - 1];
+    const projectPath = join(root, name);
+    mkdirSync(projectPath, { recursive: true });
+    core.ensureProject(projectPath, name, null);
+    for (const [title, content, scope] of [
+      [
+        `Applyable ${viewport} ${run} atomic amber keeper`,
+        `Keep the primary apply fixture for ${name}.`,
+        "project",
+      ],
+      [
+        `Applyable ${viewport} ${run} atomic amethyst keeper`,
+        `Merge the primary apply fixture for ${name}.`,
+        "project",
+      ],
+      [
+        `${refusalTitle} keeper`,
+        `Keep the refusal fixture for ${name}.`,
+        "global",
+      ],
+      [
+        `${refusalTitle} remove-me`,
+        `Remove this candidate before the shared apply for ${name}.`,
+        "global",
+      ],
+    ]) {
+      core.ltm.create({
+        id: crypto.randomUUID(),
+        ...(scope === "project" ? { projectPath } : {}),
+        scope,
+        category: "decision",
+        title,
+        content,
+        confidence: 0.88,
+      });
+    }
+  }
 }
 // #1918: five extra empty projects so the sidebar has more entries than the
 // Recent limit and the filter / "All projects" surfaces render. They have no

@@ -2,8 +2,9 @@
 
 Solid single-page app served by the gateway at `/ui`. It is a **read
 projection** of the gateway's `/api/v1` surface: the gateway's SQLite store is
-the only authority for projects, knowledge and sessions; the browser never owns
-data in this slice and never talks to a provider. #1796 adds this
+the only authority for projects, knowledge and sessions; browser caches and
+local UI/review state are non-authoritative, and the browser never talks to a
+provider. #1796 adds this
 package as a compatibility smoke project plus documentation; #1797 adds
 the shell, gateway static serving and removes the legacy server-rendered
 dashboard.
@@ -15,7 +16,7 @@ Routes (all under `/ui`, history-API fallback served by the gateway):
 | `/ui` | Workspace: project navigation, all-knowledge link + "choose a project" document |
 | `/ui/projects/:projectId` | Project identity, health, recent sessions and knowledge list |
 | `/ui/projects/:projectId/knowledge` | Server-filtered and sorted knowledge table |
-| `/ui/projects/:projectId/duplicates` | Read-only duplicate candidate review with browser-local marks |
+| `/ui/projects/:projectId/duplicates` | Duplicate review with browser-local marks, explicit apply receipts, and deleted-entry recovery |
 | `/ui/projects/:projectId/knowledge/:knowledgeId` | Knowledge entry as a document; `:knowledgeId` is the **stable logical id** |
 | `/ui/knowledge` (`?q=&category=&scope=&project=&sort=&cursor=`) | Cross-project, server-filtered and sorted knowledge table with a project column |
 | `/ui/search` (`?q=`) | Ranked cross-project knowledge search, top 50 of an exact total |
@@ -66,28 +67,40 @@ Tests:
 - pnpm --filter @loreai/ui exec vitest run test/contradictions-page.test.tsx test/contracts.test.ts test/api-client.test.ts
 - pnpm --filter @loreai/ui test:e2e
 
-### Duplicate review (#1803)
+### Duplicate review (#1803, #1804)
 
-The project page's **Review duplicates** link opens a read-only evidence
-comparison backed by `POST /api/v1/projects/:id/dedup`. The preview retains the
-legacy `project` and `global` result payloads; a `global` group is labelled
+The project page's **Review duplicates** link opens an evidence comparison
+backed by `POST /api/v1/projects/:id/dedup`. The preview retains the legacy
+`project` and `global` result payloads; a `global` group is labelled
 "Shared (no project)" in the UI, and candidate scope is shown independently as
-Project or Shared. No apply request or server mutation is available in this
-screen.
+Project or Shared.
 
 Accept and Skip create marks in the local `reviewDecisions` IndexedDB store.
-They remain in this browser and are not applied to Lore; if IndexedDB is
+They remain in this browser until explicitly applied; if IndexedDB is
 unavailable, marks last only for the current session. A mark is stale when the
 fresh preview changes its candidate membership or any candidate revision.
-Stale marks do not count as accepted. Marks for groups absent from a preview
-are shown as orphaned and require an explicit discard action; they are never
-removed automatically. Keyboard shortcuts are `j`/`k` for next/previous group,
-`a` accept, `s` skip, `u` clear, and `1`–`9` to choose a keeper.
+Stale and skipped marks are never applied. Marks for groups absent from a
+preview are shown as orphaned and require an explicit discard action; they are
+never removed automatically. Keyboard shortcuts are `j`/`k` for next/previous
+group, `a` accept, `s` skip, `u` clear, and `1`–`9` to choose a keeper.
+
+**Apply accepted** opens a confirmation with separate consequences for project
+and shared groups and the current sync state. Accepted project and shared
+groups are sent as separate operations; the project body omits `projectId`,
+while the shared body sets it to `null`. Before either request is sent, its
+exact body and operation ID are persisted as a `dedup-apply` record in the
+same IndexedDB store. If the result is unknown, **Retry** reuses that body and
+ID, allowing the gateway's idempotency receipt to replay safely. A receipt
+clears marks only for applied groups; refused marks stay available for review.
+Merged-entry links open a read-only recovery view showing the last live
+version and the complete history, including its tombstone. An unknown ID
+remains not found. Restoring a deleted entry is out of scope and is noted as
+arriving with knowledge editing (#1805).
 
 Tests:
-- `pnpm --filter @loreai/ui exec vitest run test/duplicate-review.test.tsx test/dedup-review.test.ts test/db.test.ts`
+- `pnpm --filter @loreai/ui exec vitest run test/duplicate-review.test.tsx test/dedup-review.test.ts test/db.test.ts test/shell.test.tsx`
 - `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts packages/gateway/test/api.test.ts`
-- `pnpm --filter @loreai/ui test:e2e` (`e2e/dedup-review.spec.ts`)
+- `pnpm --filter @loreai/ui test:e2e` (`e2e/dedup-review.spec.ts`, `e2e/dedup-apply.spec.ts`)
 
 ### Sidebar projects (#1918)
 
@@ -512,7 +525,7 @@ the staged tree. `setUiAssetSource()` swaps in an explicit source for tests.
 | UI contract fixtures | `pnpm exec vitest run packages/gateway/test/ui-contracts.test.ts` — real gateway responses normalised (uuids/epochs/paths) and snapshotted into `packages/ui/test/fixtures/` | root `pnpm test`, regular CI job |
 | Gateway static serving | `pnpm exec vitest run packages/gateway/test/ui-static.test.ts packages/gateway/test/review-actions.test.ts` | root `pnpm test`, regular CI job |
 | Deep-link smoke (no browser) | `node scripts/ui-deep-link-smoke.mjs` — spawns the built gateway in a throw-away data dir, plain HTTP: `/` → `/ui`, deep link → `index.html` + CSP + no-cache, hashed assets → MIME + immutable, unknown asset → non-HTML 404 | regular CI job, after the bundle step |
-| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/dedup-review.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/sessions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`, `e2e/folk-status.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
+| Browser e2e | `pnpm --filter @loreai/ui test:e2e` — `e2e/browse.spec.ts`, `e2e/all-knowledge.spec.ts`, `e2e/knowledge-table.spec.ts`, `e2e/knowledge-detail.spec.ts`, `e2e/fixture.spec.ts`, `e2e/reader.spec.ts`, `e2e/busy-fixture.spec.ts`, `e2e/entities.spec.ts`, `e2e/contradictions.spec.ts`, `e2e/dedup-review.spec.ts`, `e2e/dedup-apply.spec.ts`, `e2e/project-actions.spec.ts`, `e2e/import-history.spec.ts`, `e2e/sessions.spec.ts`, `e2e/nav-background.spec.ts` (sidebar tint covers the whole scrolled nav, light + dark + mobile drawer, #1916), `e2e/provider-costs.spec.ts`, `e2e/folk-status.spec.ts`; Playwright desktop + mobile Chromium against the built gateway (reader fixture also uses Vite dev server). Requires core/gateway builds and `pnpm --filter @loreai/core build && pnpm --filter @loreai/gateway bundle && pnpm --filter @loreai/ui exec playwright install chromium` | `.github/workflows/ui-e2e.yml` only: PRs touching `packages/ui/**` or the gateway's UI-serving files, nightly on `main`, `workflow_dispatch`; browsers cached |
 
 ## Session reader (#1801)
 

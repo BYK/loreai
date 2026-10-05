@@ -55,7 +55,16 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(page).toHaveURL(`/ui/projects/${projectId}/duplicates`);
     const review = page.getByTestId("duplicate-review");
     await expect(review).toBeVisible();
-    await expect(review.getByTestId("duplicate-group")).toHaveCount(2);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Duplicate review evidence sample candidate alpha",
+      }),
+    ).toHaveCount(1);
+    await expect(
+      review.getByTestId("duplicate-group").filter({
+        hasText: "Shared-only evidence review seed alpha",
+      }),
+    ).toHaveCount(1);
     await expect(
       review
         .getByText("Duplicate review evidence sample candidate alpha")
@@ -87,7 +96,7 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await expect(review.getByText(/Updated /).first()).toBeVisible();
 
     const sharedGroup = review.getByTestId("duplicate-group").filter({
-      hasText: "Shared duplicate review evidence sample candidate alpha",
+      hasText: "Shared-only evidence review seed alpha",
     });
     await sharedGroup.click();
     await expect(review.getByText("Shared (no project)").first()).toBeVisible();
@@ -142,6 +151,54 @@ test.describe("read-only duplicate review (MEM-01)", () => {
 
     await page.getByLabel("Keep this one (2)").check();
     await expect(page.getByLabel("Keep this one (2)")).toBeChecked();
+    const selectedKeepId = await page
+      .getByLabel("Keep this one (2)")
+      .getAttribute("value");
+    if (!selectedKeepId) throw new Error("selected keeper id is missing");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          async ({ projectId, keepId }) => {
+            const database = await new Promise<IDBDatabase>(
+              (resolve, reject) => {
+                const request = indexedDB.open("lore-ui", 4);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+              },
+            );
+            try {
+              const records = await new Promise<unknown[]>(
+                (resolve, reject) => {
+                  const request = database
+                    .transaction("reviewDecisions", "readonly")
+                    .objectStore("reviewDecisions")
+                    .getAll();
+                  request.onsuccess = () =>
+                    resolve(request.result as unknown[]);
+                  request.onerror = () => reject(request.error);
+                },
+              );
+              return records.some((record) => {
+                if (!record || typeof record !== "object") return false;
+                const mark = record as {
+                  kind?: string;
+                  projectId?: string;
+                  keepId?: string;
+                };
+                return (
+                  mark.kind === "dedup" &&
+                  mark.projectId === projectId &&
+                  mark.keepId === keepId
+                );
+              });
+            } finally {
+              database.close();
+            }
+          },
+          { projectId, keepId: selectedKeepId },
+        ),
+      )
+      .toBe(true);
     await page.reload();
     await expect(page.getByLabel("Keep this one (2)")).toBeChecked();
 
@@ -149,8 +206,14 @@ test.describe("read-only duplicate review (MEM-01)", () => {
     await page.keyboard.press("s");
     await expect(page.getByTestId("review-summary")).toContainText("1 skipped");
     await page.keyboard.press("u");
+    await expect(
+      sharedGroup.getByText("Pending", { exact: true }),
+    ).toBeVisible();
     await expect(page.getByTestId("review-summary")).toContainText(
-      "1 accepted · 0 skipped · 1 pending",
+      "1 accepted · 0 skipped",
+    );
+    await expect(page.getByTestId("review-summary")).toContainText(
+      /1 accepted · 0 skipped · \d+ pending/,
     );
 
     const afterResponse = await page.request.get(knowledgePath);

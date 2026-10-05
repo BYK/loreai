@@ -162,16 +162,18 @@ test.describe("keyboard navigation and focus-visible affordances", () => {
         .not.toBe("none/none");
       // Rows outside the viewport are unmounted; focus a visible one — the
       // landed reader mounts overscan rows beyond the viewport edge (#1923).
-      const rowKey = await page.evaluate(() => {
-        for (const el of document.querySelectorAll("[data-row-key]")) {
-          const rect = el.getBoundingClientRect();
-          if (rect.bottom > 0 && rect.top < window.innerHeight) {
-            return el.getAttribute("data-row-key");
+      const visibleRowKey = () =>
+        page.evaluate(() => {
+          for (const el of document.querySelectorAll("[data-row-key]")) {
+            const rect = el.getBoundingClientRect();
+            if (rect.bottom > 0 && rect.top < window.innerHeight) {
+              return el.getAttribute("data-row-key");
+            }
           }
-        }
-        return null;
-      });
-      expect(rowKey).toBeTruthy();
+          return null;
+        });
+      await expect.poll(visibleRowKey).toBeTruthy();
+      const rowKey = await visibleRowKey();
       const row = page.locator(`[data-row-key="${rowKey}"]`);
       await page.keyboard.press("Tab");
       await row.focus();

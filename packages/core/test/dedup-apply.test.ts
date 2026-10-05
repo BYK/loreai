@@ -620,6 +620,82 @@ describe("currentRevisions", () => {
   });
 });
 
+describe("concurrent applies", () => {
+  test("a second operation over the same reviewed revisions refuses without writes", () => {
+    const keep = createEntry("Concurrent Keep");
+    const merged = createEntry("Concurrent Merged");
+    const preview = decision(keep, merged);
+    const firstRequest = request([preview]);
+    const secondRequest = request([preview]);
+
+    const first = apply(firstRequest);
+    const second = apply(secondRequest);
+
+    expect(first.applied).toHaveLength(1);
+    expect(second.applied).toEqual([]);
+    expect(second.refused).toMatchObject([
+      { error: { code: "not_found" }, mergeIds: [merged] },
+    ]);
+    expect(isLive(merged)).toBe(false);
+    expect(dedupProvenanceFor(firstRequest.operationId)).toHaveLength(1);
+    expect(dedupProvenanceFor(secondRequest.operationId)).toEqual([]);
+  });
+
+  test("different operations over disjoint groups both apply", () => {
+    const keepA = createEntry("Disjoint Keep A");
+    const mergedA = createEntry("Disjoint Merged A");
+    const keepB = createEntry("Disjoint Keep B");
+    const mergedB = createEntry("Disjoint Merged B");
+    const firstRequest = request([decision(keepA, mergedA)]);
+    const secondRequest = request([decision(keepB, mergedB)]);
+
+    const first = apply(firstRequest);
+    const second = apply(secondRequest);
+
+    expect(first.applied).toHaveLength(1);
+    expect(first.refused).toEqual([]);
+    expect(second.applied).toHaveLength(1);
+    expect(second.refused).toEqual([]);
+    expect(isLive(mergedA)).toBe(false);
+    expect(isLive(mergedB)).toBe(false);
+    expect(dedupProvenanceFor(firstRequest.operationId)).toHaveLength(1);
+    expect(dedupProvenanceFor(secondRequest.operationId)).toHaveLength(1);
+  });
+
+  test("a thrown remove rolls back the whole group and leaves an interrupted operation", () => {
+    const keep = createEntry("Interrupted Group Keep");
+    const mergedA = createEntry("Interrupted Group Merged A");
+    const mergedB = createEntry("Interrupted Group Merged B");
+    const req = request([decision(keep, mergedA, mergedB)]);
+    const remove = ltm.remove;
+    const removeSpy = vi
+      .spyOn(ltm, "remove")
+      .mockImplementation((id, metadata) => {
+        if (id === mergedB) throw new Error("injected mid-group failure");
+        return remove(id, metadata);
+      });
+
+    try {
+      expect(() => apply(req)).toThrow("injected mid-group failure");
+    } finally {
+      removeSpy.mockRestore();
+    }
+
+    expect(isLive(mergedA)).toBe(true);
+    expect(isLive(mergedB)).toBe(true);
+    expect(ltm.versionHistory(mergedA)).toHaveLength(1);
+    expect(dedupProvenanceFor(req.operationId)).toEqual([]);
+    expect(
+      db()
+        .query(
+          "SELECT receipt, finished_at FROM dedup_operations WHERE operation_id = ?",
+        )
+        .get(req.operationId),
+    ).toEqual({ receipt: null, finished_at: null });
+    expect(() => apply(req)).toThrow(/started but never finished/);
+  });
+});
+
 describe("scope", () => {
   test("an entry from another project is scope_mismatch and nothing is written", () => {
     const keep = createEntry("Scope Keep");

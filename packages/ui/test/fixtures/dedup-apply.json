@@ -1,0 +1,23 @@
+{
+  "operationId": "ui-contracts-dedup-apply",
+  "projectId": "<uuid-0>",
+  "applied": [
+    {
+      "groupIndex": 0,
+      "keepId": "<uuid-1>",
+      "keepRevision": 1,
+      "merged": [
+        {
+          "id": "<uuid-2>",
+          "revision": 1,
+          "tombstoneVersionId": "<uuid-3>"
+        }
+      ],
+      "appliedAt": 1700000000000
+    }
+  ],
+  "refused": [],
+  "startedAt": 1700000001000,
+  "finishedAt": 1700000002000,
+  "replayed": false
+}
