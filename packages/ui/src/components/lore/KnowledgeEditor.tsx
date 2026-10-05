@@ -95,6 +95,7 @@ export const KnowledgeEditor: Component<{
   entry: KnowledgeEntry;
   versions: Loader<KnowledgeVersionHistory>;
   reloadEntry: () => void;
+  onSaved?: (entry: KnowledgeEntry) => void;
   onDeleted?: () => void;
 }> = (props) => {
   const ws = useWorkspace();
@@ -369,6 +370,7 @@ export const KnowledgeEditor: Component<{
       await invalidateCollections(props.entry, result.entry);
       props.reloadEntry();
       props.versions.reload();
+      props.onSaved?.(result.entry);
       setFreshRevision(result.revision);
       setFreshHead(undefined);
       setBaseRevision(result.revision);

@@ -14,6 +14,18 @@ async function projectIdByName(page: Page, name: string): Promise<string> {
   return project.id;
 }
 
+async function projectKnowledgeCount(page: Page, projectId: string) {
+  const response = await page.request.get("/api/v1/projects");
+  expect(response.ok()).toBe(true);
+  const projects = (await response.json()) as {
+    id: string;
+    knowledge_count: number;
+  }[];
+  const project = projects.find((item) => item.id === projectId);
+  if (!project) throw new Error(`project ${projectId} is missing`);
+  return project.knowledge_count;
+}
+
 test.describe("revision-checked knowledge editing (MEM-03)", () => {
   test("refuses sharing a project title used by shared entries", async ({
     page,
@@ -163,7 +175,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     ).toContainText("Current");
   });
 
-  test("saves only on request, retains stale drafts, deletes and restores", async ({
+  test("saves only on request, retains stale drafts, deletes, navigates back and restores", async ({
     page,
   }, testInfo) => {
     const viewport = testInfo.project.name.includes("mobile")
@@ -182,6 +194,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     const entries = (await entriesResponse.json()) as KnowledgeEntry[];
     const entry = entries.find((item) => item.title === seedTitle);
     if (!entry) throw new Error(`seeded edit entry ${seedTitle} is missing`);
+    const initialKnowledgeCount = await projectKnowledgeCount(page, projectId);
     const historyResponse = await page.request.get(
       `/api/v1/knowledge/${entry.id}/versions`,
     );
@@ -198,7 +211,12 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     await page.addInitScript(() => {
       (window as Window & { __pwned?: number }).__pwned = 0;
     });
-    await page.goto(`/ui/projects/${projectId}/knowledge/${entry.id}`);
+    await page.goto(`/ui/projects/${projectId}/knowledge`);
+    const tableEntry = page
+      .locator('[data-pane="detail"] [data-testid="knowledge-row"]')
+      .filter({ hasText: seedTitle });
+    await expect(tableEntry).toBeVisible();
+    await tableEntry.click();
     await expect(page.getByTestId("knowledge-document")).toBeVisible();
     const apiRequests: Array<{
       url: string;
@@ -281,6 +299,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
 
     await page.getByRole("button", { name: "Edit", exact: true }).click();
     const staleDraft = `Draft for conflict ${viewport} ${run}`;
+    const concurrentTitle = `Concurrent edit ${viewport} ${run} unique`;
     await page
       .getByTestId("knowledge-editor")
       .getByLabel("Title")
@@ -291,7 +310,7 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
       {
         data: {
           expected_revision: expectedRevision + 1,
-          title: `Concurrent edit ${viewport} ${run} unique`,
+          title: concurrentTitle,
           actor: "e2e",
         },
       },
@@ -320,6 +339,21 @@ test.describe("revision-checked knowledge editing (MEM-03)", () => {
     await deleteDialog.getByRole("button", { name: "Delete entry" }).click();
 
     const deleted = page.getByTestId("deleted-knowledge-document");
+    await expect(deleted).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(`/ui/projects/${projectId}/knowledge`);
+    await expect(
+      page
+        .locator('[data-pane="list"] [data-testid="knowledge-row"]')
+        .filter({ hasText: titleDraft }),
+    ).toHaveCount(0);
+    const projectNav = page.locator(
+      `[data-pane="nav"] [data-testid="nav-project"][href$="/projects/${projectId}"]`,
+    );
+    await expect(projectNav.locator("span").last()).toHaveText(
+      String(initialKnowledgeCount - 1),
+    );
+    await page.goForward();
     await expect(deleted).toBeVisible();
     await expect(
       deleted.getByRole("button", { name: "Restore…" }),
