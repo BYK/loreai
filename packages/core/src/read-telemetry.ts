@@ -39,7 +39,7 @@ export interface ReadPathTiming {
 }
 
 /** Named awaited sub-buckets attributed within {@link ReadPathTimer.await}. */
-export type AwaitBucket = "embed" | "vectorSearch";
+export type AwaitBucket = "embed" | "vectorSearch" | "fuzzyRecall";
 
 let readPathTimingHook: ((t: ReadPathTiming) => void) | null = null;
 

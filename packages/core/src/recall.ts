@@ -202,6 +202,13 @@ export type ScoredTaggedResult = { item: TaggedResult; score: number };
  */
 const CROSS_SESSION_RAW_PENALTY = 0.5;
 
+/** RRF weight of the supplemental fuzzy-title knowledge list (#1978) —
+ *  strictly below every exact/semantic list weight. */
+const FUZZY_RECALL_WEIGHT = 0.5;
+
+/** Max knowledge rows whose ONLY evidence is the fuzzy title leg (#1978). */
+const MAX_FUZZY_RECALL = 2;
+
 // ---------------------------------------------------------------------------
 // Tagged result helpers (used by exact-match boost + formatting)
 // ---------------------------------------------------------------------------
@@ -802,7 +809,7 @@ function renderResultLine(
     case "knowledge": {
       const k = tagged.item;
       const age = relativeAge(k.updated_at);
-      const titlePart = `**${inline(k.title)}** (${age}): `;
+      const titlePart = `**${inline(k.title)}** (${age}${k.match === "fuzzy" ? ", approximate" : ""}): `;
       const anchors = renderAnchors(anchorsByLogicalId?.get(k.logical_id));
       const files = renderFiles(filesByLogicalId?.get(k.logical_id));
       const contentBudget = Math.max(
@@ -1029,6 +1036,12 @@ export async function searchRecall(
   // temporal details exist they are more likely the answer.
   let hasSessionResults = false;
 
+  // Ids the exact knowledge legs already produced — the fuzzy title leg
+  // (#1978) ranks only ids NOT seen here, so a fuzzy row can never duplicate
+  // or outrank an exact/vector hit for the same entry.
+  const knowledgeSeen = new Set<string>();
+  let originalQuerySeen = false;
+
   // Track where primary (first-query) lists end so the MAX_RRF_LISTS cap
   // trims expanded-query lists first, preserving vector/supplemental lists.
   let primaryListEnd = 0;
@@ -1099,6 +1112,11 @@ export async function searchRecall(
 
     if (temporalResults.length > 0 || distillationResults.length > 0) {
       hasSessionResults = true;
+    }
+
+    if (!originalQuerySeen) {
+      for (const r of knowledgeResults) knowledgeSeen.add(r.id);
+      originalQuerySeen = true;
     }
 
     // When searching all scopes AND session-specific results exist,
@@ -1245,6 +1263,7 @@ export async function searchRecall(
             });
           }
         }
+        for (const tagged of vectorTagged) knowledgeSeen.add(tagged.item.id);
         if (vectorTagged.length) {
           // Same `k:` key prefix as BM25 knowledge — RRF merges, not duplicates.
           // Apply knowledge downweight so knowledge is consistently
@@ -1385,6 +1404,43 @@ export async function searchRecall(
     } catch {
       if (input.signal?.aborted) throw input.signal.reason;
       reportRecallDiagnostic("recall: vector search failed");
+    }
+  }
+
+  // Fuzzy title leg (#1978): a low-weight supplemental list that rescues
+  // typo'd queries when the exact FTS + vector legs underfill `limit`.
+  if (
+    knowledgeEnabled &&
+    scope !== "session" &&
+    (searchConfig?.fuzzyRecall ?? true) &&
+    knowledgeSeen.size < limit
+  ) {
+    try {
+      input.signal?.throwIfAborted();
+      const fuzzyHits = await abortable(
+        timer.await(
+          ltm.fuzzyTitleCandidates({
+            query,
+            projectPath,
+            excludeIds: knowledgeSeen,
+            limit: limit - knowledgeSeen.size,
+          }),
+          "fuzzyRecall",
+        ),
+      );
+      if (fuzzyHits.length) {
+        allRrfLists.push({
+          items: fuzzyHits.map((item) => ({
+            source: "knowledge" as const,
+            item,
+          })),
+          key: (r) => `k:${r.item.id}`,
+          weight: FUZZY_RECALL_WEIGHT,
+        });
+      }
+    } catch {
+      if (input.signal?.aborted) throw input.signal.reason;
+      reportRecallDiagnostic("recall: fuzzy knowledge search failed", "error");
     }
   }
 
@@ -1754,6 +1810,21 @@ export async function searchRecall(
       })
       .sort((a, b) => b.score - a.score);
   }
+
+  // Fuzzy-only knowledge noise cap (#1978): keep at most MAX_FUZZY_RECALL
+  // rows whose only evidence is the fuzzy title leg. An id that also appeared
+  // in an exact/vector list keeps THAT list's (unflagged) item — RRF keeps the
+  // first list's item per key and exact lists are pushed before the fuzzy one,
+  // and fuzzyTitleCandidates never returns a seen id — so `match: "fuzzy"`
+  // here means fuzzy-only.
+  let fuzzyOnly = 0;
+  fused = fused.filter((r) => {
+    if (r.item.source === "knowledge" && r.item.item.match === "fuzzy") {
+      fuzzyOnly += 1;
+      return fuzzyOnly <= MAX_FUZZY_RECALL;
+    }
+    return true;
+  });
 
   // Cap output: return at most 3x the per-source limit. With 7+ RRF sources
   // each contributing up to `limit` items, uncapped output can be huge (89+

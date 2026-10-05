@@ -20,6 +20,10 @@ export const FUZZY_MIN_QUERY = 3;
  *  recent rows under the caller's non-query predicates). */
 export const FUZZY_CANDIDATE_CAP = 2_500;
 
+/** Tighter cap for the recall fuzzy leg — its candidates are titles only and
+ *  the leg must stay cheap on the agent hot path (#1978). */
+export const FUZZY_RECALL_CAP = 1_000;
+
 export type FuzzyHit<T> = {
   item: T;
   /** 1 for exact substring hits, otherwise the fast-fuzzy score. */

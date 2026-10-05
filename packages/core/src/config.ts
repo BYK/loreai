@@ -649,6 +649,12 @@ export const LoreConfig = z.object({
         .describe(
           "Enable entity-graph fan-in (linked knowledge + 1-hop relation neighbors) for the recall tool. Default: true.",
         ),
+      fuzzyRecall: z
+        .boolean()
+        .default(true)
+        .describe(
+          "Append a low-weight fuzzy title leg to recall when FTS + vector underfill recallLimit. Default: true.",
+        ),
       /** RRF weight multiplier for the entity-graph fan-in lists. Higher values
        *  give graph-reachable knowledge/entities more influence in fusion. Set
        *  to 0 to neutralize the graph signal without disabling traversal.
@@ -848,6 +854,7 @@ export const LoreConfig = z.object({
       vectorBoostWeight: 1.5,
       vectorBoostMinTerms: 2,
       graphExpansion: true,
+      fuzzyRecall: true,
       graphBoostWeight: 1.0,
       embeddings: {
         enabled: true,

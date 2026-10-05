@@ -44,6 +44,12 @@ import {
 import type { ReadParam } from "./read-job";
 import { ReadPathTimer } from "./read-telemetry";
 import { sql } from "./sql";
+import {
+  fuzzyRank,
+  normalizeFuzzy,
+  FUZZY_MIN_QUERY,
+  FUZZY_RECALL_CAP,
+} from "./fuzzy";
 import { sessionVerifierVerdict } from "./tool-trace";
 import * as latReader from "./lat-reader";
 import {
@@ -3772,7 +3778,56 @@ export function search(input: {
   }
 }
 
-export type ScoredKnowledgeEntry = KnowledgeEntry & { rank: number };
+export type ScoredKnowledgeEntry = KnowledgeEntry & {
+  rank: number;
+  match?: "fuzzy";
+};
+
+/**
+ * Typo-tolerant title leg for recall (#1978). Unlike {@link searchScored} —
+ * which stays FTS + LIKE exact — this ranks the titles of a bounded candidate
+ * set (`FUZZY_RECALL_CAP`, most recent first) under the same tenant /
+ * project-visibility / confidence predicates as the FTS SQL and returns rows
+ * flagged `match: "fuzzy"`. `excludeIds` drops ids the exact/vector legs
+ * already found. The candidate scan and hydration run off-thread; returns []
+ * on worker failure so recall degrades to exact-only.
+ */
+export async function fuzzyTitleCandidates(input: {
+  query: string;
+  projectPath?: string;
+  excludeIds: ReadonlySet<string>;
+  limit: number;
+}): Promise<ScoredKnowledgeEntry[]> {
+  if (input.limit <= 0) return [];
+  if (normalizeFuzzy(input.query).length < FUZZY_MIN_QUERY) return [];
+  const pid = input.projectPath ? ensureProject(input.projectPath) : undefined;
+  const rows = await offloadAllOrTimeout(
+    `SELECT id, title FROM knowledge_current
+     WHERE tenant_id = ?
+       ${pid ? "AND (project_id = ? OR project_id IS NULL OR cross_project = 1)" : ""}
+       AND confidence > 0.2
+     ORDER BY updated_at DESC
+     LIMIT ?`,
+    pid
+      ? [currentTenantId(), pid, FUZZY_RECALL_CAP]
+      : [currentTenantId(), FUZZY_RECALL_CAP],
+  );
+  if (isReadJobFailure(rows)) return [];
+  const candidates = (rows as Array<{ id: string; title: string }>).filter(
+    (row) => !input.excludeIds.has(row.id),
+  );
+  const hits = fuzzyRank(input.query, candidates, (row) => [row.title], {
+    limit: input.limit,
+  });
+  if (hits.length === 0) return [];
+  const entries = await getManyOffloaded(hits.map((hit) => hit.item.id));
+  const out: ScoredKnowledgeEntry[] = [];
+  hits.forEach((hit, index) => {
+    const entry = entries.get(hit.item.id);
+    if (entry) out.push({ ...entry, rank: index + 1, match: "fuzzy" });
+  });
+  return out;
+}
 
 /**
  * Search with BM25 scores included. Returns results with raw FTS5 rank values
