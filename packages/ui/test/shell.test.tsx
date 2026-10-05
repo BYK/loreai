@@ -22,6 +22,7 @@ import { knowledgeHref } from "~/lib/href";
 import { ApiError, type ApiClient } from "~/lib/api";
 import { ConnectionContext, createConnectionStore } from "~/lib/connection";
 import type {
+  KnowledgeEffects,
   KnowledgeEntry,
   KnowledgeSearchResponse,
   KnowledgeVersionHistory,
@@ -709,6 +710,297 @@ describe("shell: project navigation and real-data path", () => {
     expect(doc.querySelector("img, script")).toBeNull();
     expect(within(doc).getByRole("heading", { level: 1 })).toHaveTextContent(
       "<img src=x onerror=alert(1)>",
+    );
+  });
+
+  it("refreshes the sidebar and project counts after delete and restore", async () => {
+    const target = entryAt(0);
+    const targetProjectId = target.project_id;
+    if (!targetProjectId) throw new Error("fixture must belong to a project");
+    let liveEntries = ENTRIES.map((entry) => ({ ...entry }));
+    let revision = 1;
+    let deleted = false;
+    const listProjects = vi.fn(async () =>
+      PROJECTS.map((project) =>
+        project.id === target.project_id
+          ? {
+              ...project,
+              knowledge_count: liveEntries.filter(
+                (entry) => entry.project_id === project.id,
+              ).length,
+            }
+          : project,
+      ),
+    );
+    const listProjectKnowledgePage = vi.fn(async (projectId: string) => ({
+      items: liveEntries.filter((entry) => entry.project_id === projectId),
+      next_cursor: null,
+    }));
+    const getKnowledge = vi.fn(async (id: string) => {
+      const entry = liveEntries.find((candidate) => candidate.id === id);
+      if (!entry) {
+        throw new ApiError(
+          "not_found",
+          `/knowledge/${id}`,
+          "Knowledge entry not found",
+          404,
+        );
+      }
+      return entry;
+    });
+    const writeEffects = (): KnowledgeEffects => ({
+      scope: "project",
+      project_id: targetProjectId,
+      revision,
+      is_deleted: deleted,
+      lore_file: { enabled: false, path: null, affected: false },
+      agents_file: { enabled: false, mode: "off", immediate: false },
+      sync: { enabled: false },
+    });
+    const listKnowledgeVersions = vi.fn(
+      async (id: string): Promise<KnowledgeVersionHistory> => {
+        const makeVersion = (
+          version: number,
+          is_current: boolean,
+          is_deleted: boolean,
+        ): KnowledgeVersionHistory["versions"][number] => ({
+          version_id: `${id}-v${version}`,
+          version,
+          created_at: Date.UTC(2026, 8, 2, 10) + version,
+          superseded_at: is_current ? null : Date.UTC(2026, 8, 2, 10),
+          is_current,
+          is_deleted,
+          title: target.title,
+          content: target.content,
+          category: target.category,
+          confidence: target.confidence,
+          scope: "project",
+          cross_project: false,
+          source_refs: {
+            session_id: null,
+            entry_id: id,
+            user_id: null,
+            created_by: null,
+            updated_by: null,
+            worker_provider_id: null,
+            worker_model_id: null,
+          },
+        });
+        const versions = [makeVersion(revision, true, deleted)];
+        if (deleted) versions.push(makeVersion(revision - 1, false, false));
+        return {
+          id,
+          current_version_id: `${id}-v${revision}`,
+          versions,
+        };
+      },
+    );
+    const deleteKnowledge = vi.fn(async (id: string) => {
+      liveEntries = liveEntries.filter((entry) => entry.id !== id);
+      revision += 1;
+      deleted = true;
+      return {
+        deleted: true as const,
+        id,
+        revision,
+        previous_revision: revision - 1,
+        version_id: `${id}-v${revision}`,
+        changed: ["is_deleted"],
+        effects: writeEffects(),
+        entry: null,
+      };
+    });
+    const restoreKnowledge = vi.fn(async (id: string) => {
+      liveEntries = [...liveEntries, target];
+      revision += 1;
+      deleted = false;
+      return {
+        id,
+        revision,
+        previous_revision: revision - 1,
+        version_id: `${id}-v${revision}`,
+        changed: ["is_deleted"],
+        effects: writeEffects(),
+        restored_from: { version_id: `${id}-v1`, version: 1 },
+        entry: target,
+      };
+    });
+    const client = fakeClient({
+      listProjects,
+      listProjectKnowledgePage,
+      getKnowledge,
+      listKnowledgeVersions,
+      getKnowledgeEffects: async () => writeEffects(),
+      deleteKnowledge,
+      restoreKnowledge,
+    });
+    mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(null));
+
+    const list = await screen.findByTestId("knowledge-list");
+    await within(list).findByText(target.title);
+    const projectCount = () => {
+      const link = screen
+        .getAllByTestId("nav-project")
+        .find((item) => item.firstElementChild?.textContent === "lore");
+      return link?.lastElementChild?.textContent;
+    };
+    await waitFor(() => expect(projectCount()).toBe("2"));
+
+    let pageCalls = listProjectKnowledgePage.mock.calls.length;
+    let projectCalls = listProjects.mock.calls.length;
+    const deleteButton = await screen.findByRole("button", { name: "Delete" });
+    await waitFor(() => expect(deleteButton).toBeEnabled());
+    fireEvent.click(deleteButton);
+    const deleteDialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(deleteDialog).getByRole("button", { name: "Delete entry" }),
+    );
+    await waitFor(() =>
+      expect(within(list).queryByText(target.title)).toBeNull(),
+    );
+    await waitFor(() => expect(projectCount()).toBe("1"));
+    await waitFor(() =>
+      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
+    );
+    await waitFor(() =>
+      expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
+    );
+
+    pageCalls = listProjectKnowledgePage.mock.calls.length;
+    projectCalls = listProjects.mock.calls.length;
+    const restoreButton = await screen.findByRole("button", {
+      name: "Restore…",
+    });
+    await waitFor(() => expect(restoreButton).toBeEnabled());
+    fireEvent.click(restoreButton);
+    const restoreDialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(restoreDialog).getByRole("button", { name: "Restore version" }),
+    );
+    await waitFor(() =>
+      expect(within(list).getByText(target.title)).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(projectCount()).toBe("2"));
+    await waitFor(() =>
+      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
+    );
+    await waitFor(() =>
+      expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
+    );
+  });
+
+  it("refreshes the sidebar after a saved retitle", async () => {
+    let currentEntry = { ...entryAt(0) };
+    const currentProjectId = currentEntry.project_id;
+    if (!currentProjectId) throw new Error("fixture must belong to a project");
+    let revision = 1;
+    const listProjects = vi.fn(async () =>
+      PROJECTS.map((project) =>
+        project.id === currentEntry.project_id
+          ? { ...project, knowledge_count: 2 }
+          : project,
+      ),
+    );
+    const listProjectKnowledgePage = vi.fn(async (projectId: string) => ({
+      items: ENTRIES.filter(
+        (entry) =>
+          entry.project_id === projectId && entry.id !== currentEntry.id,
+      ).concat(currentEntry.project_id === projectId ? [currentEntry] : []),
+      next_cursor: null,
+    }));
+    const client = fakeClient({
+      listProjects,
+      listProjectKnowledgePage,
+      async getKnowledge(id: string) {
+        if (id !== currentEntry.id) throw new Error(`unexpected entry ${id}`);
+        return currentEntry;
+      },
+      async listKnowledgeVersions(id: string) {
+        return {
+          id,
+          current_version_id: `${id}-v${revision}`,
+          versions: [
+            {
+              version_id: `${id}-v${revision}`,
+              version: revision,
+              created_at: Date.UTC(2026, 8, 2, 10),
+              superseded_at: null,
+              is_current: true,
+              is_deleted: false,
+              title: currentEntry.title,
+              content: currentEntry.content,
+              category: currentEntry.category,
+              confidence: currentEntry.confidence,
+              scope: "project",
+              cross_project: false,
+              source_refs: {
+                session_id: null,
+                entry_id: id,
+                user_id: null,
+                created_by: null,
+                updated_by: null,
+                worker_provider_id: null,
+                worker_model_id: null,
+              },
+            },
+          ],
+        };
+      },
+      async editKnowledge(id, body) {
+        revision += 1;
+        currentEntry = {
+          ...currentEntry,
+          ...(body.title !== undefined ? { title: body.title } : {}),
+        };
+        return {
+          id,
+          revision,
+          previous_revision: revision - 1,
+          version_id: `${id}-v${revision}`,
+          changed: ["title"],
+          effects: {
+            scope: "project",
+            project_id: currentProjectId,
+            revision,
+            is_deleted: false,
+            lore_file: { enabled: false, path: null, affected: false },
+            agents_file: { enabled: false, mode: "off", immediate: false },
+            sync: { enabled: false },
+          },
+          entry: currentEntry,
+        };
+      },
+    });
+    mount("/projects/p-lore/knowledge/k-sqlite", client, Promise.resolve(null));
+
+    const list = await screen.findByTestId("knowledge-list");
+    await within(list).findByText(currentEntry.title);
+    const originalTitle = currentEntry.title;
+    const pageCalls = listProjectKnowledgePage.mock.calls.length;
+    const projectCalls = listProjects.mock.calls.length;
+    const editButton = await screen.findByRole("button", { name: "Edit" });
+    await waitFor(() => expect(editButton).toBeEnabled());
+    fireEvent.click(editButton);
+    fireEvent.input(screen.getByLabelText("Title"), {
+      target: { value: "Retitled knowledge entry" },
+    });
+    const saveButton = screen.getByRole("button", {
+      name: "Save",
+    });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(
+        within(list).getByText("Retitled knowledge entry"),
+      ).toBeInTheDocument(),
+    );
+    expect(within(list).queryByText(originalTitle)).toBeNull();
+    await waitFor(() =>
+      expect(listProjectKnowledgePage).toHaveBeenCalledTimes(pageCalls + 1),
+    );
+    await waitFor(() =>
+      expect(listProjects).toHaveBeenCalledTimes(projectCalls + 1),
     );
   });
 });

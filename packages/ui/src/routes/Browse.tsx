@@ -166,9 +166,10 @@ export const Browse: Component<{
       : null,
   );
   const knowledgePage = ws.state.knowledge.page(pageSource);
-  const allKnowledgePage = ws.state.knowledge.allPage(() =>
+  const allPageSource = createMemo(() =>
     props.view === "all-knowledge" ? allQuery() : null,
   );
+  const allKnowledgePage = ws.state.knowledge.allPage(allPageSource);
   const cursor = () =>
     typeof searchParams.cursor === "string" ? searchParams.cursor : null;
   const searchQ = () =>
@@ -198,6 +199,17 @@ export const Browse: Component<{
   const versions = ws.state.knowledge.versions(
     () => knowledgeId() ?? entry.loader.data()?.id ?? null,
   );
+  const refreshAfterKnowledgeWrite = () => {
+    entry.loader.reload();
+    versions.loader.reload();
+    if (pageSource() !== null) {
+      knowledgePage.loader.reload();
+    }
+    if (allPageSource() !== null) {
+      allKnowledgePage.loader.reload();
+    }
+    ws.projects.reload();
+  };
   const evidence = ws.state.sessions.evidence(() => {
     const sourceSession = entry.loader.data()?.source_session;
     const sourceProject = projectForEntry();
@@ -408,8 +420,7 @@ export const Browse: Component<{
                     id={knowledgeId()!}
                     history={deletedHistory}
                     onRestored={() => {
-                      entry.loader.reload();
-                      versions.loader.reload();
+                      refreshAfterKnowledgeWrite();
                     }}
                   />
                 }
@@ -419,8 +430,7 @@ export const Browse: Component<{
                     history={deletedHistory}
                     versionId={version.version_id}
                     onRestored={() => {
-                      entry.loader.reload();
-                      versions.loader.reload();
+                      refreshAfterKnowledgeWrite();
                     }}
                   />
                 )}
@@ -450,7 +460,8 @@ export const Browse: Component<{
                       entry={value()}
                       versions={versions.loader}
                       reloadEntry={entry.loader.reload}
-                      onDeleted={() => entry.loader.reload()}
+                      onSaved={() => refreshAfterKnowledgeWrite()}
+                      onDeleted={() => refreshAfterKnowledgeWrite()}
                     />
                   }
                   renderRestore={(version: KnowledgeVersion) => (
@@ -458,7 +469,7 @@ export const Browse: Component<{
                       id={value().logical_id ?? value().id}
                       history={versions.loader}
                       versionId={version.version_id}
-                      onRestored={() => entry.loader.reload()}
+                      onRestored={() => refreshAfterKnowledgeWrite()}
                     />
                   )}
                   loadDistillation={(id) =>
