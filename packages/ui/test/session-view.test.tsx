@@ -789,6 +789,46 @@ describe("SessionView: in-session search", () => {
     expect(screen.getByTestId("search-select")).toBeDisabled();
   });
 
+  it("typo queries find fuzzy hits flagged approximate in the summary (#1948)", async () => {
+    const messages = longHistory();
+    mount({ messages, messageCount: messages.length });
+    await tick();
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    fireEvent.input(input, { target: { value: "nedle" } });
+    await settleSearch();
+    expect(screen.getByTestId("search-summary")).toHaveTextContent(
+      "3 matches in loaded history · approximate",
+    );
+
+    fireEvent.input(input, { target: { value: "needle" } });
+    await settleSearch();
+    const exact = screen.getByTestId("search-summary");
+    expect(exact).toHaveTextContent("3 matches in loaded history");
+    expect(exact).not.toHaveTextContent("approximate");
+  });
+
+  it("suppresses fuzzy hits once a literal match exists anywhere in the loaded history (#1948)", async () => {
+    const messages = older(20).map((m, i) => ({
+      ...m,
+      content:
+        i === 4
+          ? "needle-9 and the rest of the sentence"
+          : `needle-${10 + i} and the rest of the sentence`,
+    }));
+    mount({ messages, messageCount: messages.length });
+    await tick();
+    openQuickSearch();
+    const input = screen.getByTestId<HTMLInputElement>("search-input");
+    // Every needle-N block fuzzy-matches "needle-9 and"; the one literal hit
+    // must suppress all 19 approximate spans from the hit list.
+    fireEvent.input(input, { target: { value: "needle-9 and" } });
+    await settleSearch();
+    const summary = screen.getByTestId("search-summary");
+    expect(summary).toHaveTextContent("1 match in loaded history");
+    expect(summary).not.toHaveTextContent("approximate");
+  });
+
   it("turns the current hit into a source anchor and keeps the selection independent of the search", async () => {
     const { changes, anchor } = mount();
     await tick();
@@ -1280,7 +1320,8 @@ describe("SessionView: whole-session search", () => {
     const h = pagedHistory("portability, then much later the needle");
     mountPaged(h, h.server([h.all[3]!]));
     await tick();
-    await typeAndSearchWhole("portability needle");
+    // The query must also miss the fuzzy tail, or a span is found and shown.
+    await typeAndSearchWhole("kwyjibo needle");
     fireEvent.click(screen.getByTestId("search-whole-next"));
     for (let i = 0; i < 6 && h.from() > 0; i++) await settleSearch();
     await settleSearch();
